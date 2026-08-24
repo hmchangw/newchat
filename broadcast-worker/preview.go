@@ -19,8 +19,11 @@ import (
 
 // eligibleAsPreview reports whether an inserted message may become the room's preview.
 // deleted is false: a message on the created subject has never been deleted.
+// The canonical event carries no visible_to column, so "" here is a statement of what
+// this path can see, not a claim the message is unrestricted. preview.Eligible takes the
+// argument so whoever lands the write path has to answer for it at both call sites (#364).
 func eligibleAsPreview(msg *model.Message) bool {
-	return preview.Eligible(false, msg.Type)
+	return preview.Eligible(false, msg.Type, "")
 }
 
 // previewSealTimeout bounds the seal's two external calls — the bot app-name read and
@@ -71,7 +74,6 @@ func (p *previewSealer) sealInserted(
 		CreatedAt:   msg.CreatedAt,
 		Attachments: decoded,
 		Mentions:    mentions,
-		// VisibleTo stays empty: the canonical message carries no column for it.
 	})
 	sealed, err := preview.Seal(ctx, p.cipher, p.key, msg.ID, pvw)
 	if err != nil {

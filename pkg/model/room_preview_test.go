@@ -35,7 +35,6 @@ func samplePreviewRoom() Room {
 			Sender:    Participant{Account: "alice", EngName: "Alice", DisplayName: "Alice A"},
 			CreatedAt: created,
 			Mentions:  []Participant{{Account: "bob"}},
-			VisibleTo: "alice",
 		},
 		PreviewCiphertext: []byte{0xde, 0xad, 0xbe, 0xef},
 		PreviewNonce:      []byte{0x01, 0x02, 0x03},
@@ -64,7 +63,8 @@ func TestRoom_PreviewFields_BSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "m1", meta["messageId"])
 	assert.Contains(t, meta, "createdAt")
 	assert.Contains(t, meta, "sender")
-	assert.Equal(t, "alice", meta["visibleTo"])
+	assert.NotContains(t, meta, "visibleTo",
+		"a restricted message is preview-ineligible, so no scope can reach the stored meta")
 
 	// The sealed body is never stored in the clear: no content/attachments key
 	// may appear anywhere in the plaintext meta subdocument.
@@ -125,7 +125,6 @@ func TestPreviewMeta_BSONRoundTrip(t *testing.T) {
 		Sender:    Participant{Account: "alice"},
 		CreatedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
 		Mentions:  []Participant{{Account: "bob"}, {Account: "carol"}},
-		VisibleTo: "alice",
 	}
 
 	raw, err := bson.Marshal(meta)

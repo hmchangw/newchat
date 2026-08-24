@@ -86,8 +86,7 @@ func samplePreview() model.PreviewMessage {
 		Attachments: []cassandra.Attachment{
 			{ID: "f1", Title: "a.png", Type: "file"},
 		},
-		Mentions:  []model.Participant{{UserID: "u2", Account: "bob", ChineseName: "小明"}},
-		VisibleTo: "u1",
+		Mentions: []model.Participant{{UserID: "u2", Account: "bob", ChineseName: "小明"}},
 	}
 }
 
@@ -131,7 +130,6 @@ func TestRoomRepo_GetRoomTimesByIDs_ServesCurrentStoredPreview(t *testing.T) {
 	assert.Equal(t, "m-preview", pvw.MessageID)
 	assert.Equal(t, "hello", pvw.Content)
 	assert.Equal(t, "愛麗絲", pvw.Sender.ChineseName)
-	assert.Equal(t, "u1", pvw.VisibleTo)
 	require.Len(t, pvw.Attachments, 1)
 	assert.Equal(t, "a.png", pvw.Attachments[0].Title)
 	require.Len(t, pvw.Mentions, 1)

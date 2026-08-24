@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,7 +138,9 @@ func expectEmptyPreviewWalk(msgs *mocks.MockMessageRepository) {
 func makePage(msgs []models.Message, hasNext bool) cassrepo.Page[models.Message] {
 	nextCursor := ""
 	if hasNext {
-		nextCursor = "fake-next-cursor"
+		// Base64: the walk decodes this through cassrepo.NewCursor, so an
+		// undecodable fixture would exercise the give-up path, not continuation.
+		nextCursor = base64.StdEncoding.EncodeToString([]byte("fake-next-cursor"))
 	}
 	return cassrepo.Page[models.Message]{Data: msgs, NextCursor: nextCursor, HasNext: hasNext}
 }

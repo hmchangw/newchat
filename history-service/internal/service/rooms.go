@@ -224,10 +224,17 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 	newestObserved := ""
 	pageSize := lastMsgWalkFirstPage
 	scanned := 0
+	// `before` is the ceiling for every page, never advanced per page. created_at does not
+	// identify a row (messages_by_room clusters by created_at AND message_id), so lowering
+	// it to the last row's timestamp would re-apply `created_at < ?` and permanently strand
+	// that row's same-timestamp siblings — which the walk could then report as previewEmpty
+	// and clear. Continuation rides the page cursor instead.
+	var cursor *cassrepo.Cursor
 	for scanned < lastMsgWalkMaxScan {
 		// Clamp to the per-query cap and the remaining budget; ×8 growth starts from here.
 		pageSize = min(pageSize, lastMsgWalkMaxPage, lastMsgWalkMaxScan-scanned)
-		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor, cassrepo.PageRequest{PageSize: pageSize})
+		page, err := s.msgReader.GetMessagesBefore(ctx, roomID, before, floor,
+			cassrepo.PageRequest{PageSize: pageSize, Cursor: cursor})
 		if err != nil {
 			slog.WarnContext(ctx, "rooms.get latest-message read degraded", "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
@@ -242,7 +249,7 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		for i := range page.Data {
 			m := page.Data[i]
 			// Shared with the insert-side predicate so the two cannot disagree.
-			if !preview.Eligible(m.Deleted, m.Type) {
+			if !preview.Eligible(m.Deleted, m.Type, m.VisibleTo) {
 				continue
 			}
 			return previewWalk{
@@ -256,7 +263,15 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 		if !page.HasNext {
 			return previewWalk{State: previewEmpty, NewestObservedID: newestObserved}
 		}
-		before = page.Data[len(page.Data)-1].CreatedAt
+		// A cursor we cannot decode is unknown territory, not an empty room: continuing
+		// without it would silently restart the walk at the ceiling and loop.
+		next, err := cassrepo.NewCursor(page.NextCursor)
+		if err != nil {
+			slog.WarnContext(ctx, "rooms.get latest-message walk cursor undecodable", "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
+			return previewWalk{State: previewDegraded, NewestObservedID: newestObserved}
+		}
+		cursor = next
 		pageSize *= lastMsgWalkGrowth
 	}
 	// Ineligible tail past the budget: a survivor may exist, so unknown, never a clear.
@@ -287,7 +302,6 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		CreatedAt:   m.CreatedAt,
 		Attachments: m.DecodedAttachments,
 		Mentions:    mentions,
-		VisibleTo:   m.VisibleTo,
 	})
 }
 

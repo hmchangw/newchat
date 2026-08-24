@@ -117,9 +117,9 @@ type PreviewMessage struct {
 	CreatedAt   time.Time              `json:"createdAt"`
 	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
 	Mentions    []Participant          `json:"mentions,omitempty"`
-	// VisibleTo is surfaced now; its write-path (populating the column) is a separate
-	// follow-up, so it's empty until that lands.
-	VisibleTo string `json:"visibleTo,omitempty"`
+	// No VisibleTo: one preview is stored per room but visibility is per-user, so a
+	// restricted message is preview-INELIGIBLE (preview.Eligible) rather than previewed
+	// with a scope the room list has no way to honour (#364).
 	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
 }
 
@@ -132,7 +132,6 @@ type PreviewMeta struct {
 	Sender    Participant   `json:"sender"              bson:"sender"`
 	CreatedAt time.Time     `json:"createdAt"           bson:"createdAt"`
 	Mentions  []Participant `json:"mentions,omitempty"  bson:"mentions,omitempty"`
-	VisibleTo string        `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomsGetResponse maps each requested roomId that has a resolvable last message to

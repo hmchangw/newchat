@@ -47,12 +47,10 @@ func TestBuild_TruncatesAndNormalizesUTC(t *testing.T) {
 		Sender:    model.Participant{Account: "alice"},
 		Content:   long,
 		CreatedAt: time.Date(2026, 8, 5, 18, 0, 0, 0, loc),
-		VisibleTo: "alice",
 	})
 	assert.Equal(t, "m1", got.MessageID)
 	assert.Equal(t, strings.Repeat("x", MaxContentRunes), got.Content)
 	assert.Equal(t, time.UTC, got.CreatedAt.Location())
-	assert.Equal(t, "alice", got.VisibleTo)
 }
 
 func TestBotAwareDisplayName_Fallbacks(t *testing.T) {

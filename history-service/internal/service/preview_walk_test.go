@@ -35,9 +35,25 @@ func walkedPreviewErr(t *testing.T, readErr error, pages ...cassrepo.Page[models
 	return got, gone
 }
 
-// walkedPreviewPages is walkedPreviewErr plus the PageSize of each read, so a test can
+// walkCall is one GetMessagesBefore the walk issued, for tests that assert on how the
+// walk continued rather than on the preview it landed on.
+type walkCall struct {
+	before   time.Time
+	pageSize int
+	cursor   string
+}
+
+func pageSizesOf(calls []walkCall) []int {
+	out := make([]int, len(calls))
+	for i := range calls {
+		out[i] = calls[i].pageSize
+	}
+	return out
+}
+
+// walkedPreviewPages is walkedPreviewErr plus each read's arguments, so a test can
 // assert the escalation itself rather than the preview it happened to land on.
-func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[models.Message]) (*model.PreviewMessage, bool, []int) {
+func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[models.Message]) (*model.PreviewMessage, bool, []walkCall) {
 	t.Helper()
 	svc, msgs, subs, rooms, pub, _, _, _ := newServiceWithRoomMock(t)
 	c := testContext()
@@ -60,16 +76,20 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 			return deletedAt, true, nil, nil, nil
 		})
 
-	// The walk is sequential within one room, so recording sizes needs no lock.
-	var pageSizes []int
+	// The walk is sequential within one room, so recording calls needs no lock.
+	var calls []walkCall
 	if readErr != nil {
 		msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(cassrepo.Page[models.Message]{}, readErr)
 	} else {
 		for i := range pages {
 			msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
-				DoAndReturn(func(_ context.Context, _ string, _, _ time.Time, req cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
-					pageSizes = append(pageSizes, req.PageSize)
+				DoAndReturn(func(_ context.Context, _ string, before, _ time.Time, req cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+					cursor := ""
+					if req.Cursor != nil {
+						cursor = req.Cursor.Encode()
+					}
+					calls = append(calls, walkCall{before: before, pageSize: req.PageSize, cursor: cursor})
 					return pages[i], nil
 				})
 		}
@@ -93,7 +113,7 @@ func walkedPreviewPages(t *testing.T, readErr error, pages ...cassrepo.Page[mode
 
 	_, err := svc.DeleteMessage(c, "site-test", models.DeleteMessageRequest{MessageID: "msg-target"})
 	require.NoError(t, err)
-	return got, gone, pageSizes
+	return got, gone, calls
 }
 
 func msgAt(id string, minutesAgo int) models.Message {
@@ -113,6 +133,11 @@ func typed(m models.Message, t string) models.Message { //nolint:gocritic // hug
 
 func deleted(m models.Message) models.Message { //nolint:gocritic // hugeParam: see typed.
 	m.Deleted = true
+	return m
+}
+
+func restricted(m models.Message, to string) models.Message { //nolint:gocritic // hugeParam: see typed.
+	m.VisibleTo = to
 	return m
 }
 
@@ -152,6 +177,13 @@ func TestPreviewWalk_Eligibility(t *testing.T) {
 				typed(msgAt("m-2", 3), model.MessageTypeMemberLeft),
 				msgAt("m-1", 4),
 			},
+			want: "m-1",
+		},
+		{
+			// The room list has one preview per room but visible_to is per-user, so a
+			// restricted message can never be the right thing to show every subscriber.
+			name: "a visibility-restricted message is skipped",
+			page: []models.Message{restricted(msgAt("m-3", 1), "u-9"), msgAt("m-1", 3)},
 			want: "m-1",
 		},
 		{
@@ -211,14 +243,36 @@ func TestPreviewWalk_EscalatesPastAnIneligibleTail(t *testing.T) {
 		msgAt("m-7", 3),
 	}, true)
 
-	got, gone, pageSizes := walkedPreviewPages(t, nil, first, second)
+	got, gone, calls := walkedPreviewPages(t, nil, first, second)
 	require.NotNil(t, got)
 	assert.Equal(t, "m-7", got.MessageID)
 	assert.False(t, gone)
 	// The preview assertion above passes under a fixed page size too; this pins the
 	// escalation. Literals, not constants: external test package.
-	assert.Equal(t, []int{1, 8}, pageSizes,
+	assert.Equal(t, []int{1, 8}, pageSizesOf(calls),
 		"the walk must open with one row and grow ×8 to skip an ineligible tail")
+}
+
+// created_at does not identify a row — messages_by_room clusters by (created_at,
+// message_id). Continuing by timestamp against a strict `created_at < ?` therefore
+// drops every row that shares the boundary timestamp, and with a first page of one
+// that is any two messages in the same millisecond. The walk must continue on the
+// page cursor, holding `before` at the original ceiling for the whole walk.
+func TestPreviewWalk_ContinuesOnTheCursorNotTheTimestamp(t *testing.T) {
+	first := makePage([]models.Message{deleted(msgAt("m-9", 1))}, true)
+	second := makePage([]models.Message{msgAt("m-8", 1)}, true) // same minute as m-9
+
+	got, gone, calls := walkedPreviewPages(t, nil, first, second)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-8", got.MessageID, "the sibling sharing a timestamp must still be reachable")
+	assert.False(t, gone)
+
+	require.Len(t, calls, 2)
+	assert.Empty(t, calls[0].cursor, "the first read opens the walk")
+	assert.Equal(t, first.NextCursor, calls[1].cursor,
+		"the continuation must carry the page cursor, not rebuild a bare request")
+	assert.Equal(t, calls[0].before, calls[1].before,
+		"`before` must stay at the ceiling: moving it re-applies `created_at < ?` and strands tied rows")
 }
 
 // A tail longer than the scan budget is unknown, not empty — clearing on it would

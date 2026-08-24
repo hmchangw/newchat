@@ -87,8 +87,7 @@ func samplePreview() model.PreviewMessage {
 			FileType: "image/png", ImageURL: "/f1/img", ImageSize: 42,
 			ImageDimensions: &cassandra.ImageDimensions{Width: 10, Height: 20},
 		}},
-		Mentions:  []model.Participant{{Account: "bob"}},
-		VisibleTo: "alice",
+		Mentions: []model.Participant{{Account: "bob"}},
 	}
 }
 
@@ -150,7 +149,6 @@ func TestSeal_BodyNeverStoredInClear(t *testing.T) {
 	assert.Equal(t, "msg-1", sealed.Meta.MessageID)
 	assert.Equal(t, "alice", sealed.Meta.Sender.Account)
 	assert.Equal(t, []model.Participant{{Account: "bob"}}, sealed.Meta.Mentions)
-	assert.Equal(t, "alice", sealed.Meta.VisibleTo)
 
 	assert.False(t, bytes.Contains(sealed.Ciphertext, []byte("the quick brown fox")),
 		"message body must not survive in the ciphertext")

@@ -1020,9 +1020,11 @@ document (`previewMessage` always omitted there). All fields are optional
 
 A room's most-recent **eligible** message, composed and stored when that message is
 delivered, and enriched for room-list rendering. Eligible = not soft-deleted and not a
-system message (quoted replies are normal content and ARE eligible) — an ineligible
-newer message leaves the stored preview in place, so the room keeps showing its last
-real content; a room with only ineligible messages omits `previewMessage`.
+system message and not visibility-restricted (quoted replies are normal content and ARE
+eligible) — an ineligible newer message leaves the stored preview in place, so the room
+keeps showing its last real content; a room with only ineligible messages omits
+`previewMessage`. A restricted message is never previewed: one preview is stored per
+room, while visibility is per-user, so the room list has no way to honour the scope.
 
 Editing or deleting a message also updates the stored preview: an edit to the previewed
 message refreshes it, and deleting it moves the preview back to the previous eligible
@@ -1039,7 +1041,6 @@ next read resolves the room's preview from message history instead.
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
-| `visibleTo` | string | Optional. Currently empty until its write-path lands (surfaced now for forward-compat). |
 
 #### AppSubscription
 
