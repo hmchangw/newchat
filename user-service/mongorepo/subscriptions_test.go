@@ -15,6 +15,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/testutil"
+	"github.com/hmchangw/chat/user-service/models"
 )
 
 func TestAggregateSubscriptions_Integration(t *testing.T) {
@@ -854,4 +855,74 @@ func TestAggregateSubscriptions_OriginFieldRoundTrip_Integration(t *testing.T) {
 	require.Len(t, page.Data, 1)
 	assert.Equal(t, "teams", page.Data[0].Origin,
 		"list rows must carry the persisted origin like every other read path")
+}
+
+// The badge path must return exactly its five fields, across local, empty and cross-site rooms.
+func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	lastMsg := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	seen := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "p-room", "name": "Eng", "siteId": "site-a", "lastMsgAt": lastMsg,
+			"userCount": 9, "appCount": 1, "encKey": bson.M{"priv": make([]byte, 120), "ver": 3}},
+		bson.M{"_id": "p-quiet", "name": "Quiet", "siteId": "site-a"},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "p-sub", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Eng",
+			"roomId": "p-room", "roomType": "channel", "siteId": "site-a",
+			"lastSeenAt": seen, "threadUnread": []string{"pm-1", "pm-2"}},
+		bson.M{"_id": "p-sub-quiet", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Quiet",
+			"roomId": "p-quiet", "roomType": "channel", "siteId": "site-a"},
+		bson.M{"_id": "p-sub-remote", "u": bson.M{"_id": "u-alice", "account": "alice"}, "name": "Remote",
+			"roomId": "p-remote", "roomType": "channel", "siteId": "site-b", "lastSeenAt": seen},
+	)
+
+	subs, err := r.GetActiveSubscriptions(ctx, "alice", 100)
+	require.NoError(t, err)
+
+	byRoom := map[string]models.ActiveSubscription{}
+	for _, s := range subs {
+		byRoom[s.RoomID] = s
+	}
+	require.Len(t, byRoom, 3)
+
+	local := byRoom["p-room"]
+	assert.Equal(t, "site-a", local.SiteID)
+	require.NotNil(t, local.LastSeenAt)
+	assert.Equal(t, seen.UTC(), local.LastSeenAt.UTC())
+	require.NotNil(t, local.LastMsgAt, "the joined room's lastMsgAt must survive the projection")
+	assert.Equal(t, lastMsg.UTC(), local.LastMsgAt.UTC())
+	assert.Equal(t, []string{"pm-1", "pm-2"}, local.ThreadUnread)
+
+	quiet := byRoom["p-quiet"]
+	assert.Nil(t, quiet.LastMsgAt, "a room with no messages has no lastMsgAt")
+	assert.Nil(t, quiet.LastSeenAt, "an unread-from-birth sub has no lastSeenAt")
+
+	remote := byRoom["p-remote"]
+	assert.Equal(t, "site-b", remote.SiteID)
+	assert.Nil(t, remote.LastMsgAt, "a cross-site sub has no local room document")
+	require.NotNil(t, remote.LastSeenAt)
+
+	// Assert on the raw document: decoding first would discard a leaked encKey.
+	pipeline := r.activeSubscriptionPipeline("alice", 100)
+	cur, err := db.Collection(subscriptionsCollection).Aggregate(ctx, pipeline)
+	require.NoError(t, err)
+	var rawRows []bson.M
+	require.NoError(t, cur.All(ctx, &rawRows))
+	var rawRoom bson.M
+	for _, d := range rawRows {
+		if d["roomId"] == "p-room" {
+			rawRoom = d
+			break
+		}
+	}
+	require.NotNil(t, rawRoom, "expected the p-room row in the raw projection output")
+	keys := make([]string, 0, len(rawRoom))
+	for k := range rawRoom {
+		keys = append(keys, k)
+	}
+	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt"}, keys,
+		"the raw $project output for p-room must contain exactly the five projected fields — no encKey or other room baseline field")
 }
