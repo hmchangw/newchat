@@ -21,6 +21,7 @@ func baseValid() Config {
 		SubCacheTTL:      2 * time.Minute,
 		RoomCacheSize:    50000,
 		RoomCacheTTL:     10 * time.Second,
+		PreviewKeyEpoch:  1,
 		PreviewCacheSize: 50000,
 		PreviewCacheTTL:  10 * time.Second,
 		Pool:             mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
@@ -39,8 +40,6 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.SubCacheTTL = 0
 	cfg.RoomCacheSize = 0
 	cfg.RoomCacheTTL = 0
-	cfg.PreviewCacheSize = 0
-	cfg.PreviewCacheTTL = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -110,6 +109,18 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+// The epoch is part of the preview DEK id, so a non-positive value mints a
+// sentinel rotation could never move forward from.
+func TestValidate_RejectsNonPositivePreviewKeyEpoch(t *testing.T) {
+	for _, epoch := range []int{0, -1} {
+		cfg := baseValid()
+		cfg.PreviewKeyEpoch = epoch
+		err := validate(&cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PREVIEW_KEY_EPOCH")
+	}
 }
 
 func TestValidate_RejectsInvalidReadPreference(t *testing.T) {

@@ -13,11 +13,12 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
 func TestRoomRepo_GetRoomTimes(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	lastMsgAt := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
@@ -39,7 +40,7 @@ func TestRoomRepo_GetRoomTimes(t *testing.T) {
 
 func TestRoomRepo_GetRoomTimes_NoLastMsg(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	_, err := db.Collection("rooms").InsertOne(context.Background(), bson.M{
@@ -60,7 +61,8 @@ func TestRoomRepo_GetRoomTimes_NoLastMsg(t *testing.T) {
 // decode identically: nil pointer → zero time → "unknown" downstream.
 func TestRoomRepo_GetRoomTimes_NullLastMsg(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	// Times only, no previews: a nil cipher is the previews-off shape.
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	_, err := db.Collection("rooms").InsertOne(context.Background(), bson.M{
@@ -80,7 +82,7 @@ func TestRoomRepo_GetRoomTimes_NullLastMsg(t *testing.T) {
 
 func TestRoomRepo_GetRoomTimes_NotFound(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	_, _, err := repo.GetRoomTimes(context.Background(), "no-such-room")
 	require.ErrorIs(t, err, mongo.ErrNoDocuments)
@@ -88,7 +90,7 @@ func TestRoomRepo_GetRoomTimes_NotFound(t *testing.T) {
 
 func TestRoomRepo_GetRoomTimesByIDs(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	createdAt1 := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	lastMsgAt1 := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
@@ -131,7 +133,7 @@ func TestRoomRepo_GetRoomTimesByIDs(t *testing.T) {
 
 func TestRoomRepo_GetRoomTimesByIDs_NoLastMsg(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	_, err := db.Collection("rooms").InsertOne(context.Background(), bson.M{
@@ -151,7 +153,7 @@ func TestRoomRepo_GetRoomTimesByIDs_NoLastMsg(t *testing.T) {
 
 func TestRoomRepo_GetRoomTimesByIDs_Empty(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	got, err := repo.GetRoomTimesByIDs(context.Background(), []string{})
 	require.NoError(t, err)
@@ -161,7 +163,7 @@ func TestRoomRepo_GetRoomTimesByIDs_Empty(t *testing.T) {
 
 func TestRoomRepo_GetMinUserLastSeenAt_Set(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 	ctx := context.Background()
 
 	floor := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
@@ -184,7 +186,7 @@ func TestRoomRepo_GetMinUserLastSeenAt_Set(t *testing.T) {
 
 func TestRoomRepo_GetMinUserLastSeenAt_Unset(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 	ctx := context.Background()
 
 	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
@@ -204,7 +206,7 @@ func TestRoomRepo_GetMinUserLastSeenAt_Unset(t *testing.T) {
 
 func TestRoomRepo_GetMinUserLastSeenAt_MissingDocument(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 	ctx := context.Background()
 
 	got, err := repo.GetMinUserLastSeenAt(ctx, "no-such-room")
@@ -218,7 +220,7 @@ func TestRoomRepo_GetRoomUserCount(t *testing.T) {
 		bson.M{"_id": "room-uc-1", "userCount": 42})
 	require.NoError(t, err)
 
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 	count, err := repo.GetRoomUserCount(context.Background(), "room-uc-1")
 
 	require.NoError(t, err)
@@ -227,7 +229,7 @@ func TestRoomRepo_GetRoomUserCount(t *testing.T) {
 
 func TestRoomRepo_GetRoomUserCount_RoomMissing(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewRoomRepo(db)
+	repo := NewRoomRepo(db, nil, preview.Key{})
 
 	_, err := repo.GetRoomUserCount(context.Background(), "missing")
 
