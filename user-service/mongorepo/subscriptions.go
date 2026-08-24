@@ -389,7 +389,11 @@ func buildListRows(subs []subLite, keys map[string]roomSortKey, account string, 
 }
 
 // sortListRows orders rows as the old Mongo sort did: pinned self-DM first in
-// the favorite view, then newest activity, undated last, then by name.
+// the favorite view, then newest activity, undated last, then by name. The
+// subscription _id breaks a remaining tie, so separate page requests read the
+// same sequence — a stable sort would otherwise fall back to the phase-one
+// Find's arbitrary order and let a page boundary repeat one row and drop
+// another.
 func sortListRows(rows []listRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := &rows[i], &rows[j]
@@ -406,7 +410,10 @@ func sortListRows(rows []listRow) {
 		case b.sortAt != nil:
 			return false
 		}
-		return a.sub.Name < b.sub.Name
+		if a.sub.Name != b.sub.Name {
+			return a.sub.Name < b.sub.Name
+		}
+		return a.sub.ID < b.sub.ID
 	})
 }
 
