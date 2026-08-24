@@ -198,8 +198,10 @@ func main() {
 	} else {
 		slog.Info("room-preview persistence disabled (ATREST_ENABLED=false); the room doc must never hold a plaintext body")
 	}
+	// Cached: the lookup sits on the message path and an app's name changes about as
+	// often as the app is renamed, so an uncached read per bot message bought nothing.
 	sealer := newPreviewSealer(previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch},
-		newAppNameRepo(db.Collection("apps")))
+		preview.CachedAppNameLookup(newAppNameRepo(db.Collection("apps"))))
 
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL, sealer.enabled())
 	if err := store.EnsureIndexes(ctx); err != nil {
