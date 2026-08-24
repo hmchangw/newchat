@@ -221,9 +221,9 @@ func TestBadgeCountBatch_BudgetSpentMidBatch_StopsAndRemainingAbsent(t *testing.
 	// Account "a" computes, then the shared budget expires (simulating the 15s
 	// handler deadline elapsing part-way through the batch).
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ string, _ int) ([]model.EnrichedSubscription, error) {
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
 			cancel()
-			return []model.EnrichedSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+			return []models.ActiveSubscription{localUnreadSub("a", "ra", "site-a")}, nil
 		})
 	// "b" and "c" must NEVER reach the repo once the context is done.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
@@ -257,9 +257,9 @@ func TestBadgeCountBatch_BudgetSpentMidBatch_LaterCacheHitStillServed(t *testing
 		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
 	}
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "a", gomock.Any()).
-		DoAndReturn(func(_ context.Context, _ string, _ int) ([]model.EnrichedSubscription, error) {
+		DoAndReturn(func(_ context.Context, _ string, _ int) ([]models.ActiveSubscription, error) {
 			cancel()
-			return []model.EnrichedSubscription{localUnreadSub("a", "ra", "site-a")}, nil
+			return []models.ActiveSubscription{localUnreadSub("a", "ra", "site-a")}, nil
 		})
 	// "b" misses and sits past the spent budget — its expensive recompute must be skipped.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
