@@ -245,6 +245,13 @@ func (c *client) createChannel(name, other string) (string, error) {
 	}
 	c.rec.add(c.account, "rpc", "room.create sync reply "+accepted.Status, "", accepted.RoomID)
 
+	// "exists" is the DM open-or-create short-circuit: room-service answers from
+	// the dedup check without publishing a canonical event, so no async job
+	// result will ever arrive. The room is already usable.
+	if accepted.Status == model.CreateRoomStatusExists {
+		return accepted.RoomID, nil
+	}
+
 	msg, err := resultSub.NextMsg(rpcTimeout)
 	if err != nil {
 		return "", fmt.Errorf("await create async result: %w", err)

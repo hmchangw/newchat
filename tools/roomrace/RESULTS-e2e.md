@@ -280,3 +280,73 @@ When it is not — `message-worker` stalled, 12 ms delay:
 | bob | **100%** | 100% | **100%** | **0%** |
 
 Bob sees a completely empty room. The grace window returns him to 0%.
+
+---
+
+# DM vs channel, on the current backend (2026-08-24)
+
+Grace window **off** — these runs describe the backend exactly as it ships today.
+
+## DM
+
+`publishChannelSysMessages` is gated on `room.Type == RoomTypeChannel`, so a DM create emits
+**no system messages at all**. The first message fans out per member on
+`chat.user.{account}.event.room`, a subject both clients have held since login.
+
+```
+ 263ms  alice  rpc         room.create sync reply "accepted"   roomId = u-aliceu-carol
+ 356ms  alice  user subj   subscription.update added
+ 356ms  carol  user subj   subscription.update added
+ 357ms  alice  rpc         create-room async job result ok
+1060ms  alice  rpc         msg.send accepted by gatekeeper
+1069ms  alice  user subj   new_message "first message"
+1069ms  carol  user subj   new_message "first message"
+1133ms  alice  history     msg.history -> 0     <-- write lag; she has it live only
+1186ms  carol  history     msg.history -> 1
+```
+
+| | missed live | lost |
+|---|---|---|
+| client subscribes in 12 ms | 0% | **0%** |
+| client takes 300 ms | 0% | **0%** |
+
+**No race exists.** Alice's own history read returned zero, which is why merge-never-replace
+is mandatory even here.
+
+Also found: alice and bob already had a seeded DM, and `room.create` answered
+`status:"exists"` **without publishing a canonical event**, so no async job result ever
+arrives on that branch. A client that waits for one hangs until timeout.
+
+## Channel
+
+Two system messages (`room_created`, `members_added`) plus the user message, all on
+`chat.room.{roomId}.event`.
+
+```
+  16ms  alice  rpc         room.create sync reply "accepted"
+  29ms  alice  user subj   subscription.update added
+  29ms  bob    user subj   subscription.update added
+ ~30ms  ----   room subj   new_message [room_created]   <-- nobody subscribed yet; lost live
+  31ms  alice  rpc         create-room async job result ok
+  40ms  alice  rpc         msg.send accepted by gatekeeper
+  40ms  alice  room subj   SUBSCRIBED
+  42ms  bob    room subj   SUBSCRIBED
+  46ms  both   room subj   new_message "first message"
+  48ms  both   room subj   new_message [members_added]  <-- arrives AFTER the message it precedes
+  96ms  alice  history     msg.history -> 3
+ 146ms  bob    history     msg.history -> 3
+```
+
+Two things this pins down. `room_created` is broadcast before any client can subscribe and is
+unrecoverable from the live stream — the hinted history read is the only path to the screen.
+And live arrival order does not match `createdAt` order, so clients must sort on `createdAt`.
+A second run under identical conditions missed *both* system messages live.
+
+| | missed live | lost |
+|---|---|---|
+| instant client | 0% | **0%** |
+| 5 ms | 27% | **0%** |
+| 12 ms | 43% / 97% (creator / invitee) | **0%** |
+| 30 ms | 53% / 100% | **0%** |
+| slow member, no `meta.lastMsgAt` | 100% | **17%** |
+| write path lagging | 100% | **100%** |

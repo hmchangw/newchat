@@ -45,6 +45,7 @@ var (
 	probeRoom   = flag.String("probe-room", "", "just load history for this room id and exit")
 	writeLag    = flag.Bool("write-lag", false, "after the send, poll hinted history every 5ms to measure when the message becomes readable")
 	verbose     = flag.Bool("v", false, "print the per-iteration timeline")
+	asDM        = flag.Bool("dm", false, "create a DM instead of a channel (no name -> room-service classifies it as a DM)")
 	debugFlow   = flag.Bool("debug-flow", false, "set X-Debug: flow on room.create so the services emit flow-rung timing breadcrumbs")
 	historyAt   = flag.String("history-at", "join", "when the client reads history: join (on subscription.update) or open (after the send is accepted, i.e. when the UI enters the room)")
 )
@@ -181,7 +182,11 @@ func runOne(i int, aTally, bTally *tally) error {
 		return err
 	}
 
-	roomID, err := a.createChannel(fmt.Sprintf("e2e-%d-%d", time.Now().UnixMilli(), i), *userB)
+	name := fmt.Sprintf("e2e-%d-%d", time.Now().UnixMilli(), i)
+	if *asDM {
+		name = "" // room-service classifies an unnamed single-counterpart create as a DM
+	}
+	roomID, err := a.createChannel(name, *userB)
 	if err != nil {
 		return fmt.Errorf("create channel: %w", err)
 	}
