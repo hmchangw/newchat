@@ -3849,7 +3849,7 @@ Toggles a reaction on a message. Any subscribed room member may react — the se
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `messageId` | string | yes | The message to react to. |
-| `shortcode` | string | yes | The bare reaction shortcode without surrounding colons (e.g. `thumbsup`, `acme_party`). Must match `^[a-z0-9_+-]{1,32}$` after NFC normalisation. The server validates **format only** — it does not check the shortcode against the standard-emoji set or the site's registered custom emoji. Clients are expected to offer only shortcodes from their picker (built-in standard set + the local site's [`emoji.list`](#emojilist--list-a-sites-custom-emoji)). |
+| `shortcode` | string | yes | The reaction emoji — **any non-empty, visible textual or Unicode key** (e.g. a bare shortcode `thumbsup`, a colon-wrapped `:thumbsup:`, ASCII punctuation like `_`/`-`, a raw-unicode emoji `👍` / ZWJ sequence / flag, or a private-use glyph). The server applies **no support check**: it NFC-normalises the value and rejects only (a) a value over 64 bytes (a resource guard, ~20× any real emoji) or (b) a value with **no visible character** — empty, or made only of whitespace / control / zero-width / combining-mark code points. It does **not** check the character set, the standard-emoji set, or the site's registered custom emoji. The **FE decides renderability**. Note: reactions are stored as **opaque keys with no shortcode↔unicode aliasing**, so `thumbsup` and `👍` are two distinct reactions — the FE should send one consistent representation per emoji. Clients typically offer shortcodes from their picker (built-in standard set + the local site's [`emoji.list`](#emojilist--list-a-sites-custom-emoji)), but any emoji is accepted (e.g. a migrated one the picker doesn't list). |
 
 ```json
 {
@@ -3878,7 +3878,7 @@ Toggles a reaction on a message. Any subscribed room member may react — the se
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Common errors: `"messageId is required"`, `"shortcode is required"`, `"invalid reaction shortcode"` (malformed: fails `^[a-z0-9_+-]{1,32}$` after NFC), `"message not found"` (also returned when attempting to _add_ a reaction to a soft-deleted message), `"not subscribed to room"`, `"failed to add reaction"`, `"failed to remove reaction"`.
+See [Error envelope](#6-error-envelope-reference). Common errors: `"messageId is required"`, `"shortcode is required"`, `"reaction emoji too large"` (over 64 bytes post-NFC), `"reaction emoji is required"` (no visible character — whitespace / control / zero-width / combining-mark only; an *empty* shortcode returns `"shortcode is required"` instead, checked before canonicalization), `"message not found"` (also returned when attempting to _add_ a reaction to a soft-deleted message), `"not subscribed to room"`, `"failed to add reaction"`, `"failed to remove reaction"`.
 
 ##### Triggered events — success path
 
@@ -3892,7 +3892,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"messageId is
 | `timestamp` | number | Epoch ms (UTC). Event publish time. |
 | `eventTimestamp` | number | Milliseconds since Unix epoch (UTC). When message-worker published the canonical event. Omitted for legacy events. |
 | `messageId` | string | The reacted-to message's ID. |
-| `shortcode` | string | The bare reaction shortcode. |
+| `shortcode` | string | The canonical NFC-normalised reaction key — a textual shortcode (`thumbsup`) or a raw-unicode emoji (`👍`); opaque, not format-validated. |
 | `action` | string | `"added"` or `"removed"`. |
 | `actor` | [Participant](#participant) | The user whose toggle produced this event. |
 | `reactedAt` | string (RFC 3339) | Domain time of the toggle. |
@@ -3934,7 +3934,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors: `"messageId is
 
 | Field | Type | Notes |
 |---|---|---|
-| `shortcode` | string | The emoji shortcode reacted with. |
+| `shortcode` | string | The canonical NFC-normalised reaction key reacted with — a textual shortcode or a raw-unicode emoji; opaque, not format-validated. |
 | `action` | string | Always `"added"` here (the notification only fires on add). |
 | `actor` | [Participant](#participant) | The user who reacted. `displayName` is populated (`CombineWithFallback(engName, chineseName, account)`); for a bot account (`.bot` suffix) it's the app's display name instead, falling back to the composed name if no app matches. |
 

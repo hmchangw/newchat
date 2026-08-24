@@ -35,9 +35,13 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 		return nil, errcode.BadRequest("shortcode is required")
 	}
 
-	shortcode, err := emoji.Canonicalize(req.Shortcode)
+	// Reactions accept any emoji (no support check): CanonicalizeReaction only
+	// NFC-normalizes and caps size, so a raw-unicode or Teams-migrated emoji isn't
+	// rejected — the FE decides renderability. Its only error is an oversized blob,
+	// already a friendly client-facing BadRequest, so return it as-is.
+	shortcode, err := emoji.CanonicalizeReaction(req.Shortcode)
 	if err != nil {
-		return nil, errcode.BadRequest("invalid reaction shortcode")
+		return nil, err
 	}
 	// From here on, use the canonicalized shortcode (NFC-canonical) for any
 	// storage key or wire echo; req.Shortcode is raw input.
