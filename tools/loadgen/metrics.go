@@ -10,6 +10,47 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type snapshotGaugePair[S any] struct {
+	source      func() S
+	firstDesc   *prometheus.Desc
+	firstValue  func(S) float64
+	secondDesc  *prometheus.Desc
+	secondValue func(S) float64
+}
+
+func newSnapshotGaugePair[S any](
+	source func() S,
+	firstName string,
+	firstHelp string,
+	firstValue func(S) float64,
+	secondName string,
+	secondHelp string,
+	secondValue func(S) float64,
+) prometheus.Collector {
+	return &snapshotGaugePair[S]{
+		source:      source,
+		firstDesc:   prometheus.NewDesc(firstName, firstHelp, nil, nil),
+		firstValue:  firstValue,
+		secondDesc:  prometheus.NewDesc(secondName, secondHelp, nil, nil),
+		secondValue: secondValue,
+	}
+}
+
+func (c *snapshotGaugePair[S]) Describe(descriptions chan<- *prometheus.Desc) {
+	descriptions <- c.firstDesc
+	descriptions <- c.secondDesc
+}
+
+func (c *snapshotGaugePair[S]) Collect(metrics chan<- prometheus.Metric) {
+	snapshot := c.source()
+	metrics <- prometheus.MustNewConstMetric(
+		c.firstDesc, prometheus.GaugeValue, c.firstValue(snapshot),
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		c.secondDesc, prometheus.GaugeValue, c.secondValue(snapshot),
+	)
+}
+
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
 	natsHealthMu   sync.Mutex
@@ -73,11 +114,10 @@ type Metrics struct {
 	SoakPresenceSignals           *prometheus.CounterVec
 	SoakPresenceChecks            *prometheus.CounterVec
 	SoakPresenceConnections       *prometheus.GaugeVec
-	SoakHeartbeatDegraded         prometheus.GaugeFunc
-	SoakHeartbeatSuccessTimestamp prometheus.GaugeFunc
+	SoakHeartbeatStatus           prometheus.Collector
 	SoakHeartbeatAttempts         *prometheus.CounterVec
-	MongoUp                       prometheus.GaugeFunc
-	MongoProbeTimestamp           prometheus.GaugeFunc
+	MongoProbeStatus              prometheus.Collector
+	MongoProbeAttempts            *prometheus.CounterVec
 
 	FailureOperations            *prometheus.CounterVec
 	FailureObservations          *prometheus.CounterVec
@@ -382,19 +422,24 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"scenario", "lane", "observer", "result"},
 	)
-	m.SoakHeartbeatDegraded = prometheus.NewGaugeFunc(
-		prometheus.GaugeOpts{
-			Name: "loadgen_soak_heartbeat_degraded",
-			Help: "Whether the latest soak heartbeat attempt failed while the run remains active (1 degraded, 0 otherwise).",
+	m.SoakHeartbeatStatus = newSnapshotGaugePair(
+		m.soakHeartbeatSnapshot,
+		"loadgen_soak_heartbeat_degraded",
+		"Whether the latest soak heartbeat attempt failed while the run remains active (1 degraded, 0 otherwise).",
+		func(snapshot soakHeartbeatSnapshot) float64 {
+			if snapshot.Degraded {
+				return 1
+			}
+			return 0
 		},
-		m.soakHeartbeatDegraded,
-	)
-	m.SoakHeartbeatSuccessTimestamp = prometheus.NewGaugeFunc(
-		prometheus.GaugeOpts{
-			Name: "loadgen_soak_heartbeat_success_timestamp_seconds",
-			Help: "Unix timestamp of the latest successful soak manifest heartbeat; zero until the first success.",
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+		"Unix timestamp of the latest successful soak manifest heartbeat; zero until the first success.",
+		func(snapshot soakHeartbeatSnapshot) float64 {
+			if snapshot.LastSuccess.IsZero() {
+				return 0
+			}
+			return float64(snapshot.LastSuccess.Unix())
 		},
-		m.soakHeartbeatSuccessTimestamp,
 	)
 	m.SoakHeartbeatAttempts = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -403,20 +448,35 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"outcome"},
 	)
-	m.MongoUp = prometheus.NewGaugeFunc(
-		prometheus.GaugeOpts{
-			Name: "loadgen_mongo_up",
-			Help: "Whether loadgen's latest bounded Ping to the Mongo primary succeeded (1 up, 0 down or not yet probed).",
+	m.MongoProbeStatus = newSnapshotGaugePair(
+		m.mongoProbeSnapshot,
+		"loadgen_mongo_up",
+		"Whether loadgen's latest bounded Ping to the Mongo primary succeeded (1 up, 0 down or not yet probed).",
+		func(snapshot soakMongoProbeSnapshot) float64 {
+			if snapshot.Up {
+				return 1
+			}
+			return 0
 		},
-		m.mongoUp,
-	)
-	m.MongoProbeTimestamp = prometheus.NewGaugeFunc(
-		prometheus.GaugeOpts{
-			Name: "loadgen_mongo_probe_timestamp_seconds",
-			Help: "Unix timestamp when loadgen's latest Mongo primary Ping completed, regardless of outcome; zero until the first probe.",
+		"loadgen_mongo_probe_timestamp_seconds",
+		"Unix timestamp when loadgen's latest Mongo primary Ping completed, regardless of outcome; zero until the first probe.",
+		func(snapshot soakMongoProbeSnapshot) float64 {
+			if snapshot.CompletedAt.IsZero() {
+				return 0
+			}
+			return float64(snapshot.CompletedAt.Unix())
 		},
-		m.mongoProbeTimestamp,
 	)
+	m.MongoProbeAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_mongo_probe_attempts_total",
+			Help: "Loadgen Mongo primary Ping attempts by bounded outcome (success, error).",
+		},
+		[]string{"outcome"},
+	)
+	for _, outcome := range []soakMongoProbeOutcome{soakMongoProbeSuccess, soakMongoProbeError} {
+		m.MongoProbeAttempts.WithLabelValues(string(outcome))
+	}
 	m.FailureObservationReasons = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_observation_reasons_total",
@@ -621,8 +681,8 @@ func NewMetrics() *Metrics {
 		m.SoakEncryptionPreflight,
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
-		m.SoakHeartbeatDegraded, m.SoakHeartbeatSuccessTimestamp,
-		m.SoakHeartbeatAttempts, m.MongoUp, m.MongoProbeTimestamp,
+		m.SoakHeartbeatStatus, m.SoakHeartbeatAttempts,
+		m.MongoProbeStatus, m.MongoProbeAttempts,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
@@ -689,21 +749,6 @@ func (m *Metrics) soakHeartbeatSnapshot() soakHeartbeatSnapshot {
 	return soakHeartbeatSnapshot{}
 }
 
-func (m *Metrics) soakHeartbeatDegraded() float64 {
-	if m.soakHeartbeatSnapshot().Degraded {
-		return 1
-	}
-	return 0
-}
-
-func (m *Metrics) soakHeartbeatSuccessTimestamp() float64 {
-	success := m.soakHeartbeatSnapshot().LastSuccess
-	if success.IsZero() {
-		return 0
-	}
-	return float64(success.Unix())
-}
-
 func (m *Metrics) SetMongoProbeSource(source func() soakMongoProbeSnapshot) {
 	if m == nil || source == nil {
 		return
@@ -718,19 +763,4 @@ func (m *Metrics) mongoProbeSnapshot() soakMongoProbeSnapshot {
 		}
 	}
 	return soakMongoProbeSnapshot{}
-}
-
-func (m *Metrics) mongoUp() float64 {
-	if m.mongoProbeSnapshot().Up {
-		return 1
-	}
-	return 0
-}
-
-func (m *Metrics) mongoProbeTimestamp() float64 {
-	completedAt := m.mongoProbeSnapshot().CompletedAt
-	if completedAt.IsZero() {
-		return 0
-	}
-	return float64(completedAt.Unix())
 }

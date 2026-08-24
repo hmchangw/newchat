@@ -213,7 +213,9 @@ func TestMongoOutageRecovery_ExternalStopStart(t *testing.T) {
 	go func() {
 		heartbeatErr <- runSoakHeartbeat(
 			heartbeatCtx, store, runID, healthyTicks,
-			time.Second, soakHeartbeatRetryInterval, waitRetry, time.Now, observer,
+			time.Second, soakHeartbeatRetryInterval,
+			5*time.Minute, 30*time.Second, now,
+			waitRetry, time.Now, observer,
 		)
 	}()
 	defer func() {
@@ -240,7 +242,7 @@ func TestMongoOutageRecovery_ExternalStopStart(t *testing.T) {
 	assert.True(t, attempt.degraded)
 	assert.True(t, status.Snapshot().Degraded)
 
-	probe := newSoakMongoProbe(client, 750*time.Millisecond, time.Now)
+	probe := newSoakMongoProbe(client, 750*time.Millisecond, time.Now, metrics)
 	require.Error(t, probe.Probe(ctx))
 	assert.False(t, probe.Snapshot().Up)
 

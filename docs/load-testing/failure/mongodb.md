@@ -125,6 +125,7 @@ changing the Chart defaults:
 
 ```yaml
 soak:
+  heartbeatInterval: 30s
   heartbeatStaleAfter: 30m
   roomReadRate: "30"
 
@@ -140,9 +141,23 @@ recipientObserver:
 dashboard freshness threshold. It must exceed the longest planned outage plus
 Mongo/client recovery and operator margin; otherwise a stale `running`
 manifest can authorize teardown while loadgen is still dispatching. The longer
-lease also delays cleanup after a real loadgen crash. The emergency override
-for that case is documented in the Kubernetes runbook and is permitted only
-after the Deployment is stopped and the heartbeat is proven not to advance.
+lease also delays cleanup after a real loadgen crash. If heartbeat renewal does
+not recover, loadgen stops the workload one heartbeat interval before the last
+persisted heartbeat would become stale. That restores the lease invariant:
+once seed or teardown may treat the manifest as abandoned, this process is no
+longer dispatching. The emergency override for a crashed loadgen is documented
+in the Kubernetes runbook and is permitted only after the Deployment is stopped
+and the heartbeat is proven not to advance.
+
+Loadgen requires
+`heartbeatStaleAfter >= 2 * heartbeatInterval + 5s`; the additional interval is
+the shutdown margin and the five seconds cover an in-progress heartbeat
+attempt. The staging values above stop dispatch approximately 29 minutes 30
+seconds after the last persisted heartbeat if renewal never recovers. This PR
+adds no operator knob for the five-second bound. The Kubernetes runbook lists
+the complete staging overlay and the corresponding environment variables. The
+relationship is a workload-start requirement; teardown has no heartbeat loop
+and validates its documented crash-recovery override separately.
 
 At the configured mutation/read-receipt rates the room-state demand is 8.05
 operations/second. The default room-read capacity leaves only

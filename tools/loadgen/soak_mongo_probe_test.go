@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,7 +51,8 @@ func TestSoakMongoProbe_RecordsSuccessFailureAndAttemptDeadline(t *testing.T) {
 	wantErr := errors.New("primary unavailable")
 	pinger := &fakeSoakMongoPinger{errors: []error{nil, wantErr}}
 	now := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
-	probe := newSoakMongoProbe(pinger, 2*time.Second, func() time.Time { return now })
+	metrics := NewMetrics()
+	probe := newSoakMongoProbe(pinger, 2*time.Second, func() time.Time { return now }, metrics)
 
 	require.NoError(t, probe.Probe(context.Background()))
 	snapshot := probe.Snapshot()
@@ -65,12 +67,17 @@ func TestSoakMongoProbe_RecordsSuccessFailureAndAttemptDeadline(t *testing.T) {
 	deadlines := pinger.snapshotDeadlines()
 	require.Len(t, deadlines, 2)
 	assert.WithinDuration(t, time.Now().Add(2*time.Second), deadlines[0], time.Second)
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeSuccess))))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeError))))
 }
 
 func TestSoakMongoProbe_ShutdownCancellationPreservesLastCompletedSnapshot(t *testing.T) {
 	pinger := &fakeSoakMongoPinger{errors: []error{nil, context.Canceled}}
 	now := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
-	probe := newSoakMongoProbe(pinger, 2*time.Second, func() time.Time { return now })
+	metrics := NewMetrics()
+	probe := newSoakMongoProbe(pinger, 2*time.Second, func() time.Time { return now }, metrics)
 
 	require.NoError(t, probe.Probe(context.Background()))
 	want := probe.Snapshot()
@@ -80,11 +87,16 @@ func TestSoakMongoProbe_ShutdownCancellationPreservesLastCompletedSnapshot(t *te
 	cancel()
 	assert.ErrorIs(t, probe.Probe(ctx), context.Canceled)
 	assert.Equal(t, want, probe.Snapshot())
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeSuccess))))
+	assert.Zero(t, testutil.ToFloat64(
+		metrics.MongoProbeAttempts.WithLabelValues(string(soakMongoProbeError))),
+		"shutdown cancellation must not manufacture a Mongo outage attempt")
 }
 
 func TestRunSoakMongoProbe_StopsWhenTicksClose(t *testing.T) {
 	pinger := &fakeSoakMongoPinger{}
-	probe := newSoakMongoProbe(pinger, 2*time.Second, time.Now)
+	probe := newSoakMongoProbe(pinger, 2*time.Second, time.Now, nil)
 	ticks := make(chan time.Time, 1)
 	ticks <- time.Now()
 	close(ticks)
@@ -112,8 +124,11 @@ func TestSoakMongoProbe_StartsImmediatelyAndStopsIdempotently(t *testing.T) {
 	shutdown()
 	shutdown()
 
-	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.MongoUp))
-	assert.Equal(t, float64(now.Unix()), testutil.ToFloat64(metrics.MongoProbeTimestamp))
+	values := gatherLoadgenMetricValues(
+		t, metrics, "loadgen_mongo_up", "loadgen_mongo_probe_timestamp_seconds",
+	)
+	assert.Equal(t, float64(1), values["loadgen_mongo_up"])
+	assert.Equal(t, float64(now.Unix()), values["loadgen_mongo_probe_timestamp_seconds"])
 }
 
 func TestSoakHeartbeatStatus_ExportsAttemptsHealthAndFreshness(t *testing.T) {
@@ -125,15 +140,25 @@ func TestSoakHeartbeatStatus_ExportsAttemptsHealthAndFreshness(t *testing.T) {
 	status.RecordHeartbeatAttempt(soakHeartbeatError, true, failedAt)
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.SoakHeartbeatAttempts.WithLabelValues(string(soakHeartbeatError))))
-	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.SoakHeartbeatDegraded))
-	assert.Zero(t, testutil.ToFloat64(metrics.SoakHeartbeatSuccessTimestamp))
+	values := gatherLoadgenMetricValues(
+		t, metrics,
+		"loadgen_soak_heartbeat_degraded",
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+	)
+	assert.Equal(t, float64(1), values["loadgen_soak_heartbeat_degraded"])
+	assert.Zero(t, values["loadgen_soak_heartbeat_success_timestamp_seconds"])
 
 	status.RecordHeartbeatAttempt(soakHeartbeatSuccess, false, succeededAt)
 	assert.Equal(t, float64(1), testutil.ToFloat64(
 		metrics.SoakHeartbeatAttempts.WithLabelValues(string(soakHeartbeatSuccess))))
-	assert.Zero(t, testutil.ToFloat64(metrics.SoakHeartbeatDegraded))
+	values = gatherLoadgenMetricValues(
+		t, metrics,
+		"loadgen_soak_heartbeat_degraded",
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+	)
+	assert.Zero(t, values["loadgen_soak_heartbeat_degraded"])
 	assert.Equal(t, float64(succeededAt.Unix()),
-		testutil.ToFloat64(metrics.SoakHeartbeatSuccessTimestamp))
+		values["loadgen_soak_heartbeat_success_timestamp_seconds"])
 
 	status.RecordHeartbeatAttempt(soakHeartbeatNotActive, false, succeededAt.Add(time.Second))
 	assert.Equal(t, float64(1), testutil.ToFloat64(
@@ -142,15 +167,81 @@ func TestSoakHeartbeatStatus_ExportsAttemptsHealthAndFreshness(t *testing.T) {
 
 func TestSoakMongoProbeMetrics_DefaultToUnknownAndReadOneSnapshot(t *testing.T) {
 	metrics := NewMetrics()
-	assert.Zero(t, testutil.ToFloat64(metrics.MongoUp))
-	assert.Zero(t, testutil.ToFloat64(metrics.MongoProbeTimestamp))
+	values := gatherLoadgenMetricValues(
+		t, metrics, "loadgen_mongo_up", "loadgen_mongo_probe_timestamp_seconds",
+	)
+	assert.Zero(t, values["loadgen_mongo_up"])
+	assert.Zero(t, values["loadgen_mongo_probe_timestamp_seconds"])
 
 	probe := newSoakMongoProbe(
 		&fakeSoakMongoPinger{}, time.Second,
 		func() time.Time { return time.Unix(123, 0).UTC() },
+		metrics,
 	)
 	metrics.SetMongoProbeSource(probe.Snapshot)
 	require.NoError(t, probe.Probe(context.Background()))
-	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.MongoUp))
-	assert.Equal(t, float64(123), testutil.ToFloat64(metrics.MongoProbeTimestamp))
+	values = gatherLoadgenMetricValues(
+		t, metrics, "loadgen_mongo_up", "loadgen_mongo_probe_timestamp_seconds",
+	)
+	assert.Equal(t, float64(1), values["loadgen_mongo_up"])
+	assert.Equal(t, float64(123), values["loadgen_mongo_probe_timestamp_seconds"])
+}
+
+func TestSoakControlPlaneCollectors_ReadEachSnapshotOncePerScrape(t *testing.T) {
+	metrics := NewMetrics()
+	var mongoCalls atomic.Int64
+	metrics.SetMongoProbeSource(func() soakMongoProbeSnapshot {
+		call := mongoCalls.Add(1)
+		return soakMongoProbeSnapshot{
+			Up: call == 1, CompletedAt: time.Unix(122+call, 0).UTC(),
+		}
+	})
+	var heartbeatCalls atomic.Int64
+	metrics.SetSoakHeartbeatSource(func() soakHeartbeatSnapshot {
+		call := heartbeatCalls.Add(1)
+		return soakHeartbeatSnapshot{
+			Degraded: call != 1, LastSuccess: time.Unix(455+call, 0).UTC(),
+		}
+	})
+
+	values := gatherLoadgenMetricValues(
+		t, metrics,
+		"loadgen_mongo_up",
+		"loadgen_mongo_probe_timestamp_seconds",
+		"loadgen_soak_heartbeat_degraded",
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+	)
+
+	assert.Equal(t, int64(1), mongoCalls.Load())
+	assert.Equal(t, float64(1), values["loadgen_mongo_up"])
+	assert.Equal(t, float64(123), values["loadgen_mongo_probe_timestamp_seconds"])
+	assert.Equal(t, int64(1), heartbeatCalls.Load())
+	assert.Zero(t, values["loadgen_soak_heartbeat_degraded"])
+	assert.Equal(t, float64(456), values["loadgen_soak_heartbeat_success_timestamp_seconds"])
+}
+
+func gatherLoadgenMetricValues(
+	t *testing.T,
+	metrics *Metrics,
+	names ...string,
+) map[string]float64 {
+	t.Helper()
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	values := make(map[string]float64, len(names))
+	for _, family := range families {
+		if _, ok := wanted[family.GetName()]; !ok {
+			continue
+		}
+		require.Len(t, family.Metric, 1)
+		values[family.GetName()] = family.Metric[0].GetGauge().GetValue()
+	}
+	for _, name := range names {
+		assert.Contains(t, values, name)
+	}
+	return values
 }

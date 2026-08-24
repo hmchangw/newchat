@@ -15,27 +15,28 @@ import (
 )
 
 type soakRoomStateStoreStub struct {
-	name       string
-	nameFound  bool
-	nameErr    error
-	member     bool
-	memberErr  error
-	muted      bool
-	mutedFound bool
-	mutedErr   error
-	lastSeen   time.Time
-	seenFound  bool
-	seenErr    error
-	appended   []string
-	appendErr  error
-	appendHook func()
-	byName     string
-	byNameOK   bool
-	byNameErr  error
-	ownedRooms int
-	ownedErr   error
-	reads      int
-	contextErr func(context.Context) error
+	name             string
+	nameFound        bool
+	nameErr          error
+	member           bool
+	memberErr        error
+	muted            bool
+	mutedFound       bool
+	mutedErr         error
+	lastSeen         time.Time
+	seenFound        bool
+	seenErr          error
+	appended         []string
+	appendErr        error
+	appendHook       func()
+	appendContextErr func(context.Context) error
+	byName           string
+	byNameOK         bool
+	byNameErr        error
+	ownedRooms       int
+	ownedErr         error
+	reads            int
+	contextErr       func(context.Context) error
 }
 
 func (s *soakRoomStateStoreStub) RoomName(ctx context.Context, _ string) (string, bool, error) {
@@ -96,8 +97,13 @@ func (s *soakRoomStateStoreStub) checkContext(ctx context.Context) error {
 }
 
 func (s *soakRoomStateStoreStub) AppendOwnedRooms(
-	_ context.Context, _ string, roomIDs []string,
+	ctx context.Context, _ string, roomIDs []string,
 ) error {
+	if s.appendContextErr != nil {
+		if err := s.appendContextErr(ctx); err != nil {
+			return err
+		}
+	}
 	if s.appendHook != nil {
 		s.appendHook()
 	}

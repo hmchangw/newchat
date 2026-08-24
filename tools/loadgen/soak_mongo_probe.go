@@ -19,6 +19,13 @@ type soakMongoPinger interface {
 	Ping(context.Context, *readpref.ReadPref) error
 }
 
+type soakMongoProbeOutcome string
+
+const (
+	soakMongoProbeSuccess soakMongoProbeOutcome = "success"
+	soakMongoProbeError   soakMongoProbeOutcome = "error"
+)
+
 type soakMongoProbeSnapshot struct {
 	Up          bool
 	CompletedAt time.Time
@@ -28,6 +35,7 @@ type soakMongoProbe struct {
 	pinger  soakMongoPinger
 	timeout time.Duration
 	now     func() time.Time
+	metrics *Metrics
 	state   atomic.Pointer[soakMongoProbeSnapshot]
 }
 
@@ -35,6 +43,7 @@ func newSoakMongoProbe(
 	pinger soakMongoPinger,
 	timeout time.Duration,
 	now func() time.Time,
+	metrics *Metrics,
 ) *soakMongoProbe {
 	if timeout <= 0 {
 		timeout = soakMongoProbeTimeout
@@ -42,7 +51,7 @@ func newSoakMongoProbe(
 	if now == nil {
 		now = time.Now
 	}
-	probe := &soakMongoProbe{pinger: pinger, timeout: timeout, now: now}
+	probe := &soakMongoProbe{pinger: pinger, timeout: timeout, now: now, metrics: metrics}
 	probe.state.Store(&soakMongoProbeSnapshot{})
 	return probe
 }
@@ -60,6 +69,13 @@ func (p *soakMongoProbe) Probe(ctx context.Context) error {
 	p.state.Store(&soakMongoProbeSnapshot{
 		Up: err == nil, CompletedAt: p.now().UTC(),
 	})
+	if p.metrics != nil {
+		outcome := soakMongoProbeSuccess
+		if err != nil {
+			outcome = soakMongoProbeError
+		}
+		p.metrics.MongoProbeAttempts.WithLabelValues(string(outcome)).Inc()
+	}
 	if err != nil {
 		return fmt.Errorf("ping Mongo primary: %w", err)
 	}
@@ -101,7 +117,7 @@ func startSoakMongoProbe(
 	metrics *Metrics,
 	now func() time.Time,
 ) func() {
-	probe := newSoakMongoProbe(pinger, soakMongoProbeTimeout, now)
+	probe := newSoakMongoProbe(pinger, soakMongoProbeTimeout, now, metrics)
 	metrics.SetMongoProbeSource(probe.Snapshot)
 	probeCtx, cancel := context.WithCancel(ctx)
 	ticker := time.NewTicker(soakMongoProbeInterval)

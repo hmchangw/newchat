@@ -32,9 +32,13 @@ required evidence.
 
 Loadgen's own Mongo control plane is a separate validity gate. An absence
 claim is `INCONCLUSIVE` when `loadgen_mongo_up != 1`, when the Mongo probe
-timestamp is zero, or when `time() - loadgen_mongo_probe_timestamp_seconds`
-exceeds 60 seconds. The probe runs every 5 seconds, but the contract allows two
-30-second scrape intervals before calling the series stale.
+timestamp is zero, when `time() - loadgen_mongo_probe_timestamp_seconds`
+exceeds 60 seconds, or when
+`increase(loadgen_mongo_probe_attempts_total{outcome="error"}[2m]) > 0`. The
+counter preserves a failed probe even if a later success replaces
+the latest status before the next 30-second scrape. The probe runs every 5
+seconds, but the contract allows two scrape intervals before calling the
+series stale.
 
 The soak manifest heartbeat is valid when
 `loadgen_soak_heartbeat_degraded == 0`, its success timestamp is non-zero, and
@@ -161,6 +165,7 @@ Metrics added by this work:
   `loadgen_failure_not_sent_total`;
 - `loadgen_consumer_ack_floor_stall_seconds`.
 - `loadgen_mongo_up`, `loadgen_mongo_probe_timestamp_seconds`,
+  `loadgen_mongo_probe_attempts_total`,
   `loadgen_soak_heartbeat_degraded`,
   `loadgen_soak_heartbeat_success_timestamp_seconds`, and
   `loadgen_soak_heartbeat_attempts_total`.

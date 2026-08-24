@@ -70,6 +70,7 @@ func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *t
 		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range\"}`,
 		"loadgen_mongo_up",
 		"loadgen_mongo_probe_timestamp_seconds",
+		`increase(loadgen_mongo_probe_attempts_total{outcome=\"error\"}[2m])`,
 		"loadgen_soak_heartbeat_degraded",
 		"loadgen_soak_heartbeat_success_timestamp_seconds",
 		"loadgen_soak_heartbeat_attempts_total",

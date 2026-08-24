@@ -420,11 +420,15 @@ func (l *soakRoomLanes) Reconcile(
 		// budget. Hold the operation open and try again while the deadline
 		// allows it.
 		if operation.OperationType == failureOperationRoomCreate {
-			claimErr := l.claimCreatedRoom(ctx, &operation)
+			claimCtx, cancelClaim := context.WithTimeout(ctx, soakRoomStateTimeout)
+			claimErr := l.claimCreatedRoom(claimCtx, &operation)
+			cancelClaim()
 			completedAt = l.now().UTC()
 			if claimErr != nil {
 				if completedAt.Before(operation.Deadline) {
-					return true, l.releaseFailedCall(operation.ID, completedAt)
+					return true, l.releaseFailedCall(
+						operation.ID, completedAt, operation.Deadline,
+					)
 				}
 				slog.Error("created soak room could not be claimed before its deadline",
 					"runId", l.cfg.RunID,
@@ -651,8 +655,16 @@ func (l *soakRoomLanes) releaseProbe(operation *failureOperation, now time.Time)
 	return nil
 }
 
-func (l *soakRoomLanes) releaseFailedCall(operationID string, now time.Time) error {
-	if err := l.ledger.ReleaseClaim(operationID, now.Add(l.cfg.RetryInterval)); err != nil {
+func (l *soakRoomLanes) releaseFailedCall(
+	operationID string,
+	now time.Time,
+	deadline time.Time,
+) error {
+	next := now.Add(l.cfg.RetryInterval)
+	if next.After(deadline) {
+		next = deadline
+	}
+	if err := l.ledger.ReleaseClaim(operationID, next); err != nil {
 		return fmt.Errorf("reschedule failed soak room call: %w", err)
 	}
 	return nil

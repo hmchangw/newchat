@@ -1097,6 +1097,48 @@ func TestSoakRoomLanes_RoomCreateRetriesOwnershipFailuresAtTheFlatInterval(t *te
 		"a failed ownership call must not inherit pending-effect backoff")
 }
 
+func TestSoakRoomLanes_RoomCreateBoundsOwnershipPersistence(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendContextErr = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "ownership persistence must have a bounded context")
+		assert.WithinDuration(
+			t, time.Now().Add(soakRoomStateTimeout), deadline, time.Second,
+		)
+		return errors.New("primary unavailable")
+	}
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Len(t, fixture.ledger.ActiveOperations(), 1)
+}
+
+func TestSoakRoomLanes_RoomCreateCapsOwnershipRetryAtDeadline(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.advance(operation.Deadline.Sub(fixture.now) - 500*time.Millisecond)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	retry := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, operation.Deadline, retry.nextVerifyAt,
+		"the terminal ownership attempt must remain claimable at the deadline")
+}
+
 // Reads against a created room are issued as the account that created it. Any
 // other account is not a member, so the room_read lane would measure
 // authorization failures instead of the reads it is there to exercise.

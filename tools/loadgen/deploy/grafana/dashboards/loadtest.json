@@ -524,9 +524,14 @@
           "expr": "sum by (outcome) (increase(loadgen_soak_heartbeat_attempts_total[5m]))",
           "legendFormat": "heartbeat {{outcome}} attempts/5m",
           "refId": "E"
+        },
+        {
+          "expr": "increase(loadgen_mongo_probe_attempts_total{outcome=\"error\"}[2m])",
+          "legendFormat": "Mongo probe errors/2m",
+          "refId": "F"
         }
       ],
-      "description": "Loadgen-side validity gate, not service health. Mongo absence evidence is inconclusive while Ping is down or the probe timestamp is stale. A stale heartbeat-success timestamp exposes a stuck watcher even when its degraded gauge froze at the last value."
+      "description": "Loadgen-side validity gate, not service health. Mongo absence evidence is inconclusive while Ping is down, the probe timestamp is stale, or the two-minute evaluation window contains a probe error. The error counter preserves failures that recover between 30-second scrapes. A stale heartbeat-success timestamp exposes a stuck watcher even when its degraded gauge froze at the last value."
     }
   ]
 }

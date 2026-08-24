@@ -34,27 +34,28 @@ type soakWorkloadActions struct {
 }
 
 type soakWorkloadConfig struct {
-	RunID              string
-	Duration           time.Duration
-	Continuous         bool
-	Warmup             time.Duration
-	HeartbeatInterval  time.Duration
-	SendRate           float64
-	ReadRate           float64
-	MutationRate       float64
-	ReactionRate       float64
-	PinnedListRate     float64
-	VerifyRate         float64
-	MemberMutationRate float64
-	RoomMutationRate   float64
-	RoomReadRate       float64
-	UserReadRate       float64
-	SearchReadRate     float64
-	RoomCreateRate     float64
-	ReadReceiptRate    float64
-	PresenceRate       float64
-	MaxInFlight        int
-	StopOnActionError  bool
+	RunID               string
+	Duration            time.Duration
+	Continuous          bool
+	Warmup              time.Duration
+	HeartbeatInterval   time.Duration
+	HeartbeatStaleAfter time.Duration
+	SendRate            float64
+	ReadRate            float64
+	MutationRate        float64
+	ReactionRate        float64
+	PinnedListRate      float64
+	VerifyRate          float64
+	MemberMutationRate  float64
+	RoomMutationRate    float64
+	RoomReadRate        float64
+	UserReadRate        float64
+	SearchReadRate      float64
+	RoomCreateRate      float64
+	ReadReceiptRate     float64
+	PresenceRate        float64
+	MaxInFlight         int
+	StopOnActionError   bool
 }
 
 // soakWorkloadConfigFrom maps the parsed environment onto the workload's lane
@@ -64,26 +65,27 @@ type soakWorkloadConfig struct {
 // a test over this mapping can catch.
 func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfig {
 	return &soakWorkloadConfig{
-		RunID:              cfg.RunID,
-		Duration:           cfg.RunDuration,
-		Continuous:         cfg.RunMode == soakRunModeContinuous,
-		Warmup:             cfg.Warmup,
-		HeartbeatInterval:  cfg.HeartbeatInterval,
-		SendRate:           cfg.SendRate,
-		ReadRate:           cfg.ReadRate,
-		MutationRate:       cfg.MutationRate,
-		ReactionRate:       cfg.ReactionRate,
-		PinnedListRate:     cfg.PinnedListRate,
-		VerifyRate:         cfg.VerifyRate,
-		MemberMutationRate: cfg.MemberMutationRate,
-		RoomMutationRate:   cfg.RoomMutationRate,
-		RoomReadRate:       cfg.RoomReadRate,
-		UserReadRate:       cfg.UserReadRate,
-		SearchReadRate:     cfg.SearchReadRate,
-		RoomCreateRate:     cfg.RoomCreateRate,
-		ReadReceiptRate:    cfg.ReadReceiptRate,
-		PresenceRate:       cfg.PresenceRate,
-		MaxInFlight:        maxInFlight,
+		RunID:               cfg.RunID,
+		Duration:            cfg.RunDuration,
+		Continuous:          cfg.RunMode == soakRunModeContinuous,
+		Warmup:              cfg.Warmup,
+		HeartbeatInterval:   cfg.HeartbeatInterval,
+		HeartbeatStaleAfter: cfg.HeartbeatStaleAfter,
+		SendRate:            cfg.SendRate,
+		ReadRate:            cfg.ReadRate,
+		MutationRate:        cfg.MutationRate,
+		ReactionRate:        cfg.ReactionRate,
+		PinnedListRate:      cfg.PinnedListRate,
+		VerifyRate:          cfg.VerifyRate,
+		MemberMutationRate:  cfg.MemberMutationRate,
+		RoomMutationRate:    cfg.RoomMutationRate,
+		RoomReadRate:        cfg.RoomReadRate,
+		UserReadRate:        cfg.UserReadRate,
+		SearchReadRate:      cfg.SearchReadRate,
+		RoomCreateRate:      cfg.RoomCreateRate,
+		ReadReceiptRate:     cfg.ReadReceiptRate,
+		PresenceRate:        cfg.PresenceRate,
+		MaxInFlight:         maxInFlight,
 	}
 }
 
@@ -102,8 +104,9 @@ type soakWorkloadResult struct {
 }
 
 type soakRunWindow struct {
-	Deadline     time.Time
-	RestartCount int
+	Deadline        time.Time
+	LastHeartbeatAt time.Time
+	RestartCount    int
 }
 
 type soakLifecycleStore interface {
@@ -113,8 +116,9 @@ type soakLifecycleStore interface {
 }
 
 var (
-	errSoakManifestNotFound = errors.New("soak run manifest not found")
-	errSoakRunNotActive     = errors.New("soak run is not active")
+	errSoakManifestNotFound     = errors.New("soak run manifest not found")
+	errSoakRunNotActive         = errors.New("soak run is not active")
+	errSoakHeartbeatLeaseAtRisk = errors.New("soak heartbeat lease can no longer be renewed safely")
 )
 
 type soakHeartbeatOutcome string
@@ -225,6 +229,9 @@ func newSoakWorkload(
 	if config.HeartbeatInterval <= 0 {
 		config.HeartbeatInterval = 30 * time.Second
 	}
+	if config.HeartbeatStaleAfter <= 0 {
+		config.HeartbeatStaleAfter = 2 * time.Minute
+	}
 	if dispatch == nil {
 		dispatch = dispatchSoakLane
 	}
@@ -331,6 +338,9 @@ func (w *soakWorkload) Run(
 			heartbeatTicker.C,
 			soakHeartbeatAttemptTimeout,
 			soakHeartbeatRetryInterval,
+			w.cfg.HeartbeatStaleAfter,
+			w.cfg.HeartbeatInterval,
+			window.LastHeartbeatAt,
 			nil,
 			w.now,
 			w.heartbeatObserver,
@@ -545,8 +555,9 @@ func prepareSoakRun(
 		return soakRunWindow{}, fmt.Errorf("mark soak run running: %w", err)
 	}
 	return soakRunWindow{
-		Deadline:     *manifest.Deadline,
-		RestartCount: manifest.RestartCount,
+		Deadline:        *manifest.Deadline,
+		LastHeartbeatAt: heartbeat,
+		RestartCount:    manifest.RestartCount,
 	}, nil
 }
 
@@ -603,7 +614,10 @@ func prepareContinuousSoakRun(
 			err,
 		)
 	}
-	return soakRunWindow{RestartCount: manifest.RestartCount}, nil
+	return soakRunWindow{
+		LastHeartbeatAt: startedAt,
+		RestartCount:    manifest.RestartCount,
+	}, nil
 }
 
 func stopSoakRun(
@@ -643,6 +657,18 @@ func stopSoakRun(
 
 type soakHeartbeatRetryWait func(context.Context, time.Duration) error
 
+func minimumSoakHeartbeatStaleAfter(
+	heartbeatInterval time.Duration,
+	attemptTimeout time.Duration,
+) (time.Duration, bool) {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if heartbeatInterval <= 0 || attemptTimeout <= 0 ||
+		heartbeatInterval > (maxDuration-attemptTimeout)/2 {
+		return 0, false
+	}
+	return 2*heartbeatInterval + attemptTimeout, true
+}
+
 func waitSoakHeartbeatRetry(ctx context.Context, interval time.Duration) error {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -661,6 +687,9 @@ func runSoakHeartbeat(
 	healthyTicks <-chan time.Time,
 	attemptTimeout time.Duration,
 	retryInterval time.Duration,
+	staleAfter time.Duration,
+	shutdownMargin time.Duration,
+	lastSuccessAt time.Time,
 	waitRetry soakHeartbeatRetryWait,
 	now func() time.Time,
 	observer soakHeartbeatObserver,
@@ -677,15 +706,37 @@ func runSoakHeartbeat(
 	if waitRetry == nil {
 		waitRetry = waitSoakHeartbeatRetry
 	}
+	minimumStaleAfter, validLeaseDurations := minimumSoakHeartbeatStaleAfter(
+		shutdownMargin,
+		attemptTimeout,
+	)
+	if !validLeaseDurations || staleAfter < minimumStaleAfter {
+		return fmt.Errorf(
+			"soak heartbeat lease requires stale threshold at least twice the shutdown margin plus the attempt timeout",
+		)
+	}
+	if lastSuccessAt.IsZero() {
+		return fmt.Errorf("soak heartbeat lease requires the last persisted heartbeat time")
+	}
+	lastSuccessAt = lastSuccessAt.UTC()
 	degraded := false
 	var degradedAt time.Time
 	for healthyTicks != nil || degraded {
 		var at time.Time
 		if degraded {
-			if err := waitRetry(ctx, retryInterval); err != nil {
+			stopAt := lastSuccessAt.Add(staleAfter - shutdownMargin)
+			current := now().UTC()
+			if !current.Before(stopAt) {
+				return soakHeartbeatLeaseError(lastSuccessAt, stopAt)
+			}
+			wait := min(retryInterval, stopAt.Sub(current))
+			if err := waitRetry(ctx, wait); err != nil {
 				return err
 			}
 			at = now().UTC()
+			if !at.Before(stopAt) {
+				return soakHeartbeatLeaseError(lastSuccessAt, stopAt)
+			}
 		} else {
 			select {
 			case <-ctx.Done():
@@ -699,7 +750,12 @@ func runSoakHeartbeat(
 			}
 		}
 
-		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		stopAt := lastSuccessAt.Add(staleAfter - shutdownMargin)
+		remaining := stopAt.Sub(now().UTC())
+		if remaining <= 0 {
+			return soakHeartbeatLeaseError(lastSuccessAt, stopAt)
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, min(attemptTimeout, remaining))
 		err := store.TouchHeartbeat(attemptCtx, runID, at.UTC())
 		cancel()
 		completedAt := now().UTC()
@@ -723,6 +779,7 @@ func runSoakHeartbeat(
 			continue
 		default:
 			recordSoakHeartbeatAttempt(observer, soakHeartbeatSuccess, false, completedAt)
+			lastSuccessAt = at.UTC()
 			if degraded {
 				slog.Info("soak heartbeat recovered",
 					"runId", runID, "degradedDuration", completedAt.Sub(degradedAt))
@@ -734,6 +791,15 @@ func runSoakHeartbeat(
 		}
 	}
 	return nil
+}
+
+func soakHeartbeatLeaseError(lastSuccessAt, stopAt time.Time) error {
+	return fmt.Errorf(
+		"%w: last persisted heartbeat %s; workload stop boundary %s",
+		errSoakHeartbeatLeaseAtRisk,
+		lastSuccessAt.Format(time.RFC3339Nano),
+		stopAt.Format(time.RFC3339Nano),
+	)
 }
 
 // drainSoakHeartbeatTicks discards the stale healthy tick a time.Ticker may

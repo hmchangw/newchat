@@ -372,8 +372,11 @@ func TestRunSoakHeartbeat_UpdatesEveryTick(t *testing.T) {
 		ticks,
 		5*time.Second,
 		5*time.Second,
+		2*time.Minute,
+		30*time.Second,
+		first.Add(-30*time.Second),
 		nil,
-		time.Now,
+		func() time.Time { return first },
 		nil,
 	))
 
@@ -393,6 +396,9 @@ func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T
 			make(chan time.Time),
 			5*time.Second,
 			5*time.Second,
+			2*time.Minute,
+			30*time.Second,
+			time.Now().UTC(),
 			nil,
 			time.Now,
 			nil,
@@ -424,8 +430,9 @@ func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T
 		go func() {
 			done <- runSoakHeartbeat(
 				context.Background(), store, "run-1",
-				healthyTicks, 5*time.Second, 5*time.Second, waitRetry,
-				func() time.Time { return second }, nil,
+				healthyTicks, 5*time.Second, 5*time.Second,
+				2*time.Minute, 30*time.Second, time.Unix(100, 0).UTC(),
+				waitRetry, func() time.Time { return second }, nil,
 			)
 		}()
 
@@ -456,10 +463,13 @@ func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T
 		store.heartbeatErrors = []error{errSoakRunNotActive}
 		healthyTicks := make(chan time.Time, 1)
 		healthyTicks <- time.Unix(100, 0)
+		now := time.Now().UTC()
 
 		err := runSoakHeartbeat(
 			context.Background(), store, "run-1",
-			healthyTicks, 5*time.Second, 5*time.Second, nil, time.Now, nil,
+			healthyTicks, 5*time.Second, 5*time.Second,
+			2*time.Minute, 30*time.Second, now,
+			nil, time.Now, nil,
 		)
 
 		assert.ErrorIs(t, err, errSoakRunNotActive)
@@ -476,11 +486,79 @@ func TestRunSoakHeartbeat_ClassifiesCancellationDegradedAndInactive(t *testing.T
 		healthyTicks := make(chan time.Time, 1)
 		healthyTicks <- time.Unix(100, 0)
 		close(healthyTicks)
+		now := time.Now().UTC()
 
 		require.NoError(t, runSoakHeartbeat(
 			context.Background(), store, "run-1",
-			healthyTicks, 5*time.Second, 5*time.Second, nil, time.Now, nil,
+			healthyTicks, 5*time.Second, 5*time.Second,
+			2*time.Minute, 30*time.Second, now,
+			nil, time.Now, nil,
 		))
+	})
+
+	t.Run("unsafe lease window is rejected", func(t *testing.T) {
+		healthyTicks := make(chan time.Time)
+		close(healthyTicks)
+
+		err := runSoakHeartbeat(
+			context.Background(), seededLifecycleStore("run-1"), "run-1",
+			healthyTicks, 5*time.Second, 5*time.Second,
+			64*time.Second, 30*time.Second, time.Now().UTC(),
+			nil, time.Now, nil,
+		)
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "soak heartbeat lease")
+	})
+
+	t.Run("attempt timeout is capped at the lease stop boundary", func(t *testing.T) {
+		store := seededLifecycleStore("run-1")
+		store.manifest.State = soakManifestRunning
+		store.heartbeatFn = func(ctx context.Context) error {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok)
+			assert.WithinDuration(t, time.Now().Add(time.Second), deadline, 250*time.Millisecond)
+			return nil
+		}
+		lastSuccess := time.Unix(100, 0).UTC()
+		current := lastSuccess.Add(34 * time.Second)
+		healthyTicks := make(chan time.Time, 1)
+		healthyTicks <- current
+		close(healthyTicks)
+
+		require.NoError(t, runSoakHeartbeat(
+			context.Background(), store, "run-1", healthyTicks,
+			5*time.Second, 5*time.Second,
+			65*time.Second, 30*time.Second, lastSuccess,
+			nil, func() time.Time { return current }, nil,
+		))
+	})
+
+	t.Run("unrecovered failure stops before the persisted lease can become stale", func(t *testing.T) {
+		store := seededLifecycleStore("run-1")
+		store.manifest.State = soakManifestRunning
+		store.heartbeatFn = func(context.Context) error {
+			return errors.New("mongo unavailable")
+		}
+		lastSuccess := time.Unix(100, 0).UTC()
+		current := lastSuccess.Add(30 * time.Second)
+		healthyTicks := make(chan time.Time, 1)
+		healthyTicks <- current
+		waitRetry := func(_ context.Context, interval time.Duration) error {
+			current = current.Add(interval)
+			return nil
+		}
+
+		err := runSoakHeartbeat(
+			context.Background(), store, "run-1", healthyTicks,
+			5*time.Second, 5*time.Second,
+			2*time.Minute, 30*time.Second, lastSuccess,
+			waitRetry, func() time.Time { return current }, nil,
+		)
+
+		assert.ErrorIs(t, err, errSoakHeartbeatLeaseAtRisk)
+		assert.Equal(t, lastSuccess.Add(90*time.Second), current,
+			"the workload must stop with one heartbeat interval left on the lease")
 	})
 }
 
@@ -789,7 +867,8 @@ func TestSoakWorkload_RunsPresenceAndReadReceiptLanes(t *testing.T) {
 func TestSoakWorkloadConfigFrom_CarriesEveryLaneRate(t *testing.T) {
 	cfg := soakConfig{
 		RunID: "run-1", RunMode: soakRunModeContinuous,
-		SendRate: 1, ReadRate: 2, MutationRate: 3, ReactionRate: 4,
+		HeartbeatStaleAfter: 45 * time.Minute,
+		SendRate:            1, ReadRate: 2, MutationRate: 3, ReactionRate: 4,
 		PinnedListRate: 5, VerifyRate: 6, MemberMutationRate: 7,
 		RoomMutationRate: 8, RoomReadRate: 9, UserReadRate: 10,
 		RoomCreateRate: 11, ReadReceiptRate: 12, PresenceRate: 13,
@@ -812,6 +891,7 @@ func TestSoakWorkloadConfigFrom_CarriesEveryLaneRate(t *testing.T) {
 	assert.InDelta(t, 13.0, workloadCfg.PresenceRate, 0.0001)
 	assert.Equal(t, 256, workloadCfg.MaxInFlight)
 	assert.True(t, workloadCfg.Continuous)
+	assert.Equal(t, 45*time.Minute, workloadCfg.HeartbeatStaleAfter)
 }
 
 // The structural guard: with every configured rate non-zero, every lane must be

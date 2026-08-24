@@ -121,6 +121,58 @@ soak:
   environment: staging
 ```
 
+### Staging Mongo failure campaign settings
+
+For the planned two-minute Mongo outage, add the following block to the same
+per-run values file. If the release system uses ordered values files instead,
+apply this as the last overlay so these campaign values win:
+
+```yaml
+soak:
+  heartbeatInterval: 30s
+  heartbeatStaleAfter: 30m
+  roomReadRate: "30"
+
+ledger:
+  reconcileDeadline: 10m
+  roomReconcileReadShare: 0.5
+
+recipientObserver:
+  enabled: true
+```
+
+This is the complete Mongo-campaign values block; this change does not add
+another operator setting. The five-second heartbeat attempt timeout and the
+five-second room-state Mongo read budget are fixed safety bounds in loadgen.
+
+| Chart value | Environment variable | Staging value | Why |
+|---|---|---:|---|
+| `soak.heartbeatInterval` | `SOAK_HEARTBEAT_INTERVAL` | `30s` | Normal manifest lease-renewal cadence. Keep it explicit so the lease calculation is reviewable. |
+| `soak.heartbeatStaleAfter` | `SOAK_HEARTBEAT_STALE_AFTER` | `30m` | Destructive-operation lease, sized well beyond the planned outage and recovery. |
+| `soak.roomReadRate` | `SOAK_ROOM_READ_RATE` | `30` | Leaves room-state catch-up capacity after Mongo recovers. |
+| `ledger.reconcileDeadline` | `SOAK_RECONCILE_DEADLINE` | `10m` | Pending room operations must recover before this deadline; do not raise it to manufacture capacity. |
+| `ledger.roomReconcileReadShare` | `SOAK_ROOM_RECONCILE_READ_SHARE` | `0.5` | Reserves half of the room-read lane for reconciliation. |
+| `recipientObserver.enabled` | `SOAK_RECIPIENT_OBSERVER_ENABLED` | `true` | Retains exact-recipient evidence for the campaign. |
+
+Loadgen validates this lease relationship at startup:
+
+```text
+heartbeatStaleAfter >= 2 * heartbeatInterval + 5s
+```
+
+The extra interval is the shutdown margin; the five seconds cover a heartbeat
+attempt that begins at the normal cadence. With the values above, an
+unrecoverable heartbeat outage stops dispatch around 29 minutes 30 seconds
+after the last persisted heartbeat, before seed or teardown may treat the run
+as abandoned. The room recovery sizing assumes the outage is much shorter than
+the ten-minute reconciliation deadline. This relationship is checked for the
+`soak` workload; teardown has no heartbeat loop and validates its emergency
+lease override separately. See
+[`docs/load-testing/failure/mongodb.md`](../../../../docs/load-testing/failure/mongodb.md)
+for the demand and recovery math and
+[`docs/load-testing/loadgen/dashboard-contract.md`](../../../../docs/load-testing/loadgen/dashboard-contract.md)
+for the evidence-validity queries.
+
 Staging releases must use an immutable digest. A mutable tag is accepted only
 when `image.allowMutableTag=true`, which is reserved for local kind
 validation.
@@ -262,7 +314,12 @@ heartbeat.
 For a Mongo fault campaign, set `soak.heartbeatStaleAfter` well beyond the
 longest planned outage and recovery window (for example `30m` for a planned
 two-minute outage). This value is a destructive-operation lease; it is not the
-dashboard heartbeat freshness threshold.
+dashboard heartbeat freshness threshold. If renewal never recovers, loadgen
+stops dispatching one `soak.heartbeatInterval` before this lease can become
+stale. With the example values (`30m` and the default `30s` interval), the
+workload therefore stops after approximately 29 minutes 30 seconds without a
+successful persisted heartbeat. The staging overlay and required validation
+relationship are listed under "Staging Mongo failure campaign settings" above.
 
 If loadgen actually crashed, there is no force flag. The emergency escape hatch
 is a teardown-only lease override. First promote to `phase=stopped`, confirm no
@@ -278,8 +335,10 @@ helm upgrade cassandra-soak tools/loadgen/deploy/k8s \
   --wait --wait-for-jobs --timeout 10m
 ```
 
-Never shorten this lease while a loadgen Pod may still be running. Doing so
-permits teardown to delete a live run's topology.
+The teardown-only `1m` value is intentionally shorter than the workload lease
+minimum. It is accepted only because `phase=teardown` has no heartbeat cadence
+to protect. Never shorten this lease while a loadgen Pod may still be running.
+Doing so permits teardown to delete a live run's topology.
 
 Mongo cleanup pages the run's ownership room IDs and deletes serial batches.
 Tune `batchRooms` and `batchDelay` downward/upward to reduce or increase
