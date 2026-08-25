@@ -438,8 +438,17 @@ func (m *Metrics) stopNATSHealth() {
 // continuing to emit is the one thing the stop boundary promised not to do --
 // so the connection is closed and the interval is marked inconclusive rather
 // than left looking like a clean run that lost messages.
+// soakDrainableConn is the slice of *nats.Conn the drain needs, so both ways
+// the flush can fail are reachable from a test without a broker.
+type soakDrainableConn interface {
+	Drain() error
+	Close()
+	ClosedHandler() nats.ConnHandler
+	SetClosedHandler(nats.ConnHandler)
+}
+
 func drainSoakNATS(
-	nc *nats.Conn,
+	nc soakDrainableConn,
 	budget time.Duration,
 	invalidate func(string),
 ) {
@@ -448,7 +457,8 @@ func drainSoakNATS(
 	}
 	if budget <= 0 {
 		// Ordinary shutdown, unchanged: start the drain and let the process
-		// finish on its own schedule.
+		// finish on its own schedule. No lease is at stake, so a refusal here
+		// says nothing about the system under test.
 		if err := nc.Drain(); err != nil {
 			slog.Error("drain Cassandra soak NATS connection", "error", err)
 		}
@@ -462,16 +472,18 @@ func drainSoakNATS(
 		}
 		close(closed)
 	})
-	if err := nc.Drain(); err != nil {
-		slog.Error("drain Cassandra soak NATS connection", "error", err)
-		return
-	}
-	if waitSoakDrain(closed, budget) {
+	// Drain refuses outright on a closed or already-draining connection, which
+	// leaves the pending publishes in the same unknown state as a drain that
+	// ran out of budget. Both are the same fact about the evidence, so they get
+	// the same answer.
+	err := nc.Drain()
+	if err == nil && waitSoakDrain(closed, budget) {
 		return
 	}
 	slog.Error(
 		"abandoned the soak NATS drain at the lease boundary",
 		"budget", budget,
+		"error", err,
 		"consequence", "unflushed publishes are dropped; the interval is inconclusive",
 	)
 	if invalidate != nil {
