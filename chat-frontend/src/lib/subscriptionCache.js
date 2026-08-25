@@ -31,8 +31,13 @@ export const CACHE_KEY = 'chat.subscriptionCache.v1'
 
 /** Bumped whenever the stored shape changes. A record written by an older
  *  (or newer) build is ignored rather than migrated — the bootstrap fetch
- *  refills it within a second. */
-export const CACHE_VERSION = 1
+ *  refills it within a second.
+ *
+ *  v2 added `previews`, which hydration reads as the room's whole preview
+ *  truth (an absent room means a delete cleared it). A v1 record has no such
+ *  map, and reading its absence as "everything was deleted" would blank the
+ *  warm paint — hence a bump rather than a tolerated missing field. */
+export const CACHE_VERSION = 2
 
 /** How many subscriptions a quota-failed write retries with, keeping the
  *  most recently active rooms. A truncated cache is fine: it only shortens

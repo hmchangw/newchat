@@ -191,16 +191,27 @@ describe('RoomEventsProvider: subscription cache', () => {
       content,
       createdAt,
     })
-    seedCache({
-      r1: sub('r1', {
-        room: {
-          userCount: 3,
-          lastMsgAt: '2026-08-01T00:00:00Z',
-          crossSite: false,
-          previewMessage: previewMessage('m-old', 'last session', '2026-08-01T00:00:00Z'),
+    seedCache(
+      {
+        r1: sub('r1', {
+          room: {
+            userCount: 3,
+            lastMsgAt: '2026-08-01T00:00:00Z',
+            crossSite: false,
+            previewMessage: previewMessage('m-old', 'last session', '2026-08-01T00:00:00Z'),
+          },
+        }),
+      },
+      // What last session's write-through left behind for that same row.
+      {
+        previews: {
+          r1: {
+            messageId: 'm-old', senderName: 'Bob Lin', text: 'last session',
+            createdAt: '2026-08-01T00:00:00Z',
+          },
         },
-      }),
-    })
+      },
+    )
     render(wrap(mockNats()))
     expect(screen.getByTestId('previews').textContent).toBe('r1:last session')
 
@@ -252,6 +263,31 @@ describe('RoomEventsProvider: subscription cache', () => {
     )
     render(wrap(mockNats()))
     expect(screen.getByTestId('previews').textContent).toBe('r1:arrived while I was logged in')
+  })
+
+  it('does not resurrect a preview whose message was deleted last session', () => {
+    // The delete broadcast cleared state.previews, but the cached subscription
+    // row still names the deleted message as its previewMessage.
+    seedCache(
+      {
+        r1: sub('r1', {
+          room: {
+            userCount: 3,
+            lastMsgAt: '2026-08-01T00:00:00Z',
+            crossSite: false,
+            previewMessage: {
+              messageId: 'm-deleted',
+              sender: { account: 'bob', displayName: 'Bob Lin' },
+              content: 'this was deleted',
+              createdAt: '2026-08-01T00:00:00Z',
+            },
+          },
+        }),
+      },
+      { previews: {} },
+    )
+    render(wrap(mockNats()))
+    expect(screen.getByTestId('previews').textContent).toBe('r1:')
   })
 
   it('persists the previews it holds for the next session', async () => {

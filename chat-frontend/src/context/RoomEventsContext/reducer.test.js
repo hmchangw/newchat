@@ -1898,22 +1898,42 @@ describe('roomEventsReducer previews', () => {
     expect(next.previews.r2).toEqual(cached)
   })
 
-  it('PREVIEWS_HYDRATED keeps a newer seeded preview', () => {
-    const wire = { messageId: 'm-wire', senderName: 'Alice Chen', text: 'newer', createdAt: '2026-08-14T12:00:00Z' }
-    const seeded = { ...initialState, previews: { r1: wire } }
-    const next = roomEventsReducer(seeded, {
-      type: 'PREVIEWS_HYDRATED',
-      previews: { r1: { messageId: 'm-old', senderName: 'Bob Lin', text: 'older', createdAt: '2026-08-14T10:00:00Z' } },
-    })
-    expect(next.previews.r1).toEqual(wire)
+  it('PREVIEWS_HYDRATED wins over the seeded map even when it looks older', () => {
+    // The cached previews map is written in the same record as the cached
+    // subscriptions and is a LATER snapshot of the same client's state, so it
+    // is authoritative — including when a delete rolled the room back to an
+    // earlier message than the subscription row's previewMessage.
+    const cached = { messageId: 'm-older', senderName: 'Bob Lin', text: 'survivor', createdAt: '2026-08-14T10:00:00Z' }
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: { messageId: 'm-deleted', senderName: 'Alice Chen', text: 'deleted', createdAt: '2026-08-14T12:00:00Z' },
+      },
+    }
+    const next = roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: { r1: cached } })
+    expect(next.previews.r1).toEqual(cached)
   })
 
-  it('PREVIEWS_HYDRATED leaves the map alone when there is nothing to apply', () => {
+  it('PREVIEWS_HYDRATED drops a seeded preview the cache no longer holds', () => {
+    // A delete last session cleared the entry; the cached subscription row it
+    // was seeded from still names the deleted message, so absence has to win.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: { messageId: 'm-deleted', senderName: 'Alice Chen', text: 'deleted', createdAt: '2026-08-14T12:00:00Z' },
+      },
+    }
+    const next = roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: {} })
+    expect(next.previews).toEqual({})
+  })
+
+  it('PREVIEWS_HYDRATED without a payload leaves the map alone', () => {
+    // No previews map in the action means "this record carries none to apply",
+    // which is not the same statement as "this room has no preview".
     const seeded = {
       ...initialState,
       previews: { r1: { messageId: 'm1', senderName: 'A', text: 'x', createdAt: '2026-08-14T10:00:00Z' } },
     }
-    expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: {} }).previews).toBe(seeded.previews)
     expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED' }).previews).toBe(seeded.previews)
   })
 
@@ -2145,6 +2165,75 @@ describe('roomEventsReducer previews', () => {
         type: 'ROOM_PREVIEW_UPDATED', roomId: 'r1', deletedMessageId: 'm1',
       })
       expect(next.previews.r1).toBeUndefined()
+    })
+
+    it('takes the earlier survivor when the message on display is the one deleted', () => {
+      // Deleting the newest message resolves the room's preview to an EARLIER
+      // one, so the replacement is strictly older than what's stored. The
+      // recency guard must not apply — the stored message no longer exists.
+      const state = {
+        ...initialState,
+        previews: {
+          r1: { messageId: 'm-newest', senderName: 'Bob Lin', text: 'deleted', createdAt: '2026-08-14T12:00:00Z' },
+        },
+      }
+      const next = roomEventsReducer(state, {
+        type: 'ROOM_PREVIEW_UPDATED',
+        roomId: 'r1',
+        deletedMessageId: 'm-newest',
+        previewMessage: {
+          messageId: 'm-older',
+          sender: { account: 'alice', displayName: 'Alice Chen' },
+          content: 'the earlier survivor',
+          createdAt: '2026-08-14T11:00:00Z',
+        },
+      })
+      expect(next.previews.r1).toEqual({
+        messageId: 'm-older', senderName: 'Alice Chen', text: 'the earlier survivor',
+        createdAt: '2026-08-14T11:00:00Z',
+      })
+    })
+
+    it('still rejects an older preview when the delete is for a message not on display', () => {
+      const cur = { messageId: 'm-newest', senderName: 'Bob Lin', text: 'stays', createdAt: '2026-08-14T12:00:00Z' }
+      const next = roomEventsReducer({ ...initialState, previews: { r1: cur } }, {
+        type: 'ROOM_PREVIEW_UPDATED',
+        roomId: 'r1',
+        deletedMessageId: 'm-some-other',
+        previewMessage: {
+          messageId: 'm-older',
+          sender: { account: 'alice', displayName: 'Alice Chen' },
+          content: 'an older one',
+          createdAt: '2026-08-14T11:00:00Z',
+        },
+      })
+      expect(next.previews.r1).toEqual(cur)
+    })
+
+    it('replaces an encrypted placeholder when that very message is deleted', () => {
+      // Fix 3 protects a placeholder from the server's plaintext for the same
+      // message — but a delete of that message retires it either way.
+      const state = {
+        ...initialState,
+        previews: {
+          r1: {
+            messageId: 'm-enc', senderName: 'Alice Chen', text: '[encrypted message]',
+            createdAt: '2026-08-14T15:00:00Z', encrypted: true,
+          },
+        },
+      }
+      const next = roomEventsReducer(state, {
+        type: 'ROOM_PREVIEW_UPDATED',
+        roomId: 'r1',
+        deletedMessageId: 'm-enc',
+        previewMessage: {
+          messageId: 'm-older',
+          sender: { account: 'bob', displayName: 'Bob Lin' },
+          content: 'the earlier survivor',
+          createdAt: '2026-08-14T14:00:00Z',
+        },
+      })
+      expect(next.previews.r1.messageId).toBe('m-older')
     })
 
     it('does NOT clear when the deleted message is a different one', () => {
