@@ -331,6 +331,31 @@ func planChunks(subs []model.EnrichedSubscription, sites []string, idxBySite map
 	return jobs
 }
 
+// requestableBySite drops the rows whose sub has no Room. The last-message fan-out
+// has nothing to attach those previews to and discards them on arrival, so sending
+// their ids only crowds the 100-id cap and can split a batch that would otherwise
+// fit; a site left with none emits no chunk, which skips its RPC entirely.
+//
+// ONLY the last-message fan-out may filter this way. Room-info enrichment is what
+// POPULATES Room, so applying it there would drop every cross-site sub before the
+// RPC that resolves it and leave the whole site unenriched.
+func requestableBySite(subs []model.EnrichedSubscription, idxBySite map[string][]int) map[string][]int {
+	out := make(map[string][]int, len(idxBySite))
+	for site, rows := range idxBySite {
+		keep := make([]int, 0, len(rows))
+		for _, j := range rows {
+			if subs[j].Room == nil {
+				continue
+			}
+			keep = append(keep, j)
+		}
+		if len(keep) > 0 {
+			out[site] = keep
+		}
+	}
+	return out
+}
+
 // roomsGetSplitting fetches previews for one chunk, halving and retrying when the
 // reply will not fit the transport. A room count cannot bound reply bytes —
 // previews carry untruncated message bodies — so even a 100-room chunk can
@@ -523,7 +548,7 @@ func (s *UserService) enrichLastMessage(ctx context.Context, account string, sub
 	for site := range idxBySite {
 		sites = append(sites, site)
 	}
-	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, idxBySite, s.roomBatchChunk), len(sites), s.fanout(),
+	lastMsgBySite := fanOutChunks(ctx, planChunks(subs, sites, requestableBySite(subs, idxBySite), s.roomBatchChunk), len(sites), s.fanout(),
 		func(ctx context.Context, job chunkJob) (map[string]model.PreviewMessage, error) {
 			m, err := s.roomsGetSplitting(ctx, job.site, subs, job.rows, job.roomIDs, 0)
 			if err != nil {
