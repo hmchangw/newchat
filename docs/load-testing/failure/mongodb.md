@@ -82,7 +82,7 @@ flowchart LR
 |---|---|---|
 | room-service and room-worker membership changes | Multi-document and unordered bulk writes partially applied | The room reads back with a member set that matches neither the before nor the after state. `room_state` reports `bad`, not `missing` |
 | message-worker thread writes | Thread room/subscription written, then Cassandra or the event publish fails | The reply exists in history with no thread metadata behind it. Not visible to any current observer |
-| broadcast-worker `rooms.lastMsg*` coalescer | Flush errors are logged and **not** returned to the message handler, because the field is derived | Room previews go stale silently. The message itself still reconciles good, so nothing in the ledger moves |
+| unread-worker `rooms.lastMsg*` coalescer | Flush errors hold the batch un-acked and retry (`MaxDeliver=-1`), on a consumer separate from fan-out | Room previews lag while the flush is failing, then land on recovery. Delivery is unaffected, so nothing in the ledger moves |
 | Ambiguous mutation | The request commits, the reply is lost | Loadgen never resends a mutation: a replayed remove drops a member the first attempt already removed, and a replayed mute toggle undoes itself. Ambiguity is settled by reading state back |
 | `secondaryPreferred` reads | A secondary answers from behind the write | Without the forced-primary rule in §1 this is indistinguishable from data loss |
 | admin-service transaction pairs | The callback re-runs and duplicates a side effect outside the transaction | No traffic drives it, so this round cannot see it at all |
@@ -134,7 +134,7 @@ impact and correctness live in
 
 - Connection, instrumentation, pool tuning, read preference: `pkg/mongoutil/`
 - Transaction path: `admin-service/store_mongo.go`
-- Derived last-message coalescing: `broadcast-worker/coalescer.go`, `store_mongo.go`
+- Derived last-message coalescing: `unread-worker/batch.go`, `unread-worker/flush.go`, `unread-worker/store_mongo.go`
 - Bulk-write paths: `inbox-worker`, `room-service`, `room-worker`, `pkg/mongoutil/collection.go`
 - Loadgen lanes, observers and the ledger: `tools/loadgen/soak_room*.go`, `tools/loadgen/failure_*.go`
 - Client metric names and labels: [`../../specs/o11y/storage-dependency-metrics.md`](../../specs/o11y/storage-dependency-metrics.md)
