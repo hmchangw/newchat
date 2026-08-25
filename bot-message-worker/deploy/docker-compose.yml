@@ -6,6 +6,13 @@ services:
       context: ../..
       dockerfile: bot-message-worker/deploy/Dockerfile
     environment:
+      # history-service caches sealed message buckets; the thread paths in this
+      # worker rewrite a parent row that usually lives in one, so the same flag
+      # that enables that cache enables the invalidation here. Enabling one
+      # without the other serves stale reply counts with no signal.
+      - HISTORY_BUCKET_CACHE_ENABLED=${HISTORY_BUCKET_CACHE_ENABLED:-true}
+      - VALKEY_ADDRS=${VALKEY_ADDRS-valkey:6379}
+      - VALKEY_PASSWORD=${VALKEY_PASSWORD:-}
       - OTEL_SERVICE_NAME=bot-message-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=nats://nats:4222

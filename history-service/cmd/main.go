@@ -9,7 +9,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
@@ -17,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"

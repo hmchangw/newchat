@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"

@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -27,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -44,10 +46,18 @@ type config struct {
 	CassandraNumConns  int    `env:"CASSANDRA_NUM_CONNS"  envDefault:"8"`
 	MaxWorkers         int    `env:"MAX_WORKERS"          envDefault:"100"`
 	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
-	MongoURI           string `env:"MONGO_URI,required"`
-	MongoDB            string `env:"MONGO_DB"             envDefault:"chat"`
-	MongoUsername      string `env:"MONGO_USERNAME"       envDefault:""`
-	MongoPassword      string `env:"MONGO_PASSWORD"       envDefault:""`
+	// BucketCacheEnabled / ValkeyAddrs mirror history-service: this worker writes
+	// thread state into buckets that service caches, so it must invalidate them.
+	// The SAME env var gates both, deliberately — a deployment that enables the
+	// cache without its invalidation would serve stale reply counts with no
+	// signal. Off ⇒ no Valkey connection and no invalidation.
+	BucketCacheEnabled bool     `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
+	ValkeyAddrs        []string `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword     string   `env:"VALKEY_PASSWORD"              envDefault:""`
+	MongoURI           string   `env:"MONGO_URI,required"`
+	MongoDB            string   `env:"MONGO_DB"             envDefault:"chat"`
+	MongoUsername      string   `env:"MONGO_USERNAME"       envDefault:""`
+	MongoPassword      string   `env:"MONGO_PASSWORD"       envDefault:""`
 	Pool               mongoutil.PoolConfig
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
@@ -153,7 +163,24 @@ func main() {
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	store := NewCassandraStore(cassSession, bucketSizer, cipher)
+	// History-service caches sealed buckets; the thread paths below rewrite a
+	// parent row that usually lives in one. Invalidate on write so a reply count
+	// is visible immediately rather than after the cache TTL. Failing to connect
+	// degrades to TTL-bounded staleness, never to a dead worker.
+	var msgValkey valkeyutil.Client
+	var storeOpts []func(*CassandraStore)
+	if cfg.BucketCacheEnabled && len(cfg.ValkeyAddrs) > 0 {
+		v, vErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword)
+		if vErr != nil {
+			slog.Warn("valkey connect (history bucket-cache invalidation) failed; thread reply counts stay stale until the cache TTL", "error", vErr)
+		} else {
+			msgValkey = v
+			storeOpts = append(storeOpts, WithBucketCacheInvalidator(bucketcache.NewInvalidator(v)))
+			slog.Info("history bucket-cache invalidation enabled")
+		}
+	}
+
+	store := NewCassandraStore(cassSession, bucketSizer, cipher, storeOpts...)
 	threadStore := newThreadStoreMongo(db)
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
@@ -286,6 +313,7 @@ func main() {
 	slog.Info("message-worker running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
+		func(ctx context.Context) error { valkeyutil.Disconnect(msgValkey); return nil },
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()

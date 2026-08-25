@@ -5,8 +5,8 @@ import (
 
 	"github.com/gocql/gocql"
 
-	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 

@@ -7,8 +7,8 @@ import (
 
 	"github.com/gocql/gocql"
 
-	"github.com/hmchangw/chat/history-service/internal/bucketcache"
 	"github.com/hmchangw/chat/history-service/internal/models"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 )
 
 const baseColumns = "room_id, created_at, message_id, thread_room_id, sender, " +

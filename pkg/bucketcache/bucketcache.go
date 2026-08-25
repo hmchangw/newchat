@@ -4,7 +4,7 @@
 // walk is computed once per partition and reused across reads, users, and page
 // sizes.
 //
-// Values are gob-encoded (NOT JSON: models.Message.Reactions is a struct-keyed,
+// Values are gob-encoded (NOT JSON: cassandra.Message.Reactions is a struct-keyed,
 // marshal-only map that JSON cannot round-trip). Get decodes a fresh slice on
 // every call, so the walker's in-memory bounds filtering and the service layer's
 // later in-place redaction never mutate a cached blob.
@@ -35,14 +35,16 @@
 // # Invalidation boundary
 //
 // Bust covers the mutations history-service itself performs: edit, delete, pin,
-// unpin, and reaction add/remove. It does NOT cover writes into a sealed bucket
-// made by anything else, and those exist — most routinely, message-worker and
-// bot-message-worker updating a thread parent's tcount / thread_last_msg_at /
-// thread_room_id, since a parent is often old enough to have sealed. Those reads
-// are stale until the entry expires. With a single shared tier a DEL from those
-// writers would now close the gap; adding it is tracked separately.
+// unpin, and reaction add/remove. Writes into a sealed bucket by OTHER services
+// are covered by those services busting through Invalidator — message-worker and
+// bot-message-worker do this for the thread-parent columns (tcount,
+// thread_last_msg_at, thread_room_id) they rewrite, since a parent is often old
+// enough to have sealed.
 //
-// The four gaps an operator should weigh before enabling this are enumerated on
+// Anything that writes messages_by_room without going through one of those paths
+// — a migration tool, manual CQL — leaves a stale entry until the TTL.
+//
+// The gaps an operator should weigh before enabling this are enumerated on
 // config.Config.BucketCacheOptIn.
 package bucketcache
 
@@ -56,8 +58,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -87,7 +89,7 @@ const (
 // written by an older build a plain cache miss.
 const (
 	// tagBucket is the current cached-bucket layout. Tag 1 was the previous one
-	// (a bare gob []models.Message, which lost a zero TCount — see bucketBlob);
+	// (a bare gob []cassandra.Message, which lost a zero TCount — see bucketBlob);
 	// it is retired rather than reused, so entries an older build left in Valkey
 	// fall to interpret's unknown-tag case and degrade to a plain miss.
 	tagBucket    byte = 3
@@ -98,11 +100,41 @@ const (
 // byte, so a dense room costs almost nothing to remember.
 var oversizedMarker = []byte{tagOversized}
 
-// Cache stores whole sealed buckets in Valkey, shared across replicas.
+// Invalidator is the write side of the cache: it removes cached buckets and
+// nothing else. It is split out so a service that only invalidates — a writer
+// that mutates a sealed bucket it does not read, such as message-worker
+// stamping a thread parent — needs a Valkey client and nothing more: no TTL, no
+// read path, and no way to get the key format wrong.
+type Invalidator struct {
+	valkey valkeyutil.Client // nil makes every Bust a no-op
+}
+
+// NewInvalidator builds a bust-only handle over the given Valkey client, which
+// may be nil to disable invalidation (the caller then relies on the TTL).
+func NewInvalidator(valkey valkeyutil.Client) *Invalidator {
+	return &Invalidator{valkey: valkey}
+}
+
+// Bust removes a bucket from the cache (DEL). Best-effort: a nil client skips
+// the DEL and any Valkey error is swallowed — a failed invalidation must never
+// fail the write that triggered it, which has already been committed. Because
+// there is no per-replica tier, the delete is authoritative for every reader
+// immediately.
+func (i *Invalidator) Bust(ctx context.Context, roomID string, bucket int64) {
+	if i.valkey == nil {
+		return
+	}
+	if err := i.valkey.Del(ctx, Key(roomID, bucket)); err != nil {
+		slog.WarnContext(ctx, "bucketcache: invalidate failed (TTL will reconcile)", "room_id", roomID, "bucket", bucket, "error", err)
+	}
+}
+
+// Cache stores whole sealed buckets in Valkey, shared across replicas. It embeds
+// the Invalidator so a reader also busts through the same key builder.
 type Cache struct {
-	valkey valkeyutil.Client // nil disables caching entirely
-	ttl    time.Duration
-	rec    cachemetrics.Recorder
+	*Invalidator
+	ttl time.Duration
+	rec cachemetrics.Recorder
 }
 
 // NewCache builds a bucket cache over the given Valkey client (which may be nil
@@ -112,9 +144,9 @@ func NewCache(valkey valkeyutil.Client, ttl time.Duration) (*Cache, error) {
 		return nil, fmt.Errorf("bucketcache: ttl must be positive, got %v", ttl)
 	}
 	return &Cache{
-		valkey: valkey,
-		ttl:    ttl,
-		rec:    cachemetrics.For("history_bucket", "valkey"),
+		Invalidator: NewInvalidator(valkey),
+		ttl:         ttl,
+		rec:         cachemetrics.For("history_bucket", "valkey"),
 	}, nil
 }
 
@@ -123,7 +155,7 @@ func NewCache(valkey valkeyutil.Client, ttl time.Duration) (*Cache, error) {
 // on a cold key or any fail-open degradation. An Oversized answer counts as a
 // hit in the metrics — the cache did answer, saving the probe — even though the
 // caller still reads Cassandra for the rows it serves.
-func (c *Cache) Get(ctx context.Context, roomID string, bucket int64) ([]models.Message, Lookup) {
+func (c *Cache) Get(ctx context.Context, roomID string, bucket int64) ([]cassandra.Message, Lookup) {
 	if c.valkey == nil {
 		return nil, Miss
 	}
@@ -143,7 +175,7 @@ func (c *Cache) Get(ctx context.Context, roomID string, bucket int64) ([]models.
 
 // Put caches msgs (the complete bucket) under (roomID, bucket). Best-effort:
 // encode/Valkey errors are logged and swallowed.
-func (c *Cache) Put(ctx context.Context, roomID string, bucket int64, msgs []models.Message) {
+func (c *Cache) Put(ctx context.Context, roomID string, bucket int64, msgs []cassandra.Message) {
 	if c.valkey == nil {
 		return
 	}
@@ -172,18 +204,6 @@ func (c *Cache) PutOversized(ctx context.Context, roomID string, bucket int64) {
 	}
 }
 
-// Bust removes a bucket from the cache (DEL). Best-effort: a nil client skips
-// the DEL and any Valkey error is swallowed. Because there is no per-replica
-// tier, the delete is authoritative for every reader immediately.
-func (c *Cache) Bust(ctx context.Context, roomID string, bucket int64) {
-	if c.valkey == nil {
-		return
-	}
-	if err := c.valkey.Del(ctx, Key(roomID, bucket)); err != nil {
-		slog.WarnContext(ctx, "bucketcache: invalidate failed (TTL will reconcile)", "room_id", roomID, "bucket", bucket, "error", err)
-	}
-}
-
 // read fetches a raw cache blob. It returns (nil, false) on a miss or any
 // transport error; a genuine miss is silent while other errors are logged at
 // warn (fail-open — the caller then loads live).
@@ -201,7 +221,7 @@ func (c *Cache) read(ctx context.Context, key string) ([]byte, bool) {
 // interpret reads a stored value as the lookup it represents. ok is false for an
 // empty, unknown-tag, or corrupt value; every such case degrades to a miss so a
 // bad entry costs a live read rather than failing the request.
-func interpret(blob []byte) (msgs []models.Message, res Lookup, ok bool) {
+func interpret(blob []byte) (msgs []cassandra.Message, res Lookup, ok bool) {
 	if len(blob) == 0 {
 		return nil, Miss, false
 	}
@@ -234,7 +254,7 @@ func interpret(blob []byte) (msgs []models.Message, res Lookup, ok bool) {
 // unobservable there — but a new pointer field whose zero value IS meaningful
 // would need the same treatment.
 type bucketBlob struct {
-	Rows    []models.Message
+	Rows    []cassandra.Message
 	TCounts []optionalInt
 }
 
@@ -246,9 +266,9 @@ type optionalInt struct {
 }
 
 // encode gob-encodes a bucket's messages for cache storage behind a tag byte.
-// gob (not JSON) is used because models.Message.Reactions is a struct-keyed,
+// gob (not JSON) is used because cassandra.Message.Reactions is a struct-keyed,
 // marshal-only map that JSON cannot round-trip.
-func encode(msgs []models.Message) ([]byte, error) {
+func encode(msgs []cassandra.Message) ([]byte, error) {
 	tcounts := make([]optionalInt, len(msgs))
 	for i := range msgs {
 		if c := msgs[i].TCount; c != nil {
@@ -266,7 +286,7 @@ func encode(msgs []models.Message) ([]byte, error) {
 // decode reverses encode's gob body (the tag byte already stripped), returning a
 // freshly-allocated slice on every call so a cached blob is never aliased into a
 // caller that mutates it in place.
-func decode(blob []byte) ([]models.Message, error) {
+func decode(blob []byte) ([]cassandra.Message, error) {
 	var body bucketBlob
 	if err := gob.NewDecoder(bytes.NewReader(blob)).Decode(&body); err != nil {
 		return nil, fmt.Errorf("gob decode bucket: %w", err)

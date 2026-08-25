@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -81,8 +80,8 @@ func (f *fakeValkey) has(key string) bool {
 	return ok
 }
 
-func bucketOf(msg string) []models.Message {
-	return []models.Message{{
+func bucketOf(msg string) []cassandra.Message {
+	return []cassandra.Message{{
 		RoomID:    "r1",
 		MessageID: "m1",
 		Msg:       msg,
@@ -105,7 +104,7 @@ func TestCache_RoundTripsSealedRows(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
-	c.Put(ctx, "r1", 100, []models.Message{{
+	c.Put(ctx, "r1", 100, []cassandra.Message{{
 		MessageID:  "m1",
 		RoomID:     "r1",
 		CreatedAt:  at,

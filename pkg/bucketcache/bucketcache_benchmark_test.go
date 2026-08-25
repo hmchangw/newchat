@@ -5,15 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
-func benchBucket(n int) []models.Message {
+func benchBucket(n int) []cassandra.Message {
 	at := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	out := make([]models.Message, n)
+	out := make([]cassandra.Message, n)
 	for i := range out {
-		out[i] = models.Message{
+		out[i] = cassandra.Message{
 			MessageID: fmt.Sprintf("01970a4f8c2d7c9a%04d", i),
 			RoomID:    "01970a4f8c2d7c9aabcde0123456789f",
 			CreatedAt: at.Add(-time.Duration(i) * time.Minute),

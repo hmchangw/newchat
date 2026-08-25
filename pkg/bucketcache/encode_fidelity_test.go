@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
@@ -28,34 +27,34 @@ func TestEncodeDecode_PreservesEveryServedField(t *testing.T) {
 
 	tests := []struct {
 		name string
-		msg  models.Message
+		msg  cassandra.Message
 	}{
 		{
 			// The regression: every reply in the thread was deleted, so the
 			// delete path recomputed the parent's tcount to 0.
 			name: "thread parent with tcount zero",
-			msg: models.Message{
+			msg: cassandra.Message{
 				MessageID: "m1", RoomID: "r1", CreatedAt: at,
 				TCount: &zero, ThreadRoomID: "t1",
 			},
 		},
 		{
 			name: "thread parent with non-zero tcount",
-			msg: models.Message{
+			msg: cassandra.Message{
 				MessageID: "m2", RoomID: "r1", CreatedAt: at,
 				TCount: &two, ThreadRoomID: "t1", ThreadLastMsgAt: &at,
 			},
 		},
 		{
 			name: "message with no thread",
-			msg: models.Message{
+			msg: cassandra.Message{
 				MessageID: "m3", RoomID: "r1", CreatedAt: at, Msg: "plain",
 			},
 		},
 		{
 			// Reactions is the struct-keyed, marshal-only map gob was chosen for.
 			name: "message with reactions",
-			msg: models.Message{
+			msg: cassandra.Message{
 				MessageID: "m4", RoomID: "r1", CreatedAt: at,
 				Reactions: cassandra.Reactions{
 					{Emoji: "👍", UserAccount: "alice"}: {UserID: "u1", Account: "alice", ReactedAt: at},
@@ -66,7 +65,7 @@ func TestEncodeDecode_PreservesEveryServedField(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			in := []models.Message{tt.msg}
+			in := []cassandra.Message{tt.msg}
 
 			blob, err := encode(in)
 			require.NoError(t, err)

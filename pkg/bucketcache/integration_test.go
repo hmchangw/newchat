@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -19,7 +18,7 @@ import (
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 // TestCache_ReactionsRoundTripThroughValkey is the reason the codec is gob, not
-// JSON: models.Message.Reactions is a struct-keyed, marshal-only map. This proves
+// JSON: cassandra.Message.Reactions is a struct-keyed, marshal-only map. This proves
 // a reacted message survives the gob → Valkey → gob round-trip losslessly.
 func TestCache_ReactionsRoundTripThroughValkey(t *testing.T) {
 	t.Cleanup(func() { testutil.FlushValkey(t) })
@@ -29,7 +28,7 @@ func TestCache_ReactionsRoundTripThroughValkey(t *testing.T) {
 	ctx := context.Background()
 
 	reacted := time.Unix(1000, 0).UTC()
-	msgs := []models.Message{{
+	msgs := []cassandra.Message{{
 		RoomID:    "r1",
 		MessageID: "m1",
 		CreatedAt: time.Unix(500, 0).UTC(),
