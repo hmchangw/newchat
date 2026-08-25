@@ -434,6 +434,11 @@ func runSoakWorkload(
 ) (exitCode int) {
 	seed := opts.Seed
 	fastLeaseAbort := false
+	// Zero until the run stops because its lease is at risk. The NATS drain is
+	// registered before the ledger exists, so both are declared here and filled
+	// in once the workload has returned.
+	leaseShutdownBudget := time.Duration(0)
+	invalidateEvidence := func(string) {}
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -486,9 +491,7 @@ func runSoakWorkload(
 		if fastLeaseAbort {
 			return
 		}
-		if err := nc.Drain(); err != nil {
-			slog.Error("drain Cassandra soak NATS connection", "error", err)
-		}
+		drainSoakNATS(nc.NatsConn(), leaseShutdownBudget, invalidateEvidence)
 	}()
 	// Fail before any load is generated: derive max_payload from the connected
 	// server's INFO so non-default brokers are neither overrun nor needlessly
@@ -586,6 +589,7 @@ func runSoakWorkload(
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
 	}
+	invalidateEvidence = ledger.Invalidate
 	defer func() {
 		if fastLeaseAbort {
 			return
@@ -1209,6 +1213,12 @@ func runSoakWorkload(
 		withSoakFailureInvalidation(ledger.Invalidate),
 	)
 	result, runErr := workload.Run(workloadCtx)
+	if errors.Is(runErr, errSoakHeartbeatLeaseAtRisk) {
+		// Half the margin went to draining the lanes; the rest is all the
+		// shutdown may spend, and the NATS drain is the part of it that can
+		// still put traffic on the wire.
+		leaseShutdownBudget = cfg.Soak.HeartbeatInterval / 2
+	}
 	if result.LeaseAbort {
 		fastLeaseAbort = true
 		stopWorkload(runErr)

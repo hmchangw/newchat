@@ -1026,3 +1026,17 @@ func allSoakWorkloadActions() *soakWorkloadActions {
 		Presence: noop,
 	}
 }
+
+func TestWaitSoakDrain_BoundsOnlyWhenTheLeaseSaysSo(t *testing.T) {
+	t.Run("a drain inside the budget reports completion", func(t *testing.T) {
+		done := make(chan struct{})
+		close(done)
+
+		assert.True(t, waitSoakDrain(done, time.Minute))
+	})
+
+	t.Run("a drain past the budget is abandoned", func(t *testing.T) {
+		// Never closed: the lease boundary, not the drain, has to end the wait.
+		assert.False(t, waitSoakDrain(make(chan struct{}), time.Millisecond))
+	})
+}

@@ -542,6 +542,23 @@ func waitSoakLaneDrain(laneWG *sync.WaitGroup, budget time.Duration) bool {
 	}
 }
 
+// waitSoakDrain bounds a NATS drain by what is left of the lease margin, and
+// reports whether it finished inside it. Only the lease path bounds the drain:
+// the pending publishes it flushes belong to operations the ledger has already
+// recorded, so dropping them would manufacture the data loss this tool exists
+// to detect. Past the lease boundary that trade reverses -- the traffic must
+// stop -- and the caller says so by invalidating the evidence instead.
+func waitSoakDrain(done <-chan struct{}, budget time.Duration) bool {
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func waitSoakFailureInvalidation(
 	invalidate func(string),
 	reason string,
