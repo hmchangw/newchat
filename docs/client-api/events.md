@@ -611,6 +611,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `messageId` | string | The edited message's ID. |
 | `newContent` | string | Optional. New plaintext content. Present for DMs and unencrypted channels. |
 | `encryptedNewContent` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. For encrypted channel rooms. Decrypt with the room key to obtain the new content string. |
+| `mentions` | [Participant](../client-api.md#participant)[] | Optional. `@`-mentions resolved from the edited content, so an edit that adds a mention renders like a fresh message. Omitted when none. |
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |

@@ -409,9 +409,12 @@ type EditRoomEvent struct {
 	MessageID           string          `json:"messageId" bson:"messageId"`
 	NewContent          string          `json:"newContent,omitempty" bson:"newContent,omitempty"`
 	EncryptedNewContent json.RawMessage `json:"encryptedNewContent,omitempty" bson:"encryptedNewContent,omitempty"`
-	EditedBy            string          `json:"editedBy" bson:"editedBy"`
-	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
-	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
+	// Mentions are the @-mentions resolved from the edited content, so an edit that
+	// adds a mention renders it the same as a freshly-sent message. Omitted when none.
+	Mentions  []Participant `json:"mentions,omitempty" bson:"mentions,omitempty"`
+	EditedBy  string        `json:"editedBy" bson:"editedBy"`
+	EditedAt  time.Time     `json:"editedAt" bson:"editedAt"`
+	UpdatedAt time.Time     `json:"updatedAt" bson:"updatedAt"`
 	// ThreadParentMessageID is set when the edited message is a thread reply; its presence lets
 	// clients tell a thread-reply edit from a top-level one. Omitted for top-level messages.
 	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`
