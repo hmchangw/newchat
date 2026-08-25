@@ -86,6 +86,28 @@ func (m *Message) SenderDisplayName() string {
 	return m.UserAccount
 }
 
+// IsHiddenThreadReply reports whether the message is a thread reply that does
+// not also appear in the room's main timeline.
+//
+// It lives here because it classifies the message, not any one service's
+// routing: broadcast-worker skips channel fan-out for these, unread-worker
+// skips the room pointer and mention badge, and notification-worker skips the
+// room-wide push. Those three must agree on which messages exist in the
+// channel — a reply that fans out but never moves lastMsgAt, or a mention badge
+// with no visible message, is what disagreement looks like — and agreeing by
+// three textual copies is how that drifts.
+func (m *Message) IsHiddenThreadReply() bool {
+	return IsHiddenThreadReply(m.ThreadParentMessageID, m.TShow)
+}
+
+// IsHiddenThreadReply is the rule behind the method, exposed for consumers that
+// decode a narrow projection of a message rather than the whole type (see
+// unread-worker). Keeping one definition is the point: the services that branch
+// on this must agree on which messages exist in the channel.
+func IsHiddenThreadReply(threadParentMessageID string, tShow bool) bool {
+	return threadParentMessageID != "" && !tShow
+}
+
 // RoomTimeHint is an optional caller-supplied walk-bounds hint (UTC millis) for a
 // single room, letting history-service skip its own per-room room-times read.
 type RoomTimeHint struct {

@@ -5472,6 +5472,24 @@ func TestMessageAppInfoJSON(t *testing.T) {
 	assert.Contains(t, string(b), `"isSubscribed":false`)
 }
 
+func TestMessage_IsHiddenThreadReply(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  model.Message
+		want bool
+	}{
+		{"plain channel message", model.Message{}, false},
+		{"thread reply not shown in channel", model.Message{ThreadParentMessageID: "p1", TShow: false}, true},
+		{"thread reply also shown in channel", model.Message{ThreadParentMessageID: "p1", TShow: true}, false},
+		{"tshow without a parent is not a reply", model.Message{TShow: true}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.msg.IsHiddenThreadReply())
+		})
+	}
+}
+
 func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
 	src := &model.SubscriptionMentionEvent{
 		RoomID:      "room-1",
