@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
@@ -224,4 +225,81 @@ func TestDurableConsumerDefaults_StepsAreBounded(t *testing.T) {
 	})
 
 	assert.LessOrEqual(t, len(cc.BackOff), 32, "an absurd step count must be bounded")
+}
+
+func TestWithOutageRetryBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		in   stream.ConsumerSettings
+		want int
+	}{
+		{
+			name: "package default is raised to the outage budget",
+			in:   stream.ConsumerSettings{MaxDeliver: stream.DefaultMaxDeliver},
+			want: jsretry.DeliveriesFor(jsretry.DefaultBackoff, stream.OutageRetryWindow),
+		},
+		{
+			name: "an operator's higher value is left alone",
+			in:   stream.ConsumerSettings{MaxDeliver: 100},
+			want: 100,
+		},
+		{
+			name: "unlimited is left alone",
+			in:   stream.ConsumerSettings{MaxDeliver: -1},
+			want: -1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stream.WithOutageRetryBudget(tc.in, jsretry.DefaultBackoff).MaxDeliver)
+		})
+	}
+}
+
+// The budget must be derived from the schedule the consumer ACTUALLY settles
+// with, and must survive jitter. This is the test that was missing: the old one
+// walked DefaultBackoff's nominal entries, so it certified a budget for a
+// consumer that settled with a different, much shorter schedule — and ignored
+// that equal jitter can halve every wait.
+func TestOutageRetryBudget_GuaranteesTheWindowForEverySchedule(t *testing.T) {
+	for name, schedule := range map[string][]time.Duration{
+		"DefaultBackoff":    jsretry.DefaultBackoff,
+		"LowLatencyBackoff": jsretry.LowLatencyBackoff,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := stream.WithOutageRetryBudget(
+				stream.ConsumerSettings{MaxDeliver: stream.DefaultMaxDeliver}, schedule)
+
+			assert.GreaterOrEqual(t,
+				jsretry.MinWindow(schedule, got.MaxDeliver), stream.OutageRetryWindow,
+				"budget of %d deliveries must ride out %s even when every wait lands at its jittered minimum",
+				got.MaxDeliver, stream.OutageRetryWindow)
+		})
+	}
+}
+
+// A shorter tail needs more deliveries to cover the same window. If these ever
+// match, the budget has stopped depending on the schedule.
+func TestOutageRetryBudget_TracksTheSchedule(t *testing.T) {
+	in := stream.ConsumerSettings{MaxDeliver: stream.DefaultMaxDeliver}
+	slow := stream.WithOutageRetryBudget(in, jsretry.DefaultBackoff).MaxDeliver
+	fast := stream.WithOutageRetryBudget(in, jsretry.LowLatencyBackoff).MaxDeliver
+
+	assert.Greater(t, fast, slow,
+		"LowLatencyBackoff opens with smaller waits, so it needs more deliveries for the same window")
+}
+
+// An explicitly-tuned budget is the operator's call and must survive.
+func TestOutageRetryBudget_LeavesAnExplicitBudgetAlone(t *testing.T) {
+	in := stream.ConsumerSettings{MaxDeliver: 3}
+	assert.Equal(t, 3, stream.WithOutageRetryBudget(in, jsretry.DefaultBackoff).MaxDeliver)
+}
+
+// Other fields must pass through untouched.
+func TestWithOutageRetryBudget_LeavesOtherSettings(t *testing.T) {
+	in := stream.ConsumerSettings{AckWait: 42 * time.Second, MaxDeliver: stream.DefaultMaxDeliver, MaxWaiting: 7, MaxAckPending: 9}
+	got := stream.WithOutageRetryBudget(in, jsretry.DefaultBackoff)
+	assert.Equal(t, in.AckWait, got.AckWait)
+	assert.Equal(t, in.MaxWaiting, got.MaxWaiting)
+	assert.Equal(t, in.MaxAckPending, got.MaxAckPending)
 }

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/hmchangw/chat/pkg/jsretry"
 )
 
 // ConsumerSettings holds the env-driven knobs for durable JetStream
@@ -110,4 +112,36 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 		d = next
 	}
 	return out
+}
+
+// DefaultMaxDeliver mirrors the MaxDeliver struct tag. A consumer left at this
+// value drops a message after roughly 12.6 minutes of jsretry backoff, which is
+// the right answer for work that is cheap to lose and wrong for work that must
+// survive a dependency outage.
+const DefaultMaxDeliver = 6
+
+// OutageRetryWindow is how long a consumer opted into the outage budget must
+// keep retrying before it gives up on a message. Sized to ride out the
+// one-hour MongoDB outage the outage-survival work targets.
+const OutageRetryWindow = time.Hour
+
+// The budget is DERIVED from schedule — the backoff the caller settles with,
+// not an assumed one — and from its jittered minimum rather than its nominal
+// entries. Both halves were learned the hard way: a hardcoded budget sized
+// against DefaultBackoff was applied to a consumer settling with
+// LowLatencyBackoff, whose repeating tail was 20x shorter, so the real window
+// was about four minutes instead of the intended hour; and equal jitter can
+// halve every wait, so nominal arithmetic overstates any window by 2x.
+//
+// Pass the same schedule the service hands to jsretry.Settle. A schedule whose
+// tail is too short to cover OutageRetryWindow will produce a large delivery
+// count; that is the honest answer, and the signal to lengthen the tail.
+func WithOutageRetryBudget(s ConsumerSettings, schedule []time.Duration) ConsumerSettings {
+	if s.MaxDeliver != DefaultMaxDeliver {
+		return s
+	}
+	if n := jsretry.DeliveriesFor(schedule, OutageRetryWindow); n > s.MaxDeliver {
+		s.MaxDeliver = n
+	}
+	return s
 }

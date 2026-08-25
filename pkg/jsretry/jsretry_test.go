@@ -183,10 +183,19 @@ func TestDefaultBackoff_Shape(t *testing.T) {
 
 // Deliberately not extended: broadcast fan-out is user-visible and a
 // 15-minute-late broadcast is worthless.
-func TestLowLatencyBackoff_StaysShort(t *testing.T) {
-	assert.Equal(t, []time.Duration{
-		200 * time.Millisecond, 1 * time.Second, 5 * time.Second, 30 * time.Second,
-	}, LowLatencyBackoff)
+// The schedule has two jobs and they pull in opposite directions: open fast so
+// a sub-second hiccup is not user-visible on the fan-out path, then space out
+// far enough that a genuine outage can be ridden out within a usable delivery
+// budget. Asserted as those two properties rather than as a literal slice — the
+// literal is what let the schedule and the retry budget sized against it drift
+// apart unnoticed.
+func TestLowLatencyBackoff_OpensFastThenSpacesOut(t *testing.T) {
+	assert.Equal(t, []time.Duration{200 * time.Millisecond, 1 * time.Second, 5 * time.Second},
+		LowLatencyBackoff[:3], "the opening must stay near-immediate")
+
+	tail := LowLatencyBackoff[len(LowLatencyBackoff)-1]
+	assert.GreaterOrEqual(t, tail, 5*time.Minute,
+		"the repeating tail sets the outage window; a short one needs an unusable delivery budget")
 }
 
 // countHandler records how many log records were emitted.
@@ -264,4 +273,44 @@ func TestSettle_EmptyScheduleDoesNotPanic(t *testing.T) {
 	assert.NotPanics(t, func() {
 		Settle(context.Background(), m, nil, errors.New("boom"))
 	})
+}
+
+// Equal jitter means every wait can come in at half its nominal value, so a
+// retry budget sized on the nominal schedule promises twice the window it
+// actually guarantees. MinWindow is what a budget must be sized against.
+func TestMinWindow_IsHalfTheNominalSchedule(t *testing.T) {
+	schedule := []time.Duration{2 * time.Second, 10 * time.Second}
+
+	// 4 deliveries → 3 waits: schedule[0], schedule[1], schedule[1] (the last
+	// entry repeats). Nominal 22s, guaranteed 11s.
+	assert.Equal(t, 11*time.Second, MinWindow(schedule, 4))
+}
+
+func TestMinWindow_EdgeCases(t *testing.T) {
+	schedule := []time.Duration{time.Second}
+	assert.Zero(t, MinWindow(schedule, 1), "one delivery means no waits")
+	assert.Zero(t, MinWindow(schedule, 0))
+	assert.Zero(t, MinWindow(nil, 5), "an empty schedule cannot promise a window")
+}
+
+// Both shipped schedules must be able to span a real outage without an absurd
+// delivery count. LowLatencyBackoff exists to keep the FIRST retries fast; its
+// doc has always claimed a genuine outage is still spaced out, and a tail that
+// repeats every 30s cannot deliver that.
+func TestShippedSchedules_CanSpanAnHour(t *testing.T) {
+	for name, schedule := range map[string][]time.Duration{
+		"DefaultBackoff":    DefaultBackoff,
+		"LowLatencyBackoff": LowLatencyBackoff,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.LessOrEqual(t, DeliveriesFor(schedule, time.Hour), 20,
+				"a schedule whose tail is too short needs an unusable delivery budget to ride out an outage")
+		})
+	}
+}
+
+// The whole point of the near-immediate opening: a sub-second hiccup must not
+// be user-visible on the fan-out path.
+func TestLowLatencyBackoff_StillOpensFast(t *testing.T) {
+	assert.Less(t, LowLatencyBackoff[0], time.Second)
 }
