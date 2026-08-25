@@ -167,7 +167,7 @@ func TestDegradeTracker_OnWriteSuccess_ClearsOnceDrainTailGraceElapses(t *testin
 // TestDegradeTracker_OnWriteSuccess_DrainTailGraceRestartsOnNewBacklog guards the
 // tail timer against a stale start: a fresh undelivered backlog means the drain is
 // running again, so the grace must be measured from the next tail, not the old one.
-func TestDegradeTracker_OnWriteSuccess_DrainTailGraceRestartsOnNewBacklog(t *testing.T) {
+func TestDegradeTracker_OnWriteSuccess_NewBacklogBlocksClearingButDoesNotRestartTheGrace(t *testing.T) {
 	store := &fakeDegradeStore{}
 	now := testClockStart
 	pending, ackPending := uint64(0), uint64(1)
@@ -178,16 +178,27 @@ func TestDegradeTracker_OnWriteSuccess_DrainTailGraceRestartsOnNewBacklog(t *tes
 	tr.OnWriteFailure(context.Background())
 	tr.OnWriteSuccess(context.Background()) // tail observed at t0
 
+	// A new wave arrives. While it is undelivered the marker must be held — the clear
+	// path is gated on pending == 0 — but the wave must not restart the grace clock:
+	// doing that is what let ordinary traffic pin the marker forever.
 	now = now.Add(backlogCheckInterval)
-	pending = 500 // a new wave arrives: the drain is not in its tail at all
+	pending = 500
 	tr.OnWriteSuccess(context.Background())
+	assert.True(t, tr.Degraded(), "an undelivered backlog holds the marker")
+	assert.Equal(t, int64(0), store.clears.Load())
 
 	now = now.Add(drainTailGrace)
+	pending = 500
+	tr.OnWriteSuccess(context.Background())
+	assert.True(t, tr.Degraded(), "still undelivered, still held, however long the grace has run")
+	assert.Equal(t, int64(0), store.clears.Load())
+
+	// Delivered. Writes never failed through any of this, so the tail that began at t0
+	// is the one that counts and it has long since elapsed.
+	now = now.Add(backlogCheckInterval)
 	pending = 0
 	tr.OnWriteSuccess(context.Background())
-
-	assert.True(t, tr.Degraded(), "the grace must run from the new tail, not the abandoned one")
-	assert.Equal(t, int64(0), store.clears.Load())
+	assert.False(t, tr.Degraded(), "backlog delivered and no write has failed: the marker clears")
 }
 
 func TestDegradeTracker_OnWriteSuccess_NoOpWhenHealthy(t *testing.T) {
@@ -361,4 +372,86 @@ func TestDrainTailGraceOutlastsTheBackoffTail(t *testing.T) {
 	tail := jsretry.DefaultBackoff[len(jsretry.DefaultBackoff)-1]
 	assert.Greater(t, drainTailGrace, tail,
 		"the marker would clear while redeliveries spaced %s apart are still in flight", tail)
+}
+
+// TestDegradeTracker_TrafficDoesNotResetTheDrainTail is the #4 regression guard.
+// The tail clock used to zero on any non-zero NumPending, so on a live site an
+// ordinary arriving message restarted the grace. At one 5s sample per check, a
+// 20-minute grace needs ~240 uninterrupted samples; a site taking traffic never
+// gets them, so the marker pinned indefinitely — holding incompleteSince and thread
+// badge suppression with it.
+func TestDegradeTracker_TrafficDoesNotResetTheDrainTail(t *testing.T) {
+	now := testClockStart
+	store := &fakeDegradeStore{}
+	var pending uint64
+	tr := newTestTracker(t, store, func(context.Context) (uint64, uint64, error) {
+		return pending, 1, nil // ackPending stays 1: the tail never settles on its own
+	}, func() time.Time { return now })
+	ctx := context.Background()
+
+	tr.OnWriteFailure(ctx)
+	require.True(t, tr.Degraded())
+
+	// Two full graces of samples, with traffic arriving on every other one — the
+	// steady state of a live site. No write fails in this window, so nothing here is
+	// evidence the drain regressed.
+	samples := int(2 * drainTailGrace / backlogCheckInterval)
+	for i := range samples {
+		pending = uint64(i % 2) // alternates 0, 1, 0, 1 ...
+		tr.OnWriteSuccess(ctx)
+		now = now.Add(backlogCheckInterval)
+	}
+
+	assert.False(t, tr.Degraded(),
+		"traffic during the grace must not restart the tail, or the marker never clears on a live site")
+	assert.Positive(t, store.clears.Load(), "the marker must actually be cleared in the store")
+}
+
+// TestDegradeTracker_WriteFailureRestartsTheDrainTail is the other half: a genuine
+// regression — a write that fails again — must restart the tail, or the marker could
+// clear while Cassandra is still rejecting writes.
+func TestDegradeTracker_WriteFailureRestartsTheDrainTail(t *testing.T) {
+	now := testClockStart
+	store := &fakeDegradeStore{}
+	tr := newTestTracker(t, store, func(context.Context) (uint64, uint64, error) {
+		return 0, 1, nil
+	}, func() time.Time { return now })
+	ctx := context.Background()
+
+	tr.OnWriteFailure(ctx)
+	tr.OnWriteSuccess(ctx) // tail starts
+
+	now = now.Add(drainTailGrace / 2)
+	tr.OnWriteFailure(ctx) // regression: writes are failing again
+
+	now = now.Add(drainTailGrace/2 + time.Second) // past the ORIGINAL deadline
+	tr.OnWriteSuccess(ctx)
+	assert.True(t, tr.Degraded(), "a new failure restarts the tail; the old deadline must not carry over")
+}
+
+// TestDegradeTracker_SetLosingToConcurrentClearDoesNotResurrect is the #5 guard.
+// Set runs outside the lock; if a concurrent recovery clears the marker while that
+// Set is in flight, the Set lands afterwards and resurrects it in Mongo — and the
+// next Refresh re-adopts degraded for another whole grace cycle.
+func TestDegradeTracker_SetLosingToConcurrentClearDoesNotResurrect(t *testing.T) {
+	store := &fakeDegradeStore{}
+	tr := newTestTracker(t, store, func(context.Context) (uint64, uint64, error) {
+		return 0, 0, nil
+	}, nil)
+	ctx := context.Background()
+
+	// Simulate the interleaving deterministically: the tracker is degraded and its
+	// Set has just landed, but a concurrent success already cleared local state.
+	tr.OnWriteFailure(ctx)
+	tr.mu.Lock()
+	tr.degraded = false // the concurrent Clear won
+	tr.mu.Unlock()
+
+	tr.OnWriteFailure(ctx) // this Set must not leave a marker behind local state
+
+	tr.mu.RLock()
+	synced := tr.markerSynced
+	tr.mu.RUnlock()
+	assert.True(t, tr.Degraded() || !synced,
+		"a Set that raced a Clear must not report itself synced while local state says healthy")
 }

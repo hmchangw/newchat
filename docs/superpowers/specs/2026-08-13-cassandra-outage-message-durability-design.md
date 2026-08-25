@@ -165,7 +165,16 @@ per incident, and a history read is not worth a Mongo round-trip per call.
 - **Bounded by `drainTailGrace`.** A strict `NumAckPending == 0` gate deadlocks: a
   permanently-NAK'd message holds the count above zero forever (nats-server keeps a
   delayed NAK in the consumer's pending set), so the marker would pin and never clear. The
-  grace elapsing is the normal way a recovery ends, not an anomaly. Its length is **derived
+  grace elapsing is the normal way a recovery ends, not an anomaly.
+- **Only a write failure restarts that grace.** The clock starts when the undelivered
+  backlog first reads empty and runs from there; arriving traffic does not reset it. It
+  used to, and that made the bound useless on any site under load — `NumPending` is
+  non-zero constantly, so a 20-minute grace needed ~240 uninterrupted 5s samples it would
+  never get, and the marker pinned indefinitely after recovery (taking `incompleteSince`
+  and thread-badge suppression with it, and leaving §3.5's quote retry with no exit).
+  Queue depth is not the health signal — writes failing is, so `OnWriteFailure` is what
+  restarts the clock. Clearing is still gated on `NumPending == 0`, so a live backlog
+  holds the marker regardless of how long the grace has run. Its length is **derived
   from `jsretry.DefaultBackoff`'s tail** (two tail waits, floored at 5m), not written down:
   a literal silently falls under the interval it must outlast the next time that schedule is
   retuned — which is exactly what #344 did to the original hard-coded 5m.

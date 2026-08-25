@@ -143,6 +143,10 @@ func (t *degradeTracker) OnWriteFailure(ctx context.Context) {
 	t.mu.Lock()
 	skipWrite := t.degraded && t.markerSynced
 	t.markLocked(true)
+	// A write failing again is the one real regression signal, so it — and nothing
+	// else — restarts the drain tail. Without this the clock would keep running
+	// through a resumed outage and could clear the marker mid-failure.
+	t.drainTailSince = time.Time{}
 	if !skipWrite {
 		// A fresh transition into degraded (or a retry of one whose earlier Set
 		// never landed) — the shared store does not yet reflect it. Cleared here,
@@ -164,6 +168,19 @@ func (t *degradeTracker) OnWriteFailure(ctx context.Context) {
 		return
 	}
 	t.mu.Lock()
+	if !t.degraded {
+		// A concurrent OnWriteSuccess cleared the marker while this Set was in flight,
+		// so the Set landed after the Clear and resurrected it in the shared store.
+		// Stamping markerSynced here would leave (degraded=false, marker present), and
+		// the next Refresh would read that marker back and re-adopt degraded for another
+		// whole grace cycle. Undo the resurrection instead.
+		t.mu.Unlock()
+		if err := t.store.Clear(ctx, t.siteID); err != nil {
+			slog.ErrorContext(ctx, "failed to undo a degraded marker that raced a recovery",
+				"error", err, "site", t.siteID)
+		}
+		return
+	}
 	t.markerSynced = true
 	t.mu.Unlock()
 	slog.WarnContext(ctx, "history marked degraded", "site", t.siteID, "degraded_since", since)
@@ -198,9 +215,13 @@ func (t *degradeTracker) OnWriteSuccess(ctx context.Context) {
 		return
 	}
 	if pending > 0 {
-		t.mu.Lock()
-		t.drainTailSince = time.Time{} // still delivering: the tail hasn't started
-		t.mu.Unlock()
+		// Still delivering, so the tail clock does not start yet — but a clock already
+		// running is deliberately left alone. Arriving traffic is not evidence that the
+		// drain regressed; on a site taking any load NumPending is non-zero constantly,
+		// and restarting here meant the grace needed an uninterrupted run of samples it
+		// would never get, pinning the marker (and incompleteSince, and badge
+		// suppression) indefinitely after recovery. A genuine regression is a write
+		// failing again, and OnWriteFailure is what restarts the clock.
 		return
 	}
 	if ackPending > 0 {
