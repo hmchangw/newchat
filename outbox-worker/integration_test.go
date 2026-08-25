@@ -54,6 +54,20 @@ func createStream(t *testing.T, js jetstream.JetStream, cfg stream.Config) {
 	require.NoError(t, err)
 }
 
+// stopConsumer ends a test's consume loop and WAITS for it to finish, before
+// the connection cleanup registered earlier closes nc underneath it. Stop()
+// only unsubscribes — a callback still awaiting its forward's PubAck then fails
+// with "nats: connection closed" and fails a test whose assertions all passed.
+func stopConsumer(t *testing.T, cc jetstream.ConsumeContext) {
+	t.Helper()
+	cc.Drain()
+	select {
+	case <-cc.Closed():
+	case <-time.After(10 * time.Second):
+		t.Log("consume loop still draining after 10s; closing the connection under it")
+	}
+}
+
 // jsPublish is the same publish shape main.go wires into the handler: a
 // PubAck-blocking JetStream publish carrying msgID as the Nats-Msg-Id.
 func jsPublish(js jetstream.JetStream) PublishFunc {
@@ -138,7 +152,7 @@ func assertConcurrentLaneForwards(t *testing.T, siteID, destSiteID, roomID, even
 		_ = msg.Ack()
 	})
 	require.NoError(t, err)
-	t.Cleanup(cc.Stop)
+	t.Cleanup(func() { stopConsumer(t, cc) })
 
 	// Publish the relay event onto the OUTBOX stream's destination-scoped subject.
 	_, err = js.Publish(ctx, subject.Outbox(siteID, destSiteID, eventType), relayEvt)
@@ -239,7 +253,7 @@ func TestIntegration_ConcurrentLanePerDestinationIsolation(t *testing.T) {
 			jsretry.Settle(ctx, msg, []time.Duration{50 * time.Millisecond}, h.HandleEvent(ctx, msg.Subject(), msg.Data()))
 		})
 		require.NoError(t, err)
-		t.Cleanup(cc.Stop)
+		t.Cleanup(func() { stopConsumer(t, cc) })
 	}
 
 	// The healthy peer's event forwards despite the down peer's forever-retrying
@@ -310,7 +324,7 @@ func TestIntegration_OrderedLaneFIFOThroughOutage(t *testing.T) {
 		jsretry.Settle(ctx, msg, []time.Duration{50 * time.Millisecond}, h.HandleEvent(ctx, msg.Subject(), msg.Data()))
 	})
 	require.NoError(t, err)
-	t.Cleanup(cc.Stop)
+	t.Cleanup(func() { stopConsumer(t, cc) })
 
 	// While the destination is down nothing advances: the head member_added
 	// keeps failing (nothing captures the forward, PubAck times out) and holds
@@ -399,7 +413,7 @@ func TestIntegration_OrderedLaneKeepsRenameBehindMemberAdded(t *testing.T) {
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.HandleEvent(ctx, msg.Subject(), msg.Data()))
 	})
 	require.NoError(t, err)
-	t.Cleanup(cc.Stop)
+	t.Cleanup(func() { stopConsumer(t, cc) })
 
 	inboxStream, err := js.Stream(ctx, inboxCfg.Name)
 	require.NoError(t, err)
