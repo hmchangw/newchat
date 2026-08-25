@@ -30,6 +30,18 @@ type PoolConfig struct {
 	// them on another member adds to the total rather than replacing it. 0 keeps
 	// the never-reap behaviour for a caller that wants it.
 	MaxIdleTime time.Duration `env:"MONGO_MAX_IDLE_TIME" envDefault:"5m"`
+	// ServerSelectionTimeout bounds how long an operation waits for a usable
+	// server. A stopped MongoDB does not refuse connections, it goes quiet, and
+	// the driver's 30s default turns that silence into a hang — long enough that
+	// a caller's own deadline expires first and every fail-open path downstream
+	// never runs. Two seconds makes an outage reportable while the request still
+	// has budget to serve a cached fallback.
+	//
+	// It rides here rather than in each service's own config so adopting the
+	// shared pool field carries the bound with it. 0 leaves the URI/driver value
+	// alone; a negative value is refused, because the driver reads <= 0 as no
+	// bound at all — the very hang this exists to prevent.
+	ServerSelectionTimeout time.Duration `env:"MONGO_SERVER_SELECTION_TIMEOUT" envDefault:"2s"`
 }
 
 // WithPool is a Connect option that applies this pool configuration, so call
@@ -47,10 +59,14 @@ func WithPool(p PoolConfig) Option {
 		if p.MaxIdleTime > 0 {
 			c.maxIdleTime = &p.MaxIdleTime
 		}
+		if p.ServerSelectionTimeout > 0 {
+			c.serverSelectionTimeout = &p.ServerSelectionTimeout
+		}
 	}
 }
 
-// Validate rejects a zero max (the driver reads 0 as unbounded) and a min above max.
+// Validate rejects a zero max (the driver reads 0 as unbounded), a min above
+// max, and a negative server-selection timeout (also read as unbounded).
 func (p PoolConfig) Validate() error {
 	if p.MaxPoolSize < 1 {
 		return fmt.Errorf("MONGO_MAX_POOL_SIZE must be >= 1, got %d", p.MaxPoolSize)
@@ -60,6 +76,9 @@ func (p PoolConfig) Validate() error {
 	}
 	if p.MaxIdleTime < 0 {
 		return fmt.Errorf("MONGO_MAX_IDLE_TIME must be >= 0, got %s", p.MaxIdleTime)
+	}
+	if p.ServerSelectionTimeout < 0 {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT must be >= 0, got %s", p.ServerSelectionTimeout)
 	}
 	return nil
 }

@@ -20,8 +20,9 @@ type Observability interface {
 }
 
 type connectConfig struct {
-	obs      Observability
-	readPref *readpref.ReadPref
+	serverSelectionTimeout *time.Duration
+	obs                    Observability
+	readPref               *readpref.ReadPref
 	// maxPoolSize/minPoolSize are nil when the corresponding option was not
 	// supplied, so applyTuning leaves the client option untouched and a value
 	// from the connection URI (or the driver default) survives.
