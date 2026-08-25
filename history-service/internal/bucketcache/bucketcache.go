@@ -19,6 +19,25 @@
 // per bucket, holding either the rows or the marker, so invalidation is a plain
 // DEL. New messages never touch a sealed bucket, so ordinary message flow
 // requires no invalidation at all.
+//
+// # Invalidation boundary
+//
+// Bust covers the mutations history-service itself performs: edit, delete, pin,
+// unpin, and reaction add/remove. It does NOT cover writes into a sealed bucket
+// made by anything else, and those exist — most routinely, message-worker and
+// bot-message-worker updating a thread parent's tcount / thread_last_msg_at /
+// thread_room_id, since a parent is often old enough to have sealed. Those reads
+// are stale until the entry expires.
+//
+// So the TTL, not the mutation, is the visibility bound for a sealed bucket.
+// That is why the cache is off unless explicitly enabled; the four known gaps
+// and what they cost are enumerated on config.Config.BucketCacheOptIn, which is
+// what an operator reads before turning it on.
+//
+// Note that a Bust reaches only this process's L1 plus the shared Valkey key.
+// Get returns on an L1 hit before consulting L2, so a sibling replica holding
+// the bucket keeps serving its own copy until that entry's TTL — invalidating
+// the shared tier alone does not make a mutation visible fleet-wide.
 package bucketcache
 
 import (

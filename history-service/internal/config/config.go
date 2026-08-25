@@ -109,8 +109,37 @@ type Config struct {
 	// gate: it is a fleet-wide variable that several other services already
 	// consume, so a deployment that injects it everywhere would switch this
 	// cache on for history-service as a side effect of merging rather than as a
-	// decision. Turning it on is opting into the staleness bounds documented on
-	// BucketCacheTTL, which is a choice an operator makes deliberately.
+	// decision.
+	//
+	// BEFORE ENABLING THIS, weigh four known gaps. None is a bug in the cache's
+	// own logic; each is a case where a sealed bucket can change without the
+	// cache learning, so reads serve a stale row until the entry expires:
+	//
+	//  1. Thread state written by another service. message-worker and
+	//     bot-message-worker UPDATE tcount / thread_last_msg_at /
+	//     thread_room_id on the *thread parent's* bucket, which is usually
+	//     sealed, and have no bust hook here. A reply on a parent older than
+	//     the current bucket window leaves a stale reply count; because
+	//     chat-frontend gates the thread affordance on `tcount > 0`, a FIRST
+	//     such reply renders no "N replies" button at all. Recorded by
+	//     cassrepo's TestPerBucketCache_ThreadParentMutatedByAnotherService_StaysStale.
+	//  2. Cache-aside refill race (#250). A reader that missed can Put a
+	//     pre-mutation snapshot back after a concurrent Bust found the key
+	//     absent.
+	//  3. Cross-replica L1 (#251). Bust clears the local L1 and the shared
+	//     Valkey key; sibling replicas keep serving their own L1 copies. Get
+	//     returns on an L1 hit before consulting L2, so invalidating only the
+	//     shared tier does not fix this.
+	//  4. Wall-clock sealing. A bucket is sealed when bucket < sizer.Of(now);
+	//     nothing makes the partition immutable in Cassandra, so a create that
+	//     lands after the boundary — a federation replay, or a JetStream
+	//     redelivery, whose backoff runs to minutes — writes into a bucket a
+	//     cached copy already claims to hold completely.
+	//
+	// Until those are addressed, BucketCacheTTL is the mutation-visibility
+	// bound for sealed buckets, and an L2 hit's promotion into L1 restarts that
+	// TTL rather than preserving the remaining lifetime. Enabling this is an
+	// operator's deliberate choice to accept that bound.
 	BucketCacheOptIn bool     `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
 	ValkeyAddrs      []string `env:"VALKEY_ADDRS"                 envSeparator:","`
 	ValkeyPassword   string   `env:"VALKEY_PASSWORD"              envDefault:""`
