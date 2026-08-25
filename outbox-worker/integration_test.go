@@ -64,7 +64,10 @@ func stopConsumer(t *testing.T, cc jetstream.ConsumeContext) {
 	select {
 	case <-cc.Closed():
 	case <-time.After(10 * time.Second):
-		t.Log("consume loop still draining after 10s; closing the connection under it")
+		// Returning here puts the connection cleanup back on top of a live
+		// callback — the very race this helper exists to close — so a drain
+		// that never finishes is a teardown failure, not a note.
+		t.Errorf("consume loop still draining after 10s; connection would close under a live callback")
 	}
 }
 
