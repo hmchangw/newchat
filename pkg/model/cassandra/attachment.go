@@ -44,7 +44,8 @@ type Attachment struct {
 // JSON-encoded Attachment) into typed objects. It is lenient: a malformed blob
 // is skipped and counted (returned as skipped) rather than failing the batch, so
 // one bad row can't break a history load or a live delivery. Returns (nil, 0)
-// for empty input.
+// for empty input. Pre-migration snake_case blobs are converted to the current
+// shape in place — see normalizeAttachment.
 func DecodeAttachments(raw [][]byte) (out []Attachment, skipped int) {
 	if len(raw) == 0 {
 		return nil, 0
@@ -56,6 +57,7 @@ func DecodeAttachments(raw [][]byte) (out []Attachment, skipped int) {
 			skipped++
 			continue
 		}
+		normalizeAttachment(b, &a)
 		out = append(out, a)
 	}
 	return out, skipped
