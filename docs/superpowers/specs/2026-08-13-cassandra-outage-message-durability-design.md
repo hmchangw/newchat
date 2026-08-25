@@ -153,7 +153,10 @@ per incident, and a history read is not worth a Mongo round-trip per call.
 - **Bounded by `drainTailGrace`.** A strict `NumAckPending == 0` gate deadlocks: a
   permanently-NAK'd message holds the count above zero forever (nats-server keeps a
   delayed NAK in the consumer's pending set), so the marker would pin and never clear. The
-  grace elapsing is the normal way a recovery ends, not an anomaly.
+  grace elapsing is the normal way a recovery ends, not an anomaly. Its length is **derived
+  from `jsretry.DefaultBackoff`'s tail** (two tail waits, floored at 5m), not written down:
+  a literal silently falls under the interval it must outlast the next time that schedule is
+  retuned — which is exactly what #344 did to the original hard-coded 5m.
 
 A marker stuck set costs lag, not loss — §3.7's ack-floor-age alert is what catches it.
 Because the marker no longer gates retries, a stuck marker can no longer keep messages
@@ -223,8 +226,20 @@ and would move if anyone retuned the backoff schedule.
 
 Elapsed retry time is derived from `NumDelivered` and the backoff schedule via
 `jsretry.ElapsedFor`, which sums the delays `Settle` has already applied — with
-`DefaultBackoff` that is `36s + (N-4) × 2m`, so a 1h window is first crossed on the
-**34th delivery** (logged at startup so the mapping is visible, not implied).
+`DefaultBackoff` that is `2m36s + (N-5) × 10m`, so a 1h window is first crossed on the
+**11th delivery** (logged at startup so the mapping is visible, not implied).
+
+That number is schedule-dependent and has already moved once: it was the 34th delivery
+while `DefaultBackoff` ended in a 2m tail, and became the 11th when the shared schedule
+gained a 10m tail. Nothing in the service needed changing, which is the point of
+expressing the threshold as a duration — but it does mean the count is a derived fact to
+read off the startup log, never a constant to hard-code.
+
+`ElapsedFor` sums **un-jittered** schedule entries while the delays actually served are
+jittered into `[half, full]` of each entry. The budget is therefore an upper bound on
+real elapsed time: a 1h window is crossed after roughly 45m of wall clock on average.
+Deliberate — the deadline stays reproducible instead of depending on the random draws a
+particular message got.
 
 It is deliberately **not** the message's age on the stream (`meta.Timestamp`): after an
 outage the replayed backlog is already hours old, so an age-since-publish measure would

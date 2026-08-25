@@ -173,8 +173,10 @@ const maxReportedDeliveries uint64 = 1_000_000
 
 // deliveriesToDrop reports the first delivery count whose accumulated backoff
 // reaches window — the redelivery number a request-class failure is dropped on.
-// Logged at startup so an operator can see that the configured duration means
-// ~34 deliveries instead of having to derive it from the backoff schedule.
+// Logged at startup so an operator can see what the configured duration means in
+// deliveries (1h is 11 against the current DefaultBackoff) instead of having to
+// derive it from the backoff schedule. The count moves whenever that schedule is
+// retuned, which is why it is computed here rather than written down.
 func deliveriesToDrop(window time.Duration) uint64 {
 	for n := uint64(1); n < maxReportedDeliveries; n++ {
 		if jsretry.ElapsedFor(jsretry.DefaultBackoff, n) >= window {

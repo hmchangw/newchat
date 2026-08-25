@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -329,4 +331,34 @@ func TestDegradeTracker_OnWriteSuccess_ThrottleWindowExpires(t *testing.T) {
 	assert.Equal(t, int64(2), pendingCalls.Load(), "a second check must fire once the window elapses")
 	assert.False(t, tr.Degraded())
 	assert.Equal(t, int64(1), store.clears.Load())
+}
+
+// TestDeriveDrainTailGrace pins the grace to the retry schedule rather than a
+// literal. A hard-coded 5m silently fell under the backoff tail when #344 grew it
+// from 2m to 10m, which would clear the marker while redeliveries were still in
+// flight — telling clients history was complete mid-drain.
+func TestDeriveDrainTailGrace(t *testing.T) {
+	tests := []struct {
+		name    string
+		backoff []time.Duration
+		want    time.Duration
+	}{
+		{name: "two tail waits for a normal schedule", backoff: []time.Duration{time.Second, 10 * time.Minute}, want: 20 * time.Minute},
+		{name: "a short schedule takes the floor", backoff: []time.Duration{time.Second}, want: minDrainTailGrace},
+		{name: "an empty schedule takes the floor", backoff: nil, want: minDrainTailGrace},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, deriveDrainTailGrace(tt.backoff))
+		})
+	}
+}
+
+// TestDrainTailGraceOutlastsTheBackoffTail is the regression guard: whatever the
+// shared schedule is retuned to, the grace must outlast one tail wait, or a genuine
+// drain cannot settle inside it.
+func TestDrainTailGraceOutlastsTheBackoffTail(t *testing.T) {
+	tail := jsretry.DefaultBackoff[len(jsretry.DefaultBackoff)-1]
+	assert.Greater(t, drainTailGrace, tail,
+		"the marker would clear while redeliveries spaced %s apart are still in flight", tail)
 }

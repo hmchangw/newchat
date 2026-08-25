@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/jsretry"
 )
 
 // backlogCheckInterval throttles the consumer-info round trip on the drain path:
@@ -16,13 +18,37 @@ const backlogCheckInterval = 5 * time.Second
 // undelivered backlog is empty. Elapsing it is the normal way a recovery ends, not an
 // anomaly: settle calls OnWriteSuccess before Ack, so the very message observing the
 // drained backlog is still in the consumer's pending set and ackPending is never 0
-// there. The grace is what lets that resolve — sized above the jsretry backoff tail
-// (2m) plus an AckWait so a genuine drain tail finishes inside it.
+// there. The grace is what lets that resolve.
 //
 // It also bounds the pathological case: one message that can never be written would
 // otherwise pin the site-wide marker forever, telling every client that history is
 // incomplete.
-const drainTailGrace = 5 * time.Minute
+//
+// Derived from the retry schedule rather than written down, because a literal rots
+// the moment anyone retunes that schedule — which already happened once: this was a
+// hard-coded 5m "comfortably above the 2m tail" until the shared DefaultBackoff grew
+// a 10m tail, leaving the grace *under* the interval it has to outlast. A marker
+// cleared mid-drain tells every client history is complete while replays are still
+// in flight, which is the exact failure the marker exists to prevent.
+var drainTailGrace = deriveDrainTailGrace(jsretry.DefaultBackoff)
+
+// minDrainTailGrace floors the derived value so a degenerate or very fast schedule
+// still leaves room for one AckWait-sized settle after the backlog reads empty.
+const minDrainTailGrace = 5 * time.Minute
+
+// deriveDrainTailGrace allows two tail waits: one for the last in-flight redelivery
+// to be served, one for it to settle and Ack. Jitter only shortens a served delay
+// (equal jitter draws within [half, full]), so two full tails is an upper bound on
+// the real interval and the grace cannot land under it.
+func deriveDrainTailGrace(backoff []time.Duration) time.Duration {
+	if len(backoff) == 0 {
+		return minDrainTailGrace
+	}
+	if grace := 2 * backoff[len(backoff)-1]; grace > minDrainTailGrace {
+		return grace
+	}
+	return minDrainTailGrace
+}
 
 // historyWriteError marks a failure of the Cassandra history write specifically,
 // as opposed to the Mongo/user-lookup failures that share the handler's error
