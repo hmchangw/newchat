@@ -475,3 +475,39 @@ func TestWalkBuckets_AdaptiveWidth_DenseUnderfillDoesNotOverfetch(t *testing.T) 
 	assert.LessOrEqual(t, len(store.fetchedBuckets()), 2,
 		"dense underfill must stay narrow, not fan out to fanout width; fetched=%v", store.fetchedBuckets())
 }
+
+// --- contiguity ------------------------------------------------------------
+
+// bucketsBack returns the bucket n steps below start in DESC order.
+func bucketsBack(start int64, n int) int64 {
+	s := testSizer()
+	b := start
+	for range n {
+		b = s.Prev(b)
+	}
+	return b
+}
+
+// The walk is contiguous: it visits every bucket between its start and the row
+// it finds, and never jumps over a run it believes is empty.
+//
+// This is a correctness property, not an efficiency one. An earlier revision
+// took a skip hint derived from rooms.lastMsgAt so a degraded read could jump
+// the empty run. rooms.lastMsgAt is projected by unread-worker on a consumer
+// separate from the message-worker that writes these rows, with MaxDeliver=-1
+// holding batches un-acked through a Mongo outage, so it lags Cassandra by an
+// unbounded amount and cannot authorize skipping any bucket. Reintroducing a
+// skip needs a watermark advanced by Cassandra persistence itself.
+func TestWalkBuckets_VisitsEveryBucketDownToTheRow(t *testing.T) {
+	start := testStartBucket()
+	row := bucketsBack(start, 20)
+	store := &fakeCassandra{buckets: map[int64][]int{row: seq(1, 5)}}
+
+	res := runDesc(t, store, start, noFloorDesc, 365, 10, 8, nil)
+
+	require.Equal(t, seq(1, 5), res.Rows)
+	fetched := store.fetchedBuckets()
+	for b, s := row, testSizer(); b <= start; b = s.Next(b) {
+		assert.Contains(t, fetched, b, "bucket %d was skipped; the walk must be contiguous", b)
+	}
+}

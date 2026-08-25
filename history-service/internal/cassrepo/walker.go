@@ -184,6 +184,18 @@ func fillPage[T any](
 // Rows are always assembled in strict bucket order and the returned cursor is
 // identical to what a serial walk would produce — concurrency overlaps the I/O
 // only, never the ordering or pagination.
+//
+// The walk is contiguous by design: it visits every bucket between its start and
+// its floor, and never jumps over a run it believes is empty. That is worth
+// stating because the belief is tempting and unavailable. The obvious source for
+// it, rooms.lastMsgAt, is not a watermark for this table: unread-worker projects
+// it from MESSAGES-CANONICAL on a consumer separate from the message-worker that
+// writes these rows, with MaxDeliver=-1 holding batches un-acked through a Mongo
+// outage. The pointer therefore lags Cassandra by an unbounded amount by design
+// (docs/load-testing/failure/mongodb.md), so no timestamp taken alongside it can
+// bound how far it lags, and any bucket it authorizes skipping may hold a row.
+// Only a watermark advanced by Cassandra persistence itself could, and none
+// exists. Widen the floor or the fan-out instead.
 type bucketWalk[T any] struct {
 	sizer        msgbucket.Sizer
 	direction    walkDirection

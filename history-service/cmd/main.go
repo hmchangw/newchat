@@ -16,7 +16,9 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -27,8 +29,11 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/pagefit"
+	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // checkConfig validates positive-integer config knobs and exits the process on
@@ -51,6 +56,30 @@ func checkConfig(cfg *config.Config) {
 			os.Exit(1)
 		}
 	}
+}
+
+// subAuthReadThrough is the shared-L2 subscription access check: a closure that
+// runs subauthcache.ReadThrough behind the circuit breaker. account/roomID order
+// matches service.SubscriptionRepository.
+type subAuthReadThrough func(ctx context.Context, account, roomID string) (sharedSince *time.Time, subscribed bool, err error)
+
+// subL2Source is the always-present subscription base source. The access check
+// (GetHistorySharedSince) runs through the shared Valkey L2 read-through, itself
+// breaker-guarded, so a Mongo outage fails open regardless of whether the L1
+// process-local cache is enabled. The full-subscription read (GetSubscription,
+// pin/unpin) delegates to the raw Mongo repo unchanged. This keeps L2/breaker
+// outage survival active symmetrically with message-gatekeeper.
+type subL2Source struct {
+	l2    subAuthReadThrough
+	inner service.SubscriptionRepository
+}
+
+func (s subL2Source) GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+	return s.l2(ctx, account, roomID)
+}
+
+func (s subL2Source) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
+	return s.inner.GetSubscription(ctx, account, roomID)
 }
 
 func main() {
@@ -130,6 +159,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Shared subauthcache L2 (Valkey). nil disables the L2 tier — the base
+	// source's read-through then falls straight through to the breaker-guarded
+	// Mongo loader (still fronted, regardless of the L1 cache).
+	var subValkey valkeyutil.Client
+	if len(cfg.ValkeyAddrs) > 0 {
+		// Log and continue rather than exit: both tiers this client feeds (the
+		// subscription authz L2 and the at-rest DEK L2) are fail-open caches that
+		// degrade to Mongo. Exiting here would turn an optional accelerator into a
+		// hard startup dependency and take history reads down with Valkey.
+		client, connErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk),
+			valkeyutil.WithRequireParentSpan(true),
+		)
+		if connErr != nil {
+			slog.Error("valkey connect (subauth L2) failed; L2 caches disabled", "error", connErr)
+		} else {
+			subValkey = client
+		}
+		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2TTL > 0, "ttl", cfg.SubL2TTL)
+	}
+
 	var (
 		cipher       atrest.Cipher
 		vaultWrapper atrest.KeyWrapperCloser
@@ -145,7 +195,18 @@ func main() {
 		// missed on a lagging secondary.
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
 			options.Collection().SetReadPreference(readpref.Primary()))
-		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+		// Front the Mongo DEK store with the shared Valkey L2 so an active room's
+		// key stays reachable during a Mongo outage (the in-process DEK cache
+		// expires on a fixed TTL and cannot refetch while Mongo is down).
+		// subValkey is the client already connected for the subauth L2; a nil
+		// client disables the tier. The DEK breaker is deliberately separate from
+		// the subscription breaker so the two health signals stay independent.
+		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
+			circuitbreaker.Tracked(ctx, "atrestdek"))
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), subValkey,
+			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
+		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
+		slog.Info("at-rest DEK L2 configured", "enabled", subValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
 	}
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
@@ -164,21 +225,71 @@ func main() {
 		slog.Warn("ensure thread_subscriptions indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
-	// Front the per-request Mongo reads with process-local LRU+TTL caches.
-	var subSource service.SubscriptionRepository = subRepo
+	// Front the per-request Mongo reads with process-local LRU+TTL caches. The
+	// subscription L1's loader runs through the shared Valkey L2 (subauthcache),
+	// itself breaker-guarded so a Mongo outage fails open instead of stalling.
+	// Pinned to primary for the same reason as dekColl above: what this reads is
+	// written into a shared 90-minute L2 that every service trusts, so a
+	// replica-lagged read does not merely serve one stale answer — it publishes
+	// a just-revoked subscription as authorization for the whole TTL, and the
+	// outage TTL-slide can extend that further.
+	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
+	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2TTL,
+		circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+			circuitbreaker.Tracked(ctx, "subscription")),
+		cachemetrics.For("subauth", "l2"))
+	// history-service needs only the access-window bound out of the shared
+	// projection, so this adapts the tier's SubAuth to that narrower shape.
+	subL2 := func(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+		auth, subscribed, err := subTier.Resolve(ctx, roomID, account)
+		if err != nil || !subscribed {
+			return nil, false, err
+		}
+		var ss *time.Time
+		if auth.HistorySharedSince != nil {
+			t := time.UnixMilli(*auth.HistorySharedSince).UTC()
+			ss = &t
+		}
+		return ss, true, nil
+	}
+
+	// The breaker-guarded L2 read-through is the ALWAYS-present base source, so
+	// outage survival stays active even when the L1 cache is disabled
+	// (SubCacheSize/TTL = 0). The L1 cache, when enabled, simply layers on top:
+	// its loader calls base.GetHistorySharedSince, which already runs the
+	// L2/breaker chain.
+	base := subL2Source{l2: subL2, inner: subRepo}
+	var subSource service.SubscriptionRepository = base
 	if cfg.SubCacheSize > 0 && cfg.SubCacheTTL > 0 {
-		sc, err := readcache.NewSubscriptionCache(subRepo, cfg.SubCacheSize, cfg.SubCacheTTL)
+		sc, err := readcache.NewSubscriptionCache(base, cfg.SubCacheSize, cfg.SubCacheTTL)
 		if err != nil {
 			slog.Error("init subscription cache failed", "error", err)
 			os.Exit(1)
 		}
 		subSource = sc
-		slog.Info("subscription cache enabled", "size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL)
+		slog.Info("subscription cache enabled",
+			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
+			"sub_l2_ttl", cfg.SubL2TTL,
+			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+		)
+	} else {
+		slog.Info("subscription L1 cache disabled; L2/breaker outage survival remains active",
+			"sub_l2_ttl", cfg.SubL2TTL,
+			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+		)
 	}
 
-	var roomSource service.RoomRepository = roomRepo
+	// Fence the room reads before the L1 cache wraps them: they fail open, but
+	// only once they fail FAST (see breakerRoomRepo). Its own breaker, so
+	// room-read health and subscription-read health cannot mask each other.
+	guardedRooms := newBreakerRoomRepo(roomRepo, circuitbreaker.New(
+		cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "roomtimes"),
+		circuitbreaker.WithFailurePredicate(roomBreakerFailure)))
+
+	var roomSource service.RoomRepository = guardedRooms
 	if cfg.RoomCacheSize > 0 && cfg.RoomCacheTTL > 0 {
-		rc, err := readcache.NewRoomCache(roomRepo, cfg.RoomCacheSize, cfg.RoomCacheTTL)
+		rc, err := readcache.NewRoomCache(guardedRooms, cfg.RoomCacheSize, cfg.RoomCacheTTL)
 		if err != nil {
 			slog.Error("init room cache failed", "error", err)
 			os.Exit(1)
@@ -207,6 +318,17 @@ func main() {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	opts = append(opts, service.WithPageBudget(pageBudget))
+
+	// Room-times L2. Reuses the client already connected for the subauth tier;
+	// a nil client or a zero TTL leaves the service's no-op in place, so the
+	// bucket walk simply stays as wide as the configured history floor.
+	if subValkey != nil && cfg.RoomTimesL2TTL > 0 {
+		opts = append(opts, service.WithRoomTimesCache(
+			roomtimescache.NewTier(subValkey, cfg.RoomTimesL2TTL, cachemetrics.For("roomtimes", "l2"))))
+	}
+	slog.Info("room-times L2 configured",
+		"enabled", subValkey != nil && cfg.RoomTimesL2TTL > 0, "ttl", cfg.RoomTimesL2TTL)
+
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
@@ -243,6 +365,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return healthStop(ctx) },
+		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

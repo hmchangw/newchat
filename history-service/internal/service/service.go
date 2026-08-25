@@ -145,6 +145,39 @@ type HistoryService struct {
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
+	// roomTimes remembers the last room times MongoDB confirmed, so a walk can
+	// still be bounded while MongoDB is unreachable. Never nil — a disabled
+	// deployment gets a no-op, so the read path needs no nil check.
+	roomTimes RoomTimesCache
+}
+
+// RoomTimesCache remembers a room's last confirmed lastMsgAt/createdAt so the
+// bucket walk can still be bounded when MongoDB cannot answer. Write-on-success
+// and read-on-failure, NOT a read-through: a healthy request never consults it,
+// so it introduces no staleness on the hot path and needs no invalidation.
+type RoomTimesCache interface {
+	Store(ctx context.Context, roomID string, createdAt time.Time)
+	Fallback(ctx context.Context, roomID string) (createdAt time.Time, found bool)
+}
+
+// nopRoomTimesCache is the disabled form: it remembers nothing and offers
+// nothing, leaving the fail-open path exactly as wide as it was before the
+// tier existed.
+type nopRoomTimesCache struct{}
+
+func (nopRoomTimesCache) Store(context.Context, string, time.Time) {}
+func (nopRoomTimesCache) Fallback(context.Context, string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// WithRoomTimesCache enables the room-times L2 fallback. A nil cache leaves the
+// no-op in place.
+func WithRoomTimesCache(c RoomTimesCache) Option {
+	return func(s *HistoryService) {
+		if c != nil {
+			s.roomTimes = c
+		}
+	}
 }
 
 func New(
@@ -173,6 +206,7 @@ func New(
 		largeRoomThreshold: cfg.LargeRoomThreshold,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
+		roomTimes:          nopRoomTimesCache{},
 	}
 	for _, opt := range opts {
 		opt(s)
