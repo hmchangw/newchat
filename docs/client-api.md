@@ -884,6 +884,13 @@ Render-ready descriptor for an uploaded file. Returned by the upload endpoint
 into `msg.send` (§4), and returned decoded as objects in message payloads. Media
 fields are present only for the matching MIME family.
 
+Attachments stored in the pre-migration format are converted server-side on
+every read, so clients always receive the schema below. A converted attachment
+carries `id`, `title`, `type`, `titleLink`, `titleLinkDownload` and `fileType`
+(plus `description` when present); its `titleLink` points at
+`api/v1/file-upload/{fileId}/{fileName}`, `titleLinkDownload` is `true` like on
+any other attachment, and the media fields are absent.
+
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Drive file ID. |
