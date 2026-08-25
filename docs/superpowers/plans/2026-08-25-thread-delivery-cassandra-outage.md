@@ -196,7 +196,7 @@ git commit -m "refactor(errcode): promote the transient-vs-terminal predicate ou
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `broadcast-worker/store_mongo_test.go`:
+Append to `broadcast-worker/store_mongo_test.go`. **That file imports no testify today** — add `"github.com/stretchr/testify/assert"` and `"github.com/stretchr/testify/require"` to its import block (the rest of the package already uses both):
 
 ```go
 func TestThreadRoomInfo_ZeroParentCreatedAtIsUnknown(t *testing.T) {
@@ -505,11 +505,15 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	if parentCreatedAt == nil {
 		parentCreatedAt = room.ParentCreatedAt
 	}
+	// degradeReason records at most ONE reason per fan-out. A failed fetch and an
+	// absent thread room coincide in the common outage case, so counting them
+	// independently would double every degrade exactly when the metric is watched.
+	degradeReason := "no_thread_room"
 	if parentCreatedAt == nil {
 		fetched, ferr := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		switch {
 		case ferr != nil:
-			h.metrics.ThreadFanOutDegraded(ctx, "fetch_failed")
+			degradeReason = "fetch_failed"
 			slog.WarnContext(ctx, "thread parent unresolvable; fanning out to followers only",
 				"error", ferr, "parent_message_id", parentMsgID, "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -520,8 +524,8 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 			}
 		}
 	}
-	if parentCreatedAt == nil && len(room.Followers) == 0 {
-		h.metrics.ThreadFanOutDegraded(ctx, "no_thread_room")
+	if parentCreatedAt == nil {
+		h.metrics.ThreadFanOutDegraded(ctx, degradeReason)
 	}
 
 	// A nil parentCreatedAt makes mentionVisible fail closed for every member with a
@@ -655,7 +659,10 @@ git commit -m "test(broadcast-worker): cover the thread_rooms parent fallback ag
 - Modify: `notification-worker/integration_test.go:150-185`
 
 **Interfaces:**
-- Consumes: `errcode.IsTransient` (Task 1).
+- Consumes: nothing from earlier tasks. (This task deliberately does NOT use
+  `errcode.IsTransient`: notification-worker degrades on *any* parent-fetch error,
+  because the alternative is a NAK that MaxDeliver eventually destroys, and a
+  terminal error — the parent is genuinely gone — is no more retryable than an outage.)
 - Produces: `ThreadRoomInfo` gains `ParentCreatedAt *time.Time`; `ThreadFollowerLister.Lookup` keeps its signature.
 
 - [ ] **Step 1: Write the failing test**
@@ -1081,7 +1088,12 @@ git commit -m "feat(message-gatekeeper): refuse a thread start that no consumer 
 - Create: `chat-frontend/src/api/sendMessage/index.test.ts`
 
 **Interfaces:**
-- Consumes: `Nats.subscribe(subject, cb) => NatsSubscription`, `Nats.publish`, `userResponse(account, requestId)` from `../_transport/subjects`, `AsyncJobError` from `../_transport/asyncJob`.
+- Consumes: `Nats.subscribe(subject, cb) => NatsSubscription`, `Nats.publish`, `userResponse(account, requestId)` from `../_transport/subjects`, `AsyncJobError` and `ASYNC_JOB_ERROR_KINDS` from `../_transport/asyncJob`.
+- **`AsyncJobErrorKind` is a closed union of four values** (`asyncJob.ts:23-31`):
+  `'sync-error' | 'async-error' | 'async-timeout' | 'subscription-closed'`. Use
+  `ASYNC_JOB_ERROR_KINDS.AsyncError` for a gatekeeper refusal and
+  `ASYNC_JOB_ERROR_KINDS.AsyncTimeout` for the timeout. Do not invent new kinds —
+  they will not typecheck.
 - Produces: `sendMessage(nats, args) => Promise<void>` — **was `void`, is now a Promise**. It rejects with `AsyncJobError` carrying `.code` and `.reason`. Task 11 and Task 12 consume `.reason`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1145,7 +1157,7 @@ describe('sendMessage', () => {
     vi.useFakeTimers()
     const nats = natsDouble()
     const p = sendMessage(nats as never, { ...args, timeoutMs: 1000 })
-    const assertion = expect(p).rejects.toMatchObject({ kind: 'timeout' })
+    const assertion = expect(p).rejects.toMatchObject({ kind: 'async-timeout' })
     await vi.advanceTimersByTimeAsync(1001)
     await assertion
     vi.useRealTimers()
@@ -1171,7 +1183,7 @@ Rewrite `chat-frontend/src/api/sendMessage/index.ts`:
 
 ```ts
 import { msgSend, userResponse } from '../_transport/subjects'
-import { AsyncJobError } from '../_transport/asyncJob'
+import { AsyncJobError, ASYNC_JOB_ERROR_KINDS } from '../_transport/asyncJob'
 import type { Nats } from '../types'
 
 /** Matches asyncJob's sync-reply window; the gatekeeper answers off a JetStream
@@ -1212,8 +1224,8 @@ interface ErrorEnvelope {
  * This used to be fire-and-forget, so those replies were discarded and a
  * refused send looked identical to a successful one.
  *
- * @throws {AsyncJobError} `.kind` is 'remote' for a typed refusal (with `.code`
- *   and `.reason` from the envelope) or 'timeout' when no reply arrives.
+ * @throws {AsyncJobError} `.kind` is 'async-error' for a typed refusal (with `.code`
+ *   and `.reason` from the envelope) or 'async-timeout' when no reply arrives.
  */
 export function sendMessage(
   { user, publish, subscribe }: Nats,
@@ -1225,7 +1237,7 @@ export function sendMessage(
       settle(() => {
         const env = (data ?? {}) as ErrorEnvelope
         if (env.error) {
-          reject(new AsyncJobError(env.error, 'remote', { code: env.code, reason: env.reason, metadata: env.metadata }))
+          reject(new AsyncJobError(env.error, ASYNC_JOB_ERROR_KINDS.AsyncError, { code: env.code, reason: env.reason, metadata: env.metadata }))
           return
         }
         resolve()
@@ -1233,7 +1245,7 @@ export function sendMessage(
     })
 
     const timer = setTimeout(() => {
-      settle(() => reject(new AsyncJobError('send timed out', 'timeout')))
+      settle(() => reject(new AsyncJobError('send timed out', ASYNC_JOB_ERROR_KINDS.AsyncTimeout)))
     }, timeoutMs)
 
     let done = false
@@ -1253,7 +1265,7 @@ export function sendMessage(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd chat-frontend && npm test -- sendMessage && npm run typecheck`
-Expected: PASS on both. `AsyncJobError`'s `kind` values come from `ASYNC_JOB_ERROR_KINDS` — if `'remote'` or `'timeout'` is not among them, use the nearest existing kinds rather than inventing new ones, and update the test to match.
+Expected: PASS on both.
 
 - [ ] **Step 5: Update callers**
 

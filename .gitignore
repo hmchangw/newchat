@@ -80,3 +80,6 @@ tmp/
 
 # Captured pprof profiles from `make profile`.
 profiles/
+
+# subagent-driven-development scratch workspace
+.superpowers/
