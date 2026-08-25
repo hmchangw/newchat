@@ -126,6 +126,19 @@ func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
 	assert.NotZero(t, got.Timestamp)
 }
 
+// Room hydration failure on reactivate → skip the publish (no Room-less event), still success.
+func TestSetAppSubscription_Reactivate_RoomMetaUnavailable_NoEvent(t *testing.T) {
+	svc, subs, _, apps, rooms, _, _ := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(false), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), []string{"room1"}).Return(nil, errors.New("room svc down"))
+	// No pub expectation → the strict mock fails if a partial event is published.
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+}
+
 // An idempotent subscribed:true on an already-active botDM writes but emits no event.
 func TestSetAppSubscription_Reactivate_AlreadySubscribed_NoEvent(t *testing.T) {
 	svc, subs, _, apps, _, _, _ := newSvc(t)

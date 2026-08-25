@@ -86,10 +86,15 @@ func (s *UserService) publishAppSubscriptionReactivated(c *natsrouter.Context, a
 	subCopy := *sub
 	subCopy.IsSubscribed = true
 	subCopy.Muted = false
-	// Hydrate the non-persisted Room the "added" contract carries (GetAppSubscription decodes persisted fields only).
-	if infos, err := s.rooms.GetRoomsMeta(c, sub.SiteID, []string{sub.RoomID}); err == nil && len(infos) > 0 {
-		applyRoomInfo(&subCopy, &infos[0])
+	// The "added" contract requires a hydrated Room (GetAppSubscription decodes persisted fields only).
+	// If the lookup fails, skip the publish rather than emit a Room-less event — clients reconcile on next apps.list.
+	infos, err := s.rooms.GetRoomsMeta(c, sub.SiteID, []string{sub.RoomID})
+	if err != nil || len(infos) == 0 || !infos[0].Found {
+		slog.WarnContext(c, "skip app subscription.update: room metadata unavailable",
+			"error", err, "account", account, "room_id", sub.RoomID, "request_id", natsutil.RequestIDFromContext(c))
+		return
 	}
+	applyRoomInfo(&subCopy, &infos[0])
 	roomName := app.Name
 	if roomName == "" {
 		roomName = app.Assistant.Name
