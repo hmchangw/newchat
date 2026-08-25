@@ -1,9 +1,12 @@
 package drive
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,4 +177,63 @@ func TestClient_UploadGroupImages_FilesAroundSniffBoundary(t *testing.T) {
 			require.Equal(t, want, got, "the part body must arrive whole")
 		})
 	}
+}
+
+// A hostile filename must not be able to inject headers into the multipart
+// body. quoteEscaper percent-encodes CR/LF in the Content-Disposition filename
+// (stdlib leaves them raw); if that regressed, the injected "Content-Type:
+// text/html" would parse as the file part's real header. The files[N].fileName
+// form FIELD legitimately carries the raw filename — CR/LF in a field value
+// live in the body region, which cannot terminate a header (old resty parity).
+func TestClient_UploadGroupImages_HostileFilename(t *testing.T) {
+	const payload = "PAYLOAD"
+	hostile := "evil\"\r\nContent-Type: text/html\r\n\r\n.png"
+
+	var raw []byte
+	var boundary string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// assert (never require) here: the handler runs off the test goroutine,
+		// where FailNow is not allowed.
+		var err error
+		raw, err = io.ReadAll(r.Body)
+		assert.NoError(t, err, "read raw body")
+		_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if assert.NoError(t, err, "parse content-type") {
+			boundary = params["boundary"]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
+		[]MultipartFile{{File: fakeMultipart(payload), Filename: hostile}})
+	require.NoError(t, err)
+
+	mr := multipart.NewReader(bytes.NewReader(raw), boundary)
+	var fileParts int
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err, "a hostile filename must not break the body")
+		if part.FileName() == "" {
+			continue // envelope form fields
+		}
+		fileParts++
+		// The injection signature: raw CR/LF in the filename would end the
+		// Content-Disposition line and make text/html this part's real header.
+		require.Equal(t, "text/plain; charset=utf-8", part.Header.Get("Content-Type"),
+			"an injected Content-Type must never override the sniffed one")
+		require.Contains(t, part.Header.Get("Content-Disposition"), "%0D%0A",
+			"CR/LF must arrive percent-encoded in the header")
+		require.NotContains(t, part.FileName(), "\r")
+		require.NotContains(t, part.FileName(), "\n")
+		b, err := io.ReadAll(part)
+		require.NoError(t, err, "read part")
+		require.Equal(t, payload, string(b), "the part body must arrive whole")
+	}
+	require.Equal(t, 1, fileParts, "an injection would have split the file part")
 }
