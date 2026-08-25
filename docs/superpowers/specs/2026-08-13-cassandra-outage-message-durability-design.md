@@ -127,6 +127,18 @@ suppression (§3.6).
 
 **Granularity: site-wide.** `message-worker` sets a "history degraded since T" marker
 when its Cassandra writes begin failing, and clears it once the backlog drains.
+
+**Only an infra-class failure sets it**, and this is load-bearing precisely *because* the
+marker is site-wide. A request-class verdict (§3.3) is the classifier saying "this one row
+is unwritable" — per-message by construction — and a clean `messages_by_id` miss on a
+thread parent is an ordering race between concurrent workers, not evidence about
+Cassandra. Either one, allowed to mark, turns a single message into a site-wide "history
+is incomplete" for the whole drain grace: `incompleteSince` on every room, every thread
+badge suppressed. The cost of this rule is that a site-wide fault presenting as request
+class (a migration returning `Invalid` for every write) sets no marker; that is the
+population-signal follow-up, covered today by the drop-rate metric, its alert and
+`HISTORY_DROP_ENABLED`. Marking per-message was never a stand-in for it — it fired on one
+poison row just as readily.
 Per-room high-water-mark tracking was rejected as bookkeeping on the hot write path
 disproportionate to a rare event; over-flagging a quiet room costs a user nothing worse
 than a "still catching up" hint, and the coarse marker cannot produce false negatives.

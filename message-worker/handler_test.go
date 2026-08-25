@@ -2757,8 +2757,9 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		err := h.processMessage(context.Background(), threadData, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not yet persisted")
-		assert.True(t, isHistoryWriteError(err),
-			"a parent still in the replay backlog means history is behind — the marker must be held")
+		assert.False(t, isHistoryWriteError(err),
+			"a parent that has not landed yet is an ordering race between concurrent workers, not a "+
+				"Cassandra failure: it must NAK for redelivery without flipping the site-wide marker")
 	})
 
 	t.Run("publish error propagates for JetStream retry", func(t *testing.T) {

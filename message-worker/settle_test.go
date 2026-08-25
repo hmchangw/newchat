@@ -235,6 +235,19 @@ func TestHandler_Settle(t *testing.T) {
 		assert.False(t, msg.acked)
 	})
 
+	t.Run("a request-class failure does not degrade the site", func(t *testing.T) {
+		// The marker is site-wide and drives incompleteSince for every room plus
+		// thread-badge suppression. A request-class verdict is the classifier saying
+		// "this one row is unwritable", which says nothing about the site's history.
+		// Marking on it turns one bad message into a site-wide "history is incomplete".
+		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
+		msg := &fakeJetStreamMsg{numDelivered: 2}
+		h.settle(context.Background(), msg, requestClassErr())
+		assert.True(t, msg.naked, "inside the window it still retries")
+		assert.False(t, h.degrade.Degraded(),
+			"one unwritable row must not tell every client on the site that history is incomplete")
+	})
+
 	t.Run("an untagged parent-not-yet-persisted failure naks", func(t *testing.T) {
 		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
 		msg := &fakeJetStreamMsg{numDelivered: 900}

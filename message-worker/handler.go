@@ -185,21 +185,27 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		// The gatekeeper resolves the parent's createdAt best-effort at send time
 		// and ships it on the event; trust it when present. Otherwise resolve
 		// authoritatively from messages_by_id. A miss → parent's canonical write
-		// hasn't landed → NAK for redelivery (retried indefinitely while history is
-		// degraded) rather than persist a null, corrupting partition coords.
+		// hasn't landed → NAK for redelivery rather than persist a null, corrupting
+		// partition coords.
 		//
-		// Both outcomes are tagged as history failures: a Cassandra read that fails
-		// and a parent that has not landed are the same signal as a failed write —
-		// history is behind. Untagged, a thread reply failing at the onset of an
-		// outage would not mark the site degraded at all, before any plain message
-		// had failed its own write.
+		// Only the read *error* is tagged as a history failure. A failed Cassandra
+		// read is the same signal as a failed write — history is behind — and tagging
+		// it is what lets a thread reply mark the site degraded at the onset of an
+		// outage, before any plain message has failed its own write.
+		//
+		// A clean miss is not that signal. The canonical feed is consumed by
+		// MAX_WORKERS goroutines concurrently, so a reply overtaking its own parent is
+		// an ordering race between healthy workers, not evidence that Cassandra is
+		// unwell. Tagging it would let one routine race flip a site-wide marker that
+		// makes every room report incompleteSince and suppresses every thread badge
+		// until the drain grace elapses. It retries either way; only the marker differs.
 		if evt.Message.ThreadParentMessageCreatedAt == nil {
 			createdAt, found, err := h.store.GetMessageCreatedAt(ctx, evt.Message.ThreadParentMessageID)
 			if err != nil {
 				return fmt.Errorf("resolve thread parent createdAt: %w", historyWriteError{err})
 			}
 			if !found {
-				return historyWriteError{fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)}
+				return fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)
 			}
 			evt.Message.ThreadParentMessageCreatedAt = &createdAt
 		}

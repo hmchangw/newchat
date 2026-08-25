@@ -53,13 +53,26 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 
 	class := cassutil.ClassifyCQL(err)
 	h.histMetrics.onHistoryWriteFailure(class.String())
-	h.degrade.OnWriteFailure(ctx)
 
 	// The infra-class early return comes before retriedFor on purpose: no infra-class
 	// failure can ever lead to a drop, and during an actual Cassandra outage that is
 	// essentially every failure — so the metadata decode retriedFor needs (which walks
 	// the reply subject and allocates) is skipped on the dominant path.
+	//
+	// The marker is set only here, on the infra path. It is site-wide state — it makes
+	// every room report incompleteSince and suppresses every thread badge — so only a
+	// failure that says something about the site may set it. A request-class verdict is
+	// the classifier saying "this one row is unwritable", which is per-message by
+	// construction; marking on it turned one bad row into a site-wide "history is
+	// incomplete" for the whole drain grace.
+	//
+	// The gap this leaves is a site-wide fault that presents as request class (a rolling
+	// migration returning Invalid for every write): no marker is set, so clients are not
+	// told. That is the population-signal follow-up in the PR description — the drop-rate
+	// metric, its alert and HISTORY_DROP_ENABLED are what cover it today. Marking
+	// per-message was never a correct stand-in for it: it fired on one poison row too.
 	if class == cassutil.CQLInfra {
+		h.degrade.OnWriteFailure(ctx)
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
 		return
 	}
