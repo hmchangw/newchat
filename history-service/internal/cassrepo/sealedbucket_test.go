@@ -47,35 +47,40 @@ func TestSliceBounded(t *testing.T) {
 		since  *time.Time
 		limit  int
 		want   []string
+		// wantMore is true when limit withheld rows the bounded range still held.
+		wantMore bool
 	}{
-		{"no bounds, high limit", nil, nil, 100, []string{"0", "1", "2", "3", "4"}},
-		{"limit caps", nil, nil, 2, []string{"0", "1"}},
-		{"before excludes anchor and newer", ptr(t2), nil, 100, []string{"3", "4"}},
-		{"since excludes anchor and older", nil, ptr(t2), 100, []string{"0", "1"}},
-		{"before+since window", ptr(t1), ptr(t3), 100, []string{"2"}},
-		{"before below all", ptr(t4), nil, 100, []string{}},
-		{"since equals newest excludes all", nil, ptr(t0), 100, []string{}},
-		{"since below all keeps all", nil, ptr(time.Unix(50, 0).UTC()), 100, []string{"0", "1", "2", "3", "4"}},
-		{"window with limit", ptr(t0), ptr(t4), 2, []string{"1", "2"}},
-		{"before newer than newest keeps all", ptr(time.Unix(999, 0).UTC()), nil, 100, []string{"0", "1", "2", "3", "4"}},
+		{"no bounds, high limit", nil, nil, 100, []string{"0", "1", "2", "3", "4"}, false},
+		{"limit caps", nil, nil, 2, []string{"0", "1"}, true},
+		{"before excludes anchor and newer", ptr(t2), nil, 100, []string{"3", "4"}, false},
+		{"since excludes anchor and older", nil, ptr(t2), 100, []string{"0", "1"}, false},
+		{"before+since window", ptr(t1), ptr(t3), 100, []string{"2"}, false},
+		{"before below all", ptr(t4), nil, 100, []string{}, false},
+		{"since equals newest excludes all", nil, ptr(t0), 100, []string{}, false},
+		{"since below all keeps all", nil, ptr(time.Unix(50, 0).UTC()), 100, []string{"0", "1", "2", "3", "4"}, false},
+		{"window with limit", ptr(t0), ptr(t4), 2, []string{"1", "2"}, true},
+		{"before newer than newest keeps all", ptr(time.Unix(999, 0).UTC()), nil, 100, []string{"0", "1", "2", "3", "4"}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sliceBounded(rows, tc.before, tc.since, tc.limit)
+			got, more := sliceBounded(rows, tc.before, tc.since, tc.limit)
 			assert.Equal(t, tc.want, ids(got))
+			assert.Equal(t, tc.wantMore, more, "more must report rows withheld by limit")
 		})
 	}
 }
 
 func TestSliceBounded_EmptyInput(t *testing.T) {
-	assert.Empty(t, sliceBounded(nil, nil, nil, 10))
+	emptyRows, more := sliceBounded(nil, nil, nil, 10)
+	assert.Empty(t, emptyRows)
+	assert.False(t, more)
 }
 
 func TestSliceBounded_DoesNotMutateInput(t *testing.T) {
 	t0 := time.Unix(500, 0).UTC()
 	t1 := time.Unix(400, 0).UTC()
 	rows := descRows(t0, t1)
-	got := sliceBounded(rows, ptr(t0), nil, 100)
+	got, _ := sliceBounded(rows, ptr(t0), nil, 100)
 	require.Equal(t, []string{"1"}, ids(got))
 	// The original slice is untouched (sliceBounded returns a sub-slice view or copy,
 	// never reorders/overwrites the backing array).

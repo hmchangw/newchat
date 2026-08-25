@@ -59,7 +59,13 @@ func (r *Repository) bustBucket(ctx context.Context, roomID string, createdAt ti
 // of rows; callers that mutate must copy (the cache already decodes a fresh
 // slice per Get, so the walker's filtering is safe). Comparisons are strict,
 // matching Cassandra's `<`/`>` on the created_at clustering column.
-func sliceBounded(rows []models.Message, before, since *time.Time, limit int) []models.Message {
+//
+// more reports that the bounded range held rows beyond limit. The walker needs
+// it to tell "bucket drained" from "page capped by limit" — the distinction a
+// live fetch carries in its gocql page state, and the one Page.HasNext is built
+// from. Without it a capped cached page reads as drained and the walk terminates
+// with rows still unread.
+func sliceBounded(rows []models.Message, before, since *time.Time, limit int) (out []models.Message, more bool) {
 	start := 0
 	if before != nil {
 		// First index whose created_at < before; earlier rows (created_at >= before) are dropped.
@@ -71,11 +77,11 @@ func sliceBounded(rows []models.Message, before, since *time.Time, limit int) []
 		end = sort.Search(len(rows), func(i int) bool { return !rows[i].CreatedAt.After(*since) })
 	}
 	if start >= end {
-		return []models.Message{}
+		return []models.Message{}, false
 	}
-	out := rows[start:end]
+	out = rows[start:end]
 	if limit >= 0 && len(out) > limit {
-		out = out[:limit]
+		return out[:limit], true
 	}
-	return out
+	return out, false
 }

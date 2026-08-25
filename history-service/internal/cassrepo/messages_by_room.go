@@ -125,12 +125,16 @@ func (r *Repository) fillMessagePage(ctx context.Context, direction walkDirectio
 // queryFns apply in CQL — keep the two in lockstep, or a cache hit and a cache
 // miss would return different rows.
 //
-// It returns a nil resumeState even when it truncates a cached bucket to `limit`
-// rows. In the walker that yields a bucket-boundary NextCursor that skips the
-// bucket's unconsumed rows — safe ONLY because no caller of the two DESC methods
-// resumes via NextCursor: LoadHistory re-anchors by `before`, and the
-// surrounding-message reads use only Page.HasNext. (The cursor-consuming ASC
-// methods are deliberately left uncached.)
+// A bucket served from memory has no gocql page state, so a truncated cached
+// page reports bucketPage.hasMore with a nil resumeState. The walker keeps
+// HasNext truthful from hasMore and anchors the cursor at the bucket rather than
+// inside it, so the returned NextCursor is a bucket anchor, NOT an intra-bucket
+// resume token — replaying it re-reads the bucket from its upper bound. No
+// caller of the two DESC methods does: LoadHistory re-anchors by `before` and
+// the surrounding-message reads consume only Page.HasNext, and
+// fillMessagePageCachedDesc keeps any cursored request on the live fetcher so
+// the invariant is enforced at the method. (The cursor-consuming ASC methods are
+// deliberately left uncached.)
 func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *time.Time, floorBucket int64, live bucketFetcher[models.Message]) bucketFetcher[models.Message] {
 	if r.bucketCache == nil {
 		return live
@@ -170,11 +174,15 @@ func (r *Repository) cachedDescFetcher(roomID string, before time.Time, since *t
 		// Decrypting in place is safe despite sliceBounded returning a view:
 		// `full` is always ours — a fresh per-Get decode on a hit, and on a miss
 		// our own load, which Put has already encoded into the cache by now.
-		rows := sliceBounded(full, upper, lower, limit)
+		rows, more := sliceBounded(full, upper, lower, limit)
 		if err := r.decryptRows(ctx, rows); err != nil {
 			return bucketPage[models.Message]{}, err
 		}
-		return bucketPage[models.Message]{rows: rows}, nil
+		// resumeState stays nil — there is no gocql state for a bucket served
+		// from memory — but `more` still has to reach the walker, or a page
+		// capped at `limit` reads as a drained bucket and the walk terminates
+		// with rows unread. See bucketPage.
+		return bucketPage[models.Message]{rows: rows, hasMore: more}, nil
 	}
 }
 
