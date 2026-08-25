@@ -24,6 +24,7 @@
  * @property {string[]} appIds
  * @property {string[]} channelDmIds
  * @property {ChatlistState} [chatlist]
+ * @property {Record<string, object>} previews
  */
 
 export const CACHE_KEY = 'chat.subscriptionCache.v1'
@@ -46,6 +47,32 @@ function withoutPrivateKey(sub) {
   if (!sub?.room || !('privateKey' in sub.room)) return sub
   const { privateKey, ...room } = sub.room
   return { ...sub, room }
+}
+
+/** Keep each room's sidebar snippet, minus any encrypted placeholder. That
+ *  placeholder records "this client could not decrypt it THEN"; after a reload
+ *  the room key is seeded from `subscription.list` and the message may well
+ *  render, so it must not outlive the session. */
+function persistablePreviews(previews) {
+  const out = {}
+  for (const [roomId, preview] of Object.entries(previews ?? {})) {
+    if (!preview?.messageId || preview.encrypted) continue
+    out[roomId] = preview
+  }
+  return out
+}
+
+/** localStorage is user-editable, so a tampered previews map (or a record
+ *  written before previews were persisted) degrades to "no previews" rather
+ *  than reaching the reducer. */
+function readPreviews(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out = {}
+  for (const [roomId, preview] of Object.entries(value)) {
+    if (!preview || typeof preview !== 'object' || typeof preview.messageId !== 'string') continue
+    out[roomId] = preview
+  }
+  return out
 }
 
 /** The bucket ids live in state as Sets, and `JSON.stringify(new Set(…))`
@@ -86,9 +113,10 @@ function write(record) {
  *   appIds?: Iterable<string>,
  *   channelDmIds?: Iterable<string>,
  *   chatlist?: ChatlistState,
+ *   previews?: Record<string, object>,
  * }} slices
  */
-export function saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist }) {
+export function saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews }) {
   if (!user?.account || !user?.siteId) return
   const record = {
     v: CACHE_VERSION,
@@ -102,6 +130,7 @@ export function saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds
     appIds: toIdArray(appIds),
     channelDmIds: toIdArray(channelDmIds),
     chatlist,
+    previews: persistablePreviews(previews),
   }
   try {
     write(record)
@@ -110,7 +139,14 @@ export function saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds
     // Fall through to the trimmed retry.
   }
   try {
-    write({ ...record, subscriptions: trimToRecent(record.subscriptions, QUOTA_RETRY_LIMIT) })
+    const trimmed = trimToRecent(record.subscriptions, QUOTA_RETRY_LIMIT)
+    // Previews follow the rooms they belong to — keeping the dropped ones would
+    // spend the quota this retry is trying to free.
+    const keptPreviews = {}
+    for (const roomId of Object.keys(trimmed)) {
+      if (record.previews[roomId]) keptPreviews[roomId] = record.previews[roomId]
+    }
+    write({ ...record, subscriptions: trimmed, previews: keptPreviews })
   } catch {
     clearSubscriptionCache()
   }
@@ -150,6 +186,7 @@ export function loadSubscriptionCache(user) {
     appIds: ids(record.appIds),
     channelDmIds: ids(record.channelDmIds),
     chatlist: record.chatlist,
+    previews: readPreviews(record.previews),
   }
 }
 

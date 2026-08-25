@@ -201,6 +201,15 @@ function isOlderPreview(nextCreatedAt, curCreatedAt) {
   return nextT < curT
 }
 
+// Whether the stored preview wins over an incoming wire preview. Two reasons
+// it can: the live path stored an encrypted placeholder for that same message
+// (Fix 3), or the wire preview is strictly older than what's displayed (Fix 7).
+function storedPreviewWins(cur, next) {
+  if (!cur) return false
+  if (cur.encrypted && cur.messageId === next.messageId) return true
+  return isOlderPreview(next.createdAt, cur.createdAt)
+}
+
 /**
  * Apply the server's per-user subscription record onto a summary.
  *
@@ -354,17 +363,21 @@ export function roomEventsReducer(state, action) {
     }
     case 'BUCKETS_LOADED': {
       const subs = action.subscriptions ?? {}
-      // Seed only rooms with no preview yet. A live message can land before
-      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
-      // that message is NEWER than this list snapshot — overwriting it would show
-      // an older message in the sidebar than the room itself displays.
+      // Take the server's preview unless what's stored wins on recency (a live
+      // message that landed before this fetch resolved) or is an encrypted
+      // placeholder for the same message — NOT a fill-if-absent seed: hydration
+      // replays this action with the previous session's cached previewMessage,
+      // so on a re-login every room already has a stale entry to replace.
       // Shared by both paths: a degraded bootstrap still carries real previews
       // for the buckets it did reach.
       let previews = state.previews
       for (const [roomId, sub] of Object.entries(subs)) {
-        if (previews[roomId]) continue
         const preview = previewFromWire(sub?.room?.previewMessage)
         if (!preview) continue
+        const cur = previews[roomId]
+        // samePreview keeps the map reference stable on a no-op resync, which
+        // would otherwise re-render every row in the sidebar.
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
         if (previews === state.previews) previews = { ...state.previews }
         previews[roomId] = preview
       }
@@ -434,6 +447,21 @@ export function roomEventsReducer(state, action) {
         subscriptions: subs,
         previews,
       }
+    }
+    case 'PREVIEWS_HYDRATED': {
+      // The previous session's previews, overlaid on what BUCKETS_LOADED just
+      // seeded from the cached subscriptions. Live messages update previews but
+      // never the subscription's previewMessage, so either side can be the
+      // fresher one — the same take-if-newer rule picks the winner.
+      let previews = state.previews
+      for (const [roomId, preview] of Object.entries(action.previews ?? {})) {
+        if (!preview?.messageId) continue
+        const cur = previews[roomId]
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
+      }
+      return previews === state.previews ? state : { ...state, previews }
     }
     case 'SUBSCRIPTION_UPSERTED': {
       // Upsert a single subscription record (live delta from
@@ -1045,20 +1073,19 @@ export function roomEventsReducer(state, action) {
         // bootstrap still shows the server's plaintext — fully closing that
         // needs a backend change (withholding plaintext for encrypted rooms
         // server-side), not something this guard can fix client-side.
-        if (cur?.encrypted && cur.messageId === next.messageId) return state
         // Fix 7: broadcast-worker processes canonical messages concurrently,
         // so an edit/delete's server-resolved preview can be computed before
         // a genuinely newer message and still arrive after it — reject only
         // a STRICTLY older write; missing/unparseable timestamps are
         // accepted rather than dropped (see isOlderPreview).
         //
-        // Exempt the delete that removed the displayed preview. Its
-        // replacement is the room's PREVIOUS eligible message, so it is
-        // necessarily older than the one just deleted — the guard would
-        // reject every such delete and leave the deleted message on the
-        // sidebar until the next reload. The guard is for previews racing
-        // each other, not for a server statement about this exact preview.
-        if (!supersedesDisplayed && isOlderPreview(next.createdAt, cur?.createdAt)) return state
+        // Both guards are retired when this event deleted the message on
+        // display. Its replacement is the room's PREVIOUS eligible message,
+        // so it is necessarily older than the one just removed — Fix 7 would
+        // reject every such delete, and Fix 3 would pin an encrypted
+        // placeholder for a message that no longer exists. Neither guard is
+        // about a server statement concerning this exact preview.
+        if (!supersedesDisplayed && storedPreviewWins(cur, next)) return state
         return { ...state, previews: { ...state.previews, [roomId]: next } }
       }
       // No preview on the event. For a delete that means nothing eligible is

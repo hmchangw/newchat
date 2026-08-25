@@ -130,6 +130,9 @@ soak:
   randomSeed: 42
   warmup: 30s
   heartbeatInterval: 30s
+  # Must be at least 2 * heartbeatInterval + 5s. For a Mongo fault campaign,
+  # override this lease beyond the planned outage and recovery window; see the
+  # staging campaign overlay in README.md.
   heartbeatStaleAfter: 2m
   terminationGracePeriodSeconds: 60
   maxInFlight: 200

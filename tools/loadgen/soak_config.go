@@ -192,9 +192,20 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	if cfg.HeartbeatInterval <= 0 {
 		return fmt.Errorf("SOAK_HEARTBEAT_INTERVAL must be greater than zero")
 	}
-	if cfg.HeartbeatStaleAfter <= cfg.HeartbeatInterval {
+	minimumHeartbeatStaleAfter, validLeaseDurations := minimumSoakHeartbeatStaleAfter(
+		cfg.HeartbeatInterval,
+		soakHeartbeatAttemptTimeout,
+	)
+	if !validLeaseDurations {
+		return fmt.Errorf("SOAK_HEARTBEAT_INTERVAL is too large to calculate a safe heartbeat lease")
+	}
+	if cfg.HeartbeatStaleAfter < minimumHeartbeatStaleAfter {
 		return fmt.Errorf(
-			"SOAK_HEARTBEAT_STALE_AFTER must be greater than SOAK_HEARTBEAT_INTERVAL",
+			"SOAK_HEARTBEAT_STALE_AFTER must be at least %s for SOAK_HEARTBEAT_INTERVAL=%s "+
+				"(two heartbeat intervals plus the %s attempt timeout)",
+			minimumHeartbeatStaleAfter,
+			cfg.HeartbeatInterval,
+			soakHeartbeatAttemptTimeout,
 		)
 	}
 

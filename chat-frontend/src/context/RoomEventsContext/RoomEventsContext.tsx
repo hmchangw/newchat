@@ -214,8 +214,15 @@ function hydrateFromCache(user: Nats['user']): RoomEventsState {
     subscriptions: cached.subscriptions,
     rooms,
   })
-  if (!cached.chatlist) return seeded as RoomEventsState
-  return roomEventsReducer(seeded, {
+  // Overlay the previews the last session ended on — the cached subscriptions
+  // only carry the previewMessage its bootstrap saw, so a message that arrived
+  // afterwards lives here.
+  const withPreviews = roomEventsReducer(seeded, {
+    type: 'PREVIEWS_HYDRATED',
+    previews: cached.previews,
+  })
+  if (!cached.chatlist) return withPreviews as RoomEventsState
+  return roomEventsReducer(withPreviews, {
     type: 'CHATLIST_LOADED',
     chatlist: cached.chatlist,
   }) as RoomEventsState
@@ -271,22 +278,23 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
     seedKeys,
   )
 
-  // Write-through to the browser cache. Keyed by reference on the five
-  // persisted slices: message traffic churns roomState / summaries /
-  // msgRecvSeq but never these, so this stays quiet during a busy session.
+  // Write-through to the browser cache, keyed by reference on the persisted
+  // slices. `previews` is the one that message traffic churns, and the trailing
+  // debounce is what keeps a busy room from writing per message: the timer
+  // restarts on each change, so a burst costs one write once it settles.
   //
   // The identity check is the teardown guard. `RESET` returns the
   // `initialState` OBJECT, so `=== initialState.subscriptions` is an exact
   // "we've been reset" test — without it, logout (and StrictMode's
   // double-mount) would persist the empty post-RESET state over a good cache.
-  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist } = state
+  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews } = state
   useEffect(() => {
     if (subscriptions === initialState.subscriptions) return undefined
     const timer = setTimeout(() => {
-      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist })
+      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews })
     }, CACHE_WRITE_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist])
+  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews])
 
   const loadHistory = useCallback(
     async (roomId: string) => {
