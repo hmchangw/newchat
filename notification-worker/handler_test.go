@@ -50,13 +50,17 @@ func (s *stubMembers) Invalidate(_ context.Context, roomID string) {
 }
 
 type stubFollowers struct {
-	out map[string]map[string]struct{}
+	out      map[string]map[string]struct{}
+	parentAt map[string]*time.Time
 }
 
 func (s *stubFollowers) Lookup(_ context.Context, parentID string) (ThreadRoomInfo, error) {
 	info := ThreadRoomInfo{Followers: map[string]struct{}{}}
 	if v, ok := s.out[parentID]; ok {
 		info.Followers = v
+	}
+	if at, ok := s.parentAt[parentID]; ok {
+		info.ParentCreatedAt = at
 	}
 	return info, nil
 }
@@ -184,6 +188,49 @@ func newTestHandler(members MemberCache, followers ThreadFollowerLister, presenc
 		Emitter:            emit,
 		LargeRoomThreshold: 500,
 	})
+}
+
+// newTestHandlerWithParent builds a handler whose thread-parent resolution is
+// under test; every other collaborator is the existing inert stub.
+func newTestHandlerWithParent(followers ThreadFollowerLister, parent ParentFetcher) *Handler {
+	return NewHandler(HandlerDeps{
+		Members: &stubMembers{out: map[string][]roomsubcache.Member{
+			"r1": {
+				{ID: "u-alice", Account: "alice", RoomType: model.RoomTypeChannel},
+				{ID: "u-carol", Account: "carol", RoomType: model.RoomTypeChannel},
+			},
+		}},
+		Followers:          followers,
+		Parent:             parent,
+		Presence:           &stubPresence{},
+		Hook:               noopVetoer{},
+		Emitter:            &recordingEmitter{},
+		LargeRoomThreshold: 100,
+	})
+}
+
+// threadReplyEventJSON marshals a tshow=false thread reply — the shape that
+// routes through the thread-only notification path.
+func threadReplyEventJSON(t *testing.T, parentID, sender string) []byte {
+	t.Helper()
+	evt := model.MessageEvent{
+		Event:     model.EventCreated,
+		SiteID:    "site-a",
+		Timestamp: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC).UnixMilli(),
+		Message: model.Message{
+			ID:                    "reply-1",
+			RoomID:                "r1",
+			UserID:                "u-alice",
+			UserAccount:           sender,
+			Content:               "a thread reply",
+			CreatedAt:             time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+			ThreadParentMessageID: parentID,
+			TShow:                 false,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+	return data
 }
 
 func msgEvent(m *model.Message) []byte { //nolint:gocritic // hugeParam: test helper only; pointer avoids copy
@@ -500,9 +547,10 @@ func TestHandle_HookError_FailOpen(t *testing.T) {
 	assert.ElementsMatch(t, []string{"bob"}, emit.accounts(), "hook error must fail-open")
 }
 
-// A parent fetch failure must NAK (return an error) so JetStream redelivers, rather
-// than silently acking and dropping the thread reply's recipients.
-func TestHandle_ThreadOnlyReply_ParentFetchError_NAKs(t *testing.T) {
+// A parent fetch failure must degrade, not NAK: the message still gets acked and
+// followers (already known from thread_rooms) are still notified — losing a
+// notification is bad, but losing it permanently to MaxDeliver is worse.
+func TestHandle_ThreadOnlyReply_ParentFetchError_DoesNotError(t *testing.T) {
 	members := &stubMembers{out: map[string][]roomsubcache.Member{
 		"r1": {
 			{ID: "alice", Account: "alice"},
@@ -530,9 +578,8 @@ func TestHandle_ThreadOnlyReply_ParentFetchError_NAKs(t *testing.T) {
 		Content:               "thread reply",
 	}
 	err := h.HandleMessage(context.Background(), msgEvent(&msg))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fetch thread parent")
-	assert.Empty(t, emit.accounts(), "no notifications emitted when the parent fetch fails")
+	require.NoError(t, err, "an unresolvable parent must not NAK — MaxDeliver would destroy the notification")
+	assert.ElementsMatch(t, []string{"bob"}, emit.accounts(), "known follower still notified when the parent fetch fails")
 }
 
 // The parent createdAt comes authoritatively from history-service (stubParent), not
@@ -1881,4 +1928,35 @@ func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
 	require.Len(t, emit.emitted, 1)
 	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
 	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
+}
+
+// The thread room supplies the parent createdAt, so no history-service fetch runs
+// and restricted members are still gated correctly.
+func TestHandleMessage_ThreadReply_ThreadRoomSuppliesParentCreatedAt(t *testing.T) {
+	parentAt := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+	followers := &stubFollowers{
+		out:      map[string]map[string]struct{}{"parent-1": {"carol": {}}},
+		parentAt: map[string]*time.Time{"parent-1": &parentAt},
+	}
+	// stubParent errs: if the handler consults it, the test fails.
+	parent := stubParent{err: errcode.Internal("cassandra unavailable")}
+
+	h := newTestHandlerWithParent(followers, parent)
+
+	err := h.HandleMessage(context.Background(), threadReplyEventJSON(t, "parent-1", "alice"))
+
+	require.NoError(t, err, "the thread room resolved the parent; the fetch must not be needed")
+}
+
+// No thread room and an unreachable history-service: followers still get notified,
+// mention-only recipients are dropped, and the message is not NAK'd.
+func TestHandleMessage_ThreadReply_UnresolvableParent_DoesNotError(t *testing.T) {
+	followers := &stubFollowers{out: map[string]map[string]struct{}{}}
+	parent := stubParent{err: errcode.Internal("cassandra unavailable")}
+
+	h := newTestHandlerWithParent(followers, parent)
+
+	err := h.HandleMessage(context.Background(), threadReplyEventJSON(t, "parent-1", "alice"))
+
+	require.NoError(t, err, "an unresolvable parent must not NAK — MaxDeliver would destroy the notification")
 }

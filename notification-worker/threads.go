@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -11,10 +12,11 @@ import (
 )
 
 // ThreadRoomInfo is the per-thread metadata read from thread_rooms in one query.
-// The parent's createdAt is no longer read here — it comes authoritatively from
-// history-service (see ParentFetcher), which is race-free on the first reply.
+// ParentCreatedAt is nil when the document is absent or its timestamp is zero —
+// "unknown", never the epoch, so the suppression gate fails closed on missing data.
 type ThreadRoomInfo struct {
-	Followers map[string]struct{}
+	Followers       map[string]struct{}
+	ParentCreatedAt *time.Time
 }
 
 // ThreadFollowerLister reads thread metadata for the thread rooted at parentMessageID.
@@ -35,9 +37,10 @@ func (m *mongoThreadFollowers) Lookup(ctx context.Context, parentMessageID strin
 		return ThreadRoomInfo{Followers: map[string]struct{}{}}, nil
 	}
 	var doc struct {
-		ReplyAccounts []string `bson:"replyAccounts"`
+		ReplyAccounts         []string  `bson:"replyAccounts"`
+		ThreadParentCreatedAt time.Time `bson:"threadParentCreatedAt"`
 	}
-	opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "_id": 0})
+	opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "threadParentCreatedAt": 1, "_id": 0})
 	err := m.col.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}, opts).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -51,5 +54,10 @@ func (m *mongoThreadFollowers) Lookup(ctx context.Context, parentMessageID strin
 			out[a] = struct{}{}
 		}
 	}
-	return ThreadRoomInfo{Followers: out}, nil
+	info := ThreadRoomInfo{Followers: out}
+	if !doc.ThreadParentCreatedAt.IsZero() {
+		at := doc.ThreadParentCreatedAt.UTC()
+		info.ParentCreatedAt = &at
+	}
+	return info, nil
 }

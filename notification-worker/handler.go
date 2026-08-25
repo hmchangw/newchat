@@ -150,18 +150,32 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			return fmt.Errorf("lookup thread room for parent %s: %w", msg.ThreadParentMessageID, ferr)
 		}
 		followers = info.Followers
+		// Resolution order: event fields -> thread room (Mongo) -> history-service. Only
+		// the last one touches Cassandra, so a thread that already has a thread_rooms
+		// document resolves without it during an outage.
 		if msg.ThreadParentMessageCreatedAt != nil && evt.ThreadParentSenderAccount != "" {
 			parentCreatedAt = msg.ThreadParentMessageCreatedAt
 			parentSenderAccount = evt.ThreadParentSenderAccount
 		} else {
-			// The reply sender can always read the parent they replied to; fetch on their behalf.
-			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
-			if perr != nil {
-				return fmt.Errorf("fetch thread parent %s: %w", msg.ThreadParentMessageID, perr)
+			// The thread room already answered — no history-service round trip, so a
+			// Cassandra outage cannot stop notifications for an existing thread.
+			parentCreatedAt = info.ParentCreatedAt
+			if parentCreatedAt == nil {
+				// The reply sender can always read the parent they replied to; fetch on their behalf.
+				parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
+				if perr != nil {
+					// Degrade rather than NAK: followers below are already known, and returning
+					// an error here burns MaxDeliver until the notification is destroyed. A nil
+					// parentCreatedAt makes isRestricted fail closed, so nobody gains visibility.
+					slog.WarnContext(ctx, "thread parent unresolvable; notifying followers only",
+						"error", perr, "parent_message_id", msg.ThreadParentMessageID,
+						"request_id", natsutil.RequestIDFromContext(ctx))
+				} else {
+					pc := parent.CreatedAt
+					parentCreatedAt = &pc
+					parentSenderAccount = parent.SenderAccount
+				}
 			}
-			pc := parent.CreatedAt
-			parentCreatedAt = &pc
-			parentSenderAccount = parent.SenderAccount
 		}
 	}
 

@@ -155,13 +155,15 @@ func TestMongoThreadFollowers_Lookup(t *testing.T) {
 
 	tf := newMongoThreadFollowers(col)
 
-	t.Run("returns replyAccounts for parent", func(t *testing.T) {
+	t.Run("returns replyAccounts and parentCreatedAt for parent", func(t *testing.T) {
 		got, err := tf.Lookup(ctx, "parent-1")
 		require.NoError(t, err)
 		assert.Len(t, got.Followers, 2)
 		assert.Contains(t, got.Followers, "alice")
 		assert.Contains(t, got.Followers, "bob")
 		assert.NotContains(t, got.Followers, "carol")
+		require.NotNil(t, got.ParentCreatedAt, "threadParentCreatedAt round-trips as a non-nil pointer")
+		assert.True(t, parentCreatedAt.Equal(*got.ParentCreatedAt))
 	})
 
 	t.Run("returns replyAccounts for a thread with no parent createdAt column", func(t *testing.T) {
@@ -169,6 +171,7 @@ func TestMongoThreadFollowers_Lookup(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, got.Followers, 1)
 		assert.Contains(t, got.Followers, "carol")
+		assert.Nil(t, got.ParentCreatedAt, "zero threadParentCreatedAt must surface as nil, never the epoch")
 	})
 
 	t.Run("empty parentMessageID returns empty set", func(t *testing.T) {
