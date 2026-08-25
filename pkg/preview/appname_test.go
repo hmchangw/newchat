@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -90,4 +91,68 @@ func TestCachedAppNameLookup_CollapsesConcurrentMisses(t *testing.T) {
 
 func TestCachedAppNameLookup_NilInnerStaysNil(t *testing.T) {
 	assert.Nil(t, CachedAppNameLookup(nil), "no lookup wrapped is still no lookup")
+}
+
+// The outer cache check and sf.Do are separate steps, so a caller can miss the check
+// while a load is in flight and then reach Do after that load completed and released the
+// key — arriving as a NEW leader for an answer already cached. That interleaving sits
+// between two adjacent statements and cannot be driven from outside, so this pins the
+// property the leader itself must hold: entering the load with a warm cache reads nothing.
+func TestLoadAppName_RechecksTheCacheBeforeReading(t *testing.T) {
+	var calls atomic.Int64
+	inner := func(context.Context, string) (string, error) {
+		calls.Add(1)
+		return "Weather Bot", nil
+	}
+	cache := lru.NewLRU[string, string](appNameCacheSize, nil, appNameCacheTTL)
+
+	// The first leader populates the cache, as the real one does.
+	got, err := loadAppName(context.Background(), cache, inner, "bot-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Weather Bot", got)
+
+	// The post-completion leader must serve from that, not read again.
+	got, err = loadAppName(context.Background(), cache, inner, "bot-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Weather Bot", got)
+	assert.Equal(t, int64(1), calls.Load(),
+		"a leader arriving after the load completed must serve the cached answer, not re-read")
+}
+
+// A negative is a cached answer like any other, so the recheck must honour it too —
+// otherwise the misconfigured-bot case the cache exists for still re-reads.
+func TestLoadAppName_RechecksHonourTheCachedNegative(t *testing.T) {
+	var calls atomic.Int64
+	inner := func(context.Context, string) (string, error) {
+		calls.Add(1)
+		return "", nil
+	}
+	cache := lru.NewLRU[string, string](appNameCacheSize, nil, appNameCacheTTL)
+
+	for range 2 {
+		got, err := loadAppName(context.Background(), cache, inner, "bot-nomatch")
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	}
+	assert.Equal(t, int64(1), calls.Load(), "an empty name is an answer the recheck must reuse")
+}
+
+// An error leaves nothing cached, so the next leader must genuinely retry.
+func TestLoadAppName_ErrorLeavesNothingForTheRecheck(t *testing.T) {
+	var calls atomic.Int64
+	failing := errors.New("mongo down")
+	inner := func(context.Context, string) (string, error) {
+		if calls.Add(1) == 1 {
+			return "", failing
+		}
+		return "Recovered Bot", nil
+	}
+	cache := lru.NewLRU[string, string](appNameCacheSize, nil, appNameCacheTTL)
+
+	_, err := loadAppName(context.Background(), cache, inner, "bot-1")
+	require.ErrorIs(t, err, failing)
+
+	got, err := loadAppName(context.Background(), cache, inner, "bot-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Recovered Bot", got, "a failed load must not poison the recheck")
 }

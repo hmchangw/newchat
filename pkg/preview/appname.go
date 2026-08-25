@@ -39,12 +39,7 @@ func CachedAppNameLookup(inner AppNameLookup) AppNameLookup {
 			return name, nil
 		}
 		v, err, _ := sf.Do(botAccount, func() (any, error) {
-			name, err := inner(ctx, botAccount)
-			if err != nil {
-				return "", err
-			}
-			cache.Add(botAccount, name)
-			return name, nil
+			return loadAppName(ctx, cache, inner, botAccount)
 		})
 		if err != nil {
 			return "", err
@@ -52,4 +47,23 @@ func CachedAppNameLookup(inner AppNameLookup) AppNameLookup {
 		name, _ := v.(string)
 		return name, nil
 	}
+}
+
+// loadAppName is the singleflight leader's body, split out so the recheck below is
+// testable without driving an interleaving from outside.
+//
+// It rechecks the cache because the caller's check and its sf.Do are separate steps: a
+// caller can miss the outer check while a load is in flight, then reach Do after that
+// load finished and released the key, which makes it a NEW leader for an answer already
+// cached. Without this it would read again — the redundant read the cache exists to stop.
+func loadAppName(ctx context.Context, cache *lru.LRU[string, string], inner AppNameLookup, botAccount string) (any, error) {
+	if name, ok := cache.Get(botAccount); ok {
+		return name, nil
+	}
+	name, err := inner(ctx, botAccount)
+	if err != nil {
+		return "", err
+	}
+	cache.Add(botAccount, name)
+	return name, nil
 }
