@@ -155,7 +155,7 @@ func run() error {
 
 	mimeFilter := newMediaTypeFilter(cfg.FileUploadMediaTypeWhitelist, cfg.FileUploadMediaTypeBlacklist)
 	handler := NewHandler(store, driveClient, s3Store, cfg.MaxImages, cfg.MaxAttachments, cfg.MaxImageSizeBytes,
-		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
+		cfg.FileUploadMaxFileSize, mimeFilter, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
 		legacyDriveClient)
 
 	gin.SetMode(gin.ReleaseMode)

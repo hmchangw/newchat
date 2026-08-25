@@ -42,10 +42,6 @@ type driveClient interface {
 	GetBaseURLFromRoomOrigin(origin string) string
 }
 
-// previewFunc decodes an image once, returning a base64 preview and the source
-// dimensions; injected for testability. It reads and rewinds r in place.
-type previewFunc func(r io.ReadSeeker, mime string) (string, *model.ImageDimensions, error)
-
 // objectStore streams a stored object by key. Satisfied by *minioObjectStore.
 type objectStore interface {
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
@@ -62,23 +58,22 @@ type Handler struct {
 	maxImageSize   int64
 	maxFileSize    int64
 	mimeFilter     *mediaTypeFilter
-	preview        previewFunc
 	cacheMaxAge    int
 
 	setCookiePartitioned bool
 }
 
 // NewHandler wires the handler dependencies. maxImages/maxImageSize gate the image
-// endpoint; maxAttachments/maxFileSize/mimeFilter/preview gate the file endpoint; s3
+// endpoint; maxAttachments/maxFileSize/mimeFilter gate the file endpoint; s3
 // backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in
 // seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie;
 // legacyDrive serves the /api/v3 download from a separate (legacy) Drive backend.
 func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttachments int, maxImageSize, maxFileSize int64,
-	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
+	mimeFilter *mediaTypeFilter, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
 	return &Handler{
 		store: store, drive: dc, legacyDrive: legacyDrive, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
-		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
+		cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
 	}
 }
 
@@ -285,8 +280,8 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	// The upload is handed to both the preview and Drive as a reader, so the file
-	// is never held in memory whatever its type or size.
+	// The upload is handed to both the header read and Drive as a reader, so the
+	// file is never held in memory whatever its type or size.
 	driveFile, err := fh.Open()
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("open uploaded file: %w", err))
@@ -294,15 +289,13 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 	}
 	defer driveFile.Close()
 
-	// Build the preview + dimensions BEFORE the Drive upload so a preview failure
-	// can't leave an orphaned Drive file. imagePreview rewinds driveFile for us.
-	var preview string
-	var dims *model.ImageDimensions
-	if strings.HasPrefix(mime, "image/") {
-		if preview, dims, err = h.preview(driveFile, mime); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("build image preview: %w", err))
-			return
-		}
+	// Read the dimensions BEFORE the Drive upload so a read failure can't leave an
+	// orphaned Drive file. imageDimensions rewinds driveFile for us and no-ops on
+	// a non-image MIME, so the caller needs no image check of its own.
+	dims, err := imageDimensions(driveFile, mime)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("read image dimensions: %w", err))
+		return
 	}
 
 	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, siteID,
@@ -326,7 +319,7 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 	meta := fileMeta{id: obj.FileID, name: fh.Filename, mime: mime, size: obj.FileSize}
 	url := fileURL(roomID, obj.FileID, h.drive.GetBaseURLFromRoomOrigin(siteID))
 
-	att := buildAttachment(meta, c.PostForm("description"), url, preview, dims)
+	att := buildAttachment(meta, c.PostForm("description"), url, dims)
 	c.JSON(http.StatusOK, gin.H{"success": true, "attachments": []model.Attachment{att}})
 }
 
