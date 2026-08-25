@@ -23,7 +23,7 @@ func (r *fakeRecorder) Error(context.Context) { r.errs++ }
 func TestReadL2_Hit(t *testing.T) {
 	fake := newFakeValkey()
 	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 4}
-	raw, err := json.Marshal(want)
+	raw, err := json.Marshal(cachedMeta{Meta: want, CachedAt: time.Now().UnixMilli()})
 	require.NoError(t, err)
 	fake.data[MetaKey("r1")] = string(raw)
 	rec := &fakeRecorder{}
@@ -31,7 +31,7 @@ func TestReadL2_Hit(t *testing.T) {
 	got, found := readL2(context.Background(), fake, "r1", rec)
 
 	require.True(t, found)
-	assert.Equal(t, want, got)
+	assert.Equal(t, want, got.Meta)
 	assert.Equal(t, 1, rec.hits)
 	assert.Equal(t, 0, rec.misses)
 	assert.Equal(t, 0, rec.errs)
