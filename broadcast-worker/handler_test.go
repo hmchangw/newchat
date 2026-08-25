@@ -4346,3 +4346,67 @@ func TestChannelThreadFanOut_Degrade_RecordsExactlyOneReason(t *testing.T) {
 	assert.Equal(t, map[string]int64{degradeReasonFetchFailed: 1}, degradedByReason(t, reader),
 		"one record, under fetch_failed — never one per condition")
 }
+
+// The headline claim, end to end on the path that needs it most: an edit's canonical
+// event never carries the parent fields (it bypasses the gatekeeper), so before this
+// change every edit cost a history-service round trip. With the parent's createdAt in
+// thread_rooms the whole fan-out — followers and the history-gated mentionees — resolves
+// from Mongo alone. The MockParentFetcher registers no EXPECT, so any call to
+// history-service fails the test.
+func TestHandleThreadUpdated_ChannelRoom_ResolvesParentFromThreadRoom_NoFetch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl) // no EXPECT → FetchParent must NOT be called
+
+	parentAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	joinedAfter := parentAt.Add(time.Hour)
+	msgTime := parentAt.Add(2 * time.Hour)
+	editedAt := msgTime.Add(time.Minute)
+
+	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil)
+	// The thread room answers both questions the fan-out has: who follows the thread,
+	// and when the parent was created.
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
+		Followers:       map[string]struct{}{"erin": {}},
+		ParentCreatedAt: &parentAt,
+	}, nil)
+	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
+		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
+
+	evt := model.MessageEvent{
+		Event:     model.EventUpdated,
+		SiteID:    "site-a",
+		Timestamp: editedAt.UnixMilli(),
+		Message: model.Message{
+			ID:                    "reply-1",
+			RoomID:                "r1",
+			UserAccount:           "alice",
+			Content:               "@bob @carol @dave edited",
+			CreatedAt:             msgTime,
+			EditedAt:              &editedAt,
+			UpdatedAt:             &editedAt,
+			ThreadParentMessageID: "parent-1",
+			TShow:                 false,
+		},
+	}
+	data, _ := json.Marshal(evt)
+
+	h := NewHandler(store, us, pub, keyStore, parentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	got := map[string]bool{}
+	for _, r := range pub.records {
+		got[r.subject] = true
+	}
+	assert.True(t, got[subject.UserRoomEvent("alice")], "sender receives their own echo")
+	assert.True(t, got[subject.UserRoomEvent("erin")], "thread follower receives the edit")
+	assert.True(t, got[subject.UserRoomEvent("bob")], "unrestricted member mentionee receives the edit")
+	assert.False(t, got[subject.UserRoomEvent("carol")],
+		"member who joined after the Mongo-supplied parent createdAt is still excluded")
+	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded")
+}

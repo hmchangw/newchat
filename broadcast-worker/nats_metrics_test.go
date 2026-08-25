@@ -178,6 +178,6 @@ func TestBroadcastMetrics_ThreadViewPublishFailed_NilSafe(t *testing.T) {
 func TestBroadcastMetrics_ThreadFanOutDegraded_NilSafe(t *testing.T) {
 	var m *broadcastMetrics
 	assert.NotPanics(t, func() {
-		m.ThreadFanOutDegraded(context.Background(), "no_thread_room")
+		m.ThreadFanOutDegraded(context.Background(), degradeReasonFetchFailed)
 	}, "a nil metrics receiver must be inert, matching the other recorders")
 }

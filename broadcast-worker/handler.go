@@ -1355,13 +1355,12 @@ func (h *Handler) allowedThreadMentions(ctx context.Context, roomID string, ment
 	return allowed, nil
 }
 
-// degradeReason values for (*broadcastMetrics).ThreadFanOutDegraded. Constants,
-// not inline literals: the reason is a metric label, so its cardinality must stay
-// bounded to the cases this file actually distinguishes.
-const (
-	degradeReasonFetchFailed  = "fetch_failed"
-	degradeReasonNoThreadRoom = "no_thread_room"
-)
+// degradeReasonFetchFailed is the only reason a thread fan-out degrades: a constant,
+// not an inline literal, so the metric label's cardinality stays bounded at the one
+// call site. There is no companion "no thread room" reason — a fan-out reaches the
+// record site only when FetchParent failed, since a successful fetch always yields a
+// parent createdAt.
+const degradeReasonFetchFailed = "fetch_failed"
 
 // channelThreadFanOut builds the deduplicated channel recipient set: the reply sender
 // + the parent's thread followers + history-gated @-mentions, bots excluded.
@@ -1390,15 +1389,10 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	if parentCreatedAt == nil {
 		parentCreatedAt = room.ParentCreatedAt
 	}
-	// degradeReason records at most ONE reason per fan-out. A failed fetch and an
-	// absent thread room coincide in the common outage case, so counting them
-	// independently would double every degrade exactly when the metric is watched.
-	degradeReason := degradeReasonNoThreadRoom
 	if parentCreatedAt == nil {
 		fetched, ferr := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		switch {
 		case ferr != nil:
-			degradeReason = degradeReasonFetchFailed
 			slog.WarnContext(ctx, "thread parent unresolvable; fanning out to followers only",
 				"error", ferr, "parent_message_id", parentMsgID, "room_id", roomID,
 				"request_id", natsutil.RequestIDFromContext(ctx))
@@ -1409,8 +1403,11 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 			}
 		}
 	}
+	// Exactly one degrade record per fan-out, and only ever under this reason: reaching
+	// here means the fetch was attempted and failed, because a successful fetch always
+	// sets parentCreatedAt.
 	if parentCreatedAt == nil {
-		h.metrics.ThreadFanOutDegraded(ctx, degradeReason)
+		h.metrics.ThreadFanOutDegraded(ctx, degradeReasonFetchFailed)
 	}
 
 	// The gate runs even with a nil parentCreatedAt: mentionVisible decides per account,

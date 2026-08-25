@@ -167,9 +167,9 @@ func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event na
 }
 
 // ThreadFanOutDegraded counts thread fan-outs that shipped with a reduced
-// audience because the parent could not be resolved. reason is "no_thread_room"
-// (the thread has no thread_rooms document yet) or "fetch_failed" (history-service
-// could not answer).
+// audience because the parent could not be resolved. reason is always
+// "fetch_failed": neither the event nor the thread_rooms document carried the
+// parent's createdAt and history-service could not answer either.
 func (m *broadcastMetrics) ThreadFanOutDegraded(ctx context.Context, reason string) {
 	if m == nil || m.threadFanOutDegraded == nil {
 		return
