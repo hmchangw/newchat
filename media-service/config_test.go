@@ -105,7 +105,13 @@ func TestConfig_DefaultAvatarEnabled(t *testing.T) {
 	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
 
 	t.Run("default true", func(t *testing.T) {
+		orig, had := os.LookupEnv("DEFAULT_AVATAR_ENABLED")
 		require.NoError(t, os.Unsetenv("DEFAULT_AVATAR_ENABLED"))
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv("DEFAULT_AVATAR_ENABLED", orig)
+			}
+		})
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
 		assert.True(t, cfg.DefaultAvatarEnabled)
