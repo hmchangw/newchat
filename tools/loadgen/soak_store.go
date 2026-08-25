@@ -226,22 +226,32 @@ func (s *mongoSoakStore) GetManifest(
 	return &manifest, nil
 }
 
+// soakHeartbeatUpdate advances the persisted lease without ever moving it
+// backward. An attempt abandoned at its client timeout may still be executing
+// server-side, so it can land after a later retry has already written a newer
+// beat; $set would then regress the timestamp teardown reads while the loop
+// goes on trusting the newer one it saw acknowledged. $max makes the write
+// order irrelevant. MatchedCount still distinguishes an inactive manifest,
+// because the filter is what decides a match, not whether a field moved.
+func soakHeartbeatUpdate(heartbeat time.Time) bson.D {
+	return bson.D{{Key: "$max", Value: bson.D{
+		{Key: "lastHeartbeatAt", Value: heartbeat},
+		{Key: "updatedAt", Value: heartbeat},
+	}}}
+}
+
 func (s *mongoSoakStore) TouchHeartbeat(
 	ctx context.Context,
 	runID string,
 	at time.Time,
 ) error {
-	heartbeat := at.UTC()
 	result, err := s.manifestCollection().UpdateOne(
 		ctx,
 		bson.D{
 			{Key: "_id", Value: runID},
 			{Key: "state", Value: soakManifestRunning},
 		},
-		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "lastHeartbeatAt", Value: heartbeat},
-			{Key: "updatedAt", Value: heartbeat},
-		}}},
+		soakHeartbeatUpdate(at.UTC()),
 	)
 	if err != nil {
 		return fmt.Errorf("touch soak manifest %q heartbeat: %w", runID, err)
