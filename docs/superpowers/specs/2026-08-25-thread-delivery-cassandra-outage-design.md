@@ -120,8 +120,11 @@ already in MESSAGES-CANONICAL when the outage began, and the `message_edited` /
 - Promote `message-gatekeeper`'s `quoteFetchErrIsTerminal` (`handler.go:574`) into
   `pkg/errcode` so the gatekeeper, broadcast-worker and notification-worker classify
   transient-vs-terminal from one definition rather than three copies.
-- A counter for degraded thread fan-outs, labelled by reason (`no_thread_room`,
-  `fetch_failed`). The drop today is already counted as `terminal_reason=max_deliver` by
+- A counter for degraded thread fan-outs, labelled by reason. Only one reason is
+  emittable — `fetch_failed`. An earlier draft also specified `no_thread_room`, but
+  that label is structurally unreachable at the record site (the parent fetch either
+  errors, or succeeds and resolves the timestamp), and §3's gatekeeper refusal stops
+  the no-thread-room case reaching this code for creates at all. The drop today is already counted as `terminal_reason=max_deliver` by
   `pkg/natsmetrics/metrics.go:487-489`, but only under `event_type=created` —
   indistinguishable from any other message.
 

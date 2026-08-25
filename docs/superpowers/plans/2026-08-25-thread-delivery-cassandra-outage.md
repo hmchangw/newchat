@@ -306,7 +306,7 @@ git commit -m "feat(broadcast-worker): read the thread parent's createdAt from t
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `(*broadcastMetrics).ThreadFanOutDegraded(ctx context.Context, reason string)` — called by Task 4. Valid reasons: `"no_thread_room"`, `"fetch_failed"`.
+- Produces: `(*broadcastMetrics).ThreadFanOutDegraded(ctx context.Context, reason string)` — called by Task 4. **As built, the only emittable reason is `"fetch_failed"`**: Task 4's review found `"no_thread_room"` structurally unreachable at the record site and it was removed in fix round 2. Task 4 passes a named constant, not a literal.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -316,7 +316,7 @@ Append to `broadcast-worker/nats_metrics_test.go`:
 func TestBroadcastMetrics_ThreadFanOutDegraded_NilSafe(t *testing.T) {
 	var m *broadcastMetrics
 	assert.NotPanics(t, func() {
-		m.ThreadFanOutDegraded(context.Background(), "no_thread_room")
+		m.ThreadFanOutDegraded(context.Background(), degradeReasonFetchFailed)
 	}, "a nil metrics receiver must be inert, matching the other recorders")
 }
 ```
@@ -332,9 +332,8 @@ Follow the shape of `ThreadViewPublishFailed` (`nats_metrics.go:153-160`). Add t
 
 ```go
 // ThreadFanOutDegraded counts thread fan-outs that shipped with a reduced
-// audience because the parent could not be resolved. reason is "no_thread_room"
-// (the thread has no thread_rooms document yet) or "fetch_failed" (history-service
-// could not answer).
+// audience because the parent could not be resolved. The one emittable reason is
+// "fetch_failed" — history-service could not answer.
 func (m *broadcastMetrics) ThreadFanOutDegraded(ctx context.Context, reason string) {
 	if m == nil || m.threadFanOutDegraded == nil {
 		return
@@ -508,7 +507,6 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	// degradeReason records at most ONE reason per fan-out. A failed fetch and an
 	// absent thread room coincide in the common outage case, so counting them
 	// independently would double every degrade exactly when the metric is watched.
-	degradeReason := "no_thread_room"
 	if parentCreatedAt == nil {
 		fetched, ferr := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		switch {
