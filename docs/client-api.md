@@ -5640,6 +5640,14 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 { "success": true }
 ```
 
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — emitted once for the requester (best-effort, core NATS) so the user's other devices reconcile the botDM without a refetch. Bot accounts receive it on their **encoded** per-user subject (dots→underscores), matching their NATS JWT scope.
+
+- **Unsubscribe** (`subscribed: false` on an existing subscription) → `action: "removed"`. Payload is the dedicated `SubscriptionRemovedEvent` (`subscription` carries only `roomId`, `roomType: "botDM"`, and `u`). No event fires when there was no subscription to remove.
+- **Reactivate** (`subscribed: true` on an existing, previously-unsubscribed subscription) → `action: "added"`, the same event the first-time subscribe path emits, so the FE re-adds the botDM it dropped on the prior `removed`. See the [subscription.update schema](#subscriptionupdate-event); the embedded `Subscription` reflects `isSubscribed: true` / `muted: false`, and `appInfo` carries the bot app's identity.
+- **First-time subscribe** (`subscribed: true`, no existing DM room) → the `action: "added"` event is emitted by room-service as part of botDM room creation, not by this handler.
+
 ##### Error response
 
 | Condition | `code` | `reason` | Notes |
