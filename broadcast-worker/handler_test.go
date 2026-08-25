@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
 
@@ -4198,12 +4199,16 @@ func TestChannelThreadFanOut_UnresolvableParent_FailsClosed(t *testing.T) {
 	us := NewMockUserStore(ctrl)
 	parentFetcher := NewMockParentFetcher(ctrl)
 
+	restrictedSince := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+
 	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
 		Followers: map[string]struct{}{},
 	}, nil)
 	parentFetcher.EXPECT().
 		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
 		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", []string{"bob"}).
+		Return(map[string]*time.Time{"bob": &restrictedSince}, nil)
 
 	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false, subject.RouteGlobal)
 
@@ -4211,7 +4216,8 @@ func TestChannelThreadFanOut_UnresolvableParent_FailsClosed(t *testing.T) {
 		[]string{"bob"}, nil, "")
 
 	require.NoError(t, err, "an unresolvable parent must not error — that drops the message")
-	assert.Equal(t, []string{"alice"}, got, "mentionee bob is dropped: his history window cannot be checked")
+	assert.Equal(t, []string{"alice"}, got,
+		"mentionee bob carries a history window that cannot be checked against an unknown parent, so he fails closed")
 }
 
 // Followers still receive the reply when the parent is unresolvable — only the
@@ -4253,4 +4259,90 @@ func TestChannelThreadFanOut_ThreadRoomStoreError(t *testing.T) {
 	_, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice", nil, nil, "")
 
 	require.Error(t, err)
+}
+
+// An @-mentioned member with no history restriction still receives the reply on
+// the degraded path: mentionVisible admits a nil historySharedSince before it
+// ever looks at the parent time, so the gate must still run with a nil parent
+// rather than being skipped — skipping would drop every mentionee, restricted or
+// not, and also discard the isMember filter.
+func TestChannelThreadFanOut_UnresolvableParent_KeepsUnrestrictedMentionee(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl)
+
+	restrictedSince := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
+		Followers: map[string]struct{}{},
+	}, nil)
+	parentFetcher.EXPECT().
+		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", []string{"bob", "carol", "dave"}).
+		Return(map[string]*time.Time{"bob": nil, "carol": &restrictedSince}, nil)
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false, subject.RouteGlobal)
+
+	got, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice",
+		[]string{"bob", "carol", "dave"}, nil, "")
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, got,
+		"bob is unrestricted so he stays; carol is history-restricted and fails closed; dave is not a member")
+}
+
+// degradedByReason collects the thread fan-out degrade counter as reason -> value,
+// one entry per emitted series, so a caller can assert both the reason and that
+// only a single record was made.
+func degradedByReason(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	byReason := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "broadcast_worker_thread_fanout_degraded_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "the degrade counter must collect as an int64 sum")
+			for _, dp := range sum.DataPoints {
+				reason, found := dp.Attributes.Value("reason")
+				require.True(t, found, "every degrade point carries a reason")
+				byReason[reason.AsString()] += dp.Value
+			}
+		}
+	}
+	return byReason
+}
+
+// A failed fetch and an absent thread room coincide in the common outage case.
+// Exactly one degrade is recorded, under the more specific reason — counting both
+// would double the metric precisely when someone is watching it during an incident.
+func TestChannelThreadFanOut_Degrade_RecordsExactlyOneReason(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metrics := newBroadcastMetrics(mp.Meter("test"))
+
+	// No thread_rooms document AND a failed fetch — both degrade conditions at once.
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{}, nil)
+	parentFetcher.EXPECT().
+		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
+		Return(nil, errcode.Internal("cassandra unavailable"))
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false,
+		subject.RouteGlobal, withBroadcastMetrics(metrics))
+
+	_, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice", nil, nil, "")
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]int64{degradeReasonFetchFailed: 1}, degradedByReason(t, reader),
+		"one record, under fetch_failed — never one per condition")
 }

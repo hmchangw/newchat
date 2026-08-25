@@ -1371,8 +1371,9 @@ const (
 // already reads for followers, then history-service. Only the last touches Cassandra,
 // so a thread that existed before an outage resolves entirely from Mongo.
 //
-// When no step resolves it, the fan-out degrades rather than erroring: followers still
-// receive the reply and the history-gated mentionees are dropped. Returning an error
+// When no step resolves it, the fan-out degrades rather than erroring: followers and
+// unrestricted mentionees still receive the reply, and only mentionees whose history
+// window cannot be checked against the unknown parent are dropped. Returning an error
 // here would NAK the message, and MaxDeliver would then destroy it — a reply nobody
 // receives is strictly worse than one some people receive.
 //
@@ -1412,15 +1413,14 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 		h.metrics.ThreadFanOutDegraded(ctx, degradeReason)
 	}
 
-	// A nil parentCreatedAt makes mentionVisible fail closed for every member with a
-	// history window, so the gate never widens on missing data. Skip the query entirely
-	// when nothing can pass it.
-	var allowed []string
-	if parentCreatedAt != nil {
-		allowed, err = h.allowedThreadMentions(ctx, roomID, mentions, parentCreatedAt)
-		if err != nil {
-			return nil, err
-		}
+	// The gate runs even with a nil parentCreatedAt: mentionVisible decides per account,
+	// admitting an unrestricted mentionee (nil historySharedSince) before it looks at the
+	// parent time and failing closed only for a history-restricted one. Skipping the call
+	// would drop every mentionee, not just the restricted ones, and lose the non-member
+	// filter with them.
+	allowed, err := h.allowedThreadMentions(ctx, roomID, mentions, parentCreatedAt)
+	if err != nil {
+		return nil, err
 	}
 	return threadFanOutAccounts(sender, parentSender, room.Followers, allowed), nil
 }
