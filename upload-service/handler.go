@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -44,8 +43,8 @@ type driveClient interface {
 }
 
 // previewFunc decodes an image once, returning a base64 preview and the source
-// dimensions; injected for testability.
-type previewFunc func(data []byte, mime string) (string, *model.ImageDimensions, error)
+// dimensions; injected for testability. It reads and rewinds r in place.
+type previewFunc func(r io.ReadSeeker, mime string) (string, *model.ImageDimensions, error)
 
 // objectStore streams a stored object by key. Satisfied by *minioObjectStore.
 type objectStore interface {
@@ -286,30 +285,21 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	// Images are buffered once (for preview + dimensions) and the same bytes are
-	// reused for the Drive upload, so the file is read exactly once. Non-image
-	// types are streamed straight to Drive without buffering (a large video must
-	// not be held in memory).
-	var data []byte
-	var driveFile multipart.File
-	if strings.HasPrefix(mime, "image/") {
-		if data, err = readMultipartFile(fh); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("read uploaded file: %w", err))
-			return
-		}
-		driveFile = bytesFile{bytes.NewReader(data)}
-	} else if driveFile, err = fh.Open(); err != nil {
+	// The upload is handed to both the preview and Drive as a reader, so the file
+	// is never held in memory whatever its type or size.
+	driveFile, err := fh.Open()
+	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("open uploaded file: %w", err))
 		return
 	}
 	defer driveFile.Close()
 
 	// Build the preview + dimensions BEFORE the Drive upload so a preview failure
-	// can't leave an orphaned Drive file. data is non-nil only for images.
+	// can't leave an orphaned Drive file. imagePreview rewinds driveFile for us.
 	var preview string
 	var dims *model.ImageDimensions
-	if data != nil {
-		if preview, dims, err = h.preview(data, mime); err != nil {
+	if strings.HasPrefix(mime, "image/") {
+		if preview, dims, err = h.preview(driveFile, mime); err != nil {
 			errhttp.Write(ctx, c, fmt.Errorf("build image preview: %w", err))
 			return
 		}
@@ -495,16 +485,6 @@ func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []up
 	return results, fileHeaders
 }
 
-// readMultipartFile opens, reads, and closes a multipart file header's content.
-func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
-	f, err := fh.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}
-
 // contentDisposition builds an attachment Content-Disposition value. A non-empty
 // name is appended as an RFC 5987 filename* (percent-encoded, space -> %20, not +).
 func contentDisposition(name string) string {
@@ -514,10 +494,3 @@ func contentDisposition(name string) string {
 	encodedName := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 	return fmt.Sprintf("attachment; filename*=UTF-8''%s", encodedName)
 }
-
-// bytesFile adapts a *bytes.Reader (Read/ReadAt/Seek) to multipart.File by adding
-// a no-op Close, so already-buffered image bytes can be handed to Drive without
-// re-reading the upload.
-type bytesFile struct{ *bytes.Reader }
-
-func (bytesFile) Close() error { return nil }

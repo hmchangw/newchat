@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	_ "image/png" // register PNG decoder for image.Decode
+	"io"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
@@ -24,14 +25,25 @@ const previewDim = 32
 const previewMaxPixels = 50_000_000
 
 // imagePreview decodes an image once and returns a 32x32 blurred JPEG preview
-// (base64) plus the source pixel dimensions. Non-image MIME types, undecodable
-// bytes (e.g. heic), and over-large images yield ("", nil, nil).
-func imagePreview(data []byte, mime string) (string, *model.ImageDimensions, error) {
+// (base64) plus the source pixel dimensions. It decodes straight from r rather
+// than from a []byte so a large upload is never held in memory, and always
+// rewinds r before returning so the caller can hand the same reader to the
+// upload. Non-image MIME types, undecodable bytes (e.g. heic), and over-large
+// images yield ("", nil, nil).
+func imagePreview(r io.ReadSeeker, mime string) (_ string, _ *model.ImageDimensions, err error) {
 	if !strings.HasPrefix(strings.ToLower(mime), "image/") {
 		return "", nil, nil
 	}
+	// Every path out of here consumed part of r, and the caller still has to
+	// upload it, so the rewind belongs on the way out rather than at each return.
+	defer func() {
+		if _, rerr := r.Seek(0, io.SeekStart); rerr != nil && err == nil {
+			err = fmt.Errorf("rewind image after preview: %w", rerr)
+		}
+	}()
+
 	// Check dimensions from the header before the full (allocating) decode.
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	cfg, _, err := image.DecodeConfig(r)
 	if err != nil {
 		//nolint:nilerr // an undecodable image yields no preview, not an error
 		return "", nil, nil
@@ -39,7 +51,10 @@ func imagePreview(data []byte, mime string) (string, *model.ImageDimensions, err
 	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > previewMaxPixels {
 		return "", nil, nil
 	}
-	src, _, err := image.Decode(bytes.NewReader(data))
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", nil, fmt.Errorf("rewind image before decode: %w", err)
+	}
+	src, _, err := image.Decode(r)
 	if err != nil {
 		//nolint:nilerr // an undecodable image (e.g. heic) yields no preview, not an error
 		return "", nil, nil
