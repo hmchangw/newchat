@@ -16,7 +16,38 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 )
+
+// fakeBustClient is a minimal valkeyutil.Client that records Del calls, for
+// asserting subauthcache L2 invalidation fires. SetNX/IncrEx panic on use —
+// bust helpers never call them.
+type fakeBustClient struct {
+	dels     []string
+	delCalls int // count of Del *calls*, not keys — asserts round-trip batching
+	delErr   error
+}
+
+func (f *fakeBustClient) Get(context.Context, string) (string, error) { return "", nil }
+func (f *fakeBustClient) Set(context.Context, string, string, time.Duration) error {
+	return nil
+}
+func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
+	f.delCalls++
+	f.dels = append(f.dels, keys...)
+	return f.delErr
+}
+func (f *fakeBustClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (f *fakeBustClient) Close() error { return nil }
+func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
+	panic("fakeBustClient.SetNX not implemented")
+}
+func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
+	panic("fakeBustClient.IncrEx not implemented")
+}
 
 // --- In-memory InboxStore stub ---
 
@@ -123,6 +154,7 @@ type stubInboxStore struct {
 	addThreadUnreadErr    error
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
+	listAccountsErr       error
 	settingsUpdates       []userSettingsUpdate
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
@@ -534,6 +566,21 @@ func (s *stubInboxStore) getVisibilityUpdates() []visibilityUpdate {
 	cp := make([]visibilityUpdate, len(s.visibilityUpdates))
 	copy(cp, s.visibilityUpdates)
 	return cp
+}
+
+func (s *stubInboxStore) ListSubscriptionAccountsByRoom(_ context.Context, roomID string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listAccountsErr != nil {
+		return nil, s.listAccountsErr
+	}
+	var accounts []string
+	for i := range s.subscriptions {
+		if s.subscriptions[i].RoomID == roomID {
+			accounts = append(accounts, s.subscriptions[i].User.Account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *stubInboxStore) getThreadSubs() []model.ThreadSubscription {
@@ -1223,6 +1270,104 @@ func TestHandleEvent_RoomSync_InvalidPayload(t *testing.T) {
 	if len(store.getRooms()) != 0 {
 		t.Error("room should not be upserted with invalid payload")
 	}
+}
+
+// TestHandleEvent_RoleUpdated_BustsSubL2 covers the federated role-change
+// case: this site's local replica of a remote-origin room's subscription had
+// its Roles rewritten, so this site's own subauthcache L2 entry must die too.
+func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := &fakeBustClient{}
+	h := NewHandler(store)
+	h.valkey = fake
+
+	subEvt := model.SubscriptionUpdateEvent{
+		UserID: "u2",
+		Subscription: model.Subscription{
+			ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
+			RoomID: "room-1", SiteID: "site-a", Roles: []model.Role{model.RoleOwner},
+		},
+		Action: "role_updated", Timestamp: 1735689600000,
+	}
+	subEvtData, _ := json.Marshal(subEvt)
+	evt := model.InboxEvent{
+		Type: "role_updated", SiteID: "site-a", DestSiteID: "site-b",
+		Payload: subEvtData, Timestamp: 1735689600000,
+	}
+	evtData, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleEvent(context.Background(), evtData))
+
+	assert.Equal(t, []string{subauthcache.SubKey("room-1", "bob")}, fake.dels)
+}
+
+// TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount covers the
+// federated removal case: this site's local replicas of the removed accounts'
+// subscriptions are deleted, so each one's subauthcache L2 entry must die too
+// — the same security case as room-worker's local removal, mirrored here for
+// federated rooms.
+func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := &fakeBustClient{}
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2"},
+	)
+	store.mu.Unlock()
+
+	memberEvt := model.MemberRemoveEvent{
+		Type: "member-removed", RoomID: "r2", Accounts: []string{"alice", "dave"}, SiteID: "site-a",
+	}
+	payload, _ := json.Marshal(memberEvt)
+	evt := model.InboxEvent{Type: "member_removed", SiteID: "site-a", DestSiteID: "site-b", Payload: payload, Timestamp: time.Now().UnixMilli()}
+	data, _ := json.Marshal(evt)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.ElementsMatch(t, []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")}, fake.dels)
+	assert.Equal(t, 1, fake.delCalls, "must be a single batched Del round trip for all removed accounts")
+}
+
+// TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber
+// covers the critical gap: ApplySubscriptionRestriction is the same store
+// method room-service's roomRestricted calls, and it can bulk-rewrite Roles
+// for every local subscriber of the room (owner set, everyone else demoted),
+// so every one of them — not just OwnerAccount — needs their subauthcache L2
+// entry busted on this (federated-destination) site too.
+func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := &fakeBustClient{}
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "owner1"}, RoomID: "r1"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1"},
+		model.Subscription{ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "unrelated"}, RoomID: "other-room"},
+	)
+	store.mu.Unlock()
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "owner1", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	assert.ElementsMatch(t, []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")}, fake.dels,
+		"every local subscriber of the restricted room must be busted")
+	assert.NotContains(t, fake.dels, subauthcache.SubKey("other-room", "unrelated"),
+		"a subscriber of a different room must not be busted")
+	assert.Equal(t, 1, fake.delCalls, "must be a single batched Del round trip")
 }
 
 func TestHandleEvent_RoleUpdated(t *testing.T) {
@@ -2898,6 +3043,48 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// ApplySubscriptionRestriction can bulk-rewrite Roles for every subscriber —
+// owner set, everyone else demoted — so by the time the bust runs the write has
+// already made every cached authorization decision for this room wrong. Acking
+// on a listing failure leaves those demoted members authorized from L2 for the
+// rest of the TTL. The event is idempotent, so the error must reach JetStream
+// and let the redelivery complete the invalidation.
+func TestHandler_RoomVisibilityChanged_ListingFailureIsRetryable(t *testing.T) {
+	store := &stubInboxStore{listAccountsErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "bob", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+
+	require.Error(t, err, "the event must NAK so the redelivery can finish the bust")
+	assert.NotErrorIs(t, err, errcode.ErrPermanent,
+		"a listing failure is transient — it must retry, not Ack-drop")
+	// The authoritative write still ran; only the invalidation is outstanding.
+	assert.Len(t, store.getVisibilityUpdates(), 1)
 }
 
 func TestHandleEvent_SubscriptionMention(t *testing.T) {

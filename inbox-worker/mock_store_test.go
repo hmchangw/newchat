@@ -154,6 +154,20 @@ func (mr *MockInboxStoreMockRecorder) CreateSubscription(ctx, sub any) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateSubscription", reflect.TypeOf((*MockInboxStore)(nil).CreateSubscription), ctx, sub)
 }
 
+// DeleteRemoteRoomActivity mocks base method.
+func (m *MockInboxStore) DeleteRemoteRoomActivity(ctx context.Context, roomID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteRemoteRoomActivity", ctx, roomID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteRemoteRoomActivity indicates an expected call of DeleteRemoteRoomActivity.
+func (mr *MockInboxStoreMockRecorder) DeleteRemoteRoomActivity(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteRemoteRoomActivity", reflect.TypeOf((*MockInboxStore)(nil).DeleteRemoteRoomActivity), ctx, roomID)
+}
+
 // DeleteSubscriptionsByAccounts mocks base method.
 func (m *MockInboxStore) DeleteSubscriptionsByAccounts(ctx context.Context, roomID string, accounts []string) error {
 	m.ctrl.T.Helper()
@@ -195,6 +209,36 @@ func (m *MockInboxStore) FindUsersByAccounts(ctx context.Context, accounts []str
 func (mr *MockInboxStoreMockRecorder) FindUsersByAccounts(ctx, accounts any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUsersByAccounts", reflect.TypeOf((*MockInboxStore)(nil).FindUsersByAccounts), ctx, accounts)
+}
+
+// HasRoomSubscription mocks base method.
+func (m *MockInboxStore) HasRoomSubscription(ctx context.Context, roomID string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HasRoomSubscription", ctx, roomID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// HasRoomSubscription indicates an expected call of HasRoomSubscription.
+func (mr *MockInboxStoreMockRecorder) HasRoomSubscription(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasRoomSubscription", reflect.TypeOf((*MockInboxStore)(nil).HasRoomSubscription), ctx, roomID)
+}
+
+// ListSubscriptionAccountsByRoom mocks base method.
+func (m *MockInboxStore) ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListSubscriptionAccountsByRoom", ctx, roomID)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListSubscriptionAccountsByRoom indicates an expected call of ListSubscriptionAccountsByRoom.
+func (mr *MockInboxStoreMockRecorder) ListSubscriptionAccountsByRoom(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSubscriptionAccountsByRoom", reflect.TypeOf((*MockInboxStore)(nil).ListSubscriptionAccountsByRoom), ctx, roomID)
 }
 
 // SetSubscriptionMentions mocks base method.
@@ -351,6 +395,20 @@ func (m *MockInboxStore) UpdateUserStatus(ctx context.Context, account, statusTe
 func (mr *MockInboxStoreMockRecorder) UpdateUserStatus(ctx, account, statusText, statusIsShow, statusUpdatedAt any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateUserStatus", reflect.TypeOf((*MockInboxStore)(nil).UpdateUserStatus), ctx, account, statusText, statusIsShow, statusUpdatedAt)
+}
+
+// UpsertRemoteRoomActivity mocks base method.
+func (m *MockInboxStore) UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpsertRemoteRoomActivity", ctx, roomID, siteID, lastMsgAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpsertRemoteRoomActivity indicates an expected call of UpsertRemoteRoomActivity.
+func (mr *MockInboxStoreMockRecorder) UpsertRemoteRoomActivity(ctx, roomID, siteID, lastMsgAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertRemoteRoomActivity", reflect.TypeOf((*MockInboxStore)(nil).UpsertRemoteRoomActivity), ctx, roomID, siteID, lastMsgAt)
 }
 
 // UpsertRoom mocks base method.

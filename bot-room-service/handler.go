@@ -17,8 +17,10 @@ import (
 	"github.com/hmchangw/chat/pkg/outbox"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/timeutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -63,6 +65,10 @@ type handler struct {
 	now        func() time.Time
 	newMsgID   func() string
 	newUUIDv7  func() string
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after a member removal. nil disables invalidation (best-effort).
+	// Set post-construction, mirroring room-worker/room-service/inbox-worker.
+	valkey valkeyutil.Client
 }
 
 func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxPublisher,
@@ -394,8 +400,38 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	}
 
 	removed := []string{}
+	removedAccounts := []string{}
+	// Deferred, not called at the end of the loop: every path out of here from
+	// this point on has already committed subscription deletes, so the cached
+	// positive subauthcache decisions must die on the error paths too. A
+	// federation failure that returned before the bust would leave every account
+	// in the batch still passing authorization for the rest of the L2 TTL. One
+	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
+	// slot — and BustSubs no-ops on an empty set.
+	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
 	for _, userID := range req.UserIDs {
-		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		// The account comes from the delete itself, so the bust below cannot be
+		// skipped by the enrichment lookup failing. It is the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// which is what subauthcache.SubKey is keyed on.
+		// The destination is resolved BEFORE the delete, because the user doc is
+		// the only place it lives: the subscription's own siteId is the ROOM's
+		// site, and its u sub-document carries just _id/account/isBot. Resolving
+		// afterwards means a transient failure loses the federation for good —
+		// the row is already gone, so a retry sees wasThere=false and skips the
+		// remote removal, leaving the member subscribed on their home site.
+		// Failing before the delete costs a retry and strands nothing.
+		u, err := h.store.FindUser(c, userID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			// The user doc is genuinely gone, not unreachable: there is no remote
+			// site to notify, so the local removal proceeds with no federation.
+			u = nil
+		case err != nil:
+			return nil, fmt.Errorf("resolve removal destination for user %s: %w", userID, err)
+		}
+
+		account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
@@ -404,20 +440,11 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 			continue
 		}
 		removed = append(removed, userID)
-
-		u, err := h.store.FindUser(c, userID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// User doc is gone (best-effort federation is fine).
-				continue
-			}
-			// Transient store error — local removal already committed but federation would be lost;
-			// log for an operator and don't fail the outer op (matches sysmsg best-effort semantics).
-			slog.WarnContext(c, "bot-room-service find user for federation failed",
-				"userID", userID, "roomID", roomID, "error", err)
-			continue
+		if account != "" {
+			removedAccounts = append(removedAccounts, account)
 		}
-		if u.SiteID != "" && u.SiteID != h.siteID {
+
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
 			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
 				return nil, err
 			}
