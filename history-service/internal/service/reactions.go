@@ -166,11 +166,7 @@ func toWireParticipant(p *cassandra.Participant) pkgmodel.Participant {
 }
 
 // botAwareDisplayName composes a render-ready name, preferring a bot's app name. The
-// lookup is built only when wired — a method value derefs its receiver where written.
+// cached lookup is built once in New; nil here means no app store was wired.
 func (s *HistoryService) botAwareDisplayName(ctx context.Context, engName, chineseName, account string) string {
-	var lookup preview.AppNameLookup
-	if s.apps != nil {
-		lookup = s.apps.AppNameByAccount
-	}
-	return preview.BotAwareDisplayName(ctx, lookup, engName, chineseName, account)
+	return preview.BotAwareDisplayName(ctx, s.appName, engName, chineseName, account)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/pagefit"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -156,15 +157,19 @@ func WithPageBudget(b pagefit.Budget) Option {
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
-	msgReader          MessageReader
-	msgWriter          MessageWriter
-	subscriptions      SubscriptionRepository
-	rooms              RoomRepository
-	publisher          EventPublisher
-	threadRooms        ThreadRoomRepository
-	threadSubs         ThreadSubscriptionRepository
-	users              UserStore
-	apps               AppStore
+	msgReader     MessageReader
+	msgWriter     MessageWriter
+	subscriptions SubscriptionRepository
+	rooms         RoomRepository
+	publisher     EventPublisher
+	threadRooms   ThreadRoomRepository
+	threadSubs    ThreadSubscriptionRepository
+	users         UserStore
+	apps          AppStore
+	// appName is apps.AppNameByAccount behind a shared TTL cache, built ONCE here: a
+	// per-call wrapper would mint a fresh empty cache each time and never hit (#366).
+	// Nil when no app store is wired — BotAwareDisplayName degrades on a nil lookup.
+	appName            preview.AppNameLookup
 	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
@@ -201,6 +206,10 @@ func New(
 		largeRoomThreshold: cfg.LargeRoomThreshold,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
+	}
+	// A method value derefs its receiver where written, so this is guarded, not eager.
+	if apps != nil {
+		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
 	}
 	for _, opt := range opts {
 		opt(s)
