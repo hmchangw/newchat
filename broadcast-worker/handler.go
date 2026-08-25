@@ -1382,11 +1382,11 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	if err != nil {
 		return nil, err
 	}
-	followers, err := h.store.GetThreadFollowers(ctx, parentMsgID)
+	threadRoom, err := h.store.GetThreadRoom(ctx, parentMsgID)
 	if err != nil {
-		return nil, fmt.Errorf("get thread followers for parent %s: %w", parentMsgID, err)
+		return nil, fmt.Errorf("get thread room for parent %s: %w", parentMsgID, err)
 	}
-	return threadFanOutAccounts(sender, parent.SenderAccount, followers, allowed), nil
+	return threadFanOutAccounts(sender, parent.SenderAccount, threadRoom.Followers, allowed), nil
 }
 
 // usersByAccount indexes a slice of users by their Account for O(1) lookup

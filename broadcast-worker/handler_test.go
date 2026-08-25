@@ -2442,7 +2442,7 @@ func TestHandleThreadCreated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), parentMsgID).Return(ThreadRoomInfo{Followers: followers}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2491,7 +2491,7 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2519,7 +2519,7 @@ func TestHandleThreadCreated_ChannelRoom_NoFollowers_SendsToSenderOnly(t *testin
 }
 
 // Race regression guard: on the first reply thread_rooms may not exist yet, so
-// GetThreadFollowers returns empty and replyAccounts is unavailable. The parent
+// GetThreadRoom returns empty and replyAccounts is unavailable. The parent
 // author (fetched from history-service) must still receive the reply — they are
 // never in replyAccounts on the first reply, so an empty follower set must not drop
 // them.
@@ -2535,7 +2535,7 @@ func TestHandleThreadCreated_ChannelRoom_ParentAuthorFannedOutBeforeThreadRoomEx
 
 	// thread_rooms not created yet → no followers; parent authored by carol.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	parentFetcher := stubParentFetcher{info: &ParentMessageInfo{SenderAccount: "carol", CreatedAt: parentAt}}
 
@@ -2706,7 +2706,7 @@ func TestHandleThreadCreated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "room-1", gomock.Any()).
 		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(testUsers, nil)
 
 	evt := model.MessageEvent{
@@ -2762,7 +2762,7 @@ func TestHandleThreadCreated_ChannelRoom_UsesEventParent_SkipsFetch(t *testing.T
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "room-1", gomock.Any()).
 		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(testUsers, nil)
 
 	evt := model.MessageEvent{
@@ -2812,7 +2812,7 @@ func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t
 	parentAt := msgTime.Add(-time.Hour)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	// createdAt present but no sender account → must fetch (returns the parent author).
 	parentFetcher.EXPECT().
@@ -2864,7 +2864,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: siteID}
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), parentMsgID).Return(ThreadRoomInfo{Followers: followers}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventUpdated,
@@ -2929,7 +2929,7 @@ func TestHandleThreadUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 		Return([]model.User{{ID: "u-bob", Account: "bob", SiteID: "site-a", EngName: "Bob"}}, nil)
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
 		Return(map[string]*time.Time{"bob": nil}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 
 	evt := model.MessageEvent{
 		Event: model.EventUpdated, SiteID: "site-a", Timestamp: editedAt.UnixMilli(),
@@ -2972,7 +2972,7 @@ func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	// dave: absent → non-member → excluded.
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
 		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventUpdated,
@@ -3021,7 +3021,7 @@ func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
 	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", gomock.Any()).
 		Return(map[string]*time.Time{"bob": nil, "carol": &joinedAfter}, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventDeleted,
@@ -3053,7 +3053,7 @@ func TestHandleThreadDeleted_ChannelExcludesRestrictedAndNonMemberMentions(t *te
 	assert.False(t, got[subject.UserRoomEvent("dave")], "non-member mentionee is excluded")
 }
 
-func TestHandleThreadUpdated_ChannelRoom_GetThreadFollowersError(t *testing.T) {
+func TestHandleThreadUpdated_ChannelRoom_GetThreadRoomError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
@@ -3065,7 +3065,7 @@ func TestHandleThreadUpdated_ChannelRoom_GetThreadFollowersError(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(nil, errors.New("db error"))
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{}, errors.New("db error"))
 
 	evt := model.MessageEvent{
 		Event:     model.EventUpdated,
@@ -3160,7 +3160,7 @@ func TestHandleThreadDeleted_ChannelRoom_FansOutToFollowers(t *testing.T) {
 	room := &model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: siteID}
 	followers := map[string]struct{}{"bob": {}, "carol": {}}
 	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), parentMsgID).Return(followers, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), parentMsgID).Return(ThreadRoomInfo{Followers: followers}, nil)
 	// No NewTCount → no badge update.
 
 	evt := model.MessageEvent{
@@ -3215,7 +3215,7 @@ func TestHandleThreadDeleted_ChannelRoom_WithBadgeUpdate(t *testing.T) {
 
 	room := &model.Room{ID: "r1", Type: model.RoomTypeChannel, SiteID: "site-a"}
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(room, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 
 	evt := model.MessageEvent{
 		Event:              model.EventDeleted,
@@ -3546,7 +3546,7 @@ func TestHandleThreadCreated_PublishesThreadViewSubject(t *testing.T) {
 			meta := metaOf(testChannelRoom)
 			meta.CrossSite = tt.crossSite
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(meta, nil)
-			store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+			store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 			h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, tt.mode,
@@ -3565,7 +3565,7 @@ func TestHandleThreadCreated_ThreadViewPayloadMatchesFollowerPayload(t *testing.
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
@@ -3596,7 +3596,7 @@ func TestHandleThreadCreated_ThreadViewSubjectDisabled(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
@@ -3613,7 +3613,7 @@ func TestHandleThreadCreated_EmptyFanOutStillPublishesThreadViewSubject(t *testi
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 
 	data, err := json.Marshal(model.MessageEvent{
@@ -3639,7 +3639,7 @@ func TestHandleThreadUpdated_PublishesThreadViewSubject(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
 		withThreadViewSubject(true))
@@ -3654,7 +3654,7 @@ func TestHandleThreadDeleted_PublishesThreadViewSubject(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
 		withThreadViewSubject(true))
@@ -3673,7 +3673,7 @@ func TestHandleThreadCreated_ThreadViewPublishFailureDoesNotFailHandler(t *testi
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal,
@@ -3773,7 +3773,7 @@ func TestHandleThreadCreated_ThreadViewSubjectIsEncrypted(t *testing.T) {
 	key := testRoomKey(t)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
@@ -3800,7 +3800,7 @@ func TestHandleThreadUpdated_ThreadViewSubjectEncryptsEditedContent(t *testing.T
 	key := testRoomKey(t)
 
 	store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
 
 	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal,
@@ -3828,7 +3828,7 @@ func TestHandleThreadCreated_ThreadViewSubjectSkippedWhenEncryptionFails(t *test
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadFollowers(gomock.Any(), "parent-1").Return(map[string]struct{}{"bob": {}}, nil)
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{"bob": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(nil, errors.New("keystore down"))
 

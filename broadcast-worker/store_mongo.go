@@ -216,25 +216,38 @@ func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, ac
 	return nil
 }
 
-func (m *mongoStore) GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error) {
+func (m *mongoStore) GetThreadRoom(ctx context.Context, parentMessageID string) (ThreadRoomInfo, error) {
 	var doc struct {
-		ReplyAccounts []string `bson:"replyAccounts"`
+		ReplyAccounts         []string  `bson:"replyAccounts"`
+		ThreadParentCreatedAt time.Time `bson:"threadParentCreatedAt"`
 	}
-	opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "_id": 0})
+	opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "threadParentCreatedAt": 1, "_id": 0})
 	err := m.threadRoomCol.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}, opts).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return map[string]struct{}{}, nil
+			return ThreadRoomInfo{Followers: map[string]struct{}{}}, nil
 		}
-		return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
+		return ThreadRoomInfo{}, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
 	}
-	out := make(map[string]struct{}, len(doc.ReplyAccounts))
-	for _, a := range doc.ReplyAccounts {
+	return threadRoomInfoFrom(doc.ReplyAccounts, doc.ThreadParentCreatedAt), nil
+}
+
+// threadRoomInfoFrom builds the projection, mapping a zero parent timestamp to nil.
+// model.ThreadRoom.ThreadParentCreatedAt is a non-pointer time.Time, so an
+// unresolved parent persists as the zero value rather than as absent.
+func threadRoomInfoFrom(replyAccounts []string, parentCreatedAt time.Time) ThreadRoomInfo {
+	out := make(map[string]struct{}, len(replyAccounts))
+	for _, a := range replyAccounts {
 		if a != "" {
 			out[a] = struct{}{}
 		}
 	}
-	return out, nil
+	info := ThreadRoomInfo{Followers: out}
+	if !parentCreatedAt.IsZero() {
+		at := parentCreatedAt.UTC()
+		info.ParentCreatedAt = &at
+	}
+	return info
 }
 
 func (m *mongoStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {

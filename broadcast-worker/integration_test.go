@@ -411,18 +411,21 @@ func TestBroadcastWorker_BulkUpdateRoomLastMessage_EmptyIsNoOp_Integration(t *te
 	require.NoError(t, store.BulkUpdateRoomLastMessage(context.Background(), map[string]roomLastMsgUpdate{}))
 }
 
-func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
+func TestBroadcastWorker_GetThreadRoom_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, false)
+
+	parentCreatedAt := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	// Seed a thread room document with replyAccounts (siteID isolation is handled
 	// at the deployment level — each site has its own MongoDB instance).
 	_, err := db.Collection("thread_rooms").InsertMany(ctx, []interface{}{
 		bson.M{
-			"_id":             "tr-1",
-			"parentMessageId": "parent-1",
-			"replyAccounts":   []string{"bob", "carol", ""},
+			"_id":                   "tr-1",
+			"parentMessageId":       "parent-1",
+			"replyAccounts":         []string{"bob", "carol", ""},
+			"threadParentCreatedAt": parentCreatedAt,
 		},
 		bson.M{
 			"_id":             "tr-3",
@@ -432,23 +435,27 @@ func TestBroadcastWorker_GetThreadFollowers_Integration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	t.Run("returns followers with empty strings filtered", func(t *testing.T) {
-		followers, err := store.GetThreadFollowers(ctx, "parent-1")
+	t.Run("returns followers with empty strings filtered, and parent createdAt", func(t *testing.T) {
+		info, err := store.GetThreadRoom(ctx, "parent-1")
 		require.NoError(t, err)
 		// Empty string is filtered out.
-		assert.Equal(t, map[string]struct{}{"bob": {}, "carol": {}}, followers)
+		assert.Equal(t, map[string]struct{}{"bob": {}, "carol": {}}, info.Followers)
+		require.NotNil(t, info.ParentCreatedAt)
+		assert.WithinDuration(t, parentCreatedAt, *info.ParentCreatedAt, time.Millisecond)
 	})
 
-	t.Run("different parentMessageId returns correct subset", func(t *testing.T) {
-		followers, err := store.GetThreadFollowers(ctx, "parent-2")
+	t.Run("different parentMessageId returns correct subset and zero createdAt as nil", func(t *testing.T) {
+		info, err := store.GetThreadRoom(ctx, "parent-2")
 		require.NoError(t, err)
-		assert.Equal(t, map[string]struct{}{"dave": {}}, followers)
+		assert.Equal(t, map[string]struct{}{"dave": {}}, info.Followers)
+		assert.Nil(t, info.ParentCreatedAt)
 	})
 
-	t.Run("no document returns empty map", func(t *testing.T) {
-		followers, err := store.GetThreadFollowers(ctx, "nonexistent-parent")
+	t.Run("no document returns empty map and nil createdAt", func(t *testing.T) {
+		info, err := store.GetThreadRoom(ctx, "nonexistent-parent")
 		require.NoError(t, err)
-		assert.Empty(t, followers)
+		assert.Empty(t, info.Followers)
+		assert.Nil(t, info.ParentCreatedAt)
 	})
 }
 

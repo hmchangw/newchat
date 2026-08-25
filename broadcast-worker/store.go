@@ -13,12 +13,23 @@ import (
 //go:generate mockgen -destination=mock_keystore_test.go -package=main . RoomKeyProvider
 //go:generate mockgen -destination=mock_parentfetcher_test.go -package=main . ParentFetcher
 
+// ThreadRoomInfo is the thread_rooms projection the channel thread fan-out needs.
+// ParentCreatedAt is nil when the document is absent or carries a zero timestamp —
+// "unknown", never the epoch (see threadRoomInfoFrom).
+type ThreadRoomInfo struct {
+	Followers       map[string]struct{}
+	ParentCreatedAt *time.Time
+}
+
 // Store defines data access operations for the broadcast worker.
 type Store interface {
 	GetRoom(ctx context.Context, roomID string) (*model.Room, error)
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
-	GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error)
+	// GetThreadRoom returns the thread's followers and the parent's createdAt from
+	// one thread_rooms read. A missing document yields an empty Followers map and a
+	// nil ParentCreatedAt, not an error — the thread may simply not exist yet.
+	GetThreadRoom(ctx context.Context, parentMessageID string) (ThreadRoomInfo, error)
 	// UpdateRoomLastMessage advances the room's last-message fields and, when
 	// preview persistence is on, the stored room-list preview alongside them.
 	UpdateRoomLastMessage(ctx context.Context, upd roomLastMessage) error

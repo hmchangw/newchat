@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -25,4 +27,22 @@ func TestSubscriptionMentionsFilter_GuardsAlreadyRead(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("subscriptionMentionsFilter mismatch:\n got=%#v\nwant=%#v", got, want)
 	}
+}
+
+func TestThreadRoomInfo_ZeroParentCreatedAtIsUnknown(t *testing.T) {
+	// A zero threadParentCreatedAt must surface as nil, never as the epoch:
+	// mentionVisible treats a nil parent time as "not visible" (fail closed),
+	// while time.Time{} would compare as older than every historySharedSince
+	// and admit every mentionee.
+	info := threadRoomInfoFrom([]string{"alice", "bob"}, time.Time{})
+	assert.Nil(t, info.ParentCreatedAt)
+	assert.Len(t, info.Followers, 2)
+}
+
+func TestThreadRoomInfo_RealParentCreatedAtIsCarried(t *testing.T) {
+	at := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	info := threadRoomInfoFrom([]string{"alice", ""}, at)
+	require.NotNil(t, info.ParentCreatedAt)
+	assert.Equal(t, at, *info.ParentCreatedAt)
+	assert.Len(t, info.Followers, 1, "empty accounts are skipped")
 }
