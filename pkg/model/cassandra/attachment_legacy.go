@@ -21,11 +21,10 @@ const (
 // present in Cassandra rows written by the old stack. Only the fields that
 // survive conversion to Attachment are declared.
 type legacyAttachment struct {
-	Title             string `json:"title"`
-	Type              string `json:"type"`
-	Description       string `json:"description"`
-	TitleLink         string `json:"title_link"`
-	TitleLinkDownload bool   `json:"title_link_download"`
+	Title       string `json:"title"`
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	TitleLink   string `json:"title_link"`
 
 	ImageURL  string `json:"image_url"`
 	ImageType string `json:"image_type"`
@@ -79,12 +78,16 @@ func normalizeAttachment(raw []byte, a *Attachment) {
 func convertLegacy(l *legacyAttachment, src string) Attachment {
 	p := legacyURLPath(src)
 	att := Attachment{
-		ID:                legacyFileID(p),
-		Title:             l.Title,
-		Type:              l.Type,
-		Description:       l.Description,
-		TitleLink:         legacyDownloadURL(p),
-		TitleLinkDownload: l.TitleLinkDownload,
+		ID:          legacyFileID(p),
+		Title:       l.Title,
+		Type:        l.Type,
+		Description: l.Description,
+		TitleLink:   legacyDownloadURL(p),
+		// Always true: the rewritten URL resolves to upload-service's
+		// HandleDownloadMinioS3File, which only ever answers with
+		// Content-Disposition: attachment. The legacy flag is not carried over —
+		// an absent or false one would break the "always true" client contract.
+		TitleLinkDownload: true,
 		FileType:          strings.ToLower(strings.TrimSpace(l.mediaType())),
 	}
 	if att.Title == "" {

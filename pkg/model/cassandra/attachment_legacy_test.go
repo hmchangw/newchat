@@ -283,3 +283,31 @@ func TestDecodeAttachments_LegacyDegenerate(t *testing.T) {
 		})
 	}
 }
+
+// Every converted URL points at HandleDownloadMinioS3File, which always answers
+// with Content-Disposition: attachment, so titleLinkDownload must hold the
+// "always true" contract in docs/client-api.md regardless of the legacy value.
+func TestDecodeAttachments_LegacyAlwaysDownloadable(t *testing.T) {
+	tests := []struct {
+		name string
+		blob string
+	}{
+		{
+			name: "legacy flag absent",
+			blob: `{"title":"report.pdf","type":"file","title_link":"/file-upload/abc123/report.pdf"}`,
+		},
+		{
+			name: "legacy flag explicitly false",
+			blob: `{"title":"report.pdf","type":"file","title_link":"/file-upload/abc123/report.pdf","title_link_download":false}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, skipped := DecodeAttachments([][]byte{[]byte(tt.blob)})
+			require.Len(t, out, 1)
+			assert.Zero(t, skipped)
+			assert.True(t, out[0].TitleLinkDownload)
+		})
+	}
+}
