@@ -23,6 +23,14 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
+// maxMultipartMemory caps how much of an upload Gin keeps in memory before
+// spilling the part to a temp file. Uploads are streamed on to Drive, so nothing
+// needs to stay resident; peak heap runs roughly 3x this because bytes.Buffer
+// doubles as it grows, and Gin's own 32 MiB default costs ~97 MiB per upload in
+// flight. The trade is disk for RAM: parts over the cap spool to the OS temp
+// dir, so ephemeral storage must fit the concurrent-upload total.
+const maxMultipartMemory = 1 << 20
+
 type config struct {
 	Port    string `env:"PORT"      envDefault:"8080"`
 	DevMode bool   `env:"DEV_MODE"  envDefault:"false"`
@@ -147,11 +155,12 @@ func run() error {
 
 	mimeFilter := newMediaTypeFilter(cfg.FileUploadMediaTypeWhitelist, cfg.FileUploadMediaTypeBlacklist)
 	handler := NewHandler(store, driveClient, s3Store, cfg.MaxImages, cfg.MaxAttachments, cfg.MaxImageSizeBytes,
-		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
+		cfg.FileUploadMaxFileSize, mimeFilter, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
 		legacyDriveClient)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
 	// CORS handles preflight before tracing so OPTIONS noise does not pollute Tempo.
 	r.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	// o11y server-span middleware wraps real requests so downstream slog/handlers

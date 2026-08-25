@@ -897,7 +897,7 @@ fields are present only for the matching MIME family.
 | `imageType` | string | Image only. MIME type. |
 | `imageSize` | number | Image only. Bytes. |
 | `imageDimensions` | [ImageDimensions](#imagedimensions) | Image only. Pixel size. |
-| `imagePreview` | string | Image only. Base64 32×32 blurred JPEG. |
+| `imagePreview` | string | Image only. Base64 32×32 blurred JPEG. **No longer produced** — the upload endpoints stopped generating it. Present only on attachments uploaded before that change, which keep returning it from history, search and delivery. |
 | `audioUrl` / `audioType` / `audioSize` | string / string / number | Audio only. |
 | `videoUrl` / `videoType` / `videoSize` | string / string / number | Video only. |
 

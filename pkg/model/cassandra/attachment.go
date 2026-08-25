@@ -29,7 +29,10 @@ type Attachment struct {
 	ImageType       string           `json:"imageType,omitempty"`
 	ImageSize       int64            `json:"imageSize,omitempty"`
 	ImageDimensions *ImageDimensions `json:"imageDimensions,omitempty"`
-	ImagePreview    string           `json:"imagePreview,omitempty"`
+	// ImagePreview is no longer produced — upload-service stopped generating the
+	// blurred thumbnail. The field stays so messages stored before that change
+	// keep round-tripping their preview through history, search and delivery.
+	ImagePreview string `json:"imagePreview,omitempty"`
 
 	AudioURL  string `json:"audioUrl,omitempty"`
 	AudioType string `json:"audioType,omitempty"`
