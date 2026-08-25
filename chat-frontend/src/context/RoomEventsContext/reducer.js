@@ -210,23 +210,6 @@ function storedPreviewWins(cur, next) {
   return isOlderPreview(next.createdAt, cur.createdAt)
 }
 
-// Same question against a `subscription.list` row, which is the server's
-// read-time resolve rather than one event's view — so plain recency is the
-// wrong test. A delete never rolls `room.lastMsgAt` back, so a stored preview
-// at or before it is inside the window the row already accounts for and the
-// row supersedes it; only a stored preview that POSTDATES the row (a message
-// that arrived live after it was resolved) wins. Recency alone would pin a
-// message deleted while this client was away: the survivor the server returns
-// is older, forever. Falls back to recency when either timestamp is missing.
-function storedBeatsRow(cur, next, rowLastMsgAt) {
-  if (!cur) return false
-  if (cur.encrypted && cur.messageId === next.messageId) return true
-  const curT = Date.parse(cur.createdAt ?? '')
-  const rowT = Date.parse(rowLastMsgAt ?? '')
-  if (Number.isNaN(curT) || Number.isNaN(rowT)) return isOlderPreview(next.createdAt, cur.createdAt)
-  return curT > rowT
-}
-
 /**
  * Apply the server's per-user subscription record onto a summary.
  *
@@ -380,11 +363,11 @@ export function roomEventsReducer(state, action) {
     }
     case 'BUCKETS_LOADED': {
       const subs = action.subscriptions ?? {}
-      // Take the server's preview unless what's stored postdates the row or is
-      // an encrypted placeholder for the same message (see storedBeatsRow) —
-      // NOT a fill-if-absent seed: hydration replays this action with the
-      // previous session's cached previewMessage, so on a re-login every room
-      // already has a stale entry to replace.
+      // Take the server's preview unless what's stored wins on recency (a live
+      // message that landed before this fetch resolved) or is an encrypted
+      // placeholder for the same message — NOT a fill-if-absent seed: hydration
+      // replays this action with the previous session's cached previewMessage,
+      // so on a re-login every room already has a stale entry to replace.
       // Shared by both paths: a degraded bootstrap still carries real previews
       // for the buckets it did reach.
       let previews = state.previews
@@ -394,7 +377,7 @@ export function roomEventsReducer(state, action) {
         const cur = previews[roomId]
         // samePreview keeps the map reference stable on a no-op resync, which
         // would otherwise re-render every row in the sidebar.
-        if (storedBeatsRow(cur, preview, sub?.room?.lastMsgAt) || samePreview(cur, preview)) continue
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
         if (previews === state.previews) previews = { ...state.previews }
         previews[roomId] = preview
       }
@@ -466,18 +449,19 @@ export function roomEventsReducer(state, action) {
       }
     }
     case 'PREVIEWS_HYDRATED': {
-      // The previous session's previews, REPLACING what BUCKETS_LOADED just
-      // seeded from the cached subscriptions. The two live in one cache record
-      // written together, and this map is the later snapshot of the same
-      // client's state — so an absent room means "the delete cleared it", not
-      // "unknown", and the subscription row must not put the message back.
-      // An action with no map at all says nothing and leaves state alone.
-      if (!action.previews) return state
-      const previews = {}
-      for (const [roomId, preview] of Object.entries(action.previews)) {
-        if (preview?.messageId) previews[roomId] = preview
+      // The previous session's previews, overlaid on what BUCKETS_LOADED just
+      // seeded from the cached subscriptions. Live messages update previews but
+      // never the subscription's previewMessage, so either side can be the
+      // fresher one — the same take-if-newer rule picks the winner.
+      let previews = state.previews
+      for (const [roomId, preview] of Object.entries(action.previews ?? {})) {
+        if (!preview?.messageId) continue
+        const cur = previews[roomId]
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
       }
-      return { ...state, previews }
+      return previews === state.previews ? state : { ...state, previews }
     }
     case 'SUBSCRIPTION_UPSERTED': {
       // Upsert a single subscription record (live delta from
@@ -1072,12 +1056,6 @@ export function roomEventsReducer(state, action) {
       const next = previewFromWire(previewMessage)
       if (next) {
         const cur = state.previews[roomId]
-        // The message on display was just deleted, so neither guard below
-        // applies: the server's replacement is the room's earlier survivor
-        // (older by definition) and the placeholder has nothing left to
-        // protect. Without this the sidebar keeps a deleted message.
-        const retired = !!deletedMessageId && cur?.messageId === deletedMessageId
-        if (retired) return { ...state, previews: { ...state.previews, [roomId]: next } }
         // Fix 3: the live path already knows this message can't be decrypted
         // and stored the "[encrypted message]" placeholder. history-service /
         // broadcast-worker relay previewMessage.content unencrypted, so a
