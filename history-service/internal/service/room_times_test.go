@@ -203,7 +203,7 @@ func TestResolveRoomTimesOrError_CancelledContextDoesNotFailOpen(t *testing.T) {
 
 			require.Error(t, err, "a cancelled caller must not be served a degraded success")
 			assert.ErrorIs(t, err, tt.ctxErr)
-			assert.False(t, got.degraded, "no degraded walk for a request nobody is waiting on")
+			assert.True(t, got.createdAt.IsZero(), "no walk bounds for a request nobody is waiting on")
 		})
 	}
 }
@@ -224,7 +224,6 @@ func TestResolveRoomTimesOrError_MongoFailureStillFailsOpen(t *testing.T) {
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err, "an outage must not block the read")
-	assert.True(t, got.degraded)
 	assert.True(t, got.createdAt.IsZero())
 }
 
@@ -271,7 +270,6 @@ func TestResolveRoomTimesOrError_HealthyReadPopulatesTheTier(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, created, got.createdAt)
-	assert.False(t, got.degraded)
 	assert.Equal(t, created, tier.stored["room-1"], "only the immutable time is cacheable")
 }
 
@@ -321,7 +319,6 @@ func TestResolveRoomTimesOrError_DegradedUsesTheCachedCreatedAtAsFloor(t *testin
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err, "an outage must not block the read")
-	assert.True(t, got.degraded)
 	assert.Equal(t, cachedCreated, got.createdAt, "createdAt is immutable, so it is safe as the floor")
 }
 
@@ -340,7 +337,6 @@ func TestResolveRoomTimesOrError_DegradedWithNoCachedEntryIsUnchanged(t *testing
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err)
-	assert.True(t, got.degraded)
 	assert.True(t, got.createdAt.IsZero())
 }
 

@@ -24,8 +24,6 @@ type walkTimes struct {
 	// createdAt bounds the walk's floor. A room's creation time is immutable,
 	// so a cached value is as good as a fresh one at any age.
 	createdAt time.Time
-	// degraded reports that the fail-open path was taken.
-	degraded bool
 }
 
 // resolveRoomTimesOrError calls resolveRoomTimes and translates the result for
@@ -38,11 +36,9 @@ type walkTimes struct {
 // unknown so walkBounds widens it to now. Anything written during the outage
 // sits under that ceiling and is still reached.
 //
-// degraded is what a caller that would otherwise inherit the widest legal walk
-// uses to narrow it instead. Only the batched preview path
-// (roomLastPreviewMessage) acts on it; the explicit per-room readers ignore it
-// and keep the full configured walk, because truncating history a caller asked
-// for by name is worse than a slow read.
+// The walk is never narrowed on this path, only widened: truncating it would
+// make an idle room indistinguishable from an empty one, and both the history
+// readers and previewAfterMutation act on that difference (see walkForPreview).
 func (s *HistoryService) resolveRoomTimesOrError(
 	ctx context.Context,
 	roomID string,
@@ -71,7 +67,7 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	cachedCreated, found := s.roomTimes.Fallback(ctx, roomID)
 	slog.WarnContext(ctx, "room-times unavailable, falling back (fail-open)",
 		"room_id", roomID, "error", err, "l2_floor", found)
-	return walkTimes{createdAt: cachedCreated, degraded: true}, nil
+	return walkTimes{createdAt: cachedCreated}, nil
 }
 
 // clockSkewTolerance bounds how far in the future a client LastMsgAt hint may sit before the

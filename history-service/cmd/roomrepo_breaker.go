@@ -6,6 +6,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
@@ -63,5 +64,42 @@ func (r *breakerRoomRepo) GetRoomTimesByIDs(ctx context.Context, ids []string) (
 func (r *breakerRoomRepo) GetRoomUserCount(ctx context.Context, roomID string) (int, error) {
 	return circuitbreaker.Do1(r.breaker, func() (int, error) {
 		return r.inner.GetRoomUserCount(ctx, roomID)
+	})
+}
+
+// The preview writes are fenced by the same breaker as the reads, for the same
+// reason and with more at stake: every one of them is optional (a warm-back, or
+// the post-mutation repair), so each is code that already tolerates failure and
+// only needs the failure to arrive quickly. Unfenced, a stopped MongoDB turns
+// each into a full server-selection stall on a request whose actual answer —
+// the message page, the mutation ack — was already in hand.
+
+//nolint:gocritic // hugeParam: mirrors service.RoomRepository, whose by-value contract this wraps.
+func (r *breakerRoomRepo) SetPreviewMessage(
+	ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64,
+) error {
+	return r.breaker.Do(func() error {
+		return r.inner.SetPreviewMessage(ctx, roomID, pvw, forMsgID, asOf)
+	})
+}
+
+//nolint:gocritic // hugeParam: mirrors service.RoomRepository, whose by-value contract this wraps.
+func (r *breakerRoomRepo) UpdatePreviewBody(
+	ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64,
+) (bool, error) {
+	return circuitbreaker.Do1(r.breaker, func() (bool, error) {
+		return r.inner.UpdatePreviewBody(ctx, roomID, pvw, forMsgID, asOf)
+	})
+}
+
+func (r *breakerRoomRepo) ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error) {
+	return circuitbreaker.Do1(r.breaker, func() (bool, error) {
+		return r.inner.ClearPreview(ctx, roomID, asOf)
+	})
+}
+
+func (r *breakerRoomRepo) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
+	return r.breaker.Do(func() error {
+		return r.inner.InvalidatePreviewKey(ctx, roomID, msgID, asOf)
 	})
 }

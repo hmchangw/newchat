@@ -354,6 +354,13 @@ inconclusive rather than left to a log line: the ledger is invalidated with
 `loadgen_failure_invalidations_total`, is journaled so a restart recovers it,
 and appears on the **Reconcile lane capacity** dashboard panel.
 
+The same panel surfaces `lease_abort`. That runtime reason means heartbeat
+renewal reached the teardown lease boundary and at least one in-flight lane did
+not drain within half a heartbeat interval. Loadgen abandons those observations
+to preserve the lease fence, so the affected campaign interval is
+**INCONCLUSIVE** even when the remaining operations later recover as
+`unverified` from the WAL.
+
 An outage proves nothing about the message, so an unreachable search-service is
 never a loss claim.
 

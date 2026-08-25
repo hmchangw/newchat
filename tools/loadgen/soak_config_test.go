@@ -165,8 +165,8 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
 		{"zero heartbeat interval", func(c *soakConfig) { c.HeartbeatInterval = 0 }, "SOAK_HEARTBEAT_INTERVAL"},
-		{"stale threshold equals interval", func(c *soakConfig) {
-			c.HeartbeatStaleAfter = c.HeartbeatInterval
+		{"stale threshold cannot cover cadence and attempt timeout", func(c *soakConfig) {
+			c.HeartbeatStaleAfter = 2*c.HeartbeatInterval + soakHeartbeatAttemptTimeout - time.Nanosecond
 		}, "SOAK_HEARTBEAT_STALE_AFTER"},
 		{"negative persist grace", func(c *soakConfig) { c.PersistGrace = -time.Second }, "SOAK_PERSIST_GRACE"},
 		{"negative mutation retries", func(c *soakConfig) { c.MutationRetries = -1 }, "SOAK_MUTATION_RETRIES"},
@@ -211,6 +211,14 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestValidateSoakConfig_AcceptsMinimumHeartbeatLease(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.HeartbeatInterval = 5 * time.Second
+	cfg.HeartbeatStaleAfter = 2*cfg.HeartbeatInterval + soakHeartbeatAttemptTimeout
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
 }
 
 func TestValidateSoakConfig_ContinuousModeDoesNotRequireDuration(t *testing.T) {

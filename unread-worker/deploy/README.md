@@ -2,16 +2,30 @@
 
 Applies the room-level MongoDB state derived from MESSAGES-CANONICAL:
 `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, the sender's subscription
-`lastSeenAt`, and the `hasMention` badge. broadcast-worker performs no MongoDB
-writes; it only fans out.
+`lastSeenAt`, and the `hasMention` badge.
+
+broadcast-worker keeps one MongoDB write of its own — the room-list preview,
+buffered and drained best-effort, never awaited by a handler. It touches only the
+`preview*` fields of the room document, which carry their own `previewAsOf`
+watermark; nothing it writes overlaps what this service owns. It stayed there
+because sealing a preview needs the resolved users, mention participants and
+decoded attachments that the fan-out assembles anyway and this service, whose
+whole contract is that it reads no MongoDB, deliberately does not have.
+
+The one thing the two halves no longer guarantee each other is that
+`previewForMsgId` and `lastMsgId` move together. history-service serves a stored
+preview only while they agree, so a window where they do not costs that room one
+Cassandra walk, which then warms the document back. Both services coalesce with
+`msgbucket.NewerRow`, so they cannot disagree about which message is a room's
+newest at a same-millisecond tie — only about when each has flushed.
 
 ## Deploy order
 
 **Deploy unread-worker BEFORE rolling broadcast-worker to the release that
-removes its writes.** In that order the old broadcast-worker keeps writing until
-the new worker is live, and the overlap is harmless — the writes are idempotent
-and additive. The reverse order leaves a window in which nobody writes to MongoDB
-for messages sent during that window, and every one of the three writes is lost
+removes the room-pointer, lastSeenAt and mention writes.** In that order the old
+broadcast-worker keeps writing until the new worker is live, and the overlap is
+harmless — the writes are idempotent and additive. The reverse order leaves a window in which nobody writes to MongoDB
+for messages sent during that window, and every one of those three writes is lost
 for it, not just mention badges:
 
 - **Mention badges** (`hasMention`) raised in that window are lost — the client

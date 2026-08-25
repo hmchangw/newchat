@@ -261,10 +261,17 @@ const invalidReasonReconcileCapacity = "reconcile_capacity"
 // than merely imprecise.
 const invalidReasonReconcileLagRange = "reconcile_lag_range"
 
+// invalidReasonLeaseAbort marks evidence abandoned when an uncooperative lane
+// could not drain before the heartbeat lease's shutdown margin. The process
+// must exit to preserve the teardown fence, so those in-flight observations
+// cannot be treated as ordinary unverified results.
+const invalidReasonLeaseAbort = "lease_abort"
+
 var failureInvalidationReasonRegistry = map[string]struct{}{
 	"capacity": {}, "wal": {}, "accounting_invariant": {}, "observer_queue": {},
 	invalidReasonReconcileCapacity: {}, invalidReasonReconcileLagRange: {},
-	"observer_malformed": {}, "recipient_recovery": {}, "recipient_observer": {},
+	invalidReasonLeaseAbort: {},
+	"observer_malformed":    {}, "recipient_recovery": {}, "recipient_observer": {},
 	"timeline": {}, "other": {},
 	"sidecar": {},
 }

@@ -263,6 +263,16 @@ past `SOAK_PERSIST_GRACE`. When `SOAK_LEDGER_DIR` is configured, unresolved
 message observations are independently restored from the persistent WAL and
 continue reconciling after restart.
 
+If heartbeat renewal reaches the lease safety boundary, loadgen cancels every
+lane and gives in-flight actions half of `SOAK_HEARTBEAT_INTERVAL` to drain.
+Normal SIGTERM and duration completion still drain without that bound. A lane
+that misses the lease-risk bound is logged by name and count, and the ledger is
+invalidated with `lease_abort`; the affected evidence is **INCONCLUSIVE** and
+the process proceeds to exit rather than letting teardown's lease become stale
+while traffic may still be active. That final invalidation write is also
+bounded; if the WAL itself stalls, loadgen logs that the record may not be
+durable and exits to preserve the lease fence.
+
 Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
 history-service. Cassandra credentials are not used by normal Run A traffic.
 They are required only when teardown is explicitly configured to truncate an
@@ -297,7 +307,7 @@ Run A environment variables:
 | `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |
 | `SOAK_HEARTBEAT_INTERVAL` | `30s` | Mongo lifecycle lease renewal interval while load is active. |
-| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold. |
+| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold; must be at least `2 * SOAK_HEARTBEAT_INTERVAL + 5s`. |
 | `SOAK_SEND_RATE` | `100` | Top-level plus thread sends per second. |
 | `SOAK_READ_RATE` | `700` | Mixed history reads per second. |
 | `SOAK_THREAD_SHARE` | `0.10` | Fraction of sends attempted as thread replies. |

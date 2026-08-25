@@ -29,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/pagefit"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subauthcache"
@@ -181,8 +182,9 @@ func main() {
 	}
 
 	var (
-		cipher       atrest.Cipher
-		vaultWrapper atrest.KeyWrapperCloser
+		cipher        atrest.Cipher
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
 	)
 	if cfg.Atrest.Enabled {
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
@@ -207,12 +209,23 @@ func main() {
 			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 		slog.Info("at-rest DEK L2 configured", "enabled", subValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
+		// Preview DEKs live in their own collection (written by broadcast-worker), so
+		// they need their own cipher over the same wrapper. Sharing one cipher would
+		// also share its DEK cache across two id spaces for no benefit.
+		//
+		// No L2 tier on this one: the L2 above exists so a Cassandra-backed message
+		// read can still open its body while Mongo is down. A stored preview is read
+		// FROM Mongo, so its DEK is never needed on a request the outage did not
+		// already fail — caching it would front a read that cannot happen.
+		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(preview.DEKCollection,
+			options.Collection().SetReadPreference(readpref.Primary()))
+		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
-	roomRepo := mongorepo.NewRoomRepo(db)
+	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch})
 	threadRoomRepo := mongorepo.NewThreadRoomRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
 	userStore := userstore.NewMongoStore(db.Collection("users"))
@@ -298,6 +311,8 @@ func main() {
 		slog.Info("room cache enabled", "size", cfg.RoomCacheSize, "ttl", cfg.RoomCacheTTL)
 	}
 
+	// Fronts rooms.get's lazy fallback only: a room served from a stored preview
+	// never reaches the walk this caches.
 	var opts []service.Option
 	if cfg.PreviewCacheSize > 0 && cfg.PreviewCacheTTL > 0 {
 		pc, err := readcache.NewPreviewCache(cfg.PreviewCacheSize, cfg.PreviewCacheTTL)

@@ -514,7 +514,7 @@ func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string
 // history-service hard-rejects rooms.get above 100 ids AND above 100 hints, so an
 // unchunked 250-room page would come back with no previews at all.
 func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(250, "site-a")
 
 	var mu sync.Mutex
@@ -547,7 +547,7 @@ func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
 
 // Chunking exists to make degradation finer than per-site.
 func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(250, "site-a")
 
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
@@ -640,7 +640,7 @@ func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
 // A room count cannot bound reply bytes: previews carry untruncated message
 // bodies, so a full chunk can overflow the transport. It must be split, not lost.
 func TestEnrichLastMessage_SplitsOnResponseTooLarge(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(100, "site-a")
 
 	var mu sync.Mutex
@@ -674,7 +674,7 @@ func TestEnrichLastMessage_SplitsOnResponseTooLarge(t *testing.T) {
 // Splitting applies only to the payload refusal; other failures must not be
 // retried, or a shedding downstream would see the request multiply.
 func TestEnrichLastMessage_DoesNotSplitOtherErrors(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(100, "site-a")
 
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
@@ -689,7 +689,7 @@ func TestEnrichLastMessage_DoesNotSplitOtherErrors(t *testing.T) {
 
 // A half that still overflows degrades alone rather than taking the page with it.
 func TestEnrichLastMessage_KeepsTheHalfThatFits(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(100, "site-a")
 
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
@@ -729,7 +729,7 @@ func TestFanout_NormalisesNonPositive(t *testing.T) {
 // A zero fan-out would build an unbuffered semaphore and park forever, which
 // fixtures constructing UserService directly can otherwise hit.
 func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
-	_, _, history := newSvcRawHistory(t)
+	_, _, _, history := newSvcRawHistory(t)
 	// maxFanout deliberately left at zero, as the badge/thread fixtures build it.
 	svc := &UserService{siteID: "site-a", history: history, roomBatchChunk: 100}
 	subs, idxBySite := enrichFixture(10, "site-a")
@@ -767,7 +767,7 @@ func TestEnrichLastMessage_TruncatesPreviewContent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			svc, _, history := newSvcRawHistory(t)
+			svc, _, _, history := newSvcRawHistory(t)
 			svc.previewChars = tt.chars
 			subs, idxBySite := enrichFixture(1, "site-a")
 
@@ -806,7 +806,7 @@ func TestTruncatePreviews_DetachesFromTheOriginalBody(t *testing.T) {
 // On a payload-capped transport the page's own reply shares the ceiling history
 // just hit, so splitting spends RPCs on data that can never be delivered.
 func TestEnrichLastMessage_NoSplitOnPayloadCappedTransport(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(100, "site-a")
 
 	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
@@ -821,7 +821,7 @@ func TestEnrichLastMessage_NoSplitOnPayloadCappedTransport(t *testing.T) {
 
 // Unbounded halving is exponential in RPCs; past the depth cap the chunk degrades.
 func TestEnrichLastMessage_BoundsSplitDepth(t *testing.T) {
-	svc, _, history := newSvcRawHistory(t)
+	svc, _, _, history := newSvcRawHistory(t)
 	subs, idxBySite := enrichFixture(100, "site-a")
 
 	var mu sync.Mutex

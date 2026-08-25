@@ -1014,24 +1014,54 @@ document (`previewMessage` always omitted there). All fields are optional
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time; its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, stored server-side. Served from the room document when one is stored; when not, it is resolved from message history and that result is stored, so the room serves it from the document on subsequent reads. Its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no eligible message at all, when that site's enrichment degraded, when read-time resolution degrades for that room (a per-room read failure; the rest of the batch is unaffected), or when the request set `includeLastMessage: false` — best-effort, never fails the list. |
 
 ##### PreviewMessage
 
-A room's most-recent **eligible** message, resolved at read time and enriched for
-room-list rendering. Eligible = not soft-deleted and not a system message (quoted
-replies are normal content and ARE eligible) — an ineligible tail is walked back to
-an earlier survivor; a room with only ineligible messages omits `previewMessage`.
+A room's most-recent **eligible** message, composed and stored when that message is
+delivered, and enriched for room-list rendering. Eligible = not soft-deleted and not a
+system message and not visibility-restricted (quoted replies are normal content and ARE
+eligible) — an ineligible newer message leaves the stored preview in place, so the room
+keeps showing its last real content; a room with only ineligible messages omits
+`previewMessage`. A restricted message is never previewed: one preview is stored per
+room, while visibility is per-user, so the room list has no way to honour the scope.
+
+Editing or deleting a message also updates the stored preview: an edit to the previewed
+message refreshes it, and deleting it moves the preview back to the previous eligible
+message, or removes it when the recompute confirms the room has no eligible message
+left. A recompute that cannot complete does not leave the pre-edit or deleted content in
+place: the event omits `previewMessage`, and the stored preview stops being served, so the
+next read resolves the room's preview from message history instead.
+
+###### Reacting to a preview change
+
+`message_edited` and `message_deleted` both carry the room's preview after the mutation.
+Take `previewMessage` whenever it is present — it is the room's current preview, whichever
+message the mutation touched.
+
+When it is **omitted**, compare the event's `messageId` against the `messageId` of the
+preview being displayed. They differ ⇒ the mutation did not touch the preview, so leave it
+alone. They match ⇒ the displayed preview describes the mutated message and must stop being
+shown; what to do next differs by event:
+
+| Event | `previewMessage` omitted, `messageId` matches | Why |
+|---|---|---|
+| `message_deleted` | Clear the preview | The room has no eligible message left, or the recompute could not confirm one — either way the deleted content must not stay on the row. |
+| `message_edited` | Re-read the room (`rooms.get` / `subscription.list`) | An edit never empties a room, so this is only a recompute that did not complete; the message still exists and the next read resolves it. |
+
+There is no separate "preview cleared" flag: an omitted `previewMessage` plus a matching
+`messageId` is the signal. A client that ignores it keeps rendering the pre-edit or deleted
+content until its next room-list read, even though the server has already stopped serving
+that preview.
 
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | The message body. On `subscription.list` (both transports) it is truncated server-side to a short preview — 50 characters by default, whole characters only, no ellipsis appended. Everywhere else it is the full body. |
+| `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). On `subscription.list` (both transports) it is truncated further to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
 | `createdAt` | string | RFC 3339 timestamp. |
-| `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
-| `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
-| `visibleTo` | string | Optional. Currently empty until its write-path lands (surfaced now for forward-compat). |
+| `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. At most 10 — the room list renders a count, not the set. |
+| `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. At most 20. |
 
 #### AppSubscription
 
@@ -3418,7 +3448,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3514,7 +3544,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3535,7 +3565,7 @@ The payload is flat:
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely. An omission is not "leave the preview as it is" — if the deleted `messageId` matches the preview being displayed, the client must clear it, or the deleted content stays on the room row until the next read. See [Reacting to a preview change](#reacting-to-a-preview-change).
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
 
@@ -5609,6 +5639,14 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 ```json
 { "success": true }
 ```
+
+##### Triggered events — success path
+
+**`chat.user.{account}.event.subscription.update`** — emitted once for the requester (best-effort, core NATS) so the user's other devices reconcile the botDM without a refetch. Bot accounts receive it on their **encoded** per-user subject (dots→underscores), matching their NATS JWT scope.
+
+- **Unsubscribe** (`subscribed: false` on an existing subscription) → `action: "removed"`. Payload is the dedicated `SubscriptionRemovedEvent` (`subscription` carries only `roomId`, `roomType: "botDM"`, and `u`). No event fires when there was no subscription to remove.
+- **Reactivate** (`subscribed: true` on an existing, previously-unsubscribed subscription) → `action: "added"`, the same event the first-time subscribe path emits, so the FE re-adds the botDM it dropped on the prior `removed`. See the [subscription.update schema](#subscriptionupdate-event); the embedded `Subscription` reflects `isSubscribed: true` / `muted: false`, and `appInfo` carries the bot app's identity.
+- **First-time subscribe** (`subscribed: true`, no existing DM room) → the `action: "added"` event is emitted by room-service as part of botDM room creation, not by this handler.
 
 ##### Error response
 

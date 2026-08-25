@@ -16,6 +16,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
@@ -26,6 +27,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -91,7 +93,32 @@ type config struct {
 	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// Atrest/Vault gate room-list preview persistence. Distinct from Encryption
+	// above, which is the client-facing room-key transport: this is at-rest
+	// protection for the preview body this worker writes into the room doc.
+	Atrest atrest.Config      // env vars are already prefixed ATREST_*
+	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Rotation is an ops action — bump and redeploy. Keep it in step with
+	// history-service, which reads what this writes: a reader on another epoch
+	// treats the preview as absent.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
+	// PreviewFlushInterval is how often the buffered room-preview writes drain to
+	// MongoDB. Coalescing collapses a room's whole interval into one document
+	// update, so this is what bounds the write rate, not the message rate. It
+	// also bounds how long a room's stored preview trails its newest message —
+	// keep it short: history-service serves a preview only while its freshness
+	// key matches the room's lastMsgId, which unread-worker advances on its own
+	// (equally short) cadence, and a room whose two halves disagree is served by
+	// the Cassandra walk instead.
+	PreviewFlushInterval time.Duration `env:"PREVIEW_FLUSH_INTERVAL" envDefault:"250ms"`
 }
+
+// previewFinalFlushTimeout bounds the one flush that runs after the consumer has
+// drained, so a buffered batch still lands during shutdown without letting a
+// stalled MongoDB hold the process past its termination grace period.
+const previewFinalFlushTimeout = 5 * time.Second
 
 func main() {
 	logctx.SetupDefault(os.Stdout)
@@ -187,6 +214,62 @@ func main() {
 	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
 		usersPrimary, valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
+
+	var (
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
+	)
+	if cfg.Atrest.Enabled {
+		if cfg.PreviewKeyEpoch < 1 {
+			// The epoch is part of the DEK id, so a non-positive value mints a
+			// sentinel rotation could never move forward from.
+			slog.Error("PREVIEW_KEY_EPOCH must be >= 1", "preview_key_epoch", cfg.PreviewKeyEpoch)
+			os.Exit(1)
+		}
+		// Degrade, don't refuse to start. This worker exists for the canonical fan-out;
+		// the preview is an optional rider on it, and the runtime seal already degrades
+		// on the same dependency failing. Exiting here would stop message delivery for
+		// every room on this site because an optional feature's key store was down --
+		// history-service still serves previews from the lazy walk meanwhile.
+		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
+		if err != nil {
+			slog.Error("Vault key wrapper unavailable; starting with room-preview persistence disabled",
+				"addr", cfg.Vault.Address, "error", err)
+		} else {
+			vaultWrapper = w
+			// The preview DEK lives in its own collection, and is written here on first
+			// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
+			dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(readpref.Primary()))
+			previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+			slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
+		}
+	} else {
+		slog.Info("room-preview persistence disabled (ATREST_ENABLED=false); the room doc must never hold a plaintext body")
+	}
+	// Cached: the lookup sits on the message path and an app's name changes about as
+	// often as the app is renamed, so an uncached read per bot message bought nothing.
+	//
+	// Fenced INSIDE the cache, which is where the read actually happens. It is the last
+	// Mongo read on the fan-out path with no tier of its own, and a stopped Mongo does
+	// not error it — it stalls, for the seal's whole 2s bound, on every cold bot account.
+	// Behind the breaker that becomes an instant error, and the caller already degrades
+	// to the composed display name on one. Errors are deliberately not cached, so the
+	// name resolves again the moment Mongo does.
+	sealer := newPreviewSealer(previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch},
+		preview.CachedAppNameLookup(guardedAppNameLookup(newAppNameRepo(db.Collection("apps")), mongoBreaker)))
+
+	// The buffered writer is the one MongoDB write this service still performs, and it
+	// exists only while the sealer does: with no cipher there is nothing to store, and
+	// the room document must never hold a plaintext body.
+	var previews *previewWriter
+	if cfg.PreviewFlushInterval <= 0 {
+		slog.Error("PREVIEW_FLUSH_INTERVAL must be a positive duration",
+			"preview_flush_interval", cfg.PreviewFlushInterval)
+		os.Exit(1)
+	}
+	if sealer.enabled() {
+		previews = newPreviewWriter(store)
+	}
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
@@ -267,6 +350,19 @@ func main() {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
+	// A background context, not ctx: the flush loop has to outlive the signal that
+	// stops the consumer, so the last buffered batch lands after in-flight handlers
+	// have drained rather than being cancelled alongside them.
+	flushCtx, flushCancel := context.WithCancel(context.Background())
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		previews.Run(flushCtx, cfg.PreviewFlushInterval, previewFinalFlushTimeout)
+	}()
+	if previews != nil {
+		slog.Info("room-preview writer enabled", "flush_interval", cfg.PreviewFlushInterval)
+	}
+
 	var keyProvider RoomKeyProvider = keyStore
 	var keyCache *CachedKeyProvider
 	switch {
@@ -304,7 +400,8 @@ func main() {
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
 	handler := NewHandler(cachedStore, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
 		withBroadcastMetrics(domainMetrics), withOutboxFederation(cfg.SiteID, outboxPublish),
-		withRoomActivityRefresh(activity), withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
+		withRoomActivityRefresh(activity), withThreadViewSubject(cfg.ThreadViewSubjectEnabled),
+		withPreviewSealer(sealer, previews))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -361,10 +458,25 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		// Stop the preview writer AFTER in-flight handlers drain, so anything they
+		// buffered on the way out lands in its final flush — and WAIT for that
+		// flush, since Mongo is disconnected a few hooks below.
+		func(ctx context.Context) error {
+			flushCancel()
+			select {
+			case <-flushDone:
+				return nil
+			case <-ctx.Done():
+				return fmt.Errorf("room-preview final flush timed out: %w", ctx.Err())
+			}
+		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 	}
 	if keyStore != nil {
 		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })
+	}
+	if vaultWrapper != nil {
+		hooks = append(hooks, func(_ context.Context) error { return vaultWrapper.Close() })
 	}
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

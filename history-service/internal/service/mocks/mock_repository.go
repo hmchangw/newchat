@@ -619,6 +619,21 @@ func (m *MockRoomRepository) EXPECT() *MockRoomRepositoryMockRecorder {
 	return m.recorder
 }
 
+// ClearPreview mocks base method.
+func (m *MockRoomRepository) ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearPreview", ctx, roomID, asOf)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ClearPreview indicates an expected call of ClearPreview.
+func (mr *MockRoomRepositoryMockRecorder) ClearPreview(ctx, roomID, asOf any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearPreview", reflect.TypeOf((*MockRoomRepository)(nil).ClearPreview), ctx, roomID, asOf)
+}
+
 // GetMinUserLastSeenAt mocks base method.
 func (m *MockRoomRepository) GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error) {
 	m.ctrl.T.Helper()
@@ -678,6 +693,49 @@ func (m *MockRoomRepository) GetRoomUserCount(ctx context.Context, roomID string
 func (mr *MockRoomRepositoryMockRecorder) GetRoomUserCount(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRoomUserCount", reflect.TypeOf((*MockRoomRepository)(nil).GetRoomUserCount), ctx, roomID)
+}
+
+// InvalidatePreviewKey mocks base method.
+func (m *MockRoomRepository) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InvalidatePreviewKey", ctx, roomID, msgID, asOf)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// InvalidatePreviewKey indicates an expected call of InvalidatePreviewKey.
+func (mr *MockRoomRepositoryMockRecorder) InvalidatePreviewKey(ctx, roomID, msgID, asOf any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InvalidatePreviewKey", reflect.TypeOf((*MockRoomRepository)(nil).InvalidatePreviewKey), ctx, roomID, msgID, asOf)
+}
+
+// SetPreviewMessage mocks base method.
+func (m *MockRoomRepository) SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetPreviewMessage", ctx, roomID, pvw, forMsgID, asOf)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetPreviewMessage indicates an expected call of SetPreviewMessage.
+func (mr *MockRoomRepositoryMockRecorder) SetPreviewMessage(ctx, roomID, pvw, forMsgID, asOf any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPreviewMessage", reflect.TypeOf((*MockRoomRepository)(nil).SetPreviewMessage), ctx, roomID, pvw, forMsgID, asOf)
+}
+
+// UpdatePreviewBody mocks base method.
+func (m *MockRoomRepository) UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdatePreviewBody", ctx, roomID, pvw, forMsgID, asOf)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// UpdatePreviewBody indicates an expected call of UpdatePreviewBody.
+func (mr *MockRoomRepositoryMockRecorder) UpdatePreviewBody(ctx, roomID, pvw, forMsgID, asOf any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdatePreviewBody", reflect.TypeOf((*MockRoomRepository)(nil).UpdatePreviewBody), ctx, roomID, pvw, forMsgID, asOf)
 }
 
 // MockEventPublisher is a mock of EventPublisher interface.

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/msgbucket"
 )
 
 // subKey identifies exactly one subscription document: (roomId, u.account).
@@ -83,7 +84,13 @@ func (b *batch) add(in writeIntents, msg heldMsg) {
 
 	if in.LastMsgID != "" {
 		cur := b.rooms[in.RoomID]
-		if in.LastMsgAt.After(cur.at) {
+		// msgbucket.NewerRow, not LastMsgAt.After: broadcast-worker buffers the
+		// room-list preview against the same stream and must agree with this
+		// service on which message is the room's newest, or the reader's
+		// previewForMsgId == lastMsgId check fails and the preview reads as a
+		// miss. A plain time comparison resolves a same-millisecond pair by
+		// arrival order, which the two services need not observe alike.
+		if msgbucket.NewerRow(in.LastMsgAt, in.LastMsgID, cur.at, cur.msgID) {
 			cur.msgID = in.LastMsgID
 			cur.at = in.LastMsgAt
 		}

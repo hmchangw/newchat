@@ -20,6 +20,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -645,4 +646,97 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 	assert.Equal(t, []string{"carol"}, payload.Accounts, "only the remote-homed mentionee")
 	assert.Equal(t, msgTime.UnixMilli(), payload.MentionedAt)
 	assert.NotZero(t, payload.Timestamp)
+}
+
+// The split's load-bearing claim, against a real MongoDB: this write reaches only the
+// preview half of the room document. lastMsgAt/lastMsgId/lastMentionAllAt belong to
+// unread-worker, which holds its messages un-acked until Mongo takes them; a
+// best-effort write that also touched them could resurrect an older pointer over the
+// one that durable batch had already advanced.
+func TestBroadcastWorker_BulkUpdateRoomPreview_LeavesTheRoomPointerAlone_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
+
+	pointerAt := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	mentionAllAt := pointerAt.Add(-time.Hour)
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+		"_id": "r-pvw", "name": "general", "type": model.RoomTypeChannel, "siteId": "site-a",
+		// As unread-worker left them.
+		"lastMsgId": "m-pointer", "lastMsgAt": pointerAt, "lastMentionAllAt": mentionAllAt,
+	})
+	require.NoError(t, err)
+
+	sealed := &preview.Sealed{
+		Meta:       model.PreviewMeta{MessageID: "m-pointer", Sender: model.Participant{Account: "alice"}},
+		Ciphertext: []byte("ct"), Nonce: []byte("nonce"), KeyEpoch: 1,
+	}
+	require.NoError(t, store.BulkUpdateRoomPreview(ctx, map[string]roomPreviewUpdate{
+		"r-pvw": {msgID: "m-pointer", at: pointerAt, pvw: sealed, pvwAt: pointerAt},
+	}))
+
+	var got struct {
+		LastMsgID        string            `bson:"lastMsgId"`
+		LastMsgAt        time.Time         `bson:"lastMsgAt"`
+		LastMentionAllAt time.Time         `bson:"lastMentionAllAt"`
+		PreviewForMsgID  string            `bson:"previewForMsgId"`
+		PreviewMeta      model.PreviewMeta `bson:"previewMeta"`
+		PreviewAsOf      int64             `bson:"previewAsOf"`
+		PreviewNonce     []byte            `bson:"previewNonce"`
+	}
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-pvw"}).Decode(&got))
+
+	assert.Equal(t, "m-pointer", got.LastMsgID, "the room pointer must be untouched")
+	assert.WithinDuration(t, pointerAt, got.LastMsgAt, time.Millisecond)
+	assert.WithinDuration(t, mentionAllAt, got.LastMentionAllAt, time.Millisecond)
+
+	assert.Equal(t, "m-pointer", got.PreviewForMsgID, "the freshness key must equal lastMsgId, or the reader walks")
+	assert.Equal(t, "alice", got.PreviewMeta.Sender.Account)
+	assert.Equal(t, pointerAt.UnixMilli(), got.PreviewAsOf)
+	assert.Equal(t, []byte("nonce"), got.PreviewNonce)
+}
+
+// A stalled or reordered flush replaying an older batch must lose to the newer preview
+// already stored — that is what previewAsOf is for, and it is the only fence this write
+// has now that it no longer rides the room pointer's write.
+func TestBroadcastWorker_BulkUpdateRoomPreview_OlderWriteCannotOverwriteNewer_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
+
+	newer := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	older := newer.Add(-time.Minute)
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
+		"_id": "r-race", "name": "general", "type": model.RoomTypeChannel, "siteId": "site-a",
+		"lastMsgId": "m-new",
+	})
+	require.NoError(t, err)
+
+	sealedFor := func(id string) *preview.Sealed {
+		return &preview.Sealed{
+			Meta:       model.PreviewMeta{MessageID: id},
+			Ciphertext: []byte(id), Nonce: []byte("n"), KeyEpoch: 1,
+		}
+	}
+	require.NoError(t, store.BulkUpdateRoomPreview(ctx, map[string]roomPreviewUpdate{
+		"r-race": {msgID: "m-new", at: newer, pvw: sealedFor("m-new"), pvwAt: newer},
+	}))
+	require.NoError(t, store.BulkUpdateRoomPreview(ctx, map[string]roomPreviewUpdate{
+		"r-race": {msgID: "m-old", at: older, pvw: sealedFor("m-old"), pvwAt: older},
+	}))
+
+	var got struct {
+		PreviewForMsgID string `bson:"previewForMsgId"`
+		PreviewAsOf     int64  `bson:"previewAsOf"`
+	}
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-race"}).Decode(&got))
+	assert.Equal(t, "m-new", got.PreviewForMsgID, "the older write must be rejected by the watermark")
+	assert.Equal(t, newer.UnixMilli(), got.PreviewAsOf)
+}
+
+func TestBroadcastWorker_BulkUpdateRoomPreview_EmptyIsNoOp_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), db.Collection("users"), nil, 0, 0, nil)
+	require.NoError(t, store.BulkUpdateRoomPreview(context.Background(), nil))
+	require.NoError(t, store.BulkUpdateRoomPreview(context.Background(), map[string]roomPreviewUpdate{}))
 }

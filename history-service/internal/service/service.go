@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/pagefit"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -68,6 +69,31 @@ type RoomRepository interface {
 	GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error)
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	// SetPreviewMessage seals and stores a walk-resolved preview, guarded by asOf
+	// so it fills a room the eager writer never reached but never regresses a
+	// newer write. forMsgID is the freshness key; see previewWalk.NewestObservedID.
+	// Best-effort: the caller logs and carries on.
+	SetPreviewMessage(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) error
+	// UpdatePreviewBody reseals the body after an edit/delete, leaving the
+	// freshness key alone (a mutation does not move lastMsgId) and refusing to
+	// create — an insert is the sole creator. forMsgID is the key the walk
+	// OBSERVED: the write lands only while the stored key still equals it, so an
+	// insert that advanced the key between walk and write makes this a no-op
+	// rather than pairing this older body with the newer key.
+	//
+	// Reports whether the write landed. Losing a guard is not an error, but the
+	// caller must still repair: the body it failed to replace goes on reading as
+	// current, since a mutation never moves lastMsgId (#226).
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw models.PreviewMessage, forMsgID string, asOf int64) (bool, error)
+	// ClearPreview removes the stored preview under the same guard, for a
+	// mutation that leaves the room with no eligible message. Reports whether the
+	// write landed, for the same reason UpdatePreviewBody does.
+	ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error)
+	// InvalidatePreviewKey withdraws the freshness key from a stored preview whose
+	// body describes msgID, so the reader stops serving it and the next read
+	// re-derives it. The repair when neither write above could establish what the
+	// room now holds; a no-op once any newer write has replaced the body.
+	InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error
 }
 
 // EventPublisher publishes events to NATS with a Nats-Msg-Id dedup header.
@@ -104,18 +130,21 @@ type AppStore interface {
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
 }
 
-// PreviewCache fronts the per-room preview resolve on the rooms.get read path.
+// PreviewCache fronts the per-room preview resolve on the rooms.get lazy fallback.
 // Positives are cached; not-found and errors pass through. *readcache.PreviewCache
 // satisfies it.
 type PreviewCache interface {
 	Get(ctx context.Context, roomID string, load func(context.Context) (models.PreviewMessage, bool, error)) (models.PreviewMessage, bool, error)
+	// Invalidate drops a room's entry after a mutation changed what it previews.
+	Invalidate(roomID string)
 }
 
 // Option configures optional HistoryService dependencies.
 type Option func(*HistoryService)
 
-// WithPreviewCache installs a room-preview cache used by RoomsGet. Without it,
-// previews resolve directly (uncached).
+// WithPreviewCache installs a room-preview cache fronting RoomsGet's lazy fallback.
+// Without it, the fallback resolves directly (uncached). Rooms served from a stored
+// preview never reach the cache — they never reach the walk it fronts.
 func WithPreviewCache(pc PreviewCache) Option {
 	return func(s *HistoryService) { s.previewCache = pc }
 }
@@ -128,15 +157,19 @@ func WithPageBudget(b pagefit.Budget) Option {
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
 type HistoryService struct {
-	msgReader          MessageReader
-	msgWriter          MessageWriter
-	subscriptions      SubscriptionRepository
-	rooms              RoomRepository
-	publisher          EventPublisher
-	threadRooms        ThreadRoomRepository
-	threadSubs         ThreadSubscriptionRepository
-	users              UserStore
-	apps               AppStore
+	msgReader     MessageReader
+	msgWriter     MessageWriter
+	subscriptions SubscriptionRepository
+	rooms         RoomRepository
+	publisher     EventPublisher
+	threadRooms   ThreadRoomRepository
+	threadSubs    ThreadSubscriptionRepository
+	users         UserStore
+	apps          AppStore
+	// appName is apps.AppNameByAccount behind a shared TTL cache, built ONCE here: a
+	// per-call wrapper would mint a fresh empty cache each time and never hit (#366).
+	// Nil when no app store is wired — BotAwareDisplayName degrades on a nil lookup.
+	appName            preview.AppNameLookup
 	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
@@ -207,6 +240,10 @@ func New(
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
 		roomTimes:          nopRoomTimesCache{},
+	}
+	// A method value derefs its receiver where written, so this is guarded, not eager.
+	if apps != nil {
+		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
 	}
 	for _, opt := range opts {
 		opt(s)

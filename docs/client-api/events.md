@@ -204,7 +204,8 @@ fields are sent.
 
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
-Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+Open Room (`opened`), Mark Messages Read (`read`), Set App Subscription (`removed` on
+unsubscribe, `added` on reactivate) — see [request-reply.md](request-reply.md).
 
 ---
 
@@ -617,7 +618,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -668,7 +669,7 @@ Thread-reply deletes **additionally** emit a
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -689,7 +690,7 @@ Thread-reply deletes **additionally** emit a
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted**.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted**. An omission is not "leave the preview as it is" — if the deleted `messageId` matches the preview being displayed, the client must clear it. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change).
 
 ---
 

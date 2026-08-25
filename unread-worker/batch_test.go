@@ -48,6 +48,38 @@ func TestBatch_CoalescesRoomPointerToLatestMessage(t *testing.T) {
 	assert.Len(t, b.held, 2, "every consumed message must be held for settlement")
 }
 
+// Two messages at the same millisecond: created_at cannot order them, so the id has
+// to. broadcast-worker coalesces the same pair with the same comparator for the room's
+// preview, and history-service serves a stored preview only while previewForMsgId
+// equals lastMsgId — so a tie broken by arrival order here would leave the two services
+// naming different messages and silently send that room to the Cassandra walk.
+func TestBatch_SameMillisecondTieBreaksOnTheMessageID(t *testing.T) {
+	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+
+	for _, order := range [][2]string{{"m-1", "m-2"}, {"m-2", "m-1"}} {
+		t.Run(order[0]+" then "+order[1], func(t *testing.T) {
+			b := newBatch(nil)
+			for _, id := range order {
+				b.add(writeIntents{RoomID: "r1", LastMsgID: id, LastMsgAt: at}, held(&fakeMsg{}))
+			}
+			assert.Equal(t, "m-2", b.rooms["r1"].msgID, "the higher id wins regardless of arrival order")
+		})
+	}
+}
+
+// Sub-millisecond precision is Go's, not Cassandra's: created_at stores milliseconds,
+// so two messages inside one are a single clustering position and the id still decides.
+func TestBatch_SubMillisecondDifferenceDoesNotOrderTwoMessages(t *testing.T) {
+	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+
+	b := newBatch(nil)
+	b.add(writeIntents{RoomID: "r1", LastMsgID: "m-2", LastMsgAt: at}, held(&fakeMsg{}))
+	b.add(writeIntents{RoomID: "r1", LastMsgID: "m-1", LastMsgAt: at.Add(400 * time.Microsecond)}, held(&fakeMsg{}))
+
+	assert.Equal(t, "m-2", b.rooms["r1"].msgID,
+		"400µs is one Cassandra timestamp, so the lower id must not win on it")
+}
+
 func TestBatch_LastMentionAllAtSticksAcrossLaterPlainMessages(t *testing.T) {
 	t1 := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Second)

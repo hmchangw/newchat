@@ -93,6 +93,10 @@ type Handler struct {
 	publish PublishFunc
 	// activity announces a room's position to remote sites; nil disables it.
 	activity *roomActivityRefresher
+	// sealer seals the room-doc preview; nil means previews are not persisted.
+	sealer *previewSealer
+	// previews buffers sealed previews for the room doc; nil disables the write.
+	previews *previewWriter
 }
 
 type handlerOption func(*handlerOptions)
@@ -103,6 +107,8 @@ type handlerOptions struct {
 	siteID            string
 	publish           PublishFunc
 	activity          *roomActivityRefresher
+	sealer            *previewSealer
+	previews          *previewWriter
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
@@ -124,6 +130,13 @@ func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
 // withRoomActivityRefresh enables the cross-site room-position announce.
 func withRoomActivityRefresh(r *roomActivityRefresher) handlerOption {
 	return func(opts *handlerOptions) { opts.activity = r }
+}
+
+// withPreviewSealer supplies the room-preview sealer and the buffered writer that
+// stores what it seals; absent (or nil) disables preview persistence, which is what
+// ATREST_ENABLED=false yields.
+func withPreviewSealer(sealer *previewSealer, w *previewWriter) handlerOption {
+	return func(opts *handlerOptions) { opts.sealer, opts.previews = sealer, w }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -148,6 +161,8 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		siteID:            opts.siteID,
 		publish:           opts.publish,
 		activity:          opts.activity,
+		sealer:            opts.sealer,
+		previews:          opts.previews,
 	}
 }
 
@@ -243,6 +258,22 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
+	// The room's own pointer (lastMsgAt/lastMsgId/lastMentionAllAt), the sender's
+	// lastSeenAt and the mention badges are unread-worker's and are off this path
+	// entirely. The preview stays here because sealing one needs the users, mention
+	// participants and attachments the fan-out below has already resolved — see
+	// previewWriter for why the two halves of the room document can be written apart.
+	//
+	// Buffered, never awaited, and it cannot fail the handler: the message is going
+	// out to the room whatever the room list ends up showing.
+	sealed, sealFailed := h.previewForInserted(ctx, &msg, userByAccount, resolved.Participants)
+	h.previews.buffer(roomPreview{
+		RoomID:        msg.RoomID,
+		MsgID:         msg.ID,
+		At:            msg.CreatedAt,
+		Preview:       sealed,
+		PreviewFailed: sealFailed,
+	})
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)

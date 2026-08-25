@@ -22,7 +22,7 @@ import (
 // newSvcRawHistory builds a service exposing the history mock WITHOUT newSvc's
 // permissive RoomsGet default, so last-message enrichment tests can set an exact
 // RoomsGet expectation (result or error).
-func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockHistoryClient) {
+func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -34,7 +34,7 @@ func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionReposi
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, BadgeCountCap: 10, RoomBatchChunk: 100, MaxSiteFanout: 8}
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, nil, nil, nil, cfg), subs, history
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, nil, nil, nil, cfg), subs, rooms, history
 }
 
 func TestListSubscriptions_Types(t *testing.T) {
@@ -1079,7 +1079,7 @@ func TestCount_UnreadFalse(t *testing.T) {
 }
 
 func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1102,7 +1102,7 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 // its own room-times read; a room with no resolved LastMsgAt contributes no
 // hint entry.
 func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	lastMsgAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	storeSubs := []model.EnrichedSubscription{
 		{
@@ -1133,7 +1133,7 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
 func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
-	svc, subs, _ := newSvcRawHistory(t)
+	svc, subs, _, _ := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1151,7 +1151,7 @@ func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
 }
 
 func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1346,4 +1346,82 @@ func TestListSubscriptionsFor_LiveContextSucceeds(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Len(t, resp.Subscriptions, 1)
+}
+
+// The last-message fan-out must not spend batch budget on subs with no Room: the
+// fan-in discards any preview the reply carries for them, so their ids only crowd
+// the 100-id cap. A site left with none emits no chunk, which is what skips its RPC.
+func TestRequestableBySite_SkipsRoomlessSubs(t *testing.T) {
+	withRoom := func(id, site string) model.EnrichedSubscription {
+		return model.EnrichedSubscription{Subscription: model.Subscription{RoomID: id, SiteID: site, Room: &model.SubscriptionRoom{}}}
+	}
+	roomless := func(id, site string) model.EnrichedSubscription {
+		return model.EnrichedSubscription{Subscription: model.Subscription{RoomID: id, SiteID: site}}
+	}
+
+	tests := []struct {
+		name string
+		subs []model.EnrichedSubscription
+		size int
+		want [][]string // roomIDs per emitted chunk
+	}{
+		{
+			name: "roomless subs are dropped from the batch",
+			subs: []model.EnrichedSubscription{withRoom("r1", "site-a"), roomless("r2", "site-a"), withRoom("r3", "site-a")},
+			size: 100,
+			want: [][]string{{"r1", "r3"}},
+		},
+		{
+			name: "a site with only roomless subs emits no chunk at all",
+			subs: []model.EnrichedSubscription{roomless("r1", "site-a"), roomless("r2", "site-a")},
+			size: 100,
+			want: nil,
+		},
+		// Chunk boundaries must fall on requestable rooms, not raw rows: counting the
+		// dropped id would split a batch that fits into two RPCs.
+		{
+			name: "chunking counts only requestable rooms",
+			subs: []model.EnrichedSubscription{withRoom("r1", "site-a"), roomless("r2", "site-a"), withRoom("r3", "site-a")},
+			size: 2,
+			want: [][]string{{"r1", "r3"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			idxBySite := map[string][]int{}
+			for i := range tc.subs {
+				idxBySite[tc.subs[i].SiteID] = append(idxBySite[tc.subs[i].SiteID], i)
+			}
+			jobs := planChunks(tc.subs, []string{"site-a"}, requestableBySite(tc.subs, idxBySite), tc.size)
+			got := make([][]string, 0, len(jobs))
+			for _, j := range jobs {
+				got = append(got, j.roomIDs)
+			}
+			if tc.want == nil {
+				assert.Empty(t, got, "no requestable room must mean no chunk, hence no RPC")
+				return
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// End-to-end counterpart: a site whose subs all lack a Room issues no rooms.get at
+// all. buildLocalRoom always returns a room for a LOCAL sub, so an unresolved
+// CROSS-SITE room is how a sub ends up room-less.
+func TestListSubscriptions_LastMessage_AllRoomless_SkipsRPC(t *testing.T) {
+	svc, subs, rooms, _ := newSvcRawHistory(t)
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-b", Name: "gone-room", RoomType: model.RoomTypeChannel},
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
+		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
+	// No history.RoomsGet EXPECT — the mock ctrl fails if it is called.
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	assert.Nil(t, resp.Subscriptions[0].Base().Room)
 }

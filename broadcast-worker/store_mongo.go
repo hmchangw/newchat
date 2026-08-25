@@ -13,15 +13,14 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// EnsureIndexes creates indexes that back the store's read paths.
-// Must be called once at startup; index creation is idempotent when the key
-// spec matches.
+// EnsureIndexes creates the store's read-path indexes; idempotent, call once at startup.
 func (m *mongoStore) EnsureIndexes(ctx context.Context) error {
 	if _, err := m.threadRoomCol.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "parentMessageId", Value: 1}, {Key: "siteId", Value: 1}},
@@ -112,6 +111,68 @@ func (m *mongoStore) ListRoomMembers(ctx context.Context, roomID string) ([]room
 // delivery for every message in the room.
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
 	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec, m.metaOpts...)
+}
+
+// BulkUpdateRoomPreview applies a batch of room-preview updates in one unordered
+// BulkWrite. Missing rooms are not surfaced — the message is already persisted to
+// Cassandra and already broadcast, and a room with no stored preview is one the
+// reader walks for.
+//
+// Deliberately outside the breaker. The fence exists to turn a stalled read into a
+// fast error so the fail-open beneath it can run before the request budget is gone;
+// this write has no caller waiting on it and is already bounded by the flush's own
+// timeout. Fencing it would only let an unrelated read's failures suppress the
+// write, and let its own failures suppress the reads that gate delivery.
+func (m *mongoStore) BulkUpdateRoomPreview(ctx context.Context, updates map[string]roomPreviewUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	models := make([]mongo.WriteModel, 0, len(updates))
+	for roomID, u := range updates {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": roomID}).
+			SetUpdate(previewUpdate(&u)))
+	}
+	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk update room preview (%d rooms): %w", len(updates), err)
+	}
+	return nil
+}
+
+// previewUpdate renders one room's preview update as an aggregation pipeline — the
+// guards read the stored previewAsOf and lastMsgId, which a plain $set cannot do.
+//
+// It touches ONLY the preview fields. lastMsgAt/lastMsgId/lastMentionAllAt on the same
+// document belong to unread-worker; writing them here would race its durable, retried
+// batch with a best-effort one that drops on failure. See previewWriter for what the
+// two halves of the document guarantee each other, and what they do not.
+func previewUpdate(u *roomPreviewUpdate) mongo.Pipeline {
+	asOf := u.at.UnixMilli()
+	// The preview rides its own clock, and the flush must not collapse the two. u.at names
+	// the room's NEWEST message, which may be a later ineligible one; the body was
+	// established at pvwAt. Ordering the body by u.at would claim it is as-of a moment it
+	// knows nothing about, and would outrank a mutation that landed in between carrying the
+	// corrected body — restoring stale content under a key that then equals lastMsgId, so
+	// the reader serves it as current. Losing to that mutation instead only costs a walk.
+	pvwAsOf := u.pvwAt.UnixMilli()
+	var fields bson.M
+	switch {
+	case u.pvwFailed:
+		// The stored body is the PREVIOUS message's and opens under any key later pointing at
+		// it, so withholding is not enough — the next ineligible message would revalidate it.
+		fields = preview.GuardedClearFields(pvwAsOf)
+	case u.pvw != nil:
+		// The KEY takes the newest message's identity, the WATERMARK the preview's own clock:
+		// "what is this body paired with" and "when was it established" are different
+		// questions, and a later ineligible message answers only the first.
+		sealed := *u.pvw
+		sealed.ForMsgID = u.msgID
+		fields = preview.GuardedSetFields(sealed, pvwAsOf)
+	default:
+		// The key advance IS the newest message's event, so it keeps that clock.
+		fields = preview.GuardedAdvanceKeyFields(u.msgID, asOf)
+	}
+	return mongo.Pipeline{{{Key: "$set", Value: fields}}}
 }
 
 // GetThreadFollowers gates hidden-thread-reply delivery and, like GetRoom, has

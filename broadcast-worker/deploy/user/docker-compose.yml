@@ -43,6 +43,25 @@ services:
       - CONSUMER_MAX_DELIVER=${CONSUMER_MAX_DELIVER:-40}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-false}
+      # Room-list preview persistence. Must match history-service's ATREST_ENABLED and
+      # PREVIEW_KEY_EPOCH: the writer off with the reader on puts every room in a
+      # walk-then-warm-back loop, which is the shape a wrong rollout order also produces.
+      #
+      # The inverse is worse, and it is the one a single-step deploy produces: this writer
+      # ON while any history-service still predates the mutation-repair path stores previews
+      # that nobody updates or invalidates on an edit or delete. A mutation does not move
+      # lastMsgId, so those read as current indefinitely. In a real target, deploy
+      # history-service everywhere FIRST, then enable this in a second pass.
+      - ATREST_ENABLED=${ATREST_ENABLED:-true}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
+      - ATREST_VAULT_TRANSIT_KEY=${ATREST_VAULT_TRANSIT_KEY:-chat-kek}
+      - PREVIEW_KEY_EPOCH=${PREVIEW_KEY_EPOCH:-1}
+      # How often the buffered preview writes drain. The room's own lastMsgAt/lastMsgId
+      # are unread-worker's now and flush on its own cadence, and history-service serves
+      # a stored preview only while the two halves agree — so keep this in the same
+      # ballpark as unread-worker's FLUSH_INTERVAL.
+      - PREVIEW_FLUSH_INTERVAL=${PREVIEW_FLUSH_INTERVAL:-250ms}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}
