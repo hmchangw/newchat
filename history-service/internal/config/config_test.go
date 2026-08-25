@@ -76,8 +76,9 @@ func TestValidate_AcceptsZeroBucketCacheAsDisable(t *testing.T) {
 }
 
 func TestConfig_BucketCacheEnabled(t *testing.T) {
-	// Zero is the documented disable value for every bucket-cache knob, so any
-	// one of them at zero must keep Valkey unconnected and the cache uninstalled.
+	// The cache needs an explicit opt-in as well as usable knobs. Zero is the
+	// documented disable value for every knob, so any one of them at zero must
+	// keep Valkey unconnected and the cache uninstalled.
 	tests := []struct {
 		name     string
 		mutate   func(*Config)
@@ -88,10 +89,14 @@ func TestConfig_BucketCacheEnabled(t *testing.T) {
 		{name: "zero l1 budget", mutate: func(c *Config) { c.BucketCacheL1MaxBytes = 0 }},
 		{name: "zero ttl", mutate: func(c *Config) { c.BucketCacheTTL = 0 }},
 		{name: "zero max rows", mutate: func(c *Config) { c.BucketCacheMaxRows = 0 }},
+		// VALKEY_ADDRS is fleet-wide; without the opt-in, a deployment that sets
+		// it for other services must not switch this cache on here.
+		{name: "addrs set but not opted in", mutate: func(c *Config) { c.BucketCacheOptIn = false }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := baseValid()
+			cfg.BucketCacheOptIn = true
 			cfg.ValkeyAddrs = []string{"valkey:6379"}
 			cfg.BucketCacheL1MaxBytes = 1 << 20
 			cfg.BucketCacheTTL = 10 * time.Minute
@@ -227,6 +232,7 @@ func TestLoad_BucketCacheDefaults(t *testing.T) {
 		"HISTORY_BUCKET_CACHE_MAX_ROWS",
 		"HISTORY_BUCKET_CACHE_TTL",
 		"HISTORY_BUCKET_CACHE_L1_MAX_BYTES",
+		"HISTORY_BUCKET_CACHE_ENABLED",
 	} {
 		unsetEnv(t, k) // defaults only apply when unset
 	}
@@ -236,6 +242,7 @@ func TestLoad_BucketCacheDefaults(t *testing.T) {
 	assert.Equal(t, 50, cfg.BucketCacheMaxRows)
 	assert.Equal(t, 10*time.Minute, cfg.BucketCacheTTL)
 	assert.Equal(t, int64(256<<20), cfg.BucketCacheL1MaxBytes)
+	assert.False(t, cfg.BucketCacheOptIn, "the cache must be off until explicitly enabled")
 }
 
 // unsetEnv removes key for the duration of the test and restores its prior
