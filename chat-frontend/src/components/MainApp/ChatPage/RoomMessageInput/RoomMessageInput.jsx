@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useNats } from '@/context/NatsContext'
 import { useRoomDispatch } from '@/context/RoomEventsContext'
-import { sendMessage, uploadImage } from '@/api'
+import { sendMessage, uploadImage, formatAsyncJobError } from '@/api'
 import { encodeAttachment } from '@/lib/attachment'
 import { generateMessageID } from '@/lib/idgen'
 import { roomPrefix, roomDisplayName } from '@/lib/roomFormat'
@@ -16,6 +16,7 @@ export default function RoomMessageInput({ room, quotedTarget, onClearQuote }) {
   // { file, url } — url is a local object URL for the compose-time preview.
   const [pendingImage, setPendingImage] = useState(null)
   const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState(null)
   const inputRef = useRef(null)
 
   useEffect(() => {
@@ -89,25 +90,31 @@ export default function RoomMessageInput({ room, quotedTarget, onClearQuote }) {
     }
 
     dispatch({ type: 'MESSAGE_SENT_LOCAL', roomId: room.id, message: optimistic })
-    sendMessage(nats, { roomId: room.id, siteId: user.siteId, payload })
+    setSendError(null)
+    sendMessage(nats, { roomId: room.id, siteId: user.siteId, payload }).catch((err) => {
+      setSendError(formatAsyncJobError(err))
+    })
     setText('')
     setPendingImage(null) // effect revokes the preview object URL
     onClearQuote?.()
   }
 
   return (
-    <MessageInputForm
-      inputRef={inputRef}
-      value={text}
-      onChange={setText}
-      onSubmit={handleSubmit}
-      placeholder={placeholder}
-      disabled={disabled}
-      quotedTarget={quotedTarget}
-      onClearQuote={onClearQuote}
-      onPickImage={pickImage}
-      pendingImage={pendingImage ? { name: pendingImage.file.name, url: pendingImage.url } : null}
-      onClearImage={clearImage}
-    />
+    <>
+      {sendError && <div className="dialog-error">{sendError}</div>}
+      <MessageInputForm
+        inputRef={inputRef}
+        value={text}
+        onChange={setText}
+        onSubmit={handleSubmit}
+        placeholder={placeholder}
+        disabled={disabled}
+        quotedTarget={quotedTarget}
+        onClearQuote={onClearQuote}
+        onPickImage={pickImage}
+        pendingImage={pendingImage ? { name: pendingImage.file.name, url: pendingImage.url } : null}
+        onClearImage={clearImage}
+      />
+    </>
   )
 }

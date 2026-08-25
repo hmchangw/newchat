@@ -3,9 +3,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import RoomMessageInput from './RoomMessageInput'
 
 const publish = vi.fn()
+const subscribe = vi.fn(() => ({ unsubscribe: vi.fn() }))
 const dispatch = vi.fn()
 vi.mock('@/context/NatsContext', () => ({
-  useNats: () => ({ user: { account: 'alice', siteId: 's1', baseUrl: 'https://media.test' }, publish }),
+  useNats: () => ({ user: { account: 'alice', siteId: 's1', baseUrl: 'https://media.test' }, publish, subscribe }),
 }))
 vi.mock('@/context/RoomEventsContext', () => ({
   useRoomDispatch: () => dispatch,
@@ -26,6 +27,7 @@ function pickFile(container, file) {
 describe('RoomMessageInput', () => {
   beforeEach(() => {
     publish.mockClear()
+    subscribe.mockClear()
     dispatch.mockClear()
     vi.mocked(uploadImage).mockReset()
     vi.stubGlobal('URL', {
@@ -165,5 +167,17 @@ describe('RoomMessageInput', () => {
       sender: { engName: 'bob', account: 'bob' },
       msg: 'orig',
     })
+  })
+
+  it('surfaces a gatekeeper refusal from the response subject', async () => {
+    subscribe.mockImplementation((subject, cb) => {
+      queueMicrotask(() => cb({ error: 'too big', code: 'bad_request', reason: 'content_too_large' }))
+      return { unsubscribe: vi.fn() }
+    })
+    render(<RoomMessageInput room={room} />)
+    const input = screen.getByPlaceholderText(/general/i)
+    fireEvent.change(input, { target: { value: 'hello' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByText('too big')).toBeInTheDocument()
   })
 })

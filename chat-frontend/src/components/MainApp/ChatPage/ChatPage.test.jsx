@@ -149,9 +149,10 @@ describe('ChatPage — quote-reply E2E (real RoomMessageInput)', () => {
   it('publish call carries quotedParentMessageId after Reply staging', async () => {
     viE2E.resetModules()
     const publish = viE2E.fn()
+    const subscribe = viE2E.fn(() => ({ unsubscribe: viE2E.fn() }))
 
     viE2E.doMock('@/context/NatsContext', () => ({
-      useNats: () => ({ user: { account: 'alice', siteId: 's1' }, publish }),
+      useNats: () => ({ user: { account: 'alice', siteId: 's1' }, publish, subscribe }),
     }))
     viE2E.doMock('@/lib/idgen', () => ({ generateMessageID: () => '12345678901234567890' }))
     viE2E.doMock('uuid', () => ({ v4: () => 'req-1' }))

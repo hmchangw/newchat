@@ -10,11 +10,17 @@ const callOrder = []
 const unsubscribe = vi.fn()
 let threadEventHandler = null
 const threadHandlers = new Map()
+// sendMessage subscribes on the msg.send response subject
+// (chat.user.{account}.response.{requestId}) before publishing. Tests that
+// need to resolve/reject a send call responseHandlers.get(subject)(reply).
+const responseHandlers = new Map()
 const subscribe = vi.fn((subj, handler) => {
   callOrder.push(`subscribe:${subj}`)
   if (subj.includes('.thread.')) {
     threadEventHandler = handler
     threadHandlers.set(subj, handler)
+  } else if (subj.includes('.response.')) {
+    responseHandlers.set(subj, handler)
   }
   return { unsubscribe }
 })
@@ -78,6 +84,13 @@ function Probe() {
 const setup = () =>
   render(<ThreadEventsProvider><Probe /></ThreadEventsProvider>)
 
+// Simulates the gatekeeper's reply on the msg.send response subject for the
+// most recently subscribed send (requestId is mocked constant, so the
+// subject is always chat.user.alice.response.req-uuid).
+const respondToSend = (reply) => {
+  responseHandlers.get('chat.user.alice.response.req-uuid')?.(reply)
+}
+
 describe('ThreadEventsContext', () => {
   beforeEach(() => {
     request.mockReset()
@@ -88,6 +101,7 @@ describe('ThreadEventsContext', () => {
     unsubscribe.mockClear()
     callOrder.length = 0
     threadEventHandler = null
+    responseHandlers.clear()
   })
 
   it('openThread sets activeParent and fires msg.thread RPC; on success dispatches HISTORY_LOADED', async () => {
@@ -161,7 +175,7 @@ describe('ThreadEventsContext', () => {
     expect(call[1].quotedParentMessageId).toBe('q-id')
   })
 
-  it('sendReply publish failure (sync throw) tags _status=failed on the optimistic row', async () => {
+  it('sendReply publish failure (publish throws) tags _status=failed on the optimistic row', async () => {
     request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
     publish.mockImplementation(() => { throw new Error('Not connected') })
     setup()
@@ -188,14 +202,17 @@ describe('ThreadEventsContext — cross-dispatch OWN_THREAD_REPLY_SENT', () => {
     request.mockReset()
     publish.mockReset()
     roomDispatch.mockClear()
+    responseHandlers.clear()
   })
 
-  it('on successful sendReply, dispatches OWN_THREAD_REPLY_SENT to RoomEventsContext', async () => {
+  it('on successful sendReply, dispatches OWN_THREAD_REPLY_SENT to RoomEventsContext once the gatekeeper confirms', async () => {
     request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
-    // publish is sync void — default no-op is success.
     setup()
     await act(async () => { screen.getByText('open').click() })
     await act(async () => { screen.getByText('send').click() })
+    // Not yet — OWN_THREAD_REPLY_SENT only fires once the gatekeeper confirms.
+    expect(roomDispatch).not.toHaveBeenCalled()
+    await act(async () => { respondToSend({ id: 'OPT-000000000000000000' }) })
     expect(roomDispatch).toHaveBeenCalledWith({
       type: 'OWN_THREAD_REPLY_SENT',
       roomId: 'r1',
@@ -213,6 +230,15 @@ describe('ThreadEventsContext — cross-dispatch OWN_THREAD_REPLY_SENT', () => {
     expect(roomDispatch).not.toHaveBeenCalled()
   })
 
+  it('does NOT dispatch when the gatekeeper refuses the send', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('send').click() })
+    await act(async () => { respondToSend({ error: 'nope', code: 'unavailable', reason: 'thread_start_unavailable' }) })
+    expect(roomDispatch).not.toHaveBeenCalled()
+  })
+
   it('retryReply does NOT re-dispatch OWN_THREAD_REPLY_SENT (the original send already counted)', async () => {
     request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
     // First send fails synchronously so retryReply has something to retry.
@@ -225,6 +251,7 @@ describe('ThreadEventsContext — cross-dispatch OWN_THREAD_REPLY_SENT', () => {
     // Now succeed on retry.
     publish.mockImplementation(() => {})
     await act(async () => { screen.getByText('retry').click() })
+    await act(async () => { respondToSend({ id: 'OPT-000000000000000000' }) })
     // Even though the retry succeeded, the tcount should not be bumped by the
     // retry path — the room reducer assumes one increment per logical send,
     // and the initial sendReply already owned that responsibility (it just

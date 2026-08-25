@@ -8,7 +8,7 @@ import {
 } from '../RoomEventsContext/RoomEventsContext'
 import { generateMessageID } from '@/lib/idgen'
 import { useRoomKeys } from '@/context/RoomKeysContext'
-import { fetchThreadMessages, sendMessage, subscribeToThreadEvents } from '@/api'
+import { fetchThreadMessages, formatAsyncJobError, sendMessage, subscribeToThreadEvents } from '@/api'
 import { decryptRoomEvent } from '@/lib/decryptRoomEvent'
 import { threadEventsReducer, initialState } from './reducer'
 
@@ -198,8 +198,10 @@ export function ThreadEventsProvider({ children }) {
     dispatch({ type: 'CLOSE_THREAD' })
   }, [closeThreadSub])
 
-  // publishReply is synchronous — `publish` is sync void and throws if not
-  // connected. Callers wrap in try/catch.
+  // publishReply throws synchronously only for the "no active thread" guard.
+  // The actual send settles asynchronously on the gatekeeper's reply — it
+  // returns the sendMessage promise so callers can react to a refusal (e.g.
+  // thread_start_unavailable) or timeout, not just a disconnected publish.
   const publishReply = useCallback(
     (id, content, opts) => {
       const parent = stateRef.current.activeParent
@@ -212,7 +214,7 @@ export function ThreadEventsProvider({ children }) {
         threadParentMessageCreatedAt: parent.createdAtMs,
       }
       if (opts?.quotedParentMessageId) payload.quotedParentMessageId = opts.quotedParentMessageId
-      sendMessage(nats, { roomId: parent.roomId, siteId: parent.siteId, payload })
+      return sendMessage(nats, { roomId: parent.roomId, siteId: parent.siteId, payload })
     },
     [user, nats]
   )
@@ -245,15 +247,20 @@ export function ThreadEventsProvider({ children }) {
       dispatch({ type: 'REPLY_SENT_LOCAL', message: optimistic })
       try {
         publishReply(id, content.trim(), opts)
-        if (parent) {
-          // replyId lets the room reducer dedupe the inbound echo on tcount.
-          roomDispatch({
-            type: 'OWN_THREAD_REPLY_SENT',
-            roomId: parent.roomId,
-            parentId: parent.messageId,
-            replyId: id,
+          .then(() => {
+            if (parent) {
+              // replyId lets the room reducer dedupe the inbound echo on tcount.
+              roomDispatch({
+                type: 'OWN_THREAD_REPLY_SENT',
+                roomId: parent.roomId,
+                parentId: parent.messageId,
+                replyId: id,
+              })
+            }
           })
-        }
+          .catch((err) => {
+            dispatch({ type: 'REPLY_SEND_FAILED', messageId: id, error: formatAsyncJobError(err) })
+          })
       } catch (err) {
         dispatch({ type: 'REPLY_SEND_FAILED', messageId: id, error: err?.message ?? String(err) })
       }
@@ -267,18 +274,20 @@ export function ThreadEventsProvider({ children }) {
       if (!row) return
       dispatch({ type: 'REPLY_RETRIED', messageId })
       try {
+        // Intentionally NOT dispatching OWN_THREAD_REPLY_SENT here. A retry is
+        // the continuation of a logical send, not a new one; double-bumping the
+        // parent's tcount would inflate the badge across repeated failures and
+        // recoveries. The optimistic count stays at 0 until the next
+        // msg.thread reload reconciles from the authoritative server state.
         publishReply(
           messageId,
           row.content,
           row.quotedParentMessage
             ? { quotedParentMessageId: row.quotedParentMessage.messageId ?? row.quotedParentMessage.id }
             : undefined
-        )
-        // Intentionally NOT dispatching OWN_THREAD_REPLY_SENT here. A retry is
-        // the continuation of a logical send, not a new one; double-bumping the
-        // parent's tcount would inflate the badge across repeated failures and
-        // recoveries. The optimistic count stays at 0 until the next
-        // msg.thread reload reconciles from the authoritative server state.
+        ).catch((err) => {
+          dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: formatAsyncJobError(err) })
+        })
       } catch (err) {
         dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: err?.message ?? String(err) })
       }
