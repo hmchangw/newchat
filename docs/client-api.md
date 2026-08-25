@@ -1033,6 +1033,27 @@ left. A recompute that cannot complete does not leave the pre-edit or deleted co
 place: the event omits `previewMessage`, and the stored preview stops being served, so the
 next read resolves the room's preview from message history instead.
 
+###### Reacting to a preview change
+
+`message_edited` and `message_deleted` both carry the room's preview after the mutation.
+Take `previewMessage` whenever it is present — it is the room's current preview, whichever
+message the mutation touched.
+
+When it is **omitted**, compare the event's `messageId` against the `messageId` of the
+preview being displayed. They differ ⇒ the mutation did not touch the preview, so leave it
+alone. They match ⇒ the displayed preview describes the mutated message and must stop being
+shown; what to do next differs by event:
+
+| Event | `previewMessage` omitted, `messageId` matches | Why |
+|---|---|---|
+| `message_deleted` | Clear the preview | The room has no eligible message left, or the recompute could not confirm one — either way the deleted content must not stay on the row. |
+| `message_edited` | Re-read the room (`rooms.get` / `subscription.list`) | An edit never empties a room, so this is only a recompute that did not complete; the message still exists and the next read resolves it. |
+
+There is no separate "preview cleared" flag: an omitted `previewMessage` plus a matching
+`messageId` is the signal. A client that ignores it keeps rendering the pre-edit or deleted
+content until its next room-list read, even though the server has already stopped serving
+that preview.
+
 | Field | Type | Notes |
 |---|---|---|
 | `messageId` | string | |
@@ -3427,7 +3448,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3523,7 +3544,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3544,7 +3565,7 @@ The payload is flat:
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted** entirely. An omission is not "leave the preview as it is" — if the deleted `messageId` matches the preview being displayed, the client must clear it, or the deleted content stays on the room row until the next read. See [Reacting to a preview change](#reacting-to-a-preview-change).
 
 **Thread-reply deletes additionally emit a `ThreadMetadataUpdatedEvent`** (see [§4.1 Thread Metadata Event](#41-thread-metadata-event)) to update the parent message's reply-count badge. The `DeleteRoomEvent` and `ThreadMetadataUpdatedEvent` are published independently; clients must handle each on its own.
 
