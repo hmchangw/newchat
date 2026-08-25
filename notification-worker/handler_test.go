@@ -1938,8 +1938,10 @@ func TestHandleMessage_ThreadReply_ThreadRoomSuppliesParentCreatedAt(t *testing.
 		out:      map[string]map[string]struct{}{"parent-1": {"carol": {}}},
 		parentAt: map[string]*time.Time{"parent-1": &parentAt},
 	}
-	// stubParent errs: if the handler consults it, the test fails.
-	parent := stubParent{err: errcode.Internal("cassandra unavailable")}
+	// failIfCalledParent fails the test outright if FetchParent is ever invoked —
+	// stubParent{err: ...} would not, since a fetch error now degrades to a nil
+	// parentCreatedAt rather than an error, which made this assertion tautological.
+	parent := failIfCalledParent{t}
 
 	h := newTestHandlerWithParent(followers, parent)
 
@@ -1959,4 +1961,43 @@ func TestHandleMessage_ThreadReply_UnresolvableParent_DoesNotError(t *testing.T)
 	err := h.HandleMessage(context.Background(), threadReplyEventJSON(t, "parent-1", "alice"))
 
 	require.NoError(t, err, "an unresolvable parent must not NAK — MaxDeliver would destroy the notification")
+}
+
+// A degraded (nil) parentCreatedAt must fail CLOSED, not open: a member whose
+// history window starts after the message is still excluded, while a member with
+// no HistorySharedSince (unrestricted) is still notified. This is the property the
+// whole degrade-instead-of-NAK design depends on — if it inverted, a Cassandra
+// outage would widen visibility instead of merely delaying a notification.
+func TestHandle_ThreadOnlyReply_DegradedParent_StillFailsClosedForRestrictedMember(t *testing.T) {
+	restrictedSince := time.Now().Add(time.Hour).UnixMilli() // joined "after" any resolvable parent
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"},                                   // sender
+			{ID: "bob", Account: "bob", HistorySharedSince: &restrictedSince}, // restricted follower
+			{ID: "carol", Account: "carol"},                                   // unrestricted follower
+		},
+	}}
+	followers := &stubFollowers{out: map[string]map[string]struct{}{
+		"parent-1": {"bob": {}, "carol": {}},
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             stubParent{err: errcode.Internal("cassandra unavailable")}, // forces degrade: nil parentCreatedAt
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	msg := model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+		ThreadParentMessageID: "parent-1",
+		TShow:                 false,
+		Content:               "thread reply",
+	}
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&msg)))
+	assert.ElementsMatch(t, []string{"carol"}, emit.accounts(),
+		"restricted bob excluded under a degraded parent; unrestricted carol still notified")
 }
