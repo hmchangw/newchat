@@ -665,6 +665,12 @@ func (s *HistoryService) previewAfterMutation(c *natsrouter.Context, msg *models
 // takes both. It does cover the ones where only the write path broke — a failed seal
 // (Vault), a guard that rejected the write, and a walk that never resolved — which is
 // every case where the room is repairable at all without a durable retry queue.
+//
+// Both attempts share ONE budget. The mutation has already committed, so this whole
+// function is time the client spends on a request that succeeded; a fresh window for the
+// repair would double that wait exactly when Mongo is unwell, since the write it follows
+// timed out rather than failed fast. A fast failure — a rejected guard, a failed seal —
+// still leaves the repair nearly all of it.
 func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, msgID string, w *previewWalk, at time.Time) {
 	// A hidden thread reply never reaches the room timeline, so no stored preview can
 	// describe it: nothing to write, and nothing to withdraw.
@@ -679,7 +685,10 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, ms
 		s.previewCache.Invalidate(roomID)
 	}
 
-	applied, err := s.writeMutatedPreview(c, roomID, w, at.UnixMilli())
+	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
+	defer cancel()
+
+	applied, err := s.writeMutatedPreview(ctx, roomID, w, at.UnixMilli())
 	if err != nil {
 		slog.WarnContext(c, "persist mutated room preview failed", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(c), "error", err)
@@ -690,8 +699,6 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, ms
 	// Keyed on the mutated message, not on what the walk observed: the freshness key can
 	// name a message the body does not describe, so only the body's own id identifies
 	// what this mutation invalidated. Already-replaced bodies make it a no-op.
-	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
-	defer cancel()
 	if err := s.rooms.InvalidatePreviewKey(ctx, roomID, msgID, at.UnixMilli()); err != nil {
 		slog.WarnContext(c, "withdraw stale room preview key failed", "room_id", roomID,
 			"message_id", msgID, "request_id", natsutil.RequestIDFromContext(c), "error", err)
@@ -701,10 +708,9 @@ func (s *HistoryService) persistMutatedPreview(c *natsrouter.Context, roomID, ms
 // writeMutatedPreview applies the walk's outcome, reporting whether the write landed. A
 // degraded walk establishes nothing, so it writes nothing and reports not-applied — the
 // caller's repair is what keeps the room from serving the body it could not re-derive.
-func (s *HistoryService) writeMutatedPreview(c *natsrouter.Context, roomID string, w *previewWalk, asOf int64) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, warmBackTimeout)
-	defer cancel()
-
+//
+// ctx is the caller's shared repair budget, not this write's own: see persistMutatedPreview.
+func (s *HistoryService) writeMutatedPreview(ctx context.Context, roomID string, w *previewWalk, asOf int64) (bool, error) {
 	switch w.State {
 	case previewFound:
 		// Body only: a mutation does not move lastMsgId. Pinned to the key the walk
