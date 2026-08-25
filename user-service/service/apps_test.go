@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -11,8 +12,20 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/models"
 )
+
+// appSub is a botDM subscription fixture for the reactivate/unsubscribe paths.
+func appSub(muted bool) *model.Subscription {
+	return &model.Subscription{
+		ID:       "ex",
+		RoomID:   "room1",
+		RoomType: model.RoomTypeBotDM,
+		Muted:    muted,
+		User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+	}
+}
 
 func appWith(enabled bool) *model.App {
 	return &model.App{ID: "app1", Name: "Helper", Assistant: &model.AppAssistant{Enabled: enabled, Name: "helper.bot"}}
@@ -86,13 +99,27 @@ func TestSetAppSubscription_CreateDMRoomError(t *testing.T) {
 }
 
 func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
-	svc, subs, _, apps, _, _, _ := newSvc(t)
+	svc, subs, _, apps, _, _, pub := newSvc(t)
 	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
-	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(&model.Subscription{ID: "ex", Muted: true}, nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(true), nil)
 	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	var got model.SubscriptionUpdateEvent
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			require.NoError(t, json.Unmarshal(data, &got))
+			return nil
+		})
 	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
 	require.NoError(t, err)
 	assert.True(t, resp.Success)
+	// Reactivate → "added" so other devices re-add the botDM; same handler as first-subscribe.
+	assert.Equal(t, "added", got.Action)
+	assert.True(t, got.Subscription.IsSubscribed)
+	assert.False(t, got.Subscription.Muted, "reactivate clears muted on the wire event too")
+	require.NotNil(t, got.AppInfo)
+	assert.Equal(t, "app1", got.AppInfo.ID)
+	assert.Equal(t, "helper.bot", got.AppInfo.AssistantName)
+	assert.NotZero(t, got.Timestamp)
 }
 
 func TestSetAppSubscription_ReactivateSetAppSubscribedError(t *testing.T) {
@@ -105,9 +132,33 @@ func TestSetAppSubscription_ReactivateSetAppSubscribedError(t *testing.T) {
 }
 
 func TestSetAppSubscription_Unsubscribe(t *testing.T) {
+	svc, subs, _, apps, _, _, pub := newSvc(t)
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(false), nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", false, true).Return(nil)
+	var got model.SubscriptionRemovedEvent
+	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).
+		DoAndReturn(func(_ any, _ string, data []byte) error {
+			require.NoError(t, json.Unmarshal(data, &got))
+			return nil
+		})
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: false})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
+	// Mirrors room-worker's botDM removed event so the FE needs no new handler.
+	assert.Equal(t, "removed", got.Action)
+	assert.Equal(t, "room1", got.Subscription.RoomID)
+	assert.Equal(t, model.RoomTypeBotDM, got.Subscription.RoomType)
+	assert.Equal(t, "alice", got.Subscription.U.Account)
+	assert.Equal(t, "u-alice", got.Subscription.U.ID)
+	assert.NotZero(t, got.Timestamp)
+}
+
+// No botDM row → nothing to unsubscribe: no write, no event, still success.
+func TestSetAppSubscription_Unsubscribe_NoSubscription(t *testing.T) {
 	svc, subs, _, apps, _, _, _ := newSvc(t)
 	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
-	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", false, true).Return(nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(nil, nil)
 	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: false})
 	require.NoError(t, err)
 	assert.True(t, resp.Success)
@@ -116,6 +167,7 @@ func TestSetAppSubscription_Unsubscribe(t *testing.T) {
 func TestSetAppSubscription_UnsubscribeSetAppSubscribedError(t *testing.T) {
 	svc, subs, _, apps, _, _, _ := newSvc(t)
 	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(false), nil)
 	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", false, true).Return(errors.New("db down"))
 	_, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: false})
 	requireCode(t, err, errcode.CodeInternal)
