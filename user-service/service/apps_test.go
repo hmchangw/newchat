@@ -99,10 +99,12 @@ func TestSetAppSubscription_CreateDMRoomError(t *testing.T) {
 }
 
 func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
-	svc, subs, _, apps, _, _, pub := newSvc(t)
+	svc, subs, _, apps, rooms, _, pub := newSvc(t)
 	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
 	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(appSub(true), nil)
 	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), []string{"room1"}).
+		Return([]model.RoomInfo{{RoomID: "room1", Found: true, SiteID: "site-a", Name: "Test Bot", AppCount: 1, UserCount: 1}}, nil)
 	var got model.SubscriptionUpdateEvent
 	pub.EXPECT().Publish(gomock.Any(), subject.SubscriptionUpdate("alice"), gomock.Any()).
 		DoAndReturn(func(_ any, _ string, data []byte) error {
@@ -116,10 +118,26 @@ func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
 	assert.Equal(t, "added", got.Action)
 	assert.True(t, got.Subscription.IsSubscribed)
 	assert.False(t, got.Subscription.Muted, "reactivate clears muted on the wire event too")
+	require.NotNil(t, got.Subscription.Room, "added event must carry the hydrated room")
+	assert.Equal(t, "Test Bot", got.Subscription.Room.Name)
 	require.NotNil(t, got.AppInfo)
 	assert.Equal(t, "app1", got.AppInfo.ID)
 	assert.Equal(t, "helper.bot", got.AppInfo.AssistantName)
 	assert.NotZero(t, got.Timestamp)
+}
+
+// An idempotent subscribed:true on an already-active botDM writes but emits no event.
+func TestSetAppSubscription_Reactivate_AlreadySubscribed_NoEvent(t *testing.T) {
+	svc, subs, _, apps, _, _, _ := newSvc(t)
+	active := appSub(false)
+	active.IsSubscribed = true
+	apps.EXPECT().GetApp(gomock.Any(), "app1").Return(appWith(true), nil)
+	subs.EXPECT().GetAppSubscription(gomock.Any(), "alice", "helper.bot").Return(active, nil)
+	subs.EXPECT().SetAppSubscribed(gomock.Any(), "alice", "helper.bot", true, false).Return(nil)
+	// No pub / GetRoomsMeta expectations → the strict mocks fail if either is called.
+	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
+	require.NoError(t, err)
+	assert.True(t, resp.Success)
 }
 
 func TestSetAppSubscription_ReactivateSetAppSubscribedError(t *testing.T) {

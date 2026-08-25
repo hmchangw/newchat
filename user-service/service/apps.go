@@ -55,10 +55,13 @@ func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAp
 		}
 		return &models.OKResponse{Success: true}, nil
 	}
+	wasSubscribed := existing.IsSubscribed
 	if err := s.subs.SetAppSubscribed(c, account, botName, true, false); err != nil {
 		return nil, fmt.Errorf("reactivate app: %w", err)
 	}
-	s.publishAppSubscriptionReactivated(c, account, existing, app)
+	if !wasSubscribed { // emit only on a real unsubscribed→subscribed transition, not an idempotent re-subscribe
+		s.publishAppSubscriptionReactivated(c, account, existing, app)
+	}
 	return &models.OKResponse{Success: true}, nil
 }
 
@@ -83,6 +86,10 @@ func (s *UserService) publishAppSubscriptionReactivated(c *natsrouter.Context, a
 	subCopy := *sub
 	subCopy.IsSubscribed = true
 	subCopy.Muted = false
+	// Hydrate the non-persisted Room the "added" contract carries (GetAppSubscription decodes persisted fields only).
+	if infos, err := s.rooms.GetRoomsMeta(c, sub.SiteID, []string{sub.RoomID}); err == nil && len(infos) > 0 {
+		applyRoomInfo(&subCopy, &infos[0])
+	}
 	roomName := app.Name
 	if roomName == "" {
 		roomName = app.Assistant.Name
