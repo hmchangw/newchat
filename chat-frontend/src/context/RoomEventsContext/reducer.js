@@ -210,6 +210,23 @@ function storedPreviewWins(cur, next) {
   return isOlderPreview(next.createdAt, cur.createdAt)
 }
 
+// Same question for a `subscription.list` row, which is the server's read-time
+// resolve rather than one event's view — so plain recency is the wrong test.
+// A delete never rolls `room.lastMsgAt` back, so a stored preview at or before
+// it is inside the window the row already accounts for and the row supersedes
+// it; only a message that POSTDATES the row (one that arrived live after it was
+// resolved) survives. Recency alone would pin a message deleted while this
+// client was away: the survivor the server returns is older, forever.
+// Falls back to the recency rule when either timestamp is missing.
+function rowPreviewWins(cur, next, rowLastMsgAt) {
+  if (!cur) return false
+  if (cur.encrypted && cur.messageId === next.messageId) return true
+  const curT = Date.parse(cur.createdAt ?? '')
+  const rowT = Date.parse(rowLastMsgAt ?? '')
+  if (Number.isNaN(curT) || Number.isNaN(rowT)) return isOlderPreview(next.createdAt, cur.createdAt)
+  return curT > rowT
+}
+
 /**
  * Apply the server's per-user subscription record onto a summary.
  *
@@ -363,11 +380,11 @@ export function roomEventsReducer(state, action) {
     }
     case 'BUCKETS_LOADED': {
       const subs = action.subscriptions ?? {}
-      // Take the server's preview unless what's stored wins on recency (a live
-      // message that landed before this fetch resolved) or is an encrypted
-      // placeholder for the same message — NOT a fill-if-absent seed: hydration
-      // replays this action with the previous session's cached previewMessage,
-      // so on a re-login every room already has a stale entry to replace.
+      // Take the server's preview unless what's stored postdates the row or is
+      // an encrypted placeholder for the same message (see rowPreviewWins) —
+      // NOT a fill-if-absent seed: hydration replays this action with the
+      // previous session's cached previewMessage, so on a re-login every room
+      // already has a stale entry to replace.
       // Shared by both paths: a degraded bootstrap still carries real previews
       // for the buckets it did reach.
       let previews = state.previews
@@ -377,7 +394,7 @@ export function roomEventsReducer(state, action) {
         const cur = previews[roomId]
         // samePreview keeps the map reference stable on a no-op resync, which
         // would otherwise re-render every row in the sidebar.
-        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
+        if (rowPreviewWins(cur, preview, sub?.room?.lastMsgAt) || samePreview(cur, preview)) continue
         if (previews === state.previews) previews = { ...state.previews }
         previews[roomId] = preview
       }

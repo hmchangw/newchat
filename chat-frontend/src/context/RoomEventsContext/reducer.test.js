@@ -1824,6 +1824,58 @@ describe('roomEventsReducer previews', () => {
     })
   })
 
+  it('BUCKETS_LOADED takes an older server preview when the stored message predates the row', () => {
+    // A delete this client never received (logged out, or core NATS at-most-once)
+    // leaves the deleted message stored. The row resolves the earlier survivor,
+    // and `room.lastMsgAt` — which a delete never rolls back — proves the stored
+    // message is inside the window the server just resolved over.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: { messageId: 'm-deleted', senderName: 'Bob Lin', text: 'deleted while away', createdAt: '2026-08-14T12:00:00Z' },
+      },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: {
+        r1: {
+          roomId: 'r1',
+          room: {
+            lastMsgAt: '2026-08-14T12:00:00Z',
+            previewMessage: wirePreview({ messageId: 'm-older', createdAt: '2026-08-14T11:00:00Z' }),
+          },
+        },
+      },
+    })
+    expect(next.previews.r1.messageId).toBe('m-older')
+  })
+
+  it('BUCKETS_LOADED keeps a live preview that postdates the row', () => {
+    // The other side of the same rule: a message that arrived after the row was
+    // resolved is newer than its lastMsgAt, so the snapshot cannot supersede it.
+    const live = {
+      messageId: 'm-live', senderName: 'Live Sender', text: 'beat the fetch',
+      createdAt: '2026-08-14T13:00:00Z',
+    }
+    const next = roomEventsReducer({ ...initialState, previews: { r1: live } }, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: {
+        r1: {
+          roomId: 'r1',
+          room: {
+            lastMsgAt: '2026-08-14T12:00:00Z',
+            previewMessage: wirePreview({ messageId: 'm-snapshot', createdAt: '2026-08-14T12:00:00Z' }),
+          },
+        },
+      },
+    })
+    expect(next.previews.r1).toEqual(live)
+  })
+
   it('BUCKETS_LOADED keeps an encrypted placeholder for the same message', () => {
     // Fix 3 parity: a resync's wire preview relays the body unencrypted, and
     // must not flip a row the timeline is deliberately refusing to render.
