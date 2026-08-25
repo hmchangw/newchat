@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 func main() {
@@ -98,6 +99,23 @@ func run() error {
 		return nil
 	}
 	h := newHandler(st, sessStore, cfg, nc, publishInbox)
+
+	// Best-effort session-cache invalidation. A connect failure logs and
+	// continues (nil client, every bust a no-op) rather than exiting: this is an
+	// optional tier, not a hard startup dependency — same shape as
+	// bot-room-service and inbox-worker. Without it a revoked token keeps
+	// authenticating from cache until its refresh window elapses.
+	if len(cfg.ValkeyAddrs) > 0 {
+		vk, verr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk))
+		if verr != nil {
+			slog.Error("valkey connect (session revocation) failed, continuing without it", "error", verr)
+		} else {
+			h.valkey = vk
+			defer func() { _ = vk.Close() }()
+			slog.Info("session revocation invalidation enabled")
+		}
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

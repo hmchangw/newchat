@@ -908,10 +908,10 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 					})
 			},
 			setupSessions: func(s *fakeSessionStore) {
-				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) (int64, error) {
+				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) ([]string, error) {
 					assert.Equal(t, "site-A", siteID)
 					assert.Equal(t, "alice", account)
-					return 3, nil
+					return []string{"h1", "h2", "h3"}, nil
 				}
 			},
 			wantStatus: http.StatusOK,
@@ -920,8 +920,8 @@ func TestHandler_revokeAllSessions(t *testing.T) {
 			name:    "store error returns 500",
 			account: "bob",
 			setupSessions: func(s *fakeSessionStore) {
-				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) (int64, error) {
-					return 0, fmt.Errorf("db offline")
+				s.DeleteForAccountFn = func(_ context.Context, siteID, account string) ([]string, error) {
+					return nil, fmt.Errorf("db offline")
 				}
 			},
 			wantStatus: http.StatusInternalServerError,

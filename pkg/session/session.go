@@ -32,9 +32,14 @@ type Session struct {
 type Store interface {
 	Insert(ctx context.Context, s *Session) error
 	FindByHash(ctx context.Context, hash string) (*Session, error)
-	DeleteBeyondCap(ctx context.Context, account string, max int) (int64, error)
-	DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) (int64, error)
-	DeleteForAccount(ctx context.Context, siteID, account string) (int64, error)
+	// The three bulk deletes return the _id of every session they removed.
+	// A session _id IS the token hash (Insert stamps sessiontoken.Hash, and
+	// FindByHash queries _id), so the caller can hand these straight to
+	// sessioncache.BustMany. Returning only a count is what let a revoked
+	// token keep authenticating from cache until its refresh window elapsed.
+	DeleteBeyondCap(ctx context.Context, account string, max int) ([]string, error)
+	DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) ([]string, error)
+	DeleteForAccount(ctx context.Context, siteID, account string) ([]string, error)
 	ListForAccount(ctx context.Context, siteID, account string) ([]Session, error)
 	DeleteByID(ctx context.Context, siteID, account, id string) (int64, error)
 	EnsureIndexes(ctx context.Context) error
@@ -87,7 +92,7 @@ func (s *MongoStore) FindByHash(ctx context.Context, hash string) (*Session, err
 // same-millisecond inserts; login is not high-throughput enough to warrant
 // wrapping this in a transaction, and "keep newest N" is not a safety
 // invariant worth the added contention.
-func (s *MongoStore) DeleteBeyondCap(ctx context.Context, account string, max int) (int64, error) {
+func (s *MongoStore) DeleteBeyondCap(ctx context.Context, account string, max int) ([]string, error) {
 	cur, err := s.coll.Find(ctx, bson.M{"account": account},
 		options.Find().
 			SetProjection(bson.M{"_id": 1}).
@@ -95,46 +100,63 @@ func (s *MongoStore) DeleteBeyondCap(ctx context.Context, account string, max in
 			SetSkip(int64(max)),
 	)
 	if err != nil {
-		return 0, fmt.Errorf("find over-cap sessions: %w", err)
+		return nil, fmt.Errorf("find over-cap sessions: %w", err)
 	}
 	var toDelete []struct {
 		ID string `bson:"_id"`
 	}
 	if err := cur.All(ctx, &toDelete); err != nil {
-		return 0, fmt.Errorf("decode over-cap sessions: %w", err)
+		return nil, fmt.Errorf("decode over-cap sessions: %w", err)
 	}
 	if len(toDelete) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	ids := make([]string, len(toDelete))
 	for i, d := range toDelete {
 		ids[i] = d.ID
 	}
-	res, err := s.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}})
-	if err != nil {
-		return 0, fmt.Errorf("delete over-cap sessions: %w", err)
+	if _, err := s.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": ids}}); err != nil {
+		return nil, fmt.Errorf("delete over-cap sessions: %w", err)
 	}
-	return res.DeletedCount, nil
+	return ids, nil
 }
 
-func (s *MongoStore) DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) (int64, error) {
-	res, err := s.coll.DeleteMany(ctx, bson.M{
+func (s *MongoStore) DeleteForAccountExcept(ctx context.Context, siteID, account, exceptID string) ([]string, error) {
+	return s.deleteAndReportIDs(ctx, bson.M{
 		"siteId":  siteID,
 		"account": account,
 		"_id":     bson.M{"$ne": exceptID},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("delete sessions for account except: %w", err)
-	}
-	return res.DeletedCount, nil
+	}, "delete sessions for account except")
 }
 
-func (s *MongoStore) DeleteForAccount(ctx context.Context, siteID, account string) (int64, error) {
-	res, err := s.coll.DeleteMany(ctx, bson.M{"siteId": siteID, "account": account})
+func (s *MongoStore) DeleteForAccount(ctx context.Context, siteID, account string) ([]string, error) {
+	return s.deleteAndReportIDs(ctx, bson.M{"siteId": siteID, "account": account}, "delete sessions for account")
+}
+
+// deleteAndReportIDs collects the _ids a filter matches, then deletes by that
+// same FILTER rather than by the collected ids. The order matters: deleting by
+// the filter still removes a session inserted between the two calls, so a
+// concurrent login cannot survive a revoke. Such a late arrival is simply
+// absent from the returned ids — it has no cache entry worth busting yet.
+func (s *MongoStore) deleteAndReportIDs(ctx context.Context, filter bson.M, what string) ([]string, error) {
+	cur, err := s.coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
 	if err != nil {
-		return 0, fmt.Errorf("delete sessions for account: %w", err)
+		return nil, fmt.Errorf("%s (collect ids): %w", what, err)
 	}
-	return res.DeletedCount, nil
+	var found []struct {
+		ID string `bson:"_id"`
+	}
+	if err := cur.All(ctx, &found); err != nil {
+		return nil, fmt.Errorf("%s (decode ids): %w", what, err)
+	}
+	if _, err := s.coll.DeleteMany(ctx, filter); err != nil {
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+	ids := make([]string, len(found))
+	for i, f := range found {
+		ids[i] = f.ID
+	}
+	return ids, nil
 }
 
 func (s *MongoStore) ListForAccount(ctx context.Context, siteID, account string) ([]Session, error) {

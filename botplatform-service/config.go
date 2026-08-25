@@ -13,10 +13,15 @@ type config struct {
 	// SiteID identifies this service's home site; scopes bot streams. Login is not gated on it.
 	SiteID string `env:"SITE_ID,required"`
 
-	MongoURI      string `env:"MONGO_URI,required"`
-	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"`
-	MongoPassword string `env:"MONGO_PASSWORD"`
+	MongoURI          string        `env:"MONGO_URI,required"`
+	MongoDB           string        `env:"MONGO_DB"       envDefault:"chat"`
+	MongoUsername     string        `env:"MONGO_USERNAME"`
+	MongoPassword     string        `env:"MONGO_PASSWORD"`
+	MongoBreakerFails int           `env:"MONGO_BREAKER_FAILS"            envDefault:"5"`
+	MongoBreakerCool  time.Duration `env:"MONGO_BREAKER_COOLDOWN"         envDefault:"10s"`
+	// SessionCacheTTL keeps already-authenticated bots working while Mongo is
+	// unreachable. 0 disables the tier. Matches the other L2 tiers at 90m.
+	SessionCacheTTL time.Duration `env:"SESSION_CACHE_TTL" envDefault:"90m"`
 
 	Pool mongoutil.PoolConfig
 	HTTP ginutil.TimeoutConfig

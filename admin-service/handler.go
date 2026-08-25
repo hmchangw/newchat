@@ -17,6 +17,8 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/pwhash"
 	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/sessioncache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Handler wires the AdminStore, session.Store, Config, room-service RPC
@@ -30,6 +32,10 @@ type Handler struct {
 	// remoteDests is remoteSites(cfg.AllSiteIDs, cfg.SiteID), computed once — the
 	// config never changes after startup, so no request needs to re-derive it.
 	remoteDests []string
+	// valkey invalidates cached sessions on revoke. Write-only from here, and
+	// nil disables it. Set post-construction, mirroring room-service,
+	// room-worker, inbox-worker and bot-room-service.
+	valkey valkeyutil.Client
 }
 
 // newHandler constructs a Handler with the given stores, config, room RPC, and
@@ -398,10 +404,15 @@ func (h *Handler) revokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	if _, err := h.sessions.DeleteForAccount(ctx, h.cfg.SiteID, account); err != nil {
+	revoked, err := h.sessions.DeleteForAccount(ctx, h.cfg.SiteID, account)
+	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("delete sessions: %w", err))
 		return
 	}
+	// The Mongo row is gone, but every bot/admin request resolves through the
+	// session cache — without this the revoked tokens keep authenticating until
+	// their refresh window elapses, and never at all while Mongo is down.
+	sessioncache.BustMany(ctx, h.valkey, revoked)
 
 	h.audit(ctx, c, "session.revoke_all", "", account, nil)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -421,6 +432,8 @@ func (h *Handler) revokeSession(c *gin.Context) {
 		errhttp.Write(ctx, c, fmt.Errorf("delete session: %w", err))
 		return
 	}
+	// A session's _id IS its token hash, so the path parameter is the cache key.
+	sessioncache.Bust(ctx, h.valkey, sessionID)
 
 	h.audit(ctx, c, "session.revoke", "", account, map[string]string{"sessionId": sessionID})
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
