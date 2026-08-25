@@ -94,6 +94,9 @@ func (f *fakeClient) Del(_ context.Context, keys ...string) error {
 	}
 	return nil
 }
+func (f *fakeClient) Expire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
 
 func (f *fakeClient) Close() error {
 	f.closeCalled++
@@ -231,4 +234,87 @@ func TestConnectCluster_ErrorPath(t *testing.T) {
 	_, err := valkeyutil.ConnectCluster(context.Background(), []string{"127.0.0.1:1"}, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "valkey cluster connect")
+}
+
+// --- ReadCachedJSON ---
+
+type cacheSpy struct{ hit, miss, err int }
+
+func (s *cacheSpy) Hit(context.Context)   { s.hit++ }
+func (s *cacheSpy) Miss(context.Context)  { s.miss++ }
+func (s *cacheSpy) Error(context.Context) { s.err++ }
+
+type cachedThing struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func nonEmptyID(c *cachedThing) bool { return c.ID != "" }
+
+func TestReadCachedJSON(t *testing.T) {
+	const key = "thing:{r1}"
+	tests := []struct {
+		name      string
+		stored    string // "" means absent
+		getErr    error
+		wantOK    bool
+		wantID    string
+		wantHit   int
+		wantMiss  int
+		wantError int
+	}{
+		{name: "usable hit", stored: `{"id":"u1","name":"alice"}`, wantOK: true, wantID: "u1", wantHit: 1},
+		{name: "clean miss", wantMiss: 1},
+		// Any well-formed JSON that is not a T decodes to the zero value. Serving
+		// that is worse than a refetch, so it must count as a miss, not a hit.
+		{name: "json null decodes to zero", stored: "null", wantMiss: 1},
+		{name: "empty object decodes to zero", stored: "{}", wantMiss: 1},
+		{name: "foreign value decodes to zero", stored: `{"unrelated":"x"}`, wantMiss: 1},
+		{name: "partial value failing validation", stored: `{"name":"alice"}`, wantMiss: 1},
+		{name: "transport failure", getErr: errors.New("valkey unreachable"), wantError: 1},
+		{name: "undecodable payload", stored: "not-json", wantError: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake()
+			fake.getErr = tt.getErr
+			if tt.stored != "" {
+				fake.store[key] = tt.stored
+			}
+			rec := &cacheSpy{}
+
+			got, ok := valkeyutil.ReadCachedJSON(context.Background(), fake, key, "thing", rec, nonEmptyID, "room_id", "r1")
+
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantID, got.ID)
+			assert.Equal(t, tt.wantHit, rec.hit, "hit count")
+			assert.Equal(t, tt.wantMiss, rec.miss, "miss count")
+			assert.Equal(t, tt.wantError, rec.err, "error count")
+		})
+	}
+}
+
+// A nil validity predicate means every decoded value is usable.
+func TestReadCachedJSON_NilPredicateAcceptsZeroValue(t *testing.T) {
+	fake := newFake()
+	fake.store["k"] = "{}"
+	rec := &cacheSpy{}
+
+	_, ok := valkeyutil.ReadCachedJSON[cachedThing](context.Background(), fake, "k", "thing", rec, nil)
+
+	assert.True(t, ok)
+	assert.Equal(t, 1, rec.hit)
+}
+
+// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
+func (f *fakeClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := f.Get(ctx, k)
+		if err != nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
 }
