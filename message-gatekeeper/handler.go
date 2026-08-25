@@ -554,10 +554,10 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 	}
 	if err != nil {
 		var ee *errcode.Error
-		if quoteFetchErrIsTerminal(err) && errors.As(err, &ee) {
+		if !errcode.IsTransient(err) && errors.As(err, &ee) {
 			// Terminal typed *errcode.Error → reply + Ack; preserves the upstream
 			// category (not_found, forbidden, …) for the client. The errors.As guard
-			// is belt-and-suspenders: quoteFetchErrIsTerminal only reports true for a
+			// is belt-and-suspenders: errcode.IsTransient only reports false for a
 			// typed errcode today, but guarding the bool means a future predicate
 			// change can't fall through here returning a nil *errcode.Error.
 			return nil, false, ee
@@ -574,28 +574,6 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 		return nil, false, cerr
 	}
 	return snap, false, nil
-}
-
-// quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
-// permanent reason not to quote (reject) vs a transient infra failure (degrade
-// to the placeholder). Only unavailable/internal errcodes and non-errcode infra
-// failures (unmarshal) are transient; every other errcode category (not_found,
-// forbidden, bad_request, …) is terminal. NATS timeout and no-responders arrive
-// as errcode.CodeUnavailable (via natsutil.RequestFailure) and are handled by
-// the unavailable case below, not the non-errcode fallback.
-// history-service collapses a Cassandra read failure to code=internal, so
-// internal is treated as transient here.
-func quoteFetchErrIsTerminal(err error) bool {
-	var ee *errcode.Error
-	if errors.As(err, &ee) {
-		switch ee.Code {
-		case errcode.CodeUnavailable, errcode.CodeInternal:
-			return false
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // placeholderQuoteSnapshot builds the degraded-mode quoted-parent snapshot for a
