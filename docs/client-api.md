@@ -85,6 +85,8 @@ paths.
     - [11.1 GET card template](#111-http--get-apiv1cardspathcardversiontemplatejson) · [11.2 POST /api/v1/cards/validate (admin)](#112-http--post-apiv1cardsvalidate-admin)
 12. [Client Update Service](#12-client-update-service)
     - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
+13. [User Service HTTP API](#13-user-service-http-api)
+    - [13.1 Authentication](#131-authentication) · [13.2 GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions)
 
 ---
 
@@ -1012,7 +1014,7 @@ document (`previewMessage` always omitted there). All fields are optional
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
 | `privateKey` | string | Base64-encoded room E2E private key — initial key bootstrap for room members (see [§5](#5-room-encryption)). Present only for encrypted (channel) rooms whose key the caller's site holds; omitted otherwise. |
 | `keyVersion` | number | Version of `privateKey`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time. Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's latest eligible message, resolved server-side at read time; its `content` is truncated to a short preview (see [PreviewMessage](#previewmessage)). Omitted when the room has no message, or that site's enrichment degraded, or the request set `includeLastMessage: false` — best-effort, never fails the list. |
 
 ##### PreviewMessage
 
@@ -1025,7 +1027,7 @@ an earlier survivor; a room with only ineligible messages omits `previewMessage`
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | The full message body; the client truncates for display. |
+| `content` | string | The message body. On `subscription.list` (both transports) it is truncated server-side to a short preview — 50 characters by default, whole characters only, no ellipsis appended. Everywhere else it is the full body. |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. |
@@ -3416,7 +3418,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message, or on a read error. |
 
 ```json
 {
@@ -3512,7 +3514,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`, but `content` is the full body — list rows truncate it). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
 
 ```json
 {
@@ -5162,6 +5164,13 @@ There is **no** member list on a section — membership rides the subscriptions.
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.list`
 **Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
 
+> **Large pages:** the NATS reply is capped at 128 KB, so a full sidebar does not
+> fit in one call — a page that overflows it comes back as `internal` /
+> [`response_too_large`](#6-error-envelope-reference), which is the signal to
+> switch rather than to retry. Clients fetching 100+ rows should use the HTTP form,
+> [GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions), which returns
+> the same body with no payload ceiling.
+
 Returns the user's sidebar subscriptions, optionally filtered by type, age, and favorite status. The reply is **room-info-enriched** — see "Enrichment" below.
 
 ##### Request body
@@ -5318,6 +5327,8 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
 |-----------|--------|-------|
 | Unknown `type` value | `bad_request` | `{ "code": "bad_request", "error": "unknown subscription type" }` |
 | Negative `updatedWithinDays` | `bad_request` | `{ "code": "bad_request", "error": "updatedWithinDays must be non-negative" }` |
+| Server exceeded its own handler budget | `unavailable` | Enrichment did not finish in time. Retryable — the server fails rather than return a page whose rooms are indistinguishable from deleted ones. |
+| Reply exceeds the transport payload cap | `internal` (`response_too_large`) | Only over NATS. The HTTP form has no payload ceiling — see [GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions). |
 | Internal failure | `internal` | — |
 
 ---
@@ -8573,3 +8584,133 @@ Liveness probe.
 ```json
 { "status": "ok" }
 ```
+
+---
+
+## 13. User Service HTTP API
+
+HTTP endpoints served by `user-service`, alongside its NATS request/reply surface. They exist because a NATS reply is capped at **128 KB**, which a full sidebar exceeds: a user with 200–300 subscriptions must otherwise page at ~40 rows and issue 5–8 round trips at startup. Over HTTP the same data arrives in one request.
+
+**Base URL:** the user-service HTTP listener (`HTTP_PORT`, default `8080`). Health probes are on a separate port (`HEALTH_ADDR`, default `:8081`) and are never rate-limited.
+
+### 13.1 Authentication
+
+Every `/api/v1` endpoint takes exactly one credential:
+
+| Header(s) | Credential | Notes |
+|---|---|---|
+| `ssoToken` | OIDC access token | **Recommended.** Verified locally against cached JWKS — no network hop. |
+| `x-user-id` + `x-auth-token` | Botplatform session | Costs a botplatform round trip, and `pkg/botauth` caps concurrent validations at 64. |
+
+Supplying both is a `400`. The account is taken from the verified credential, never from the request, so a caller can only ever read its own data — the same guarantee NATS subject scoping provides.
+
+> **Use `ssoToken` for sidebar initialization.** The session-token path depends on botplatform being reachable and shares a 64-validation ceiling, which binds well before the server's own concurrency cap during a mass reconnect.
+
+### 13.2 HTTP — GET /api/v1/subscriptions
+
+The HTTP form of [`subscription.list`](#subscriptionlist). Same enrichment, same response body, no payload ceiling.
+
+#### Query parameters
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | One of `current`, `rooms`, `apps`. Same meaning as the NATS field. |
+| `favorite` | boolean | no | Filters to favorites and pins the caller's self-DM first. |
+| `updatedWithinDays` | number | no | `rooms` only. Must be non-negative. |
+| `includeLastMessage` | boolean | no | Omitted ⇒ include. Send `false` to skip the per-room `previewMessage` resolve. |
+| `offset` | integer | no | Zero-based. Negative ⇒ `0`. Default `0`. |
+| `limit` | integer | no | Omitted or ≤ 0 ⇒ `HTTP_SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); values above `HTTP_SUBSCRIPTION_MAX_LIMIT` (default `400`) are capped to it. |
+
+> **Send `limit=200`.** It covers a typical sidebar in one request. Larger pages cost the server nothing extra in database work — the room join and activity sort run over the account's full subscription set regardless of page size, so one 200-row page is roughly 5× cheaper in total than five 40-row pages.
+
+```http
+GET /api/v1/subscriptions?type=current&limit=200 HTTP/1.1
+ssoToken: <oidc-access-token>
+Accept-Encoding: gzip
+```
+
+#### Success response
+
+Identical to the NATS reply — see [`subscription.list`](#subscriptionlist) for the full row schema.
+
+| Field | Type | Notes |
+|---|---|---|
+| `subscriptions` | array<[Subscription](#subscription)> | One page of room-info-enriched records. |
+| `hasMore` | boolean | `true` when at least one more record follows this page. |
+
+```json
+{
+  "subscriptions": [
+    {
+      "id": "01970a4f8c2d7c9a01970a4f8c2d7c9b",
+      "u": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice", "isBot": false },
+      "roomId": "01970a4f8c2d7c9aQ",
+      "siteId": "siteA",
+      "roomType": "channel",
+      "roles": ["member"],
+      "name": "engineering-general",
+      "joinedAt": "2026-05-06T08:01:23Z",
+      "hasMention": false,
+      "hasUnread": true,
+      "hasGroupMention": false,
+      "alert": true,
+      "muted": false,
+      "favorite": true,
+      "room": {
+        "siteId": "siteA",
+        "name": "engineering-general",
+        "userCount": 42,
+        "lastMsgAt": "2026-06-01T10:00:00Z",
+        "previewMessage": {
+          "messageId": "01970a4f8c2d7c9aBB",
+          "sender": { "userId": "01970a4f8c2d7c9a", "account": "alice", "displayName": "Alice" },
+          "content": "morning team",
+          "createdAt": "2026-06-01T10:00:00Z"
+        }
+      }
+    }
+  ],
+  "hasMore": true
+}
+```
+
+**Compression.** Send `Accept-Encoding: gzip`. A 200-row page is roughly 150 KB of JSON and compresses to a small fraction of that. Responses under 1 KB are returned uncompressed.
+
+**Request correlation.** Send `X-Request-ID` as a hyphenated UUID to correlate with server logs; the server mints one when absent and echoes it on every response.
+
+#### Error responses
+
+Same envelope as every other endpoint (see [§6](#6-error-envelope-reference)).
+
+| Condition | Status | `code` | `reason` |
+|---|---|---|---|
+| Unparseable parameter (e.g. `limit=abc`) | `400` | `bad_request` | — |
+| Unknown `type` | `400` | `bad_request` | — |
+| Negative `updatedWithinDays` | `400` | `bad_request` | — |
+| Both `ssoToken` and `x-auth-token` supplied | `400` | `bad_request` | `ambiguous_token` |
+| No credential supplied | `401` | `unauthenticated` | `missing_fields` |
+| Invalid credential | `401` | `unauthenticated` | `invalid_sso_token` |
+| Expired SSO token | `401` | `unauthenticated` | `sso_token_expired` |
+| Credential type not configured on this deployment | `503` | `unavailable` | `upstream_unavailable` |
+| Pod at its in-flight capacity | `429` | `too_many_requests` | `overloaded` |
+| Server exceeded its own handler budget | `503` | `unavailable` | — |
+| Internal failure | `500` | `internal` | — |
+
+##### 429 — server at capacity
+
+The pod caps concurrent in-flight requests (`HTTP_MAX_CONCURRENCY`, default `256`) and sheds the overflow immediately rather than queueing work whose client has already timed out.
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+Content-Type: application/json
+X-Request-ID: 01970a4f-8c2d-7c9a-abcd-e0123456789f
+
+{
+  "code": "too_many_requests",
+  "error": "server is at capacity, retry shortly",
+  "reason": "overloaded"
+}
+```
+
+**Client contract:** honour `Retry-After` and retry with jitter. A 429 means *this pod* is momentarily full, not that the request was wrong — an immediate uniform retry from every client re-creates the burst that caused it. Do not treat it as a fatal error or force re-login.

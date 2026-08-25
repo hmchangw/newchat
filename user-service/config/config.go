@@ -20,6 +20,39 @@ type MongoConfig struct {
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
+// HTTPConfig configures the client-facing HTTP listener (env prefix: HTTP_).
+type HTTPConfig struct {
+	Port string `env:"PORT" envDefault:"8080"`
+	// MaxConcurrency caps in-flight HTTP handlers, shedding the overflow with 429.
+	// Its own budget, so a burst cannot take handler slots or Mongo connections from
+	// the NATS path — but the NATS connection and the room/history services behind
+	// it are still shared. The default assumes a 2 GiB pod (~1.2 MB live per
+	// in-flight page); halve it on a 1 GiB one. 0 disables.
+	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"512"`
+	// MaxConns bounds accepted TCP connections; see ginutil.LimitListener for why.
+	// Must exceed MaxConcurrency, since keep-alives outnumber in-flight requests.
+	// 0 disables.
+	MaxConns       int           `env:"MAX_CONNS" envDefault:"2048"`
+	HandlerTimeout time.Duration `env:"HANDLER_TIMEOUT" envDefault:"30s"`
+	// WriteTimeout must exceed HandlerTimeout: net/http starts its clock when the
+	// request headers are read, so an equal value cuts the response mid-write.
+	WriteTimeout     time.Duration `env:"WRITE_TIMEOUT"      envDefault:"35s"`
+	GzipMinBytes     int           `env:"GZIP_MIN_BYTES"     envDefault:"1024"`
+	MongoMaxPoolSize uint64        `env:"MONGO_MAX_POOL_SIZE" envDefault:"128"`
+	// 0 by default: a warm floor is per replica-set member, a standing cost the
+	// cluster carries idle. The price is that a burst after a lull pays connect and
+	// auth, throttled by the driver's maxConnecting of 2.
+	MongoMinPoolSize uint64 `env:"MONGO_MIN_POOL_SIZE" envDefault:"0"`
+	// Pool sizes are per replica-set member, and the driver never reaps idle
+	// connections by default, so a burst's peak would be held for the process life.
+	MongoMaxIdleTime time.Duration `env:"MONGO_MAX_IDLE_TIME" envDefault:"5m"`
+	// Page bounds. The default matches the NATS one so an omitted limit behaves
+	// identically on both transports; the max is far higher because no 128 KB
+	// payload ceiling applies here.
+	DefaultLimit int `env:"SUBSCRIPTION_DEFAULT_LIMIT" envDefault:"40"`
+	MaxLimit     int `env:"SUBSCRIPTION_MAX_LIMIT"     envDefault:"400"`
+}
+
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
 type NATSConfig struct {
 	URL       string `env:"URL,notEmpty"`
@@ -37,6 +70,17 @@ type Config struct {
 	DefaultAppsLimit         int           `env:"APPS_DEFAULT_LIMIT" envDefault:"20"`
 	MaxAccountNames          int           `env:"MAX_ACCOUNT_NAMES"      envDefault:"100"`
 	HandlerTimeout           time.Duration `env:"HANDLER_TIMEOUT"        envDefault:"15s"`
+	// RoomBatchChunk caps room ids per enrichment RPC. 100 is history-service's hard
+	// batch cap and keeps each reply well under the 128 KB NATS payload.
+	RoomBatchChunk int `env:"ROOM_BATCH_CHUNK" envDefault:"100"`
+	// PreviewContentChars truncates previewMessage.content at read time; the stored
+	// message is untouched. It is what bounds a page's preview memory, since a body
+	// may reach the gatekeeper's 20 KB ceiling. 0 disables truncation.
+	PreviewContentChars int `env:"PREVIEW_CONTENT_CHARS" envDefault:"50"`
+	// MaxSiteFanout bounds concurrent enrichment RPCs per request. Chunking makes a
+	// large page issue several per site, so this is the knob that throttles the
+	// resulting downstream load without a rebuild.
+	MaxSiteFanout int `env:"MAX_SITE_FANOUT" envDefault:"8"`
 	// Room sort-key cache for subscription.list (see
 	// mongorepo.NewSubscriptionRepo). An entry is at most TTL old and staleness
 	// only affects ordering; zero or less for either knob turns the cache off.
@@ -93,7 +137,9 @@ type Config struct {
 	BadgeCountCacheFirst bool        `env:"BADGE_COUNT_CACHE_FIRST" envDefault:"false"`
 	Mongo                MongoConfig `envPrefix:"MONGO_"`
 	NATS                 NATSConfig  `envPrefix:"NATS_"`
-	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
+	// Pool caps the NATS-path Mongo connection pool (MONGO_MAX_POOL_SIZE /
+	// MONGO_MIN_POOL_SIZE / MONGO_MAX_IDLE_TIME). The HTTP path has its own,
+	// HTTP_MONGO_-prefixed, so a large page cannot starve the RPC handlers.
 	Pool mongoutil.PoolConfig
 	// ShowTeamsRoom controls whether Teams-migrated rooms (origin "teams")
 	// appear in the subscription list/count; false hides them (reversible
@@ -102,6 +148,30 @@ type Config struct {
 	// ShowTeamsAccounts allowlists accounts that see Teams rooms even when
 	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
 	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+	// HealthAddr serves /healthz and /readyz on their own listener, so a shed API
+	// request can never fail a kubelet probe.
+	HealthAddr string `env:"HEALTH_ADDR" envDefault:":8081"`
+	// BotplatformURL enables the session-token auth branch; unset leaves SSO only.
+	BotplatformURL string `env:"BOTPLATFORM_URL" envDefault:""`
+	// GoMemLimitFraction sets GOMEMLIMIT to this share of the cgroup quota.
+	GoMemLimitFraction float64    `env:"GOMEMLIMIT_FRACTION" envDefault:"0.8"`
+	HTTP               HTTPConfig `envPrefix:"HTTP_"`
+}
+
+// validateMongoPool checks the HTTP client's pool trio. The NATS client uses
+// mongoutil.PoolConfig.Validate; this exists because PoolConfig's env tags are
+// fixed to the MONGO_ prefix and cannot be reused under HTTP_MONGO_.
+func validateMongoPool(prefix string, maxPool, minPool uint64, idle time.Duration) error {
+	if maxPool < 1 {
+		return fmt.Errorf("%sMAX_POOL_SIZE must be >= 1, got %d", prefix, maxPool)
+	}
+	if minPool > maxPool {
+		return fmt.Errorf("%[1]sMIN_POOL_SIZE (%[2]d) must be <= %[1]sMAX_POOL_SIZE (%[3]d)", prefix, minPool, maxPool)
+	}
+	if idle < 0 {
+		return fmt.Errorf("%sMAX_IDLE_TIME must be >= 0, got %s", prefix, idle)
+	}
+	return nil
 }
 
 // Load parses environment variables into Config; rejects MAX_SUBSCRIPTION_LIMIT < 1 because $limit:0 errors at query time.
@@ -127,6 +197,47 @@ func Load() (Config, error) {
 	}
 	if cfg.DefaultAppsLimit > cfg.MaxAppsLimit {
 		return Config{}, fmt.Errorf("APPS_DEFAULT_LIMIT (%d) must be <= APPS_MAX_LIMIT (%d)", cfg.DefaultAppsLimit, cfg.MaxAppsLimit)
+	}
+	if cfg.HTTP.MaxLimit < 1 {
+		return Config{}, fmt.Errorf("HTTP_SUBSCRIPTION_MAX_LIMIT must be >= 1, got %d", cfg.HTTP.MaxLimit)
+	}
+	if cfg.HTTP.DefaultLimit < 1 {
+		return Config{}, fmt.Errorf("HTTP_SUBSCRIPTION_DEFAULT_LIMIT must be >= 1, got %d", cfg.HTTP.DefaultLimit)
+	}
+	if cfg.HTTP.DefaultLimit > cfg.HTTP.MaxLimit {
+		return Config{}, fmt.Errorf("HTTP_SUBSCRIPTION_DEFAULT_LIMIT (%d) must be <= HTTP_SUBSCRIPTION_MAX_LIMIT (%d)", cfg.HTTP.DefaultLimit, cfg.HTTP.MaxLimit)
+	}
+	if cfg.HTTP.MaxConcurrency < 0 {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONCURRENCY must be >= 0, got %d", cfg.HTTP.MaxConcurrency)
+	}
+	if cfg.HTTP.MaxConns < 0 {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONNS must be >= 0, got %d", cfg.HTTP.MaxConns)
+	}
+	if cfg.HTTP.MaxConns > 0 && cfg.HTTP.MaxConns <= cfg.HTTP.MaxConcurrency {
+		return Config{}, fmt.Errorf("HTTP_MAX_CONNS (%d) must exceed HTTP_MAX_CONCURRENCY (%d): keep-alive connections outnumber in-flight requests", cfg.HTTP.MaxConns, cfg.HTTP.MaxConcurrency)
+	}
+	// Checked before the comparison below: ginutil.Timeout disables itself at <= 0,
+	// so a zero would pass "write exceeds handler" while dropping the budget.
+	if cfg.HTTP.HandlerTimeout <= 0 {
+		return Config{}, fmt.Errorf("HTTP_HANDLER_TIMEOUT must be > 0, got %s", cfg.HTTP.HandlerTimeout)
+	}
+	if cfg.HTTP.WriteTimeout <= cfg.HTTP.HandlerTimeout {
+		return Config{}, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must exceed HTTP_HANDLER_TIMEOUT (%s)", cfg.HTTP.WriteTimeout, cfg.HTTP.HandlerTimeout)
+	}
+	if err := validateMongoPool("HTTP_MONGO_", cfg.HTTP.MongoMaxPoolSize, cfg.HTTP.MongoMinPoolSize, cfg.HTTP.MongoMaxIdleTime); err != nil {
+		return Config{}, err
+	}
+	if cfg.GoMemLimitFraction <= 0 || cfg.GoMemLimitFraction > 1 {
+		return Config{}, fmt.Errorf("GOMEMLIMIT_FRACTION must be in (0,1], got %v", cfg.GoMemLimitFraction)
+	}
+	if cfg.MaxSiteFanout < 1 {
+		return Config{}, fmt.Errorf("MAX_SITE_FANOUT must be >= 1, got %d", cfg.MaxSiteFanout)
+	}
+	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
+		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
+	}
+	if cfg.PreviewContentChars < 0 {
+		return Config{}, fmt.Errorf("PREVIEW_CONTENT_CHARS must be >= 0, got %d", cfg.PreviewContentChars)
 	}
 	if cfg.MaxConcurrency < 0 {
 		return Config{}, fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)

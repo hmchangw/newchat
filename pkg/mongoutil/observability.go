@@ -1,6 +1,8 @@
 package mongoutil
 
 import (
+	"time"
+
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -25,6 +27,7 @@ type connectConfig struct {
 	// from the connection URI (or the driver default) survives.
 	maxPoolSize *uint64
 	minPoolSize *uint64
+	maxIdleTime *time.Duration
 }
 
 // Option configures Connect. Options are additive; the zero config attaches no

@@ -2,6 +2,7 @@ package mongoutil
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,4 +46,32 @@ func TestPoolConfig_Validate_RejectsMinAboveMax(t *testing.T) {
 	err := PoolConfig{MaxPoolSize: 100, MinPoolSize: 200}.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MONGO_MIN_POOL_SIZE")
+}
+
+// The driver's own maxIdleTimeMS default is 0, which means never reap, so a pool
+// that grew during a burst holds those sockets for the life of the process. The
+// default here is what stops that fleet-wide.
+func TestWithPool_AppliesMaxIdleTime(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithPool(PoolConfig{MaxPoolSize: 150, MaxIdleTime: 5 * time.Minute})).applyTuning(clientOpts)
+
+	require.NotNil(t, clientOpts.MaxConnIdleTime)
+	assert.Equal(t, 5*time.Minute, *clientOpts.MaxConnIdleTime)
+}
+
+// Zero is the documented "never reap" escape hatch and must leave a URI-supplied
+// maxIdleTimeMS intact, matching how MinPoolSize=0 behaves.
+func TestWithPool_OmitsMaxIdleTimeWhenZero(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithPool(PoolConfig{MaxPoolSize: 150, MaxIdleTime: 0})).applyTuning(clientOpts)
+
+	assert.Nil(t, clientOpts.MaxConnIdleTime, "zero MaxIdleTime must leave a URI/driver value intact")
+}
+
+// A negative duration is a typo, not a request to disable reaping.
+func TestPoolConfig_Validate_RejectsNegativeMaxIdleTime(t *testing.T) {
+	err := PoolConfig{MaxPoolSize: 150, MaxIdleTime: -time.Second}.Validate()
+
+	require.Error(t, err)
+	assert.Equal(t, "MONGO_MAX_IDLE_TIME must be >= 0, got -1s", err.Error())
 }

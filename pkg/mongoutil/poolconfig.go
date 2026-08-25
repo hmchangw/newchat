@@ -1,6 +1,9 @@
 package mongoutil
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // PoolConfig is an env-tagged MongoDB connection-pool configuration. Add it as a
 // named field to a service's config (e.g. `Pool mongoutil.PoolConfig`), call
@@ -21,6 +24,12 @@ import "fmt"
 type PoolConfig struct {
 	MaxPoolSize uint64 `env:"MONGO_MAX_POOL_SIZE" envDefault:"150"`
 	MinPoolSize uint64 `env:"MONGO_MIN_POOL_SIZE" envDefault:"0"`
+	// MaxIdleTime reaps connections idle this long. Needed explicitly: the driver
+	// reads its own default of 0 as NEVER reap, so a pool grown during a burst
+	// holds those sockets for the life of the process, and a failover re-growing
+	// them on another member adds to the total rather than replacing it. 0 keeps
+	// the never-reap behaviour for a caller that wants it.
+	MaxIdleTime time.Duration `env:"MONGO_MAX_IDLE_TIME" envDefault:"5m"`
 }
 
 // WithPool is a Connect option that applies this pool configuration, so call
@@ -35,6 +44,9 @@ func WithPool(p PoolConfig) Option {
 		if p.MinPoolSize > 0 {
 			c.minPoolSize = &p.MinPoolSize
 		}
+		if p.MaxIdleTime > 0 {
+			c.maxIdleTime = &p.MaxIdleTime
+		}
 	}
 }
 
@@ -45,6 +57,9 @@ func (p PoolConfig) Validate() error {
 	}
 	if p.MinPoolSize > p.MaxPoolSize {
 		return fmt.Errorf("MONGO_MIN_POOL_SIZE (%d) must be <= MONGO_MAX_POOL_SIZE (%d)", p.MinPoolSize, p.MaxPoolSize)
+	}
+	if p.MaxIdleTime < 0 {
+		return fmt.Errorf("MONGO_MAX_IDLE_TIME must be >= 0, got %s", p.MaxIdleTime)
 	}
 	return nil
 }

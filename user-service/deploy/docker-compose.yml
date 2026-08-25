@@ -29,6 +29,38 @@ services:
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-nats-chat}
+      # Client-facing HTTP listener (subscription.list without the 128 KB NATS cap).
+      # Pinned, not overridable: docker-local/traefik/dynamic.yml forwards to
+      # user-service:8080 and its file provider does no env substitution.
+      - HTTP_PORT=8080
+      - HTTP_MAX_CONCURRENCY=${HTTP_MAX_CONCURRENCY:-512}
+      - HTTP_MAX_CONNS=${HTTP_MAX_CONNS:-2048}
+      - HTTP_HANDLER_TIMEOUT=${HTTP_HANDLER_TIMEOUT:-30s}
+      - HTTP_WRITE_TIMEOUT=${HTTP_WRITE_TIMEOUT:-35s}
+      - HTTP_GZIP_MIN_BYTES=${HTTP_GZIP_MIN_BYTES:-1024}
+      # A Mongo pool of its own, so a large page cannot starve the NATS handlers.
+      - HTTP_MONGO_MAX_POOL_SIZE=${HTTP_MONGO_MAX_POOL_SIZE:-128}
+      - HTTP_MONGO_MIN_POOL_SIZE=${HTTP_MONGO_MIN_POOL_SIZE:-0}
+      - HTTP_MONGO_MAX_IDLE_TIME=${HTTP_MONGO_MAX_IDLE_TIME:-5m}
+      - MONGO_MAX_POOL_SIZE=${MONGO_MAX_POOL_SIZE:-150}
+      - MONGO_MIN_POOL_SIZE=${MONGO_MIN_POOL_SIZE:-0}
+      - MONGO_MAX_IDLE_TIME=${MONGO_MAX_IDLE_TIME:-5m}
+      - HTTP_SUBSCRIPTION_DEFAULT_LIMIT=${HTTP_SUBSCRIPTION_DEFAULT_LIMIT:-40}
+      - HTTP_SUBSCRIPTION_MAX_LIMIT=${HTTP_SUBSCRIPTION_MAX_LIMIT:-400}
+      # Room ids per enrichment RPC; history-service hard-rejects over 100.
+      - ROOM_BATCH_CHUNK=${ROOM_BATCH_CHUNK:-100}
+      # Truncates each preview body; a page holds 400 and a body may reach 20 KB.
+      - PREVIEW_CONTENT_CHARS=${PREVIEW_CONTENT_CHARS:-50}
+      - MAX_SITE_FANOUT=${MAX_SITE_FANOUT:-8}
+      - HEALTH_ADDR=${HEALTH_ADDR:-:8081}
+      # Unset leaves HTTP auth on ssoToken only.
+      - BOTPLATFORM_URL=${BOTPLATFORM_URL:-}
+      - GOMEMLIMIT_FRACTION=${GOMEMLIMIT_FRACTION:-0.8}
+    ports:
+      # 8080 in-container; host 8090 because 8080 (auth), 8082 (admin), 8085
+      # (portal), 8086 (upload), 8087 (tcard), 8088 (observability) and 8089
+      # (client-update) are taken. The health listener stays unpublished.
+      - "${USER_SERVICE_HOST_PORT:-8090}:8080"
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

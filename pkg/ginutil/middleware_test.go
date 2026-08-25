@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -136,6 +137,8 @@ func TestCORS_PreflightOptions_Returns204WithoutHandler(t *testing.T) {
 	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
 }
 
+// Without the credential headers on the preflight allow-list the endpoint is
+// unreachable cross-origin, which is how this was missed the first time.
 func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -158,4 +161,41 @@ func TestCORS_PreflightOptions_AllowsTracePropagationHeaders(t *testing.T) {
 	// Preflight stays permissive; untrusted identity is dropped at extraction by
 	// obs.PublicIngressPropagator, so a rolling client is not blocked by CORS.
 	assert.Contains(t, allowed, "baggage")
+}
+
+// A browser preflight that omits these fails, making every credentialed endpoint
+// unreachable cross-origin — the failure is invisible server-side, so pin them.
+func TestCORS_PreflightAllowsCredentialHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CORS())
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/subscriptions", nil)
+	req.Header.Set("Origin", "https://chat.example.com")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNoContent, w.Code)
+	allowed := w.Header().Get("Access-Control-Allow-Headers")
+	for _, h := range []string{"ssoToken", botauth.HeaderUserID, botauth.HeaderAuthToken} {
+		assert.Contains(t, allowed, h, "credential header must survive preflight")
+	}
+}
+
+// Neither header is CORS-safelisted, so a browser client cannot read the
+// Retry-After it is told to honour, nor correlate X-Request-ID, without this.
+func TestCORS_ExposesRetryAfterAndRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(CORS())
+	r.GET("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://chat.example.com")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	exposed := w.Header().Get("Access-Control-Expose-Headers")
+	assert.Contains(t, exposed, "Retry-After")
+	assert.Contains(t, exposed, natsutil.RequestIDHeader)
 }

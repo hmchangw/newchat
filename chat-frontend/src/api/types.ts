@@ -243,7 +243,9 @@ export interface Attachment {
 export interface PreviewMessage {
   messageId: string
   sender: Participant
-  /** The full message body; the client truncates for display. */
+  /** On `subscription.list` rows the server has already truncated this to a short
+   *  preview (50 characters by default); on `message_edited` / `message_deleted`
+   *  events it is the full body. The client truncates further for display. */
   content: string
   /** RFC3339. */
   createdAt: string
