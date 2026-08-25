@@ -50,8 +50,11 @@ func (h *handler) setImageCacheHeaders(c *gin.Context, etag string) {
 func (h *handler) serveDefault(c *gin.Context, kind, seed, name string) {
 	c.Set("media_kind", kind)
 	if !h.cfg.DefaultAvatarEnabled {
-		// Default generated avatar disabled: 404 so the client renders its own fallback.
+		// Default generated avatar disabled: a cacheable 404 (same bounded max-age as the
+		// SVG) so the client renders its own fallback without re-hitting the backend on
+		// every render; a toggle change propagates within that window.
 		c.Set("media_outcome", "disabled")
+		h.setImageCacheHeaders(c, "")
 		errhttp.Write(c.Request.Context(), c, errcode.NotFound("avatar not found"))
 		return
 	}

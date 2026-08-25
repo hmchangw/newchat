@@ -48,6 +48,8 @@ func TestDefaultAvatarDisabled_User_404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.NotContains(t, w.Body.String(), "<svg")
 	assert.Contains(t, w.Body.String(), "not_found")
+	// Bounded negative-cache so a disabled default doesn't force a per-render backend lookup.
+	assert.Equal(t, "public, max-age=3600", w.Header().Get("Cache-Control"))
 }
 
 func TestDefaultAvatarDisabled_Bot_404(t *testing.T) {
