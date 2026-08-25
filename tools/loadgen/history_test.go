@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuiltinHistoryPreset(t *testing.T) {
-	cases := []string{"history-small", "history-medium", "history-large"}
+	cases := []string{"history-small", "history-medium", "history-large", "history-sparse"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			p, ok := BuiltinHistoryPreset(name)

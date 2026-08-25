@@ -38,6 +38,68 @@ var builtinHistoryPresets = map[string]HistoryPreset{
 		MessagesPerRoom: 50000, MessageSpanDays: 30, ThreadRate: 0.10,
 		RepliesPerThread: 3, ContentBytes: 200,
 	},
+	// history-sparse models a long-lived, low-traffic room: a year of history at
+	// a handful of messages per bucket. It exists to measure history-service's
+	// per-bucket read cache, which the three presets above cannot exercise at
+	// all — see HistoryRowsPerBucket for the arithmetic, and the test that pins
+	// it. Not a throughput preset: the row count per room is deliberately tiny.
+	"history-sparse": {
+		Name: "history-sparse", Users: 5000, Rooms: 1000, BaselineSize: 20,
+		MessagesPerRoom: 240, MessageSpanDays: 360, ThreadRate: 0.05,
+		RepliesPerThread: 3, ContentBytes: 200,
+	},
+}
+
+// Bucket-shape thresholds a preset must satisfy for history-service's
+// per-bucket cache to do anything. Both come from that service's defaults:
+// HISTORY_BUCKET_CACHE_MAX_ROWS and the LoadHistory page size.
+const (
+	// historyCacheMaxRows mirrors HISTORY_BUCKET_CACHE_MAX_ROWS. A bucket with
+	// more rows is declined as oversized and read live, so a preset denser than
+	// this never produces a single cache hit.
+	historyCacheMaxRows = 50
+	// historyDefaultPageLimit mirrors the LoadHistory default page size. Below
+	// it a page spans several buckets, which is the multi-bucket walk the cache
+	// collapses; at or above it a page fills from one bucket and the cache saves
+	// no round trip.
+	historyDefaultPageLimit = 20
+)
+
+// HistoryRowsPerBucket estimates how many top-level rows one (room, bucket)
+// partition holds under this preset, given the bucket width history-service is
+// configured with. Messages are spread uniformly across the span, so this is
+// simply the share of the span one bucket covers.
+//
+// This is the number that decides whether a run can measure the per-bucket
+// cache. Above historyCacheMaxRows every bucket is declined as oversized and
+// the cache serves nothing; at or above historyDefaultPageLimit a page fills
+// from a single bucket and there is no walk to collapse. All three of the
+// small/medium/large presets sit far above both — they model busy rooms, and
+// the cache targets sparse ones.
+func HistoryRowsPerBucket(p *HistoryPreset, bucketWidth time.Duration) float64 {
+	span := time.Duration(p.MessageSpanDays) * 24 * time.Hour
+	if span <= 0 || bucketWidth <= 0 {
+		return 0
+	}
+	if bucketWidth > span {
+		return float64(p.MessagesPerRoom) // the whole room lands in one bucket
+	}
+	return float64(p.MessagesPerRoom) * (float64(bucketWidth) / float64(span))
+}
+
+// HistorySealedBuckets estimates how many SEALED buckets a room's history spans
+// under this preset. The newest bucket is the current one and is never cached,
+// so this is the count of buckets a read can actually be served from cache.
+func HistorySealedBuckets(p *HistoryPreset, bucketWidth time.Duration) int {
+	span := time.Duration(p.MessageSpanDays) * 24 * time.Hour
+	if span <= 0 || bucketWidth <= 0 {
+		return 0
+	}
+	total := int(span / bucketWidth)
+	if span%bucketWidth != 0 {
+		total++
+	}
+	return max(total-1, 0)
 }
 
 // BuiltinHistoryPreset looks up a preset by name.
