@@ -5,16 +5,125 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// metaReader is the slice of Store the cross-site check needs.
-type metaReader interface {
-	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
+// roomActivityRefresh is one room's coalesced position, handed to the publisher
+// so destination sites can order a room they hold no rooms doc for.
+type roomActivityRefresh struct {
+	roomID string
+	at     time.Time
+}
+
+// roomActivityRefresher announces a room's position cross-site at most once per
+// room per interval.
+//
+// It hangs off the fan-out path rather than a Mongo write batch: broadcast-worker
+// no longer writes rooms.lastMsgAt (unread-worker owns that now), so there is no
+// batch left to ride. Nothing is lost by the move — the announce still happens
+// exactly once per created message, the handler has already resolved the room's
+// meta so the cross-site test costs no read, and the throttle rather than the
+// write cadence was always what governed the announce rate.
+//
+// A nil refresher is inert, which is how a single-site deployment disables it.
+type roomActivityRefresher struct {
+	publish  func(context.Context, roomActivityRefresh) error
+	interval time.Duration
+	now      func() time.Time
+
+	mu            sync.Mutex
+	lastRefreshed map[string]time.Time
+	lastPruned    time.Time
+}
+
+func newRoomActivityRefresher(publish func(context.Context, roomActivityRefresh) error, interval time.Duration) *roomActivityRefresher {
+	return &roomActivityRefresher{
+		publish:       publish,
+		interval:      interval,
+		lastRefreshed: make(map[string]time.Time),
+	}
+}
+
+func (r *roomActivityRefresher) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// refresh announces roomID's position, subject to the cross-site test and the
+// per-room throttle. crossSite is the room meta's tri-state: an unclassified
+// room (nil) counts as cross-site, since the cost of guessing wrong is one
+// wasted publish and the destination ignores rooms it holds no subscription for.
+//
+// Cost scales with distinct active cross-site rooms per interval, not with
+// message rate. The interval can be generous because the consumer cannot see the
+// difference: the subscription list serves ordering from a cache whose own TTL is
+// an order of magnitude longer, so a position a few seconds behind is
+// indistinguishable from a fresh one. The cost of the throttle is that a room
+// going quiet right after a burst keeps the position from its last announce —
+// stale by at most one interval, and repaired by its next message.
+//
+// Failures are logged, never returned: the position is decorative, the next
+// message re-establishes it, and returning would NAK a message already
+// broadcast to every client in the room.
+func (r *roomActivityRefresher) refresh(ctx context.Context, roomID string, crossSite *bool, at time.Time) {
+	if r == nil || r.publish == nil {
+		return
+	}
+	if crossSite != nil && !*crossSite {
+		return
+	}
+	now := r.clock()
+	if r.throttled(roomID, now) {
+		return
+	}
+	if err := r.publish(ctx, roomActivityRefresh{roomID: roomID, at: at}); err != nil {
+		slog.WarnContext(ctx, "publish room activity refresh failed",
+			"room_id", roomID, "error", err,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	}
+}
+
+// throttled reports whether roomID was announced within interval, and records
+// the announce when it was not. Pruning is amortized to once per interval
+// rather than run on every message: the map then stays bounded by rooms active
+// within roughly two intervals, without an O(rooms) sweep on the hot path.
+func (r *roomActivityRefresher) throttled(roomID string, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.interval <= 0 {
+		return false
+	}
+	if last, ok := r.lastRefreshed[roomID]; ok && now.Sub(last) < r.interval {
+		return true
+	}
+	if r.lastRefreshed == nil {
+		r.lastRefreshed = make(map[string]time.Time)
+	}
+	r.lastRefreshed[roomID] = now
+	if now.Sub(r.lastPruned) >= r.interval {
+		r.pruneLocked(now)
+		r.lastPruned = now
+	}
+	return false
+}
+
+// pruneLocked drops rooms that have gone quiet for longer than the interval;
+// their next message re-announces immediately, so keeping them would only leak
+// memory. Callers must hold r.mu.
+func (r *roomActivityRefresher) pruneLocked(now time.Time) {
+	for roomID, last := range r.lastRefreshed {
+		if now.Sub(last) >= r.interval {
+			delete(r.lastRefreshed, roomID)
+		}
+	}
 }
 
 // remotePeers returns the sites to refresh: everything in allSiteIDs except this
@@ -36,25 +145,10 @@ func remotePeers(siteID string, allSiteIDs []string) []string {
 	return peers
 }
 
-// crossSiteChecker reports whether a room has members off this site, reading the
-// room-meta cache. An unclassified room (nil CrossSite) counts as cross-site:
-// the cost of guessing wrong is one wasted publish, and the destination ignores
-// rooms it holds no subscription for. A meta read failure skips the refresh —
-// the next message in the room retries it.
-func crossSiteChecker(s metaReader) func(ctx context.Context, roomID string) bool {
-	return func(ctx context.Context, roomID string) bool {
-		meta, err := s.GetRoomMeta(ctx, roomID)
-		if err != nil {
-			return false
-		}
-		return meta.CrossSite == nil || *meta.CrossSite
-	}
-}
-
 // roomActivityPublisher emits one refresh per peer site on the core-NATS
 // activity lane. One room per message keeps the payload bounded by
 // construction — a batched form would grow with the number of active rooms and
-// eventually exceed max_payload, silently losing a whole flush window.
+// eventually exceed max_payload, silently losing a whole window.
 func roomActivityPublisher(p Publisher, siteID string, peers []string) func(context.Context, roomActivityRefresh) error {
 	return func(ctx context.Context, r roomActivityRefresh) error {
 		evt := model.RoomActivityEvent{

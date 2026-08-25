@@ -211,6 +211,15 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 		t.Fatal("transient message never redelivered")
 	}
 
+	// Both signals above are sent from inside the handler, but the outcome is
+	// recorded after it: Nak() tells the server first and calls finish second
+	// (metrics.go), and a bare Nak redelivers instantly — so the redelivery can
+	// be handled and signalled while the naked message's goroutine has not yet
+	// reached its finish. Waiting on the handler WaitGroup is what makes the
+	// counters readable; without it the nak assertion below reads 0 whenever a
+	// loaded scheduler wins that race.
+	wg.Wait()
+
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 

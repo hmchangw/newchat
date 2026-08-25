@@ -16,6 +16,7 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -51,25 +52,27 @@ type config struct {
 	MongoPassword string   `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
-	MongoReadPreference  string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	Pool                 mongoutil.PoolConfig
-	MaxWorkers           int           `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	Pool                mongoutil.PoolConfig
+	MaxWorkers          int `env:"MAX_WORKERS"               envDefault:"100"`
 	// RoomActivityRefreshInterval caps how often one room's position is announced
-	// cross-site, independently of the Mongo flush above. Generous by design: the
-	// subscription list serves ordering from a cache with a far longer TTL, so a
-	// position a few seconds behind is indistinguishable from a fresh one.
-	// Non-positive announces on every flush.
+	// cross-site. Generous by design: the subscription list serves ordering from a
+	// cache with a far longer TTL, so a position a few seconds behind is
+	// indistinguishable from a fresh one. Non-positive announces on every message.
 	RoomActivityRefreshInterval time.Duration   `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
 	UserCacheSize               int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
 	UserCacheTTL                time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	UserL2TTL                   time.Duration   `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
 	RoomMetaCacheSize           int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL            time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
 	RoomKeyGracePeriod          time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	RoomKeyCacheTTL             time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
 	RoomKeyCacheSize            int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	MongoBreakerFails           int             `env:"BROADCAST_MONGO_BREAKER_FAILS"    envDefault:"5"`
+	MongoBreakerCooldown        time.Duration   `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
 	RoomKeyRetiredTTL           time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
-	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
+	RoomSubCacheTTL             time.Duration   `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"` // shared key; see pkg/roomsubcache docs
 	ValkeyAddrs                 []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword              string          `env:"VALKEY_PASSWORD"           envDefault:""`
 	ValkeyKeyGracePeriod        time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
@@ -142,19 +145,48 @@ func main() {
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
-	var metaValkey valkeyutil.Client
+	var valkeyClient valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkeyClient, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)
 		if err != nil {
-			slog.Error("valkey connect (room-meta L2) failed", "error", err)
+			slog.Error("valkey connect failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
 	}
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
+	// One breaker for every Mongo call site in this service, not one per site.
+	// The breaker tracks a single fact — is Mongo reachable — and every call site
+	// is evidence about it, so they share one failure budget: N breakers at
+	// threshold T cost N*T stalled calls before the service is fully fenced,
+	// which is the delay the breaker exists to remove. Call sites differ only in
+	// which "healthy absence" they can return, and mongoBreakerFailure exempts
+	// all of them.
+	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
+		circuitbreaker.Tracked(ctx, "mongo"),
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	// subscriptions is pinned to primary: it feeds roomsubcache, a SHARED
+	// 90-minute entry that notification-worker reads too, so a replica-lagged
+	// read here republishes a removed member to every consumer of that key for
+	// the whole TTL rather than costing one stale fan-out. Same reasoning as
+	// roomsPrimary below.
+	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
+	// rooms is pinned for the identical reason: it is what GetRoomMeta reads
+	// through into roommetacache, another key shared with message-gatekeeper and
+	// notification-worker. A lagging secondary there republishes a renamed or
+	// just-deleted room to all of them for the TTL.
+	roomsPrimaryStore := mongoutil.CollectionWithReadPreference(db.Collection("rooms"), readpref.Primary())
+	// users is the third collection behind the same shared key: the roomsubcache
+	// loader reads it to stamp HomeSiteID, and notification-worker routes its
+	// per-site badge RPC off that field. A secondary that has not yet replicated
+	// a just-added member stamps it empty for whoever wins the cold fill, and
+	// every reader of the key inherits that for the TTL — so it is pinned
+	// alongside subscriptions and rooms, as notification-worker already does.
+	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
+	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
+		usersPrimary, valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
@@ -164,8 +196,8 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
-	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	us, err := userstore.Resilient(db.Collection("users"), mongoBreaker,
+		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)
@@ -217,14 +249,14 @@ func main() {
 	}
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
-	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
-	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
-	coalescer := newCoalescingStore(cachedStore, store)
+	// The cross-site room-position announce. It used to ride the rooms.lastMsgAt
+	// flush; that write is unread-worker's now, so it fires from the fan-out path
+	// instead — same one-per-created-message coverage, and the room meta the
+	// cross-site test needs is already in the handler's hand.
+	var activity *roomActivityRefresher
 	if peers := remotePeers(cfg.SiteID, cfg.AllSiteIDs); len(peers) > 0 {
-		coalescer.crossSite = crossSiteChecker(cachedStore)
-		coalescer.publishActivity = roomActivityPublisher(publisher, cfg.SiteID, peers)
-		coalescer.refreshInterval = cfg.RoomActivityRefreshInterval
-		coalescer.lastRefreshed = make(map[string]time.Time)
+		activity = newRoomActivityRefresher(
+			roomActivityPublisher(publisher, cfg.SiteID, peers), cfg.RoomActivityRefreshInterval)
 		slog.Info("cross-site room-activity refresh enabled",
 			"peers", peers, "refresh_interval", cfg.RoomActivityRefreshInterval)
 	} else {
@@ -234,9 +266,6 @@ func main() {
 		slog.Warn("cross-site room-activity refresh disabled: no remote peers configured",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	flushCtx, flushCancel := context.WithCancel(context.Background())
-	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
-	slog.Info("last-msg coalescer enabled", "flush_interval", cfg.LastMsgFlushInterval)
 
 	var keyProvider RoomKeyProvider = keyStore
 	var keyCache *CachedKeyProvider
@@ -273,9 +302,9 @@ func main() {
 	}
 
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
+	handler := NewHandler(cachedStore, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
 		withBroadcastMetrics(domainMetrics), withOutboxFederation(cfg.SiteID, outboxPublish),
-		withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
+		withRoomActivityRefresh(activity), withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -332,11 +361,6 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
-		// Stop the coalescer AFTER in-flight handlers drain so any final buffered UpdateRoomLastMessage calls land in this last flush.
-		func(_ context.Context) error {
-			flushCancel()
-			return nil
-		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 	}
 	if keyStore != nil {
@@ -345,7 +369,7 @@ func main() {
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		// Flush observability LAST so all prior teardown telemetry is exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
@@ -408,7 +432,9 @@ func guardedProcessor(process messageProcessor) natsmetrics.ProcessMessage {
 // buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
 // without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot streams.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	// Outage retry budget: fan-out that cannot complete must wait for the
+	// dependency rather than drop the message after ~2.6 minutes.
+	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.LowLatencyBackoff))
 	cc.Durable = durable
 	cc.FilterSubject = filterSubject
 	return cc
