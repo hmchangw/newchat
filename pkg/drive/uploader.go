@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -34,13 +35,14 @@ type Client struct {
 // (the Drive is reached over a private network); the download client uses a
 // 5-minute timeout to allow large streamed bodies.
 //
-// The upload side keeps only the *http.Client: the bulk upload streams its body,
-// and Resty v2 always materializes an io.Reader body in memory to make it
-// replayable (createHTTPRequest -> getBodyCopy -> io.ReadAll), which is the very
-// OOM this path exists to avoid. Building it through restyutil anyway preserves
-// the shared transport, OTel instrumentation and timeout — but not resty's
-// request/response log hooks; upload failures are logged once at the caller's
-// errhttp boundary instead.
+// The upload side keeps only the *http.Client — a deliberate exception to the
+// Resty-for-outbound-HTTP guideline: the bulk upload streams its body, and
+// Resty v2 materializes any io.Reader body it cannot natively replay
+// (createHTTPRequest -> getBodyCopy -> io.ReadAll; only in-memory bytes/strings
+// readers escape), which is the very OOM this path exists to avoid. Building it
+// through restyutil anyway preserves the shared transport, OTel instrumentation
+// and timeout — but not resty's request/response log hooks; upload failures are
+// logged once at the caller's errhttp boundary instead.
 func NewClient(cfg *Config) *Client {
 	// #nosec G402 -- internal Drive over a private network; TLS verification is intentionally skipped per deployment.
 	insecure := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}}
@@ -105,7 +107,11 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("drive bulk upload returned status %d", resp.StatusCode)
+		// Bounded snippet so a Drive rejection is diagnosable without resty's
+		// response logging, and without ever logging a full body. A read error
+		// here is irrelevant next to the status and intentionally dropped.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("drive bulk upload returned status %d: %s", resp.StatusCode, snippet)
 	}
 	var result []UploadGroupImageResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

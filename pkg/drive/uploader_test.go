@@ -190,14 +190,14 @@ func TestClient_UploadGroupImages_SniffsEachPartIndependently(t *testing.T) {
 func TestClient_UploadGroupImages_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"quota exceeded"}`)
 	}))
 	defer srv.Close()
 	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
 	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
 		[]MultipartFile{{File: fakeMultipart("x"), Filename: "a.png"}})
-	if err == nil {
-		t.Fatal("expected error on 500")
-	}
+	require.ErrorContains(t, err, "status 500")
+	require.ErrorContains(t, err, "quota exceeded", "the response snippet must reach the error for diagnosis")
 }
 
 // TestClient_UploadGroupImages_TransportAndDecodeErrors covers the two error

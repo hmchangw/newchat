@@ -33,11 +33,13 @@ func TestZeroReader_SeekAndReadAt(t *testing.T) {
 
 	p := []byte{9, 9, 9, 9}
 	n, err := z.ReadAt(p, 8)
-	require.NoError(t, err)
+	assert.Equal(t, io.EOF, err, "io.ReaderAt: a short read must return an explaining error")
 	assert.Equal(t, 2, n)
 	assert.Equal(t, []byte{0, 0}, p[:n])
 	_, err = z.ReadAt(p, 10)
 	assert.Equal(t, io.EOF, err)
+	_, err = z.ReadAt(p, -1)
+	require.Error(t, err, "negative offsets read before the file")
 }
 
 func TestPeakHeapDuring_SamplesWhileFnRuns(t *testing.T) {

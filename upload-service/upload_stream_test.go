@@ -101,9 +101,7 @@ func TestHandleUploadFile_StreamsLargeFileWithoutBuffering(t *testing.T) {
 	})
 
 	require.Equal(t, "200 OK", status)
-	if peak > maxPeak {
-		t.Fatalf("peak heap %d MiB for a %d MiB upload (limit %d MiB): the body is being buffered",
-			peak>>20, fileSize>>20, maxPeak>>20)
-	}
-	fmt.Printf("non-image: uploaded %d MiB with a %d MiB peak heap\n", fileSize>>20, peak>>20)
+	require.LessOrEqualf(t, peak, uint64(maxPeak),
+		"peak heap %d MiB for a %d MiB upload: the body is being buffered", peak>>20, fileSize>>20)
+	t.Logf("non-image: uploaded %d MiB with a %d MiB peak heap", fileSize>>20, peak>>20)
 }

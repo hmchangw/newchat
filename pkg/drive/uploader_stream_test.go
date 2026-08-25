@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -42,18 +45,13 @@ func TestClient_UploadGroupImages_StreamsWithoutBufferingBody(t *testing.T) {
 	peak := testutil.PeakHeapDuring(func() {
 		_, err = c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", files)
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 	total := int64(fileSize) * fileCount
-	if got < total {
-		t.Fatalf("server received %d bytes, want at least %d — every file must arrive whole", got, total)
-	}
-	if peak > maxPeak {
-		t.Fatalf("peak heap %d MiB while uploading %d MiB across %d files (limit %d MiB): the body is being buffered in memory",
-			peak>>20, total>>20, fileCount, maxPeak>>20)
-	}
-	fmt.Printf("streamed %d MiB across %d files with a %d MiB peak heap\n", total>>20, fileCount, peak>>20)
+	require.GreaterOrEqual(t, got, total, "every file must arrive whole")
+	require.LessOrEqualf(t, peak, uint64(maxPeak),
+		"peak heap %d MiB while uploading %d MiB across %d files: the body is being buffered in memory",
+		peak>>20, total>>20, fileCount)
+	t.Logf("streamed %d MiB across %d files with a %d MiB peak heap", total>>20, fileCount, peak>>20)
 }
 
 // Streaming must not silently downgrade the request to chunked transfer-encoding:
@@ -76,15 +74,9 @@ func TestClient_UploadGroupImages_SendsExactContentLength(t *testing.T) {
 		{File: fakeMultipart(pngMagic + "aaaaaaaaaa"), Filename: "a.png"},
 		{File: fakeMultipart(pdfMagic + "bbb"), Filename: "b.pdf"},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(te) != 0 {
-		t.Fatalf("Transfer-Encoding = %v, want none (a Content-Length body)", te)
-	}
-	if declared != received {
-		t.Fatalf("Content-Length = %d but body was %d bytes — the declared length must be exact", declared, received)
-	}
+	require.NoError(t, err)
+	require.Empty(t, te, "want a Content-Length body, not chunked transfer-encoding")
+	require.Equal(t, received, declared, "the declared Content-Length must be exact")
 }
 
 // failingFile is a multipart.File whose Seek or Read fails on demand.
@@ -142,15 +134,8 @@ func TestClient_UploadGroupImages_UnreadableFile(t *testing.T) {
 			c := NewClient(&Config{URL: srv.URL, Token: "tok"})
 			_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
 				[]MultipartFile{{File: tt.file, Filename: "a.png"}})
-			if err == nil {
-				t.Fatal("expected an error")
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error = %q, want it to mention %q", err, tt.wantErr)
-			}
-			if hits != 0 {
-				t.Fatalf("Drive was called %d times; the upload must fail before any request", hits)
-			}
+			require.ErrorContains(t, err, tt.wantErr)
+			require.Zero(t, hits, "the upload must fail before any request reaches Drive")
 		})
 	}
 }
@@ -163,21 +148,19 @@ func TestClient_UploadGroupImages_FilesAroundSniffBoundary(t *testing.T) {
 			want := strings.Repeat("x", size)
 			var got string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// assert (never require) here: the handler runs off the test
+				// goroutine, where FailNow is not allowed.
 				// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
-				if err := r.ParseMultipartForm(10 << 20); err != nil {
-					t.Errorf("parse multipart form: %v", err)
+				if err := r.ParseMultipartForm(10 << 20); !assert.NoError(t, err, "parse multipart form") {
 					return
 				}
 				f, err := r.MultipartForm.File["files[0].file"][0].Open()
-				if err != nil {
-					t.Errorf("open part: %v", err)
+				if !assert.NoError(t, err, "open part") {
 					return
 				}
 				defer f.Close()
 				b, err := io.ReadAll(f)
-				if err != nil {
-					t.Errorf("read part: %v", err)
-				}
+				assert.NoError(t, err, "read part")
 				got = string(b)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `[]`)
@@ -187,12 +170,8 @@ func TestClient_UploadGroupImages_FilesAroundSniffBoundary(t *testing.T) {
 			c := NewClient(&Config{URL: srv.URL, Token: "tok"})
 			_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
 				[]MultipartFile{{File: fakeMultipart(want), Filename: "a.bin"}})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != want {
-				t.Fatalf("part body = %d bytes, want %d", len(got), len(want))
-			}
+			require.NoError(t, err)
+			require.Equal(t, want, got, "the part body must arrive whole")
 		})
 	}
 }

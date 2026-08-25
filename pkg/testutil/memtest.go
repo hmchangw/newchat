@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"io"
 	"runtime"
 	"time"
@@ -30,16 +31,24 @@ func (z *ZeroReader) Read(p []byte) (int, error) {
 }
 
 func (z *ZeroReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("testutil.ZeroReader.ReadAt: negative offset")
+	}
 	if off >= z.N {
 		return 0, io.EOF
 	}
-	if int64(len(p)) > z.N-off {
-		p = p[:z.N-off]
+	n := len(p)
+	var err error
+	if int64(n) > z.N-off {
+		n = int(z.N - off)
+		// io.ReaderAt contract: n < len(p) must come with an explaining error,
+		// like bytes.Reader — a size-driven caller loops forever otherwise.
+		err = io.EOF
 	}
-	for i := range p {
+	for i := range p[:n] {
 		p[i] = 0
 	}
-	return len(p), nil
+	return n, err
 }
 
 func (z *ZeroReader) Seek(offset int64, whence int) (int64, error) {
