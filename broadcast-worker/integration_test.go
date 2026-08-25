@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -862,4 +863,83 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 	assert.Equal(t, []string{"carol"}, payload.Accounts, "only the remote-homed mentionee")
 	assert.Equal(t, msgTime.UnixMilli(), payload.MentionedAt)
 	assert.NotZero(t, payload.Timestamp)
+}
+
+// erroringParentFetcher stands in for history-service with Cassandra down:
+// FetchParent always fails, and the stub records whether it was ever called so a
+// test can prove a Mongo-resolved parent short-circuits the history round-trip
+// entirely, rather than merely tolerating its failure.
+type erroringParentFetcher struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (f *erroringParentFetcher) FetchParent(context.Context, string, string, string, string) (*ParentMessageInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	return nil, errors.New("history-service unreachable: cassandra down")
+}
+
+func (f *erroringParentFetcher) wasCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.called
+}
+
+// TestBroadcastWorker_ChannelThreadFanOut_HistoryFetchFails_Integration is the
+// end-to-end proof of the Cassandra-outage fix: a real thread_rooms document
+// already carries threadParentCreatedAt (as it would once the thread has seen a
+// prior reply), so channelThreadFanOut resolves the parent from Mongo and never
+// falls through to FetchParent — the fan-out neither errors nor drops the
+// follower even though history-service (and the Cassandra behind it) is down.
+func TestBroadcastWorker_ChannelThreadFanOut_HistoryFetchFails_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	seedUsers(t, db)
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-outage", Name: "general", Type: model.RoomTypeChannel, UserCount: 2, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+
+	parentAt := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+	_, err = db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+		"_id":                   "tr-outage",
+		"parentMessageId":       "parent-outage",
+		"threadParentCreatedAt": parentAt,
+		"roomId":                "r-outage",
+		"replyAccounts":         []string{"bob"},
+	})
+	require.NoError(t, err)
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0)
+	us := userstore.NewMongoStore(db.Collection("users"))
+	pub := &recordingPublisher{}
+	fetcher := &erroringParentFetcher{}
+	h := NewHandler(store, us, pub, &fakeRoomKeyProvider{}, fetcher, false, subject.RouteGlobal)
+
+	msgTime := time.Now().UTC().Truncate(time.Millisecond)
+	data, err := json.Marshal(model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "reply-outage", RoomID: "r-outage", UserID: "u-alice", UserAccount: "alice",
+			Content: "still delivered even with cassandra down", CreatedAt: msgTime,
+			ThreadParentMessageID: "parent-outage", TShow: false,
+		},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleMessage(ctx, data),
+		"fan-out must not error even though history-service is unreachable")
+
+	var subjects []string
+	for _, rec := range pub.getRecords() {
+		subjects = append(subjects, rec.subject)
+	}
+	assert.Contains(t, subjects, subject.UserRoomEvent("bob"), "thread follower must still receive the reply")
+	assert.Contains(t, subjects, subject.UserRoomEvent("alice"), "sender still gets their own echo")
+	assert.False(t, fetcher.wasCalled(),
+		"parentCreatedAt resolved from thread_rooms; history-service must not be consulted")
 }
