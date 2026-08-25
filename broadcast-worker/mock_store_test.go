@@ -147,15 +147,15 @@ func (mr *MockStoreMockRecorder) SetSubscriptionMentions(ctx, roomID, accounts, 
 }
 
 // UpdateRoomLastMessage mocks base method.
-func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
+func (m *MockStore) UpdateRoomLastMessage(ctx context.Context, upd roomLastMessage) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, roomID, msgID, msgAt, mentionAll)
+	ret := m.ctrl.Call(m, "UpdateRoomLastMessage", ctx, upd)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateRoomLastMessage indicates an expected call of UpdateRoomLastMessage.
-func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, roomID, msgID, msgAt, mentionAll any) *gomock.Call {
+func (mr *MockStoreMockRecorder) UpdateRoomLastMessage(ctx, upd any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, roomID, msgID, msgAt, mentionAll)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateRoomLastMessage", reflect.TypeOf((*MockStore)(nil).UpdateRoomLastMessage), ctx, upd)
 }

@@ -1053,9 +1053,15 @@ export function roomEventsReducer(state, action) {
       // message buffer — which is the normal case for a sidebar row.
       const { roomId, previewMessage, deletedMessageId } = action
       if (!roomId) return state
+      const cur = state.previews[roomId]
+      // True when this event removed the very message the sidebar is showing.
+      // Both branches below turn on it: the server has spoken about THIS
+      // preview, so its answer wins over what we hold.
+      const supersedesDisplayed = Boolean(
+        deletedMessageId && cur && cur.messageId === deletedMessageId
+      )
       const next = previewFromWire(previewMessage)
       if (next) {
-        const cur = state.previews[roomId]
         // Fix 3: the live path already knows this message can't be decrypted
         // and stored the "[encrypted message]" placeholder. history-service /
         // broadcast-worker relay previewMessage.content unencrypted, so a
@@ -1072,15 +1078,21 @@ export function roomEventsReducer(state, action) {
         // a genuinely newer message and still arrive after it — reject only
         // a STRICTLY older write; missing/unparseable timestamps are
         // accepted rather than dropped (see isOlderPreview).
-        if (storedPreviewWins(cur, next)) return state
+        //
+        // Both guards are retired when this event deleted the message on
+        // display. Its replacement is the room's PREVIOUS eligible message,
+        // so it is necessarily older than the one just removed — Fix 7 would
+        // reject every such delete, and Fix 3 would pin an encrypted
+        // placeholder for a message that no longer exists. Neither guard is
+        // about a server statement concerning this exact preview.
+        if (!supersedesDisplayed && storedPreviewWins(cur, next)) return state
         return { ...state, previews: { ...state.previews, [roomId]: next } }
       }
       // No preview on the event. For a delete that means nothing eligible is
       // left — but only when the deleted message is the one on display. Any
       // other id is contradictory input (the server would have echoed the
       // unchanged preview), so leave what's there.
-      const cur = state.previews[roomId]
-      if (!deletedMessageId || !cur || cur.messageId !== deletedMessageId) return state
+      if (!supersedesDisplayed) return state
       const { [roomId]: _cleared, ...rest } = state.previews
       return { ...state, previews: rest }
     }

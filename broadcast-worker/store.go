@@ -19,7 +19,9 @@ type Store interface {
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
 	ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error)
 	GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error)
-	UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error
+	// UpdateRoomLastMessage advances the room's last-message fields and, when
+	// preview persistence is on, the stored room-list preview alongside them.
+	UpdateRoomLastMessage(ctx context.Context, upd roomLastMessage) error
 	// SetSubscriptionMentions flags accounts as mentioned, unless a given account
 	// already read past msgCreatedAt (lastSeenAt >= msgCreatedAt) — otherwise an
 	// async mention write can clobber a read-clear that happened first (#467).

@@ -35,6 +35,9 @@ services:
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
       - ATREST_VAULT_TRANSIT_KEY=${ATREST_VAULT_TRANSIT_KEY:-chat-kek}
+      # Must match broadcast-worker's. A reader on a different epoch treats every
+      # stored preview as a miss and falls back to the Cassandra walk.
+      - PREVIEW_KEY_EPOCH=${PREVIEW_KEY_EPOCH:-1}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).
       - DEBUG_LOG_PAYLOADS=${DEBUG_LOG_PAYLOADS:-false}

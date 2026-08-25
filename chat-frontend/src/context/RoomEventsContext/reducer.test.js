@@ -2315,6 +2315,48 @@ describe('roomEventsReducer previews', () => {
         })
         expect(next.previews.r1).toBeUndefined()
       })
+
+      // Deleting the displayed preview replaces it with the room's PREVIOUS
+      // eligible message, which is necessarily older than the one just removed.
+      // The guard exists for out-of-order live previews, not for this: applying
+      // it here leaves the deleted message on the sidebar until the next reload.
+      it('accepts an older replacement when the delete removed the displayed preview', () => {
+        const next = roomEventsReducer(seededWithCreatedAt(), {
+          type: 'ROOM_PREVIEW_UPDATED',
+          roomId: 'r1',
+          deletedMessageId: 'm1',
+          previewMessage: {
+            messageId: 'm0',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'the previous message, now the newest',
+            createdAt: '2026-08-14T14:00:00Z',
+          },
+        })
+        expect(next.previews.r1).toEqual({
+          messageId: 'm0', senderName: 'Bob Lin',
+          text: 'the previous message, now the newest',
+          createdAt: '2026-08-14T14:00:00Z',
+        })
+      })
+
+      // Only the displayed preview's own delete earns that exemption. A delete
+      // of some other message leaves the preview alone, so a stale older wire
+      // preview riding along with it must still be rejected.
+      it('still rejects an older preview when the delete removed some other message', () => {
+        const state = seededWithCreatedAt()
+        const next = roomEventsReducer(state, {
+          type: 'ROOM_PREVIEW_UPDATED',
+          roomId: 'r1',
+          deletedMessageId: 'm-somewhere-else',
+          previewMessage: {
+            messageId: 'm-late-arriving',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'resolved before the newer message but delivered after',
+            createdAt: '2026-08-14T14:00:00Z',
+          },
+        })
+        expect(next).toBe(state)
+      })
     })
   })
 })

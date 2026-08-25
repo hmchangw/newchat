@@ -5,24 +5,67 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/preview"
 )
 
-// roomLastMsgUpdate is the per-room state buffered between flushes.
-//
-// Coalescing semantics:
-//   - msgID/at carry the LATEST observed message for the room (max by createdAt).
-//   - lastMentionAllAt carries the latest createdAt among messages whose
-//     mentionAll flag was true; it sticks across subsequent non-mention-all
-//     messages until a newer mention-all arrives.
+// roomLastMessage is one room-doc update from an inserted message. The preview rides
+// along: previewForMsgId only means anything against the lastMsgId written beside it.
+type roomLastMessage struct {
+	RoomID     string
+	MsgID      string
+	At         time.Time
+	MentionAll bool
+	// Preview is the sealed preview, nil when MsgID is ineligible or previews are off.
+	// Nil still advances the key: the stored body is the room's last eligible message.
+	Preview *preview.Sealed
+	// PreviewFailed means MsgID was eligible but sealing failed, so the stored body is
+	// stale and the write clears it. Never true alongside a non-nil Preview (#224).
+	PreviewFailed bool
+}
+
+// roomLastMsgUpdate is the per-room state buffered between flushes. Fields take the
+// max by createdAt; pvw/pvwFailed ride pvwAt so an ineligible message can't displace them.
 type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
 	lastMentionAllAt time.Time
+	pvw              *preview.Sealed
+	pvwFailed        bool
+	pvwAt            time.Time
+	// pvwMsgID is the message that last moved the preview clock, so the preview and the
+	// room tuple break ties the same way rather than on separate rules.
+	pvwMsgID string
 }
 
-// bulkRoomLastMsgWriter is the persistence boundary the coalescer flushes to.
-// Kept separate from the Store interface so the handler-facing contract stays
-// narrow; the production implementation lives on *mongoStore.
+// maxPendingPreviews bounds how many buffered rooms may hold a sealed preview body. The
+// room tuple is tiny and required; the preview is the large, optional half, so a stalled
+// flush sheds previews and keeps ordering rather than growing without limit. A shed room
+// simply has no stored preview, which the reader already handles by walking (#289).
+const maxPendingPreviews = 5000
+
+// maxFlushDuration bounds one bulk write, so a stalled Mongo cannot hold the drained
+// batch (and the replacement map filling behind it) for the process's lifetime.
+const maxFlushDuration = 30 * time.Second
+
+// newerRow reports whether (at, id) sorts newer than (curAt, curID) in messages_by_room's
+// clustering order: created_at DESC, message_id DESC. created_at alone does not order two
+// rows, so comparing it alone leaves same-instant messages resolved by arrival -- which
+// need not match the order the preview walk reads them back in (#293).
+func newerRow(at time.Time, id string, curAt time.Time, curID string) bool {
+	// Compared at the precision Cassandra STORES, not the precision Go carries. created_at
+	// is a Cassandra timestamp — milliseconds — so two messages that differ only in
+	// sub-millisecond digits are one clustering position there. Comparing full Go
+	// precision would take the timestamp branch and skip the id tiebreaker that exists to
+	// match that position, which is the whole point of the comparator.
+	a, b := at.UnixMilli(), curAt.UnixMilli()
+	if a != b {
+		return a > b
+	}
+	return id > curID
+}
+
+// bulkRoomLastMsgWriter is the flush boundary, kept off Store so the contract stays narrow.
 type bulkRoomLastMsgWriter interface {
 	BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error
 }
@@ -70,6 +113,9 @@ type coalescingStore struct {
 
 	mu      sync.Mutex
 	pending map[string]roomLastMsgUpdate
+	// pendingPreviews counts buffered rooms currently holding a preview, so the cap is a
+	// counter rather than a scan of pending on every message.
+	pendingPreviews int
 }
 
 func (c *coalescingStore) clock() time.Time {
@@ -87,26 +133,51 @@ func newCoalescingStore(inner Store, bulk bulkRoomLastMsgWriter) *coalescingStor
 	}
 }
 
-// UpdateRoomLastMessage buffers the update. Always returns nil; the buffered
-// write is performed asynchronously by Flush.
-func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, roomID, msgID string, at time.Time, mentionAll bool) error {
+// UpdateRoomLastMessage buffers the update; Flush performs the write asynchronously.
+//
+//nolint:gocritic // hugeParam: roomLastMessage is the Store.UpdateRoomLastMessage contract shared with the mock; by-value keeps the buffered copy obviously independent of the caller's.
+func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cur := c.pending[roomID]
-	if at.After(cur.at) {
-		cur.msgID = msgID
-		cur.at = at
+	cur := c.pending[upd.RoomID]
+	if newerRow(upd.At, upd.MsgID, cur.at, cur.msgID) {
+		cur.msgID = upd.MsgID
+		cur.at = upd.At
 	}
-	if mentionAll && at.After(cur.lastMentionAllAt) {
-		cur.lastMentionAllAt = at
+	if upd.MentionAll && upd.At.After(cur.lastMentionAllAt) {
+		cur.lastMentionAllAt = upd.At
 	}
-	c.pending[roomID] = cur
+	// Against pvwAt, not at: a later ineligible message must not evict the preview it
+	// cannot replace. A seal failure moves this clock too, so an older seal cannot win.
+	if (upd.Preview != nil || upd.PreviewFailed) && newerRow(upd.At, upd.MsgID, cur.pvwAt, cur.pvwMsgID) {
+		had := cur.pvw != nil
+		switch {
+		case upd.PreviewFailed:
+			cur.pvw, cur.pvwFailed = nil, true
+		case had || c.pendingPreviews < maxPendingPreviews:
+			cur.pvw, cur.pvwFailed = upd.Preview, false
+		default:
+			// Over the cap: shed the BODY, and record that an eligible message arrived
+			// without one — which is a seal FAILURE, not an ineligible message. Leaving
+			// it as neither would take the flush's key-advance branch and stamp the new
+			// id over the room's previous body, certifying a preview for a message it
+			// does not describe. That is #224, reintroduced by the cap that bounds #289.
+			cur.pvw, cur.pvwFailed = nil, true
+		}
+		switch now := cur.pvw != nil; {
+		case !had && now:
+			c.pendingPreviews++
+		case had && !now:
+			c.pendingPreviews--
+		}
+		cur.pvwAt = upd.At
+		cur.pvwMsgID = upd.MsgID
+	}
+	c.pending[upd.RoomID] = cur
 	return nil
 }
 
-// Flush drains the pending buffer and writes it via the bulk writer. Safe to
-// call concurrently with UpdateRoomLastMessage; takes the lock only to swap
-// the map so the BulkWrite itself runs without blocking new updates.
+// Flush drains the buffer, holding the lock only to swap the map so writes aren't blocked.
 func (c *coalescingStore) Flush(ctx context.Context) error {
 	c.mu.Lock()
 	if len(c.pending) == 0 {
@@ -115,7 +186,12 @@ func (c *coalescingStore) Flush(ctx context.Context) error {
 	}
 	batch := c.pending
 	c.pending = make(map[string]roomLastMsgUpdate, len(batch))
+	c.pendingPreviews = 0
 	c.mu.Unlock()
+	// Bounded: the drained batch stays live for the whole write, and handlers fill the
+	// replacement map behind it, so an unbounded write is an unbounded pair of maps.
+	ctx, cancel := context.WithTimeout(ctx, maxFlushDuration)
+	defer cancel()
 	c.refreshRemoteActivity(ctx, batch)
 	return c.bulk.BulkUpdateRoomLastMessage(ctx, batch)
 }

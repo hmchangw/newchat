@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -12,13 +13,12 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-// EnsureIndexes creates indexes that back the store's read paths.
-// Must be called once at startup; index creation is idempotent when the key
-// spec matches.
+// EnsureIndexes creates the store's read-path indexes; idempotent, call once at startup.
 func (m *mongoStore) EnsureIndexes(ctx context.Context) error {
 	if _, err := m.threadRoomCol.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "parentMessageId", Value: 1}, {Key: "siteId", Value: 1}},
@@ -35,9 +35,11 @@ type mongoStore struct {
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
 	metaRec       roommetacache.Recorder
+	// Switches the room-doc update from a plain $set to the guarded pipeline.
+	previews bool
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration) *mongoStore {
+func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration, previews bool) *mongoStore {
 	return &mongoStore{
 		roomCol:       roomCol,
 		subCol:        subCol,
@@ -45,6 +47,7 @@ func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valk
 		valkey:        valkey,
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
+		previews:      previews,
 	}
 }
 
@@ -75,49 +78,55 @@ func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
 }
 
-func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, roomID, msgID string, msgAt time.Time, mentionAll bool) error {
-	fields := bson.M{
-		"lastMsgAt": msgAt,
-		"lastMsgId": msgID,
-		"updatedAt": msgAt,
-	}
-	if mentionAll {
-		fields["lastMentionAllAt"] = msgAt
-	}
-	filter := bson.M{"_id": roomID}
-	update := bson.M{"$set": fields}
-
-	res, err := m.roomCol.UpdateOne(ctx, filter, update)
+//nolint:gocritic // hugeParam: roomLastMessage is the Store.UpdateRoomLastMessage contract shared with the coalescer and the mock.
+func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, upd roomLastMessage) error {
+	u := asBuffered(upd)
+	res, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": upd.RoomID}, m.lastMessageUpdate(&u))
 	if err != nil {
-		return fmt.Errorf("update room last message %s: %w", roomID, err)
+		return fmt.Errorf("update room last message %s: %w", upd.RoomID, err)
 	}
 	if res.MatchedCount == 0 {
-		return fmt.Errorf("update room last message %s: %w", roomID, mongo.ErrNoDocuments)
+		return fmt.Errorf("update room last message %s: %w", upd.RoomID, mongo.ErrNoDocuments)
 	}
 	return nil
 }
 
-// BulkUpdateRoomLastMessage applies a batch of room.lastMsgAt/lastMsgId
-// updates in a single unordered BulkWrite. Missing rooms (MatchedCount==0
-// per model) are not surfaced — lastMsgAt is decorative and the source-of-
-// truth message has already been persisted to Cassandra by message-worker.
+// asBuffered renders a direct update in the buffered form so both paths share one
+// builder. Every field must be carried: one dropped silently changes the write.
+//
+//nolint:gocritic // hugeParam: matches UpdateRoomLastMessage's by-value contract.
+func asBuffered(upd roomLastMessage) roomLastMsgUpdate {
+	return roomLastMsgUpdate{
+		msgID:            upd.MsgID,
+		at:               upd.At,
+		lastMentionAllAt: mentionAllAt(upd),
+		pvw:              upd.Preview,
+		pvwFailed:        upd.PreviewFailed,
+		pvwAt:            upd.At,
+	}
+}
+
+// mentionAllAt renders the flag as the timestamp the buffered form carries.
+//
+//nolint:gocritic // hugeParam: matches UpdateRoomLastMessage's by-value contract.
+func mentionAllAt(upd roomLastMessage) time.Time {
+	if !upd.MentionAll {
+		return time.Time{}
+	}
+	return upd.At
+}
+
+// BulkUpdateRoomLastMessage applies a batch of room updates in one unordered BulkWrite.
+// Missing rooms are not surfaced — the message is already persisted to Cassandra.
 func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
-		fields := bson.M{
-			"lastMsgAt": u.at,
-			"lastMsgId": u.msgID,
-			"updatedAt": u.at,
-		}
-		if !u.lastMentionAllAt.IsZero() {
-			fields["lastMentionAllAt"] = u.lastMentionAllAt
-		}
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
-			SetUpdate(bson.M{"$set": fields}))
+			SetUpdate(m.lastMessageUpdate(&u)))
 	}
 	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
 		return fmt.Errorf("bulk update room last message (%d rooms): %w", len(updates), err)
@@ -125,9 +134,58 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	return nil
 }
 
-// subscriptionMentionsFilter matches subs that have NOT already read past
-// msgCreatedAt. $not/$gte (not $lt) so it still matches a missing/null
-// lastSeenAt — plain $lt skips missing fields, wrongly excluding never-read subs (#467).
+// lastMessageUpdate renders one room's update: $set with previews off, a pipeline with
+// them on. lastMsgAt/lastMsgId stay unguarded — a bad future one would freeze ordering.
+func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
+	fields := bson.M{
+		"lastMsgAt": u.at,
+		"lastMsgId": u.msgID,
+		"updatedAt": u.at,
+	}
+	if !u.lastMentionAllAt.IsZero() {
+		fields["lastMentionAllAt"] = u.lastMentionAllAt
+	}
+	if !m.previews {
+		return bson.M{"$set": fields}
+	}
+
+	// A bare "$"-prefixed string reads as a field path in a pipeline stage.
+	for k, v := range fields {
+		if s, ok := v.(string); ok {
+			fields[k] = bson.M{"$literal": s}
+		}
+	}
+	asOf := u.at.UnixMilli()
+	// The preview rides its own clock, and the flush must not collapse the two. u.at names
+	// the room's NEWEST message, which may be a later ineligible one; the body was
+	// established at pvwAt. Ordering the body by u.at would claim it is as-of a moment it
+	// knows nothing about, and would outrank a mutation that landed in between carrying the
+	// corrected body — restoring stale content under a key that then equals lastMsgId, so
+	// the reader serves it as current. Losing to that mutation instead only costs a walk.
+	pvwAsOf := u.pvwAt.UnixMilli()
+	var pvwFields bson.M
+	switch {
+	case u.pvwFailed:
+		// The stored body is the PREVIOUS message's and opens under any key later pointing at
+		// it, so withholding is not enough — the next ineligible message would revalidate it.
+		pvwFields = preview.GuardedClearFields(pvwAsOf)
+	case u.pvw != nil:
+		// The KEY takes the newest message's identity, the WATERMARK the preview's own clock:
+		// "what is this body paired with" and "when was it established" are different
+		// questions, and a later ineligible message answers only the first.
+		sealed := *u.pvw
+		sealed.ForMsgID = u.msgID
+		pvwFields = preview.GuardedSetFields(sealed, pvwAsOf)
+	default:
+		// The key advance IS the newest message's event, so it keeps that clock.
+		pvwFields = preview.GuardedAdvanceKeyFields(u.msgID, asOf)
+	}
+	maps.Copy(fields, pvwFields)
+	return mongo.Pipeline{{{Key: "$set", Value: fields}}}
+}
+
+// subscriptionMentionsFilter matches subs that have NOT already read past msgCreatedAt.
+// $not/$gte, not $lt: plain $lt skips missing fields, excluding never-read subs (#467).
 func subscriptionMentionsFilter(roomID string, accounts []string, msgCreatedAt time.Time) bson.M {
 	return bson.M{
 		"roomId":     roomID,
@@ -146,9 +204,8 @@ func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string,
 	return nil
 }
 
-// AdvanceSubscriptionLastSeen advances the sender's lastSeenAt via $max so it
-// never regresses a sender who already read later. A missing subscription is a
-// best-effort no-op (MatchedCount unchecked).
+// AdvanceSubscriptionLastSeen advances lastSeenAt via $max so it never regresses a
+// sender who already read later. A missing subscription is a best-effort no-op.
 func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, account string, at time.Time) error {
 	if _, err := m.subCol.UpdateOne(ctx,
 		bson.M{"roomId": roomID, "u.account": account},
@@ -192,9 +249,7 @@ func (m *mongoStore) GetHistorySharedSince(ctx context.Context, roomID string, a
 		return nil, fmt.Errorf("query history windows for room %s: %w", roomID, err)
 	}
 	defer cursor.Close(ctx)
-	// Minimal decode shape: the projection returns only u.account + historySharedSince,
-	// so decode just those rather than the full model.SubscriptionUser (whose other
-	// fields would silently be zero-valued).
+	// Decode only the projected fields — model.SubscriptionUser's rest would be zero.
 	var rows []struct {
 		User struct {
 			Account string `bson:"account"`
