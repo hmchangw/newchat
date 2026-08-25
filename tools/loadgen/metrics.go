@@ -10,6 +10,47 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type snapshotGaugePair[S any] struct {
+	source      func() S
+	firstDesc   *prometheus.Desc
+	firstValue  func(S) float64
+	secondDesc  *prometheus.Desc
+	secondValue func(S) float64
+}
+
+func newSnapshotGaugePair[S any](
+	source func() S,
+	firstName string,
+	firstHelp string,
+	firstValue func(S) float64,
+	secondName string,
+	secondHelp string,
+	secondValue func(S) float64,
+) prometheus.Collector {
+	return &snapshotGaugePair[S]{
+		source:      source,
+		firstDesc:   prometheus.NewDesc(firstName, firstHelp, nil, nil),
+		firstValue:  firstValue,
+		secondDesc:  prometheus.NewDesc(secondName, secondHelp, nil, nil),
+		secondValue: secondValue,
+	}
+}
+
+func (c *snapshotGaugePair[S]) Describe(descriptions chan<- *prometheus.Desc) {
+	descriptions <- c.firstDesc
+	descriptions <- c.secondDesc
+}
+
+func (c *snapshotGaugePair[S]) Collect(metrics chan<- prometheus.Metric) {
+	snapshot := c.source()
+	metrics <- prometheus.MustNewConstMetric(
+		c.firstDesc, prometheus.GaugeValue, c.firstValue(snapshot),
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		c.secondDesc, prometheus.GaugeValue, c.secondValue(snapshot),
+	)
+}
+
 // Metrics holds the Prometheus collectors used across loadgen components.
 type Metrics struct {
 	natsHealthMu   sync.Mutex
@@ -18,6 +59,8 @@ type Metrics struct {
 	// which is well after the registry is built, and is read on the scrape
 	// goroutine.
 	recipientExpectations atomic.Pointer[func() int]
+	soakHeartbeatSource   atomic.Pointer[func() soakHeartbeatSnapshot]
+	mongoProbeSource      atomic.Pointer[func() soakMongoProbeSnapshot]
 	Registry              *prometheus.Registry
 	Published             *prometheus.CounterVec
 	PublishErrors         *prometheus.CounterVec
@@ -71,6 +114,10 @@ type Metrics struct {
 	SoakPresenceSignals           *prometheus.CounterVec
 	SoakPresenceChecks            *prometheus.CounterVec
 	SoakPresenceConnections       *prometheus.GaugeVec
+	SoakHeartbeatStatus           prometheus.Collector
+	SoakHeartbeatAttempts         *prometheus.CounterVec
+	MongoProbeStatus              prometheus.Collector
+	MongoProbeAttempts            *prometheus.CounterVec
 
 	FailureOperations            *prometheus.CounterVec
 	FailureObservations          *prometheus.CounterVec
@@ -375,6 +422,61 @@ func NewMetrics() *Metrics {
 		},
 		[]string{"scenario", "lane", "observer", "result"},
 	)
+	m.SoakHeartbeatStatus = newSnapshotGaugePair(
+		m.soakHeartbeatSnapshot,
+		"loadgen_soak_heartbeat_degraded",
+		"Whether the latest soak heartbeat attempt failed while the run remains active (1 degraded, 0 otherwise).",
+		func(snapshot soakHeartbeatSnapshot) float64 {
+			if snapshot.Degraded {
+				return 1
+			}
+			return 0
+		},
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+		"Unix timestamp of the latest successful soak manifest heartbeat; zero until the first success.",
+		func(snapshot soakHeartbeatSnapshot) float64 {
+			if snapshot.LastSuccess.IsZero() {
+				return 0
+			}
+			return float64(snapshot.LastSuccess.Unix())
+		},
+	)
+	m.SoakHeartbeatAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_soak_heartbeat_attempts_total",
+			Help: "Soak manifest heartbeat attempts by bounded outcome (success, error, not_active).",
+		},
+		[]string{"outcome"},
+	)
+	m.MongoProbeStatus = newSnapshotGaugePair(
+		m.mongoProbeSnapshot,
+		"loadgen_mongo_up",
+		"Whether loadgen's latest bounded Ping to the Mongo primary succeeded (1 up, 0 down or not yet probed).",
+		func(snapshot soakMongoProbeSnapshot) float64 {
+			if snapshot.Up {
+				return 1
+			}
+			return 0
+		},
+		"loadgen_mongo_probe_timestamp_seconds",
+		"Unix timestamp when loadgen's latest Mongo primary Ping completed, regardless of outcome; zero until the first probe.",
+		func(snapshot soakMongoProbeSnapshot) float64 {
+			if snapshot.CompletedAt.IsZero() {
+				return 0
+			}
+			return float64(snapshot.CompletedAt.Unix())
+		},
+	)
+	m.MongoProbeAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "loadgen_mongo_probe_attempts_total",
+			Help: "Loadgen Mongo primary Ping attempts by bounded outcome (success, error).",
+		},
+		[]string{"outcome"},
+	)
+	for _, outcome := range []soakMongoProbeOutcome{soakMongoProbeSuccess, soakMongoProbeError} {
+		m.MongoProbeAttempts.WithLabelValues(string(outcome))
+	}
 	m.FailureObservationReasons = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "loadgen_failure_observation_reasons_total",
@@ -579,6 +681,8 @@ func NewMetrics() *Metrics {
 		m.SoakEncryptionPreflight,
 		m.SoakLaneAttempts,
 		m.SoakPresenceSignals, m.SoakPresenceChecks, m.SoakPresenceConnections,
+		m.SoakHeartbeatStatus, m.SoakHeartbeatAttempts,
+		m.MongoProbeStatus, m.MongoProbeAttempts,
 		m.FailureOperations, m.FailureObservations, m.FailureObservationReasons, m.FailureInflight,
 		m.FailureRecipientExpectations,
 		m.FailureRecovered, m.FailureInvalidations, m.FailureJournalBytes,
@@ -627,4 +731,36 @@ func (m *Metrics) recipientExpectationCount() float64 {
 		return float64((*source)())
 	}
 	return 0
+}
+
+func (m *Metrics) SetSoakHeartbeatSource(source func() soakHeartbeatSnapshot) {
+	if m == nil || source == nil {
+		return
+	}
+	m.soakHeartbeatSource.Store(&source)
+}
+
+func (m *Metrics) soakHeartbeatSnapshot() soakHeartbeatSnapshot {
+	if m != nil {
+		if source := m.soakHeartbeatSource.Load(); source != nil {
+			return (*source)()
+		}
+	}
+	return soakHeartbeatSnapshot{}
+}
+
+func (m *Metrics) SetMongoProbeSource(source func() soakMongoProbeSnapshot) {
+	if m == nil || source == nil {
+		return
+	}
+	m.mongoProbeSource.Store(&source)
+}
+
+func (m *Metrics) mongoProbeSnapshot() soakMongoProbeSnapshot {
+	if m != nil {
+		if source := m.mongoProbeSource.Load(); source != nil {
+			return (*source)()
+		}
+	}
+	return soakMongoProbeSnapshot{}
 }

@@ -3,7 +3,7 @@
 > Verified against the code on 2026-08-21. Scope for this round: the services
 > that serve ordinary chat traffic. Cross-site federation, push delivery, the
 > Teams synchronisation processes and the data-migration processes are out of
-> scope and are listed in §5.
+> scope and are listed in §6.
 >
 > Loadgen generates traffic and records what it can observe. It does not inject
 > faults and it does not decide whether the campaign passed.
@@ -23,7 +23,7 @@ somebody else's dashboard.
 | Transactions | admin-service uses `WithTransaction` for credential and session revocation (`admin-service/store_mongo.go`) | The callback may run more than once on a transient transaction error, so side effects inside it must stay transaction-only and idempotent |
 | Unordered bulk writes | broadcast-worker, inbox-worker, room-service, room-worker and `pkg/mongoutil/collection.go` | A bulk result can be partially applied. Reconcile per document, never per request |
 | Pool tuning | Driver/URI defaults almost everywhere; history-service configures min/max explicitly (`history-service/cmd/main.go`) | Pool exhaustion and recovery are per service. One service's headroom says nothing about another's |
-| Readiness | Health servers register `natsutil.HealthCheck` only; no service probes MongoDB | A pod with a broken Mongo client stays `Ready` and keeps taking traffic. This is deliberate for this round — see §5 |
+| Readiness | Health servers register `natsutil.HealthCheck` only; no service probes MongoDB | A pod with a broken Mongo client stays `Ready` and keeps taking traffic. This is deliberate for this round — see §6 |
 | Startup | `mongoutil.Connect` pings and callers exit on failure | A pod that restarts during an outage crash-loops. That is a different scenario from steady-state degradation and must not be read as one |
 
 One consequence outranks the rest: **a Mongo write succeeding and the caller
@@ -56,7 +56,7 @@ per-operation verdict.
 | media-service, upload-service, portal-service, tcard-service | Avatars/emoji, uploads, users and HR employees, cards | **No traffic** |
 | bot-message-handler, bot-message-worker, bot-room-service, botplatform-service | Bot users, subscriptions, rooms, room DEKs | **No traffic**: the `botroom` mode is synthetic and does not drive the real bot chain |
 | hr-sync-worker | Reads HR employees, bulk-upserts users | **No traffic** |
-| inbox-worker | Applies cross-site subscription/room/user state | Out of scope this round (§5) |
+| inbox-worker | Applies cross-site subscription/room/user state | Out of scope this round (§6) |
 
 ## 3. Paths that need reconciliation, and how they fail
 
@@ -118,7 +118,75 @@ The query-time rules for turning these counters into `VALID` / `INCONCLUSIVE`,
 impact and correctness live in
 [`../loadgen/dashboard-contract.md`](../loadgen/dashboard-contract.md).
 
-## 5. Out of scope this round
+## 5. Campaign control-plane configuration
+
+For a planned two-minute Mongo outage, use a campaign overlay rather than
+changing the Chart defaults:
+
+```yaml
+soak:
+  heartbeatInterval: 30s
+  heartbeatStaleAfter: 30m
+  roomReadRate: "30"
+
+ledger:
+  reconcileDeadline: 10m
+  roomReconcileReadShare: 0.5
+
+recipientObserver:
+  enabled: true
+```
+
+`heartbeatStaleAfter` is the active-run lease used by seed and teardown, not a
+dashboard freshness threshold. It must exceed the longest planned outage plus
+Mongo/client recovery and operator margin; otherwise a stale `running`
+manifest can authorize teardown while loadgen is still dispatching. The longer
+lease also delays cleanup after a real loadgen crash. If heartbeat renewal does
+not recover, loadgen stops the workload one heartbeat interval before the last
+persisted heartbeat would become stale. That restores the lease invariant:
+once seed or teardown may treat the manifest as abandoned, this process is no
+longer dispatching. The emergency override for a crashed loadgen is documented
+in the Kubernetes runbook and is permitted only after the Deployment is stopped
+and the heartbeat is proven not to advance.
+
+On that lease-risk path only, in-flight lanes receive half of one heartbeat
+interval to drain. If they finish, the other half remains for ledger, observer,
+NATS, and process shutdown. If a lane does not drain, loadgen logs the active
+lane names and counts, records
+`loadgen_failure_invalidations_total{reason="lease_abort"}` through the durable
+ledger, and bypasses graceful cleanup so no later unbounded wait can cross the
+lease boundary. The abandoned operations may recover from the WAL as
+`unverified`, but the `lease_abort` invalidation makes the affected campaign
+interval explicitly **INCONCLUSIVE**. Ordinary SIGTERM and duration completion
+retain the existing unbounded graceful drain.
+
+The invalidation write itself is bounded to one quarter of a heartbeat interval
+so a stalled WAL cannot defeat the lease fence. If that final write does not
+finish, loadgen emits a separate error saying the invalidation may not have
+reached the WAL and exits anyway; the lease guarantee takes precedence over
+preserving that last evidence record.
+
+Loadgen requires
+`heartbeatStaleAfter >= 2 * heartbeatInterval + 5s`; the additional interval is
+the shutdown margin and the five seconds cover an in-progress heartbeat
+attempt. The staging values above stop dispatch approximately 29 minutes 30
+seconds after the last persisted heartbeat if renewal never recovers. This PR
+adds no operator knob for the five-second bound. The Kubernetes runbook lists
+the complete staging overlay and the corresponding environment variables. The
+relationship is a workload-start requirement; teardown has no heartbeat loop
+and validates its documented crash-recovery override separately.
+
+At the configured mutation/read-receipt rates the room-state demand is 8.05
+operations/second. The default room-read capacity leaves only
+`20 * 0.5 - 8.05 = 1.95` operations/second for catch-up; the campaign overlay
+raises that to `30 * 0.5 - 8.05 = 6.95`. A two-minute outage therefore creates
+at most about 966 pending operations and takes about 139 seconds to drain under
+the steady-rate model. This recovery calculation applies only while the outage
+and recovery remain well below the ten-minute reconciliation deadline. Once an
+operation expires, extra read capacity cannot turn its `unverified` result back
+into evidence.
+
+## 6. Out of scope this round
 
 - **Cross-site federation** (OUTBOX, remote INBOX, inbox-worker convergence)
   and **push delivery** — next round.
@@ -130,7 +198,7 @@ impact and correctness live in
   and the "is the service itself alive" question harder to answer. Client
   metrics carry that signal instead.
 
-## 6. Code evidence
+## 7. Code evidence
 
 - Connection, instrumentation, pool tuning, read preference: `pkg/mongoutil/`
 - Transaction path: `admin-service/store_mongo.go`

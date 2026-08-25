@@ -275,8 +275,16 @@
         "runMode": {"type": "string", "enum": ["continuous"]},
         "randomSeed": {"type": "integer"},
         "warmup": {"type": "string", "minLength": 1},
-        "heartbeatInterval": {"type": "string", "minLength": 1},
-        "heartbeatStaleAfter": {"type": "string", "minLength": 1},
+        "heartbeatInterval": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Manifest heartbeat cadence. Loadgen requires heartbeatStaleAfter to be at least twice this interval plus 5s."
+        },
+        "heartbeatStaleAfter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Active-run destructive-operation lease. Must be at least 2 * heartbeatInterval + 5s and longer than the planned Mongo outage and recovery window."
+        },
         "terminationGracePeriodSeconds": {
           "type": "integer",
           "minimum": 1
