@@ -219,6 +219,66 @@ describe('RoomEventsProvider: subscription cache', () => {
     )
   })
 
+  it('paints last session\'s newest snippet on the very first render', async () => {
+    // The cached subscription's previewMessage is the bootstrap snapshot from
+    // the previous session; the persisted preview is where its live messages
+    // landed. The warm paint must show the latter.
+    seedCache(
+      {
+        r1: sub('r1', {
+          room: {
+            userCount: 3,
+            lastMsgAt: '2026-08-01T00:00:00Z',
+            crossSite: false,
+            previewMessage: {
+              messageId: 'm-old',
+              sender: { account: 'bob', displayName: 'Bob Lin' },
+              content: 'bootstrap snapshot',
+              createdAt: '2026-08-01T00:00:00Z',
+            },
+          },
+        }),
+      },
+      {
+        previews: {
+          r1: {
+            messageId: 'm-live',
+            senderName: 'Bob Lin',
+            text: 'arrived while I was logged in',
+            createdAt: '2026-08-02T00:00:00Z',
+          },
+        },
+      },
+    )
+    render(wrap(mockNats()))
+    expect(screen.getByTestId('previews').textContent).toBe('r1:arrived while I was logged in')
+  })
+
+  it('persists the previews it holds for the next session', async () => {
+    const request = bucketRequest({
+      favorites: [],
+      apps: [],
+      rooms: [sub('r1', {
+        room: {
+          userCount: 3,
+          lastMsgAt: '2026-08-02T00:00:00Z',
+          crossSite: false,
+          previewMessage: {
+            messageId: 'm-new',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'newest message',
+            createdAt: '2026-08-02T00:00:00Z',
+          },
+        },
+      })],
+    })
+    render(wrap(mockNats({ request })))
+    await waitFor(
+      () => expect(loadSubscriptionCache(USER)?.previews?.r1?.text).toBe('newest message'),
+      { timeout: 3000 },
+    )
+  })
+
   it('writes nothing when storage is unavailable', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('storage disabled')

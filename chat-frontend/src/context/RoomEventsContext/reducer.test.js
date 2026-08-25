@@ -1883,6 +1883,40 @@ describe('roomEventsReducer previews', () => {
     expect(next.previews.r2.messageId).toBe('m-new-r2')
   })
 
+  it('PREVIEWS_HYDRATED takes the cached preview when it is newer', () => {
+    // Live messages update state.previews but never the cached subscription's
+    // previewMessage, so the cache carries the fresher snippet of the two.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: { messageId: 'm-wire', senderName: 'Alice Chen', text: 'older', createdAt: '2026-08-14T10:00:00Z' },
+      },
+    }
+    const cached = { messageId: 'm-live', senderName: 'Bob Lin', text: 'newer', createdAt: '2026-08-14T12:00:00Z' }
+    const next = roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: { r1: cached, r2: cached } })
+    expect(next.previews.r1).toEqual(cached)
+    expect(next.previews.r2).toEqual(cached)
+  })
+
+  it('PREVIEWS_HYDRATED keeps a newer seeded preview', () => {
+    const wire = { messageId: 'm-wire', senderName: 'Alice Chen', text: 'newer', createdAt: '2026-08-14T12:00:00Z' }
+    const seeded = { ...initialState, previews: { r1: wire } }
+    const next = roomEventsReducer(seeded, {
+      type: 'PREVIEWS_HYDRATED',
+      previews: { r1: { messageId: 'm-old', senderName: 'Bob Lin', text: 'older', createdAt: '2026-08-14T10:00:00Z' } },
+    })
+    expect(next.previews.r1).toEqual(wire)
+  })
+
+  it('PREVIEWS_HYDRATED leaves the map alone when there is nothing to apply', () => {
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm1', senderName: 'A', text: 'x', createdAt: '2026-08-14T10:00:00Z' } },
+    }
+    expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: {} }).previews).toBe(seeded.previews)
+    expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED' }).previews).toBe(seeded.previews)
+  })
+
   it('MESSAGE_RECEIVED overwrites the preview for a room with no message buffer', () => {
     const next = roomEventsReducer(initialState, {
       type: 'MESSAGE_RECEIVED',

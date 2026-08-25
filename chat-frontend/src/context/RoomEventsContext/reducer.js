@@ -448,6 +448,21 @@ export function roomEventsReducer(state, action) {
         previews,
       }
     }
+    case 'PREVIEWS_HYDRATED': {
+      // The previous session's previews, overlaid on what BUCKETS_LOADED just
+      // seeded from the cached subscriptions. Live messages update previews but
+      // never the subscription's previewMessage, so either side can be the
+      // fresher one — the same take-if-newer rule picks the winner.
+      let previews = state.previews
+      for (const [roomId, preview] of Object.entries(action.previews ?? {})) {
+        if (!preview?.messageId) continue
+        const cur = previews[roomId]
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
+      }
+      return previews === state.previews ? state : { ...state, previews }
+    }
     case 'SUBSCRIPTION_UPSERTED': {
       // Upsert a single subscription record (live delta from
       // `subscription.update` events). Spreads the new fields on top
