@@ -93,6 +93,32 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 	})
 }
 
+func TestConfig_DefaultAvatarEnabled(t *testing.T) {
+	t.Setenv("SITE_ID", "s1")
+	t.Setenv("CLUSTER_DOMAINS", `[{"siteID":"s1","domain":"http://localhost:8080"}]`)
+	t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+	t.Setenv("MINIO_ACCESS_KEY", "k")
+	t.Setenv("MINIO_SECRET_KEY", "s")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
+
+	t.Run("default true", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("DEFAULT_AVATAR_ENABLED"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.True(t, cfg.DefaultAvatarEnabled)
+	})
+
+	t.Run("override false", func(t *testing.T) {
+		t.Setenv("DEFAULT_AVATAR_ENABLED", "false")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.False(t, cfg.DefaultAvatarEnabled)
+	})
+}
+
 // TestConfig_BotplatformURLRequired guards the tag that keeps the write endpoints
 // from ever being served anonymously: absent and empty must both refuse to start.
 func TestConfig_BotplatformURLRequired(t *testing.T) {
