@@ -59,7 +59,8 @@ type broadcastMetrics struct {
 	deliveryOpts map[deliveryKey]metric.MeasurementOption
 
 	// Failures only: the delivery counter already carries this lane's volume.
-	threadViewFailures metric.Int64Counter
+	threadViewFailures   metric.Int64Counter
+	threadFanOutDegraded metric.Int64Counter
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
@@ -81,12 +82,18 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 	if err != nil {
 		threadViewFailures, _ = noopMeter.Int64Counter("broadcast_worker_thread_view_publish_failures_total")
 	}
+	threadFanOutDegraded, err := meter.Int64Counter("broadcast_worker_thread_fanout_degraded_total",
+		metric.WithDescription("Thread fan-outs that shipped with a reduced audience due to parent resolution failure."))
+	if err != nil {
+		threadFanOutDegraded, _ = noopMeter.Int64Counter("broadcast_worker_thread_fanout_degraded_total")
+	}
 	m := &broadcastMetrics{
-		fanout:             fanout,
-		deliveries:         deliveries,
-		threadViewFailures: threadViewFailures,
-		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
-		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
+		fanout:               fanout,
+		deliveries:           deliveries,
+		threadViewFailures:   threadViewFailures,
+		threadFanOutDegraded: threadFanOutDegraded,
+		fanoutOpts:           make(map[fanoutKey]metric.MeasurementOption),
+		deliveryOpts:         make(map[deliveryKey]metric.MeasurementOption),
 	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
@@ -157,6 +164,17 @@ func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event na
 	// Inline, not prebuilt: this runs only after a publish already failed.
 	m.threadViewFailures.Add(ctx, 1,
 		metric.WithAttributes(attribute.String("event_type", string(normalizeBroadcastEvent(event)))))
+}
+
+// ThreadFanOutDegraded counts thread fan-outs that shipped with a reduced
+// audience because the parent could not be resolved. reason is "no_thread_room"
+// (the thread has no thread_rooms document yet) or "fetch_failed" (history-service
+// could not answer).
+func (m *broadcastMetrics) ThreadFanOutDegraded(ctx context.Context, reason string) {
+	if m == nil || m.threadFanOutDegraded == nil {
+		return
+	}
+	m.threadFanOutDegraded.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
 }
 
 type broadcastMetricLabels struct {
