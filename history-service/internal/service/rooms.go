@@ -249,7 +249,7 @@ func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, last
 		for i := range page.Data {
 			m := page.Data[i]
 			// Shared with the insert-side predicate so the two cannot disagree.
-			if !preview.Eligible(m.Deleted, m.Type, m.VisibleTo) {
+			if !preview.Eligible(m.Deleted, m.Type) {
 				continue
 			}
 			return previewWalk{
@@ -302,6 +302,7 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		CreatedAt:   m.CreatedAt,
 		Attachments: m.DecodedAttachments,
 		Mentions:    mentions,
+		VisibleTo:   m.VisibleTo,
 	})
 }
 

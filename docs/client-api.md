@@ -1020,11 +1020,11 @@ document (`previewMessage` always omitted there). All fields are optional
 
 A room's most-recent **eligible** message, composed and stored when that message is
 delivered, and enriched for room-list rendering. Eligible = not soft-deleted and not a
-system message and not visibility-restricted (quoted replies are normal content and ARE
-eligible) — an ineligible newer message leaves the stored preview in place, so the room
-keeps showing its last real content; a room with only ineligible messages omits
-`previewMessage`. A restricted message is never previewed: one preview is stored per
-room, while visibility is per-user, so the room list has no way to honour the scope.
+system message (quoted replies are normal content and ARE eligible) — an ineligible newer
+message leaves the stored preview in place, so the room keeps showing its last real
+content; a room with only ineligible messages omits `previewMessage`. A message carrying a
+`visibleTo` marker **is** eligible and is previewed with the marker attached: the backend
+does not filter previews on `visibleTo`, so the client honours the scope.
 
 Editing or deleting a message also updates the stored preview: an edit to the previewed
 message refreshes it, and deleting it moves the preview back to the previous eligible
@@ -1062,6 +1062,7 @@ that preview.
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. At most 10 — the room list renders a count, not the set. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. At most 20. |
+| `visibleTo` | string | Optional. The message's opaque visibility marker, surfaced verbatim; the backend does not filter the preview on it. |
 
 #### AppSubscription
 
@@ -2914,7 +2915,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `threadParentId` | string | Optional. Set when this message is a thread reply. |
 | `threadParentCreatedAt` | string | Optional. RFC 3339. |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Optional. Embedded snapshot of the quoted message. |
-| `visibleTo` | string | Optional. Visibility scope. |
+| `visibleTo` | string | Optional. Opaque client-set visibility marker (set on `msg.send`). Stored and surfaced verbatim; the backend never filters delivery, reads, or previews on it — the client interprets the scope. |
 | `reactions` | map<emoji, [ReactionUser](#reactionuser)[]> | Optional. Omitted when absent; `{}` when present but empty. |
 | `deleted` | boolean | Optional. `true` for tombstoned messages. |
 | `type` | string | Optional. System-message type when set; regular messages omit it. Known values: `"room_created"`, `"members_added"`, `"member_removed"`, `"member_left"`, `"room_renamed"`. For all five, `msg` is populated with a server-rendered human-readable body and `sender.account` is the responsible actor (the requester for adds/removes-by-other / room-creates / renames, the leaving user for self-leave). `"room_restricted"` also appears on historical messages: it is no longer produced — a restriction change emits a [room event](client-api/events.md#room_restricted-roomrestrictedroomevent) instead — but rows written before that change remain readable. |
@@ -6302,6 +6303,7 @@ The same subject and request body cover three send variants: plain message, thre
 | `tshow` | boolean | no | The "Also send to channel" option. Only meaningful on a thread reply (`threadParentMessageId` set): the reply is persisted into the parent room's channel timeline as well as the thread (dual-write into `messages_by_room` in addition to `thread_messages_by_thread` + `messages_by_id`), and is surfaced with `tshow: true` on the persisted message. On a non-thread send the flag is **ignored and normalized to `false`** — the request is not rejected. |
 | `quotedParentMessageId` | string | no | Set when posting a quoted message. The gatekeeper fetches the authoritative parent snapshot from message history and embeds it in the persisted message. If that fetch fails *transiently* (history briefly unavailable), the message is not dropped: the gatekeeper inserts a placeholder snapshot for live delivery (body `"Content temporarily unavailable"`), and `message-worker` re-projects the authoritative snapshot (or drops the quote) from history before the durable write, so the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `type` | string | no | Optional client-settable message type. The only accepted value is `"important"` (an important message — previews and notifies like a normal message). Any other value, including a system type (`room_created`, etc.), is rejected with `bad_request`. Omitted = a normal message. |
+| `visibleTo` | string | no | Optional opaque visibility marker, ≤ 4096 bytes. Stored and surfaced verbatim (on history reads and the room-list preview); the server never interprets it or filters delivery, reads, or previews on it — the client interprets visibility. Oversize is rejected with `bad_request`. |
 
 ##### Plain message
 
@@ -6368,6 +6370,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. The body is the persist
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort for a thread reply; absent when the parent's createdAt could not be resolved at send time. |
 | `tshow` | boolean | Present only when the request set `tshow: true` on a thread reply (absent when the flag was normalized away on a non-thread send). |
 | `quotedParentMessage` | [QuotedParentMessage](#quotedparentmessage) | Present only for a quoted send — the server-fetched snapshot of the quoted parent. |
+| `visibleTo` | string | Present only when the request set `visibleTo` — echoed verbatim. |
 
 The gatekeeper does **not** populate `mentions`, `editedAt`/`updatedAt`, `type`, or `sysMsgData` on this reply (all `omitempty`, so they are absent). Mention resolution and the enriched `sender` happen in the broadcast fan-out event ([§4 triggered events](#triggered-events--success-path)), not in this reply.
 
@@ -6395,6 +6398,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `content must not be empty` | `bad_request` | — | Empty `content`. |
 | `invalid message type "…"` | `bad_request` | — | `type` is set to something other than `"important"` (e.g. a system type). |
 | `content exceeds maximum size of 20480 bytes` | `bad_request` | — | `content` > 20 KiB. |
+| `visibleTo exceeds maximum size of 4096 bytes` | `bad_request` | — | `visibleTo` > 4096 bytes. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
 | `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |

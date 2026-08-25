@@ -87,8 +87,24 @@ func samplePreview() model.PreviewMessage {
 			FileType: "image/png", ImageURL: "/f1/img", ImageSize: 42,
 			ImageDimensions: &cassandra.ImageDimensions{Width: 10, Height: 20},
 		}},
-		Mentions: []model.Participant{{Account: "bob"}},
+		Mentions:  []model.Participant{{Account: "bob"}},
+		VisibleTo: "u1,u2",
 	}
+}
+
+// VisibleTo rides the plaintext Meta half (visibility metadata), never the sealed body,
+// and roundtrips through Seal/Open. It is deliberately NOT a preview-eligibility gate.
+func TestSeal_VisibleToInPlaintextMeta(t *testing.T) {
+	ctx := context.Background()
+	sealed, err := Seal(ctx, fakeCipher{}, Key{SiteID: "site-a", Epoch: 1}, "msg-1", samplePreview())
+	require.NoError(t, err)
+
+	assert.Equal(t, "u1,u2", sealed.Meta.VisibleTo)
+	assert.NotContains(t, string(sealed.Ciphertext), "u1,u2", "visibleTo must not be sealed into the body")
+
+	got, err := Open(ctx, fakeCipher{}, "site-a", sealed)
+	require.NoError(t, err)
+	assert.Equal(t, "u1,u2", got.VisibleTo)
 }
 
 func TestKey_ID(t *testing.T) {

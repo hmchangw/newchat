@@ -60,6 +60,7 @@ func Seal(ctx context.Context, c atrest.Cipher, k Key, forMsgID string, p model.
 			Sender:    p.Sender,
 			CreatedAt: p.CreatedAt,
 			Mentions:  p.Mentions,
+			VisibleTo: p.VisibleTo,
 		},
 		Ciphertext: ciphertext,
 		Nonce:      meta.Nonce,
@@ -93,6 +94,7 @@ func Open(ctx context.Context, c atrest.Cipher, siteID string, s Sealed) (model.
 		CreatedAt:   s.Meta.CreatedAt,
 		Attachments: atts,
 		Mentions:    s.Meta.Mentions,
+		VisibleTo:   s.Meta.VisibleTo,
 	}, nil
 }
 

@@ -62,8 +62,10 @@ func truncateContent(s string) string {
 
 // Eligible reports whether a message may represent its room — system and deleted ones
 // may not. Shared: a rule on one writer only would strand a preview the walk never picks.
-func Eligible(deleted bool, msgType, visibleTo string) bool {
-	return !deleted && !model.IsSystemMessageType(msgType) && visibleTo == ""
+// VisibleTo is deliberately NOT a gate: a message with a visibility marker is still
+// previewed and carries the marker, leaving the client to honour the scope.
+func Eligible(deleted bool, msgType string) bool {
+	return !deleted && !model.IsSystemMessageType(msgType)
 }
 
 // AppNameLookup resolves a bot account's app display name; ("", nil) means no match.

@@ -31,6 +31,11 @@ import (
 
 const maxContentBytes = 20 * 1024 // 20 KB
 
+// maxVisibleToBytes caps the opaque client-set VisibleTo marker. The value is never
+// interpreted here — the cap is a defensive bound so a client cannot store an unbounded
+// blob on the row.
+const maxVisibleToBytes = 4096
+
 // quotedParentUnavailablePlaceholder is the degraded-mode quoted-parent body used
 // when the authoritative fetch fails transiently. It never persists —
 // message-worker re-projects the real snapshot before the durable write.
@@ -359,6 +364,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid message type %q", req.Type))
 	}
 
+	// VisibleTo is opaque — validate only its size, never its content.
+	if len(req.VisibleTo) > maxVisibleToBytes {
+		return nil, errcode.BadRequest(
+			fmt.Sprintf("visibleTo exceeds maximum size of %d bytes", maxVisibleToBytes),
+			errcode.WithMetadata("maxVisibleToBytes", strconv.Itoa(maxVisibleToBytes), "attempted", strconv.Itoa(len(req.VisibleTo))),
+		)
+	}
+
 	// Verify subscription
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil {
@@ -455,6 +468,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		QuotedParentMessage:          quotedSnapshot,
 		Attachments:                  req.Attachments,
 		Type:                         req.Type,
+		VisibleTo:                    req.VisibleTo,
 	}
 
 	// Publish MessageEvent to MESSAGES-CANONICAL. QuotedParentUnverified rides the

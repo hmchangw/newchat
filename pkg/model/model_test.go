@@ -487,6 +487,27 @@ func TestMessageJSON(t *testing.T) {
 		assert.False(t, present, "threadParentMessageCreatedAt should be omitted when nil")
 	})
 
+	t.Run("visibleTo round-trip and omitempty", func(t *testing.T) {
+		m := model.Message{
+			ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice",
+			Content:   "hello",
+			CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+			VisibleTo: "u1,u2",
+		}
+		roundTrip(t, &m, &model.Message{})
+
+		bs, err := bson.Marshal(&m)
+		require.NoError(t, err)
+		var back model.Message
+		require.NoError(t, bson.Unmarshal(bs, &back))
+		assert.Equal(t, "u1,u2", back.VisibleTo)
+
+		empty := model.Message{ID: "m1", RoomID: "r1", UserID: "u1", UserAccount: "alice", Content: "hi", CreatedAt: m.CreatedAt}
+		data, err := json.Marshal(&empty)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"visibleTo"`, "empty VisibleTo must be omitted")
+	})
+
 	t.Run("editedAt + updatedAt round-trip", func(t *testing.T) {
 		edited := time.Date(2026, 1, 1, 12, 5, 0, 0, time.UTC)
 		updated := time.Date(2026, 1, 1, 12, 6, 0, 0, time.UTC)
