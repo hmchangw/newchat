@@ -1355,38 +1355,74 @@ func (h *Handler) allowedThreadMentions(ctx context.Context, roomID string, ment
 	return allowed, nil
 }
 
+// degradeReason values for (*broadcastMetrics).ThreadFanOutDegraded. Constants,
+// not inline literals: the reason is a metric label, so its cardinality must stay
+// bounded to the cases this file actually distinguishes.
+const (
+	degradeReasonFetchFailed  = "fetch_failed"
+	degradeReasonNoThreadRoom = "no_thread_room"
+)
+
 // channelThreadFanOut builds the deduplicated channel recipient set: the reply sender
-// + the parent author (both included for multi-device sync / thread ownership, race-free)
 // + the parent's thread followers + history-gated @-mentions, bots excluded.
 //
-// The parent's CreatedAt (gate) and author account (recipient) come from the event
-// when the gatekeeper resolved them on the send path (eventParentCreatedAt != nil &&
-// eventParentSenderAccount != "") — skipping the history-service round-trip. When either
-// is absent (edit/delete canonical events bypass the gatekeeper, or a gatekeeper
-// soft-fail) both are fetched from history-service; a fetch error is returned so the
-// caller NAKs and JetStream redelivers. The gate lives here so no thread handler can
-// bypass it.
+// The parent's createdAt is resolved in three steps, cheapest first: the event (the
+// gatekeeper resolved it on the send path), then the thread_rooms document this method
+// already reads for followers, then history-service. Only the last touches Cassandra,
+// so a thread that existed before an outage resolves entirely from Mongo.
+//
+// When no step resolves it, the fan-out degrades rather than erroring: followers still
+// receive the reply and the history-gated mentionees are dropped. Returning an error
+// here would NAK the message, and MaxDeliver would then destroy it — a reply nobody
+// receives is strictly worse than one some people receive.
+//
+// The parent author needs no separate resolution: message-worker seeds them into
+// replyAccounts at first reply, so followers already contains them.
 func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, parentMsgID, sender string, mentions []string, eventParentCreatedAt *time.Time, eventParentSenderAccount string) ([]string, error) {
-	parent := &ParentMessageInfo{}
-	if eventParentCreatedAt != nil && eventParentSenderAccount != "" {
-		parent.CreatedAt = *eventParentCreatedAt
-		parent.SenderAccount = eventParentSenderAccount
-	} else {
-		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
-		if err != nil {
-			return nil, fmt.Errorf("fetch thread parent %s: %w", parentMsgID, err)
-		}
-		parent = fetched
-	}
-	allowed, err := h.allowedThreadMentions(ctx, roomID, mentions, &parent.CreatedAt)
-	if err != nil {
-		return nil, err
-	}
-	threadRoom, err := h.store.GetThreadRoom(ctx, parentMsgID)
+	room, err := h.store.GetThreadRoom(ctx, parentMsgID)
 	if err != nil {
 		return nil, fmt.Errorf("get thread room for parent %s: %w", parentMsgID, err)
 	}
-	return threadFanOutAccounts(sender, parent.SenderAccount, threadRoom.Followers, allowed), nil
+
+	parentCreatedAt := eventParentCreatedAt
+	parentSender := eventParentSenderAccount
+	if parentCreatedAt == nil {
+		parentCreatedAt = room.ParentCreatedAt
+	}
+	// degradeReason records at most ONE reason per fan-out. A failed fetch and an
+	// absent thread room coincide in the common outage case, so counting them
+	// independently would double every degrade exactly when the metric is watched.
+	degradeReason := degradeReasonNoThreadRoom
+	if parentCreatedAt == nil {
+		fetched, ferr := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
+		switch {
+		case ferr != nil:
+			degradeReason = degradeReasonFetchFailed
+			slog.WarnContext(ctx, "thread parent unresolvable; fanning out to followers only",
+				"error", ferr, "parent_message_id", parentMsgID, "room_id", roomID,
+				"request_id", natsutil.RequestIDFromContext(ctx))
+		default:
+			parentCreatedAt = &fetched.CreatedAt
+			if parentSender == "" {
+				parentSender = fetched.SenderAccount
+			}
+		}
+	}
+	if parentCreatedAt == nil {
+		h.metrics.ThreadFanOutDegraded(ctx, degradeReason)
+	}
+
+	// A nil parentCreatedAt makes mentionVisible fail closed for every member with a
+	// history window, so the gate never widens on missing data. Skip the query entirely
+	// when nothing can pass it.
+	var allowed []string
+	if parentCreatedAt != nil {
+		allowed, err = h.allowedThreadMentions(ctx, roomID, mentions, parentCreatedAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return threadFanOutAccounts(sender, parentSender, room.Followers, allowed), nil
 }
 
 // usersByAccount indexes a slice of users by their Account for O(1) lookup

@@ -2797,10 +2797,11 @@ func TestHandleThreadCreated_ChannelRoom_UsesEventParent_SkipsFetch(t *testing.T
 	assert.False(t, got[subject.UserRoomEvent("carol")], "member who joined after the event-carried parent createdAt is excluded")
 }
 
-// When the event lacks the parent sender account (e.g. gatekeeper soft-fail),
-// broadcast-worker must fall back to FetchParent even if createdAt is present —
-// both values come from the same fetch.
-func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t *testing.T) {
+// When the event carries createdAt but no parent sender account (e.g. a gatekeeper
+// soft-fail), no history-service round trip happens: createdAt already gates the
+// mentions, and the parent author reaches the fan-out through the thread room's
+// replyAccounts, which message-worker seeds at the first reply.
+func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_ParentAuthorFromFollowers(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
@@ -2812,12 +2813,12 @@ func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t
 	parentAt := msgTime.Add(-time.Hour)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
-	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{Followers: map[string]struct{}{}}, nil)
+	// The thread room carries the parent author in replyAccounts; the event's createdAt
+	// gates the mentions. The MockParentFetcher registers no EXPECT, so any FetchParent
+	// call fails the test.
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").
+		Return(ThreadRoomInfo{Followers: map[string]struct{}{"carol": {}}}, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
-	// createdAt present but no sender account → must fetch (returns the parent author).
-	parentFetcher.EXPECT().
-		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
-		Return(&ParentMessageInfo{SenderAccount: "carol", CreatedAt: parentAt}, nil)
 
 	evt := model.MessageEvent{
 		Event:     model.EventCreated,
@@ -2845,7 +2846,7 @@ func TestHandleThreadCreated_ChannelRoom_MissingSenderAccount_FallsBackToFetch(t
 		got[r.subject] = true
 	}
 	assert.True(t, got[subject.UserRoomEvent("alice")], "reply sender receives their own echo")
-	assert.True(t, got[subject.UserRoomEvent("carol")], "parent author (from fetch fallback) receives the reply")
+	assert.True(t, got[subject.UserRoomEvent("carol")], "parent author (a thread follower) receives the reply")
 }
 
 func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
@@ -4158,4 +4159,98 @@ func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
 	assert.Less(t, elapsed, mentionFanoutTimeout, "3 batches must not cost 3 budgets")
 	hadDeadline, _ := pub.calls()
 	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
+}
+
+// The thread room supplies the parent createdAt when the event lacks it, so no
+// history-service round trip happens at all. This is the Cassandra-outage path
+// for every thread that existed before the outage began.
+func TestChannelThreadFanOut_ThreadRoomSuppliesParentCreatedAt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl) // no EXPECT → FetchParent must NOT be called
+
+	parentAt := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+	joinedLate := parentAt.Add(time.Hour)
+
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
+		Followers:       map[string]struct{}{"carol": {}},
+		ParentCreatedAt: &parentAt,
+	}, nil)
+	store.EXPECT().GetHistorySharedSince(gomock.Any(), "r1", []string{"bob", "dave"}).
+		Return(map[string]*time.Time{"bob": nil, "dave": &joinedLate}, nil)
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false, subject.RouteGlobal)
+
+	got, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice",
+		[]string{"bob", "dave"}, nil, "")
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "carol", "bob"}, got,
+		"sender + follower + unrestricted mentionee; dave joined after the parent")
+}
+
+// No thread room and no usable fetch: deliver to whoever we can verify rather
+// than returning an error, which JetStream would turn into a dropped message.
+func TestChannelThreadFanOut_UnresolvableParent_FailsClosed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl)
+
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
+		Followers: map[string]struct{}{},
+	}, nil)
+	parentFetcher.EXPECT().
+		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
+		Return(nil, errcode.Internal("cassandra unavailable"))
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false, subject.RouteGlobal)
+
+	got, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice",
+		[]string{"bob"}, nil, "")
+
+	require.NoError(t, err, "an unresolvable parent must not error — that drops the message")
+	assert.Equal(t, []string{"alice"}, got, "mentionee bob is dropped: his history window cannot be checked")
+}
+
+// Followers still receive the reply when the parent is unresolvable — only the
+// history-gated mentionees are dropped.
+func TestChannelThreadFanOut_UnresolvableParent_KeepsFollowers(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	parentFetcher := NewMockParentFetcher(ctrl)
+
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{
+		Followers: map[string]struct{}{"carol": {}, "zoe": {}},
+	}, nil)
+	parentFetcher.EXPECT().
+		FetchParent(gomock.Any(), "alice", "r1", "site-a", "parent-1").
+		Return(nil, errcode.Internal("cassandra unavailable"))
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), parentFetcher, false, subject.RouteGlobal)
+
+	got, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice",
+		nil, nil, "")
+
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "carol", "zoe"}, got,
+		"the parent author is among replyAccounts, so followers already cover them")
+}
+
+// A Mongo failure is still an error: thread_rooms is the fallback's own store,
+// and losing it means we know nothing, not that we should degrade silently.
+func TestChannelThreadFanOut_ThreadRoomStoreError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+
+	store.EXPECT().GetThreadRoom(gomock.Any(), "parent-1").Return(ThreadRoomInfo{}, errors.New("db error"))
+
+	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), NewMockParentFetcher(ctrl), false, subject.RouteGlobal)
+
+	_, err := h.channelThreadFanOut(context.Background(), "r1", "site-a", "parent-1", "alice", nil, nil, "")
+
+	require.Error(t, err)
 }
