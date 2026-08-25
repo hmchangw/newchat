@@ -77,6 +77,11 @@ type config struct {
 	MaxUploadBytes     int64 `env:"MAX_UPLOAD_BYTES" envDefault:"1048576"`
 	CacheMaxAgeSeconds int   `env:"CACHE_MAX_AGE_SECONDS" envDefault:"21600"`
 
+	// DefaultAvatarEnabled gates the generated "initials" default avatar. When
+	// false, the avatar endpoints return 404 instead of synthesizing an SVG, so
+	// the client renders its own fallback.
+	DefaultAvatarEnabled bool `env:"DEFAULT_AVATAR_ENABLED" envDefault:"true"`
+
 	// Custom-emoji upload limits. Bytes cap the raw body; dimension caps the
 	// decoded width AND height independently.
 	EmojiMaxUploadBytes int64 `env:"EMOJI_MAX_UPLOAD_BYTES" envDefault:"262144"`

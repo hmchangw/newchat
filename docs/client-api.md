@@ -6913,6 +6913,8 @@ HTTP endpoints served by `media-service` — the three GETs are public, the two 
 
 **Default image:** when no custom image exists (and for users with no `employeeId`), the service returns a deterministic SVG "initials" avatar (`Content-Type: image/svg+xml`) generated on the fly — never stored. The SVG is cacheable: it carries a stable `ETag` and `Cache-Control: public, max-age=<cfg>`.
 
+**Default-avatar toggle:** the generated default is gated by `DEFAULT_AVATAR_ENABLED` (default `true`). When disabled, every avatar endpoint returns `404 not_found` instead of synthesizing the SVG (for rooms, users with no `employeeId`, and bots), and the client MUST render its own fallback on image-load failure — the same `<img onerror>` contract as the employee-photo `404` case below. Both the SVG and the disabled `404` carry the same `Cache-Control: public, max-age=<cfg>`, so **a toggle change propagates to shared/browser caches within that window** (default 6h); purge those caches to apply it immediately.
+
 **Frontend-default contract for user avatars:** after a `307` to the employee-photo host, a user who has an `employeeId` but no actual photo on that host receives a `404` from the external service. The client MUST render its own fallback on image-load failure (`<img onerror>`). The server-side default (initials SVG) only covers users with no `employeeId`, bots, and rooms.
 
 ### GET /api/v1/avatar/:accountName
