@@ -8,6 +8,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
@@ -18,6 +19,7 @@ import (
 type MongoStore struct {
 	subscriptions *mongo.Collection
 	rooms         *mongo.Collection
+	threadRooms   *mongo.Collection
 	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
 	metaTTL       time.Duration
 	metaRec       roommetacache.Recorder
@@ -27,6 +29,7 @@ func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL time.Du
 	return &MongoStore{
 		subscriptions: db.Collection("subscriptions"),
 		rooms:         db.Collection("rooms"),
+		threadRooms:   db.Collection("thread_rooms"),
 		valkey:        valkey,
 		metaTTL:       metaTTL,
 		metaRec:       cachemetrics.For("roommeta", "l2"),
@@ -47,4 +50,19 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
 	return roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL, s.metaRec)
+}
+
+// ThreadRoomExists reports whether a thread_rooms document exists for
+// parentMessageID. Projected to _id only — the caller needs existence, not the
+// document.
+func (s *MongoStore) ThreadRoomExists(ctx context.Context, parentMessageID string) (bool, error) {
+	opts := options.FindOne().SetProjection(bson.M{"_id": 1})
+	err := s.threadRooms.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}, opts).Err()
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, nil
+		}
+		return false, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
+	}
+	return true, nil
 }

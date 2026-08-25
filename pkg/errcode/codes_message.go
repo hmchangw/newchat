@@ -14,4 +14,10 @@ const (
 	PinDisabled     Reason = "pin_disabled"
 	PinLimitReached Reason = "pin_limit_reached"
 	PinRoomTooLarge Reason = "pin_room_too_large"
+	// MessageThreadStartUnavailable: the sender is starting a NEW thread while
+	// history is unreachable. The thread has no thread_rooms document, so no
+	// consumer can resolve the parent and the reply would reach nobody. Replies to
+	// existing threads are unaffected — the frontend uses this to disable thread
+	// starts, not thread replies.
+	MessageThreadStartUnavailable Reason = "thread_start_unavailable"
 )

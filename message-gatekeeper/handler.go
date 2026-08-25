@@ -428,8 +428,13 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// Resolve the thread parent's createdAt + sender account server-side,
 	// best-effort: a fetch failure ships the event without the values (each
 	// consumer falls back to a store it owns), so a Cassandra outage never blocks
-	// the send path. Both ride the same fetch.
-	threadParentCreatedAt, threadParentSenderAccount := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	// the send path. Both ride the same fetch. The one exception is a thread that
+	// no consumer could resolve at all — that send is refused, see
+	// resolveThreadParent.
+	threadParentCreatedAt, threadParentSenderAccount, err := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	if err != nil {
+		return nil, err
+	}
 
 	// Compose the sender's render-ready display name once at write time so every
 	// downstream consumer (notification-worker, future search-sync-worker) reads
@@ -497,36 +502,66 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 // server-side, returning (nil, "") for a non-thread reply. It reuses the quote
 // snapshot when the parent is also the verified quoted message (the unverified
 // placeholder carries a synthetic timestamp), otherwise fetches by ID. Both
-// values come from the same snapshot in one fetch. Best-effort: any failure logs
-// a warning and returns (nil, "") — downstream consumers fall back to their own
+// values come from the same snapshot in one fetch. Best-effort: a failure logs a
+// warning and returns (nil, "") — downstream consumers fall back to their own
 // stores.
+//
+// The one failure it does NOT wave through: an outage-class fetch failure for a
+// thread that has no thread_rooms document. message-worker creates that document
+// only after a Cassandra read, so during a history outage a thread first replied
+// to now has nothing any consumer can resolve the parent from — the reply would
+// reach only its sender. That send is refused with
+// errcode.MessageThreadStartUnavailable instead.
 func (h *Handler) resolveThreadParent(
 	ctx context.Context,
 	account, roomID, siteID string,
 	req *model.SendMessageRequest,
 	quotedSnapshot *cassandra.QuotedParentMessage,
 	quotedUnverified bool,
-) (*time.Time, string) {
+) (*time.Time, string, error) {
 	if req.ThreadParentMessageID == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	if quotedSnapshot != nil && !quotedUnverified && req.QuotedParentMessageID == req.ThreadParentMessageID {
 		t := quotedSnapshot.CreatedAt.UTC()
-		return &t, quotedSnapshot.Sender.Account
+		return &t, quotedSnapshot.Sender.Account, nil
 	}
 	if h.parentFetcher == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
 	if err != nil || snap == nil {
-		slog.WarnContext(ctx, "thread parent resolution failed, publishing without it",
+		slog.WarnContext(ctx, "thread parent resolution failed",
 			"error", err,
 			"parent_message_id", req.ThreadParentMessageID,
 			"request_id", req.RequestID)
-		return nil, ""
+		// Only an outage-class failure warrants the thread_rooms probe. A terminal
+		// error (not_found, forbidden) keeps the historical soft-fail, and so does a
+		// (nil, nil) fetcher-contract violation: neither is evidence that history is
+		// down, so neither may produce an "unavailable" refusal.
+		if err == nil || !errcode.IsTransient(err) {
+			return nil, "", nil
+		}
+		exists, xerr := h.store.ThreadRoomExists(ctx, req.ThreadParentMessageID)
+		if xerr != nil {
+			// Mongo is the last thing that could have answered. Soft-fail as before
+			// rather than refusing a send on a second, unrelated failure.
+			slog.WarnContext(ctx, "thread room probe failed; publishing without parent",
+				"error", xerr, "parent_message_id", req.ThreadParentMessageID,
+				"request_id", req.RequestID)
+			return nil, "", nil
+		}
+		if !exists {
+			return nil, "", errcode.Unavailable(
+				"cannot start a new thread while message history is unavailable",
+				errcode.WithReason(errcode.MessageThreadStartUnavailable))
+		}
+		// The thread exists: broadcast-worker resolves the parent from the same
+		// document, so the send proceeds without the event-carried fields.
+		return nil, "", nil
 	}
 	t := snap.CreatedAt.UTC()
-	return &t, snap.Sender.Account
+	return &t, snap.Sender.Account, nil
 }
 
 // resolveQuoteSnapshot resolves the quoted parent into a snapshot, preferring the

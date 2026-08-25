@@ -47,3 +47,23 @@ func TestMongoStore_GetRoomMeta_ReadsThroughL2(t *testing.T) {
 	assert.Equal(t, "site-a", again.SiteID)
 	assert.Equal(t, model.RoomTypeChannel, again.Type)
 }
+
+func TestMongoStore_ThreadRoomExists(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "gk-threadroom")
+
+	_, err := db.Collection("thread_rooms").InsertOne(ctx, bson.M{
+		"_id": "tr1", "parentMessageId": "parent-1", "roomId": "r1", "siteId": "site-a",
+	})
+	require.NoError(t, err)
+
+	store := NewMongoStore(db, nil, time.Minute)
+
+	exists, err := store.ThreadRoomExists(ctx, "parent-1")
+	require.NoError(t, err)
+	assert.True(t, exists, "an existing thread must be reported as resolvable")
+
+	exists, err = store.ThreadRoomExists(ctx, "parent-unknown")
+	require.NoError(t, err)
+	assert.False(t, exists, "a thread with no document must report false, not an error")
+}

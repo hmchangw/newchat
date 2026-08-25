@@ -25,6 +25,10 @@ var (
 type Store interface {
 	GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error)
 	GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error)
+	// ThreadRoomExists reports whether a thread already exists for parentMessageID.
+	// Read only when parent resolution has already failed, to tell "this thread is
+	// resolvable from Mongo" from "nothing can resolve it".
+	ThreadRoomExists(ctx context.Context, parentMessageID string) (bool, error)
 }
 
 // ParentMessageFetcher resolves a quoted parent message into a snapshot

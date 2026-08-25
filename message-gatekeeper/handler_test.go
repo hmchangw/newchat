@@ -226,6 +226,11 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				s.EXPECT().
 					GetSubscription(gomock.Any(), validAccount, validRoomID).
 					Return(sub, nil)
+				// The outage probe finds an existing thread, so the reply is still
+				// deliverable and the send keeps its soft-fail behaviour.
+				s.EXPECT().
+					ThreadRoomExists(gomock.Any(), threadParentID).
+					Return(true, nil)
 			},
 			setupFetcher: func(f *MockParentMessageFetcher) {
 				f.EXPECT().
@@ -1409,6 +1414,9 @@ func TestHandler_ProcessMessage_WithQuote(t *testing.T) {
 			},
 			setupStore: func(s *MockStore) {
 				s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
+				// The outage probe finds an existing thread, so the degraded send
+				// proceeds instead of being refused.
+				s.EXPECT().ThreadRoomExists(gomock.Any(), threadID).Return(true, nil)
 			},
 			setupFetcher: func(f *MockParentMessageFetcher) {
 				// Two fetches: the quote resolution (degrades to a placeholder) and
@@ -2223,11 +2231,14 @@ func TestHandler_processMessage_ThreadParentCreatedAt_ResolvedViaFetch(t *testin
 }
 
 func TestHandler_processMessage_ThreadParentCreatedAt_FetchFails_StillPublishes(t *testing.T) {
-	h, _, fetcher, published := threadReplyHarness(t)
+	h, store, fetcher, published := threadReplyHarness(t)
 	parentID := idgen.GenerateMessageID()
 	fetcher.EXPECT().
 		FetchQuotedParent(gomock.Any(), "alice", "room-1", "site-a", parentID).
 		Return(nil, errors.New("history unavailable"))
+	// An untyped error counts as outage-class, so the thread_rooms probe runs; the
+	// thread already exists, so the send keeps its soft-fail behaviour.
+	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(true, nil)
 
 	req := model.SendMessageRequest{
 		ID:                    idgen.GenerateMessageID(),
@@ -2255,6 +2266,8 @@ func TestHandler_processMessage_ThreadParentCreatedAt_NilSnapshot_StillPublishes
 	fetcher.EXPECT().
 		FetchQuotedParent(gomock.Any(), "alice", "room-1", "site-a", parentID).
 		Return(nil, nil) // contract violation: nil snapshot, nil error
+	// No ThreadRoomExists EXPECT: a (nil, nil) fetch is not evidence of an outage,
+	// so it soft-fails without probing and never refuses the send.
 
 	req := model.SendMessageRequest{
 		ID:                    idgen.GenerateMessageID(),
@@ -2554,4 +2567,131 @@ func mustMember(t *testing.T, key, value string) baggage.Member {
 	member, err := baggage.NewMember(key, value)
 	require.NoError(t, err)
 	return member
+}
+
+// testSubscription is the plain member subscription every thread-start test
+// reuses. Read-only: processMessage never mutates the subscription it is given.
+var testSubscription = &model.Subscription{
+	User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
+	RoomID: "r1",
+	Roles:  []model.Role{model.RoleMember},
+}
+
+// newTestHandler builds a Handler wired to the given mocks, mirroring
+// threadReplyHarness but leaving every store expectation to the caller.
+func newTestHandler(store Store, fetcher ParentMessageFetcher) *Handler {
+	return &Handler{
+		store:              store,
+		publish:            makePublishFunc(nil, nil),
+		siteID:             "site-a",
+		parentFetcher:      fetcher,
+		largeRoomThreshold: 500,
+	}
+}
+
+// Starting a NEW thread while history is unreachable is refused: message-worker
+// cannot create the thread_rooms document, so no consumer could ever resolve the
+// parent and the reply would reach nobody.
+func TestProcessMessage_ThreadStart_HistoryDown_Rejected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(false, nil)
+
+	h := newTestHandler(store, fetcher)
+
+	_, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "first reply in a new thread",
+		ThreadParentMessageID: parentID,
+	})
+
+	var ee *errcode.Error
+	require.ErrorAs(t, err, &ee)
+	assert.Equal(t, errcode.CodeUnavailable, ee.Code)
+	assert.Equal(t, errcode.MessageThreadStartUnavailable, ee.Reason)
+}
+
+// A thread that already exists is unaffected: broadcast-worker resolves the parent
+// from the same thread_rooms document, so the send goes through as normal.
+func TestProcessMessage_ExistingThread_HistoryDown_Publishes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(true, nil)
+
+	h := newTestHandler(store, fetcher)
+
+	out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "reply to an existing thread",
+		ThreadParentMessageID: parentID,
+	})
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, out)
+}
+
+// A terminal fetch error keeps today's soft-fail: the thread_rooms probe is only
+// for outage-class failures, so a missing parent does not become "unavailable".
+func TestProcessMessage_ThreadStart_TerminalFetchError_SoftFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.NotFound("message not found"))
+	// no ThreadRoomExists EXPECT → the probe must not run for a terminal error
+
+	h := newTestHandler(store, fetcher)
+
+	out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "reply",
+		ThreadParentMessageID: parentID,
+	})
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, out)
+}
+
+// A Mongo probe failure soft-fails rather than refusing the send: the probe is a
+// safeguard, and a second unrelated failure must not turn into a client refusal.
+func TestProcessMessage_ThreadStart_ProbeFails_SoftFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(false, errors.New("mongo down"))
+
+	h := newTestHandler(store, fetcher)
+
+	out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "reply",
+		ThreadParentMessageID: parentID,
+	})
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, out)
 }

@@ -73,6 +73,21 @@ func (mr *MockStoreMockRecorder) GetSubscription(ctx, account, roomID any) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSubscription", reflect.TypeOf((*MockStore)(nil).GetSubscription), ctx, account, roomID)
 }
 
+// ThreadRoomExists mocks base method.
+func (m *MockStore) ThreadRoomExists(ctx context.Context, parentMessageID string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ThreadRoomExists", ctx, parentMessageID)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ThreadRoomExists indicates an expected call of ThreadRoomExists.
+func (mr *MockStoreMockRecorder) ThreadRoomExists(ctx, parentMessageID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ThreadRoomExists", reflect.TypeOf((*MockStore)(nil).ThreadRoomExists), ctx, parentMessageID)
+}
+
 // MockParentMessageFetcher is a mock of ParentMessageFetcher interface.
 type MockParentMessageFetcher struct {
 	ctrl     *gomock.Controller
