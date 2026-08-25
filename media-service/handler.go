@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/model"
 )
@@ -48,6 +49,12 @@ func (h *handler) setImageCacheHeaders(c *gin.Context, etag string) {
 
 func (h *handler) serveDefault(c *gin.Context, kind, seed, name string) {
 	c.Set("media_kind", kind)
+	if !h.cfg.DefaultAvatarEnabled {
+		// Default generated avatar disabled: 404 so the client renders its own fallback.
+		c.Set("media_outcome", "disabled")
+		errhttp.Write(c.Request.Context(), c, errcode.NotFound("avatar not found"))
+		return
+	}
 	c.Set("media_outcome", "default")
 	etag := defaultETag(seed, name)
 	h.setImageCacheHeaders(c, etag)
