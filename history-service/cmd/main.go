@@ -158,9 +158,9 @@ func main() {
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
-	// Per-bucket read cache (L1 in-process + L2 Valkey) for the sealed Cassandra
-	// LoadHistory reads. Disabled when VALKEY_ADDRS is unset. The cache lives
-	// inside cassRepo: sealed buckets are served from cache, the current bucket
+	// Per-bucket Valkey read cache for the sealed Cassandra LoadHistory reads,
+	// shared by every replica. Off unless HISTORY_BUCKET_CACHE_ENABLED. The cache
+	// lives inside cassRepo: sealed buckets are served from it, the current bucket
 	// and mutations always hit Cassandra, and the write path busts affected
 	// buckets synchronously.
 	var (
@@ -171,17 +171,16 @@ func main() {
 		// The cache is an optimization, never a dependency: a Valkey outage must not
 		// keep this replica from serving reads Cassandra can already answer. Degrade
 		// to uncached reads instead of exiting, or a Valkey blip during a rolling
-		// restart would take out every replacement replica. Skipping the cache
-		// entirely (rather than falling back to an L1-only cache) keeps mutation
-		// invalidation correct — without L2 to consult, a sibling replica's L1 would
-		// serve pre-mutation rows until the TTL expired.
+		// restart would take out every replacement replica. There is no in-process
+		// fallback tier, so an outage means no caching at all rather than a set of
+		// replicas each serving its own divergent copy.
 		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
 		if err != nil {
 			slog.Warn("valkey connect (per-bucket cache) failed, serving uncached reads", "error", err)
 			msgValkey = nil
 		} else {
-			bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheL1MaxBytes, cfg.BucketCacheTTL)
+			bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheTTL)
 			if cerr != nil {
 				// Not a dependency outage — the knobs themselves are unusable, and
 				// config validation should already have rejected them. Fail loudly.
@@ -189,7 +188,7 @@ func main() {
 				os.Exit(1)
 			}
 			repoOpts = append(repoOpts, cassrepo.WithBucketCache(bc, cfg.BucketCacheMaxRows))
-			slog.Info("per-bucket cache enabled", "l1MaxBytes", cfg.BucketCacheL1MaxBytes, "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
+			slog.Info("per-bucket cache enabled", "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
 		}
 	}
 

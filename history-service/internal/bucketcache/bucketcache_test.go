@@ -92,7 +92,7 @@ func bucketOf(msg string) []models.Message {
 
 func newCache(t *testing.T, fv valkeyutil.Client) *Cache {
 	t.Helper()
-	c, err := NewCache(fv, 1<<20, time.Minute)
+	c, err := NewCache(fv, time.Minute)
 	require.NoError(t, err)
 	return c
 }
@@ -126,27 +126,18 @@ func TestKey_Format(t *testing.T) {
 }
 
 func TestNewCache_InvalidArgs(t *testing.T) {
-	// A TTL in (0, minTTL) is the sharp edge: golang-lru remaps ttl <= 0 to its
-	// no-eviction sentinel, but keeps a sub-100ns ttl and starts the reaper with
-	// time.NewTicker(ttl / 100), which truncates to 0 and panics.
 	tests := []struct {
-		name     string
-		maxBytes int64
-		ttl      time.Duration
-		wantErr  bool
+		name    string
+		ttl     time.Duration
+		wantErr bool
 	}{
-		{name: "zero max bytes", maxBytes: 0, ttl: time.Minute, wantErr: true},
-		{name: "negative max bytes", maxBytes: -1, ttl: time.Minute, wantErr: true},
-		{name: "zero ttl", maxBytes: 10, ttl: 0, wantErr: true},
-		{name: "negative ttl", maxBytes: 10, ttl: -time.Second, wantErr: true},
-		{name: "ttl below reaper tick floor", maxBytes: 10, ttl: time.Nanosecond, wantErr: true},
-		{name: "ttl one tick below floor", maxBytes: 10, ttl: 99 * time.Nanosecond, wantErr: true},
-		{name: "ttl at reaper tick floor", maxBytes: 10, ttl: 100 * time.Nanosecond},
-		{name: "ordinary ttl", maxBytes: 1 << 20, ttl: time.Minute},
+		{name: "zero ttl", ttl: 0, wantErr: true},
+		{name: "negative ttl", ttl: -time.Second, wantErr: true},
+		{name: "ordinary ttl", ttl: time.Minute},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, err := NewCache(newFakeValkey(), tt.maxBytes, tt.ttl)
+			c, err := NewCache(newFakeValkey(), tt.ttl)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -181,26 +172,28 @@ func TestCache_MissThenPutThenGet_CopySafe(t *testing.T) {
 	assert.Equal(t, "orig", got2[0].Msg, "each Get must return a fresh copy")
 }
 
-func TestCache_L2Hit_PopulatesL1(t *testing.T) {
-	fv := newFakeValkey() // shared L2
+// The cache has one shared tier and no per-replica copy, so a Bust by any
+// instance is immediately visible to every other. This is the property the
+// earlier L1 could not provide: a sibling replica went on serving pre-mutation
+// rows from its own memory until that entry's TTL, whatever happened in Valkey.
+func TestCache_BustIsVisibleToOtherInstances(t *testing.T) {
+	fv := newFakeValkey() // the shared tier, standing in for one Valkey cluster
 	ctx := context.Background()
 
-	c1 := newCache(t, fv)
-	c1.Put(ctx, "r1", 100, bucketOf("orig"))
+	writer := newCache(t, fv) // the replica handling the mutation
+	reader := newCache(t, fv) // a sibling replica serving reads
 
-	// Second instance: cold L1, shares L2 → hits.
-	c2 := newCache(t, fv)
-	got, res := c2.Get(ctx, "r1", 100)
-	require.Equal(t, Hit, res, "served from shared L2")
+	writer.Put(ctx, "r1", 100, bucketOf("orig"))
+
+	got, res := reader.Get(ctx, "r1", 100)
+	require.Equal(t, Hit, res, "sibling serves the shared entry")
+	require.Len(t, got, 1)
 	assert.Equal(t, "orig", got[0].Msg)
 
-	// Prove c2's L1 was populated: wipe L2, c2 still serves from L1.
-	fv.mu.Lock()
-	fv.data = map[string]string{}
-	fv.mu.Unlock()
-	got2, res := c2.Get(ctx, "r1", 100)
-	require.Equal(t, Hit, res, "served from L1 after L2 wiped")
-	assert.Equal(t, "orig", got2[0].Msg)
+	writer.Bust(ctx, "r1", 100)
+
+	_, res = reader.Get(ctx, "r1", 100)
+	assert.Equal(t, Miss, res, "the sibling must not keep serving the busted bucket")
 }
 
 func TestCache_Bust_RemovesEntry(t *testing.T) {
@@ -212,7 +205,7 @@ func TestCache_Bust_RemovesEntry(t *testing.T) {
 	require.True(t, fv.has(Key("r1", 100)))
 
 	c.Bust(ctx, "r1", 100)
-	assert.False(t, fv.has(Key("r1", 100)), "L2 entry deleted")
+	assert.False(t, fv.has(Key("r1", 100)), "entry deleted")
 	assert.Equal(t, []string{Key("r1", 100)}, fv.dels)
 
 	_, res := c.Get(ctx, "r1", 100)
@@ -236,10 +229,11 @@ func TestCache_FailOpen_SetError(t *testing.T) {
 
 	assert.NotPanics(t, func() { c.Put(ctx, "r1", 100, bucketOf("orig")) })
 
-	// L1 is independent, so it still serves despite the L2 write failing.
-	got, res := c.Get(ctx, "r1", 100)
-	require.Equal(t, Hit, res)
-	assert.Equal(t, "orig", got[0].Msg)
+	// With one shared tier there is no per-process copy to fall back on: a failed
+	// write simply leaves the bucket uncached, and the next read goes live. The
+	// cache degrades to absent, never to a divergent per-pod view.
+	_, res := c.Get(ctx, "r1", 100)
+	assert.Equal(t, Miss, res, "a failed write must leave nothing cached")
 }
 
 func TestCache_FailOpen_DelError(t *testing.T) {
@@ -260,7 +254,7 @@ func TestCache_FailOpen_DelError(t *testing.T) {
 }
 
 func TestCache_NilClient_Noops(t *testing.T) {
-	c, err := NewCache(nil, 1<<20, time.Minute)
+	c, err := NewCache(nil, time.Minute)
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -268,85 +262,6 @@ func TestCache_NilClient_Noops(t *testing.T) {
 	assert.NotPanics(t, func() { c.Bust(ctx, "r1", 100) })
 	_, res := c.Get(ctx, "r1", 100)
 	assert.Equal(t, Miss, res, "nil client is a permanent miss")
-}
-
-// TestCache_ByteBoundedEviction verifies L1 evicts least-recently-used buckets
-// to stay under the byte budget (not an entry count). Uses a nil Valkey so Get
-// reflects L1 alone.
-func TestCache_ByteBoundedEviction(t *testing.T) {
-	ctx := context.Background()
-	blob, err := encode(bucketOf("payload"))
-	require.NoError(t, err)
-	s := int64(len(blob))
-
-	c, err := NewCache(nil, 2*s, time.Minute) // budget holds exactly two buckets
-	require.NoError(t, err)
-
-	c.Put(ctx, "r", 1, bucketOf("payload"))
-	c.Put(ctx, "r", 2, bucketOf("payload"))
-	require.Equal(t, 2*s, c.curBytes.Load(), "two buckets fill the budget exactly")
-
-	c.Put(ctx, "r", 3, bucketOf("payload")) // over budget → evict the oldest (bucket 1)
-	assert.Equal(t, 2*s, c.curBytes.Load(), "curBytes stays at the budget after eviction")
-	assert.LessOrEqual(t, c.curBytes.Load(), c.maxBytes)
-
-	_, res := c.Get(ctx, "r", 1)
-	assert.Equal(t, Miss, res, "least-recently-used bucket was evicted")
-	_, res = c.Get(ctx, "r", 2)
-	assert.Equal(t, Hit, res)
-	_, res = c.Get(ctx, "r", 3)
-	assert.Equal(t, Hit, res)
-}
-
-// TestCache_ByteAccounting verifies the counter stays exact across a re-Put of
-// the same key (no double-count) and a Bust (returns to zero).
-func TestCache_ByteAccounting(t *testing.T) {
-	ctx := context.Background()
-	small, err := encode(bucketOf("s"))
-	require.NoError(t, err)
-	big, err := encode(bucketOf("a-much-longer-payload-string"))
-	require.NoError(t, err)
-
-	c, err := NewCache(nil, 1<<20, time.Minute)
-	require.NoError(t, err)
-
-	c.Put(ctx, "r", 1, bucketOf("s"))
-	require.Equal(t, int64(len(small)), c.curBytes.Load())
-
-	// Re-Put the same key with larger content: the counter reflects the new size
-	// only (the old entry is removed first, not replaced in place).
-	c.Put(ctx, "r", 1, bucketOf("a-much-longer-payload-string"))
-	require.Equal(t, int64(len(big)), c.curBytes.Load(), "re-Put must not double-count")
-
-	c.Bust(ctx, "r", 1)
-	require.Equal(t, int64(0), c.curBytes.Load(), "bust returns the counter to zero")
-}
-
-// TestCache_ByteAccounting_ConsistentUnderConcurrency runs concurrent Puts/Gets
-// (with -race) and confirms the atomic byte counter never drifts from the actual
-// bytes held in L1.
-func TestCache_ByteAccounting_ConsistentUnderConcurrency(t *testing.T) {
-	ctx := context.Background()
-	c, err := NewCache(nil, 1<<20, time.Minute)
-	require.NoError(t, err)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			b := int64(i % 8)
-			c.Put(ctx, "r", b, bucketOf("payload"))
-			c.Get(ctx, "r", b)
-		}(i)
-	}
-	wg.Wait()
-
-	var actual int64
-	for _, v := range c.l1.Values() {
-		actual += int64(len(v))
-	}
-	assert.Equal(t, actual, c.curBytes.Load(), "byte counter must match the bytes actually held in L1")
 }
 
 // An oversized bucket is never cached, so without a marker every read repeats
@@ -369,23 +284,23 @@ func TestCache_PutOversized_ReportsOversized(t *testing.T) {
 }
 
 // The marker must cross replicas, or every process pays the probe once per TTL.
-func TestCache_PutOversized_SharedViaL2(t *testing.T) {
+func TestCache_PutOversized_SharedAcrossReplicas(t *testing.T) {
 	fv := newFakeValkey()
 	ctx := context.Background()
 
 	c1 := newCache(t, fv)
 	c1.PutOversized(ctx, "r1", 100)
 
-	c2 := newCache(t, fv) // cold L1, shared L2
+	c2 := newCache(t, fv) // a sibling replica
 	_, res := c2.Get(ctx, "r1", 100)
-	assert.Equal(t, Oversized, res, "marker served from shared L2")
+	assert.Equal(t, Oversized, res, "the marker is shared, so one probe serves every replica")
 
-	// L1 was populated too: wipe L2 and c2 still answers without a round trip.
+	// Nothing survives outside the shared tier: wipe it and the verdict is gone.
 	fv.mu.Lock()
 	fv.data = map[string]string{}
 	fv.mu.Unlock()
 	_, res = c2.Get(ctx, "r1", 100)
-	assert.Equal(t, Oversized, res, "marker served from L1 after L2 wiped")
+	assert.Equal(t, Miss, res, "no per-process copy outlives the shared entry")
 }
 
 func TestCache_FailOpen_PutOversizedSetError(t *testing.T) {
@@ -396,10 +311,10 @@ func TestCache_FailOpen_PutOversizedSetError(t *testing.T) {
 
 	assert.NotPanics(t, func() { c.PutOversized(ctx, "r1", 100) })
 
-	// L1 is independent of the failed L2 write, so this replica still skips the
-	// probe; other replicas re-probe until one of them lands the marker.
+	// The marker did not land, so the verdict is simply not recorded and the next
+	// read re-probes. Costly, but never wrong.
 	_, res := c.Get(ctx, "r1", 100)
-	assert.Equal(t, Oversized, res)
+	assert.Equal(t, Miss, res, "an unrecorded verdict re-probes rather than being assumed")
 }
 
 // A delete can drop a bucket back under the cap, so a bust must clear the
@@ -415,24 +330,21 @@ func TestCache_Bust_ClearsOversizedMarker(t *testing.T) {
 
 	c.Bust(ctx, "r1", 100)
 
-	assert.False(t, fv.has(Key("r1", 100)), "L2 marker deleted")
+	assert.False(t, fv.has(Key("r1", 100)), "marker deleted")
 	_, res := c.Get(ctx, "r1", 100)
 	assert.Equal(t, Miss, res, "bucket is re-probed after a bust")
 }
 
-// A marker replaces cached rows and vice versa: both live under one key, so the
-// byte accounting must not double-count or strand the previous value.
+// A marker replaces cached rows and vice versa: both live under one key.
 func TestCache_OversizedMarker_ReplacesCachedRows(t *testing.T) {
 	ctx := context.Background()
-	c, err := NewCache(nil, 1<<20, time.Minute)
-	require.NoError(t, err)
+	c := newCache(t, newFakeValkey())
 
 	c.Put(ctx, "r1", 100, bucketOf("orig"))
 	c.PutOversized(ctx, "r1", 100)
 
 	_, res := c.Get(ctx, "r1", 100)
 	require.Equal(t, Oversized, res, "marker supersedes the cached rows")
-	assert.Equal(t, int64(1), c.curBytes.Load(), "L1 holds the marker alone")
 
 	c.Put(ctx, "r1", 100, bucketOf("orig"))
 	got, res := c.Get(ctx, "r1", 100)

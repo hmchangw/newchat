@@ -96,17 +96,18 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
-	// Per-bucket read cache (Cassandra sealed-bucket LoadHistory reads). L2 is
-	// Valkey; when ValkeyAddrs is empty the whole cache is disabled and reads go
-	// direct to Cassandra. Only sealed buckets (strictly older than the current
-	// one) are cached; the hot current bucket is always read live.
+	// Per-bucket read cache (Cassandra sealed-bucket LoadHistory reads), stored
+	// in Valkey and shared by every replica. Only sealed buckets (strictly older
+	// than the current one) are cached; the hot current bucket is always read
+	// live.
+	//
 	// BucketCacheOptIn gates the whole feature. VALKEY_ADDRS alone is not the
 	// gate: it is a fleet-wide variable that several other services already
 	// consume, so a deployment that injects it everywhere would switch this
 	// cache on for history-service as a side effect of merging rather than as a
 	// decision.
 	//
-	// BEFORE ENABLING THIS, weigh four known gaps. None is a bug in the cache's
+	// BEFORE ENABLING THIS, weigh three known gaps. None is a bug in the cache's
 	// own logic; each is a case where a sealed bucket can change without the
 	// cache learning, so reads serve a stale row until the entry expires:
 	//
@@ -121,29 +122,23 @@ type Config struct {
 	//  2. Cache-aside refill race (#250). A reader that missed can Put a
 	//     pre-mutation snapshot back after a concurrent Bust found the key
 	//     absent.
-	//  3. Cross-replica L1 (#251). Bust clears the local L1 and the shared
-	//     Valkey key; sibling replicas keep serving their own L1 copies. Get
-	//     returns on an L1 hit before consulting L2, so invalidating only the
-	//     shared tier does not fix this.
-	//  4. Wall-clock sealing. A bucket is sealed when bucket < sizer.Of(now);
+	//  3. Wall-clock sealing. A bucket is sealed when bucket < sizer.Of(now);
 	//     nothing makes the partition immutable in Cassandra, so a create that
 	//     lands after the boundary — a federation replay, or a JetStream
 	//     redelivery, whose backoff runs to minutes — writes into a bucket a
 	//     cached copy already claims to hold completely.
 	//
 	// Until those are addressed, BucketCacheTTL is the mutation-visibility
-	// bound for sealed buckets, and an L2 hit's promotion into L1 restarts that
-	// TTL rather than preserving the remaining lifetime. Enabling this is an
-	// operator's deliberate choice to accept that bound.
-	BucketCacheOptIn bool     `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
-	ValkeyAddrs      []string `env:"VALKEY_ADDRS"                 envSeparator:","`
-	ValkeyPassword   string   `env:"VALKEY_PASSWORD"              envDefault:""`
-	// BucketCacheL1MaxBytes caps the total encoded bucket data held in the
-	// per-replica L1, LRU-evicted to stay under budget. Byte-bounded (not entry-
-	// count-bounded) so the memory ceiling holds regardless of bucket size.
-	// Default 256 MiB.
-	BucketCacheL1MaxBytes int64         `env:"HISTORY_BUCKET_CACHE_L1_MAX_BYTES" envDefault:"268435456"`
-	BucketCacheTTL        time.Duration `env:"HISTORY_BUCKET_CACHE_TTL"          envDefault:"10m"`
+	// bound for sealed buckets. Enabling this is an operator's deliberate
+	// choice to accept that bound.
+	//
+	// (A fourth gap, cross-replica L1 staleness, is closed by construction:
+	// the cache has one shared Valkey tier and no per-replica copy, so a Bust
+	// is authoritative for every reader immediately.)
+	BucketCacheOptIn bool          `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
+	ValkeyAddrs      []string      `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword   string        `env:"VALKEY_PASSWORD"              envDefault:""`
+	BucketCacheTTL   time.Duration `env:"HISTORY_BUCKET_CACHE_TTL" envDefault:"10m"`
 	// BucketCacheMaxRows caps how many rows a bucket may hold to be cacheable;
 	// larger (dense) buckets are read live instead of cached whole. The default
 	// sits just above the largest ordinary page (surroundingPageSize 50), which
@@ -171,7 +166,6 @@ type Config struct {
 func (c *Config) BucketCacheEnabled() bool {
 	return c.BucketCacheOptIn &&
 		len(c.ValkeyAddrs) > 0 &&
-		c.BucketCacheL1MaxBytes > 0 &&
 		c.BucketCacheTTL > 0 &&
 		c.BucketCacheMaxRows > 0
 }
@@ -217,9 +211,6 @@ func validate(cfg *Config) error {
 	}
 	if cfg.BucketCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_BUCKET_CACHE_TTL must be >= 0, got %s", cfg.BucketCacheTTL)
-	}
-	if cfg.BucketCacheL1MaxBytes < 0 {
-		return fmt.Errorf("HISTORY_BUCKET_CACHE_L1_MAX_BYTES must be >= 0, got %d", cfg.BucketCacheL1MaxBytes)
 	}
 	if cfg.BucketCacheMaxRows < 0 {
 		return fmt.Errorf("HISTORY_BUCKET_CACHE_MAX_ROWS must be >= 0, got %d", cfg.BucketCacheMaxRows)

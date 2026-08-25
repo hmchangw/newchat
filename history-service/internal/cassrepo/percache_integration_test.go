@@ -28,7 +28,7 @@ func newBucketCachedRepo(t *testing.T, session *gocql.Session, maxRows int, now 
 	t.Helper()
 	t.Cleanup(func() { testutil.FlushValkey(t) })
 	vk := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
-	bc, err := bucketcache.NewCache(vk, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(vk, time.Minute)
 	require.NoError(t, err)
 	repo := NewRepository(session, msgbucket.New(percacheWindow), 365, nil,
 		WithBucketCache(bc, maxRows),
@@ -37,13 +37,11 @@ func newBucketCachedRepo(t *testing.T, session *gocql.Session, maxRows int, now 
 	return repo, vk
 }
 
-// probeBucket reads a bucket through a cache instance with a cold L1, so it
-// observes what Valkey holds rather than what a previous probe promoted into its
-// own memory. Reusing one instance across observations would see its own stale
-// L1 after another replica busts the key.
+// probeBucket reads a bucket through a separate cache instance. With one shared
+// tier any instance observes the same state, so this is just a convenient reader.
 func probeBucket(t *testing.T, vk valkeyutil.Client, roomID string, bucket int64) ([]models.Message, bucketcache.Lookup) {
 	t.Helper()
-	c, err := bucketcache.NewCache(vk, 1<<20, time.Minute)
+	c, err := bucketcache.NewCache(vk, time.Minute)
 	require.NoError(t, err)
 	return c.Get(context.Background(), roomID, bucket)
 }
@@ -235,7 +233,7 @@ func TestPerBucketCache_CursorMintedHotReplayedSealed(t *testing.T) {
 	var clockNow time.Time
 	t.Cleanup(func() { testutil.FlushValkey(t) })
 	vk := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
-	bc, err := bucketcache.NewCache(vk, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(vk, time.Minute)
 	require.NoError(t, err)
 	repo := NewRepository(session, msgbucket.New(percacheWindow), 365, nil,
 		WithBucketCache(bc, 2000),

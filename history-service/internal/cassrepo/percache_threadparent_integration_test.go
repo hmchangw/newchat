@@ -47,11 +47,10 @@ import (
 // (write.go, SoftDeleteMessage) for exactly this reason; the increment path just
 // lives in another service.
 //
-// This is why HISTORY_BUCKET_CACHE_ENABLED defaults to false. Closing the gap
-// needs cross-replica invalidation, not just a shared-tier DEL: Cache.Get
-// returns on an L1 hit before consulting L2, so a replica already holding the
-// bucket in its in-process L1 keeps serving the stale row whatever happens in
-// Valkey.
+// This is why HISTORY_BUCKET_CACHE_ENABLED defaults to false. The cache now has
+// a single shared tier, so a DEL from those writers WOULD close this gap — the
+// blocker is that neither worker has a Valkey client or the key builder, which
+// is tracked separately.
 //
 // WHEN THIS IS FIXED: invert the assertions — assertStale becomes assertFresh
 // (tcount 1, thread_room_id stamped) — and drop this header.

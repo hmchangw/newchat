@@ -66,7 +66,7 @@ func (l *recordingLive) fetch() bucketFetcher[models.Message] {
 
 func newCachedRepo(t *testing.T, mv valkeyutil.Client) *Repository {
 	t.Helper()
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	return NewRepository(nil, msgbucket.New(fetcherWindow), 122, nil,
 		WithBucketCache(bc, 2000),
@@ -98,7 +98,7 @@ func (c *fakeCipher) EnsureDEK(context.Context, string) error { return nil }
 
 func newCachedRepoWithCipher(t *testing.T, mv valkeyutil.Client, cipher atrest.Cipher) *Repository {
 	t.Helper()
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	return NewRepository(nil, msgbucket.New(fetcherWindow), 122, cipher,
 		WithBucketCache(bc, 2000),
@@ -122,7 +122,7 @@ func encRow(id string, at time.Time, payload string) models.Message {
 // cache reads, standing in for a previous fill.
 func seedCache(t *testing.T, mv valkeyutil.Client, bucket int64, rows ...models.Message) {
 	t.Helper()
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	bc.Put(context.Background(), "r1", bucket, rows)
 }
@@ -227,7 +227,7 @@ func TestCachedDescFetcher_SealedBucket_ServesFromCacheAndFilters(t *testing.T) 
 	t0 := fetcherNow.Add(-73 * time.Hour)
 	t1 := t0.Add(-time.Minute)
 	t2 := t1.Add(-time.Minute)
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	bc.Put(context.Background(), "r1", sealed, []models.Message{
 		{MessageID: "a", RoomID: "r1", CreatedAt: t0},
@@ -254,7 +254,7 @@ func TestCachedDescFetcher_SealedBucket_RespectsRemaining(t *testing.T) {
 	sealed := sizer.Prev(sizer.Of(fetcherNow))
 
 	t0 := fetcherNow.Add(-73 * time.Hour)
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	bc.Put(context.Background(), "r1", sealed, []models.Message{
 		{MessageID: "a", RoomID: "r1", CreatedAt: t0},
@@ -280,7 +280,7 @@ func TestCachedDescFetcher_KnownOversized_SkipsProbe(t *testing.T) {
 	sizer := msgbucket.New(fetcherWindow)
 	sealed := sizer.Prev(sizer.Of(fetcherNow))
 
-	bc, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	bc, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	bc.PutOversized(context.Background(), "r1", sealed)
 
@@ -301,7 +301,7 @@ func TestBustBucket_EvictsMessageBucket(t *testing.T) {
 	createdAt := fetcherNow.Add(-100 * time.Hour)
 	bucket := msgbucket.New(fetcherWindow).Of(createdAt)
 
-	seed, err := bucketcache.NewCache(mv, 1<<20, time.Minute)
+	seed, err := bucketcache.NewCache(mv, time.Minute)
 	require.NoError(t, err)
 	seed.Put(ctx, "r1", bucket, []models.Message{{MessageID: "x", RoomID: "r1", CreatedAt: createdAt}})
 	require.Contains(t, mv.data, bucketcache.Key("r1", bucket))

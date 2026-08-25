@@ -51,14 +51,6 @@ func TestValidate_RejectsNegativeBucketCacheTTL(t *testing.T) {
 	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_TTL")
 }
 
-func TestValidate_RejectsNegativeBucketCacheL1MaxBytes(t *testing.T) {
-	cfg := baseValid()
-	cfg.BucketCacheL1MaxBytes = -1
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_BUCKET_CACHE_L1_MAX_BYTES")
-}
-
 func TestValidate_RejectsNegativeBucketCacheMaxRows(t *testing.T) {
 	cfg := baseValid()
 	cfg.BucketCacheMaxRows = -1
@@ -70,7 +62,6 @@ func TestValidate_RejectsNegativeBucketCacheMaxRows(t *testing.T) {
 func TestValidate_AcceptsZeroBucketCacheAsDisable(t *testing.T) {
 	cfg := baseValid()
 	cfg.BucketCacheTTL = 0
-	cfg.BucketCacheL1MaxBytes = 0
 	cfg.BucketCacheMaxRows = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
@@ -86,7 +77,6 @@ func TestConfig_BucketCacheEnabled(t *testing.T) {
 	}{
 		{name: "all set", mutate: func(*Config) {}, expected: true},
 		{name: "no valkey addrs", mutate: func(c *Config) { c.ValkeyAddrs = nil }},
-		{name: "zero l1 budget", mutate: func(c *Config) { c.BucketCacheL1MaxBytes = 0 }},
 		{name: "zero ttl", mutate: func(c *Config) { c.BucketCacheTTL = 0 }},
 		{name: "zero max rows", mutate: func(c *Config) { c.BucketCacheMaxRows = 0 }},
 		// VALKEY_ADDRS is fleet-wide; without the opt-in, a deployment that sets
@@ -98,7 +88,6 @@ func TestConfig_BucketCacheEnabled(t *testing.T) {
 			cfg := baseValid()
 			cfg.BucketCacheOptIn = true
 			cfg.ValkeyAddrs = []string{"valkey:6379"}
-			cfg.BucketCacheL1MaxBytes = 1 << 20
 			cfg.BucketCacheTTL = 10 * time.Minute
 			cfg.BucketCacheMaxRows = 2000
 			tt.mutate(&cfg)
@@ -231,7 +220,6 @@ func TestLoad_BucketCacheDefaults(t *testing.T) {
 	for _, k := range []string{
 		"HISTORY_BUCKET_CACHE_MAX_ROWS",
 		"HISTORY_BUCKET_CACHE_TTL",
-		"HISTORY_BUCKET_CACHE_L1_MAX_BYTES",
 		"HISTORY_BUCKET_CACHE_ENABLED",
 	} {
 		unsetEnv(t, k) // defaults only apply when unset
@@ -241,7 +229,6 @@ func TestLoad_BucketCacheDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 50, cfg.BucketCacheMaxRows)
 	assert.Equal(t, 10*time.Minute, cfg.BucketCacheTTL)
-	assert.Equal(t, int64(256<<20), cfg.BucketCacheL1MaxBytes)
 	assert.False(t, cfg.BucketCacheOptIn, "the cache must be off until explicitly enabled")
 }
 
