@@ -1784,23 +1784,87 @@ describe('roomEventsReducer previews', () => {
     // resolves, so a live message can land and be written to previews via
     // MESSAGE_RECEIVED before this dispatch fires. That live entry is NEWER
     // than the list snapshot's previewMessage and must survive.
-    const seeded = {
-      ...initialState,
-      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+    const live = {
+      messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived',
+      createdAt: '2026-08-14T11:00:00Z',
     }
+    const seeded = { ...initialState, previews: { r1: live } }
     const next = roomEventsReducer(seeded, {
       type: 'BUCKETS_LOADED',
       favoriteIds: [], appIds: [], channelDmIds: ['r1'],
       rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
       subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-stale' }) } } },
     })
-    expect(next.previews.r1).toEqual({ messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' })
+    expect(next.previews.r1).toEqual(live)
+  })
+
+  it('BUCKETS_LOADED replaces a stale stored preview with a newer wire one', () => {
+    // Regression: `hydrateFromCache` replays BUCKETS_LOADED with LAST session's
+    // cached previewMessage, so by the time the network bootstrap lands every
+    // room already has an entry. A fill-if-absent seed drops the fresh server
+    // preview and the sidebar keeps showing the previous session's message.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: {
+          messageId: 'm-cached', senderName: 'Alice Chen', text: 'from last session',
+          createdAt: '2026-08-13T09:00:00Z',
+        },
+      },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-newest' }) } } },
+    })
+    expect(next.previews.r1).toEqual({
+      messageId: 'm-newest', senderName: 'Alice Chen', text: 'hello there',
+      createdAt: '2026-08-14T10:00:00Z',
+    })
+  })
+
+  it('BUCKETS_LOADED keeps an encrypted placeholder for the same message', () => {
+    // Fix 3 parity: a resync's wire preview relays the body unencrypted, and
+    // must not flip a row the timeline is deliberately refusing to render.
+    const placeholder = {
+      messageId: 'm1', senderName: 'Alice Chen', text: '[encrypted message]',
+      createdAt: '2026-08-14T10:00:00Z', encrypted: true,
+    }
+    const seeded = { ...initialState, previews: { r1: placeholder } }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview() } } },
+    })
+    expect(next.previews.r1).toEqual(placeholder)
+  })
+
+  it('BUCKETS_LOADED keeps the previews reference stable when nothing changes', () => {
+    const stored = {
+      messageId: 'm1', senderName: 'Alice Chen', text: 'hello there',
+      createdAt: '2026-08-14T10:00:00Z',
+    }
+    const seeded = { ...initialState, previews: { r1: stored } }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview() } } },
+    })
+    expect(next.previews).toBe(seeded.previews)
   })
 
   it('BUCKETS_LOADED still seeds a room with no prior preview alongside one that is guarded', () => {
     const seeded = {
       ...initialState,
-      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+      previews: {
+        r1: {
+          messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived',
+          createdAt: '2026-08-14T11:00:00Z',
+        },
+      },
     }
     const next = roomEventsReducer(seeded, {
       type: 'BUCKETS_LOADED',
