@@ -228,6 +228,8 @@ func gatekeeperReason(err *errcode.Error) gatekeeperReasonCode {
 		return reasonNotSubscribed
 	case errcode.MessageLargeRoomPostRestricted:
 		return reasonRoomRestricted
+	case errcode.MessageThreadStartUnavailable:
+		return reasonThreadStartUnavailable
 	default:
 	}
 	if err.Code == errcode.CodeBadRequest {
@@ -499,19 +501,20 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 }
 
 // resolveThreadParent resolves the thread parent's createdAt and sender account
-// server-side, returning (nil, "") for a non-thread reply. It reuses the quote
-// snapshot when the parent is also the verified quoted message (the unverified
-// placeholder carries a synthetic timestamp), otherwise fetches by ID. Both
-// values come from the same snapshot in one fetch. Best-effort: a failure logs a
-// warning and returns (nil, "") — downstream consumers fall back to their own
-// stores.
+// server-side, returning (nil, "", nil) for a non-thread reply. It reuses the
+// quote snapshot when the parent is also the verified quoted message (the
+// unverified placeholder carries a synthetic timestamp), otherwise fetches by ID.
+// Both values come from the same snapshot in one fetch. Best-effort: a failure
+// logs a warning and returns (nil, "", nil) — downstream consumers fall back to
+// their own stores.
 //
 // The one failure it does NOT wave through: an outage-class fetch failure for a
-// thread that has no thread_rooms document. message-worker creates that document
-// only after a Cassandra read, so during a history outage a thread first replied
-// to now has nothing any consumer can resolve the parent from — the reply would
-// reach only its sender. That send is refused with
-// errcode.MessageThreadStartUnavailable instead.
+// channel thread reply with tshow=false whose parent has no thread_rooms
+// document. message-worker creates that document only after a Cassandra read, so
+// during a history outage a thread first replied to now has nothing any consumer
+// can resolve the parent from — the reply would reach only its sender. That send
+// is refused with errcode.MessageThreadStartUnavailable instead. tshow=true and
+// DM/BotDM replies are excluded: their fan-out never resolves a parent.
 func (h *Handler) resolveThreadParent(
 	ctx context.Context,
 	account, roomID, siteID string,
@@ -540,6 +543,23 @@ func (h *Handler) resolveThreadParent(
 		// (nil, nil) fetcher-contract violation: neither is evidence that history is
 		// down, so neither may produce an "unavailable" refusal.
 		if err == nil || !errcode.IsTransient(err) {
+			return nil, "", nil
+		}
+		// Refuse only the sends that an unresolvable parent actually breaks:
+		// channel thread replies hidden from the channel. A tshow=true reply fails
+		// broadcast-worker's shouldUseThreadFanOut and takes the room broadcast
+		// path; a DM/BotDM reply fans out to every member via publishDMEvents.
+		// Neither resolves a parent, so both deliver during the outage.
+		if req.TShow {
+			return nil, "", nil
+		}
+		meta, merr := h.store.GetRoomMeta(ctx, roomID)
+		if merr != nil {
+			slog.WarnContext(ctx, "room meta lookup failed; publishing without parent",
+				"error", merr, "room_id", roomID, "request_id", req.RequestID)
+			return nil, "", nil
+		}
+		if meta.Type != model.RoomTypeChannel {
 			return nil, "", nil
 		}
 		exists, xerr := h.store.ThreadRoomExists(ctx, req.ThreadParentMessageID)

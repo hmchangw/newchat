@@ -229,6 +229,9 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				// The outage probe finds an existing thread, so the reply is still
 				// deliverable and the send keeps its soft-fail behaviour.
 				s.EXPECT().
+					GetRoomMeta(gomock.Any(), validRoomID).
+					Return(roommetacache.Meta{ID: validRoomID, Type: model.RoomTypeChannel, UserCount: 3}, nil)
+				s.EXPECT().
 					ThreadRoomExists(gomock.Any(), threadParentID).
 					Return(true, nil)
 			},
@@ -1416,6 +1419,8 @@ func TestHandler_ProcessMessage_WithQuote(t *testing.T) {
 				s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
 				// The outage probe finds an existing thread, so the degraded send
 				// proceeds instead of being refused.
+				s.EXPECT().GetRoomMeta(gomock.Any(), validRoomID).
+					Return(roommetacache.Meta{ID: validRoomID, Type: model.RoomTypeChannel, UserCount: 3}, nil)
 				s.EXPECT().ThreadRoomExists(gomock.Any(), threadID).Return(true, nil)
 			},
 			setupFetcher: func(f *MockParentMessageFetcher) {
@@ -2238,6 +2243,8 @@ func TestHandler_processMessage_ThreadParentCreatedAt_FetchFails_StillPublishes(
 		Return(nil, errors.New("history unavailable"))
 	// An untyped error counts as outage-class, so the thread_rooms probe runs; the
 	// thread already exists, so the send keeps its soft-fail behaviour.
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
+		Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 3}, nil)
 	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(true, nil)
 
 	req := model.SendMessageRequest{
@@ -2601,6 +2608,8 @@ func TestProcessMessage_ThreadStart_HistoryDown_Rejected(t *testing.T) {
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
 	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
 		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").
+		Return(roommetacache.Meta{ID: "r1", Type: model.RoomTypeChannel, UserCount: 3}, nil)
 	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(false, nil)
 
 	h := newTestHandler(store, fetcher)
@@ -2629,6 +2638,8 @@ func TestProcessMessage_ExistingThread_HistoryDown_Publishes(t *testing.T) {
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
 	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
 		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").
+		Return(roommetacache.Meta{ID: "r1", Type: model.RoomTypeChannel, UserCount: 3}, nil)
 	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(true, nil)
 
 	h := newTestHandler(store, fetcher)
@@ -2681,7 +2692,101 @@ func TestProcessMessage_ThreadStart_ProbeFails_SoftFails(t *testing.T) {
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
 	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
 		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").
+		Return(roommetacache.Meta{ID: "r1", Type: model.RoomTypeChannel, UserCount: 3}, nil)
 	store.EXPECT().ThreadRoomExists(gomock.Any(), parentID).Return(false, errors.New("mongo down"))
+
+	h := newTestHandler(store, fetcher)
+
+	out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "reply",
+		ThreadParentMessageID: parentID,
+	})
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, out)
+}
+
+// A tshow=true reply is never routed through broadcast-worker's thread fan-out
+// (shouldUseThreadFanOut requires !TShow) — it takes the room broadcast path and
+// delivers with no parent resolution at all. Refusing it during an outage would
+// break a send the outage never touched.
+func TestProcessMessage_ThreadStart_TShow_HistoryDown_Publishes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	// No ThreadRoomExists / GetRoomMeta EXPECT: a tshow reply is decided on the
+	// request alone, so the failure path must not query anything.
+
+	h := newTestHandler(store, fetcher)
+
+	out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		RequestID:             idgen.GenerateRequestID(),
+		Content:               "also send to channel",
+		ThreadParentMessageID: parentID,
+		TShow:                 true,
+	})
+
+	require.NoError(t, err)
+	assert.NotEmpty(t, out)
+}
+
+// A DM/BotDM thread reply fans out via publishDMEvents to every member with no
+// parent resolution, so it delivers during an outage. Refusing it would also make
+// a DM thread reply fail while a plain message in the same DM succeeds.
+func TestProcessMessage_ThreadStart_DMRoom_HistoryDown_Publishes(t *testing.T) {
+	for _, roomType := range []model.RoomType{model.RoomTypeDM, model.RoomTypeBotDM} {
+		t.Run(string(roomType), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			fetcher := NewMockParentMessageFetcher(ctrl)
+
+			parentID := idgen.GenerateMessageID()
+			store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+			store.EXPECT().GetRoomMeta(gomock.Any(), "r1").
+				Return(roommetacache.Meta{ID: "r1", Type: roomType, UserCount: 2}, nil)
+			fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+				Return(nil, errcode.Internal("cassandra unavailable"))
+			// No ThreadRoomExists EXPECT: the probe is channel-only.
+
+			h := newTestHandler(store, fetcher)
+
+			out, err := h.processMessage(context.Background(), "alice", "r1", "site-a", &model.SendMessageRequest{
+				ID:                    idgen.GenerateMessageID(),
+				RequestID:             idgen.GenerateRequestID(),
+				Content:               "first reply in a DM thread",
+				ThreadParentMessageID: parentID,
+			})
+
+			require.NoError(t, err)
+			assert.NotEmpty(t, out)
+		})
+	}
+}
+
+// The room-type lookup is a safeguard on an already-failed path: when it fails
+// too, the send keeps its historical soft-fail rather than being refused on a
+// second, unrelated failure.
+func TestProcessMessage_ThreadStart_RoomMetaFails_SoftFails(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	parentID := idgen.GenerateMessageID()
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").Return(testSubscription, nil)
+	fetcher.EXPECT().FetchQuotedParent(gomock.Any(), "alice", "r1", "site-a", parentID).
+		Return(nil, errcode.Internal("cassandra unavailable"))
+	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").
+		Return(roommetacache.Meta{}, errors.New("mongo down"))
+	// No ThreadRoomExists EXPECT: the probe never runs without a room type.
 
 	h := newTestHandler(store, fetcher)
 

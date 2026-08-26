@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -133,4 +134,33 @@ func TestHandler_HandleJetStreamMsg_RecordsAcceptedAndRetryOutcomes(t *testing.T
 func TestGatekeeperMetrics_Record_NilReceiverIsSafe(t *testing.T) {
 	var metrics *gatekeeperMetrics
 	metrics.Record(context.Background(), resultAccepted, reasonNone)
+}
+
+// gatekeeperReason must map every rejection an operator asks about onto its own
+// label — a refusal landing in "unknown" is indistinguishable from a genuinely
+// unclassified one, which is exactly the wrong answer during a history outage.
+func TestGatekeeperReason_Mapping(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *errcode.Error
+		want gatekeeperReasonCode
+	}{
+		{"not subscribed", errcode.Forbidden("no", errcode.WithReason(errcode.MessageNotSubscribed)), reasonNotSubscribed},
+		{"large room restricted", errcode.Forbidden("no", errcode.WithReason(errcode.MessageLargeRoomPostRestricted)), reasonRoomRestricted},
+		{"thread start unavailable", errcode.Unavailable("no", errcode.WithReason(errcode.MessageThreadStartUnavailable)), reasonThreadStartUnavailable},
+		{"bad request without reason", errcode.BadRequest("bad"), reasonInvalidPayload},
+		{"unclassified", errcode.Internal("boom"), reasonUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, gatekeeperReason(tt.err))
+		})
+	}
+}
+
+// Every reason code the mapper can return must be in allGatekeeperReasons, or
+// newGatekeeperMetrics never precomputes its attribute set and Record silently
+// falls back to the failed/unknown series.
+func TestAllGatekeeperReasons_CoversThreadStartUnavailable(t *testing.T) {
+	assert.Contains(t, allGatekeeperReasons, reasonThreadStartUnavailable)
 }

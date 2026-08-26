@@ -24,19 +24,21 @@ var allGatekeeperResults = []gatekeeperResult{resultAccepted, resultRejected, re
 type gatekeeperReasonCode string
 
 const (
-	reasonNone             gatekeeperReasonCode = "none"
-	reasonInvalidSubject   gatekeeperReasonCode = "invalid_subject"
-	reasonInvalidPayload   gatekeeperReasonCode = "invalid_payload"
-	reasonNotSubscribed    gatekeeperReasonCode = "not_subscribed"
-	reasonRoomRestricted   gatekeeperReasonCode = "room_restricted"
-	reasonCanonicalPublish gatekeeperReasonCode = "canonical_publish"
-	reasonDependency       gatekeeperReasonCode = "dependency"
-	reasonUnknown          gatekeeperReasonCode = "unknown"
+	reasonNone                   gatekeeperReasonCode = "none"
+	reasonInvalidSubject         gatekeeperReasonCode = "invalid_subject"
+	reasonInvalidPayload         gatekeeperReasonCode = "invalid_payload"
+	reasonNotSubscribed          gatekeeperReasonCode = "not_subscribed"
+	reasonRoomRestricted         gatekeeperReasonCode = "room_restricted"
+	reasonThreadStartUnavailable gatekeeperReasonCode = "thread_start_unavailable"
+	reasonCanonicalPublish       gatekeeperReasonCode = "canonical_publish"
+	reasonDependency             gatekeeperReasonCode = "dependency"
+	reasonUnknown                gatekeeperReasonCode = "unknown"
 )
 
 var allGatekeeperReasons = []gatekeeperReasonCode{
 	reasonNone, reasonInvalidSubject, reasonInvalidPayload, reasonNotSubscribed,
-	reasonRoomRestricted, reasonCanonicalPublish, reasonDependency, reasonUnknown,
+	reasonRoomRestricted, reasonThreadStartUnavailable, reasonCanonicalPublish,
+	reasonDependency, reasonUnknown,
 }
 
 type gatekeeperMetrics struct {
