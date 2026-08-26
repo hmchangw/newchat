@@ -20,8 +20,10 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -45,12 +47,12 @@ type config struct {
 	RoomMetaCacheSize  int           `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
 	RoomMetaCacheTTL   time.Duration `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
 	Valkey             valkeyutil.Config
-	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"90m"`
-	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
+	RoomMetaL2         roommetacache.TTLConfig
+	SubL2              subauthcache.TTLConfig  `envPrefix:"GATEKEEPER_"`
 	Breaker            mongoutil.BreakerConfig `envPrefix:"GATEKEEPER_"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
-	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
+	UserL2             userstore.TTLConfig
 	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`
@@ -120,7 +122,7 @@ func main() {
 		os.Exit(1)
 	}
 	if valkeyClient != nil {
-		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2.TTL, "user_ttl", cfg.UserL2.TTL)
 	}
 
 	// Separate instances so a warm room-meta L2 hit can't reset the subscription
@@ -129,7 +131,7 @@ func main() {
 	subBreaker := cfg.Breaker.New(ctx, "subscription")
 	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
 		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
-	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
+	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
@@ -146,7 +148,7 @@ func main() {
 	userBreaker := cfg.Breaker.New(ctx, "user",
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	users, err := userstore.Resilient(db.Collection("users"), userBreaker,
-		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
+		valkeyClient, cfg.UserL2.TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)
 		os.Exit(1)
@@ -155,7 +157,7 @@ func main() {
 		"sub_cache_size", cfg.SubCacheSize, "sub_cache_ttl", cfg.SubCacheTTL,
 		"room_meta_cache_size", cfg.RoomMetaCacheSize, "room_meta_cache_ttl", cfg.RoomMetaCacheTTL,
 		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
-		"sub_l2_ttl", cfg.SubL2TTL,
+		"sub_l2_ttl", cfg.SubL2.TTL,
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)

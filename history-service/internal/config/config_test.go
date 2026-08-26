@@ -42,7 +42,7 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.RoomCacheTTL = 0
 	cfg.PreviewCacheSize = 0
 	cfg.PreviewCacheTTL = 0
-	cfg.SubL2TTL = 0
+	cfg.SubL2.TTL = 0
 	cfg.Breaker.Fails = 0
 	cfg.Breaker.Cooldown = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
@@ -183,13 +183,13 @@ func TestValidate_RejectsNegativeValues(t *testing.T) {
 		set     func(*Config)
 		wantEnv string
 	}{
-		{"sub L2 TTL", func(c *Config) { c.SubL2TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
+		{"sub L2 TTL", func(c *Config) { c.SubL2.TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
 		{"mongo breaker fails", func(c *Config) { c.Breaker.Fails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
 		{"mongo breaker cooldown", func(c *Config) { c.Breaker.Cooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
-		{"DEK L2 TTL", func(c *Config) { c.DEKL2TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
+		{"DEK L2 TTL", func(c *Config) { c.DEKL2.TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
 		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
 		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
-		{"room times L2 TTL", func(c *Config) { c.RoomTimesL2TTL = -time.Second }, "ROOM_TIMES_L2_TTL"},
+		{"room times L2 TTL", func(c *Config) { c.RoomTimesL2.TTL = -time.Second }, "ROOM_TIMES_L2_TTL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -378,4 +378,19 @@ func TestLoad_BreakerEnvNamesUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 9, cfg.Breaker.Fails)
 	assert.Equal(t, 45*time.Second, cfg.Breaker.Cooldown)
+}
+
+// The L2 retentions moved onto each tier package's TTLConfig. The composed env
+// names must be byte-identical to what they were before the move.
+func TestLoad_L2TTLEnvNamesUnchanged(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("HISTORY_SUB_L2_TTL", "22m")
+	t.Setenv("ATREST_DEK_L2_TTL", "55m")
+	t.Setenv("ROOM_TIMES_L2_TTL", "66m")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 22*time.Minute, cfg.SubL2.TTL)
+	assert.Equal(t, 55*time.Minute, cfg.DEKL2.TTL)
+	assert.Equal(t, 66*time.Minute, cfg.RoomTimesL2.TTL)
 }

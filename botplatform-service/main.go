@@ -80,7 +80,7 @@ func run() error {
 			"msg_ttl", cfg.BotIdempotencyMsgTTL,
 			"room_mgmt_ttl", cfg.BotIdempotencyRoomMgmtTTL,
 		)
-		slog.Info("bot session L2 cache enabled", "ttl", cfg.SessionCacheTTL)
+		slog.Info("bot session L2 cache enabled", "ttl", cfg.SessionCache.TTL)
 	} else {
 		slog.Warn("bot rate-limit + idempotency DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
@@ -90,7 +90,7 @@ func run() error {
 	// rather than each re-learning the outage.
 	mongoBreaker := cfg.Breaker.New(ctx, "mongo",
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
-	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCacheTTL)
+	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCache.TTL)
 	subStore := newMongoSubscriptionStore(db, mongoBreaker)
 	h := newHandler(st, &cfg)
 	h.subs = subStore

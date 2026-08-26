@@ -49,9 +49,9 @@ type config struct {
 	PushRecipientBatchSize int           `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
 	RoomMetaCacheSize      int           `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL       time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
+	RoomMetaL2             roommetacache.TTLConfig
 	Valkey                 valkeyutil.Config
-	RoomSubCacheTTL        time.Duration `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
+	RoomSubCache           roomsubcache.TTLConfig
 	Breaker                mongoutil.BreakerConfig
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
@@ -136,7 +136,7 @@ func main() {
 
 	// Built here rather than inside the loader: the tier's closures escape to the
 	// heap, so constructing one per L1 miss would allocate on every cold room.
-	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2TTL,
+	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2.TTL,
 		nil, cachemetrics.For("roommeta", "l2"))
 	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)
 	if err != nil {
@@ -155,7 +155,7 @@ func main() {
 	// Guard the loader, not the Lookup: an open breaker must still serve L2 hits.
 	memberBreaker := cfg.Breaker.New(ctx, "roomsub")
 	memberLookup := roomsubcache.NewLookup(cache,
-		roomsubcache.GuardLoader(loader, memberBreaker), cfg.RoomSubCacheTTL)
+		roomsubcache.GuardLoader(loader, memberBreaker), cfg.RoomSubCache.TTL)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {

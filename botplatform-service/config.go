@@ -5,6 +5,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/sessioncache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -19,9 +20,9 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
 	Breaker       mongoutil.BreakerConfig
-	// SessionCacheTTL keeps already-authenticated bots working while Mongo is
+	// SessionCache keeps already-authenticated bots working while Mongo is
 	// unreachable. 0 disables the tier. Matches the other L2 tiers at 90m.
-	SessionCacheTTL time.Duration `env:"SESSION_CACHE_TTL" envDefault:"90m"`
+	SessionCache sessioncache.TTLConfig
 
 	Pool mongoutil.PoolConfig
 	HTTP ginutil.TimeoutConfig

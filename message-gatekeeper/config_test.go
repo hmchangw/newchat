@@ -40,3 +40,19 @@ func TestConfig_BreakerDefaults(t *testing.T) {
 	require.Equal(t, 5, cfg.Breaker.Fails)
 	require.Equal(t, 10*time.Second, cfg.Breaker.Cooldown)
 }
+
+// The L2 retentions moved onto each tier package's TTLConfig so the services
+// sharing a cache key cannot disagree about them. The composed env names must
+// be byte-identical to what they were before the move.
+func TestConfig_L2TTLEnvNamesUnchanged(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ROOM_META_L2_TTL", "11m")
+	t.Setenv("GATEKEEPER_SUB_L2_TTL", "22m")
+	t.Setenv("USER_L2_TTL", "33m")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, 11*time.Minute, cfg.RoomMetaL2.TTL)
+	require.Equal(t, 22*time.Minute, cfg.SubL2.TTL)
+	require.Equal(t, 33*time.Minute, cfg.UserL2.TTL)
+}

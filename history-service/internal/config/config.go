@@ -10,6 +10,8 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/roomtimescache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -110,20 +112,20 @@ type Config struct {
 	// to Mongo, breaker-guarded).
 	Valkey valkeyutil.Config
 
-	// SubL2TTL is the shared Valkey L2 retention for subscription authz — the
+	// SubL2 is the shared Valkey L2 retention for subscription authz — the
 	// outage buffer. Long by design (default 90m) so an L2 hit carries the
 	// access decision through a Mongo outage. 0 disables the L2 tier.
-	SubL2TTL time.Duration `env:"HISTORY_SUB_L2_TTL" envDefault:"90m"`
+	SubL2 subauthcache.TTLConfig `envPrefix:"HISTORY_"`
 
 	// Breaker guards this service's Mongo reads — the subauthcache loader and the
 	// room repository, each with its own instance off these shared knobs.
 	Breaker mongoutil.BreakerConfig `envPrefix:"HISTORY_"`
 
-	// DEKL2TTL is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
+	// DEKL2 is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
 	// outage buffer for decrypting history. The in-process DEK cache expires on
 	// a fixed TTL stamped at fetch time, so without this L2 an active room loses
 	// its key partway through a Mongo outage. 0 disables the DEK L2 tier.
-	DEKL2TTL time.Duration `env:"ATREST_DEK_L2_TTL" envDefault:"90m"`
+	DEKL2 atrest.TTLConfig
 
 	// DEKBreakerFails/DEKBreakerCooldown configure the circuit breaker guarding
 	// the Mongo DEK fetch. Kept separate from the subscription breaker so the
@@ -131,12 +133,12 @@ type Config struct {
 	DEKBreakerFails    int           `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
 	DEKBreakerCooldown time.Duration `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
 
-	// RoomTimesL2TTL is the Valkey L2 retention for a room's last confirmed
+	// RoomTimesL2 is the Valkey L2 retention for a room's last confirmed
 	// createdAt, which floors the Cassandra bucket walk. Unlike the other tiers
 	// this one is never read while Mongo is healthy, so its TTL governs only how
 	// long a room stays cheap to read *during* an outage.
 	// 0 disables it, leaving the walk as wide as the configured history floor.
-	RoomTimesL2TTL time.Duration `env:"ROOM_TIMES_L2_TTL" envDefault:"90m"`
+	RoomTimesL2 roomtimescache.TTLConfig
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
@@ -238,17 +240,17 @@ func validate(cfg *Config) error {
 				WalkCeilingSkewHours, spanHours, cfg.MessageBucketHours, needBuckets)
 		}
 	}
-	if cfg.SubL2TTL < 0 {
-		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2TTL)
+	if cfg.SubL2.TTL < 0 {
+		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2.TTL)
 	}
 	if err := cfg.Breaker.Validate("HISTORY_"); err != nil {
 		return err
 	}
-	if cfg.RoomTimesL2TTL < 0 {
-		return fmt.Errorf("ROOM_TIMES_L2_TTL must be >= 0, got %s", cfg.RoomTimesL2TTL)
+	if cfg.RoomTimesL2.TTL < 0 {
+		return fmt.Errorf("ROOM_TIMES_L2_TTL must be >= 0, got %s", cfg.RoomTimesL2.TTL)
 	}
-	if cfg.DEKL2TTL < 0 {
-		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2TTL)
+	if cfg.DEKL2.TTL < 0 {
+		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2.TTL)
 	}
 	if cfg.DEKBreakerFails < 0 {
 		return fmt.Errorf("ATREST_DEK_BREAKER_FAILS must be >= 0, got %d", cfg.DEKBreakerFails)

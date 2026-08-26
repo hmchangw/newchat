@@ -29,6 +29,8 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -61,10 +63,10 @@ type config struct {
 	// cross-site. Generous by design: the subscription list serves ordering from a
 	// cache with a far longer TTL, so a position a few seconds behind is
 	// indistinguishable from a fresh one. Non-positive announces on every message.
-	RoomActivityRefreshInterval time.Duration           `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
-	UserCacheSize               int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL                time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	UserL2TTL                   time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
+	RoomActivityRefreshInterval time.Duration `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
+	UserCacheSize               int           `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL                time.Duration `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	UserL2                      userstore.TTLConfig
 	RoomMetaCacheSize           int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
 	RoomMetaCacheTTL            time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
 	RoomKeyGracePeriod          time.Duration           `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
@@ -72,8 +74,8 @@ type config struct {
 	RoomKeyCacheSize            int                     `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
 	Breaker                     mongoutil.BreakerConfig `envPrefix:"BROADCAST_"`
 	RoomKeyRetiredTTL           time.Duration           `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
-	RoomMetaL2TTL               time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
-	RoomSubCacheTTL             time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"` // shared key; see pkg/roomsubcache docs
+	RoomMetaL2                  roommetacache.TTLConfig
+	RoomSubCache                roomsubcache.TTLConfig
 	Valkey                      valkeyutil.Config
 	ValkeyKeyGracePeriod        time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
 	HealthAddr                  string          `env:"HEALTH_ADDR"              envDefault:":8081"`
@@ -176,7 +178,7 @@ func main() {
 		os.Exit(1)
 	}
 	if valkeyClient != nil {
-		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2.TTL, "user_ttl", cfg.UserL2.TTL)
 	}
 	// One breaker for every Mongo call site in this service, not one per site.
 	// The breaker tracks a single fact — is Mongo reachable — and every call site
@@ -206,7 +208,7 @@ func main() {
 	// alongside subscriptions and rooms, as notification-worker already does.
 	usersPrimary := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 	store := NewMongoStore(roomsPrimaryStore, subsPrimary, db.Collection("thread_rooms"),
-		usersPrimary, valkeyClient, cfg.RoomMetaL2TTL, cfg.RoomSubCacheTTL, mongoBreaker)
+		usersPrimary, valkeyClient, cfg.RoomMetaL2.TTL, cfg.RoomSubCache.TTL, mongoBreaker)
 
 	var (
 		previewCipher atrest.Cipher
@@ -273,7 +275,7 @@ func main() {
 	}
 	slog.Info("room-meta-cache enabled", "size", cfg.RoomMetaCacheSize, "ttl", cfg.RoomMetaCacheTTL)
 	us, err := userstore.Resilient(db.Collection("users"), mongoBreaker,
-		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
+		valkeyClient, cfg.UserL2.TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)

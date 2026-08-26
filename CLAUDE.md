@@ -323,6 +323,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - `SCREAMING_SNAKE_CASE` for env var names; prefix with service name for service-specific vars
 - Fail fast on missing required config — log error and exit with non-zero code
 - Always provide `envDefault` for non-critical config (port, database name, log level); never default secrets or connection strings — mark them `required`
+- **A knob shared by more than one service is declared once, in the package that owns the thing it configures, and mounted as a named field.** `mongoutil.PoolConfig` / `mongoutil.BreakerConfig`, `valkeyutil.Config`, and each L2 tier's `TTLConfig` (`roommetacache`, `userstore`, `roomsubcache`, `atrest`, `subauthcache`, `sessioncache`, `roomtimescache`). Never re-declare the env tag and `envDefault` in a service — that is how two services reading the same Valkey key end up on different TTLs, which the tag-level default cannot prevent. A service that needs its own env prefix puts `envPrefix` on the field; the tags carry the full operator-facing name, so `Breaker mongoutil.BreakerConfig` with `envPrefix:"HISTORY_"` reads `HISTORY_MONGO_BREAKER_FAILS`.
 
 ### Docker
 - Multi-stage Dockerfiles: `golang:1.25.13-alpine` builder, `alpine:3.21` runtime

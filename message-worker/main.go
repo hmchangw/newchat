@@ -54,12 +54,12 @@ type config struct {
 	Pool               mongoutil.PoolConfig
 	UserCacheSize      int           `env:"USER_CACHE_SIZE"      envDefault:"10000"`
 	UserCacheTTL       time.Duration `env:"USER_CACHE_TTL"       envDefault:"5m"`
-	UserL2TTL          time.Duration `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
-	HealthAddr         string        `env:"HEALTH_ADDR"          envDefault:":8081"`
-	PProfEnabled       bool          `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr        string        `env:"METRICS_ADDR"         envDefault:":9090"`
+	UserL2             userstore.TTLConfig
+	HealthAddr         string `env:"HEALTH_ADDR"          envDefault:":8081"`
+	PProfEnabled       bool   `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr        string `env:"METRICS_ADDR"         envDefault:":9090"`
 	Valkey             valkeyutil.Config
-	DEKL2TTL           time.Duration `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
+	DEKL2              atrest.TTLConfig
 	Breaker            mongoutil.BreakerConfig
 	DEKBreakerFails    int                     `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
 	DEKBreakerCooldown time.Duration           `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
@@ -150,19 +150,19 @@ func main() {
 	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
 	valkeyClient := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "DEK and user L2", valkeyutil.Instrumented(sdk))
 	if cfg.Valkey.Enabled() {
-		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2TTL > 0, "dek_ttl", cfg.DEKL2TTL)
+		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2.TTL > 0, "dek_ttl", cfg.DEKL2.TTL)
 	}
 
 	userBreaker := cfg.Breaker.New(ctx, "user",
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	us, err := userstore.Resilient(db.Collection("users"), userBreaker,
-		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
+		valkeyClient, cfg.UserL2.TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL,
-		"l2_enabled", valkeyClient != nil && cfg.UserL2TTL > 0, "l2_ttl", cfg.UserL2TTL)
+		"l2_enabled", valkeyClient != nil && cfg.UserL2.TTL > 0, "l2_ttl", cfg.UserL2.TTL)
 
 	var (
 		cipher       atrest.Cipher
@@ -181,7 +181,7 @@ func main() {
 		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
 			circuitbreaker.Tracked(ctx, "atrestdek"))
 		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), valkeyClient,
-			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
+			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
 

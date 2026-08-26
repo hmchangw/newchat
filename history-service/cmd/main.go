@@ -169,7 +169,7 @@ func main() {
 	// hard startup dependency and take history reads down with Valkey.
 	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2", valkeyutil.Instrumented(sdk))
 	if cfg.Valkey.Enabled() {
-		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2TTL > 0, "ttl", cfg.SubL2TTL)
+		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2.TTL > 0, "ttl", cfg.SubL2.TTL)
 	}
 
 	var (
@@ -197,9 +197,9 @@ func main() {
 		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
 			circuitbreaker.Tracked(ctx, "atrestdek"))
 		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), subValkey,
-			cfg.DEKL2TTL, dekBreaker, atrest.DefaultL2Recorder())
+			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
-		slog.Info("at-rest DEK L2 configured", "enabled", subValkey != nil && cfg.DEKL2TTL > 0, "ttl", cfg.DEKL2TTL)
+		slog.Info("at-rest DEK L2 configured", "enabled", subValkey != nil && cfg.DEKL2.TTL > 0, "ttl", cfg.DEKL2.TTL)
 		// Preview DEKs live in their own collection (written by broadcast-worker), so
 		// they need their own cipher over the same wrapper. Sharing one cipher would
 		// also share its DEK cache across two id spaces for no benefit.
@@ -238,7 +238,7 @@ func main() {
 	// a just-revoked subscription as authorization for the whole TTL, and the
 	// outage TTL-slide can extend that further.
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
-	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2TTL,
+	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2.TTL,
 		cfg.Breaker.New(ctx, "subscription"),
 		cachemetrics.For("subauth", "l2"))
 	// history-service needs only the access-window bound out of the shared
@@ -272,12 +272,12 @@ func main() {
 		subSource = sc
 		slog.Info("subscription cache enabled",
 			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
-			"sub_l2_ttl", cfg.SubL2TTL,
+			"sub_l2_ttl", cfg.SubL2.TTL,
 			"mongo_breaker_fails", cfg.Breaker.Fails, "mongo_breaker_cooldown", cfg.Breaker.Cooldown,
 		)
 	} else {
 		slog.Info("subscription L1 cache disabled; L2/breaker outage survival remains active",
-			"sub_l2_ttl", cfg.SubL2TTL,
+			"sub_l2_ttl", cfg.SubL2.TTL,
 			"mongo_breaker_fails", cfg.Breaker.Fails, "mongo_breaker_cooldown", cfg.Breaker.Cooldown,
 		)
 	}
@@ -292,11 +292,11 @@ func main() {
 	// nil client or a zero TTL leaves the service's no-op in place, so the bucket
 	// walk simply stays as wide as the configured history floor.
 	var roomTimes service.RoomTimesCache
-	if subValkey != nil && cfg.RoomTimesL2TTL > 0 {
-		roomTimes = roomtimescache.NewTier(subValkey, cfg.RoomTimesL2TTL, cachemetrics.For("roomtimes", "l2"))
+	if subValkey != nil && cfg.RoomTimesL2.TTL > 0 {
+		roomTimes = roomtimescache.NewTier(subValkey, cfg.RoomTimesL2.TTL, cachemetrics.For("roomtimes", "l2"))
 	}
 	slog.Info("room-times L2 configured",
-		"enabled", roomTimes != nil, "ttl", cfg.RoomTimesL2TTL)
+		"enabled", roomTimes != nil, "ttl", cfg.RoomTimesL2.TTL)
 
 	// The seeder goes BENEATH the room cache, so only an authoritative read
 	// writes the tier. Above it, a cache hit would write Valkey on every history
