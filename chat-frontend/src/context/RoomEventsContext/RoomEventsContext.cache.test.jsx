@@ -8,6 +8,15 @@ vi.mock('@/context/RoomKeysContext', () => ({
   useRoomKeys: () => ({ decrypt: async () => null, hasKey: () => false, ensureKey: async () => false, seedKeys: () => {} }),
 }))
 
+const degradedMock = {
+  historyDegraded: false,
+  noteHistoryFailure: () => {},
+  noteHistorySuccess: () => {},
+}
+vi.mock('@/context/DegradedContext', () => ({
+  useDegraded: () => degradedMock,
+}))
+
 const USER = { account: 'alice', siteId: 'site-A' }
 
 function sub(roomId, over = {}) {

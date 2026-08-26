@@ -24,6 +24,19 @@ vi.mock('@/context/RoomKeysContext', () => ({
   useRoomKeys: () => currentRoomKeysMock,
 }))
 
+// RoomEventsContext also calls useDegraded() to report history-load outcomes.
+// Stub it out so tests don't need a real DegradedProvider. The functions are
+// module-scoped (not recreated per call) so callbacks that depend on them
+// (e.g. loadHistory) keep a stable identity across renders.
+const degradedMock = {
+  historyDegraded: false,
+  noteHistoryFailure: () => {},
+  noteHistorySuccess: () => {},
+}
+vi.mock('@/context/DegradedContext', () => ({
+  useDegraded: () => degradedMock,
+}))
+
 // The provider now write-throughs its subscription state to localStorage and
 // hydrates from it on mount. Without this, one test's persisted sidebar would
 // warm-start the next one's provider.

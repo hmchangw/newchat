@@ -11,6 +11,7 @@ import {
 } from 'react'
 import { useNats } from '@/context/NatsContext'
 import { useRoomKeys } from '@/context/RoomKeysContext'
+import { useDegraded } from '@/context/DegradedContext'
 import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
 import { useRoomSubscriptions } from './useRoomSubscriptions'
 import { useUnreadCount as useUnreadCountFold } from './useUnreadCount'
@@ -237,6 +238,14 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
   const nats = useNats() as unknown as Nats
   const { user } = nats
   const { decrypt, ensureKey, seedKeys } = useRoomKeys()
+  // useDegraded() returns `never` to TS because DegradedContext.jsx does
+  // createContext(null) without annotations (mirrors the useNats() cast
+  // above). Cast to the shape the hook actually returns at runtime.
+  const { noteHistoryFailure, noteHistorySuccess } = useDegraded() as unknown as {
+    historyDegraded: boolean
+    noteHistoryFailure: (err: unknown) => void
+    noteHistorySuccess: () => void
+  }
   const [state, dispatch] = useReducer(roomEventsReducer, user, hydrateFromCache) as unknown as [
     RoomEventsState,
     Dispatch<{ type: string; [k: string]: unknown }>,
@@ -320,10 +329,16 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
           const asc = [...(resp.messages ?? [])].reverse()
           // A full page back ⇒ there may be older messages to paginate to.
           const hasMoreOlder = (resp.messages?.length ?? 0) >= HISTORY_PAGE_SIZE
-          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_LOADED', roomId, messages: asc, hasMoreOlder })
+          if (currentGeneration() === gen) {
+            dispatch({ type: 'HISTORY_LOADED', roomId, messages: asc, hasMoreOlder })
+            noteHistorySuccess()
+          }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_FAILED', roomId, error: message })
+          if (currentGeneration() === gen) {
+            dispatch({ type: 'HISTORY_FAILED', roomId, error: message })
+            noteHistoryFailure(err)
+          }
           throw err
         } finally {
           inflightHistory.current.delete(roomId)
@@ -332,7 +347,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       inflightHistory.current.set(roomId, promise)
       return promise
     },
-    [user, nats, currentGeneration],
+    [user, nats, currentGeneration, noteHistoryFailure, noteHistorySuccess],
   )
 
   // Fetch the page of messages immediately older than the buffer's current
@@ -364,9 +379,13 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
           const hasMoreOlder = (resp.messages?.length ?? 0) >= HISTORY_PAGE_SIZE
           if (currentGeneration() === gen) {
             dispatch({ type: 'HISTORY_OLDER_LOADED', roomId, messages: asc, hasMoreOlder })
+            noteHistorySuccess()
           }
         } catch (err) {
-          if (currentGeneration() === gen) dispatch({ type: 'HISTORY_OLDER_FAILED', roomId })
+          if (currentGeneration() === gen) {
+            dispatch({ type: 'HISTORY_OLDER_FAILED', roomId })
+            noteHistoryFailure(err)
+          }
           throw err
         } finally {
           inflightOlder.current.delete(roomId)
@@ -375,7 +394,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       inflightOlder.current.set(roomId, promise)
       return promise
     },
-    [user, nats, currentGeneration],
+    [user, nats, currentGeneration, noteHistoryFailure, noteHistorySuccess],
   )
 
   const setActiveRoom = useCallback(
@@ -412,15 +431,17 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
           messages: resp.messages,
           focusMessageId: messageId,
         })
+        noteHistorySuccess()
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         if (currentGeneration() === gen) {
           dispatch({ type: 'HISTORY_FAILED', roomId, error: message })
+          noteHistoryFailure(err)
         }
         throw err
       }
     },
-    [user, nats, currentGeneration],
+    [user, nats, currentGeneration, noteHistoryFailure, noteHistorySuccess],
   )
 
   const resetToLiveTail = useCallback((roomId: string) => {

@@ -29,6 +29,17 @@ vi.mock('@/context/RoomKeysContext', () => ({
   useRoomKeys: () => ({ decrypt: async () => null, hasKey: () => false }),
 }))
 
+// RoomEventsProvider also calls useDegraded() to report history-load
+// outcomes. Stub it so this test doesn't need a real DegradedProvider.
+const degradedMock = {
+  historyDegraded: false,
+  noteHistoryFailure: () => {},
+  noteHistorySuccess: () => {},
+}
+vi.mock('@/context/DegradedContext', () => ({
+  useDegraded: () => degradedMock,
+}))
+
 vi.mock('./AppHeader/AppHeader', () => ({
   default: ({ onSelectRoom }) => (
     <header>

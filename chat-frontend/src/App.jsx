@@ -3,6 +3,7 @@ import { NatsProvider, useNats } from '@/context/NatsContext'
 import { RoomKeysProvider } from '@/context/RoomKeysContext'
 import { RoomEventsProvider } from '@/context/RoomEventsContext'
 import { ThreadEventsProvider } from '@/context/ThreadEventsContext'
+import { DegradedProvider } from '@/context/DegradedContext'
 import LoginPage from '@/pages/LoginPage'
 import MainApp from '@/components/MainApp/MainApp'
 import OidcCallback from '@/pages/OidcCallback'
@@ -57,13 +58,15 @@ function AppContent() {
   }
 
   return (
-    <RoomKeysProvider>
-      <RoomEventsProvider>
-        <ThreadEventsProvider>
-          <MainApp />
-        </ThreadEventsProvider>
-      </RoomEventsProvider>
-    </RoomKeysProvider>
+    <DegradedProvider>
+      <RoomKeysProvider>
+        <RoomEventsProvider>
+          <ThreadEventsProvider>
+            <MainApp />
+          </ThreadEventsProvider>
+        </RoomEventsProvider>
+      </RoomKeysProvider>
+    </DegradedProvider>
   )
 }
 
