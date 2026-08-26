@@ -82,7 +82,8 @@ export function operationName(nats: Nats, args: OperationArgs, opts?: OperationO
 | Operation kind | Primitive | Example |
 |---|---|---|
 | Sync RPC, immediate reply | `nats.request<T>(subject, payload)` | `searchRooms`, `listRoomMembers`, `getRoom` |
-| Fire-and-forget event | `nats.publish(subject, payload)` | `sendMessage`, `editMessage`, `markRoomRead` |
+| Fire-and-forget event | `nats.publish(subject, payload)` | `editMessage`, `markRoomRead` |
+| Publish, then await the reply | `nats.subscribe(responseSubject, cb)` + `nats.publish(...)` | `sendMessage` — subscribes to `chat.user.{account}.response.{requestId}` first, publishes, then settles on the gatekeeper's reply (or an `async-timeout`) |
 | Two-phase async job | `nats.requestWithAsyncResult(subject, payload, opts?)` | `createRoom`, `addMembers`, `removeMember`, `updateMemberRole` |
 | Subscription | `nats.subscribe(subject, cb)` | `subscribeToRoomEvents`, `subscribeToSubscriptionUpdates` |
 

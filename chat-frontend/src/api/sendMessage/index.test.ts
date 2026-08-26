@@ -79,4 +79,32 @@ describe('sendMessage', () => {
     await expect(sendMessage(nats as never, args)).rejects.toBeInstanceOf(AsyncJobError)
     expect(unsubscribe).toHaveBeenCalled()
   })
+
+  // subscribe runs before publish, so a disconnected client throws there first —
+  // the likeliest 'not connected' path, and the one the JSDoc promises a
+  // sync-error for.
+  it('rejects with a sync-error AsyncJobError when subscribe throws synchronously', async () => {
+    const subscribe = vi.fn(() => {
+      throw new Error('Not connected')
+    })
+    const publish = vi.fn()
+    const nats = { user: { account: 'alice' }, subscribe, publish }
+
+    const err = await sendMessage(nats as never, args).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(AsyncJobError)
+    expect(err).toMatchObject({ kind: 'sync-error', message: 'Not connected' })
+    expect(publish).not.toHaveBeenCalled()
+  })
+
+  it('leaves no pending timer when subscribe throws', async () => {
+    vi.useFakeTimers()
+    const subscribe = vi.fn(() => {
+      throw new Error('Not connected')
+    })
+    const nats = { user: { account: 'alice' }, subscribe, publish: vi.fn() }
+
+    await expect(sendMessage(nats as never, args)).rejects.toBeInstanceOf(AsyncJobError)
+    expect(vi.getTimerCount()).toBe(0)
+    vi.useRealTimers()
+  })
 })

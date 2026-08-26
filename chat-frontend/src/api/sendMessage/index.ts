@@ -1,6 +1,6 @@
 import { msgSend, userResponse } from '../_transport/subjects'
 import { AsyncJobError, ASYNC_JOB_ERROR_KINDS } from '../_transport/asyncJob'
-import type { Nats } from '../types'
+import type { Nats, NatsSubscription } from '../types'
 
 /** Matches asyncJob's sync-reply window; the gatekeeper answers off a JetStream
  *  consumer, so this covers consumer lag as well as the request itself. */
@@ -42,40 +42,45 @@ interface ErrorEnvelope {
  *
  * @throws {AsyncJobError} `.kind` is 'async-error' for a typed refusal (with `.code`
  *   and `.reason` from the envelope), 'async-timeout' when no reply arrives, or
- *   'sync-error' when `publish` itself throws (e.g. not connected) — a local
- *   transport failure, never a remote one, so it carries no `.code`/`.reason`.
+ *   'sync-error' when `subscribe` or `publish` itself throws (e.g. not connected) — a
+ *   local transport failure, never a remote one, so it carries no `.code`/`.reason`.
  */
 export function sendMessage(
   { user, publish, subscribe }: Nats,
   { roomId, siteId, payload, timeoutMs = DEFAULT_SEND_TIMEOUT }: SendMessageArgs,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    // Subscribe before publishing so a fast gatekeeper cannot beat us to the reply.
-    const sub = subscribe(userResponse(user.account, payload.requestId), (data: unknown) => {
-      settle(() => {
-        const env = (data ?? {}) as ErrorEnvelope
-        if (env.error) {
-          reject(new AsyncJobError(env.error, ASYNC_JOB_ERROR_KINDS.AsyncError, { code: env.code, reason: env.reason, metadata: env.metadata }))
-          return
-        }
-        resolve()
-      })
-    })
-
-    const timer = setTimeout(() => {
-      settle(() => reject(new AsyncJobError('send timed out', ASYNC_JOB_ERROR_KINDS.AsyncTimeout)))
-    }, timeoutMs)
-
     let done = false
+    let sub: NatsSubscription | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+
     function settle(fn: () => void) {
       if (done) return
       done = true
-      clearTimeout(timer)
-      sub.unsubscribe()
+      if (timer !== undefined) clearTimeout(timer)
+      sub?.unsubscribe()
       fn()
     }
 
     try {
+      // Subscribe before publishing so a fast gatekeeper cannot beat us to the reply.
+      // subscribe() is inside the try because it throws first when the client is
+      // disconnected — publish() is never reached in that case.
+      sub = subscribe(userResponse(user.account, payload.requestId), (data: unknown) => {
+        settle(() => {
+          const env = (data ?? {}) as ErrorEnvelope
+          if (env.error) {
+            reject(new AsyncJobError(env.error, ASYNC_JOB_ERROR_KINDS.AsyncError, { code: env.code, reason: env.reason, metadata: env.metadata }))
+            return
+          }
+          resolve()
+        })
+      })
+
+      timer = setTimeout(() => {
+        settle(() => reject(new AsyncJobError('send timed out', ASYNC_JOB_ERROR_KINDS.AsyncTimeout)))
+      }, timeoutMs)
+
       publish(msgSend(user.account, roomId, siteId), payload)
     } catch (err) {
       // A local transport failure (e.g. not connected) — not a remote
