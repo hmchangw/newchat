@@ -213,6 +213,7 @@ func (m *soakMutator) Edit(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body: soakEditMessageRequest{
 				MessageID: message.ID,
 				NewMsg:    content,
@@ -259,6 +260,7 @@ func (m *soakMutator) Delete(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakDeleteMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -333,6 +335,7 @@ func (m *soakMutator) pin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakPinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -371,6 +374,7 @@ func (m *soakMutator) unpin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakUnpinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -413,6 +417,7 @@ func (m *soakMutator) React(
 	request := soakRPCRequest{
 		Action:  soakRPCReact,
 		Subject: subject.MsgReact(actor.Account, roomID, m.cfg.SiteID),
+		Account: actor.Account, RoomID: roomID,
 		Body: soakReactMessageRequest{
 			MessageID: message.ID,
 			Shortcode: soakReactionShortcode,
@@ -582,6 +587,7 @@ func (m *soakMutator) readReactionState(
 			roomID,
 			m.cfg.SiteID,
 		),
+		Account: account, RoomID: roomID,
 		Body:      soakGetMessageByIDRequest{MessageID: messageID},
 		Timeout:   m.cfg.RequestTimeout,
 		RetryMode: soakRetrySafe,
@@ -602,6 +608,14 @@ func (m *soakMutator) readReactionState(
 	return false, nil
 }
 
+// gained the account and room that identify a failure. One copy per RPC sits
+// beside a JSON marshal and a network round trip; a pointer here would only
+// move the copy into soakRPCClient.Call, which takes the request by value.
+//
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: the request crossed the 80-byte threshold when it
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (m *soakMutator) callMutation(
 	ctx context.Context,
 	request soakRPCRequest,

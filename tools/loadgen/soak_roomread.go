@@ -176,6 +176,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCReadReceiptList,
 		Subject: subject.MessageReadReceipt(message.Author, roomID, r.cfg.SiteID),
+		Account: message.Author, RoomID: roomID,
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -194,6 +195,7 @@ func (r *soakRoomReader) ListMembers(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCMemberList,
 		Subject: subject.MemberList(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Members)
@@ -228,6 +230,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSubscriptionList,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Account: account,
 		Body: soakSubscriptionListRequest{
 			Type:               soakSubscriptionListType,
 			Limit:              r.cfg.SubscriptionListLimit,
@@ -253,6 +256,7 @@ func (r *soakRoomReader) RoomState(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.MemberList(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
 		sample.Messages = len(response.Members)
@@ -269,6 +273,7 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.RoomsInfoBatchSubscribe(r.cfg.SiteID),
+		RoomID:  roomID,
 		Body:    soakRoomsInfoRequest{RoomIDs: []string{roomID}},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -303,6 +308,7 @@ func (r *soakRoomReader) SubscriptionFor(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -361,6 +367,9 @@ func (r *soakRoomReader) pickRoomBatch() []string {
 	return batch
 }
 
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (r *soakRoomReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -373,7 +382,8 @@ func (r *soakRoomReader) call(
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
 	sample := soakReadSample{
-		Action: request.Action, Latency: r.now().Sub(startedAt), Retries: result.Retries,
+		Action: request.Action, Latency: r.now().Sub(startedAt),
+		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass

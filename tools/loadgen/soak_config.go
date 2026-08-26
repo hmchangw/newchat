@@ -134,6 +134,12 @@ type soakConfig struct {
 	// from the rest of the request without re-seeding anything.
 	SubscriptionListLimit              int   `env:"SUBSCRIPTION_LIST_LIMIT"          envDefault:"0"`
 	SubscriptionListIncludeLastMessage *bool `env:"SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE"`
+
+	// RoomZipfS and RoomZipfV shape which rooms the send lane picks. Defaults
+	// reproduce the constants they replaced; raise V to model a site whose
+	// busiest room is a few percent of traffic rather than a fifth of it.
+	RoomZipfS float64 `env:"ROOM_ZIPF_S" envDefault:"1.2"`
+	RoomZipfV float64 `env:"ROOM_ZIPF_V" envDefault:"1.0"`
 }
 
 // soakPayloadBudgetRatio is the share of max_payload a page of message bodies
@@ -286,6 +292,12 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	// MAX_SUBSCRIPTION_LIMIT, but that is the service's own configuration and
 	// loadgen cannot read it, whereas a negative page size is wrong under every
 	// configuration.
+	if cfg.RoomZipfS <= 1 {
+		return fmt.Errorf("SOAK_ROOM_ZIPF_S must be greater than 1, got %v", cfg.RoomZipfS)
+	}
+	if cfg.RoomZipfV < 1 {
+		return fmt.Errorf("SOAK_ROOM_ZIPF_V must be at least 1, got %v", cfg.RoomZipfV)
+	}
 	if cfg.SubscriptionListLimit < 0 {
 		return fmt.Errorf("SOAK_SUBSCRIPTION_LIST_LIMIT must not be negative")
 	}

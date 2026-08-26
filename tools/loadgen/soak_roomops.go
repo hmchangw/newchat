@@ -61,6 +61,9 @@ func (m *soakRoomMutator) AddMember(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMemberAdd,
 		Subject: subject.MemberAdd(requester, roomID, m.siteID),
+		// The requester is who the RPC is addressed as; the member being added
+		// is in the body, and naming it here would point at the wrong account.
+		Account: requester, RoomID: roomID,
 		Body:    soakAddMembersRequest{RoomID: roomID, Users: []string{account}},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
@@ -99,6 +102,7 @@ func (m *soakRoomMutator) Rename(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomRename,
 		Subject: subject.RoomRename(requester, roomID, m.siteID),
+		Account: requester, RoomID: roomID,
 		Body:    soakRoomRenameRequest{NewName: newName},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
@@ -118,6 +122,7 @@ func (m *soakRoomMutator) ToggleMute(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMuteToggle,
 		Subject: subject.MuteToggle(account, roomID, m.siteID),
+		Account: account, RoomID: roomID,
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
 		// Mute is applied inline, so a recognised reply is proof of the stored
@@ -142,6 +147,7 @@ func (m *soakRoomMutator) MarkRead(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMessageRead,
 		Subject: subject.MessageRead(account, roomID, m.siteID),
+		Account: account, RoomID: roomID,
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
 		outcome.Accepted = reply.Status == soakRoomStatusAccepted
@@ -161,6 +167,7 @@ func (m *soakRoomMutator) CreateRoom(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomCreate,
 		Subject: subject.RoomCreate(requester, m.siteID),
+		Account: requester,
 		Body:    soakCreateRoomRequest{Name: name, Users: users},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, "", func(outcome *soakRoomMutationOutcome) {
@@ -176,6 +183,14 @@ const (
 	soakRoomStatusOK = "ok"
 )
 
+// gained the account and room that identify a failure. One copy per RPC sits
+// beside a JSON marshal and a network round trip; a pointer here would only
+// move the copy into soakRPCClient.Call, which takes the request by value.
+//
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: the request crossed the 80-byte threshold when it
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (m *soakRoomMutator) call(
 	ctx context.Context,
 	request soakRPCRequest,

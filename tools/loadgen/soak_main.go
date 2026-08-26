@@ -156,6 +156,7 @@ func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
 		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
+		ReplyBytes: sample.ReplyBytes, Rows: sample.Messages,
 	}))
 }
 
@@ -255,7 +256,7 @@ func newSoakRuntimeSelector(
 	if cfg == nil {
 		return nil, fmt.Errorf("soak configuration is required")
 	}
-	picker, err := newSoakRoomPicker(seed, len(topology.Rooms))
+	picker, err := newSoakRoomPicker(seed, len(topology.Rooms), cfg.RoomZipfS, cfg.RoomZipfV)
 	if err != nil {
 		return nil, fmt.Errorf("build soak room distribution: %w", err)
 	}
@@ -461,6 +462,9 @@ func runSoakWorkload(
 		slog.Error("load Cassandra soak topology", "runId", cfg.Soak.RunID, "error", err)
 		return 1
 	}
+	slog.Info("Cassandra soak topology loaded",
+		append([]any{"runId", cfg.Soak.RunID},
+			summarizeSoakTopology(&topology, cfg.Soak.SendRate).LogValues()...)...)
 	selector, err := newSoakRuntimeSelector(&topology, &cfg.Soak, seed)
 	if err != nil {
 		slog.Error("prepare Cassandra soak distributions", "error", err)
@@ -1128,13 +1132,13 @@ func runSoakWorkload(
 		},
 		MemberMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.MemberMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak member mutation", "error", err)
+				slog.Error("run Cassandra soak member mutation", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room mutation", "error", err)
+				slog.Error("run Cassandra soak room mutation", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
@@ -1145,7 +1149,7 @@ func runSoakWorkload(
 			if roomReconcileGate.Allow() {
 				reconciled, err := roomLanes.Reconcile(actionCtx, roomVerifier)
 				if err != nil {
-					slog.Error("reconcile Cassandra soak room operation", "error", err)
+					slog.Error("reconcile Cassandra soak room operation", soakErrorAttrs(err)...)
 				}
 				if reconciled {
 					return nil
@@ -1166,37 +1170,37 @@ func runSoakWorkload(
 				}
 			}
 			if err := roomReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room read", "error", err)
+				slog.Error("run Cassandra soak room read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		UserRead: func(actionCtx context.Context, _ bool) error {
 			if err := userReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak user read", "error", err)
+				slog.Error("run Cassandra soak user read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		SearchRead: func(actionCtx context.Context, _ bool) error {
 			if err := searchReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak search read", "error", err)
+				slog.Error("run Cassandra soak search read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room create", "error", err)
+				slog.Error("run Cassandra soak room create", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		ReadReceipt: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.ReadReceipt(actionCtx); err != nil {
-				slog.Error("run Cassandra soak read receipt", "error", err)
+				slog.Error("run Cassandra soak read receipt", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		Presence: func(actionCtx context.Context, _ bool) error {
 			if err := presenceLane.Signal(actionCtx); err != nil {
-				slog.Error("run Cassandra soak presence signal", "error", err)
+				slog.Error("run Cassandra soak presence signal", soakErrorAttrs(err)...)
 			}
 			return nil
 		},

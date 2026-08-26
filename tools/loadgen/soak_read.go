@@ -39,9 +39,13 @@ type soakReadConfig struct {
 }
 
 type soakReadSample struct {
-	Action      soakRPCAction
-	Latency     time.Duration
+	Action  soakRPCAction
+	Latency time.Duration
+	// Messages is the row count the read came back with; ReplyBytes is what
+	// those rows weighed on the wire. Latency alone cannot tell a slow page
+	// from a large one.
 	Messages    int
+	ReplyBytes  int
 	ErrorClass  soakErrorClass
 	ErrorReason soakErrorReason
 	Retries     int
@@ -164,6 +168,7 @@ func (r *soakReader) LoadHistory(
 				roomID,
 				r.cfg.SiteID,
 			),
+			Account: account, RoomID: roomID,
 			Body: request, Timeout: r.cfg.RequestTimeout,
 			RetryMode: soakRetrySafe,
 		}, &response)
@@ -180,7 +185,8 @@ func (r *soakReader) LoadHistory(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCLoadHistory, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if len(response.Messages) == 0 {
 			r.record(&sample)
@@ -234,6 +240,7 @@ func (r *soakReader) GetThreadMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCGetThread,
 			Subject: subject.MsgThread(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakGetThreadMessagesRequest{
 				ThreadMessageID: parent.ID,
 				Cursor:          cursor,
@@ -253,7 +260,8 @@ func (r *soakReader) GetThreadMessages(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCGetThread, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
 			r.record(&sample)
@@ -295,6 +303,7 @@ func (r *soakReader) GetMessageByID(
 	result, latency, err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCGetMessage,
 		Subject: subject.MsgGet(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakGetMessageByIDRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response)
@@ -308,7 +317,7 @@ func (r *soakReader) GetMessageByID(
 	}
 	sample := soakReadSample{
 		Action: soakRPCGetMessage, Latency: latency,
-		Messages: 1, Retries: result.Retries,
+		Messages: 1, ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if response.MessageID != message.ID {
 		sample.ErrorClass = soakErrorAssertion
@@ -341,6 +350,7 @@ func (r *soakReader) ListPinnedMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCPinnedList,
 			Subject: subject.MsgPinnedList(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakListPinnedMessagesRequest{
 				Cursor: cursor,
 				Limit:  r.cfg.PageLimit,
@@ -364,7 +374,8 @@ func (r *soakReader) ListPinnedMessages(
 		}
 		sample := soakReadSample{
 			Action: soakRPCPinnedList, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
 			r.record(&sample)
@@ -384,6 +395,14 @@ func (r *soakReader) ListPinnedMessages(
 	return outcome, nil
 }
 
+// gained the account and room that identify a failure. One copy per RPC sits
+// beside a JSON marshal and a network round trip; a pointer here would only
+// move the copy into soakRPCClient.Call, which takes the request by value.
+//
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: the request crossed the 80-byte threshold when it
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (r *soakReader) call(
 	ctx context.Context,
 	request soakRPCRequest,

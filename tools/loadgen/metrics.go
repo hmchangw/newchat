@@ -94,6 +94,8 @@ type Metrics struct {
 	SoakErrors                *prometheus.CounterVec
 	SoakErrorReasons          *prometheus.CounterVec
 	SoakRPCLatency            *prometheus.HistogramVec
+	SoakReplyBytes            *prometheus.HistogramVec
+	SoakRows                  *prometheus.HistogramVec
 	SoakVerifications         *prometheus.CounterVec
 	SoakMutationTargetMissing prometheus.Counter
 	SoakConfiguredRate        *prometheus.GaugeVec
@@ -294,6 +296,28 @@ func NewMetrics() *Metrics {
 			Name:    "loadgen_soak_rpc_latency_seconds",
 			Help:    "Cassandra soak per-RPC end-to-end latency by bounded action.",
 			Buckets: buckets,
+		},
+		[]string{"action"},
+	)
+	// Bounded at the 128 KiB max_payload our brokers run: a page whose
+	// distribution is climbing into the top bucket is the warning that the
+	// next one comes back as response_too_large instead of data.
+	m.SoakReplyBytes = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "loadgen_soak_reply_bytes",
+			Help: "Cassandra soak reply size in bytes by bounded action, successful replies only.",
+			Buckets: []float64{
+				512, 1024, 2048, 4096, 8192,
+				16384, 32768, 65536, 98304, 131072,
+			},
+		},
+		[]string{"action"},
+	)
+	m.SoakRows = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "loadgen_soak_rows",
+			Help:    "Rows returned per Cassandra soak paged read by bounded action.",
+			Buckets: []float64{1, 2, 5, 10, 20, 40, 100, 200, 400},
 		},
 		[]string{"action"},
 	)
@@ -673,7 +697,7 @@ func NewMetrics() *Metrics {
 		m.BotRoomPublished, m.BotRoomPublishErrors,
 		m.BotRoomE2ELatency, m.BotRoomReadLatency,
 		m.SoakOperations, m.SoakRetries, m.SoakErrors, m.SoakErrorReasons,
-		m.SoakRPCLatency, m.SoakVerifications,
+		m.SoakRPCLatency, m.SoakReplyBytes, m.SoakRows, m.SoakVerifications,
 		m.SoakMutationTargetMissing, m.SoakConfiguredRate, m.SoakIntended,
 		m.SoakDispatched, m.SoakSchedulerUnderrun, m.SoakLaneSaturation, m.SoakGlobalSaturation,
 		m.SoakRoomCandidates, m.SoakRoomQuarantineProbes, m.SoakRoomPoolExhausted,

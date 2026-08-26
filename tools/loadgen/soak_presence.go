@@ -195,7 +195,8 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 		Timeout: l.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response)
 	sample := soakReadSample{
-		Action: soakRPCPresenceQuery, Latency: l.now().Sub(startedAt), Retries: result.Retries,
+		Action: soakRPCPresenceQuery, Latency: l.now().Sub(startedAt),
+		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass

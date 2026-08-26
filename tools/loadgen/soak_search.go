@@ -124,6 +124,7 @@ func (r *soakSearchReader) SearchMessages(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSearchMessages,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
+		Account: account,
 		Body:    model.SearchMessagesRequest{Query: term, Size: r.cfg.PageSize},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -137,6 +138,7 @@ func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSearchRooms,
 		Subject: subject.SearchRooms(account, r.cfg.SiteID),
+		Account: account,
 		Body:    model.SearchRoomsRequest{Query: term, Size: r.cfg.PageSize},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -171,6 +173,7 @@ func (r *soakSearchReader) IndexedAt(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSearchIndexProbe,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
+		Account: account,
 		Body: model.SearchMessagesRequest{
 			Query:   term,
 			RoomIDs: []string{roomID},
@@ -215,6 +218,9 @@ func (r *soakSearchReader) pickQuery() (string, string) {
 	return r.accounts[r.rng.Intn(len(r.accounts))], r.terms[r.rng.Intn(len(r.terms))]
 }
 
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (r *soakSearchReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -227,7 +233,8 @@ func (r *soakSearchReader) call(
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
 	sample := soakReadSample{
-		Action: request.Action, Latency: r.now().Sub(startedAt), Retries: result.Retries,
+		Action: request.Action, Latency: r.now().Sub(startedAt),
+		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass

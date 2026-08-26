@@ -312,8 +312,13 @@ func (soakTimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type soakRPCRequest struct {
-	Action           soakRPCAction
-	Subject          string
+	Action  soakRPCAction
+	Subject string
+	// Account and RoomID identify the request in the failure log. A metric
+	// label cannot hold them (unbounded), so this is the only place a reader
+	// learns which account to grep the server's logs for.
+	Account          string
+	RoomID           string
 	Body             any
 	Timeout          time.Duration
 	RetryMode        soakRetryMode
@@ -321,8 +326,12 @@ type soakRPCRequest struct {
 }
 
 type soakRPCResult struct {
-	Attempts          int
-	Retries           int
+	Attempts int
+	Retries  int
+	// ReplyBytes is the wire size of a SUCCESSFUL reply. A transport failure
+	// has nothing to size and an oversize failure carries only the compact
+	// envelope, so both leave it zero rather than reporting a tiny page.
+	ReplyBytes        int
 	ErrorClass        soakErrorClass
 	ErrorReason       soakErrorReason
 	AmbiguityResolved bool
@@ -367,6 +376,9 @@ func newSoakRPCClient(
 	}
 }
 
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (c *soakRPCClient) Call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -376,14 +388,28 @@ func (c *soakRPCClient) Call(
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	// carry stamps the request identity onto every failure leaving this
+	// function, so the lane logger above does not have to thread it through.
+	carry := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return &soakRequestError{
+			Action: request.Action, Subject: request.Subject,
+			Account: request.Account, RoomID: request.RoomID,
+			Class: result.ErrorClass, Reason: result.ErrorReason,
+			Attempts: result.Attempts, Retries: result.Retries,
+			err: err,
+		}
+	}
 	if !validSoakRPCAction(request.Action) {
 		result.ErrorClass = soakErrorInternal
-		return result, fmt.Errorf("invalid soak RPC action %q", request.Action)
+		return result, carry(fmt.Errorf("invalid soak RPC action %q", request.Action))
 	}
 	body, err := json.Marshal(request.Body)
 	if err != nil {
 		result.ErrorClass = soakErrorRequestEncode
-		return result, fmt.Errorf("marshal %s request: %w", request.Action, err)
+		return result, carry(fmt.Errorf("marshal %s request: %w", request.Action, err))
 	}
 
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
@@ -404,11 +430,12 @@ func (c *soakRPCClient) Call(
 			if response != nil {
 				if err := json.Unmarshal(reply, response); err != nil {
 					result.ErrorClass = soakErrorResponseDecode
-					return result, fmt.Errorf("decode %s response: %w", request.Action, err)
+					return result, carry(fmt.Errorf("decode %s response: %w", request.Action, err))
 				}
 			}
 			result.ErrorClass = ""
 			result.ErrorReason = ""
+			result.ReplyBytes = len(reply)
 			return result, nil
 		}
 
@@ -419,7 +446,7 @@ func (c *soakRPCClient) Call(
 		if resolveErr != nil {
 			result.ErrorClass = classifySoakRPCError(resolveErr)
 			result.ErrorReason = classifySoakRPCReason(resolveErr)
-			return result, fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr)
+			return result, carry(fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr))
 		}
 		if resolved {
 			result.AmbiguityResolved = true
@@ -433,32 +460,35 @@ func (c *soakRPCClient) Call(
 		if !retry {
 			if request.RetryMode == soakRetryAmbiguous && transientSoakError(class) {
 				result.ErrorClass = soakErrorAmbiguous
-				return result, fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr)
+				return result, carry(fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr))
 			}
-			return result, fmt.Errorf("%s request failed: %w", request.Action, requestErr)
+			return result, carry(fmt.Errorf("%s request failed: %w", request.Action, requestErr))
 		}
 		if attempt == c.retry.MaxAttempts {
-			return result, fmt.Errorf(
+			return result, carry(fmt.Errorf(
 				"%w: %s: %w",
 				errSoakRetryExhausted,
 				request.Action,
 				requestErr,
-			)
+			))
 		}
 
 		delay := c.backoff(result.Retries)
 		if err := c.sleeper.Sleep(ctx, delay); err != nil {
-			return result, fmt.Errorf("wait to retry %s: %w", request.Action, err)
+			return result, carry(fmt.Errorf("wait to retry %s: %w", request.Action, err))
 		}
 		result.Retries++
 	}
 
-	return result, fmt.Errorf(
+	return result, carry(fmt.Errorf(
 		"RPC retry loop exited unexpectedly: %w",
 		errSoakRetryExhausted,
-	)
+	))
 }
 
+// failure identity; one copy per RPC is nothing beside the marshal and round trip.
+//
+//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
 func (c *soakRPCClient) shouldRetryAmbiguous(
 	ctx context.Context,
 	request soakRPCRequest,

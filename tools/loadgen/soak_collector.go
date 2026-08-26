@@ -66,6 +66,12 @@ type soakOperationSample struct {
 	ErrorClass    soakErrorClass
 	ErrorReason   soakErrorReason
 	TargetMissing bool
+	// ReplyBytes and Rows describe the payload a successful read came back
+	// with. Both stay zero for failures, which is why observation is gated on
+	// the outcome rather than on the values being non-zero: an empty page is a
+	// real answer and has to be counted.
+	ReplyBytes int
+	Rows       int
 }
 
 type soakFixedHistogram struct {
@@ -259,6 +265,14 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 				c.metrics.SoakRPCLatency.WithLabelValues(action).Observe(
 					sample.Latency.Seconds(),
 				)
+			}
+			if sample.Outcome == soakOutcomeSucceeded {
+				if sample.ReplyBytes > 0 {
+					c.metrics.SoakReplyBytes.WithLabelValues(action).Observe(
+						float64(sample.ReplyBytes),
+					)
+				}
+				c.metrics.SoakRows.WithLabelValues(action).Observe(float64(sample.Rows))
 			}
 			if sample.TargetMissing {
 				c.metrics.SoakMutationTargetMissing.Inc()
