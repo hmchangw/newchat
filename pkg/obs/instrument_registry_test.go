@@ -361,4 +361,110 @@ const routerSubjectExpr = "rt.natsSubject"
 // identity prefixes from the contract's forbidden-label list, so a subject
 // builder taking a room, account, user or message id fails here for the same
 // reason such a key fails the semgrep rule.
-var entityArg = regexp.MustCompile(`(?i)\b(room|account|user|message|msg|thread|device|session|recipient)(id)?\b`)
+//
+// The root list is the contract's, in full. An earlier version carried only
+// the nine roots that came to mind while writing it and omitted request,
+// trace, doc, span, tenant, org, run, inbox and pod — so
+// subject.SomeBuilder(orgID) was one subject per organisation and passed.
+// Keeping the two lists identical is the point: a guard that enforces a
+// smaller vocabulary than the rule it backs is a guard with a published list
+// of ways around it.
+//
+// The tail is `_?u?id`, not `id`. Go identifiers spell the same thing four
+// ways — roomId, roomID, roomUID, room_id — and \b sees no boundary inside
+// any of them, so the earlier `(id)?` matched only the first two and let
+// roomUID and room_id through.
+//
+// Matching runs over the whole argument text, builder name included, so
+// subject.Inbox(siteID) would be rejected on its name alone. That is the safe
+// direction for a guard — it over-rejects, and the fix is to rename or to
+// widen boundedSubjectArg deliberately — and no call site hits it today.
+var entityArg = regexp.MustCompile(
+	`(?i)\b(room|account|user|message|msg|thread|device|session|recipient|` +
+		`request|trace|doc|span|tenant|org|run|inbox|pod)(_?u?id)?\b`)
+
+// TestBoundedSubjectArg pins the guard's own decisions.
+//
+// Without this, TestEverySubscriptionSubjectIsBounded passing proves only that
+// today's call sites happen to be spelled acceptably — a regex edit that
+// accidentally accepted everything would keep it green, which is the failure
+// mode a guard exists to prevent. So the accept and reject sides are asserted
+// directly, one case per independently-editable branch.
+func TestBoundedSubjectArg(t *testing.T) {
+	tests := []struct {
+		name    string
+		arg     string
+		bounded bool
+	}{
+		{"router stored pattern", routerSubjectExpr, true},
+		{"builder with no arguments", "subject.MessagesCanonicalAll()", true},
+		{"builder taking a site id", "subject.InboxExternalAll(siteID)", true},
+		{"builder taking a wildcard", "subject.RoomEvents(subject.Wildcard)", true},
+
+		{"bare identifier", "subj", false},
+		{"struct field", "h.subject", false},
+		{"formatted string", `fmt.Sprintf("chat.room.%s.events", roomID)`, false},
+		{"string literal", `"chat.room.abc.events"`, false},
+		{"builder-shaped but not a builder", "subjects.RoomEvents()", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.bounded, boundedSubjectArg(tt.arg))
+		})
+	}
+}
+
+// TestEntityArg_CoversTheForbiddenIdentityVocabulary asserts that every identity
+// root the metrics contract forbids as a label is also rejected as a subject
+// builder argument, in every tail spelling.
+//
+// The two lists had drifted: entityArg knew room, account, user, message,
+// msg, thread, device, session and recipient, while the contract — and the
+// semgrep cardinality rule that enforces it — also list request, trace, doc,
+// span, tenant, org, run, inbox and pod. subject.SomeBuilder(orgID) is one
+// subject per organisation whichever list you consult, so the guard has to
+// know the whole vocabulary rather than the part that came to mind.
+//
+// The UID tail is here for the same reason: accountUID is an identifier and
+// the earlier `(id)?` tail did not match it, because there is no word boundary
+// between "account" and "UID".
+func TestEntityArg_CoversTheForbiddenIdentityVocabulary(t *testing.T) {
+	roots := []string{
+		"room", "account", "user", "message", "msg", "thread", "device",
+		"session", "recipient", "request", "trace", "doc", "span", "tenant",
+		"org", "run", "inbox", "pod",
+	}
+	tails := []string{"", "Id", "ID", "id", "UID", "Uid", "_id", "_uid"}
+
+	for _, root := range roots {
+		for _, tail := range tails {
+			arg := "subject.SomeBuilder(" + root + tail + ")"
+			t.Run(root+tail, func(t *testing.T) {
+				assert.True(t, entityArg.MatchString(arg), "%s names an entity", arg)
+				assert.False(t, boundedSubjectArg(arg), "%s must not pass the guard", arg)
+			})
+		}
+	}
+}
+
+// TestEntityArg_AllowsBoundedArguments is the other half: widening the
+// vocabulary must not start rejecting arguments that open no series. These are
+// the near-misses — a bounded field whose name contains a root, and the site
+// and wildcard arguments real builders actually take.
+func TestEntityArg_AllowsBoundedArguments(t *testing.T) {
+	bounded := []string{
+		"subject.SomeBuilder(siteID)",
+		"subject.SomeBuilder(cfg.SiteID)",
+		"subject.SomeBuilder(subject.Wildcard)",
+		"subject.SomeBuilder(eventType)",
+		"subject.SomeBuilder(userAgent)",
+		"subject.SomeBuilder(orgName)",
+		"subject.SomeBuilder(errorType)",
+		"subject.SomeBuilder(runInfo)",
+	}
+	for _, arg := range bounded {
+		t.Run(arg, func(t *testing.T) {
+			assert.False(t, entityArg.MatchString(arg), "%s names no entity", arg)
+		})
+	}
+}
