@@ -193,7 +193,7 @@ the drop keeps its own reason — the first classification per delivery wins.
 | NATS exporter JSZ families | `prometheus-nats-exporter` | Existing in local loadgen/observability compose | Staging/production deployment is external and must be proven by preflight |
 | OTel NATS spans | instrumented services | Existing | Spans do not replace counters, gauges, or terminal advisories |
 | `nats_slow_consumer_events_total{subject,queue}` | `pkg/natsutil` | Existing | Per-episode count; exact drops are in the log fields |
-| `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Only the 7 services calling `ConnectWithMetrics`, not every helper user (§13.2); scoped by resource, not by inline `service_name` |
+| `chat_nats_client_connected` / `chat_nats_client_connection_events_total{event}` | `pkg/natsutil` | Existing | Only the 14 services calling `ConnectWithMetrics`, not every helper user (§13.2); scoped by resource, not by inline `service_name` |
 | Section 7 shared application families | `pkg/natsmetrics` | Existing for message-gatekeeper, message-worker, broadcast-worker, notification-worker, history-service, room-service, and room-worker | Adoption depth differs: the first four and room-worker instrument the consumer path; history-service and room-service are publisher-side only |
 | Section 8 domain families | owning service | Existing for the four first-campaign services | See Section 8 for the channel fan-out caveat |
 
@@ -435,16 +435,24 @@ That last point is why this family matters more since the publish-success half
 was dropped — it is the only thing that shows the disconnect interval those
 publishes were at risk in (§7.1).
 
-**Say "should", because today it is seven services, not all of them.** §13.2
-names which. `natsutil.ConnectWithMetrics` is opt-in by design — its own doc
-comment says so — and the callers still on `natsutil.Connect` include one-shot
-tools (`data-migration/oplog-*`, `teams-*`) and loadgen, which are not
-long-running production traffic and should stay out. The ones that arguably
-should be in and are not — `outbox-worker`, `admin-service`, `inbox-worker`,
-`search-sync-worker`, `user-service`, `bot-*` — are an adoption decision with a
-cost per service, not an oversight this document can close by asserting a "must"
-that nothing enforces. Whoever takes that decision should start from §13.2's
-inventory rather than from this paragraph.
+**Say "should", because it is fourteen services, not all of them.** §13.2 names
+which. `natsutil.ConnectWithMetrics` is opt-in by design — its own doc comment
+says so — and the callers still on `natsutil.Connect` include one-shot tools
+(`data-migration/oplog-*`, `teams-*`) and loadgen, which are not long-running
+production traffic and should stay out.
+
+Every service whose publish path this PR instrumented emits this family too. It
+was seven services until the ten `natsrouter` services gained publish-failure
+metrics here, which left seven of them reporting failures with no way to see the
+disconnect interval those failures happened in — an asymmetry this change
+introduced, so it is closed here rather than deferred.
+
+What remains outside is a genuine adoption decision with a cost per service, not
+an oversight this document can close by asserting a "must": `outbox-worker`,
+`admin-service`, `inbox-worker`, `search-sync-worker`, `bot-message-worker` and
+`push-notification-service` all connect and none of them is touched by this PR.
+`outbox-worker` is the one that matters most, for the reason §13.2 already
+gives. Whoever takes that decision should start from §13.2's inventory.
 
 | OTel instrument / Prometheus family | Type | Labels | Semantics |
 |---|---|---|---|
@@ -731,7 +739,7 @@ absent there.
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
-| `chat_nats_client_connected`<br><sub>`chat.nats.client.connected`</sub> | gauge | the 7 services calling `ConnectWithMetrics` — **not** every service using the helper; see below | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
+| `chat_nats_client_connected`<br><sub>`chat.nats.client.connected`</sub> | gauge | the 14 services calling `ConnectWithMetrics` — **not** every service using the helper; see below | at startup | none at per-process granularity | **SLO-1b connection-risk backstop** (roadmap P4) |
 | `chat_nats_client_connection_events_total`<br><sub>`chat.nats.client.connection.events`</sub> | counter | same 7 | at startup (initial connect) | none | SLO-1b backstop |
 | `nats_slow_consumer_events_total` | counter | every service using the shared helper — this one is wired in the error handler, not opt-in | on first episode | none | campaign |
 
@@ -744,7 +752,7 @@ using the shared connect helper") hid:
 
 | Family | Requires | Services today |
 |---|---|---|
-| `chat_nats_client_*` | `natsutil.ConnectWithMetrics`, not `natsutil.Connect` | **7** — broadcast-worker, history-service, message-gatekeeper, message-worker, notification-worker, room-service, room-worker |
+| `chat_nats_client_*` | `natsutil.ConnectWithMetrics`, not `natsutil.Connect` | **14** — broadcast-worker, history-service, message-gatekeeper, message-worker, notification-worker, room-service, room-worker, and the seven this PR's router work also instrumented: bot-message-handler, bot-room-service, media-service, search-service, translation-service, user-presence-service, user-service |
 | `chat_nats_publish_failures_total` | a separately constructed `natsmetrics.Publisher`, passed to the publish site or to `natsrouter.WithMetrics` | **14** — the 7 above plus bot-message-handler, bot-room-service, media-service, search-service, translation-service, user-presence-service, user-service |
 
 25 call sites use plain `natsutil.Connect`. Four services publish to NATS with no
