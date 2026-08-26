@@ -92,7 +92,7 @@ func TestRoutesRegistered(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
 	r := gin.New()
-	registerRoutes(r, h)
+	registerRoutes(r, h, func(c *gin.Context) { c.Next() })
 
 	got := map[string]bool{}
 	for _, ri := range r.Routes() {

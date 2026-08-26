@@ -36,6 +36,7 @@ func accessLogMiddleware() gin.HandlerFunc {
 			"status", c.Writer.Status(),
 			"latency_ms", time.Since(start).Milliseconds(),
 			"client_ip", c.ClientIP(),
+			"service_account", c.GetString(ctxServiceAccount),
 		)
 	}
 }

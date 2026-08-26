@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/svcjwt"
 )
 
 func main() {
@@ -54,25 +55,31 @@ func run() error {
 	cache := newBlobCache(cfg.CacheMaxEntries, cfg.CacheTTL, cfg.CacheMaxObjectBytes)
 	handler := NewHandler(store, cache)
 
+	verifier, err := svcjwt.NewVerifier(cfg.SvcJWTPublicKey, cfg.SvcJWTIssuer, cfg.SvcJWTAudience)
+	if err != nil {
+		return fmt.Errorf("build service-token verifier: %w", err)
+	}
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(o11ygin.Middleware("client-update-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, handler)
+	registerRoutes(r, handler, requireServiceAccount(verifier, cfg.AllowedServiceAccounts))
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      r,
-		ReadTimeout:  30 * time.Second,
+		ReadTimeout:  cfg.HTTPReadTimeout,
 		WriteTimeout: cfg.HTTPWriteTimeout,
 	}
 
 	srvErr := make(chan error, 1)
 	go func() {
-		slog.Info("client-update-service starting", "addr", addr, "site", cfg.SiteID)
+		slog.Info("client-update-service starting", "addr", addr, "site", cfg.SiteID,
+			"allowed_service_accounts", len(cfg.AllowedServiceAccounts))
 		srvErr <- srv.ListenAndServe()
 	}()
 
