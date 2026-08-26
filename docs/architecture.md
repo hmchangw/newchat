@@ -278,7 +278,7 @@ sequenceDiagram
 
 | Store | Used for | Owners |
 |-------|----------|--------|
-| **MongoDB** | Operational data: rooms, subscriptions, room members, users, apps | room-service, user-service, room-worker, unread-worker, notification-worker, inbox-worker (write); broadcast-worker (read only — see §Event Flow) |
+| **MongoDB** | Operational data: rooms, subscriptions, room members, users, apps | room-service, user-service, room-worker, unread-worker, notification-worker, inbox-worker (write); broadcast-worker (read-mostly: one preview write — see §Event Flow) |
 | **Cassandra** | Message history (time-series, bucketed by `(room_id, bucket)`) | message-worker (write), history-service (read) |
 | **Elasticsearch** | Full-text search index (messages, rooms, users) | search-sync-worker (write), search-service (read) |
 | **Valkey** (cluster) | Subscription/room-meta caches, presence | message-gatekeeper, broadcast-worker, notification-worker, user-presence-service |

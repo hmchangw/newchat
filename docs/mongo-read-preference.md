@@ -56,9 +56,12 @@ All reads go to a secondary except the pinned handles.
 | broadcast-worker | `rooms` (metadata), `subscriptions`, `thread_rooms`, `users` | `rooms` **via roomkeystore** — encryption must not miss a fresh/rotated key |
 | notification-worker | `subscriptions`, `thread_rooms`, `rooms` (meta backfill) | — |
 
-broadcast-worker is read-only against MongoDB — its room/subscription MongoDB
-writes (`rooms.lastMsgAt`/`lastMsgId`, subscription `lastSeenAt`, `hasMention`)
-moved to `unread-worker`. The reads above are unaffected by that split.
+broadcast-worker is read-mostly against MongoDB. Its room/subscription writes
+(`rooms.lastMsgAt`/`lastMsgId`, subscription `lastSeenAt`, `hasMention`) moved to
+`unread-worker`; what stays is the room-list preview (`rooms.preview*`), buffered
+and drained best-effort so no handler awaits it. The reads above are unaffected
+by that split, and the preview write is not read-preference sensitive — it is a
+write, and the reader tolerates a miss by walking Cassandra.
 
 The DEK store and roomkeystore pins matter because those keys are written by
 *other* services and read here to decrypt / encrypt; a lagging secondary could
