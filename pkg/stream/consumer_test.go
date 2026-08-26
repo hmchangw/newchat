@@ -303,3 +303,60 @@ func TestWithOutageRetryBudget_LeavesOtherSettings(t *testing.T) {
 	assert.Equal(t, in.MaxWaiting, got.MaxWaiting)
 	assert.Equal(t, in.MaxAckPending, got.MaxAckPending)
 }
+
+// A service that budgets its own work against the ack deadline must read the
+// deadline the server will actually enforce: nats-server overwrites AckWait
+// with BackOff[0] (server/consumer.go:677-682). Today the two agree by
+// construction; reading the derived value is what keeps that true if the
+// derivation ever changes.
+func TestConsumerSettings_EffectiveAckWait(t *testing.T) {
+	tests := []struct {
+		name string
+		in   stream.ConsumerSettings
+		want time.Duration
+	}{
+		{
+			"backoff disabled falls back to AckWait",
+			stream.ConsumerSettings{AckWait: 30 * time.Second, MaxDeliver: 6, BackOffSteps: 0},
+			30 * time.Second,
+		},
+		{
+			"backoff enabled reports the head of the schedule",
+			stream.ConsumerSettings{AckWait: 45 * time.Second, MaxDeliver: 6, BackOffSteps: 5, BackOffFactor: 2, BackOffMax: 8 * time.Minute},
+			45 * time.Second,
+		},
+		{
+			"a cap below AckWait cannot shorten the deadline",
+			stream.ConsumerSettings{AckWait: 30 * time.Second, MaxDeliver: 6, BackOffSteps: 3, BackOffFactor: 2, BackOffMax: 5 * time.Second},
+			30 * time.Second,
+		},
+		{
+			"a non-positive AckWait is reported as configured, for the caller to reject",
+			stream.ConsumerSettings{AckWait: 0, MaxDeliver: 6, BackOffSteps: 5, BackOffFactor: 2},
+			0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.in.EffectiveAckWait())
+		})
+	}
+}
+
+// The invariant the helper exists to preserve, across the whole knob space.
+func TestConsumerSettings_EffectiveAckWaitMatchesTheConsumerConfig(t *testing.T) {
+	for _, steps := range []int{0, 1, 5, 100} {
+		for _, ackWait := range []time.Duration{time.Second, 30 * time.Second, 2 * time.Minute} {
+			s := stream.ConsumerSettings{
+				AckWait: ackWait, MaxDeliver: 6,
+				BackOffSteps: steps, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+			}
+			cc := stream.DurableConsumerDefaults(s)
+			want := cc.AckWait
+			if len(cc.BackOff) > 0 {
+				want = cc.BackOff[0]
+			}
+			assert.Equal(t, want, s.EffectiveAckWait(), "steps=%d ackWait=%s", steps, ackWait)
+		}
+	}
+}

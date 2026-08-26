@@ -114,6 +114,19 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 	return out
 }
 
+// EffectiveAckWait is the ack deadline the server will actually enforce: the
+// head of the backoff schedule when one is derived, else AckWait. The server
+// overwrites AckWait with BackOff[0] (server/consumer.go:677-682), so a service
+// that sizes its own work against the deadline — unread-worker's flush budget —
+// must read this rather than the configured field. The two agree today by
+// construction; reading the derived value keeps that from drifting silently.
+func (s ConsumerSettings) EffectiveAckWait() time.Duration {
+	if schedule := s.backOffSchedule(); len(schedule) > 0 {
+		return schedule[0]
+	}
+	return s.AckWait
+}
+
 // DefaultMaxDeliver mirrors the MaxDeliver struct tag. A consumer left at this
 // value drops a message after roughly 12.6 minutes of jsretry backoff, which is
 // the right answer for work that is cheap to lose and wrong for work that must

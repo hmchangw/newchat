@@ -73,8 +73,9 @@ func main() {
 	}
 	// Fail fast rather than run with a flush that can outlive the ack deadline:
 	// the whole point of bounding the flush is that it gives up BEFORE JetStream
-	// redelivers the batch underneath it.
-	if err := validateFlushBudget(cfg.FlushInterval, cfg.FlushTimeout, cfg.Consumer.AckWait); err != nil {
+	// redelivers the batch underneath it. EffectiveAckWait, not the configured
+	// field, because the server enforces BackOff[0] when a schedule is derived.
+	if err := validateFlushBudget(cfg.FlushInterval, cfg.FlushTimeout, cfg.Consumer.EffectiveAckWait()); err != nil {
 		slog.Error("invalid flush configuration", "error", err)
 		os.Exit(1)
 	}
@@ -263,7 +264,8 @@ func requestSelfShutdown() {
 }
 
 // validateFlushBudget rejects a configuration in which a held message can
-// outlive its ack deadline.
+// outlive its ack deadline. ackWait is the deadline the server will enforce
+// (stream.ConsumerSettings.EffectiveAckWait), not necessarily the configured one.
 //
 // The budget is 2*timeout+interval. Run drives Flush SYNCHRONOUSLY, so the
 // worst case for a message is three waits, not one: the flush already running
