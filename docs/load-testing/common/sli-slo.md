@@ -119,8 +119,8 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | SLO-1b | J1 | **channel** room-subject broadcast **enqueue-accepted** (local core-NATS, single publish) / **canonical messages routed to the room-subject path** (`broadcast_path=room_subject`) | 99.9% | 🔧 P2 · approximate · enqueue-only (see §2) |
 | SLO-2 | J1 | room-subject broadcast **enqueue-accepted within 1 s** of canonical acceptance (late = bad) / canonical messages on the room-subject path (`broadcast_path=room_subject`) | 99% | 🔧 P2 · approximate · enqueue-only |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
-| SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
-| SLO-5 | J2 | thread open succeeds **within 250 ms** / eligible thread opens | 95% | 🔧 P1 · target provisional — no baseline yet |
+| SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 · **server-side proxy** (see §2) |
+| SLO-5 | J2 | thread open succeeds **within 250 ms** / eligible thread opens | 95% | 🔧 P1 · **server-side proxy** · target provisional — no baseline yet |
 | SLO-6 | J3 | **recipients** accepted into `PUSH_NOTIFICATION` / notifiable recipients | 99.9% | 🔧 P4 · approximate · handoff only (see §4) |
 | SLO-7 | J4 | search returns ok / **eligible** search requests | 99.5% | ✅ partial-failure · outage needs backstop (§5) |
 | SLO-8 | J4 | **successful** search returns **within 1 s** / successful searches | 95% | 🔧 P4 (needs status label) |
@@ -373,6 +373,32 @@ partition slice). Targets: §1.
   `rpc_method="channel_history"` and `le="0.5"`. Pin this label set in the
   recording rule's test — adding a tenth `RequestResult` without revisiting the
   regex silently moves it into or out of the denominator.
+
+  **These two are a server-side proxy, and the row says so.** The histogram's
+  timer stops in a `defer` that runs after the handler returns — which is after
+  `Respond`, and `Respond` on Core NATS returns as soon as the reply enters the
+  client's write or reconnect buffer. So the interval measured is *request
+  received → reply handed to the local NATS client*, not *caller got the answer*.
+
+  The gap is not symmetric, which is what makes it worth labelling. If the
+  connection drops after the handler returns, the server records a sub-bound
+  success and the caller times out — and the caller's timeout is not any
+  server-side `error_type`, so it enters neither the numerator nor the
+  denominator. A server→client partition therefore moves this SLI *toward* green
+  during exactly the incident it should catch. §0.1's own outage-safe-denominator
+  rule is the same principle: do not let the measured component be its own
+  scorekeeper.
+
+  Pair it with the client connection metrics (`chat_nats_client_connected`,
+  `chat_nats_client_connection_events_total`) so "the SLI is green while the
+  connection lane is flapping" is visible. history-service emits them.
+
+  A true caller-visible SLI needs a synthetic prober running continuously in
+  production, or client RUM — the P6 last-mile item already declared below, not
+  the load generator, which does not run in the 28-day window this SLO is
+  measured over. **Whether to move SLO-4/5 onto that measurement point is open
+  with this document's owner**; until then the proxy label is what keeps the row
+  from over-claiming.
 
   **Both bounds sit exactly on a histogram bucket boundary, and that is why they
   are the numbers they are.** `le="0.5"` and `le="0.25"` above are real
