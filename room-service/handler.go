@@ -1304,6 +1304,7 @@ func (h *Handler) aggregateRoomInfo(ids []string, rooms []model.Room, keys map[s
 		entry.AppCount = r.AppCount
 		entry.LastMsgID = r.LastMsgID
 		entry.LastMsgAt = timePtrToMillis(r.LastMsgAt)
+		entry.LastUserMsgAt = timePtrToMillis(r.LastUserMsgAt)
 		entry.LastMentionAllAt = timePtrToMillis(r.LastMentionAllAt)
 		entry.MinUserLastSeenAt = timePtrToMillis(r.MinUserLastSeenAt)
 		entry.CrossSite = r.CrossSite

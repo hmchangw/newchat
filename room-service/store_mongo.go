@@ -437,7 +437,7 @@ func (s *MongoStore) ListRoomsByIDs(ctx context.Context, ids []string) ([]model.
 	cursor, err := s.roomsSecondary.Find(ctx, bson.M{"_id": bson.M{"$in": ids}},
 		options.Find().SetProjection(bson.M{
 			"_id": 1, "siteId": 1, "name": 1, "userCount": 1, "appCount": 1,
-			"lastMsgId": 1, "lastMsgAt": 1, "lastMentionAllAt": 1, "minUserLastSeenAt": 1, "crossSite": 1,
+			"lastMsgId": 1, "lastMsgAt": 1, "lastUserMsgAt": 1, "lastMentionAllAt": 1, "minUserLastSeenAt": 1, "crossSite": 1,
 		}))
 	if err != nil {
 		return nil, fmt.Errorf("list rooms by ids: %w", err)
