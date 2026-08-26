@@ -127,6 +127,12 @@ const inboxLabel = "inbox"
 // This was suppressed with a nosemgrep and a justification that only considered
 // the instant, not the lifetime. The rule was right.
 //
+// What keeps the *other* half of that justification true — "a registered subject
+// is a per-subscription constant" — is TestEverySubscriptionSubjectIsBounded in
+// pkg/obs, which fails on any subscribe whose subject is not a pkg/subject
+// builder or a stored route pattern. Without it the claim would be exactly the
+// kind this file's own history warns about: asserted, and enforced by nothing.
+//
 // The default prefix is the only one recognised. nats.CustomInboxPrefix would
 // produce inboxes this leaves uncollapsed, but Connect is never called with it
 // anywhere in the repo, and reading the effective prefix off the connection

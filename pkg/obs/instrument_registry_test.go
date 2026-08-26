@@ -280,3 +280,64 @@ func TestInstrumentRegexesCoverObservableConstructors(t *testing.T) {
 	assert.Equal(t, []string{"nameFromAConstant"}, nonLiteral,
 		"the literal-name gate must see Observable declarations too")
 }
+
+// Every NATS subscription subject becomes a metric label value on
+// nats_slow_consumer_events_total, via subjectLabel in pkg/natsutil. That label
+// carries a nosemgrep whose justification is "a registered subject is a
+// per-subscription constant" — true today, but a claim with nothing enforcing
+// it, which is precisely how the _INBOX leak survived review once already.
+//
+// This is what enforces it. A subject built from a room id, an account or any
+// other per-entity value would be one series per entity, and the rule that would
+// normally catch it is suppressed at that call site by design.
+//
+// The guard is deliberately shape-based rather than a whitelist of call sites:
+// the risk is a subscribe nobody thought about, so a new one has to be spelled
+// in a bounded form or fail here.
+func TestEverySubscriptionSubjectIsBounded(t *testing.T) {
+	repo := repoFS(t)
+
+	var offenders []string
+	require.NoError(t, walkGoSources(repo, func(path string, src []byte) {
+		// loadgen is a client, not a service: it subscribes to per-user inboxes
+		// on purpose and does not emit the slow-consumer counter.
+		if strings.HasPrefix(path, "tools/") {
+			return
+		}
+		for _, m := range subscribeCall.FindAllStringSubmatch(string(src), -1) {
+			if arg := strings.TrimSpace(m[2]); !boundedSubjectArg(arg) {
+				offenders = append(offenders, fmt.Sprintf("%s: %s(%s)", path, m[1], arg))
+			}
+		}
+	}))
+
+	assert.Empty(t, offenders, "a subscription subject reaches nats_slow_consumer_events_total as a "+
+		"label value, so it must come from a pkg/subject builder or a stored field, never a string "+
+		"built from an id. If one of these is genuinely bounded, widen boundedSubjectArg and say why.\n"+
+		"Unbounded:\n  %s", strings.Join(offenders, "\n  "))
+}
+
+// subscribeCall captures the method name and first argument of a core-NATS
+// subscribe. The o11y wrapper takes a context first, so the subject is the
+// second argument there; both spellings are matched.
+var subscribeCall = regexp.MustCompile(
+	`\.((?:Queue)?Subscribe(?:Sync)?)\((?:[Cc]tx|context\.\w+\(\))?,?\s*([^,)]+)`)
+
+// boundedSubjectArg accepts the two shapes that cannot grow without limit: a
+// pkg/subject builder (its arguments are site ids and wildcards, never entity
+// ids) and a plain field or identifier holding a route pattern registered at
+// startup. A composed string, a Sprintf, or a call from any other package is
+// rejected — those are how an id gets in.
+func boundedSubjectArg(arg string) bool {
+	switch {
+	case strings.HasPrefix(arg, "subject."):
+		return true
+	case strings.Contains(arg, `"`), strings.Contains(arg, "+"), strings.Contains(arg, "Sprintf"):
+		return false
+	case strings.Contains(arg, "("):
+		return false
+	default:
+		// A bare identifier or selector: r.natsSubject, rt.natsSubject, subj.
+		return regexp.MustCompile(`^[A-Za-z_][\w.]*$`).MatchString(arg)
+	}
+}
