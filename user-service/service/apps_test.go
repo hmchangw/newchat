@@ -79,6 +79,10 @@ func TestSetAppSubscription_SubscribeNew(t *testing.T) {
 	resp, err := svc.SetAppSubscription(ctx("alice", "site-a"), models.SetAppSubscriptionRequest{AppID: "app1", Subscribed: true})
 	require.NoError(t, err)
 	assert.True(t, resp.Success)
+	// The full app is returned so the client needs no follow-up apps.list.
+	require.NotNil(t, resp.App)
+	assert.Equal(t, "app1", resp.App.ID)
+	assert.Equal(t, "Helper", resp.App.Name)
 }
 
 func TestSetAppSubscription_GetAppSubscriptionStoreError(t *testing.T) {

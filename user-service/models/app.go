@@ -28,9 +28,16 @@ type AppsListResponse struct {
 	HasMore bool          `json:"hasMore"`
 }
 
-// OKResponse is the generic success body (subscription.setAppSubscription).
+// OKResponse is the generic success body (sso.set).
 type OKResponse struct {
 	Success bool `json:"success"`
+}
+
+// SetAppSubscriptionResponse is the subscription.setAppSubscription success body: the
+// full app is returned so the client has its details without a follow-up apps.list.
+type SetAppSubscriptionResponse struct {
+	Success bool       `json:"success"`
+	App     *model.App `json:"app,omitempty"`
 }
 
 // AppCategory maps a fab/domain name to its site. ID is the hex form of the

@@ -5638,12 +5638,16 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 
 ##### Success response
 
-| Field     | Type    | Notes |
-|-----------|---------|-------|
-| `success` | boolean | Always `true`. |
+| Field     | Type            | Notes |
+|-----------|-----------------|-------|
+| `success` | boolean         | Always `true`. |
+| `app`     | [App](#app)     | The full app record (same shape as an `apps.list` item without `isSubscribed`), so the client has the app's details without a follow-up `apps.list`. |
 
 ```json
-{ "success": true }
+{
+  "success": true,
+  "app": { "id": "calendar-app", "name": "Calendar", "assistant": { "enabled": true, "name": "calendar.bot" } }
+}
 ```
 
 ##### Triggered events — success path

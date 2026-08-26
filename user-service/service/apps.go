@@ -14,7 +14,7 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAppSubscriptionRequest) (*models.OKResponse, error) {
+func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAppSubscriptionRequest) (*models.SetAppSubscriptionResponse, error) {
 	account := c.Param("account")
 	c.WithLogValues("account", account)
 	if req.AppID == "" {
@@ -40,20 +40,20 @@ func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAp
 
 	if !req.Subscribed {
 		if existing == nil {
-			return &models.OKResponse{Success: true}, nil // nothing subscribed: no write, no event
+			return &models.SetAppSubscriptionResponse{Success: true, App: app}, nil // nothing subscribed: no write, no event
 		}
 		if err := s.subs.SetAppSubscribed(c, account, botName, false, true); err != nil {
 			return nil, fmt.Errorf("unsubscribe app: %w", err)
 		}
 		s.publishAppSubscriptionRemoved(c, account, existing)
-		return &models.OKResponse{Success: true}, nil
+		return &models.SetAppSubscriptionResponse{Success: true, App: app}, nil
 	}
 	if existing == nil {
 		// First subscribe emits via room creation — nothing to publish here.
 		if _, err := s.rooms.CreateDMRoom(c, account, botName, model.RoomTypeBotDM); err != nil {
 			return nil, fmt.Errorf("create botDM room: %w", err)
 		}
-		return &models.OKResponse{Success: true}, nil
+		return &models.SetAppSubscriptionResponse{Success: true, App: app}, nil
 	}
 	wasSubscribed := existing.IsSubscribed
 	if err := s.subs.SetAppSubscribed(c, account, botName, true, false); err != nil {
@@ -62,7 +62,7 @@ func (s *UserService) SetAppSubscription(c *natsrouter.Context, req models.SetAp
 	if !wasSubscribed { // emit only on a real unsubscribed→subscribed transition, not an idempotent re-subscribe
 		s.publishAppSubscriptionReactivated(c, account, existing, app)
 	}
-	return &models.OKResponse{Success: true}, nil
+	return &models.SetAppSubscriptionResponse{Success: true, App: app}, nil
 }
 
 // Tell the user's other devices to drop the botDM (mirrors room-worker's removed event; best-effort).

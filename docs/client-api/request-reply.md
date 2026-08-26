@@ -1971,7 +1971,7 @@ per-site thread RPC.
 
 **Subject:** `chat.user.{account}.request.user.{siteID}.subscription.setAppSubscription`
 
-PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app.
+PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app. The success reply returns the full `app` record so the client needs no follow-up `apps.list`.
 
 #### Request body
 
@@ -1979,7 +1979,7 @@ PUT-like idempotent endpoint to subscribe or unsubscribe from a bot app.
 
 #### Success response
 
-`{ "success": true }`
+`{ "success": true, "app": { …full App record… } }`
 
 #### Errors
 
