@@ -145,3 +145,30 @@ Foundations are disciplined: `pkg/jsretry` makes bare `Nak()` impossible (zero v
 4. **medium** — set a client-wide Mongo `SetTimeout` (or per-op deadlines in worker handlers).
 5. **medium** — enforce inbox-worker single-replica at deploy level, or add the watermark guard before it is ever scaled out.
 6. **low** — log + jitter-backoff the search-sync `Fetch` error path; add a park/DLQ stream for MaxDeliver-exhausted canonical messages so >13-minute outages degrade to replayable backlog instead of loss.
+
+---
+
+## 5. Cross-site federation (score 3/5)
+
+The OUTBOX design (per-destination FIFO + concurrent lanes, `MaxDeliver=-1`, dedup IDs, watermark-guarded applies) is well-reasoned — `docs/design/2026-07-05-membership-federation-durability.md` shows the failure modes were understood. But the "no membership change is ever lost" guarantee rests on three things that don't exist yet: destination-side unbounded retry, the reconciliation backstop, and verified stream retention. Origin-side durability is real; destination-side it is a ~13-minute cliff.
+
+### Findings
+
+- **critical** — destination drops events after ~13 min of retries. `inbox-worker/main.go:983-988` builds its INBOX consumer from `DurableConsumerDefaults` with default `MaxDeliver=6` (`pkg/stream/consumer.go:18`); `jsretry.DefaultBackoff` totals ~12.6 min. Every Nak-until-dependency-lands path — `member_added` referencing not-yet-replicated users (`inbox-worker/handler.go:318-319`), and role/mute/favorite/section/read events awaiting their `member_added` (`main.go:192-199`) — silently exhausts and is server-dropped with no DLQ. A destination Mongo outage >13 min drops *every* in-flight INBOX event; the origin FIFO lane's `MaxDeliver=-1` durability ends at the destination stream, and the reconciliation backstop (design doc §3.4) is explicitly **not built**.
+- **high** — OUTBOX retention is an unverified IaC precondition; both failure directions lose data. `outbox-worker/bootstrap.go:43-46` sets only Name+Subjects; nothing pins `MaxAge`/`MaxBytes`/`R3+file`. With Limits-policy `MaxAge`, expiry deletes *parked unacked* forwards during an outage longer than MaxAge → silent membership divergence with no repair path; without `MaxAge`, a multi-day peer outage grows the stream unboundedly. No OUTBOX oldest-message-age alert exists.
+- **high** — cross-lane dependency race compounds the MaxDeliver cliff: concurrent-lane events (`role_updated`, `subscription_*`) routinely overtake the FIFO-lane `member_added` they depend on; the destination's Nak-retry absorbs this only within the ~13-min budget. After a peer outage the concurrent lane fans out at full pool speed while the ordered lane drains serially at ~1/RTT — if the ordered backlog takes >13 min to drain (≳15–45k events at 20–60 ev/s), dependent subscription-state events are dropped en masse.
+- **high** — `ALL_SITE_IDS` drift silently strands events. Producers pick destinations from per-user/room `SiteID` data; `outbox-worker/main.go:38,122-126` builds lanes only for its own env list, warning only when the list is entirely empty. A peer present in data but absent from the env has *no consumer* — its events sit in OUTBOX unconsumed forever; `outbox.Publish` (`pkg/outbox/outbox.go:83`) validates event type but not destination, and each service carries its own copy of the list.
+- **medium** — inbox-worker horizontal scaling breaks membership ordering (shared durable, ordering only within one instance; `member_added`/`member_removed` have no watermark guard and hard-delete) — same finding as stability §4; nothing caps replicas to 1.
+- **medium** — FIFO-lane throughput ceiling under churn. `MaxAckPending=1` per destination (`outbox-worker/main.go:273-277`) ⇒ ceiling ≈ 1/(cross-gateway PubAck RTT): ~20 ev/s at 50ms RTT, ~6 ev/s at 150ms. Bulk adds are batched per room×destination (`room-worker/handler.go:1266-1292`), so 1000 members in one room is one event — but an HR/Teams sync touching 10k rooms produces ~10k ordered events per destination ≈ 8–30 min of lag, and `room_renamed` queues behind the entire churn backlog (SLO-9 says 99% forwarded within 30s).
+- **medium** — direct-publish paths lose state on gateway outage. `user-service/service/status.go:117-120` (also settings/chatlist, `admin-service/permissions.go`) publish straight to remote INBOX, log-and-continue: status self-heals on the next set, but a lost chatlist/settings/permissions event stays divergent until the user next changes it. Real-time message fan-out to remote users is core-NATS fire-and-forget (`broadcast-worker/handler.go:1179`) — during a gateway outage remote users miss delivery *and* the activity refresh, so rooms show no new-message signal until the next post-recovery message; history is safe at origin.
+- **low** — down-peer re-poke load is negligible (ordered lane ~1 probe/10 min; concurrent lane ≤1000 parked × ~10 min backoff ≈ 1.7 attempts/s).
+- **nitpick** — design-doc drift: §3.2 says DefaultBackoff "capped at 2m"; `pkg/jsretry` has a 10m tail.
+
+### Recommendations
+
+1. **critical** — set `CONSUMER_MAX_DELIVER=-1` (or a large bound + DLQ) on inbox-worker's INBOX consumer; add a max-deliveries advisory/DLQ consumer with alerting.
+2. **high** — codify OUTBOX/INBOX retention in code or a checked-in IaC manifest; have the bootstrap verify path assert `MaxAge`/replicas, not just existence; alert on OUTBOX oldest-message age.
+3. **high** — build the §3.4 reconciliation backstop — the only unconditional repair for every finding above.
+4. **high** — detect `ALL_SITE_IDS` drift: reject/alert on `outbox.Publish` to a destination outside the configured peer set, or derive producer and consumer peer sets from one source.
+5. **medium** — enforce single-replica membership apply (or the Appendix-A watermark guard) before inbox-worker is scaled out.
+6. **medium** — pre-plan hashed per-room FIFO lanes for churn bursts; alert on ordered-lane consumer lag while the peer is healthy.
