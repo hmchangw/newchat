@@ -320,8 +320,15 @@ func TestEverySubscriptionSubjectIsBounded(t *testing.T) {
 // subscribeCall captures the method name and first argument of a core-NATS
 // subscribe. The o11y wrapper takes a context first, so the subject is the
 // second argument there; both spellings are matched.
+//
+// Every spelling nats.go offers, not only the ones in use today: Subscribe,
+// SubscribeSync, QueueSubscribe, QueueSubscribeSync, QueueSubscribeSyncWithChan,
+// ChanSubscribe and ChanQueueSubscribe. The channel forms take the subject
+// first as well. A guard that only knew the shapes already in the repo would
+// pass the day someone reached for a different one, which is the day it is
+// supposed to earn its place.
 var subscribeCall = regexp.MustCompile(
-	`\.((?:Queue)?Subscribe(?:Sync)?)\((?:[Cc]tx|context\.\w+\(\))?,?\s*([^,)]+)`)
+	`\.((?:Chan)?(?:Queue)?Subscribe(?:Sync)?(?:WithChan)?)\((?:[Cc]tx|context\.\w+\(\))?,?\s*([^,)]+)`)
 
 // boundedSubjectArg accepts only shapes whose boundedness something enforces.
 //
