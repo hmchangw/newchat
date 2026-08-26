@@ -427,10 +427,24 @@ evidence either way.
 
 ### 7.2 Client connection state
 
-Every service that opens a broker connection must emit these. Without them a
-broker outage and a wedged consumer loop are indistinguishable: the consumer
-loop gauge can stay at one while the client is detached, and Core NATS publishes
-keep succeeding into the buffer.
+Every long-running service that carries production traffic over a broker
+connection should emit these. Without them a broker outage and a wedged consumer
+loop are indistinguishable: the consumer loop gauge can stay at one while the
+client is detached, and Core NATS publishes keep succeeding into the buffer.
+That last point is why this family matters more since the publish-success half
+was dropped — it is the only thing that shows the disconnect interval those
+publishes were at risk in (§7.1).
+
+**Say "should", because today it is seven services, not all of them.** §13.2
+names which. `natsutil.ConnectWithMetrics` is opt-in by design — its own doc
+comment says so — and the callers still on `natsutil.Connect` include one-shot
+tools (`data-migration/oplog-*`, `teams-*`) and loadgen, which are not
+long-running production traffic and should stay out. The ones that arguably
+should be in and are not — `outbox-worker`, `admin-service`, `inbox-worker`,
+`search-sync-worker`, `user-service`, `bot-*` — are an adoption decision with a
+cost per service, not an oversight this document can close by asserting a "must"
+that nothing enforces. Whoever takes that decision should start from §13.2's
+inventory rather than from this paragraph.
 
 | OTel instrument / Prometheus family | Type | Labels | Semantics |
 |---|---|---|---|
