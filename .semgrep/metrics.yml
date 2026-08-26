@@ -112,10 +112,19 @@ rules:
               metavariable: $KEY
               # Three shapes, all drawn from the contract's forbidden-label list:
               #
-              #   1. An identity prefix with an optional Id / _id / UID / _uid tail.
+              #   1. An identity root with an optional Id / _id / UID / _uid tail,
+              #      under any number of namespace qualifiers.
               #      The tail is optional because attribute.String("room", roomID) is
               #      the same one-series-per-room growth as ("roomId", roomID), and
               #      the bare key slipped past the earlier form of this rule.
+              #      The qualifier prefix is there because this branch used to be
+              #      anchored at the start of the key, and OTel semconv namespaces
+              #      everything: it saw user.id but not messaging.message.id, which
+              #      is the spelling actually reached for. The qualifier segments
+              #      are consumed only up to an identity root, so what follows the
+              #      root still has to be an id tail — http.request.method and
+              #      messaging.batch.message_count keep passing, and
+              #      boundedQualifiedKeys is what holds that.
               #   2. Anything ending in Subject or subject, however it is qualified.
               #      The contract forbids both "inbox subject" and "arbitrary
               #      destination subject", and the key is nearly always qualified —
@@ -141,4 +150,4 @@ rules:
               # form is the one most likely to be reached for. Widening the
               # separator does not widen what matches: the tails are still a closed
               # set, so error.type, user.agent and org.name stay outside it.
-              regex: ^(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$
+              regex: ^(?:(?:[A-Za-z0-9]+[._])*(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$

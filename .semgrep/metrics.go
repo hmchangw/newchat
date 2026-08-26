@@ -217,6 +217,28 @@ func dottedSemconvKeys(ctx context.Context, c metric.Int64Counter, v string) {
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("error.stack", v)))
 }
 
+// A qualified identity key: the identity root is not the start of the key.
+// OTel semconv namespaces its attributes, so the id keys most likely to be
+// reached for are spelled this way — messaging.message.id, not message.id —
+// and an identity branch anchored at the start of the key saw none of them.
+// Each is still one series per entity.
+func qualifiedIdentityKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.message.id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging_message_id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("chat.room.id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("db.session.id", v)))
+	// Two qualifier segments, and the bare-root tail: the qualifier is a
+	// repeated group, and the id tail stays optional under it.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("chat.federation.dest.inbox", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Key("k8s.pod.uid").String(v)))
+}
+
 // Bounded labels, including the error *classifications* the contract allows.
 // The per-call rule still fires on each — that is the separate complaint about
 // building the set inline — but the cardinality rule must not, and the absence
@@ -262,6 +284,29 @@ func boundedLabelsInWidenedForms(ctx context.Context, c metric.Int64Counter, v s
 	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("recipients", n)))
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.Bool("run_info", true)))
+}
+
+// The negative side of the qualified-identity widening, and the one that
+// decides whether it was worth doing. Every key here contains an identity root
+// as a namespace segment and is nonetheless bounded, because what follows the
+// root is not an id tail. If the qualifier prefix were written loosely enough
+// to swallow these, the rule would forbid the entire semconv namespace and get
+// switched off — which is a worse outcome than the hole it closes.
+func boundedQualifiedKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("http.request.method", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.destination.name", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.batch.message_count", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("db.operation.name", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("chat.user.agent", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("k8s.pod.phase", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("chat.error.type", v)))
 }
 
 // --- metrics-no-unbounded-label: propagation through a local variable ---
