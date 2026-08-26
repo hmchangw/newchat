@@ -95,7 +95,23 @@ subscription has no `lastSeenAt`, and `unread(nil, ms≠nil)` is already true. T
 freeze guarantees the reference is non-nil the moment the membership system message
 lands (existing room → pre-system position; new room → `createdAt`). Members who have
 opened the room have `lastSeenAt` at/past the frozen floor, so later system events
-never re-flag them. Existing rooms self-heal on their first post-deploy system event.
+never re-flag them.
+
+**The freeze inherits pre-deploy pollution — "self-healing" is too strong.** The
+fallback rung is `lastMsgAt`, which before this change was bumped by system
+messages too, so it is an *unclassified* activity time, not a user-message time.
+For a legacy room whose newest pre-deploy event was a system message at T2 while
+its last real user message was T1, the first post-deploy system-only write freezes
+T2 in as `lastUserMsgAt`. A member who had read through T1 is then flagged unread,
+and the room sorts at T2, until the room's next user message overwrites the field.
+This is **not a regression** — that member already read as unread today, because
+today's unread compares against the same `lastMsgAt` = T2 — but the room is not
+repaired either, and a room that goes quiet after that keeps the wrong reference
+indefinitely. Correcting it needs an accurate per-room user-message backfill from
+history, which is the migration this design set out to avoid; the alternative is
+to accept the limitation, scoped to legacy rooms whose last pre-deploy event was a
+system message. Rooms created after the cutover are unaffected: their own
+`room_created` message freezes `createdAt`, which is a correct floor.
 
 ### Wire addition: `RoomEvent.systemMsg`
 
