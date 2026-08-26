@@ -284,10 +284,10 @@ func requestSelfShutdown() {
 // non-positive value passes the budget comparison trivially — 2*0+0 is under
 // any AckWait, and a negative timeout drags the budget below zero — and then
 // fails at runtime, which is the one outcome this function exists to prevent:
-// a non-positive interval panics time.NewTicker in flusher.Run, and a
-// non-positive timeout hands every flush an already-expired context, so no
-// batch ever lands, nothing is ever acked, and the consumer stalls silently
-// with MaxDeliver=-1 holding the messages.
+// a non-positive interval makes flushloop.Run log and return without ever
+// starting, and a non-positive timeout hands every flush an already-expired
+// context — either way no batch ever lands, nothing is ever acked, and the
+// consumer stalls silently with MaxDeliver=-1 holding the messages.
 func validateFlushBudget(interval, timeout, ackWait time.Duration) error {
 	for _, d := range []struct {
 		name  string

@@ -115,11 +115,6 @@ type config struct {
 	PreviewFlushInterval time.Duration `env:"PREVIEW_FLUSH_INTERVAL" envDefault:"250ms"`
 }
 
-// previewFinalFlushTimeout bounds the one flush that runs after the consumer has
-// drained, so a buffered batch still lands during shutdown without letting a
-// stalled MongoDB hold the process past its termination grace period.
-const previewFinalFlushTimeout = 5 * time.Second
-
 func main() {
 	logctx.SetupDefault(os.Stdout)
 	pretouchJSON()
@@ -352,7 +347,7 @@ func main() {
 	flushDone := make(chan struct{})
 	go func() {
 		defer close(flushDone)
-		previews.Run(flushCtx, cfg.PreviewFlushInterval, previewFinalFlushTimeout)
+		previews.Run(flushCtx, cfg.PreviewFlushInterval)
 	}()
 	if previews != nil {
 		slog.Info("room-preview writer enabled", "flush_interval", cfg.PreviewFlushInterval)

@@ -11,7 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/flushloop"
 	"github.com/hmchangw/chat/pkg/jsretry"
 )
 
@@ -217,44 +217,30 @@ func classifyFlushErr(err error) error {
 	return errcode.Permanent(errcode.Internal("mongo rejected unread-state bulk write", errcode.WithCause(err)))
 }
 
-// finalFlushTimeout bounds the one flush that runs after ctx is cancelled. It
-// is a constant rather than a parameter because every call site — production
-// and tests alike — passed the same value, and sitting next to the env-driven,
-// validated FlushTimeout it only invited confusing the two.
-const finalFlushTimeout = 5 * time.Second
-
 // Run drives the flush ticker until ctx is cancelled, then performs one final
-// flush on a fresh context so a buffered batch still lands — and its messages
-// still settle — even though the supplied ctx is already done.
+// flush so a buffered batch still lands — and its messages still settle — even
+// though the supplied ctx is already done. That final flush takes
+// flushloop.DefaultFinalTimeout.
 //
-// Every call into Flush is jobguard-recovered: Flush runs user-derived data
-// (a batch built from event content) through BulkWrite, and a panic there
-// must not kill this goroutine — an unrecovered panic here crashes the whole
-// process, and with MaxDeliver=-1 the held-but-un-acked batch redelivers
-// forever after every restart, turning a deterministic panic into a crash
-// loop with no way for the message to fall out of the stream.
-// perFlushTimeout bounds each periodic flush. Flush is driven synchronously
-// here, so an unbounded write does not merely delay its own batch — it stops
-// every later flush, the pending batch keeps growing, and the held messages
-// behind it pass AckWait and redeliver into a MongoDB that is evidently already
-// unwell. Bounding it turns that into an ordinary transient failure: the batch
-// is Nak'd, the loop keeps ticking, and back-pressure engages instead of a
-// silent stall. Must stay comfortably below CONSUMER_ACK_WAIT for the same
-// reason MONGO_SERVER_SELECTION_TIMEOUT stays below it.
+// perFlushTimeout bounds each periodic flush. Flush is driven synchronously, so
+// an unbounded write does not merely delay its own batch — it stops every later
+// flush, the pending batch keeps growing, and the held messages behind it pass
+// AckWait and redeliver into a MongoDB that is evidently already unwell.
+// Bounding it turns that into an ordinary transient failure: the batch is
+// Nak'd, the loop keeps ticking, and back-pressure engages instead of a silent
+// stall. Must stay comfortably below CONSUMER_ACK_WAIT for the same reason
+// MONGO_SERVER_SELECTION_TIMEOUT stays below it.
+//
+// Flush reports its own failures — it has the batch sizes and the poison-vs-
+// retry distinction the loop cannot see — so nothing is returned to flushloop
+// to log a second time.
 func (f *flusher) Run(ctx context.Context, interval, perFlushTimeout time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			finalCtx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
-			jobguard.Guard("unread-state flush", func() { f.Flush(finalCtx) })
-			cancel()
-			return
-		case <-t.C:
-			flushCtx, cancel := context.WithTimeout(ctx, perFlushTimeout)
-			jobguard.Guard("unread-state flush", func() { f.Flush(flushCtx) })
-			cancel()
-		}
-	}
+	flushloop.Run(ctx, flushloop.Config{
+		Name:     "unread-state flush",
+		Interval: interval,
+		PerFlush: perFlushTimeout,
+	}, func(ctx context.Context) error {
+		f.Flush(ctx)
+		return nil
+	})
 }

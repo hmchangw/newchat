@@ -319,7 +319,7 @@ func TestPreviewWriter_NilIsInert(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); w.Run(ctx, time.Millisecond, time.Second) }()
+	go func() { defer close(done); w.Run(ctx, time.Millisecond) }()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -599,23 +599,60 @@ func TestHandler_PreviewForInserted_SealsWhenTheCallerHasNoDeadline(t *testing.T
 // this service that is explicitly optional and droppable, and the service exists
 // to keep fan-out alive — crashing over a room-list preview inverts that.
 func TestPreviewWriter_FlushPanicDoesNotKillTheLoop(t *testing.T) {
-	bulk := &panickingBulkWriter{}
+	bulk := newPanickingBulkWriter()
 	w := newPreviewWriter(bulk)
 	w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-1", At: time.Now().UTC()})
 
-	assert.NotPanics(t, func() { w.guardedFlush(context.Background(), "boom") })
-	assert.Equal(t, 1, bulk.calls, "the flush was attempted")
+	// Driven through the real loop rather than a flush helper: the claim is that
+	// this service's preview loop survives a panicking write, and the loop is
+	// what has to survive it.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assert.NotPanics(t, func() { w.Run(ctx, time.Millisecond) })
+	}()
 
-	// And the writer is still usable: the next interval buffers and flushes normally.
+	select {
+	case <-bulk.first:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("the loop never attempted a flush")
+	}
+	// Still usable: buffer again and let the loop pick it up.
 	w.buffer(roomPreview{RoomID: "r-2", MsgID: "m-2", At: time.Now().UTC()})
-	assert.NotPanics(t, func() { w.guardedFlush(context.Background(), "boom") })
-	assert.Equal(t, 2, bulk.calls)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop did not return after a panicking flush")
+	}
+	assert.GreaterOrEqual(t, bulk.count(), 2, "the loop kept flushing after the panic")
 }
 
 // panickingBulkWriter stands in for a write that blows up on user-derived data.
-type panickingBulkWriter struct{ calls int }
+type panickingBulkWriter struct {
+	mu        sync.Mutex
+	calls     int
+	firstOnce sync.Once
+	first     chan struct{}
+}
+
+func newPanickingBulkWriter() *panickingBulkWriter {
+	return &panickingBulkWriter{first: make(chan struct{})}
+}
+
+func (p *panickingBulkWriter) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
 
 func (p *panickingBulkWriter) BulkUpdateRoomPreview(context.Context, map[string]roomPreviewUpdate) error {
+	p.mu.Lock()
 	p.calls++
+	p.mu.Unlock()
+	p.firstOnce.Do(func() { close(p.first) })
 	panic("bulk write exploded")
 }

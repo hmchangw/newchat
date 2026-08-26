@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/flushloop"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/preview"
 )
@@ -166,39 +165,23 @@ func (w *previewWriter) Flush(ctx context.Context) error {
 	return w.bulk.BulkUpdateRoomPreview(ctx, batch)
 }
 
-// Run drives the periodic flush loop until ctx is cancelled. On cancellation a
-// final flush runs against a fresh context with finalTimeout so a buffered
-// batch still lands even if the supplied ctx is already done.
-func (w *previewWriter) Run(ctx context.Context, interval, finalTimeout time.Duration) {
+// Run drives the periodic flush loop until ctx is cancelled, then runs one
+// final flush so a buffered batch still lands even though the supplied ctx is
+// already done.
+//
+// No per-flush bound is passed: Flush bounds its own bulk write (maxFlushDuration),
+// since the drained batch stays live for the whole write while handlers fill the
+// replacement map behind it. The final drain takes flushloop.DefaultFinalTimeout.
+//
+// A flush failure is logged and never returned to the handler. The message is
+// already in Cassandra and already broadcast, and a room with no stored preview
+// is one history-service walks for — never NAK a delivered message over this.
+func (w *previewWriter) Run(ctx context.Context, interval time.Duration) {
 	if w == nil {
 		return
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			finalCtx, cancel := context.WithTimeout(context.Background(), finalTimeout)
-			w.guardedFlush(finalCtx, "final flush of room preview buffer failed")
-			cancel()
-			return
-		case <-t.C:
-			w.guardedFlush(ctx, "flush room preview buffer failed")
-		}
-	}
-}
-
-// guardedFlush runs one flush with panic recovery. This goroutine drives
-// user-derived data — a preview composed from message content — through
-// BulkWrite, and an unrecovered panic here would take the whole process down.
-// That is not a proportionate outcome for the one write in this service that is
-// explicitly optional and droppable: it would stop message fan-out for the
-// entire site over a room-list preview. Recover, log, keep ticking; the room
-// simply has no stored preview, which the reader already handles by walking.
-func (w *previewWriter) guardedFlush(ctx context.Context, failMsg string) {
-	jobguard.Guard("room preview flush", func() {
-		if err := w.Flush(ctx); err != nil {
-			slog.ErrorContext(ctx, failMsg, "error", err)
-		}
-	})
+	flushloop.Run(ctx, flushloop.Config{
+		Name:     "room preview flush",
+		Interval: interval,
+	}, w.Flush)
 }
