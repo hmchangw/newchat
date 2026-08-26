@@ -47,14 +47,8 @@ func newRoomActivityRefresher(publish func(context.Context, roomActivityRefresh)
 		publish:       publish,
 		interval:      interval,
 		lastRefreshed: make(map[string]time.Time),
+		now:           time.Now,
 	}
-}
-
-func (r *roomActivityRefresher) clock() time.Time {
-	if r.now != nil {
-		return r.now()
-	}
-	return time.Now()
 }
 
 // refresh announces roomID's position, subject to the cross-site test and the
@@ -80,7 +74,7 @@ func (r *roomActivityRefresher) refresh(ctx context.Context, roomID string, cros
 	if crossSite != nil && !*crossSite {
 		return
 	}
-	now := r.clock()
+	now := r.now()
 	if r.throttled(roomID, now) {
 		return
 	}
@@ -104,26 +98,45 @@ func (r *roomActivityRefresher) throttled(roomID string, now time.Time) bool {
 	if last, ok := r.lastRefreshed[roomID]; ok && now.Sub(last) < r.interval {
 		return true
 	}
-	if r.lastRefreshed == nil {
-		r.lastRefreshed = make(map[string]time.Time)
-	}
 	r.lastRefreshed[roomID] = now
 	if now.Sub(r.lastPruned) >= r.interval {
-		r.pruneLocked(now)
-		r.lastPruned = now
+		if r.pruneLocked(now) {
+			r.lastPruned = now
+		}
 	}
 	return false
 }
 
+// pruneScanBudget bounds how many watermarks one prune pass examines. Pruning
+// runs on the fan-out hot path under the same mutex every handler needs, so an
+// unbounded pass is an O(active cross-site rooms) critical section that blocks
+// every concurrent message — including messages for rooms it is not examining.
+// A fixed budget makes the lock hold constant-time instead.
+const pruneScanBudget = 256
+
 // pruneLocked drops rooms that have gone quiet for longer than the interval;
 // their next message re-announces immediately, so keeping them would only leak
 // memory. Callers must hold r.mu.
-func (r *roomActivityRefresher) pruneLocked(now time.Time) {
+//
+// It examines at most pruneScanBudget entries per pass and reports whether it
+// reached the end of the map. A partial pass deliberately does NOT advance
+// lastPruned, so the next message resumes the sweep rather than waiting another
+// interval — Go randomizes map iteration order, so successive partial passes
+// cover the map without needing a cursor. The bound trades a slower sweep for a
+// lock nobody waits on; the map's size is what the sweep is protecting anyway,
+// and it stays bounded by rooms active within one interval.
+func (r *roomActivityRefresher) pruneLocked(now time.Time) (complete bool) {
+	scanned := 0
 	for roomID, last := range r.lastRefreshed {
+		if scanned == pruneScanBudget {
+			return false
+		}
+		scanned++
 		if now.Sub(last) >= r.interval {
 			delete(r.lastRefreshed, roomID)
 		}
 	}
+	return true
 }
 
 // remotePeers returns the sites to refresh: everything in allSiteIDs except this

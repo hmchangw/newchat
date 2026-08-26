@@ -238,3 +238,45 @@ func TestRoomActivityRefresher_ConcurrentRefreshIsThreadSafe(t *testing.T) {
 	// Ten distinct rooms, each throttled to one announce inside the interval.
 	assert.Len(t, pub.all(), 10)
 }
+
+// Pruning runs under the mutex every fan-out handler needs, so a pass must be
+// constant-time regardless of how many cross-site rooms were active. An
+// unbounded sweep made the critical section O(active rooms) and stalled
+// unrelated messages.
+func TestRoomActivityRefresher_PruneScanIsBounded(t *testing.T) {
+	r := newRoomActivityRefresher(func(context.Context, roomActivityRefresh) error { return nil }, time.Minute)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	stale := now.Add(-time.Hour)
+	for i := range pruneScanBudget * 3 {
+		r.lastRefreshed[fmt.Sprintf("room-%d", i)] = stale
+	}
+
+	complete := r.pruneLocked(now)
+
+	assert.False(t, complete, "a map larger than the budget cannot be swept in one pass")
+	assert.Equal(t, pruneScanBudget*3-pruneScanBudget, len(r.lastRefreshed),
+		"exactly the budget is examined, and every examined entry was stale")
+}
+
+// A partial sweep must not advance the watermark: the next message resumes it
+// rather than leaving the remainder for a whole interval. Go randomizes map
+// iteration, so repeated partial passes converge without a cursor.
+func TestRoomActivityRefresher_PartialPruneResumesOnTheNextMessage(t *testing.T) {
+	r := newRoomActivityRefresher(func(context.Context, roomActivityRefresh) error { return nil }, time.Minute)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	stale := now.Add(-time.Hour)
+	for i := range pruneScanBudget * 2 {
+		r.lastRefreshed[fmt.Sprintf("stale-%d", i)] = stale
+	}
+
+	// Each call prunes at most the budget; lastPruned stays put while incomplete,
+	// so the sweep continues instead of stalling until the next interval.
+	for range 4 {
+		r.throttled(fmt.Sprintf("live-%d", len(r.lastRefreshed)), now)
+	}
+
+	for k := range r.lastRefreshed {
+		assert.NotContains(t, k, "stale-", "every stale watermark is eventually swept")
+	}
+}
