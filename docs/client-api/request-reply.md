@@ -6,7 +6,7 @@
 
 This document covers all client-initiated interactions:
 
-- **Request/reply** — client publishes to `…request.…`, awaits a reply on `_INBOX.>`.
+- **Request/reply** — client publishes to `…request.…`, awaits a reply on `chat.user.{account}.>`.
 - **Publish operations** — client publishes with no synchronous reply (Send Message,
   presence lifecycle).
 
@@ -325,7 +325,7 @@ that owns the room), not the caller's own site.
 ### Create Room
 
 **Subject:** `chat.user.{account}.request.room.{siteID}.create`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Async-job RPC — sync reply only confirms acceptance; room is created by `room-worker`.
 Room type is inferred server-side from the payload shape (`name` set → channel;
@@ -374,7 +374,7 @@ DM/self-DM already exists: `{ "status": "exists", "roomId": "<existing room id>"
 ### Add Members
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.add`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Async-job RPC. `X-Request-ID` recommended (required to receive `AsyncJobResult`).
 
@@ -411,7 +411,7 @@ available (no app record / disabled assistant), user/org not found, unrecognized
 ### Remove Member
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.remove`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Async-job RPC. `X-Request-ID` recommended.
 
@@ -442,7 +442,7 @@ cannot leave individually.
 ### Update Member Role
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.role-update`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 **Synchronous RPC** — role change is applied inline before reply. No `AsyncJobResult`.
 
@@ -469,7 +469,7 @@ Not an owner; target not a member; invalid `newRole`; already owner (promote); b
 ### Rename Room
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.room.rename`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Async-job RPC. `X-Request-ID` header **required**. Caller must be a room owner or
 platform admin. Channel rooms only.
@@ -502,7 +502,7 @@ platform admin. Channel rooms only.
 ### List Members
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.list`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -529,7 +529,7 @@ platform admin. Channel rooms only.
 ### Get Member Statuses
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.member.statuses`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -553,7 +553,7 @@ See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-membe
 ### Get Mentionable Subscriptions
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.subscription.mentionable`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Used by the message composer's `@…` mention autocomplete. The caller and the
 `p_admin` platform-admin pseudo-account are excluded (QA `p_` accounts are
@@ -582,7 +582,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 ### Mark Messages Read
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.read`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Advances the caller's `lastSeenAt` and clears the per-subscription
 `alert` flag. No request body required.
@@ -602,7 +602,7 @@ Synchronous RPC. Advances the caller's `lastSeenAt` and clears the per-subscript
 ### Mark Thread as Read
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.thread.read`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Clears one thread's unread state for the caller: refreshes the
 `ThreadSubscription` (`lastSeenAt`, `hasMention=false`) and concurrently `$pull`s the
@@ -638,7 +638,7 @@ via the internal cross-site inbox flow (not a client-visible event).
 ### Toggle Mute
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.mute.toggle`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Flips `Subscription.muted`. Every successful call toggles the bit —
 clients must debounce. No request body required.
@@ -661,7 +661,7 @@ clients must debounce. No request body required.
 ### Toggle Favorite
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.favorite.toggle`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Flips `Subscription.favorite`. Every successful call toggles the bit —
 clients must debounce. No request body required. Also orderable via
@@ -687,7 +687,7 @@ leaves any existing `sectionId` alone.
 ### Move Chat to Section
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.chat.move`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Sets the subscription's `sectionId` + fractional `sectionOrder`, or
 removes it from its section (`sectionId: null`). Membership lives on the subscription,
@@ -716,7 +716,7 @@ mirroring favorite. Full detail + read model: [Chatlist Sections](../client-api.
 ### Open Room
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.open`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous RPC. Sets `Subscription.open` to `true`. Every successful call sets the
 bit — not a toggle. No request body required.
@@ -739,7 +739,7 @@ bit — not a toggle. No request body required.
 ### Read Message Receipts
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.message.read-receipt`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Synchronous, sender-only RPC. Returns local-site users whose `subscription.lastSeenAt`
 is at or after the target message's `createdAt`. The message author is excluded from
@@ -778,7 +778,7 @@ outside access window"` (`forbidden`, `outside_access_window` — predates the r
 ### List Org Members
 
 **Subject:** `chat.user.{account}.request.orgs.{orgID}.{siteID}.members`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Returns all users whose `sectId` OR `deptId` equals `{orgID}` on the given site.
 No request body.
@@ -799,7 +799,7 @@ No request body.
 ### Get Room App Tabs
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.app.tabs`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Empty body. Returns apps with `channelTab.enabled=true` AND `channelTab.default=true`,
 sorted by `channelTab.name asc`.
@@ -820,7 +820,7 @@ sorted by `channelTab.name asc`.
 ### Get Room App Command Menu
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.app.cmd-menu`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Empty body. Returns one entry per bot subscribed in the room whose owning app has
 `assistant.enabled=true`.
@@ -841,7 +841,7 @@ Same envelope and sentinels as Get Room App Tabs.
 ### Start Teams Room Call
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.teams.call`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 External client label: `POST /api/v1/calls/room`. Builds a Teams deep-link call to every
 other room member (caller excluded). No Graph API call — link derived from member list.
@@ -868,7 +868,7 @@ Empty body.
 ### Start Teams User Call
 
 **Subject:** `chat.user.{account}.request.teams.{siteID}.call.user`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 External client label: `POST /api/v1/calls/user`. Builds a Teams 1:1 call deep-link.
 No Graph API call.
@@ -897,7 +897,7 @@ No Graph API call.
 ### Start Teams Meeting
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.teams.meeting`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 External client label: `POST /api/v1/meetings`. Creates a Teams `onlineMeeting` via
 Graph API. **Idempotent per room** — repeated calls for the same room return the same
@@ -983,7 +983,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 ### Load History
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.history`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -1008,7 +1008,7 @@ Message schema: see [../client-api.md § Message schema](../client-api.md#messag
 ### Load Next Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.next`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Forward-pagination counterpart to Load History.
 
@@ -1035,7 +1035,7 @@ Forward-pagination counterpart to Load History.
 ### Load Surrounding Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.surrounding`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -1063,7 +1063,7 @@ Pivot on **exactly one** of `messageId` or `timestamp`.
 ### Get Message By ID
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.get`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -1082,7 +1082,7 @@ A single `Message` object.
 ### Get Messages By IDs
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.get.ids`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 All IDs must belong to the same room. IDs not found or outside access window are silently
 omitted.
@@ -1108,7 +1108,7 @@ omitted.
 ### Edit Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.edit`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Only the original sender may edit.
 
@@ -1138,7 +1138,7 @@ Only the original sender may edit.
 ### Delete Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.delete`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Soft-delete (row preserved for audit). Only the original sender may delete. Idempotent.
 
@@ -1166,7 +1166,7 @@ Soft-delete (row preserved for audit). Only the original sender may delete. Idem
 ### Pin Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.pin`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Idempotent — pinning an already-pinned message returns success without re-publishing.
 
@@ -1201,7 +1201,7 @@ Idempotent — pinning an already-pinned message returns success without re-publ
 ### Unpin Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.unpin`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Idempotent. Soft-deleted messages are still unpinnable.
 
@@ -1227,7 +1227,7 @@ messages that don't exist or belong to a different room.
 ### List Pinned Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.pinned.list`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Most-recently-pinned first. Kill-switch and large-room override do **not** apply to
 listing. Caller with a `historySharedSince` lower bound receives redacted stubs for pins
@@ -1257,7 +1257,7 @@ replies whose thread parent predates it; `tshow=true` replies are judged on thei
 ### React to Message
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.react`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Toggle — server decides add vs remove by checking the calling user's existing reactor
 state. Can always **remove** from a soft-deleted message; cannot **add** to one.
@@ -1289,7 +1289,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 ### Get Thread Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.thread`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 #### Request body
 
@@ -1316,7 +1316,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 ### Get Thread Parent Messages
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.msg.thread.parent`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Lists parent messages of threads the user has subscribed to (or all threads, depending
 on filter). Drives a "Threads" tab in the client.
@@ -1358,7 +1358,7 @@ search-service on that site.
 ### search.messages
 
 **Subject:** `chat.user.{account}.request.search.{siteID}.messages`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Full-text message search. Auto-scoped to rooms the user is a member of. May include
 messages from remote sites. One query matches message text, attachment text (file
@@ -1417,7 +1417,7 @@ history load.
 ### Search Rooms
 
 **Subject:** `chat.user.{account}.request.search.{siteID}.rooms`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Full-text search across rooms the caller is subscribed to. Results from the spotlight
 ES index.
@@ -1442,7 +1442,7 @@ ES index.
 ### Search Apps
 
 **Subject:** `chat.user.{account}.request.search.{siteID}.apps`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Current behavior (prototype): not yet subscription-scoped — every matching app is
 returned. Planned behavior: scoped to apps the caller has subscribed to.
@@ -1468,7 +1468,7 @@ returned. Planned behavior: scoped to apps the caller has subscribed to.
 ### Search Users
 
 **Subject:** `chat.user.{account}.request.search.{siteID}.users`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Proxy search via third-party HR endpoint. Company-scoping enforced by the HR endpoint.
 
@@ -1491,7 +1491,7 @@ Top-level JSON array of `SearchUser` (`account`, `engName`?, `chineseName`?).
 ### Search Orgs
 
 **Subject:** `chat.user.{account}.request.search.{siteID}.orgs`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Prefix search over the company-wide organization directory (sections/departments),
 served from the local spotlight-org ES index. Not user-scoped — the same results for
@@ -2200,7 +2200,7 @@ the request to that site's media-service.
 ### emoji.list
 
 **Subject:** `chat.user.{account}.request.emoji.{siteID}.list`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Lists the site's custom emoji, sorted by `shortcode`.
 
@@ -2231,7 +2231,7 @@ See [../client-api.md §3.5](../client-api.md#emojientry) for the full schema + 
 ### emoji.delete
 
 **Subject:** `chat.user.{account}.request.emoji.{siteID}.delete`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 Deletes a custom emoji. Any authenticated user may delete (v1). Disabled by default —
 gated by media-service's `EMOJI_DELETE_ENABLED` (default `false`).
@@ -2260,7 +2260,7 @@ kill-switch off (`forbidden`, reason `emoji_delete_disabled`), store failure (`i
 **Subject:** `chat.user.{account}.room.{roomID}.{siteID}.msg.send`
 **Async reply:** `chat.user.{account}.response.{requestID}` (subscribe to `chat.user.{account}.>` to receive it)
 
-Publish + async-reply pattern — no `_INBOX.>` reply. Covers plain message, thread reply,
+Publish + async-reply pattern — no `chat.user.{account}.>` reply. Covers plain message, thread reply,
 and quoted message; variant determined by optional fields.
 
 `{siteID}` must be the room's origin siteID.
@@ -2317,7 +2317,7 @@ error table. Key errors:
 ### Translate Text
 
 **Subject:** `chat.user.{account}.request.translate.{siteID}.text`
-**Reply subject:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply subject:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 `{siteID}` is the caller's own (local) site ID — translation is stateless and not
 federated, so always use your own site (no origin-site rule like `msg.send`).
@@ -2352,7 +2352,7 @@ Standard `{ code, reason?, error }` envelope. Key errors: `empty_text` (`bad_req
 ### Room Encryption Key Get
 
 **Subject:** `chat.user.{account}.request.room.{roomID}.{siteID}.key.get`
-**Reply:** auto-generated `_INBOX.>` (NATS request/reply)
+**Reply:** auto-generated `chat.user.{account}.>` (NATS request/reply)
 
 On-demand key fetch when a received message cannot be decrypted with held keys.
 Call only when needed; back off after failure (permanently-gone keys won't reappear).
