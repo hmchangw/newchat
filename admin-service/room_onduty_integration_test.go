@@ -99,7 +99,7 @@ func newOnDutyRig(t *testing.T, siteID string, reply func(model.RoomRestrictedRe
 	r := gin.New()
 	// Mirrors main.go: without it the X-Request-ID never reaches the NATS message.
 	r.Use(ginutil.RequestID())
-	registerRoutes(r, h, sessions, cfg.SiteID)
+	registerRoutes(r, h, sessions, cfg.SiteID, 10*time.Minute)
 
 	return &onDutyRig{router: r, authToken: authToken, received: received, gotHeaders: gotHeaders}
 }
@@ -222,7 +222,7 @@ func TestIntegration_SetRoomOnDuty_RPCTimeout(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, sessions, cfg.SiteID)
+	registerRoutes(r, h, sessions, cfg.SiteID, 10*time.Minute)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/admin/rooms/r1/onduty", strings.NewReader(`{"onDuty":true,"ownerAccount":"alice"}`))
 	req.Header.Set("Content-Type", "application/json")

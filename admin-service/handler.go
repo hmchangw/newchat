@@ -30,6 +30,19 @@ type Handler struct {
 	// remoteDests is remoteSites(cfg.AllSiteIDs, cfg.SiteID), computed once — the
 	// config never changes after startup, so no request needs to re-derive it.
 	remoteDests []string
+	// clientUpdate forwards artifact uploads to client-update-service. Nil when
+	// the service is not configured for it; the upload route then answers 503
+	// rather than dereferencing it.
+	clientUpdate clientUpdateUploader
+}
+
+// handlerOption customizes a Handler after construction. Variadic so adding a
+// dependency never churns the existing call sites.
+type handlerOption func(*Handler)
+
+// withClientUpdate installs the client-update forwarder.
+func withClientUpdate(f clientUpdateUploader) handlerOption {
+	return func(h *Handler) { h.clientUpdate = f }
 }
 
 // newHandler constructs a Handler with the given stores, config, room RPC, and
@@ -37,11 +50,15 @@ type Handler struct {
 // route need not build one; the duty handler answers 503 rather than
 // dereferencing it. A nil publishInbox is tolerated the same way — fanout
 // no-ops in tests that don't exercise it.
-func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publishInbox func(ctx context.Context, subj string, data []byte) error) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{
+func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publishInbox func(ctx context.Context, subj string, data []byte) error, opts ...handlerOption) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	h := &Handler{
 		store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publishInbox: publishInbox,
 		remoteDests: remoteSites(cfg.AllSiteIDs, cfg.SiteID),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a

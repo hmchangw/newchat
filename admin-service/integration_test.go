@@ -1287,7 +1287,7 @@ func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	registerRoutes(r, h, sessions, cfg.SiteID)
+	registerRoutes(r, h, sessions, cfg.SiteID, 10*time.Minute)
 
 	// Seed one admin
 	hash, err := pwhash.Hash("s3cret", cfg.BcryptCost)

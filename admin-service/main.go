@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/svcjwt"
 )
 
 func main() {
@@ -97,13 +98,39 @@ func run() error {
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publishInbox)
+	// Client-update publishing is opt-in per site: an empty base URL leaves the
+	// forwarder nil and the upload route answers 503. loadConfig has already
+	// rejected a half-configured opt-in, so reaching here with a base URL means
+	// the key and account are present too.
+	var handlerOpts []handlerOption
+	if cfg.ClientUpdateBaseURL == "" {
+		slog.Warn("client update publishing is disabled: CLIENT_UPDATE_BASE_URL is unset",
+			"site", cfg.SiteID)
+	} else {
+		signer, err := svcjwt.NewSigner(cfg.SvcJWTPrivateKey, cfg.SvcJWTIssuer)
+		if err != nil {
+			return fmt.Errorf("build service-token signer: %w", err)
+		}
+		// Minted per forward and never returned to a caller, so no bearer
+		// credential for client-update-service ever leaves this process.
+		mintClientUpdateToken := func() (string, error) {
+			token, _, err := signer.Sign(cfg.ClientUpdateServiceAccount, cfg.ClientUpdateAudience, cfg.SvcJWTTTL)
+			if err != nil {
+				return "", fmt.Errorf("sign client-update token: %w", err)
+			}
+			return token, nil
+		}
+		handlerOpts = append(handlerOpts,
+			withClientUpdate(newClientUpdateForwarder(cfg.ClientUpdateBaseURL, cfg.ClientUpdateUploadTimeout, mintClientUpdateToken)))
+	}
+
+	h := newHandler(st, sessStore, cfg, nc, publishInbox, handlerOpts...)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	obsMW := o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
 	applyBaseMiddleware(r, obsMW)
-	registerRoutes(r, h, sessStore, cfg.SiteID)
+	registerRoutes(r, h, sessStore, cfg.SiteID, cfg.ClientUpdateUploadTimeout)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

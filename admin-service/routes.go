@@ -1,13 +1,15 @@
 package main
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/hmchangw/chat/pkg/session"
 )
 
 // registerRoutes wires all HTTP routes onto r.
-func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID string) {
+func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID string, uploadTimeout time.Duration) {
 	r.GET("/healthz", h.healthz)
 	r.GET("/readyz", h.readyz)
 
@@ -28,4 +30,5 @@ func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID st
 	admin.POST("/permissions", h.createPermissions)
 	admin.GET("/permissions", h.listPermissions)
 	admin.POST("/permissions/resync", h.resyncPermissions)
+	admin.POST("/client-update/version", extendDeadlines(uploadTimeout), h.uploadClientVersion)
 }

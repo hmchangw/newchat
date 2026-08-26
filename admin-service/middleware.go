@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
+	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -83,4 +87,29 @@ func principalFrom(c *gin.Context) session.Session {
 	v, _ := c.Get(ctxPrincipal)
 	s, _ := v.(session.Session)
 	return s
+}
+
+// extendDeadlines pushes this request's read and write deadlines out to d.
+//
+// admin-service's server-wide ReadTimeout (15s) and WriteTimeout
+// (httpWriteTimeout, 40s) are sized for the cross-site permission fanout — see
+// config.go and applyBaseMiddleware — and must not be widened for every route
+// just because one route needs minutes. An artifact upload extends its own
+// instead, leaving every other route's behavior untouched.
+//
+// A ResponseWriter that cannot take deadlines (httptest's recorder in unit
+// tests) reports http.ErrNotSupported; the handler still runs, it simply keeps
+// the server-wide timeouts.
+func extendDeadlines(d time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rc := http.NewResponseController(c.Writer)
+		until := time.Now().Add(d)
+		if err := rc.SetReadDeadline(until); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.WarnContext(c.Request.Context(), "extend read deadline failed", "error", err)
+		}
+		if err := rc.SetWriteDeadline(until); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.WarnContext(c.Request.Context(), "extend write deadline failed", "error", err)
+		}
+		c.Next()
+	}
 }
