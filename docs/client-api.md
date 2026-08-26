@@ -5585,7 +5585,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
 
-**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. The count reads subscription state only — it consults no room document, and no room name is filtered.
+**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
 
 ##### Request body
 
