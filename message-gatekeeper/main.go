@@ -208,9 +208,7 @@ func main() {
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		func(msgCtx context.Context, msg *natsmetrics.Message) {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
 		})
 

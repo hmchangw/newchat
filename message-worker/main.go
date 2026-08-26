@@ -291,8 +291,7 @@ func main() {
 				// natsrouter's Recovery middleware, so an unrecovered panic would
 				// crash the worker and crash-loop on JetStream redelivery.
 				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+					handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 					// Dispatch by subject: the one-time .teams.batch migration
 					// writes straight to Cassandra; the live .created feed runs the
 					// normal pipeline.
@@ -300,7 +299,6 @@ func main() {
 						teamsMigration.consume(handlerCtx, msg)
 						return
 					}
-					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 					handler.HandleJetStreamMsg(handlerCtx, msg)
 				})
 			}(msgCtx, msg)

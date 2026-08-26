@@ -407,6 +407,11 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	// stable X-Request-ID still defeat dedup upstream (room-service mints a fresh
 	// ID each attempt); the boundary no longer rejects them. See
 	// docs/error-handling.md §3a.
+	// Deliberately not logctx.ConsumeContext, which every other stream consumer
+	// uses: room-service always stamps an id on ROOMS, and downstream dedup keys
+	// derive from it, so a missing one is an error here rather than the quiet
+	// mint StampRequestID performs. Admission and capture below are identical —
+	// keep them in step with ConsumeContext if that grows a fourth step.
 	inbound := ""
 	if h := msg.Headers(); h != nil {
 		inbound = h.Get(natsutil.RequestIDHeader)

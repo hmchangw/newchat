@@ -402,9 +402,7 @@ func main() {
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
 	broadcastSub, err := nc.QueueSubscribe(ctx, subject.ServerBroadcastWildcard(cfg.SiteID), "broadcast-worker",
 		func(msgCtx context.Context, msg *nats.Msg) {
-			broadcastCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
-			broadcastCtx = logctx.Admit(broadcastCtx, msg.Header)
-			logctx.CapturePayload(broadcastCtx, "consumed", msg.Subject, msg.Data)
+			broadcastCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
 			handler.HandleServerBroadcast(broadcastCtx, msg.Data)
 		})
 	if err != nil {
@@ -506,11 +504,9 @@ type messageProcessor func(msgCtx context.Context, msg jetstream.Msg)
 // the handler, then settle via jsretry (short first retry; malformed events Ack-drop).
 func broadcastProcessor(handler *Handler) messageProcessor {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
-		handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 		// X-Migration: live events are NOT filtered here — during the legacy→new backend release
 		// switch we still need broadcast to fan them out so live clients see the messages.
-		handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-		logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+		handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 		// flow: hop entry with stream-wait latency time-diffing can't see. Gate the block so
 		// msg.Metadata() and arg-building are skipped on the hot path (slog.Log builds args before Enabled runs).
 		if logctx.Enabled(handlerCtx, logctx.LevelFlow) {

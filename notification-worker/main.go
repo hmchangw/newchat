@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -342,7 +343,7 @@ func main() {
 				// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
 				// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
 				jobguard.Run(msg, func() {
-					handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+					handlerCtx, reqID := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 					// Migrated events carry X-Migration: live — the source already delivered them, so
 					// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
 					if natsutil.IsMigrationLiveHeader(msg.Headers()) {

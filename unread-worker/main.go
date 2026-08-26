@@ -349,9 +349,7 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 		// the stream. On panic the message stays un-acked and JetStream
 		// redelivers it after AckWait, same as any other transient failure.
 		jobguard.Guard(msg.Subject(), func() {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 
 			var evt eventProjection
 			if err := sonic.Unmarshal(msg.Data(), &evt); err != nil {

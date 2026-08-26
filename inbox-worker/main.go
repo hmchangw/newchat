@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -868,7 +869,7 @@ func main() {
 	// both. Fire-and-forget — a failure self-heals on the room's next message.
 	activitySub, err := nc.QueueSubscribe(ctx, subject.RoomActivity(cfg.SiteID), "inbox-worker",
 		func(msgCtx context.Context, msg *nats.Msg) {
-			actCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
+			actCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
 			if err := handler.HandleRoomActivity(actCtx, msg.Data); err != nil {
 				slog.WarnContext(actCtx, "apply room activity refresh failed", "error", err)
 			}
@@ -911,7 +912,7 @@ func main() {
 		// redelivery. On panic it Acks (poison drop).
 		jobguard.Run(m.msg, func() {
 			msg := m.msg
-			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
+			handlerCtx, _ := logctx.ConsumeContext(m.ctx, msg.Headers(), msg.Subject(), msg.Data())
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
