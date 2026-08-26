@@ -402,6 +402,14 @@ Add, with alerts:
   — a rising `class="request"` rate is a migration-induced wave, visible before the
   retry window elapses and anything is destroyed.
 - Degraded-marker state and duration.
+- Stream retention verdict (`message_worker_stream_retention_insufficient`) — 1 when
+  MESSAGES-CANONICAL cannot hold a backlog for `MIN_STREAM_MAX_AGE`, **-1 when the
+  check could not run at all**, else 0. Alert on `!= 0`: an unverified boundary is not
+  a verified-good one. This is the ops prerequisite below made self-checking, since
+  `pkg/stream` sets only Name and Subjects and nothing in the repo can otherwise show
+  what retention a site is actually running. Deliberately advisory — refusing to boot
+  on a bad verdict would stop the pod persisting anything at all, trading a partial
+  outage for a total one.
 - Ack-pending depth (`message_worker_consumer_num_ack_pending`) — the saturation
   signal for `MaxDeliver=-1`. Every message that cannot settle holds one of
   `MaxAckPending` slots, and a consumer at its ceiling delivers nothing at all, so

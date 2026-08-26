@@ -107,8 +107,8 @@ func TestMetrics_AckFloorAgeIsZeroWhenNothingIsPending(t *testing.T) {
 	last := time.Now().Add(-9 * time.Hour)
 
 	tests := []struct {
-		name          string
-		numAckPending int
+		name           string
+		numAckPending  int
 		wantAgeAtMost  int64
 		wantAgeAtLeast int64
 	}{

@@ -28,6 +28,10 @@ type metrics struct {
 	numAckPending      atomic.Uint64
 	ackFloorAgeSeconds atomic.Int64
 	degraded           atomic.Int64
+	// streamRetentionInsufficient is 1 when the stream cannot hold a backlog for the
+	// outage this service is sized for, and -1 when the check could not run at all —
+	// an unverified boundary is not a verified-good one.
+	streamRetentionInsufficient atomic.Int64
 	// infoPollFailures makes a frozen gauge distinguishable from a healthy one:
 	// a failed poll leaves numPending and ackFloorAgeSeconds at their last value.
 	infoPollFailures atomic.Int64
@@ -81,6 +85,11 @@ func newMetrics() (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("num ack pending gauge: %w", err)
 	}
+	retentionGauge, err := meter.Int64ObservableGauge("message_worker_stream_retention_insufficient",
+		metric.WithDescription("1 when MESSAGES-CANONICAL retention is below the retry policy's assumption, -1 when unverified, else 0"))
+	if err != nil {
+		return nil, fmt.Errorf("stream retention gauge: %w", err)
+	}
 	pollFailures, err := meter.Int64ObservableCounter("message_worker_consumer_info_poll_failures_total",
 		metric.WithDescription("failed consumer-info polls — the lag gauges hold stale values across these"))
 	if err != nil {
@@ -94,9 +103,10 @@ func newMetrics() (*metrics, error) {
 		o.ObserveInt64(ackPendingGauge, int64(m.numAckPending.Load()))
 		o.ObserveInt64(ackAge, m.ackFloorAgeSeconds.Load())
 		o.ObserveInt64(degradedGauge, m.degraded.Load())
+		o.ObserveInt64(retentionGauge, m.streamRetentionInsufficient.Load())
 		o.ObserveInt64(pollFailures, m.infoPollFailures.Load())
 		return nil
-	}, pending, ackPendingGauge, ackAge, degradedGauge, pollFailures); err != nil {
+	}, pending, ackPendingGauge, ackAge, degradedGauge, retentionGauge, pollFailures); err != nil {
 		return nil, fmt.Errorf("register gauge callback: %w", err)
 	}
 
@@ -158,6 +168,27 @@ func (m *metrics) setDegraded(degraded bool) {
 		v = 1
 	}
 	m.degraded.Store(v)
+}
+
+// setStreamRetentionInsufficient records the startup retention verdict.
+func (m *metrics) setStreamRetentionInsufficient(insufficient bool) {
+	if m == nil {
+		return
+	}
+	var v int64
+	if insufficient {
+		v = 1
+	}
+	m.streamRetentionInsufficient.Store(v)
+}
+
+// setStreamRetentionUnknown marks the boundary as unverified (-1), which must alert
+// like a bad verdict rather than read as a good one.
+func (m *metrics) setStreamRetentionUnknown() {
+	if m == nil {
+		return
+	}
+	m.streamRetentionInsufficient.Store(-1)
 }
 
 // onInfoPollFailure records a poll that left the lag gauges holding stale values.

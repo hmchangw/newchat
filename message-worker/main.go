@@ -56,6 +56,12 @@ type config struct {
 	PProfEnabled       bool          `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string        `env:"METRICS_ADDR"         envDefault:":9090"`
 	DegradeRefresh     time.Duration `env:"DEGRADE_REFRESH_INTERVAL" envDefault:"5s"`
+	// MinStreamMaxAge is the MESSAGES-CANONICAL retention this service's retry policy
+	// assumes. With MaxDeliver=-1 the stream is the only durability boundary left, and
+	// retention is ops/IaC state no code in this repo can see — so the service reads it
+	// back at startup and says so when it is short. Advisory: checked, logged and
+	// gauged, never fatal. 0 disables the check.
+	MinStreamMaxAge time.Duration `env:"MIN_STREAM_MAX_AGE" envDefault:"24h"`
 	// InvalidRetryWindow is how long a request-class Cassandra failure (see
 	// cqlclass.go) is retried before the message is dropped, measured as
 	// accumulated NAK backoff. A duration rather than a delivery count because the
@@ -266,6 +272,14 @@ func main() {
 	stopLagPoller := startLagPoller(ctx, mtr, func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
 		return cons.Info(ctx)
 	}, 15*time.Second)
+
+	reportStreamRetention(ctx, func(ctx context.Context) (*jetstream.StreamInfo, error) {
+		st, err := js.Stream(ctx, streamName)
+		if err != nil {
+			return nil, fmt.Errorf("open stream %s: %w", streamName, err)
+		}
+		return st.Info(ctx)
+	}, streamName, cfg.MinStreamMaxAge, mtr)
 
 	// The marker is adopted synchronously here, before the consume loop below can
 	// process a single replayed row: a pod restarted mid-outage must not spend its

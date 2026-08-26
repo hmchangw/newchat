@@ -35,6 +35,10 @@ services:
       # Unattended brake: caps destruction per pod per minute so a site-wide fault
       # that presents as a request error cannot destroy a whole feed unnoticed.
       - MAX_DROPS_PER_MINUTE=${MAX_DROPS_PER_MINUTE:-10}
+      # With MaxDeliver=-1 the stream is the only durability boundary left. Its
+      # retention is ops/IaC state, so the service reads it back at startup and says
+      # so when it is shorter than the outage the retry policy assumes. Advisory.
+      - MIN_STREAM_MAX_AGE=${MIN_STREAM_MAX_AGE:-24h}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
       - VAULT_TOKEN=${VAULT_TOKEN:-dev-only-token}
