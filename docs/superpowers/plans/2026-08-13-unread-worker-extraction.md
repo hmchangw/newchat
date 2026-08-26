@@ -1691,8 +1691,9 @@ And add to the o11y anchor block, after `room-service: *local-o11y`:
 
 Applies the room-level MongoDB state derived from MESSAGES-CANONICAL:
 `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, the sender's subscription
-`lastSeenAt`, and the `hasMention` badge. broadcast-worker performs no MongoDB
-writes; it only fans out.
+`lastSeenAt`, and the `hasMention` badge. broadcast-worker is read-mostly after
+this: its only remaining MongoDB write is the room-list preview, buffered and
+drained best-effort, which no handler awaits.
 
 ## Deploy order
 
@@ -2069,7 +2070,7 @@ with:
 
 In Section 6 under **JetStream Streams**, append to the `MESSAGES-CANONICAL-{siteID}` bullet:
 
-> Consumed by `message-worker` (Cassandra persistence), `broadcast-worker` (fan-out, reads only), `unread-worker` (room/subscription MongoDB writes) and `notification-worker`. `unread-worker` runs with `MaxDeliver=-1` so a MongoDB outage retries rather than drops; broadcast-worker performs no MongoDB writes, so a MongoDB failure can never make it re-broadcast a message.
+> Consumed by `message-worker` (Cassandra persistence), `broadcast-worker` (fan-out; one buffered preview write), `unread-worker` (room/subscription MongoDB writes) and `notification-worker`. `unread-worker` runs with `MaxDeliver=-1` so a MongoDB outage retries rather than drops; broadcast-worker keeps only the room-list preview write, which is buffered and never awaited, so a MongoDB failure can never make it re-broadcast a message.
 
 - [ ] **Step 2: Update docs/architecture.md**
 
