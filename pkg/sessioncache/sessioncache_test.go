@@ -295,9 +295,9 @@ func TestBust_DropsTheEntry(t *testing.T) {
 
 	Bust(ctx, vk, hash)
 	assert.NotContains(t, vk.data, Key(hash))
-	// Both generations: a rolling deploy can still have a binary writing the
-	// pre-Box key, and a revocation has to reach that entry too.
-	assert.Equal(t, []string{Key(hash), legacyKey(hash)}, vk.dels)
+	// One key, not two: this package is new, so no deployed binary has ever
+	// written an earlier generation for a bust to chase.
+	assert.Equal(t, []string{Key(hash)}, vk.dels)
 }
 
 func TestBust_NilClientIsNoOp(t *testing.T) {

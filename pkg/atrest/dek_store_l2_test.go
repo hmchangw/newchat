@@ -181,7 +181,6 @@ func seedRow(roomID string) RoomDataKey {
 
 func TestDEKKey(t *testing.T) {
 	assert.Equal(t, "dek:{room1}:v2", DEKKey("room1"))
-	assert.Equal(t, "dek:{room1}", legacyDEKKey("room1"))
 	// The version trails the key so the hash tag keeps the room's cluster slot.
 	assert.Contains(t, DEKKey("room1"), "{room1}")
 }

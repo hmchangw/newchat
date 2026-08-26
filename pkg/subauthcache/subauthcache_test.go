@@ -142,9 +142,8 @@ func newTestTier(c valkeyutil.Client, ttl time.Duration, rec Recorder, loader Lo
 
 func TestSubKey(t *testing.T) {
 	assert.Equal(t, "sub:{room1}:alice:v2", SubKey("room1", "alice"))
-	assert.Equal(t, "sub:{room1}:alice", legacySubKey("room1", "alice"))
 	// The version trails the key so every subscriber of one room still shares a
-	// cluster slot, which BustSubs' multi-key DEL depends on.
+	// cluster slot.
 	assert.Contains(t, SubKey("room1", "alice"), "{room1}")
 }
 

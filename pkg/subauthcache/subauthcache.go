@@ -57,21 +57,14 @@ func SubKey(roomID, account string) string {
 }
 
 // cacheKeySchemaVersion namespaces keys by stored shape, as roomsubcache and
-// roommetacache do. v2 is the shared valkeyutil.Box envelope; a v1 binary would
-// decode it into a bare SubAuth with every field zero and no JSON error, so the
-// version is what makes those entries miss instead.
+// roommetacache do, so a future change to the stored value misses these entries
+// rather than decoding them into an all-zero SubAuth with no JSON error. No
+// earlier generation exists to clear: this package is new, and the shapes
+// numbered below it never ran outside this branch.
 //
 // The version trails the key so the {roomID} hash tag still groups a room's
-// subscribers into one cluster slot, which BustSubs depends on.
+// subscribers into one cluster slot.
 const cacheKeySchemaVersion = "v2"
-
-// legacySubKey is the pre-Box generation, which carried no version segment.
-// Only invalidation touches it: while such a binary can still be live, a bust
-// must clear both or it keeps serving a subscription that just changed. Drop it
-// once none can be running.
-func legacySubKey(roomID, account string) string {
-	return "sub:{" + roomID + "}:" + account
-}
 
 // FetchFromMongo reads the subscription projection both services need. Returns
 // (zero, false, nil) when the user is not subscribed (Mongo ErrNoDocuments).
@@ -122,9 +115,9 @@ func BustSubs(ctx context.Context, client valkeyutil.Client, roomID string, acco
 	if client == nil || len(accounts) == 0 {
 		return
 	}
-	keys := make([]string, 0, len(accounts)*2)
+	keys := make([]string, 0, len(accounts))
 	for _, account := range accounts {
-		keys = append(keys, SubKey(roomID, account), legacySubKey(roomID, account))
+		keys = append(keys, SubKey(roomID, account))
 	}
 	valkeyutil.BustKeys(ctx, client, "subauth", keys...)
 }

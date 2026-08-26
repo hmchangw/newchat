@@ -49,12 +49,11 @@ type Loader func(ctx context.Context, hash string) (*session.Session, error)
 // learns no credential they could authenticate with.
 func Key(hash string) string { return "session:" + hash + ":" + cacheKeySchemaVersion }
 
-// cacheKeySchemaVersion namespaces keys by stored shape. v2 is the shared
-// valkeyutil.Box envelope; legacyKey is the generation before it, cleared
-// alongside so a bust reaches a v1 binary's entry too.
+// cacheKeySchemaVersion namespaces keys by stored shape, so a future change to
+// the stored value misses these entries instead of decoding them as the wrong
+// shape. No earlier generation exists to clear: this package is new, and the
+// shapes numbered below it never ran outside this branch.
 const cacheKeySchemaVersion = "v2"
-
-func legacyKey(hash string) string { return "session:" + hash }
 
 // usableSession rejects an entry with no session ID: it would authenticate
 // nobody in particular for a full TTL.
@@ -111,7 +110,7 @@ func Bust(ctx context.Context, client valkeyutil.Client, hash string) {
 	if hash == "" {
 		return
 	}
-	valkeyutil.BustKeys(ctx, client, "session", Key(hash), legacyKey(hash))
+	valkeyutil.BustKeys(ctx, client, "session", Key(hash))
 }
 
 // BustMany invalidates every supplied session hash. Empty hashes are skipped,
@@ -126,7 +125,7 @@ func BustMany(ctx context.Context, client valkeyutil.Client, hashes []string) {
 	keys := make([]string, 0, len(hashes)*2)
 	for _, h := range hashes {
 		if h != "" {
-			keys = append(keys, Key(h), legacyKey(h))
+			keys = append(keys, Key(h))
 		}
 	}
 	if len(keys) == 0 {

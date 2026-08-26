@@ -21,13 +21,12 @@ func DEKKey(roomID string) string {
 	return "dek:{" + roomID + "}:" + cacheKeySchemaVersion
 }
 
-// cacheKeySchemaVersion namespaces keys by stored shape. v2 is the shared
-// valkeyutil.Box envelope; legacyDEKKey is the generation before it, cleared
-// alongside so a bust reaches a v1 binary's entry too. The version trails the
-// key so the {roomID} hash tag keeps its cluster slot.
+// cacheKeySchemaVersion namespaces keys by stored shape, so a future change to
+// the stored value misses these entries instead of decoding them as the wrong
+// shape. No earlier generation exists to clear: this cache is new, and the
+// shapes numbered below it never ran outside this branch. The version trails
+// the key so the {roomID} hash tag keeps its cluster slot.
 const cacheKeySchemaVersion = "v2"
-
-func legacyDEKKey(roomID string) string { return "dek:{" + roomID + "}" }
 
 // usableDEK rejects an entry with no wrapped key: serving it would fail Unwrap
 // for the entry's whole TTL.
@@ -164,7 +163,7 @@ func (s *l2DEKStore) invalidate(ctx context.Context, roomID string) {
 	if !s.l2Enabled() {
 		return
 	}
-	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID), legacyDEKKey(roomID))
+	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID))
 }
 
 // DefaultL2Recorder is the shared metrics recorder for the DEK L2 tier, so
