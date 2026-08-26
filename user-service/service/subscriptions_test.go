@@ -1425,3 +1425,81 @@ func TestListSubscriptions_LastMessage_AllRoomless_SkipsRPC(t *testing.T) {
 	require.Len(t, resp.Subscriptions, 1)
 	assert.Nil(t, resp.Subscriptions[0].Base().Room)
 }
+
+// A system event bumps lastMsgAt but not lastUserMsgAt; a member who has read
+// the room must not be counted, while a newly added member (no lastSeenAt) is.
+func TestCountUnread_SystemBumpDoesNotCount(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userAt := time.UnixMilli(100).UTC() // read
+	sysAt := time.UnixMilli(300).UTC()  // newer system bump
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastUserMsgAt: &userAt, LastMsgAt: &sysAt},
+		}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count, "system bump past the read position must not count")
+}
+
+func TestCountUnread_NewlyAddedMemberCounts(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	frozen := time.UnixMilli(100).UTC() // freeze pinned the pre-system position
+	sysAt := time.UnixMilli(300).UTC()
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastUserMsgAt: &frozen, LastMsgAt: &sysAt}, // no LastSeenAt
+		}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count, "a never-read subscription counts whenever the room has any user-activity reference")
+}
+
+// Cross-site rooms follow the same rule via RoomInfo.lastUserMsgAt, falling
+// back to lastMsgAt for peers that predate the field.
+func TestCountUnread_CrossSiteSystemBumpDoesNotCount(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userMs, sysMs := int64(100), int64(300)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen},
+		{RoomID: "rb2", SiteID: "site-b", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"rb1", "rb2"})).
+		Return([]model.RoomInfo{
+			{RoomID: "rb1", Found: true, LastUserMsgAt: &userMs, LastMsgAt: &sysMs}, // read; system bump ignored
+			{RoomID: "rb2", Found: true, LastMsgAt: &sysMs},                         // legacy peer: lastMsgAt rules
+		}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count, "rb1 read (user activity older than seen); rb2 unread via legacy fallback")
+}
+
+// List path counterpart: a LOCAL sub's hasUnread must compare lastSeenAt against
+// lastUserMsgAt (the system bump on lastMsgAt is ignored), and the wire room
+// object must carry lastUserMsgAt through to the client.
+func TestListSubscriptions_LocalUnread_PrefersLastUserMsgAt(t *testing.T) {
+	svc, subs, _, _, _, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userAt := time.UnixMilli(100).UTC()
+	sysAt := time.UnixMilli(300).UTC()
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel, LastSeenAt: &seen},
+		RoomName:     "General", LastUserMsgAt: &userAt, LastMsgAt: &sysAt,
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	resp, err := svc.ListSubscriptionsFor(context.Background(), "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	base := resp.Subscriptions[0].Base()
+	assert.False(t, base.HasUnread, "system bump past the read position must not count as unread")
+	require.NotNil(t, base.Room)
+	require.NotNil(t, base.Room.LastUserMsgAt)
+	assert.Equal(t, userAt, *base.Room.LastUserMsgAt)
+}

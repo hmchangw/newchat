@@ -82,4 +82,7 @@ type ActiveSubscription struct {
 	ThreadUnread []string   `json:"threadUnread,omitempty" bson:"threadUnread,omitempty"`
 	// Joined from the room; nil for a cross-site sub or a room with no messages.
 	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
+	// Joined from the room like LastMsgAt; the unread reference is
+	// LastUserMsgAt ?? LastMsgAt.
+	LastUserMsgAt *time.Time `json:"lastUserMsgAt,omitempty" bson:"lastUserMsgAt,omitempty"`
 }
