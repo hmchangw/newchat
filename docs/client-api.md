@@ -5151,9 +5151,14 @@ favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
 [`subscription.list`](#subscriptionlist): `room.lastUserMsgAt` descending, falling back to
 `room.lastMsgAt` for rooms that predate it. Sorting on `lastMsgAt` alone would let a system
 message — a rename, a member change — resurface a dormant room above one with newer real
-conversation. A room with neither timestamp needs no third client-side rung: the server
-already orders it by its `createdAt`, and an `added` payload carries that value in
-`lastUserMsgAt`.)
+conversation. A room carrying **neither** timestamp cannot be placed client-side at all —
+the room object exposes no `createdAt` — so preserve the server's relative position for it
+rather than folding it to the end of the list: `subscription.list` already ordered it by
+`createdAt`, and a naive `?? 0` comparator would sink a freshly created room to the bottom
+of a section the server had put it at the top of. In practice most rooms do carry a value:
+an `added` payload stamps `lastUserMsgAt`, and a room's own `room_created` system message
+freezes the field to `createdAt`. The gap is a room that predates the field and has seen no
+message since.)
 
 ##### Client read model
 
@@ -5165,7 +5170,9 @@ already orders it by its `createdAt`, and an `added` payload carries that value 
    favorite/bot). A `sectionId` pointing at a section not in the definitions renders in
    **chats** (orphan tolerance — a deleted section leaves its members orphaned, no cascade).
 4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last user
-   activity (`lastUserMsgAt ?? lastMsgAt`, descending — see **sortMode** above).
+   activity (`lastUserMsgAt ?? lastMsgAt`, descending — see **sortMode** above). Sort
+   **stably**, and treat two rooms that both lack an activity timestamp as equal, so the
+   server's `createdAt` ordering survives the client-side grouping.
 5. Live updates: `subscription.update` (a chat's membership/order changed) and
    `chatlist.update` (a section def changed) each replace their own scope, guarded by
    their timestamp (last-write-wins, no deltas).
