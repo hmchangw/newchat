@@ -25,6 +25,8 @@ services:
       - CACHE_MAX_ENTRIES=4
       - CACHE_TTL=24h
       - CACHE_MAX_OBJECT_BYTES=536870912
+      # Dev-only credential. Must match admin-service's CLIENT_UPDATE_TOKEN.
+      - UPLOAD_TOKENS=${CLIENT_UPDATE_TOKENS:-admin-service:local-dev-token-0123456789}
     networks:
       - chat-local
 

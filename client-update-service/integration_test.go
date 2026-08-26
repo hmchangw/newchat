@@ -82,7 +82,7 @@ func TestIntegration_DownloadServesFromCacheOnSecondHit(t *testing.T) {
 	cs := &countingStore{versionStore: base}
 	h := NewHandler(cs, newBlobCache(4, time.Hour, 1024))
 	r := gin.New()
-	registerRoutes(r, h)
+	registerRoutes(r, h, testTokens())
 
 	for i := 0; i < 2; i++ {
 		w := httptest.NewRecorder()

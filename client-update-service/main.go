@@ -31,6 +31,10 @@ func run() error {
 		return fmt.Errorf("parse config: %w", err)
 	}
 
+	if err := validateUploadTokens(cfg.UploadTokens); err != nil {
+		return fmt.Errorf("validate upload tokens: %w", err)
+	}
+
 	ctx := context.Background()
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -60,7 +64,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, handler)
+	registerRoutes(r, handler, cfg.UploadTokens)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
