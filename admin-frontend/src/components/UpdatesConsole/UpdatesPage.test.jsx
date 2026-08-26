@@ -71,6 +71,42 @@ describe('UpdatesPage', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/\.yaml or \.yml/i))
   })
 
+  it('shows the reason-keyed friendly copy, not the raw message, for a known reason', async () => {
+    uploadClientVersion.mockRejectedValue(
+      new AsyncJobError('permission denied: role revoked', {
+        code: 'forbidden',
+        reason: 'not_admin',
+      }),
+    )
+    render(<UpdatesPage />)
+
+    selectFile(screen.getByLabelText(/config file/i), yaml())
+    selectFile(screen.getByLabelText(/executable/i), exe())
+    fireEvent.click(screen.getByRole('button', { name: /upload/i }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('You need admin access to do that.'),
+    )
+    expect(screen.getByRole('alert')).not.toHaveTextContent('permission denied: role revoked')
+  })
+
+  it('sends files through without client-side validation', async () => {
+    // client-update-service is the sole authority on artifact validity — this form
+    // must never second-guess file names/extensions itself.
+    uploadClientVersion.mockResolvedValue(undefined)
+    render(<UpdatesPage />)
+
+    const mismatchedConfig = new File(['not yaml'], 'notes.txt', { type: 'text/plain' })
+    selectFile(screen.getByLabelText(/config file/i), mismatchedConfig)
+    selectFile(screen.getByLabelText(/executable/i), exe())
+    fireEvent.click(screen.getByRole('button', { name: /upload/i }))
+
+    await waitFor(() => expect(uploadClientVersion).toHaveBeenCalledTimes(1))
+    const [, cfg, bin] = uploadClientVersion.mock.calls[0]
+    expect(cfg.name).toBe('notes.txt')
+    expect(bin.name).toBe('app.exe')
+  })
+
   it('disables the button while an upload is in flight', async () => {
     let release
     uploadClientVersion.mockImplementation(() => new Promise((r) => { release = r }))
