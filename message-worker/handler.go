@@ -199,13 +199,21 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		// unwell. Tagging it would let one routine race flip a site-wide marker that
 		// makes every room report incompleteSince and suppresses every thread badge
 		// until the drain grace elapses. It retries either way; only the marker differs.
+		//
+		// The miss is still typed, because retrying it is bounded rather than endless:
+		// settleOrphanedParent retries freely while the site is degraded and gives up
+		// once a healthy site has failed to produce the parent for a whole window.
 		if evt.Message.ThreadParentMessageCreatedAt == nil {
 			createdAt, found, err := h.store.GetMessageCreatedAt(ctx, evt.Message.ThreadParentMessageID)
 			if err != nil {
 				return fmt.Errorf("resolve thread parent createdAt: %w", historyWriteError{err})
 			}
 			if !found {
-				return fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)
+				// Typed, not spelled: settle bounds this one (see settleOrphanedParent).
+				// Under MaxDeliver=-1 an untyped miss NAKs for the life of the pod, and a
+				// parent that is never coming holds an ack-pending slot it never releases.
+				return fmt.Errorf("resolve thread parent createdAt: %w",
+					orphanedParentError{parentID: evt.Message.ThreadParentMessageID})
 			}
 			evt.Message.ThreadParentMessageCreatedAt = &createdAt
 		}

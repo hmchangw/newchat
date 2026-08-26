@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -19,6 +20,9 @@ import (
 //
 //   - success              → Ack (and let the tracker consider clearing the marker)
 //   - permanent (decode)   → Ack-drop, unchanged and still first among error cases
+//   - orphaned parent      → NAK while the site is degraded (the parent is still
+//     replaying), otherwise NAK until the retry window elapses and then drop; see
+//     settleOrphanedParent
 //   - non-history failure  → NAK indefinitely; a Mongo/user-lookup/mention failure
 //     leaves the marker untouched, so dropping one would open a hole while
 //     history-service keeps telling clients their history is complete
@@ -44,6 +48,10 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	}
 	if _, isPermanent := errcode.IsPermanent(err); isPermanent {
 		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		return
+	}
+	if parentID, orphaned := orphanedParent(err); orphaned {
+		h.settleOrphanedParent(ctx, msg, err, parentID)
 		return
 	}
 	if !isHistoryWriteError(err) {
@@ -114,7 +122,7 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	id, roomID := droppedIdentity(msg.Data())
 	slog.ErrorContext(ctx, "dropping message: Cassandra rejects it as a request error and the retry window has elapsed",
 		"message_id", id, "room_id", roomID, "site", h.siteID,
-		"cql_code", code, "retried_for", retried.String(),
+		"drop_code", code, "retried_for", retried.String(),
 		"retry_window", h.drop.RetryWindow.String(),
 		"request_id", natsutil.RequestIDFromContext(ctx))
 	if ackErr := msg.Ack(); ackErr != nil {
@@ -126,12 +134,96 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	h.histMetrics.onDropped(code)
 }
 
+// orphanedParentError marks a thread reply whose parent is absent from
+// messages_by_id. It is deliberately a type rather than an error string: settle has
+// to tell it apart from every other plain failure, and with MaxDeliver=-1 the cost
+// of not telling them apart is unbounded (see settleOrphanedParent).
+//
+// Not a historyWriteError: a clean miss is an ordering race between concurrent
+// workers, not evidence that Cassandra is unwell, so it must never flip the
+// site-wide marker. Only the *read error* on that lookup carries that signal.
+type orphanedParentError struct{ parentID string }
+
+func (e orphanedParentError) Error() string {
+	return "thread parent " + e.parentID + " not yet persisted in messages_by_id"
+}
+
+// orphanedParent reports whether err is a missing-thread-parent failure, and names
+// the parent so a drop can be logged against it.
+func orphanedParent(err error) (string, bool) {
+	var o orphanedParentError
+	if errors.As(err, &o) {
+		return o.parentID, true
+	}
+	return "", false
+}
+
+// settleOrphanedParent bounds the one non-Cassandra failure that can be permanent.
+//
+// Every other plain error on this path is a dependency being unavailable — Mongo,
+// the user lookup, a downstream publish — and those resolve for every message at
+// once when the dependency comes back, so retrying them forever is right. A parent
+// that is absent from messages_by_id does not resolve that way: the reply overtook
+// it (transient, resolves in seconds) or the parent is never coming (permanent, and
+// this service manufactures that case itself — dropping a parent above orphans every
+// reply to it). Under MaxDeliver=-1 the permanent case NAKs for the life of the pod,
+// holding one of MaxAckPending slots that is never released; enough of them and the
+// consumer stops delivering anything at all, which is a total history outage rather
+// than the bounded per-message loss this PR set out to remove.
+//
+// The two cases are separated by site health rather than by inspecting the parent:
+//
+//   - Degraded: the parent is very likely still in the replay backlog, so retry
+//     regardless of how long this has gone on. A drain must never be read as a
+//     permanently missing parent.
+//   - Healthy: history has caught up, so a parent still absent after the full retry
+//     window is absent for good. Drop it — through the same kill switch, the same
+//     per-pod rate cap and the same counter as the CQL path, because those brakes
+//     bound destruction, not a particular cause of it.
+func (h *Handler) settleOrphanedParent(ctx context.Context, msg jetstream.Msg, err error, parentID string) {
+	if h.degrade.Degraded() {
+		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		return
+	}
+	retried, measurable := retriedFor(msg)
+	if !measurable || retried < h.drop.RetryWindow {
+		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
+		return
+	}
+
+	switch {
+	case !h.drop.Enabled:
+		h.suppressDrop(ctx, msg, err, dropCodeOrphanedParent, retried, dropSuppressedDisabled)
+		return
+	case !h.drop.limiter.Allow():
+		h.suppressDrop(ctx, msg, err, dropCodeOrphanedParent, retried, dropSuppressedRateLimited)
+		return
+	}
+
+	// Same ordering as the CQL drop: log before the Ack, so a message that survives a
+	// failed Ack leaves a reconcilable false alarm rather than a silent destruction.
+	// parent_id is safe to log (an application-generated ID); the reply's own content
+	// is not, and is not logged.
+	id, roomID := droppedIdentity(msg.Data())
+	slog.ErrorContext(ctx, "dropping thread reply: its parent is absent from history and the retry window has elapsed",
+		"message_id", id, "room_id", roomID, "site", h.siteID,
+		"parent_id", parentID, "drop_code", dropCodeOrphanedParent,
+		"retried_for", retried.String(), "retry_window", h.drop.RetryWindow.String(),
+		"request_id", natsutil.RequestIDFromContext(ctx))
+	if ackErr := msg.Ack(); ackErr != nil {
+		slog.ErrorContext(ctx, "failed to ack dropped thread reply — it will be redelivered", "error", ackErr,
+			"message_id", id, "request_id", natsutil.RequestIDFromContext(ctx))
+		return
+	}
+	h.histMetrics.onDropped(dropCodeOrphanedParent)
+}
+
 // suppressDrop withholds a drop one of the guards refused and retries the message
 // instead.
 //
 // The raw error is deliberately NOT logged, matching the drop-ERROR log above: a CQL
 // "Invalid" message echoes the offending value (`Invalid string constant (…) for "col"`),
-// so the error text is untrusted message content. cql_code carries the whole diagnostic
+// so the error text is untrusted message content. drop_code carries the whole diagnostic
 // without it. This matters more here than anywhere else on the path — suppression runs
 // on every re-evaluation of the message, and a schema-drift wave re-evaluates
 // constantly, so an error field would pour that text into the log at volume. Truncating
@@ -140,7 +232,7 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 func (h *Handler) suppressDrop(ctx context.Context, msg jetstream.Msg, err error, code string, retried time.Duration, reason string) {
 	h.histMetrics.onDropSuppressed(reason)
 	slog.WarnContext(ctx, "history drop suppressed — retrying instead",
-		"reason", reason, "cql_code", code, "retried_for", retried.String(),
+		"reason", reason, "drop_code", code, "retried_for", retried.String(),
 		"request_id", natsutil.RequestIDFromContext(ctx))
 	jsretry.SettleQuiet(ctx, msg, jsretry.DefaultBackoff, err)
 }

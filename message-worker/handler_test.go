@@ -2760,6 +2760,12 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		assert.False(t, isHistoryWriteError(err),
 			"a parent that has not landed yet is an ordering race between concurrent workers, not a "+
 				"Cassandra failure: it must NAK for redelivery without flipping the site-wide marker")
+
+		parentID, orphaned := orphanedParent(err)
+		assert.True(t, orphaned,
+			"settle needs the miss typed, not spelled: with MaxDeliver=-1 an untyped miss NAKs for the "+
+				"life of the pod, holding an ack-pending slot a permanently absent parent never releases")
+		assert.Equal(t, "msg-parent", parentID, "the drop log must be able to name the parent it gave up on")
 	})
 
 	t.Run("publish error propagates for JetStream retry", func(t *testing.T) {

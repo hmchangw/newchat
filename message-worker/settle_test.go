@@ -372,7 +372,7 @@ func TestHandler_Settle_DropLogNamesTheMessageWithoutLeakingIt(t *testing.T) {
 	assert.Equal(t, "m-poison", fields["message_id"])
 	assert.Equal(t, "r-42", fields["room_id"])
 	assert.Equal(t, "site-a", fields["site"])
-	assert.Equal(t, "invalid", fields["cql_code"])
+	assert.Equal(t, "invalid", fields["drop_code"])
 	assert.Equal(t, "5h52m36s", fields["retried_for"], "40 deliveries: 36s + 2m + 35 × 10m of accumulated backoff")
 	assert.Equal(t, "10s", fields["retry_window"])
 
@@ -456,11 +456,11 @@ func TestHandler_Settle_SuppressedDropsNameTheirReason(t *testing.T) {
 			fields := rec.fieldsOf(slog.LevelWarn, "history drop suppressed — retrying instead")
 			require.NotNil(t, fields, "a suppressed drop must be visible in the log")
 			assert.Equal(t, tt.wantReason, fields["reason"])
-			assert.Equal(t, "invalid", fields["cql_code"])
+			assert.Equal(t, "invalid", fields["drop_code"])
 
 			// The suppression paths run on every re-evaluation of the message, and a
 			// schema-drift wave re-evaluates constantly, so an error field here would
-			// pour untrusted CQL text into the server log at volume. cql_code above
+			// pour untrusted CQL text into the server log at volume. drop_code above
 			// carries the whole diagnostic without the content. This mirrors
 			// TestHandler_Settle_DropLogNamesTheMessageWithoutLeakingIt for the drop log.
 			assert.NotContains(t, fields, "error",
@@ -489,4 +489,94 @@ func TestHandler_Settle_FailedAckOnDropIsNotADrop(t *testing.T) {
 	fields := rec.fieldsOf(slog.LevelError, "failed to ack dropped message — it will be redelivered")
 	require.NotNil(t, fields, "an unacked drop must be visible as a non-drop")
 	assert.Equal(t, "m-1", fields["message_id"])
+}
+
+// TestHandler_Settle_OrphanedParent covers the second give-up path.
+//
+// MaxDeliver=-1 means JetStream never retires a message, so every error that can
+// be permanent needs a deadline of its own or it holds a MaxAckPending slot for
+// the life of the pod. A parent that will never land is exactly that: unlike a
+// Mongo outage it does not resolve when a dependency recovers, and this service
+// manufactures the condition itself — dropping a parent orphans every reply to it.
+func TestHandler_Settle_OrphanedParent(t *testing.T) {
+	// Same arithmetic as the CQL tests: 36s of accumulated backoff by the 4th
+	// delivery, 6s by the 3rd, so a 10s window is crossed at 4 and not at 3.
+	shortWindow := newDropPolicy(10*time.Second, true, 10, nil)
+	orphan := func() error {
+		return fmt.Errorf("resolve thread parent: %w", orphanedParentError{parentID: "p-1"})
+	}
+
+	t.Run("naks while the site is degraded, however long it has retried", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, true, shortWindow)
+		msg := &fakeJetStreamMsg{numDelivered: 5000}
+		h.settle(context.Background(), msg, orphan())
+		assert.True(t, msg.naked, "during a replay the parent is very likely still in the backlog")
+		assert.False(t, msg.acked, "a drain must never be mistaken for a permanently missing parent")
+	})
+
+	t.Run("naks inside the window", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
+		msg := &fakeJetStreamMsg{numDelivered: 3}
+		h.settle(context.Background(), msg, orphan())
+		assert.True(t, msg.naked)
+		assert.False(t, msg.acked)
+	})
+
+	t.Run("drops once the window elapses on a healthy site", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
+		msg := &fakeJetStreamMsg{numDelivered: 4}
+		h.settle(context.Background(), msg, orphan())
+		assert.True(t, msg.acked, "a parent absent from a healthy site's history is not coming back")
+		assert.False(t, msg.naked)
+	})
+
+	t.Run("the kill switch withholds the drop", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, false, newDropPolicy(10*time.Second, false, 10, nil))
+		msg := &fakeJetStreamMsg{numDelivered: 4}
+		h.settle(context.Background(), msg, orphan())
+		assert.True(t, msg.naked)
+		assert.False(t, msg.acked, "HISTORY_DROP_ENABLED=false must brake every give-up path, not just the CQL one")
+	})
+
+	t.Run("shares the drop rate cap with the CQL path", func(t *testing.T) {
+		// One budget bounds destruction per pod regardless of which give-up path
+		// asked for it — the cap exists to bound loss, not to bound a cause.
+		h := newDegradeStateHandler(t, nil, noopPublish, false, newDropPolicy(10*time.Second, true, 1, nil))
+		first := &fakeJetStreamMsg{numDelivered: 4}
+		h.settle(context.Background(), first, requestClassErr())
+		require.True(t, first.acked, "the CQL drop consumes the pod's only slot")
+
+		second := &fakeJetStreamMsg{numDelivered: 4}
+		h.settle(context.Background(), second, orphan())
+		assert.True(t, second.naked)
+		assert.False(t, second.acked, "the orphan path must not have a second budget of its own")
+	})
+
+	t.Run("an unmeasurable message is never destroyed", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
+		msg := &metadataErrMsg{fakeJetStreamMsg{numDelivered: 4}}
+		h.settle(context.Background(), msg, orphan())
+		assert.True(t, msg.naked)
+		assert.False(t, msg.acked)
+	})
+
+	t.Run("never sets the site-wide marker", func(t *testing.T) {
+		// A missing parent is a per-message data condition. Marking on it would make
+		// every room report incompleteSince because one reply outran one parent.
+		h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
+		h.settle(context.Background(), &fakeJetStreamMsg{numDelivered: 4}, orphan())
+		assert.False(t, h.degrade.Degraded())
+	})
+
+	t.Run("regression: the retry loop is bounded, so an ack-pending slot cannot leak", func(t *testing.T) {
+		// The failure this whole path exists to prevent: with MaxDeliver=-1 an
+		// unbounded NAK loop pins one of MaxAckPending slots for the life of the pod,
+		// and enough of them stop the consumer delivering anything at all.
+		for _, delivered := range []uint64{4, 100, 10_000, 1_000_000} {
+			h := newDegradeStateHandler(t, nil, noopPublish, false, shortWindow)
+			msg := &fakeJetStreamMsg{numDelivered: delivered}
+			h.settle(context.Background(), msg, orphan())
+			assert.True(t, msg.acked, "delivery %d must settle, not retry forever", delivered)
+		}
+	})
 }

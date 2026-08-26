@@ -105,6 +105,12 @@ func (m *metrics) onDropped(code string) {
 	m.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("code", code)))
 }
 
+// dropCodeOrphanedParent labels a drop the CQL classifier had no say in: the write
+// was never attempted because the reply's thread parent is absent from history. It
+// shares the "code" attribute with cassutil.CQLCode's values, which stay disjoint
+// from it, so one counter answers "what did this pod destroy, and why".
+const dropCodeOrphanedParent = "orphaned_parent"
+
 // The only two reasons a drop is withheld. Bounded by construction: an operator
 // releasing the kill switch needs to distinguish them, and nothing else may become a
 // label value.
