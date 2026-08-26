@@ -402,6 +402,25 @@ Add, with alerts:
   — a rising `class="request"` rate is a migration-induced wave, visible before the
   retry window elapses and anything is destroyed.
 - Degraded-marker state and duration.
+- Ack-pending depth (`message_worker_consumer_num_ack_pending`) — the saturation
+  signal for `MaxDeliver=-1`. Every message that cannot settle holds one of
+  `MaxAckPending` slots, and a consumer at its ceiling delivers nothing at all, so
+  this separates "retrying hard" from "wedged".
+- Failed consumer-info polls (`message_worker_consumer_info_poll_failures_total`) —
+  the sampler leaves the two lag gauges holding their previous values when a poll
+  fails, so a broken NATS connection otherwise reports a flat, healthy-looking lag.
+  Alert on this alongside the gauges, never on the gauges alone.
+
+Two shapes to get right in the alert rules themselves:
+
+- `message_worker_ack_floor_age_seconds` reads 0 whenever nothing is ack-pending.
+  `AckFloor.Last` is the timestamp of the last *acknowledged* message and keeps that
+  value once the consumer goes quiet, so an age derived from it unconditionally
+  climbs forever on an idle site — the alert meant to catch a stuck retry loop would
+  page every low-traffic site overnight instead.
+- `message_worker_history_dropped_total` is labelled `code`, whose values are the CQL
+  codes (`invalid`, `syntax`, `other`, `none`) *and* `orphaned_parent` — the drop of a
+  thread reply whose parent never landed, which the CQL classifier has no say in.
 
 **This section is what keeps the change from trading a visible failure for an invisible
 one; it is not optional polish.** It ships before the behavioral changes (§6).

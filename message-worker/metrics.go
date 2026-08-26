@@ -25,8 +25,12 @@ type metrics struct {
 	dropSuppressed       metric.Int64Counter
 
 	numPending         atomic.Uint64
+	numAckPending      atomic.Uint64
 	ackFloorAgeSeconds atomic.Int64
 	degraded           atomic.Int64
+	// infoPollFailures makes a frozen gauge distinguishable from a healthy one:
+	// a failed poll leaves numPending and ackFloorAgeSeconds at their last value.
+	infoPollFailures atomic.Int64
 }
 
 func newMetrics() (*metrics, error) {
@@ -69,14 +73,30 @@ func newMetrics() (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("degraded gauge: %w", err)
 	}
+	// The saturation signal for MaxDeliver=-1: every message that cannot settle holds
+	// one of MaxAckPending slots, and a consumer at its ceiling delivers nothing at
+	// all. Paired with the drop counters it separates "retrying hard" from "wedged".
+	ackPendingGauge, err := meter.Int64ObservableGauge("message_worker_consumer_num_ack_pending",
+		metric.WithDescription("messages delivered and not yet acked — the MaxAckPending saturation signal"))
+	if err != nil {
+		return nil, fmt.Errorf("num ack pending gauge: %w", err)
+	}
+	pollFailures, err := meter.Int64ObservableCounter("message_worker_consumer_info_poll_failures_total",
+		metric.WithDescription("failed consumer-info polls — the lag gauges hold stale values across these"))
+	if err != nil {
+		return nil, fmt.Errorf("consumer info poll failures counter: %w", err)
+	}
 
 	if _, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		// #nosec G115 -- NumPending is a queue depth, far below int64 max
 		o.ObserveInt64(pending, int64(m.numPending.Load()))
+		// #nosec G115 -- NumAckPending is bounded by MaxAckPending
+		o.ObserveInt64(ackPendingGauge, int64(m.numAckPending.Load()))
 		o.ObserveInt64(ackAge, m.ackFloorAgeSeconds.Load())
 		o.ObserveInt64(degradedGauge, m.degraded.Load())
+		o.ObserveInt64(pollFailures, m.infoPollFailures.Load())
 		return nil
-	}, pending, ackAge, degradedGauge); err != nil {
+	}, pending, ackPendingGauge, ackAge, degradedGauge, pollFailures); err != nil {
 		return nil, fmt.Errorf("register gauge callback: %w", err)
 	}
 
@@ -140,11 +160,20 @@ func (m *metrics) setDegraded(degraded bool) {
 	m.degraded.Store(v)
 }
 
-func (m *metrics) setLag(numPending uint64, ackFloorAgeSeconds float64) {
+// onInfoPollFailure records a poll that left the lag gauges holding stale values.
+func (m *metrics) onInfoPollFailure() {
+	if m == nil {
+		return
+	}
+	m.infoPollFailures.Add(1)
+}
+
+func (m *metrics) setLag(numPending, numAckPending uint64, ackFloorAgeSeconds float64) {
 	if m == nil {
 		return
 	}
 	m.numPending.Store(numPending)
+	m.numAckPending.Store(numAckPending)
 	m.ackFloorAgeSeconds.Store(int64(ackFloorAgeSeconds))
 }
 
@@ -157,15 +186,22 @@ func startLagPoller(ctx context.Context, m *metrics, info consumerInfoFunc, ever
 		ci, err := info(ctx)
 		if err != nil {
 			slog.WarnContext(ctx, "consumer info poll failed", "error", err)
+			m.onInfoPollFailure()
 			return
 		}
 		if ci == nil {
+			m.onInfoPollFailure()
 			return
 		}
+		// AckFloor.Last is the timestamp of the last *acknowledged* message and keeps
+		// that value once the consumer goes quiet, so an age derived from it alone
+		// climbs forever on an idle site. The gauge is meant to catch a redelivery set
+		// that is stuck; with nothing waiting to be acked, nothing is overdue.
 		var age float64
-		if ci.AckFloor.Last != nil {
+		if ci.NumAckPending > 0 && ci.AckFloor.Last != nil {
 			age = time.Since(*ci.AckFloor.Last).Seconds()
 		}
-		m.setLag(ci.NumPending, age)
+		// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
+		m.setLag(ci.NumPending, uint64(ci.NumAckPending), age)
 	})
 }
