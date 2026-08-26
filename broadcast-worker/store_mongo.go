@@ -89,15 +89,12 @@ func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	})
 }
 
-// roomWithoutPreview excludes the sealed preview from every GetRoom decode. The
-// callers (edit, delete, reaction, thread mutation) read ID/Type/Name/SiteID/
-// Accounts/CrossSite and none of the preview fields, but previewCiphertext holds
-// a whole sealed message body plus its attachments — the only unbounded thing on
-// the document — so an unprojected read moves and allocates it per event.
+// roomWithoutPreview keeps the sealed preview out of every GetRoom decode. No
+// caller reads it, and previewCiphertext holds a whole message body plus
+// attachments — the only unbounded field on the document.
 //
-// Exclusion rather than an allow-list: the callers between them touch most of the
-// document, and an allow-list that silently omits a field a future caller adds
-// fails as a nil rather than a compile error.
+// Excluding rather than listing what to keep: callers touch most of the
+// document, and a missing field would surface as a nil, not a build error.
 var roomWithoutPreview = options.FindOne().SetProjection(bson.M{
 	"previewMeta": 0, "previewCiphertext": 0, "previewNonce": 0,
 })

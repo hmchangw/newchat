@@ -49,34 +49,26 @@ type Loader func(ctx context.Context, hash string) (*session.Session, error)
 // learns no credential they could authenticate with.
 func Key(hash string) string { return "session:" + hash }
 
-// cachedSession is the stored envelope. The embedded Stamp records when MongoDB
-// last confirmed the session, which is what separates an entry that can be
-// served directly from one due for re-validation. The field is declared rather than
-// embedded so composite literals keep working; see valkeyutil.Entry.
+// cachedSession is the stored envelope. CachedAt is when MongoDB last confirmed
+// the session, which decides whether it can be served or needs a re-check.
 type cachedSession struct {
 	Session  session.Session `json:"session"`
 	CachedAt int64           `json:"cachedAt"`
 }
 
 // Stamped reports when MongoDB last confirmed the session.
-func (c cachedSession) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: interface-required value receiver, see Usable
+func (c cachedSession) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: value receiver required by valkeyutil.Entry
 
-// Usable rejects an entry with no session ID or no confirmation stamp: serving
-// one would authenticate an identity-less principal for the rest of its TTL, and
-// an unstamped entry (written before the envelope existed) would read as
-// permanently stale.//
-// The value receiver is required, and so is the gocritic exemption below it:
-// valkeyutil.Entry is satisfied by the type the tier stores, and a value type's
-// method set excludes pointer-receiver methods. The copy is two per cache read,
-// against a Valkey round trip.
-func (c cachedSession) Usable() bool { return c.Session.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: see the note above
+// Usable rejects an entry with no session ID (it would authenticate nobody for a
+// full TTL) or no stamp (written before the envelope existed, so it would read
+// as permanently stale).
+func (c cachedSession) Usable() bool { return c.Session.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: value receiver required by valkeyutil.Entry
 
 // Cache is a read-through Valkey tier over a session Loader.
 type Cache struct {
 	load Loader
 	tier valkeyutil.Tier[string, cachedSession]
-	// client is retained only so Bust has something to hand BustKeys; the tier
-	// owns every other use of it.
+	// client is kept only for Bust; the tier owns every other use.
 	client valkeyutil.Client
 }
 
@@ -101,10 +93,8 @@ func newWithClock(load Loader, client valkeyutil.Client, ttl time.Duration, now 
 	return c
 }
 
-// loadEntry adapts the session Loader to the tier's three-way contract.
-// ErrNotFound is a decision — the session is genuinely gone — and must reach the
-// tier as a confirmed absence rather than an error, or an outage and a
-// revocation would be indistinguishable and the tier would evict on both.
+// loadEntry adapts Loader to the tier's three results. ErrNotFound must arrive
+// as "missing", not as an error, or a revocation and an outage look the same.
 func (c *Cache) loadEntry(ctx context.Context, hash string) (cachedSession, bool, error) {
 	s, err := c.load(ctx, hash)
 	switch {
@@ -149,14 +139,9 @@ func BustMany(ctx context.Context, client valkeyutil.Client, hashes []string) {
 	valkeyutil.BustKeys(ctx, client, "session", keys...)
 }
 
-// FindByHash resolves a session for an already-hashed token.
-//
-// It returns session.ErrNotFound only when the source of truth said so — an
-// outage surfaces as a different error, so a caller cannot read "MongoDB is
-// down" as "this token is invalid".
-// The refresh-and-survive policy behind this — serve a fresh entry, re-validate
-// a stale one, slide on failure, evict on a confirmed revocation — is
-// valkeyutil.Tier's, shared with every other L2 tier in the repo.
+// FindByHash resolves a session for an already-hashed token. It returns
+// session.ErrNotFound only when MongoDB said so, so a caller cannot mistake an
+// outage for an invalid token. Caching policy is valkeyutil.Tier's.
 func (c *Cache) FindByHash(ctx context.Context, hash string) (*session.Session, error) {
 	entry, found, err := c.tier.Resolve(ctx, hash)
 	if err != nil {

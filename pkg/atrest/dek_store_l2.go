@@ -68,17 +68,9 @@ func (c cachedDEK) Usable() bool { return len(c.Row.WrappedDEK) > 0 }
 type l2DEKStore struct {
 	inner  DEKStore
 	client valkeyutil.Client
-	// ttl is retained only so l2Enabled and invalidate can answer without
-	// reaching into the tier; the tier owns every other use of it.
-	//
-	// It also fixes the refresh window, via valkeyutil.RefreshAfter. That window
-	// MUST exceed the cipher's in-process DEK cache TTL (ATREST_DEK_CACHE_TTL),
-	// because that L1 sits in front and does not slide: this tier is consulted at
-	// most once per room per L1 TTL per pod. Were the window the shorter of the
-	// two, every L2 hit would be older than it and the refresh would degenerate
-	// into a Mongo read plus a full SET on every L1 miss — precisely the load the
-	// L2 exists to absorb. The 90m/1h defaults stay comfortably apart, and
-	// SlideOnFresh below covers the gap that remains.
+	// ttl is kept only for l2Enabled and invalidate; the tier owns the rest. It
+	// must stay above ATREST_DEK_CACHE_TTL, or every miss in that cache triggers
+	// a Mongo read here. The 90m/1h defaults leave room.
 	ttl     time.Duration
 	breaker *circuitbreaker.Breaker
 	tier    valkeyutil.Tier[string, cachedDEK]
@@ -105,27 +97,20 @@ func newL2DEKStoreWithClock(inner DEKStore, client valkeyutil.Client, ttl time.D
 		Key:    DEKKey,
 		Load:   s.loadEntry,
 		Stamp:  func(e cachedDEK, ms int64) cachedDEK { e.CachedAt = ms; return e },
-		// Both deviations from the default tier behaviour, and both load-bearing.
-		//
-		// SlideOnFresh: the DEK L1 is an hour while the refresh window opens at
-		// RefreshAfter(90m) = 67.5m, so every L1 miss lands BEFORE the window.
-		// Without a slide the entry would be served, never re-armed, and expire at
-		// 90m — with the next L1 miss at 120m finding nothing, exactly during the
-		// outage this tier exists to survive. Safe because Fresh() is computed from
-		// CachedAt, which only a real re-validation advances: this moves the
-		// eviction deadline, not the revalidation one.
+		// The in-process DEK cache lasts an hour but the reload window opens at
+		// 67.5m, so every miss there arrives before the window and the entry would
+		// expire at 90m without ever being extended. Sliding moves only the expiry.
 		SlideOnFresh: true,
-		// KeepOnAbsent: nothing deletes DEK rows, so "no such row" is lag or an
-		// anomaly. Honoring it would evict, and the cipher would then mint a second
-		// DEK — orphaning every message already encrypted under the first.
+		// Nothing deletes DEK rows, so "no such row" is lag. Acting on it would
+		// have the cipher create a second DEK, orphaning everything sealed with the
+		// first.
 		KeepOnAbsent: true,
 	}, now)
 	return s
 }
 
-// loadEntry adapts the inner store to the tier's three-way contract. A nil row
-// is "no DEK yet", which the cipher turns into lazy creation, so it must reach
-// the tier as a confirmed absence rather than an error.
+// loadEntry adapts the inner store to the tier's three results. A nil row is
+// "missing", not an error, so the cipher can create one.
 func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (cachedDEK, bool, error) {
 	row, err := s.fetchInner(ctx, roomID)
 	if err != nil {
@@ -139,12 +124,9 @@ func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (cachedDEK, b
 
 func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
 
-// Get resolves a room's wrapped DEK. A nil row (no error) means "no DEK yet" and
-// is never cached — that value is what drives lazy DEK creation in the cipher.
-//
-// The refresh-and-survive policy is valkeyutil.Tier's, shared with every other
-// L2 tier in the repo; the two ways this tier differs from the default are
-// declared as options in the constructor above.
+// Get resolves a room's wrapped DEK. A nil row means "no DEK yet" and is never
+// cached — the cipher uses it to create one. Caching policy is
+// valkeyutil.Tier's; the two options above are where this tier differs.
 func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, error) {
 	entry, found, err := s.tier.Resolve(ctx, roomID)
 	if err != nil {

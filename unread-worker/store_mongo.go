@@ -27,26 +27,18 @@ func NewMongoStore(roomCol, subCol *mongo.Collection) *mongoStore {
 	}
 }
 
-// roomLastMsgFilter matches a room only when (at, msgID) sorts newer than the
-// stored pointer, so a redelivered older message cannot regress it.
+// roomLastMsgFilter matches a room only when (at, msgID) is newer than what is
+// stored, so a redelivered older message cannot move the pointer backwards.
 //
-// This is msgbucket.NewerRow rendered in BSON, and it has to be: the in-memory
-// coalescer breaks ties with that comparator, and so does broadcast-worker's
-// preview writer, which stamps previewForMsgId. history-service serves a stored
-// preview only while previewForMsgId equals lastMsgId, so a guard that ordered
-// ties differently from those two would leave the pointer on whichever message
-// of a same-millisecond pair happened to land first while the preview named the
-// other — a permanent miss for that room until a newer message arrives. Two
-// messages at one millisecond reach this separately whenever they fall in
-// different flush batches or one is redelivered.
+// This is msgbucket.NewerRow in BSON, and has to be: the coalescer and
+// broadcast-worker's preview writer both order ties that way, and the reader
+// serves a preview only while previewForMsgId equals lastMsgId. Ordering ties
+// differently here would leave the two naming different messages, and that room
+// never serves its preview again.
 //
-// The two clauses:
-//   - strictly older (or absent): $not/$gte rather than $lt, so a room whose
-//     lastMsgAt is missing or null still matches — $lt would skip it and the
-//     pointer would never be set at all.
-//   - same instant, lower id: the case the first clause refuses. BSON dates are
-//     millisecond-precision and the driver truncates on encode, so this equality
-//     compares at exactly the granularity NewerRow does.
+// Two clauses: strictly older or absent ($not/$gte, so a missing lastMsgAt still
+// matches, which $lt would skip), and same instant with a lower id. BSON dates
+// are millisecond-precision, the same granularity NewerRow compares at.
 func roomLastMsgFilter(roomID, msgID string, at time.Time) bson.M {
 	return bson.M{
 		"_id": roomID,

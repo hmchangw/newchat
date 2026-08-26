@@ -107,11 +107,10 @@ func (r *roomActivityRefresher) throttled(roomID string, now time.Time) bool {
 	return false
 }
 
-// pruneScanBudget bounds how many watermarks one prune pass examines. Pruning
-// runs on the fan-out hot path under the same mutex every handler needs, so an
-// unbounded pass is an O(active cross-site rooms) critical section that blocks
-// every concurrent message — including messages for rooms it is not examining.
-// A fixed budget makes the lock hold constant-time instead.
+// pruneScanBudget caps how many watermarks one prune pass looks at. Pruning runs
+// under the mutex every handler needs, so an unbounded pass blocks concurrent
+// messages for as long as the room count is large. A fixed budget keeps the lock
+// hold constant. Whatever is left is picked up next interval.
 const pruneScanBudget = 256
 
 // pruneLocked drops rooms that have gone quiet for longer than the interval;

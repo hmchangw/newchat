@@ -77,22 +77,13 @@ type L2Tier struct {
 
 // NewL2Tier wires the tier over a rooms collection.
 //
-// breaker fences the Mongo fetch so a cold miss fast-fails during an outage
-// instead of stalling on Mongo's own timeout. A nil breaker fences nothing.
-// It fences ONLY the fetch, never the L2 read in front of it: an open breaker
-// must still serve cached rooms, since during the outage that opened it they are
-// the only tier that can answer.
+// breaker guards the Mongo read so a miss fails fast during an outage instead of
+// waiting out Mongo's timeout. Nil means no guard. It covers only the Mongo
+// read, never the Valkey one — an open breaker must still serve cached rooms.
+// Argument order matches subauthcache.NewTier and atrest.NewL2DEKStore.
 //
-// The breaker is a positional parameter, in this position, rather than an
-// option: subauthcache.NewTier and atrest.NewL2DEKStore both take (…, ttl,
-// breaker, rec), and roomsubcache.GuardLoader takes the breaker itself too. This package used to take a bare func(func() error) error, which
-// made every caller write WithFetchGuard(breaker.Do) and leaked the mechanism
-// into the call site. No production caller ever passed anything but a breaker's
-// Do; only the tests did, and they still can (see tierOption).
-//
-// rec records L2 hit/miss/error outcomes; callers pass a shared
-// cachemetrics.For("roommeta", "l2") so every service emits the same series.
-// A nil client (L2 disabled) records nothing — there is no L2 to hit or miss.
+// rec records hit/miss/error; pass cachemetrics.For("roommeta", "l2") so every
+// service reports the same series.
 func NewL2Tier(client valkeyutil.Client, rooms *mongo.Collection, ttl time.Duration, breaker *circuitbreaker.Breaker, rec Recorder) *L2Tier {
 	var opts []tierOption
 	if breaker != nil {

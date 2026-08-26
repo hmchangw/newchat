@@ -35,13 +35,9 @@ type SubAuth struct {
 	HistorySharedSince *int64       `json:"historySharedSince,omitempty"` // epoch millis; nil = full access
 }
 
-// cachedAuth is the L2 wire form: the decision plus the moment it was last
-// confirmed against the source of truth. CachedAt is cache bookkeeping and
-// drives refresh-on-read (see Tier.serveHit).
-//
-// An entry written by an older build (a bare SubAuth) decodes to a zero Auth
-// here, which Usable already treats as a miss, so the format change costs one
-// extra load per (room, account) rather than serving a wrong decision.
+// cachedAuth is the stored envelope: the decision plus when it was last
+// confirmed. An entry from an older build decodes to a zero Auth, which Usable
+// treats as a miss, so the format change costs one reload per (room, account).
 
 type cachedAuth struct {
 	Auth SubAuth `json:"auth"`
@@ -52,9 +48,8 @@ type cachedAuth struct {
 // Stamped reports when the source of truth last confirmed the decision.
 func (c cachedAuth) Stamped() int64 { return c.CachedAt }
 
-// Usable rejects an entry with no user ID. This entry's presence means
-// "subscribed", so serving a zero value would grant access with no identity
-// attached for the entry's whole TTL.
+// Usable rejects an entry with no user ID: its presence means "subscribed", so a
+// zero value would grant access to nobody in particular for a full TTL.
 func (c cachedAuth) Usable() bool { return c.Auth.ID != "" }
 
 // Recorder records the outcome of an L2 cache lookup. An alias of
@@ -133,9 +128,7 @@ func BustSubs(ctx context.Context, client valkeyutil.Client, roomID string, acco
 	valkeyutil.BustKeys(ctx, client, "subauth", keys...)
 }
 
-// subID is the tier's identifier: this cache is keyed on a (room, account) pair
-// rather than a single id, which is the one way it differs in shape from the
-// other L2 tiers.
+// subID is the tier's key: a (room, account) pair rather than a single id.
 type subID struct {
 	roomID  string
 	account string
@@ -148,12 +141,10 @@ type subID struct {
 // hand-assembled the same loader-wrapping-breaker rig in service code, where it
 // could drift and could not be changed from the package that owns it.
 //
-// The refresh-and-survive policy is valkeyutil.Tier's, shared with every other
-// L2 tier in the repo, so a room that keeps being read stays authorized through
-// an outage of any length and a swallowed invalidation is corrected within one
-// refresh window rather than living out the full TTL. For an authorization
-// decision that second property is the difference between revoked access dying
-// in minutes and dying in hours.
+// Caching policy is valkeyutil.Tier's: a room that keeps being read stays
+// authorized through an outage, and a missed invalidation is corrected within
+// one reload window instead of a full TTL — for access control, minutes not
+// hours.
 type Tier struct {
 	// ttl also fixes the refresh window, via valkeyutil.RefreshAfter. That
 	// window must exceed the process-local L1 TTL in front of this tier (two
@@ -203,9 +194,8 @@ func newTierWithClock(client valkeyutil.Client, ttl time.Duration, rec Recorder,
 	return t
 }
 
-// loadEntry adapts the Loader to the tier's three-way contract. A confirmed
-// non-subscriber is an absence, not an error — collapsing the two would make an
-// outage indistinguishable from a revocation, and the tier would evict on both.
+// loadEntry adapts Loader to the tier's three results. A confirmed
+// non-subscriber is "missing", not an error, or an outage looks like a removal.
 func (t *Tier) loadEntry(ctx context.Context, id subID) (cachedAuth, bool, error) {
 	auth, subscribed, err := t.loader(ctx, id.roomID, id.account)
 	if err != nil {
@@ -214,15 +204,10 @@ func (t *Tier) loadEntry(ctx context.Context, id subID) (cachedAuth, bool, error
 	return cachedAuth{Auth: auth}, subscribed, nil
 }
 
-// Resolve returns the caller's subscription authorization for a room:
-// (auth, true, nil) when subscribed, (zero, false, nil) for a confirmed
-// non-subscriber, and an error only when the source of truth could not answer.
-// Fail-open: a nil client or any Valkey error degrades to the loader, and only
-// the loader's result governs the returned error.
-//
-// Positive-only, inherited from valkeyutil.Tier: a confirmed non-subscriber is
-// never written, so the cache can only ever grant access the source of truth
-// already granted.
+// Resolve returns the caller's authorization for a room: (auth, true, nil) when
+// subscribed, (zero, false, nil) when confirmed not, and an error only when the
+// source could not answer. A non-subscriber is never cached, so the cache can
+// only grant access MongoDB already granted.
 func (t *Tier) Resolve(ctx context.Context, roomID, account string) (SubAuth, bool, error) {
 	entry, subscribed, err := t.inner.Resolve(ctx, subID{roomID: roomID, account: account})
 	if err != nil {

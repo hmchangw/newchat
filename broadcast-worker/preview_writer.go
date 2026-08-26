@@ -11,13 +11,12 @@ import (
 	"github.com/hmchangw/chat/pkg/preview"
 )
 
-// roomPreview is one room-doc preview update derived from an inserted message.
+// roomPreview is one preview update from an inserted message.
 //
-// Every main-timeline insert produces one, eligible or not: an ineligible
-// message (a join notice, a rename) leaves the stored body alone but still
-// advances the room's newest message, and the freshness key has to follow it or
-// the still-correct body reads as stale. MsgID is therefore the room's newest
-// message, not the preview's.
+// Every insert makes one. An ineligible message (a join notice, a rename) leaves
+// the stored body alone but still advances the room's newest message, and the
+// key has to follow or a correct body reads as stale. So MsgID is the room's
+// newest message, not the preview's.
 type roomPreview struct {
 	RoomID string
 	MsgID  string
@@ -58,45 +57,36 @@ type bulkRoomPreviewWriter interface {
 	BulkUpdateRoomPreview(ctx context.Context, updates map[string]roomPreviewUpdate) error
 }
 
-// previewWriter buffers the latest preview state per room and drains it through a single
-// Mongo BulkWrite on a ticker. Memory is bounded by the count of distinct active rooms
-// within a flush interval — coalescing collapses any number of messages for the same room
-// into one map entry — not by message rate.
+// previewWriter buffers the newest preview per room and drains them in one Mongo
+// BulkWrite on a ticker. Memory scales with distinct active rooms per interval,
+// not with message rate, since messages for one room collapse into one entry.
 //
-// # Why this is the only MongoDB write left in broadcast-worker
+// # Why this is broadcast-worker's only MongoDB write
 //
-// The room's own pointer (lastMsgAt / lastMsgId / lastMentionAllAt), the sender's
-// lastSeenAt and the mention badges all moved to unread-worker, which holds their
-// messages un-acked until MongoDB takes them and so cannot lose a write to an outage.
-// The preview did not move with them, because sealing one needs the resolved users, the
-// mention participants and the decoded attachments that this service assembles for the
-// fan-out anyway, and that unread-worker deliberately holds none of (its event projection
-// decodes nine fields and reads no MongoDB at all). Rebuilding that enrichment there
-// would cost a user-store read per message on the service whose whole contract is that it
-// performs none.
+// The room pointer, the sender's lastSeenAt and the mention badges all moved to
+// unread-worker, which holds messages un-acked until MongoDB takes them. The
+// preview stayed because sealing one needs the users, mention participants and
+// attachments this service already resolved for the fan-out, and that
+// unread-worker deliberately does not read.
 //
-// Splitting them is safe because the preview fields carry their own watermark
-// (previewAsOf) and are guarded against it, not against lastMsgAt: the two halves of the
-// document order themselves independently and neither can overwrite the other's newer
-// state. What the split gives up is atomicity between the freshness key and lastMsgId,
-// and the cost of that is bounded and self-repairing:
+// Splitting is safe because the preview fields have their own watermark
+// (previewAsOf) and are guarded against it, not against lastMsgAt, so neither
+// half of the document can overwrite the other. What it gives up is atomicity
+// between the preview key and lastMsgId:
 //
-//   - An ELIGIBLE insert writes body and key together under GuardedSetFields, whose only
-//     condition is the watermark. Ordinary messages — nearly all traffic — are unaffected.
-//   - An INELIGIBLE insert takes GuardedAdvanceKeyFields, which lands only while the
-//     stored key still equals the stored lastMsgId. If unread-worker's flush moved
-//     lastMsgId first, that equality fails and the advance is skipped; the room then reads
-//     as a miss and history-service's lazy walk resolves and warms it back. One walk,
-//     repaired permanently, on system messages only.
+//   - An eligible insert writes body and key together, guarded only by the
+//     watermark. Ordinary messages are unaffected.
+//   - An ineligible one advances the key only while it still equals lastMsgId.
+//     If unread-worker flushed first that fails, and the room reads as a miss
+//     until history-service walks Cassandra and warms it back. One walk, on
+//     system messages only.
 //
-// That is the same self-healing miss the eager design already accepts for out-of-order
-// inserts — the eager writer exists to make misses rare, not impossible, and the read path
-// does not assume it did.
+// That is the same miss the eager design already accepts for out-of-order
+// inserts: it exists to make misses rare, not impossible.
 //
-// Failures are logged at flush time, never propagated to the handler: the message is
-// already persisted to Cassandra and already broadcast, and a room with no stored preview
-// is a room history-service walks for. This service must never NAK a delivered message
-// over an optional write.
+// Flush failures are logged, never returned to the handler. The message is
+// already in Cassandra and already broadcast, and a room with no stored preview
+// is one history-service walks for — never NAK a delivered message over this.
 type previewWriter struct {
 	bulk bulkRoomPreviewWriter
 
