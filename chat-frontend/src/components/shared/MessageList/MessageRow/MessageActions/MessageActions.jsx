@@ -17,10 +17,13 @@ export default function MessageActions({
   const showDelete = !!isOwn
 
   const { historyDegraded } = useDegraded()
-  // A message with no replies has no thread_rooms document, so a reply to it
-  // cannot be delivered while history is down and the gatekeeper will refuse it.
-  // tcount > 0 means the thread exists and resolves from Mongo — leave it alone.
-  const threadStartBlocked = historyDegraded && !(message.tcount > 0)
+  // The gatekeeper only refuses a thread-start in a channel room with no
+  // existing thread (see message-gatekeeper/handler.go: meta.Type !=
+  // model.RoomTypeChannel is never refused) — a message with no replies has
+  // no thread_rooms document there, so a reply can't be delivered while
+  // history is down. DM/botDM/discussion rooms and tcount > 0 (thread
+  // already exists, resolves from Mongo) are never refused — leave them alone.
+  const threadStartBlocked = historyDegraded && room?.type === 'channel' && !(message.tcount > 0)
 
   // If nothing would render and the kebab is hidden too (others' message),
   // skip the toolbar entirely so we don't paint an empty floating bar.

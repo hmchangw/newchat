@@ -118,17 +118,34 @@ describe('MessageActions — Edit / Delete visibility', () => {
 
 describe('MessageActions — thread start while history is degraded', () => {
   it('disables "reply in thread" on a message with no replies while degraded', () => {
-    renderWithDegraded(<MessageActions message={{ id: 'm1', tcount: 0 }} onThread={() => {}} />, { degraded: true })
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} onThread={() => {}} />,
+      { degraded: true }
+    )
     expect(screen.getByRole('button', { name: /thread/i })).toBeDisabled()
   })
 
   it('keeps "reply in thread" enabled on a message that already has replies', () => {
-    renderWithDegraded(<MessageActions message={{ id: 'm1', tcount: 3 }} onThread={() => {}} />, { degraded: true })
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 3 }} room={{ type: 'channel' }} onThread={() => {}} />,
+      { degraded: true }
+    )
     expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
   })
 
   it('keeps "reply in thread" enabled when healthy', () => {
-    renderWithDegraded(<MessageActions message={{ id: 'm1', tcount: 0 }} onThread={() => {}} />, { degraded: false })
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} onThread={() => {}} />,
+      { degraded: false }
+    )
+    expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
+  })
+
+  it('keeps "reply in thread" enabled in a DM room while degraded — the gatekeeper never refuses DM thread starts', () => {
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'dm' }} onThread={() => {}} />,
+      { degraded: true }
+    )
     expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
   })
 })
