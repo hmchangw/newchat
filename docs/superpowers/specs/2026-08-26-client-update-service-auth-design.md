@@ -247,6 +247,14 @@ It is never returned to the caller, so the browser — and any other client of
 `admin-service` — never handles a bearer credential for
 `client-update-service`.
 
+**Why a 5m TTL is sufficient for a 10m upload.** `requireServiceAccount` runs
+as Gin middleware, so the token is verified when the request *headers* arrive —
+before any of the body is read. The interval the TTL must cover is therefore
+mint → headers, which is milliseconds; the body may then stream for as long as
+`CLIENT_UPDATE_UPLOAD_TIMEOUT` allows without `exp` ever being consulted again.
+Do not "fix" `SVCJWT_TTL` to exceed the upload timeout: it would be a larger
+forgery window bought for nothing.
+
 Downstream status mapping:
 
 | Downstream | admin-service returns | Rationale |
