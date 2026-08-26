@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -54,6 +55,34 @@ type Config struct {
 	// min(FanoutTimeout, request deadline). A blanket router timeout shorter than
 	// FanoutTimeout would silently shrink the fanout — see applyBaseMiddleware.
 	Pool mongoutil.PoolConfig
+
+	// SvcJWTPrivateKey signs the service-account tokens this service presents to
+	// client-update-service. Private half only lives here; client-update-service
+	// holds the public key and can verify but never mint.
+	//
+	// Optional, NOT required: admin-service runs at every site, but client updates
+	// are published from one. Requiring it would force every site to hold a copy of
+	// the signing key merely to boot, multiplying the private key across sites for
+	// no benefit. Half-configured is still rejected — see checkClientUpdateConfig.
+	SvcJWTPrivateKey string `env:"SVCJWT_PRIVATE_KEY" envDefault:""`
+	SvcJWTIssuer     string `env:"SVCJWT_ISSUER" envDefault:"admin-service"`
+	// SvcJWTTTL only has to cover mint -> the downstream's middleware reading the
+	// request headers, which is milliseconds. The body may then stream for as
+	// long as ClientUpdateUploadTimeout allows: the token is verified once, before
+	// the body is read, and exp is never consulted again. Do NOT widen this to
+	// match the upload timeout — it would enlarge the forgery window for nothing.
+	SvcJWTTTL time.Duration `env:"SVCJWT_TTL" envDefault:"5m"`
+
+	// ClientUpdateBaseURL empty means client-update publishing is disabled at this
+	// site: no forwarder is built and the upload route answers 503.
+	ClientUpdateBaseURL        string `env:"CLIENT_UPDATE_BASE_URL" envDefault:""`
+	ClientUpdateAudience       string `env:"CLIENT_UPDATE_AUDIENCE" envDefault:"client-update-service"`
+	ClientUpdateServiceAccount string `env:"CLIENT_UPDATE_SERVICE_ACCOUNT" envDefault:""`
+	// ClientUpdateUploadTimeout is the per-request deadline the upload route
+	// installs for itself via extendDeadlines. It is deliberately NOT passed
+	// through checkHandlerTimeout: that guard keeps handler budgets under the 40s
+	// server write timeout, and this route escapes that timeout by design.
+	ClientUpdateUploadTimeout time.Duration `env:"CLIENT_UPDATE_UPLOAD_TIMEOUT" envDefault:"10m"`
 }
 
 func loadConfig() (Config, error) {
@@ -65,6 +94,9 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if err := checkHandlerTimeout("FANOUT_TIMEOUT", c.FanoutTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := checkClientUpdateConfig(c); err != nil {
 		return Config{}, err
 	}
 	if err := c.Pool.Validate(); err != nil {
@@ -82,6 +114,23 @@ func checkHandlerTimeout(name string, d time.Duration) error {
 	}
 	if d >= httpWriteTimeout {
 		return fmt.Errorf("invalid %s %s: must be below the %s HTTP write timeout", name, d, httpWriteTimeout)
+	}
+	return nil
+}
+
+// checkClientUpdateConfig rejects a half-configured forwarder. The feature is
+// opt-in per site (an empty base URL disables it), but a site that opts in and
+// omits the signing key or the service account would fail at the first upload
+// rather than at startup — so that combination is a startup error.
+func checkClientUpdateConfig(c Config) error { //nolint:gocritic // hugeParam: startup value, called once
+	if c.ClientUpdateBaseURL == "" {
+		return nil
+	}
+	if c.SvcJWTPrivateKey == "" {
+		return errors.New("CLIENT_UPDATE_BASE_URL is set but SVCJWT_PRIVATE_KEY is empty: client update publishing cannot sign its requests")
+	}
+	if c.ClientUpdateServiceAccount == "" {
+		return errors.New("CLIENT_UPDATE_BASE_URL is set but CLIENT_UPDATE_SERVICE_ACCOUNT is empty: client update publishing has no identity to present")
 	}
 	return nil
 }
