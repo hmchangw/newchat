@@ -205,9 +205,9 @@ async function fetchAllPages(
  *  for the `Subscription`+`room` shape, shared by the sidebar bootstrap
  *  and the live `added` subscription.update path (both carry the same
  *  shape by design). The real user-service embeds the fields we actually
- *  need under `sub.room` (userCount, lastMsgAt, lastMsgId, appCount);
- *  fields the reducer's `toSummary` doesn't read default to neutral
- *  zero/empty values so the type contract is satisfied.
+ *  need under `sub.room` (userCount, lastMsgAt, lastUserMsgAt, lastMsgId,
+ *  appCount); fields the reducer's `toSummary` doesn't read default to
+ *  neutral zero/empty values so the type contract is satisfied.
  *
  *  `crossSite` is tri-state on the wire: an explicit `true`/`false` is
  *  authoritative (global/local); ABSENT means the room's locality is
@@ -223,7 +223,10 @@ export function subToRoom(sub: DMSubscription, fallbackSiteId: string): Room {
     userCount: sub.room?.userCount ?? 0,
     appCount: sub.room?.appCount ?? 0,
     lastMsgId: sub.room?.lastMsgId ?? '',
-    lastMsgAt: sub.room?.lastMsgAt ?? undefined,
+    // lastMsgAt here means "user activity" client-side: seed from
+    // lastUserMsgAt (last NON-system message) and fall back to lastMsgAt
+    // for rooms that predate the field.
+    lastMsgAt: sub.room?.lastUserMsgAt ?? sub.room?.lastMsgAt ?? undefined,
     createdAt: '',
     updatedAt: '',
     crossSite: sub.room?.crossSite ?? true,

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { initialState } from './reducer'
-import { selectUnreadRoomIds } from './selectUnread'
+import { selectUnreadRoomIds, isRoomUnread } from './selectUnread'
 
 /** Build a state whose summaries and subscriptions are joined by roomId.
  *  `rooms` entries: { id, lastMsgAt, lastSeenAt, muted, threadUnread }. */
@@ -104,5 +104,31 @@ describe('selectUnreadRoomIds', () => {
     // A room can land in summaries before its subscription row arrives.
     const state = { ...initialState, summaries: [{ id: 'a', lastMsgAt: T1 }], subscriptions: {} }
     expect(selectUnreadRoomIds(state, true)).toEqual(['a'])
+  })
+})
+
+describe('isRoomUnread', () => {
+  const room = { id: 'r1', lastMsgAt: '2026-08-26T10:00:00Z' }
+
+  it('never-read subscription with any activity is unread', () => {
+    expect(isRoomUnread(room, undefined, false)).toBe(true)
+    expect(isRoomUnread(room, {}, false)).toBe(true)
+  })
+
+  it('read past the last user message is not unread', () => {
+    expect(isRoomUnread(room, { lastSeenAt: '2026-08-26T11:00:00Z' }, false)).toBe(false)
+  })
+
+  it('muted suppresses everything', () => {
+    expect(isRoomUnread(room, { muted: true }, false)).toBe(false)
+  })
+
+  it('reading the room suppresses message-unread but not thread-unread', () => {
+    expect(isRoomUnread(room, {}, true)).toBe(false)
+    expect(isRoomUnread(room, { threadUnread: ['m1'] }, true)).toBe(true)
+  })
+
+  it('a room with no activity reference is not unread', () => {
+    expect(isRoomUnread({ id: 'r2', lastMsgAt: null }, {}, false)).toBe(false)
   })
 })

@@ -2696,3 +2696,168 @@ describe('roomEventsReducer: BUCKETS_LOADED merge mode', () => {
     expect(next.appIds.size).toBe(0)
   })
 })
+
+// Helper: seed a state with one summary (via ROOMS_LOADED) AND a matching
+// live-mode roomState buffer (lastMsgAt mirrors the room's), so both the
+// summaries-resort guard and the roomState guard can be asserted against
+// the same base state.
+function seededStateWithRoom(roomId, roomOverrides = {}) {
+  const withSummary = roomEventsReducer(initialState, {
+    type: 'ROOMS_LOADED',
+    rooms: [room(roomId, roomOverrides)],
+  })
+  return {
+    ...withSummary,
+    roomState: {
+      ...withSummary.roomState,
+      [roomId]: {
+        messages: [],
+        hasLoadedHistory: false,
+        historyError: null,
+        unreadCount: 0,
+        hasMention: false,
+        mentionAll: false,
+        lastMsgAt: roomOverrides.lastMsgAt ?? null,
+        lastMsgId: null,
+        bufferMode: BUFFER_MODE.LIVE,
+        pendingLiveMessages: [],
+        focusMessageId: null,
+        hasMoreOlder: false,
+        loadingOlder: false,
+      },
+    },
+  }
+}
+
+describe('MESSAGE_RECEIVED system messages', () => {
+  const base = seededStateWithRoom('r1', { lastMsgAt: '2026-08-01T00:00:00Z' })
+
+  const sysEvent = {
+    type: 'new_message',
+    roomId: 'r1',
+    lastMsgAt: '2026-08-26T10:00:00.000Z',
+    lastMsgId: 'm-sys',
+    message: {
+      id: 'm-sys', roomId: 'r1', type: 'members_added',
+      content: 'bob joined', createdAt: '2026-08-26T10:00:00.000Z',
+    },
+  }
+
+  it('appends to the timeline but does not bump lastMsgAt, unreadCount, or re-sort', () => {
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: sysEvent })
+    const rs = next.roomState['r1']
+    expect(rs.messages.map((m) => m.id)).toContain('m-sys')
+    expect(rs.lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(rs.unreadCount).toBe(base.roomState['r1']?.unreadCount ?? 0)
+    expect(next.summaries).toBe(base.summaries) // untouched reference: no resort, no bump
+    expect(next.msgRecvSeq).toBe(base.msgRecvSeq + 1)
+  })
+
+  it('gates on the plaintext systemMsg flag when the body is encrypted', () => {
+    const encEvent = {
+      type: 'new_message', roomId: 'r1', systemMsg: true,
+      lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+      encryptedMessage: { v: 1 },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: encEvent })
+    expect(next.roomState['r1'].lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(next.summaries).toBe(base.summaries)
+  })
+
+  it('a normal message still bumps and re-sorts', () => {
+    const userEvent = { ...sysEvent, lastMsgId: 'm-user', message: { ...sysEvent.message, id: 'm-user', type: undefined } }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: userEvent })
+    expect(next.roomState['r1'].lastMsgAt).toBe('2026-08-26T10:00:00.000Z')
+    expect(next.summaries).not.toBe(base.summaries)
+  })
+})
+
+describe('MESSAGE_RECEIVED system messages — historical buffer mode', () => {
+  function historicalBase(roomId, lastMsgAt) {
+    const loaded = seededStateWithRoom(roomId, { lastMsgAt })
+    return roomEventsReducer(loaded, {
+      type: 'REPLACE_ROOM_BUFFER',
+      roomId,
+      messages: [],
+      focusMessageId: null,
+    })
+  }
+
+  it('buffers a system message into pendingLiveMessages without bumping lastMsgAt/unreadCount/summaries', () => {
+    const base = historicalBase('r2', '2026-08-01T00:00:00Z')
+    const sysEvent = {
+      type: 'new_message',
+      roomId: 'r2',
+      lastMsgAt: '2026-08-26T10:00:00.000Z',
+      lastMsgId: 'm-sys2',
+      message: {
+        id: 'm-sys2', roomId: 'r2', type: 'room_renamed',
+        content: 'renamed the room', createdAt: '2026-08-26T10:00:00.000Z',
+      },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: sysEvent })
+    const rs = next.roomState['r2']
+    expect(rs.pendingLiveMessages.map((m) => m.id)).toContain('m-sys2')
+    expect(rs.lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(rs.unreadCount).toBe(0)
+    expect(next.summaries).toBe(base.summaries)
+  })
+
+  it('a normal message in historical mode still bumps lastMsgAt/unreadCount and re-sorts', () => {
+    const base = historicalBase('r2', '2026-08-01T00:00:00Z')
+    const userEvent = {
+      type: 'new_message', roomId: 'r2',
+      lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-user2',
+      message: { id: 'm-user2', roomId: 'r2', content: 'hi', createdAt: '2026-08-26T10:00:00.000Z' },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: userEvent })
+    expect(next.roomState['r2'].lastMsgAt).toBe('2026-08-26T10:00:00.000Z')
+    expect(next.roomState['r2'].unreadCount).toBe(1)
+    expect(next.summaries).not.toBe(base.summaries)
+  })
+})
+
+describe('MESSAGE_RECEIVED: system events touch no user-facing room state', () => {
+  const base = seededStateWithRoom('r1', { lastMsgAt: '2026-08-01T00:00:00Z' })
+
+  it('an encrypted system event does not become the sidebar preview', () => {
+    // The synthesized placeholder carries no type/sysMsgData, so only the
+    // plaintext systemMsg flag can keep "[encrypted message]" out of the snippet.
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', systemMsg: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+        encryptedMessage: { v: 1 },
+      },
+    })
+    expect(next.previews).toBe(base.previews)
+  })
+
+  it('a system event never sets mention state', () => {
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', systemMsg: true,
+        hasMention: true, mentionAll: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+        message: { id: 'm-sys', roomId: 'r1', type: 'members_added', content: 'bob joined', createdAt: '2026-08-26T10:00:00.000Z' },
+      },
+    })
+    expect(next.roomState.r1.hasMention).toBe(false)
+    expect(next.roomState.r1.mentionAll).toBe(false)
+  })
+
+  it('a normal message still sets mention state', () => {
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', hasMention: true, mentionAll: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-user',
+        message: { id: 'm-user', roomId: 'r1', content: 'hi @alice', createdAt: '2026-08-26T10:00:00.000Z' },
+      },
+    })
+    expect(next.roomState.r1.hasMention).toBe(true)
+    expect(next.roomState.r1.mentionAll).toBe(true)
+  })
+})

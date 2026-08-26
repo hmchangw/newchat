@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { fetchSidebarBuckets, PAGE_LIMIT, MAX_PAGES } from './index'
+import { fetchSidebarBuckets, subToRoom, PAGE_LIMIT, MAX_PAGES } from './index'
 import type { Nats, DMSubscription } from '../types'
 
 const SUBJECT = 'chat.user.alice.request.user.site-A.subscription.list'
@@ -224,4 +224,18 @@ describe('fetchSidebarBuckets: failure reporting', () => {
 
     expect(buckets.failures.sort()).toEqual(['apps', 'favorites', 'rooms'])
   }, 20000)
+})
+
+describe('subToRoom', () => {
+  it('prefers lastUserMsgAt over lastMsgAt for the summary position', () => {
+    const s = sub('r1', {
+      room: { lastMsgAt: '2026-08-26T10:00:00Z', lastUserMsgAt: '2026-08-01T00:00:00Z' },
+    })
+    expect(subToRoom(s, 'site-a').lastMsgAt).toBe('2026-08-01T00:00:00Z')
+  })
+
+  it('falls back to lastMsgAt when lastUserMsgAt is absent (pre-cutover rooms)', () => {
+    const s = sub('r1', { room: { lastMsgAt: '2026-08-26T10:00:00Z' } })
+    expect(subToRoom(s, 'site-a').lastMsgAt).toBe('2026-08-26T10:00:00Z')
+  })
 })

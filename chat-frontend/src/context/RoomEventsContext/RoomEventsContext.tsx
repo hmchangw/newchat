@@ -28,6 +28,7 @@ import {
   subToRoom,
 } from '@/api'
 import { deriveSidebarSections } from '@/lib/chatlist'
+import { isRoomUnread } from './selectUnread'
 import { loadSubscriptionCache, saveSubscriptionCache } from '@/lib/subscriptionCache'
 import type {
   ChatlistState,
@@ -114,6 +115,11 @@ interface RoomSummary {
    *  room has no preview — the row still renders at full height with a blank
    *  snippet line. */
   preview?: RoomPreview
+  /** Read-position unread (the same rule as the header badge, via
+   *  isRoomUnread) — stamped by useSidebarSections so the row bolds for a
+   *  member whose read position is behind even when no live message counter
+   *  has accrued (e.g. she was just added to the room). */
+  hasUnread?: boolean
 }
 
 /** Top-level state shape returned by `roomEventsReducer`. */
@@ -569,22 +575,25 @@ export interface SidebarSection {
  */
 export function useSidebarSections(): SidebarSection[] {
   const { state } = useRoomEventsInternal()
-  const { summaries, subscriptions, chatlist, previews } = state
+  const { summaries, subscriptions, chatlist, previews, activeRoomId } = state
   return useMemo(() => {
     const enrich = (room: RoomSummary): RoomSummary => {
       const sub = subscriptions[room.id]
       const preview = previews[room.id]
-      if (!sub && !preview) return room
+      // Stamped even when the room has no subscription record yet: a
+      // never-read room with activity is unread by the shared rule.
+      const hasUnread = isRoomUnread(room, sub, room.id === activeRoomId)
       return {
         ...room,
         subscriptionName: sub?.name ?? room.subscriptionName,
         hrInfo: sub?.hrInfo ?? room.hrInfo,
         preview,
+        hasUnread,
       }
     }
     const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
     return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
-  }, [summaries, subscriptions, chatlist, previews])
+  }, [summaries, subscriptions, chatlist, previews, activeRoomId])
 }
 
 /** Raw overlay section order (the full list the backend stores — built-ins +

@@ -43,6 +43,14 @@ export interface SubscriptionRoom {
   appCount?: number
   lastMsgAt?: string | null
   lastMsgId?: string
+  /** User-activity reference — what unread/sidebar ordering are computed
+   *  from. Normally the last NON-system message time; on a
+   *  subscription.update `added` payload for a room with no messages yet
+   *  it is the room's createdAt, so a just-added member has something to
+   *  flag the room unread against. Absent for rooms with none recorded
+   *  since the field shipped (fall back to lastMsgAt). Mirrors
+   *  model.SubscriptionRoom.LastUserMsgAt. */
+  lastUserMsgAt?: string | null
   lastMentionAllAt?: string | null
   /** Base64-encoded room E2E private key — delivered on subscription.list
    *  for initial key bootstrap (same payload as the room.key.get RPC). */
