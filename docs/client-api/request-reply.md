@@ -228,14 +228,15 @@ Full decision logic, limits, and response schemas are in
 
 ### HTTP — Client Update Service
 
-Public HTTP endpoints served by `client-update-service` (no `ssoToken`/auth in v1
-— must be network-restricted). Full request/response schemas and the download
-cache behavior are in
+HTTP endpoints served by `client-update-service`. Uploads require a service-account
+bearer token (only `admin-service` holds one); downloads are unauthenticated and
+must be network-restricted. Full request/response schemas and the download cache
+behavior are in
 [../client-api.md §12](../client-api.md#12-client-update-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
-| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). |
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). Service-account bearer token required. |
 | `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
 | `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 
@@ -287,6 +288,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger, materializes the new state on each subject's user doc, and fans it out to every other site (unacknowledged destinations come back as `syncFailures`), with one slim audit entry per subject (§9.13). |
 | `GET /v1/admin/permissions` | synchronous HTTP | List the permission ledger newest-first — company-wide by default, with optional independent `subjectAccount` and `permission` query filters; `currentlyGranted` (read from the materialized state) is included only when both filters are set (§9.14). |
 | `POST /v1/admin/permissions/resync` | synchronous HTTP | Re-deliver the current materialized permission state for the given accounts to every other site; writes nothing, idempotent (§9.15). |
+| `POST /v1/admin/client-updates` | synchronous HTTP | Publish a client update artifact pair; streamed on to client-update-service under this service's own credential. Audited as `client_update.upload`. |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 

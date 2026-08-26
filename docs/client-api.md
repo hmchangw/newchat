@@ -79,6 +79,7 @@ paths.
    - [PUT /api/v1/emoji/:shortcode](#put-apiv1emojishortcode)
 8. [Presence](#8-presence)
 9. [Admin Service](#9-admin-service)
+    - [9.16 POST /v1/admin/client-updates](#916-http--post-v1adminclient-updates)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
@@ -8122,6 +8123,49 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `recordedBy` | string | The admin account that recorded this row (from the session token). |
 | `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
+### 9.16 HTTP — POST /v1/admin/client-updates
+
+**Auth:** admin session (`Authorization: Bearer <session token>`), same as every `/v1/admin/…` route.
+
+Publishes a client update artifact pair. `admin-service` streams both parts
+straight through to `client-update-service` under its own service-account
+credential — nothing is buffered, and the browser never holds that credential.
+
+The artifacts themselves are validated by `client-update-service`, not here: file
+name and extension rules live there and are reported back verbatim on a `400`.
+
+#### Request
+
+`multipart/form-data`:
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. |
+| `executeFile` | file (binary) | yes | The executable. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both artifacts published. |
+| `400 Bad Request` | Body is not `multipart/form-data`, or `client-update-service` rejected the artifacts (its message is relayed). |
+| `401 Unauthorized` | Missing or invalid admin session. |
+| `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
+| `503 Service Unavailable` | `client-update-service` is unreachable, or this service's upload credential is not configured or was rejected. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+**Audit:** a successful upload appends an `AuditEntry` with action
+`client_update.upload` and `details` naming both uploaded file names.
+
 ---
 
 ### 9.16 Resync user
@@ -8631,13 +8675,17 @@ Uploads and downloads stream end-to-end; downloads are fronted by a bounded
 TTL+size in-memory cache.
 
 > [!WARNING]
-> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
-> can upload or download update artifacts. **They MUST be network-restricted
-> before any production exposure.**
+> **`GET /api/v1/version/:fileName` is UNAUTHENTICATED.** Anyone who can reach the
+> service can download update artifacts. It **MUST be network-restricted**. Uploads
+> are gated on a service account (below).
 
 ### POST /api/v1/version
 
-**Auth:** none (v1)
+**Auth:** `Authorization: Bearer <service-account token>`. The token must match an
+entry in the service's `UPLOAD_TOKENS` table (`account:token`, comma-separated).
+Only `admin-service` is provisioned; browsers and end-user clients never call this
+endpoint directly — they go through
+[`POST /v1/admin/client-updates`](#916-http--post-v1adminclient-updates).
 
 Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
 and streamed straight to MinIO (no size cap). An upload of an existing file name
@@ -8656,6 +8704,7 @@ overwrites it and evicts any cached copy.
 |---|---|
 | `200 OK` | Both files stored. |
 | `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `401 Unauthorized` | Missing, malformed, or unrecognized service-account token. Identical response for all three. |
 | `500 Internal Server Error` | MinIO write failure. |
 
 ##### Success response (`200`)
