@@ -3,8 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/svcjwt"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -91,4 +97,97 @@ func TestIntegration_DownloadServesFromCacheOnSecondHit(t *testing.T) {
 		assert.Equal(t, "BINARY", w.Body.String())
 	}
 	assert.Equal(t, 1, cs.opens, "second download must be served from cache, not re-opened")
+}
+
+// authedRouter builds the real router with real auth against a real MinIO
+// container, and returns it with a signer that mints tokens it will accept.
+func authedRouter(t *testing.T) (*gin.Engine, *svcjwt.Signer) {
+	t.Helper()
+	client, bucket := testutil.MinIO(t, "clientupdateauth")
+	store := newMinioVersionStore(client, bucket, 30*time.Second)
+	h := NewHandler(store, newBlobCache(4, time.Hour, 1<<20))
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	enc := base64.StdEncoding
+	signer, err := svcjwt.NewSigner(enc.EncodeToString(priv.Seed()), "admin-service")
+	require.NoError(t, err)
+	verifier, err := svcjwt.NewVerifier(enc.EncodeToString(pub), "admin-service", "client-update-service")
+	require.NoError(t, err)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	registerRoutes(r, h, requireServiceAccount(verifier, []string{"svc-updater"}))
+	return r, signer
+}
+
+// uploadForm builds the configFile + executeFile multipart body the upload expects.
+func uploadForm(t *testing.T, cfgName, cfgBody, exeName, exeBody string) (*bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for _, f := range []struct{ field, name, body string }{
+		{"configFile", cfgName, cfgBody},
+		{"executeFile", exeName, exeBody},
+	} {
+		part, err := w.CreateFormFile(f.field, f.name)
+		require.NoError(t, err)
+		_, err = part.Write([]byte(f.body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Close())
+	return &buf, w.FormDataContentType()
+}
+
+func TestIntegration_AuthedUploadThenOpenDownload(t *testing.T) {
+	r, signer := authedRouter(t)
+	token, _, err := signer.Sign("svc-updater", "client-update-service", time.Hour)
+	require.NoError(t, err)
+
+	body, contentType := uploadForm(t, "app.yaml", "version: 2", "app.exe", "MZbinary")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/version", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	// The download must still work with NO credential — the whole point of
+	// gating only the upload.
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/version/app.exe", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "MZbinary", w.Body.String())
+}
+
+func TestIntegration_UnauthenticatedUploadIsRefused(t *testing.T) {
+	r, _ := authedRouter(t)
+
+	body, contentType := uploadForm(t, "app.yaml", "version: 2", "app.exe", "MZbinary")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/version", body)
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// And nothing was written: the artifact must not exist.
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/version/app.exe", nil))
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"a refused upload must not have reached MinIO")
+}
+
+func TestIntegration_UnallowlistedAccountIsRefused(t *testing.T) {
+	r, signer := authedRouter(t)
+	token, _, err := signer.Sign("svc-intruder", "client-update-service", time.Hour)
+	require.NoError(t, err)
+
+	body, contentType := uploadForm(t, "app.yaml", "version: 2", "app.exe", "MZbinary")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/version", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
