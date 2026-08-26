@@ -7484,11 +7484,13 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 func TestSubscriptionRoomFor(t *testing.T) {
 	lastMsg := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC)
 	mention := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	floor := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
 	room := &model.Room{
 		ID: "r1", Name: "eng", Type: model.RoomTypeChannel, SiteID: "site-a",
 		UserCount: 3, AppCount: 1, LastMsgAt: &lastMsg, LastMsgID: "m123",
+		LastUserMsgAt:    &lastUserMsg,
 		LastMentionAllAt: &mention, MinUserLastSeenAt: &floor, CrossSite: ptrBool(false),
 	}
 
@@ -7506,6 +7508,7 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, 1, got.AppCount)
 		assert.Equal(t, &lastMsg, got.LastMsgAt)
 		assert.Equal(t, "m123", got.LastMsgID)
+		assert.Equal(t, &lastUserMsg, got.LastUserMsgAt)
 		assert.Equal(t, &mention, got.LastMentionAllAt)
 		assert.Equal(t, &floor, got.MinUserLastSeenAt)
 		require.NotNil(t, got.PrivateKey)
@@ -7522,13 +7525,78 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, "eng", got.Name)
 	})
 
-	t.Run("nil time fields and nil CrossSite pass through", func(t *testing.T) {
-		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2}
+	t.Run("fresh room pins lastUserMsgAt to createdAt", func(t *testing.T) {
+		// The added event outruns broadcast-worker's freeze: for a brand-new room
+		// neither lastMsgAt nor lastUserMsgAt exists yet, so the event must carry
+		// the same reference the freeze will persist (createdAt) — without it the
+		// added member's client has nothing to flag the room unread against.
+		created := time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
+		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2, CreatedAt: created}
 		got := subscriptionRoomFor(bare, nil)
 		assert.Nil(t, got.CrossSite)
-		assert.Nil(t, got.LastMsgAt)
+		assert.Nil(t, got.LastMsgAt, "wire lastMsgAt mirrors the doc — only the unread reference is pre-seeded")
+		require.NotNil(t, got.LastUserMsgAt)
+		assert.True(t, got.LastUserMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
 		assert.Nil(t, got.LastMentionAllAt)
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
+	})
+
+	t.Run("pre-freeze room falls back to lastMsgAt for the reference", func(t *testing.T) {
+		created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		pre := &model.Room{
+			ID: "r3", Name: "legacy", SiteID: "site-a", UserCount: 2,
+			LastMsgAt: &lastMsg, LastMsgID: "m9", CreatedAt: created,
+		}
+		got := subscriptionRoomFor(pre, nil)
+		require.NotNil(t, got.LastUserMsgAt)
+		assert.True(t, got.LastUserMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
+	})
+}
+
+// TestActorSubscriptionIsPreRead: whoever performs the creation has, by
+// definition, already seen the room, so their own subscription carries
+// lastSeenAt from the start. Without it their client flags the brand-new room
+// unread the moment they switch away — the room always ships a non-nil
+// user-activity reference (createdAt), and an absent read position reads as
+// "never opened". Members they invited get no lastSeenAt: the room IS new to
+// them, which is what makes an added member's room unread.
+func TestActorSubscriptionIsPreRead(t *testing.T) {
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	requester := &model.User{ID: "u-alice", Account: "alice"}
+	other := &model.User{ID: "u-bob", Account: "bob"}
+	bot := &model.User{ID: "u-helper", Account: "helper.bot"}
+	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
+
+	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
+		subs := buildDMSubs(requester, other, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Nil(t, subs[1].LastSeenAt, "the counterpart has not seen it")
+	})
+
+	t.Run("botDM: initiator pre-read", func(t *testing.T) {
+		subs := buildBotDMSubs(requester, bot, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt)
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+	})
+
+	t.Run("self-DM: sole member is pre-read", func(t *testing.T) {
+		sub := buildSelfDMSub(requester, room, at)
+		require.NotNil(t, sub.LastSeenAt)
+		assert.True(t, sub.LastSeenAt.Equal(at))
+	})
+
+	t.Run("channel: creator pre-read, invited members unread", func(t *testing.T) {
+		channel := &model.Room{ID: "r2", SiteID: "site-a", Type: model.RoomTypeChannel, Name: "eng", CreatedAt: at}
+		subs := buildChannelSubs(requester, []model.User{*other}, channel, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "creator")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Equal(t, []model.Role{model.RoleOwner}, subs[0].Roles)
+		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
+		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
 	})
 }
