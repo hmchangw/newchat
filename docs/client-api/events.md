@@ -132,6 +132,7 @@ Two shapes exist — discriminated by `action`:
       "userCount": 12,
       "appCount": 1,
       "lastMsgAt": "2026-05-06T07:59:01Z",
+      "lastUserMsgAt": "2026-05-06T07:59:01Z",
       "lastMsgId": "01970a4f8c2d7c9aM123",
       "lastMentionAllAt": "2026-05-05T11:00:00Z",
       "minUserLastSeenAt": "2026-05-04T09:30:00Z",
@@ -391,6 +392,7 @@ messages through a separate backend path.
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
 | `hasMention` | boolean | Optional. Per-recipient flag — present only on DM events. |
+| `systemMsg` | boolean | Optional. `true` when the message is a server-generated system message (`room_created`, `members_added`, …). Clients must not advance unread state or sidebar ordering from a flagged event — present in plaintext even when the body is sealed in `encryptedMessage`. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
 | `encryptedMessage` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. Set for encrypted channel rooms. Decrypt with room key for `version`. |
 
