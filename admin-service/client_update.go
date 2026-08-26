@@ -3,13 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"strings"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-resty/resty/v2"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 )
 
 // clientUpdateVersionPath is client-update-service's upload endpoint
@@ -83,4 +90,152 @@ func upstreamMessage(body, fallback string) string {
 		return env.Error
 	}
 	return fallback
+}
+
+// clientUpdateAuditAction is the audit action for a published artifact pair.
+const clientUpdateAuditAction = "client_update.upload"
+
+// quoteEscaper mirrors mime/multipart's own escaping for Content-Disposition
+// values, so a filename containing a quote or backslash cannot break out of the
+// header it is written into.
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+
+// relayResult carries the relay goroutine's outcome back to the handler. The
+// filenames travel on the channel rather than a shared map so the handler can
+// read them without racing the goroutine that filled them.
+type relayResult struct {
+	names map[string]string
+	err   error
+}
+
+// uploadClientVersion relays an artifact pair to client-update-service under this
+// service's own credential, then records the publication in the audit log.
+//
+// It validates nothing about the artifacts: client-update-service owns the
+// extension and content rules, and duplicating them here would let the two
+// services disagree about what a valid upload is.
+func (h *Handler) uploadClientVersion(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	if h.uploader == nil {
+		errhttp.Write(ctx, c, errcode.Unavailable("client update upload is not configured"))
+		return
+	}
+
+	// A large artifact outlives the server's 15s read / 40s write timeouts. Those
+	// stay put — httpWriteTimeout doubles as the ceiling checkHandlerTimeout
+	// validates ROOM_RPC_TIMEOUT and FANOUT_TIMEOUT against — so only this
+	// request's deadlines move.
+	if err := extendUploadDeadlines(c, h.cfg.ClientUpdateTimeout); err != nil {
+		errhttp.Write(ctx, c, err)
+		return
+	}
+
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		errhttp.Write(ctx, c, errcode.BadRequest("request body must be multipart/form-data"))
+		return
+	}
+
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	done := make(chan relayResult, 1)
+	go func() {
+		names, relayErr := relayParts(mr, mw)
+		// Closing the pipe is what unblocks the reader, so it must happen on every
+		// path out of this goroutine.
+		_ = pw.CloseWithError(relayErr)
+		done <- relayResult{names: names, err: relayErr}
+	}()
+
+	uploadErr := h.uploader.Upload(ctx, mw.FormDataContentType(), pr)
+	// Unblocks the goroutine if the upload gave up mid-body; a no-op otherwise.
+	_ = pr.CloseWithError(uploadErr)
+	res := <-done
+
+	if uploadErr != nil {
+		errhttp.Write(ctx, c, uploadErr)
+		return
+	}
+	if res.err != nil {
+		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
+		return
+	}
+
+	h.audit(ctx, c, clientUpdateAuditAction, "", "", res.names)
+	c.JSON(http.StatusOK, gin.H{"result": "success"})
+}
+
+// extendUploadDeadlines pushes this request's read and write deadlines out to d.
+// Verified reachable: gin's responseWriter implements Unwrap, and neither
+// o11ygin nor otelgin replaces c.Writer. A failure here is fatal rather than
+// ignored — a silent no-op would kill every large upload at the server's 15s
+// read timeout, with nothing in the logs to explain it.
+func extendUploadDeadlines(c *gin.Context, d time.Duration) error {
+	rc := http.NewResponseController(c.Writer)
+	deadline := time.Now().Add(d)
+	if err := rc.SetReadDeadline(deadline); err != nil {
+		return fmt.Errorf("extend upload read deadline: %w", err)
+	}
+	if err := rc.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("extend upload write deadline: %w", err)
+	}
+	return nil
+}
+
+// relayParts copies every file part through to mw, preserving each part's field
+// name, filename and declared Content-Type, and returns field->filename for the
+// audit entry. Non-file fields are skipped: client-update-service reads only
+// file parts.
+//
+// CreatePart, not CreateFormFile: the latter stamps application/octet-stream on
+// every part, which would change what client-update-service stores the .yaml as.
+func relayParts(mr *multipart.Reader, mw *multipart.Writer) (map[string]string, error) {
+	names := make(map[string]string)
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return names, fmt.Errorf("read upload part: %w", err)
+		}
+		if err := relayOnePart(part, mw, names); err != nil {
+			_ = part.Close()
+			return names, err
+		}
+		if err := part.Close(); err != nil {
+			return names, fmt.Errorf("close upload part: %w", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return names, fmt.Errorf("finish relay body: %w", err)
+	}
+	return names, nil
+}
+
+// relayOnePart copies a single part and records its filename.
+func relayOnePart(part *multipart.Part, mw *multipart.Writer, names map[string]string) error {
+	if part.FileName() == "" {
+		return nil // not a file part
+	}
+	names[part.FormName()] = part.FileName()
+
+	hdr := textproto.MIMEHeader{}
+	// %q rather than "%s" would re-escape what quoteEscaper already escaped.
+	hdr.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, //nolint:gocritic // sprintfQuotedString
+		quoteEscaper.Replace(part.FormName()), quoteEscaper.Replace(part.FileName())))
+	// Copied only when present, so a bare part stays bare and the upstream's own
+	// content-type fallback still applies.
+	if ct := part.Header.Get("Content-Type"); ct != "" {
+		hdr.Set("Content-Type", ct)
+	}
+	fw, err := mw.CreatePart(hdr)
+	if err != nil {
+		return fmt.Errorf("create relay part %q: %w", part.FormName(), err)
+	}
+	if _, err := io.Copy(fw, part); err != nil {
+		return fmt.Errorf("relay part %q: %w", part.FormName(), err)
+	}
+	return nil
 }
