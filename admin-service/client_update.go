@@ -53,7 +53,8 @@ func (u *restyVersionUploader) Upload(ctx context.Context, contentType string, b
 		SetBody(body).
 		Post(clientUpdateVersionPath)
 	if err != nil {
-		return errcode.Unavailable("client update service is unavailable", errcode.WithCause(err))
+		return errcode.Unavailable("client update service is unavailable",
+			errcode.WithCause(fmt.Errorf("post client update: %w", err)))
 	}
 	return mapUpstreamStatus(resp.StatusCode(), resp.String())
 }
@@ -72,8 +73,15 @@ func mapUpstreamStatus(status int, body string) error {
 		return errcode.Unavailable("client update upload is misconfigured",
 			errcode.WithCause(fmt.Errorf("client-update-service rejected this service's credential with status %d", status)))
 	default:
+		// The upstream's own envelope message, never the raw body: CLAUDE.md forbids
+		// wrapping a raw body into a cause, and a 5xx from an ingress or proxy can
+		// carry arbitrary content. A body that is not an envelope yields status only.
+		if msg := upstreamMessage(body, ""); msg != "" {
+			return errcode.Unavailable("client update service is unavailable",
+				errcode.WithCause(fmt.Errorf("client-update-service returned status %d: %s", status, truncateForLog(msg))))
+		}
 		return errcode.Unavailable("client update service is unavailable",
-			errcode.WithCause(fmt.Errorf("client-update-service returned status %d: %s", status, truncateUpstreamBody(body))))
+			errcode.WithCause(fmt.Errorf("client-update-service returned status %d", status)))
 	}
 }
 
@@ -82,12 +90,12 @@ func mapUpstreamStatus(status int, body string) error {
 // cannot bloat a log line.
 const maxUpstreamBodyLogLen = 256
 
-// truncateUpstreamBody trims body to maxUpstreamBodyLogLen bytes for logging.
-func truncateUpstreamBody(body string) string {
-	if len(body) <= maxUpstreamBodyLogLen {
-		return body
+// truncateForLog caps a log value at maxUpstreamBodyLogLen bytes.
+func truncateForLog(s string) string {
+	if len(s) <= maxUpstreamBodyLogLen {
+		return s
 	}
-	return body[:maxUpstreamBodyLogLen] + "...(truncated)"
+	return s[:maxUpstreamBodyLogLen] + "...(truncated)"
 }
 
 // upstreamMessage lifts the human-readable text out of an errcode envelope. The

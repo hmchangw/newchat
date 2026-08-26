@@ -110,6 +110,11 @@ func TestValidateClientUpdate(t *testing.T) {
 		{"valid", func(*Config) {}, false},
 		{"unparseable url", func(c *Config) { c.ClientUpdateURL = "://nope" }, true},
 		{"url without scheme", func(c *Config) { c.ClientUpdateURL = "client-update-service:8080" }, true},
+		{"https url", func(c *Config) { c.ClientUpdateURL = "https://client-update-service" }, false},
+		// *http.Transport rejects any other scheme at request time, so every upload
+		// would 503. Fail at startup instead.
+		{"ftp scheme", func(c *Config) { c.ClientUpdateURL = "ftp://client-update-service" }, true},
+		{"file scheme", func(c *Config) { c.ClientUpdateURL = "file:///etc/passwd" }, true},
 		{"empty token", func(c *Config) { c.ClientUpdateToken = "" }, true},
 		{"zero timeout", func(c *Config) { c.ClientUpdateTimeout = 0 }, true},
 		{"negative timeout", func(c *Config) { c.ClientUpdateTimeout = -time.Second }, true},

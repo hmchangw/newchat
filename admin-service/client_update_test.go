@@ -99,14 +99,33 @@ func TestMapUpstreamStatus_DefaultBranchLogsUpstreamBody(t *testing.T) {
 }
 
 // The upstream body is capped so a large error page cannot bloat a log line.
-func TestMapUpstreamStatus_DefaultBranchTruncatesLongBody(t *testing.T) {
-	longBody := strings.Repeat("x", 1000)
-	err := mapUpstreamStatus(500, longBody)
+// A 5xx from an ingress or proxy carries arbitrary content, and CLAUDE.md forbids
+// wrapping a raw body into a cause. Only the upstream's own envelope message may
+// reach the log, so a non-envelope body must contribute nothing but the status.
+func TestMapUpstreamStatus_DefaultBranchKeepsRawBodyOutOfTheCause(t *testing.T) {
+	rawBody := strings.Repeat("x", 1000)
+	err := mapUpstreamStatus(500, rawBody)
 	require.Error(t, err)
 	cause := errors.Unwrap(err)
 	require.Error(t, cause)
-	assert.LessOrEqual(t, len(cause.Error()), len(longBody))
+
+	assert.NotContains(t, cause.Error(), "xxx", "a non-envelope body must not reach the cause")
+	assert.Contains(t, cause.Error(), "500")
+}
+
+func TestMapUpstreamStatus_DefaultBranchLogsTheEnvelopeMessageTruncated(t *testing.T) {
+	longMessage := strings.Repeat("m", 1000)
+	body := `{"code":"internal","error":"` + longMessage + `"}`
+
+	err := mapUpstreamStatus(500, body)
+	require.Error(t, err)
+	cause := errors.Unwrap(err)
+	require.Error(t, cause)
+
+	assert.Contains(t, cause.Error(), "500")
+	assert.Contains(t, cause.Error(), "mmm", "the upstream's own message is useful to an operator")
 	assert.Contains(t, cause.Error(), "truncated")
+	assert.Less(t, len(cause.Error()), len(longMessage))
 }
 
 // A 401/403 body may quote a credential rejection — it must never reach the

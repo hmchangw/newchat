@@ -370,6 +370,11 @@ export async function listPermissions(
  *
  * @throws {AsyncJobError} on a non-2xx response or a transport failure.
  */
+/** Client-side ceiling for one artifact upload, matching admin-service's
+ * CLIENT_UPDATE_UPLOAD_TIMEOUT default (10m) so the browser does not give up
+ * while the server is still relaying. */
+export const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000
+
 export function uploadClientVersion(
   authToken: string,
   configFile: File,
@@ -386,6 +391,10 @@ export function uploadClientVersion(
     xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
     // Content-Type is deliberately unset: the browser writes the multipart
     // boundary, and overriding it produces a body the server cannot parse.
+    // Without this, timeout defaults to 0 (never) and xhr.ontimeout below can
+    // never fire, so a stalled upload leaves the promise pending and the Upload
+    // button disabled forever.
+    xhr.timeout = UPLOAD_TIMEOUT_MS
 
     if (onProgress) {
       xhr.upload.onprogress = (e: ProgressEvent) => {

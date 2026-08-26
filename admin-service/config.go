@@ -109,8 +109,11 @@ func validateClientUpdate(rawURL, token string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("invalid CLIENT_UPDATE_URL: %w", err)
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute URL with scheme and host", rawURL)
+	// Only http/https: the uploader resolves the version path against this base and
+	// sends it through *http.Transport, which rejects any other scheme at request
+	// time. Failing here turns a per-upload 503 into a startup error.
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute http or https URL with a host", rawURL)
 	}
 	if token == "" {
 		return fmt.Errorf("CLIENT_UPDATE_TOKEN must not be empty")

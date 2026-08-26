@@ -15,6 +15,7 @@ import {
   setPassword,
   updateUser,
   uploadClientVersion,
+  UPLOAD_TIMEOUT_MS,
 } from './index'
 
 function mockResponse(status: number, body: unknown): Response {
@@ -569,6 +570,7 @@ describe('uploadClientVersion', () => {
     onerror: (() => void) | null = null
     onabort: (() => void) | null = null
     ontimeout: (() => void) | null = null
+    timeout = 0
     status = 0
     responseText = ''
     method = ''
@@ -696,5 +698,19 @@ describe('uploadClientVersion', () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
     MockXHR.instances[0].ontimeout?.()
     await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // xhr.timeout defaults to 0, which disables timeouts entirely and makes the
+  // ontimeout handler above unreachable. Asserting the configured value is what
+  // proves a stalled upload can actually settle.
+  it('configures a non-zero upload timeout so ontimeout can fire', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+
+    expect(xhr.timeout).toBe(UPLOAD_TIMEOUT_MS)
+    expect(xhr.timeout).toBeGreaterThan(0)
+
+    xhr.respond()
+    await promise
   })
 })
