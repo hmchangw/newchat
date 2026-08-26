@@ -5,14 +5,32 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
  *  re-arms it if the outage is still on. */
 const DEGRADED_TTL_MS = 60_000
 
-/** Outage-class signals. These mirror the categories errcode.IsTransient treats
- *  as retryable infrastructure, so the client and the server agree on what an
- *  outage is. A terminal error (not_found, forbidden) is a settled answer, not
- *  an outage, and must not disable anything. */
+/** The errcode categories that are a settled answer: retrying gets the same
+ *  result, so none of them is an outage. Everything else is (see below). */
+const TERMINAL_ERROR_CODES = new Set([
+  'bad_request', 'unauthenticated', 'forbidden', 'not_found', 'conflict', 'too_many_requests',
+])
+
+/** Outage-class signals, mirroring `errcode.IsTransient` in BOTH directions:
+ *  a classified terminal category is not an outage, and anything unclassified
+ *  is (the server's `IsTransient` returns true for every non-*errcode.Error).
+ *
+ *  The unclassified half is load-bearing, not theoretical. `requestSync` times
+ *  out at 5s and only attaches `.code` when the reply carried an errcode
+ *  envelope, so the two failure modes that never produce one are exactly the
+ *  ones this feature exists for: Cassandra up but not answering (cassutil's
+ *  10s query timeout outlives our 5s, so nats.ws throws `TIMEOUT`) and
+ *  history-service down or crash-looping (`503`, no responders). Requiring a
+ *  `.code` silently skipped both.
+ *
+ *  Direction of the failure is deliberate: a wrong arm costs 60s of disabled
+ *  thread-start buttons, cleared early by the next successful load or send; a
+ *  missed arm costs a silently dropped thread reply, which is the bug this
+ *  whole change exists to prevent. */
 function isOutageSignal(err) {
-  return err?.code === 'unavailable'
-    || err?.code === 'internal'
-    || err?.reason === 'thread_start_unavailable'
+  if (!err) return false
+  if (err.reason === 'thread_start_unavailable') return true
+  return !TERMINAL_ERROR_CODES.has(err.code)
 }
 
 const DegradedContext = createContext(null)
