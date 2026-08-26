@@ -36,11 +36,6 @@ type ESConfig struct {
 	TLSSkipVerify bool   `env:"TLS_SKIP_VERIFY"  envDefault:"false"`
 }
 
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
-}
-
 type NATSConfig struct {
 	URL       string `env:"URL,required"`
 	CredsFile string `env:"CREDS_FILE" envDefault:""`
@@ -83,9 +78,9 @@ type SearchConfig struct {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID   string         `env:"SITE_ID,required"`
-	ES       ESConfig       `envPrefix:"SEARCH_"`
-	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID   string   `env:"SITE_ID,required"`
+	ES       ESConfig `envPrefix:"SEARCH_"`
+	Valkey   valkeyutil.Config
 	NATS     NATSConfig     `envPrefix:"NATS_"`
 	Search   SearchConfig   `envPrefix:"SEARCH_"`
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
@@ -131,6 +126,10 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
 		os.Exit(1)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
@@ -183,10 +182,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)

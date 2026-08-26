@@ -7,6 +7,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // httpWriteTimeout bounds a response write measured from the request, so in-handler
@@ -31,9 +32,8 @@ type Config struct {
 	// it: this service only ever BUSTS the cache, never reads it, so a missing
 	// client degrades to the pre-cache behaviour (revocation lands when the
 	// entry's refresh window elapses) rather than breaking anything.
-	ValkeyAddrs           []string `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword        string   `env:"VALKEY_PASSWORD"`
-	SessionsMaxPerAccount int      `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
+	Valkey                valkeyutil.Config
+	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
 	// NatsURL backs the room-service RPC behind the duty toggle. Required: the
 	// toggle has no fallback transport, so a missing value must fail at startup.
 	NatsURL       string `env:"NATS_URL,required"`

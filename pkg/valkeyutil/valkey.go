@@ -49,6 +49,18 @@ type clusterClient struct {
 
 // ConnectCluster dials a Valkey cluster via the provided seed addresses, verifies connectivity with PING, and returns a Client.
 func ConnectCluster(ctx context.Context, addrs []string, password string, opts ...Option) (Client, error) {
+	c, err := dialCluster(ctx, addrs, password, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &clusterClient{c: c}, nil
+}
+
+// dialCluster is the shared dial: construct, instrument, PING, or clean up. Both
+// the Client-returning and the raw-*redis.ClusterClient-returning entry points
+// go through it, so a caller that needs the concrete type does not re-implement
+// the setup — three services had, each with its own instrumentation.
+func dialCluster(ctx context.Context, addrs []string, password string, opts ...Option) (*redis.ClusterClient, error) {
 	c := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:    addrs,
 		Password: password,
@@ -69,7 +81,7 @@ func ConnectCluster(ctx context.Context, addrs []string, password string, opts .
 		return nil, fmt.Errorf("valkey cluster connect: %w", err)
 	}
 	slog.Info("connected to Valkey cluster", "addrs", addrs)
-	return &clusterClient{c: c}, nil
+	return c, nil
 }
 
 // instrumentCluster attaches o11y/redis tracing+metrics hooks when observability is configured.

@@ -69,15 +69,11 @@ func run() error {
 	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency, and leaves
 	// session validation reading Mongo on every bot request (dev only; prod must
 	// supply). Connected before the stores so the session cache can use it.
-	var valkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			return fmt.Errorf("connect valkey: %w", err)
-		}
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		return fmt.Errorf("connect valkey: %w", err)
+	}
+	if valkey != nil {
 		slog.Info("bot rate-limit + idempotency enabled",
 			"per_caller_per_min", cfg.BotRateLimitPerCallerPerMin,
 			"global_per_min", cfg.BotRateLimitGlobalPerMin,

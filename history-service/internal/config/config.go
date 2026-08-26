@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // WalkCeilingSkewHours is the clock-skew pad the reader adds above `now` when it
@@ -107,8 +108,7 @@ type Config struct {
 	// Valkey cluster fronting the shared subauthcache L2. Empty ValkeyAddrs
 	// disables the L2 tier (the L1 subscription cache falls straight through
 	// to Mongo, breaker-guarded).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 
 	// SubL2TTL is the shared Valkey L2 retention for subscription authz — the
 	// outage buffer. Long by design (default 90m) so an L2 hit carries the

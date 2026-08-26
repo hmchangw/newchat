@@ -45,14 +45,13 @@ type config struct {
 	// offloads the primary.
 	MongoReadPreference    string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
 	Pool                   mongoutil.PoolConfig
-	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
-	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
-	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
-	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
-	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
+	MaxWorkers             int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LargeRoomThreshold     int           `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
+	PushRecipientBatchSize int           `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
+	RoomMetaCacheSize      int           `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL       time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomMetaL2TTL          time.Duration `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
+	Valkey                 valkeyutil.Config
 	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
 	MongoBreakerFails      int                     `env:"MONGO_BREAKER_FAILS"       envDefault:"5"`
 	MongoBreakerCool       time.Duration           `env:"MONGO_BREAKER_COOLDOWN"    envDefault:"10s"`
@@ -82,8 +81,8 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	if len(cfg.ValkeyAddrs) == 0 {
-		slog.Error("VALKEY_ADDRS required")
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
 		os.Exit(1)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
@@ -131,10 +130,7 @@ func main() {
 	// preference. The other collections here tolerate replica lag and keep it.
 	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
@@ -379,7 +375,7 @@ func main() {
 		"site", cfg.SiteID,
 		"large_room_threshold", cfg.LargeRoomThreshold,
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
-		"valkey_addrs", cfg.ValkeyAddrs,
+		"valkey_addrs", cfg.Valkey.Addrs,
 		"presence_enabled", cfg.PresenceEnabled,
 		"badge_count_enabled", cfg.BadgeCountEnabled,
 		"user_settings_enabled", cfg.UserSettingsEnabled,

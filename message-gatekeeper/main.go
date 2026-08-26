@@ -35,17 +35,16 @@ type config struct {
 	MongoUsername      string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword      string `env:"MONGO_PASSWORD"  envDefault:""`
 	Pool               mongoutil.PoolConfig
-	MaxWorkers         int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	LargeRoomThreshold int                     `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
-	MaxAttachments     int                     `env:"MAX_ATTACHMENTS"      envDefault:"1"`
-	MaxAttachmentBytes int                     `env:"MAX_ATTACHMENT_BYTES" envDefault:"8192"`
-	ChatBaseURL        string                  `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
-	SubCacheSize       int                     `env:"GATEKEEPER_SUB_CACHE_SIZE"  envDefault:"100000"`
-	SubCacheTTL        time.Duration           `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
-	RoomMetaCacheSize  int                     `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
-	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
-	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"               envSeparator:","`
-	ValkeyPassword     string                  `env:"VALKEY_PASSWORD"            envDefault:""`
+	MaxWorkers         int           `env:"MAX_WORKERS"     envDefault:"100"`
+	LargeRoomThreshold int           `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
+	MaxAttachments     int           `env:"MAX_ATTACHMENTS"      envDefault:"1"`
+	MaxAttachmentBytes int           `env:"MAX_ATTACHMENT_BYTES" envDefault:"8192"`
+	ChatBaseURL        string        `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
+	SubCacheSize       int           `env:"GATEKEEPER_SUB_CACHE_SIZE"  envDefault:"100000"`
+	SubCacheTTL        time.Duration `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
+	RoomMetaCacheSize  int           `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
+	RoomMetaCacheTTL   time.Duration `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
+	Valkey             valkeyutil.Config
 	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"90m"`
 	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
 	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
@@ -116,16 +115,12 @@ func main() {
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 
-	var valkeyClient valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2TTL, "user_ttl", cfg.UserL2TTL)
 	}
 

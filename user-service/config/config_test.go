@@ -276,7 +276,7 @@ func TestLoad_ValkeyDisabledByDefault(t *testing.T) {
 	t.Setenv("SITE_ID", "site-a")
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+	require.Empty(t, cfg.Valkey.Addrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
 }
 
 func TestLoad_ValkeyAddrsParsed(t *testing.T) {
@@ -286,7 +286,7 @@ func TestLoad_ValkeyAddrsParsed(t *testing.T) {
 	t.Setenv("VALKEY_ADDRS", "node-1:6379,node-2:6379")
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
+	require.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.Valkey.Addrs)
 }
 
 func TestLoad_BadgeDefaults(t *testing.T) {

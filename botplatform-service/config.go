@@ -5,6 +5,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -36,8 +37,7 @@ type config struct {
 	NatsCredsFile string `env:"NATS_CREDS_FILE"`
 
 	// ValkeyAddrs seeds the Valkey cluster backing rate-limit + idempotency; empty disables both.
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD"`
+	Valkey valkeyutil.Config
 
 	// BotRateLimitPerCallerPerMin caps requests per bot per 60s window; 0 disables per-caller.
 	BotRateLimitPerCallerPerMin int `env:"BOT_RATE_LIMIT_PER_CALLER_PER_MIN" envDefault:"600"`

@@ -10,10 +10,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -59,8 +57,7 @@ type config struct {
 	// hooks and busts become no-ops, and the subauthcache TTL reconciles). A
 	// connect failure logs and continues rather than exiting — both are
 	// optional cache tiers, not hard dependencies.
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
 	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
@@ -842,25 +839,12 @@ func main() {
 	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
 	var subValkey valkeyutil.Client
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap adds tracing+metrics in place, mirroring
-		// pkg/valkeyutil's instrumentCluster.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
 		// The same connection backs best-effort subauthcache L2 invalidation
 		// after a federated role_updated/member_removed write. One pool serves

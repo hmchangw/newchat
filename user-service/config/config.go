@@ -7,6 +7,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
@@ -111,8 +112,7 @@ type Config struct {
 	// ValkeyAddrs seeds the Valkey cluster backing the thread-unread badge
 	// accelerator (pkg/badgecache); empty disables it (Phase A deploys need no
 	// Valkey — badge.count.batch falls back to computing counts on the fly).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long an account's badge unread-room set survives
 	// without a BumpBatch/Seed/Reseed refresh. Keep identical across the badge
 	// cache's writers (user-service, room-service, inbox-worker). Must be >= 1s

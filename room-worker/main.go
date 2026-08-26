@@ -78,8 +78,7 @@ type config struct {
 
 	// Valkey backs best-effort room-meta L2 cache invalidation. Optional: when
 	// VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 
 	// Atrest/Vault drive eager at-rest DEK provisioning for synchronously-created
 	// DM rooms. When Atrest.Enabled is false the DEK is created lazily by message-worker.
@@ -169,16 +168,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	var metaValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)
-			os.Exit(1)
-		}
+	metaValkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)
+		os.Exit(1)
+	}
+	if metaValkey != nil {
 		slog.Info("room-meta L2 invalidation enabled")
 	}
 

@@ -40,8 +40,7 @@ type config struct {
 
 	// Valkey backs best-effort subauthcache L2 invalidation on member removal.
 	// Optional: when VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 
 	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
 	// handlers — kept at this service's historical 200 default (below the fleet
@@ -115,18 +114,9 @@ func run() error {
 	// and continues (nil client, bust becomes a no-op reconciled by the L2
 	// TTL) rather than exiting — this is an optional cache tier, not a hard
 	// startup dependency.
-	var subValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		subValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			slog.Error("valkey connect (subauth L2 invalidation) failed, continuing without it", "error", err)
-			subValkey = nil
-		} else {
-			slog.Info("subauth L2 invalidation enabled")
-		}
+	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2 invalidation", valkeyutil.Instrumented(sdk))
+	if subValkey != nil {
+		slog.Info("subauth L2 invalidation enabled")
 	}
 
 	peers := parsePeers(cfg.AllSiteIDs, cfg.SiteID)

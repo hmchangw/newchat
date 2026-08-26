@@ -52,14 +52,13 @@ type config struct {
 	MongoUsername      string `env:"MONGO_USERNAME"       envDefault:""`
 	MongoPassword      string `env:"MONGO_PASSWORD"       envDefault:""`
 	Pool               mongoutil.PoolConfig
-	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
-	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
-	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
-	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
-	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
-	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword     string                  `env:"VALKEY_PASSWORD" envDefault:""`
+	UserCacheSize      int           `env:"USER_CACHE_SIZE"      envDefault:"10000"`
+	UserCacheTTL       time.Duration `env:"USER_CACHE_TTL"       envDefault:"5m"`
+	UserL2TTL          time.Duration `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
+	HealthAddr         string        `env:"HEALTH_ADDR"          envDefault:":8081"`
+	PProfEnabled       bool          `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr        string        `env:"METRICS_ADDR"         envDefault:":9090"`
+	Valkey             valkeyutil.Config
 	DEKL2TTL           time.Duration           `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
 	MongoBreakerFails  int                     `env:"MONGO_BREAKER_FAILS"         envDefault:"5"`
 	MongoBreakerCool   time.Duration           `env:"MONGO_BREAKER_COOLDOWN"      envDefault:"10s"`
@@ -150,17 +149,8 @@ func main() {
 	// fail-open cache tier and stop every write — strictly worse than the outage
 	// the L2 exists to survive. A nil client is the documented "L2 off" contract
 	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
-	var valkeyClient valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		client, connErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if connErr != nil {
-			slog.Error("valkey connect failed; the DEK and user L2 tiers are disabled", "error", connErr)
-		} else {
-			valkeyClient = client
-		}
+	valkeyClient := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "DEK and user L2", valkeyutil.Instrumented(sdk))
+	if cfg.Valkey.Enabled() {
 		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2TTL > 0, "dek_ttl", cfg.DEKL2TTL)
 	}
 

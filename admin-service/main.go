@@ -105,16 +105,10 @@ func run() error {
 	// optional tier, not a hard startup dependency — same shape as
 	// bot-room-service and inbox-worker. Without it a revoked token keeps
 	// authenticating from cache until its refresh window elapses.
-	if len(cfg.ValkeyAddrs) > 0 {
-		vk, verr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk))
-		if verr != nil {
-			slog.Error("valkey connect (session revocation) failed, continuing without it", "error", verr)
-		} else {
-			h.valkey = vk
-			defer func() { _ = vk.Close() }()
-			slog.Info("session revocation invalidation enabled")
-		}
+	if vk := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "session revocation", valkeyutil.Instrumented(sdk)); vk != nil {
+		h.valkey = vk
+		defer func() { _ = vk.Close() }()
+		slog.Info("session revocation invalidation enabled")
 	}
 
 	gin.SetMode(gin.ReleaseMode)

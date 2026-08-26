@@ -163,21 +163,12 @@ func main() {
 	// Shared subauthcache L2 (Valkey). nil disables the L2 tier — the base
 	// source's read-through then falls straight through to the breaker-guarded
 	// Mongo loader (still fronted, regardless of the L1 cache).
-	var subValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		// Log and continue rather than exit: both tiers this client feeds (the
-		// subscription authz L2 and the at-rest DEK L2) are fail-open caches that
-		// degrade to Mongo. Exiting here would turn an optional accelerator into a
-		// hard startup dependency and take history reads down with Valkey.
-		client, connErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if connErr != nil {
-			slog.Error("valkey connect (subauth L2) failed; L2 caches disabled", "error", connErr)
-		} else {
-			subValkey = client
-		}
+	// ConnectOptional rather than a fatal: both tiers this client feeds (the
+	// subscription authz L2 and the at-rest DEK L2) are fail-open caches that
+	// degrade to Mongo. Exiting here would turn an optional accelerator into a
+	// hard startup dependency and take history reads down with Valkey.
+	subValkey := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "subauth L2", valkeyutil.Instrumented(sdk))
+	if cfg.Valkey.Enabled() {
 		slog.Info("subauth L2 cache configured", "enabled", subValkey != nil && cfg.SubL2TTL > 0, "ttl", cfg.SubL2TTL)
 	}
 

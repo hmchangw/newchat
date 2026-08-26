@@ -16,17 +16,13 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
 type NATSConfig struct {
 	URL       string `env:"URL,required"`
 	CredsFile string `env:"CREDS_FILE" envDefault:""`
-}
-
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
 }
 
 type MongoConfig struct {
@@ -49,11 +45,11 @@ type PresenceConfig struct {
 }
 
 type Config struct {
-	SiteID        string         `env:"SITE_ID,required"`
-	UserCacheSize int            `env:"USER_CACHE_SIZE" envDefault:"10000"`
-	UserCacheTTL  time.Duration  `env:"USER_CACHE_TTL"  envDefault:"5m"`
-	NATS          NATSConfig     `envPrefix:"NATS_"`
-	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID        string        `env:"SITE_ID,required"`
+	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
+	NATS          NATSConfig    `envPrefix:"NATS_"`
+	Valkey        valkeyutil.Config
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
 	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
 
@@ -73,6 +69,12 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	// Presence state lives entirely in Valkey, so this service cannot start
+	// without one.
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
 		os.Exit(1)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
