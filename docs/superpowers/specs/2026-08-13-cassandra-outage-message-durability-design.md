@@ -269,6 +269,23 @@ backwards in the situation this design exists for. Only time actually spent retr
 counts. A message whose metadata cannot be read has no delivery count and is therefore
 retried, never dropped.
 
+**Known limitation: the count is not request-class-specific** ([#383](https://github.com/hmchangw/newchat/issues/383), deferred).
+`NumDelivered` counts every delivery for any reason, and Cassandra is only one of several
+things that can fail a message — a Mongo lookup, a thread parent that has not landed, a
+downstream publish. So a message pre-aged by unrelated failures arrives at its *first*
+request-class error already judged to have spent its hour, and is dropped with zero
+retries of that error — the same "precisely backwards" outcome the stream-timestamp
+measure was rejected for, reached by a narrower road.
+
+It needs two problems overlapping to matter: something that pre-ages the message *and* a
+transient site-wide `Invalid`. Where `Invalid` comes from a genuinely bad row the drop is
+correct anyway, and on a healthy site nothing approaches 11 deliveries, so the window
+behaves as designed. The case that bites is a migration run against a draining backlog
+after an outage. **Until #383 lands, set `HISTORY_DROP_ENABLED=false` before any schema
+migration that follows an incident** — that removes the drop entirely and makes the class
+unreachable. `message_worker_history_dropped_total{code="invalid"}` is what shows it
+firing.
+
 **The degraded marker is not consulted here.** An earlier revision selected the retry
 policy by site health and had to be reverted: a history failure re-degrades the site, so
 a message's own failure destroyed the evidence needed to condemn it. The error class
