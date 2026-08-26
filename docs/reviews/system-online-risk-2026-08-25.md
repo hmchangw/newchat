@@ -118,3 +118,30 @@ The read path is genuinely well engineered — bucketed partitions with TWCS ali
 4. **medium** — monitor TWCS efficacy under mutation churn (SSTablesPerRead p99 on `messages_by_room`); if old-window rewrites are material, serve `tcount`/`thread_last_msg_at` from `messages_by_id` only.
 5. **medium** — write the per-room msgs/day ceiling the 360h window assumes into the schema doc; consider a smaller window at next major migration for known-hot rooms.
 6. **low** — revisit explicit-null binds on the encrypted insert path (a read-side `IS NOT NULL` branch already exists).
+
+---
+
+## 4. Stability & resilience (score 4/5)
+
+Foundations are disciplined: `pkg/jsretry` makes bare `Nak()` impossible (zero violations in production code; `time.Sleep` only in tests/tools), server-side BackOff is derived and clamped in one place (`pkg/stream/consumer.go`), `jobguard` gives panic containment with poison-drop semantics, NATS connects with `MaxReconnects(-1)`, request/reply services get admission control + handler timeouts, all consumers use queue groups / shared durables, caches are LRU+TTL or Valkey-TTL bounded, `memlimit` prevents OOMKill spirals, and every worker's shutdown ordering is correct (`iter.Stop` → `wg.Wait` → `Drain` → DBs, 25s < 30s grace).
+
+### Findings
+
+- **high** — message-gatekeeper has **no panic recovery**. `message-gatekeeper/main.go:195-202`: `natsmetrics.Consume` (`pkg/natsmetrics/loop.go:39`) has no `recover`, and unlike broadcast-worker (`guardedProcessor`), message-worker, notification-worker, room-worker and outbox-worker, the processor is not wrapped in `jobguard.Run`. A handler panic on a client-supplied poison message on the ingest path crashes the pod; JetStream redelivers → up to `MaxDeliver=6` crash-restarts per message; a burst becomes a crash storm.
+- **medium** — notification-worker shutdown race. `notification-worker/main.go:378-399` vs `:489-505`: the invalidation pump goroutine is uncounted/unawaited; `invalIter.Stop()` is immediately followed by `close(invalCh)`, so an in-flight send at `:392` panics ("send on closed channel") during shutdown.
+- **medium** — permanent head-of-line block on the ordered federation lane. `outbox-worker/handler.go:59` + `main.go:241-251`: on the `MaxDeliver=-1`, `MaxAckPending=1` lane only malformed subject/envelope is Permanent; a forward that can *never* succeed for other reasons (envelope over destination `max_msg_size`, deleted destination INBOX stream) is Nak'd forever and blocks all membership/rename federation to that peer, with no escape hatch or dedicated alert.
+- **medium** — no Mongo deadlines in workers. `pkg/mongoutil` sets no client-level `Timeout`, and JetStream worker handlers (inbox-worker store methods `main.go:83-731`, message-worker) run Mongo ops on undeadlined consumer contexts; a TCP black hole pins up to `MaxWorkers` goroutines and the ack-pending budget until kernel timeouts.
+- **medium** — inbox-worker ordering holds only within one instance. `inbox-worker/main.go:857-903`: the membership FIFO is a *shared* durable pull consumer; ≥2 replicas silently reintroduce the add/remove resurrection race the FIFO transport was built to prevent, and nothing enforces single-replica (one replica is also the per-site federation-apply SPOF, mitigated by JetStream buffering).
+- **medium/low** — no DLQ anywhere: `MaxDeliver=6` × `jsretry.DefaultBackoff` ≈ 13-minute retry budget; an infra outage longer than that permanently drops messages (for message-worker that is lost Cassandra history) with only terminal metrics.
+- **low** — `search-sync-worker/main.go:448-461`: `Fetch` errors are silent and unbackoffed; during a NATS outage each collection loop fails fast and spins hot.
+- **low** — `push-notification-service/main.go:70-90`: pump goroutine not counted in the WaitGroup (message between `Next()` and `wg.Add(1)` can race `nc.Drain` — the exact race outbox-worker's `drainPool` comment fixes) and no `jobguard` around `HandleJetStreamMsg` (panic-safe today, fragile once real APNs/FCM replaces `LogDispatcher`).
+- **nitpick** — `notification-worker/main.go:387,397`: `_ = msg.Ack()` discarded without the CLAUDE.md-required comment.
+
+### Recommendations
+
+1. **high** — wrap message-gatekeeper's processor in `jobguard.Run` (mirror broadcast-worker's `guardedProcessor`).
+2. **medium** — count the notification-worker inval pump in a WaitGroup and await it between `invalIter.Stop()` and `close(invalCh)` (or let the pump own the close).
+3. **medium** — in outbox-worker, classify never-succeeding publish errors (max-payload, stream-not-found) as Permanent-with-page; alert on ordered-lane oldest-ack-pending age.
+4. **medium** — set a client-wide Mongo `SetTimeout` (or per-op deadlines in worker handlers).
+5. **medium** — enforce inbox-worker single-replica at deploy level, or add the watermark guard before it is ever scaled out.
+6. **low** — log + jitter-backoff the search-sync `Fetch` error path; add a park/DLQ stream for MaxDeliver-exhausted canonical messages so >13-minute outages degrade to replayable backlog instead of loss.
