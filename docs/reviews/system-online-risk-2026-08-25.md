@@ -172,3 +172,36 @@ The OUTBOX design (per-destination FIFO + concurrent lanes, `MaxDeliver=-1`, ded
 4. **high** — detect `ALL_SITE_IDS` drift: reject/alert on `outbox.Publish` to a destination outside the configured peer set, or derive producer and consumer peer sets from one source.
 5. **medium** — enforce single-replica membership apply (or the Appendix-A watermark guard) before inbox-worker is scaled out.
 6. **medium** — pre-plan hashed per-room FIFO lanes for churn bursts; alert on ordered-lane consumer lag while the peer is healthy.
+
+---
+
+## 6. Edge services & operational configuration (score 4/5)
+
+Well-hardened edge: every Gin server sets Read/Write timeouts, Resty defaults to 30s, `natsrouter.GuardConfig` (MAX_CONCURRENCY=256 + 10s request timeout) is adopted by room/history/search/media/user services, presence is batch-capped (`BATCH_MAX=100`, 3s peer timeout, change-only publishes), pagination knobs exist (search `MAX_DOC_COUNTS`, history bucket caps, `ROOM_MEMBERS_LIMIT`), `BOOTSTRAP_STREAMS` defaults false, pool configs are validated, healthz/readyz everywhere. Residual risk concentrates in the auth front door and unvalidated cross-service invariants.
+
+### Findings
+
+- **high** — auth front door has no admission control. `auth-service/routes.go:12`, `main.go:108-126`: POST `/api/v1/auth` has no concurrency cap and no rate limit — `ginutil.MaxConcurrency` (429-shedding) exists and user-service HTTP uses it, auth-service does not. A fleet-wide reconnect storm (a NATS restart re-mints every JWT) against a slow OIDC IdP (10s timeout, `pkg/oidc/oidc.go:64`) piles unbounded in-flight goroutines/IdP calls on the one service every client needs to get online.
+- **high** (mismatch #1) — `MESSAGE_BUCKET_HOURS` parsed independently in `message-worker/main.go:46`, `history-service/internal/config/config.go:53`, `bot-message-worker/main.go:37`: drift sends writers and readers to different Cassandra partitions — messages silently disappear from history (see §3).
+- **high** (mismatch #2) — `ALL_SITE_IDS` divergence between producers (`user-service/config/config.go:66`, `broadcast-worker/main.go:49`, `bot-room-service/main.go:29`, `admin-service/config.go:48`) and `outbox-worker/main.go:38`: a peer in a producer's list but not outbox-worker's gets events published into a lane with no consumer — federation to that site silently stops (see §5).
+- **medium** (mismatch #3) — `ROOM_KEY_RETIRED_TTL` in 4 services (`room-service/main.go:60`, `room-worker/main.go:70`, `bot-room-service/main.go:39`, `broadcast-worker/main.go:71`): only broadcast-worker enforces the 2×cache rule (`main.go:303`); drift among the three *writers* is unvalidated — a short-configured writer expires key versions peers still resolve, permanently failing `key.get` for messages already on the wire. Same convention-only class: `BADGE_CACHE_TTL`, `ROOM_LOCALITY_GRACE` (`room-service/main.go:103-110`), `ADMIN_ACCT_PREFIX`.
+- **medium** — `translation-service/handler.go:26-45`: only an empty-text check before calling the external (paid/slow) backend; no max text length, no per-account rate limit — one client can monopolize the global `MAX_CONCURRENCY=100` budget with 1MB payloads.
+- **medium** — observability gap: `pkg/natsmetrics/metrics.go:216` counts redeliveries/outcomes but no consumer-lag or stream-depth gauge exists anywhere; outbox-worker imports no natsmetrics at all — a down-peer backlog or a consumer-less OUTBOX lane is invisible unless ops independently scrapes NATS server metrics (assumed, not evidenced in-repo).
+- **low** — `auth-service/handler.go:329`: JWT expiry jitter is ±, so a token can live 1.1×`NATS_JWT_EXPIRY` (~2.2h); with no revocation path an offboarded user keeps NATS access that long.
+- **low** — `TLS_SKIP_VERIFY` / `TEAMS_TLS_INSECURE` single env vars (`auth-service/main.go:36`, `search-service/main.go:36`, `room-service/main.go:78`) disable TLS verification in prod with only a comment as a guard.
+- **nitpick** — `upload-service/main.go:61,186`: `FILE_UPLOAD_MAX_FILE_SIZE=-1` (unlimited) is accepted; combined with a 5m WriteTimeout it's an operator footgun.
+
+### Top 3 silent-incident config mismatches
+
+1. `MESSAGE_BUCKET_HOURS` drift → cross-partition write/read split, silent history loss.
+2. `ALL_SITE_IDS` producer/outbox-worker divergence → consumer-less OUTBOX lanes, silent federation stall.
+3. `ROOM_KEY_RETIRED_TTL` writer drift → premature key-version expiry, permanent `key.get` failures.
+
+### Recommendations
+
+1. **high** — add `ginutil.MaxConcurrency` + a per-IP/account limiter to `/api/v1/auth`; consider a short-TTL validation cache to survive IdP brownouts.
+2. **high** — export a per-destination `NumPending` gauge from outbox-worker and alert when OUTBOX contains destination subjects with no consumer lane (detects mismatch #2 at runtime).
+3. **high** — Cassandra marker-row guard for the bucket window (see §3 rec 3).
+4. **medium** — generalize broadcast-worker's fail-fast: writers publish their `ROOM_KEY_RETIRED_TTL` (and `BADGE_CACHE_TTL`, `ROOM_LOCALITY_GRACE`) to a well-known Mongo doc and cross-check at startup.
+5. **medium** — enforce max text length + per-account rate limit in translation-service; adopt consumer-lag/pending gauges in workers or document the NATS exporter as a hard prod dependency.
+6. **low** — make JWT jitter subtract-only, or document that effective max lifetime exceeds `NATS_JWT_EXPIRY`.
