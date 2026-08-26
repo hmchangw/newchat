@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // buildMembers builds a deterministic slice of size n for benchmark fixtures.
@@ -23,7 +24,7 @@ func BenchmarkValkeyCache_Get(b *testing.B) {
 	for _, size := range []int{10, 100, 1000, 10000} {
 		b.Run(strconv.Itoa(size), func(b *testing.B) {
 			ctx := context.Background()
-			client := newFakeClient()
+			client := valkeyfake.New()
 			cache := roomsubcache.NewValkeyCache(client)
 			if err := cache.Set(ctx, "room", buildMembers(size), time.Minute); err != nil {
 				b.Fatal(err)
@@ -44,7 +45,7 @@ func BenchmarkValkeyCache_Set(b *testing.B) {
 	for _, size := range []int{10, 100, 1000, 10000} {
 		b.Run(strconv.Itoa(size), func(b *testing.B) {
 			ctx := context.Background()
-			client := newFakeClient()
+			client := valkeyfake.New()
 			cache := roomsubcache.NewValkeyCache(client)
 			members := buildMembers(size)
 

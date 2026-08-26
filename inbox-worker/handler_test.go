@@ -17,37 +17,8 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
-
-// fakeBustClient is a minimal valkeyutil.Client that records Del calls, for
-// asserting subauthcache L2 invalidation fires. SetNX/IncrEx panic on use —
-// bust helpers never call them.
-type fakeBustClient struct {
-	dels     []string
-	delCalls int // count of Del *calls*, not keys — asserts round-trip batching
-	delErr   error
-}
-
-func (f *fakeBustClient) Get(context.Context, string) (string, error) { return "", nil }
-func (f *fakeBustClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
-	f.delCalls++
-	f.dels = append(f.dels, keys...)
-	return f.delErr
-}
-func (f *fakeBustClient) Expire(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func (f *fakeBustClient) Close() error { return nil }
-func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	panic("fakeBustClient.SetNX not implemented")
-}
-func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	panic("fakeBustClient.IncrEx not implemented")
-}
 
 // --- In-memory InboxStore stub ---
 
@@ -1277,7 +1248,7 @@ func TestHandleEvent_RoomSync_InvalidPayload(t *testing.T) {
 // its Roles rewritten, so this site's own subauthcache L2 entry must die too.
 func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
 	store := &stubInboxStore{}
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store)
 	h.valkey = fake
 
@@ -1297,7 +1268,7 @@ func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
 	evtData, _ := json.Marshal(evt)
 	require.NoError(t, h.HandleEvent(context.Background(), evtData))
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("room-1", "bob")})
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("room-1", "bob")})
 }
 
 // TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount covers the
@@ -1307,7 +1278,7 @@ func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
 // federated rooms.
 func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
 	store := &stubInboxStore{}
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store)
 	h.valkey = fake
 
@@ -1327,8 +1298,8 @@ func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
 
 	require.NoError(t, h.HandleEvent(context.Background(), data))
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")})
-	assert.Equal(t, 1, fake.delCalls, "must be a single batched Del round trip for all removed accounts")
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")})
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip for all removed accounts")
 }
 
 // TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber
@@ -1339,7 +1310,7 @@ func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
 // entry busted on this (federated-destination) site too.
 func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *testing.T) {
 	store := &stubInboxStore{}
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store)
 	h.valkey = fake
 
@@ -1363,11 +1334,11 @@ func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *
 
 	require.NoError(t, h.HandleEvent(context.Background(), evt))
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
 		"every local subscriber of the restricted room must be busted")
-	assert.NotContains(t, fake.dels, subauthcache.SubKey("other-room", "unrelated"),
+	assert.NotContains(t, fake.DeletedKeys(), subauthcache.SubKey("other-room", "unrelated"),
 		"a subscriber of a different room must not be busted")
-	assert.Equal(t, 1, fake.delCalls, "must be a single batched Del round trip")
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip")
 }
 
 func TestHandleEvent_RoleUpdated(t *testing.T) {
@@ -3043,19 +3014,6 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
-}
-
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
 }
 
 // ApplySubscriptionRestriction can bulk-rewrite Roles for every subscriber —

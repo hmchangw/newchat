@@ -5,37 +5,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/sessioncache"
-	"github.com/hmchangw/chat/pkg/valkeyutil"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
-// bustRecorder records the keys a revoke deletes from the session cache.
-type bustRecorder struct {
-	valkeyutil.Client
-	dels []string
-}
-
-func (b *bustRecorder) Del(_ context.Context, keys ...string) error {
-	b.dels = append(b.dels, keys...)
-	return nil
-}
-
-func (b *bustRecorder) Expire(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func newRevokeHandler(t *testing.T, sessions *fakeSessionStore) (*Handler, *bustRecorder) {
+func newRevokeHandler(t *testing.T, sessions *fakeSessionStore) (*Handler, *valkeyfake.Client) {
 	t.Helper()
 	store := NewMockAdminStore(gomock.NewController(t))
 	store.EXPECT().AppendAudit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 	h := newHandler(store, sessions, Config{SiteID: "site-A"}, nil, nil)
-	bust := &bustRecorder{}
+	bust := valkeyfake.New()
 	h.valkey = bust
 	return h, bust
 }
@@ -60,7 +44,7 @@ func TestRevokeAllSessions_BustsEveryRevokedHash(t *testing.T) {
 	// Subset, not equality: a bust also clears the pre-Box generation, which is
 	// sessioncache's own bookkeeping (pinned by its TestBust_DropsTheEntry) and
 	// will be deleted once no such binary can run.
-	assert.Subset(t, bust.dels, []string{sessioncache.Key("hash-a"), sessioncache.Key("hash-b")},
+	assert.Subset(t, bust.DeletedKeys(), []string{sessioncache.Key("hash-a"), sessioncache.Key("hash-b")},
 		"every revoked session must be evicted from the cache that authorizes it")
 }
 
@@ -76,7 +60,7 @@ func TestRevokeSession_BustsTheSessionHash(t *testing.T) {
 	setupSessionRouter(h).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/sessions/hash-a?account=alice", nil))
 	require.Equal(t, http.StatusOK, w.Code)
 
-	assert.Subset(t, bust.dels, []string{sessioncache.Key("hash-a")},
+	assert.Subset(t, bust.DeletedKeys(), []string{sessioncache.Key("hash-a")},
 		"the path parameter IS the token hash, so it is the cache key")
 }
 

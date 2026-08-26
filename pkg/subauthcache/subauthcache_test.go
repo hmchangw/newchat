@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -41,72 +42,6 @@ func TestFromSubscription(t *testing.T) {
 		assert.Equal(t, since.UnixMilli(), *got.HistorySharedSince)
 	})
 }
-
-// fakeValkey is an in-memory valkeyutil.Client for tests.
-type fakeValkey struct {
-	store      map[string]string
-	getErr     error
-	setErr     error
-	delErr     error
-	expireErr  error
-	getHits    int
-	setHits    int
-	delHits    int // count of Del *calls*, not keys — asserts round-trip batching
-	expireHits int
-	onDel      func(ctx context.Context) // observes the context Del actually runs under
-}
-
-func newFakeValkey() *fakeValkey { return &fakeValkey{store: map[string]string{}} }
-
-func (f *fakeValkey) Get(_ context.Context, key string) (string, error) {
-	f.getHits++
-	if f.getErr != nil {
-		return "", f.getErr
-	}
-	v, ok := f.store[key]
-	if !ok {
-		return "", valkeyutil.ErrCacheMiss
-	}
-	return v, nil
-}
-func (f *fakeValkey) Set(_ context.Context, key, value string, _ time.Duration) error {
-	f.setHits++
-	if f.setErr != nil {
-		return f.setErr
-	}
-	f.store[key] = value
-	return nil
-}
-func (f *fakeValkey) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	return false, nil
-}
-func (f *fakeValkey) IncrEx(context.Context, string, time.Duration) (int64, error) { return 0, nil }
-func (f *fakeValkey) Del(ctx context.Context, keys ...string) error {
-	f.delHits++
-	if f.onDel != nil {
-		f.onDel(ctx)
-	}
-	if f.delErr != nil {
-		return f.delErr
-	}
-	for _, k := range keys {
-		delete(f.store, k)
-	}
-	return nil
-}
-
-// Expire mirrors Valkey: it re-arms an existing key's deadline and reports
-// whether the key was there, but never creates one.
-func (f *fakeValkey) Expire(_ context.Context, key string, _ time.Duration) (bool, error) {
-	f.expireHits++
-	if f.expireErr != nil {
-		return false, f.expireErr
-	}
-	_, ok := f.store[key]
-	return ok, nil
-}
-
-func (f *fakeValkey) Close() error { return nil }
 
 // spyRecorder counts hit/miss/error.
 type spyRecorder struct{ hit, miss, err int }
@@ -148,7 +83,7 @@ func TestSubKey(t *testing.T) {
 }
 
 func TestReadThrough_L2Hit_SkipsLoader(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	rec := &spyRecorder{}
 	// pre-populate L2
 	seed := SubAuth{ID: "u1", Account: "alice", Roles: []model.Role{model.RoleOwner}}
@@ -182,8 +117,8 @@ func TestReadThrough_ZeroValueL2Entry_TreatedAsMiss(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fv := newFakeValkey()
-			fv.store[SubKey("room1", "alice")] = tt.stored
+			fv := valkeyfake.New()
+			fv.Seed(SubKey("room1", "alice"), tt.stored, time.Minute)
 			rec := &spyRecorder{}
 
 			loads := 0
@@ -202,7 +137,7 @@ func TestReadThrough_ZeroValueL2Entry_TreatedAsMiss(t *testing.T) {
 }
 
 func TestReadThrough_L2Miss_LoadsAndPopulates(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	rec := &spyRecorder{}
 	loads := 0
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
@@ -213,12 +148,12 @@ func TestReadThrough_L2Miss_LoadsAndPopulates(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, subscribed)
 	assert.Equal(t, 1, loads)
-	assert.Equal(t, 1, fv.setHits, "subscribed result must populate L2")
+	assert.Equal(t, 1, fv.Calls().Set, "subscribed result must populate L2")
 	assert.Equal(t, 1, rec.miss)
 }
 
 func TestReadThrough_NotSubscribed_NotCached(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	rec := &spyRecorder{}
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{}, false, nil // confirmed non-subscriber
@@ -226,11 +161,11 @@ func TestReadThrough_NotSubscribed_NotCached(t *testing.T) {
 	_, subscribed, err := newTestTier(fv, time.Hour, rec, loader).Resolve(context.Background(), "room1", "bob")
 	require.NoError(t, err)
 	assert.False(t, subscribed)
-	assert.Equal(t, 0, fv.setHits, "negative result must not be cached")
+	assert.Equal(t, 0, fv.Calls().Set, "negative result must not be cached")
 }
 
 func TestReadThrough_LoaderError_Propagates_NoCache(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	rec := &spyRecorder{}
 	sentinel := errors.New("mongo down / breaker open")
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
@@ -238,7 +173,7 @@ func TestReadThrough_LoaderError_Propagates_NoCache(t *testing.T) {
 	}
 	_, _, err := newTestTier(fv, time.Hour, rec, loader).Resolve(context.Background(), "room1", "alice")
 	require.ErrorIs(t, err, sentinel)
-	assert.Equal(t, 0, fv.setHits)
+	assert.Equal(t, 0, fv.Calls().Set)
 }
 
 func TestReadThrough_NilClient_FailsOpenToLoader(t *testing.T) {
@@ -253,8 +188,8 @@ func TestReadThrough_NilClient_FailsOpenToLoader(t *testing.T) {
 }
 
 func TestReadThrough_ValkeySetError_SwallowedReturnsLoaded(t *testing.T) {
-	fv := newFakeValkey()
-	fv.setErr = errors.New("valkey unreachable")
+	fv := valkeyfake.New()
+	fv.FailSet(errors.New("valkey unreachable"))
 	rec := &spyRecorder{}
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1", Account: "alice"}, true, nil
@@ -263,7 +198,7 @@ func TestReadThrough_ValkeySetError_SwallowedReturnsLoaded(t *testing.T) {
 	require.NoError(t, err, "a Valkey Set failure must be swallowed, not fail the call")
 	assert.True(t, subscribed)
 	assert.Equal(t, "u1", got.ID)
-	assert.Equal(t, 1, fv.setHits, "populate must have been attempted")
+	assert.Equal(t, 1, fv.Calls().Set, "populate must have been attempted")
 }
 
 func TestReadThrough_NonPositiveTTL_BypassesL2(t *testing.T) {
@@ -276,7 +211,7 @@ func TestReadThrough_NonPositiveTTL_BypassesL2(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fv := newFakeValkey()
+			fv := valkeyfake.New()
 			rec := &spyRecorder{}
 			loader := func(context.Context, string, string) (SubAuth, bool, error) {
 				return SubAuth{ID: "u1", Account: "alice"}, true, nil
@@ -285,14 +220,14 @@ func TestReadThrough_NonPositiveTTL_BypassesL2(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, subscribed)
 			assert.Equal(t, "u1", got.ID)
-			assert.Equal(t, 0, fv.getHits, "non-positive ttl must skip the L2 read")
-			assert.Equal(t, 0, fv.setHits, "non-positive ttl must skip the L2 populate")
+			assert.Equal(t, 0, fv.Calls().Get, "non-positive ttl must skip the L2 read")
+			assert.Equal(t, 0, fv.Calls().Set, "non-positive ttl must skip the L2 populate")
 		})
 	}
 }
 
 func TestReadThrough_NilRecorder_DoesNotPanic(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1", Account: "alice"}, true, nil
 	}
@@ -306,10 +241,10 @@ func TestReadThrough_NilRecorder_DoesNotPanic(t *testing.T) {
 // --- BustSub tests ---
 
 func TestBustSub_DeletesTheKey(t *testing.T) {
-	fv := newFakeValkey()
-	fv.store[SubKey("room1", "alice")] = `{"id":"u1"}`
+	fv := valkeyfake.New()
+	fv.Seed(SubKey("room1", "alice"), `{"id":"u1"}`, time.Minute)
 	BustSub(context.Background(), fv, "room1", "alice")
-	_, ok := fv.store[SubKey("room1", "alice")]
+	ok := fv.Has(SubKey("room1", "alice"))
 	assert.False(t, ok, "BustSub must delete the L2 entry")
 }
 
@@ -318,15 +253,15 @@ func TestBustSub_NilClient_NoPanic(t *testing.T) {
 }
 
 func TestBustSub_ValkeyErrorSwallowed(t *testing.T) {
-	fv := newFakeValkey()
-	fv.store[SubKey("room1", "alice")] = `{"id":"u1"}`
-	fv.delErr = errors.New("valkey down")
+	fv := valkeyfake.New()
+	fv.Seed(SubKey("room1", "alice"), `{"id":"u1"}`, time.Minute)
+	fv.FailDel(errors.New("valkey down"))
 	assert.NotPanics(t, func() { BustSub(context.Background(), fv, "room1", "alice") })
 }
 
 func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
-	fv := newFakeValkey()
-	fv.getErr = errors.New("valkey unreachable")
+	fv := valkeyfake.New()
+	fv.FailGet(errors.New("valkey unreachable"))
 	rec := &spyRecorder{}
 	loader := func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1"}, true, nil
@@ -344,7 +279,7 @@ func TestReadThrough_ValkeyGetError_FailsOpenToLoader(t *testing.T) {
 // that was explicitly revoked and keeping it alive for a full TTL. Extending the
 // expiry of a key that no longer exists must be a no-op.
 func TestTier_SlideDoesNotResurrectABustedEntry(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1", Account: "alice"}, true, nil
 	})
@@ -353,7 +288,7 @@ func TestTier_SlideDoesNotResurrectABustedEntry(t *testing.T) {
 
 	// Stand in for a bust landing between the L2 read and the re-arm: the refresh
 	// fails, and by the time the slide runs the key is gone.
-	fv.onDel = nil
+	fv.OnDel(nil)
 	clock.Advance(pastRefresh)
 	tier.loader = func(context.Context, string, string) (SubAuth, bool, error) {
 		BustSub(context.Background(), fv, "room1", "alice")
@@ -362,20 +297,20 @@ func TestTier_SlideDoesNotResurrectABustedEntry(t *testing.T) {
 	_, _, err = tier.Resolve(context.Background(), "room1", "alice")
 	require.NoError(t, err)
 
-	_, ok := fv.store[SubKey("room1", "alice")]
+	ok := fv.Has(SubKey("room1", "alice"))
 	assert.False(t, ok, "the slide must not recreate a key that was busted")
 }
 
 // A failed re-arm is best-effort: the value was already served.
 func TestTier_SlideRearmFailureStillServes(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1", Account: "alice"}, true, nil
 	})
 	_, _, err := tier.Resolve(context.Background(), "room1", "alice") // warms
 	require.NoError(t, err)
 
-	fv.expireErr = errors.New("valkey expire failed")
+	fv.FailExpire(errors.New("valkey expire failed"))
 	clock.Advance(pastRefresh)
 	tier.loader = func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{}, false, errors.New("mongo down")
@@ -390,26 +325,26 @@ func TestTier_SlideRearmFailureStillServes(t *testing.T) {
 // --- BustSubs (batched) tests ---
 
 func TestBustSubs_SingleDelCallWithAllKeys(t *testing.T) {
-	fv := newFakeValkey()
-	fv.store[SubKey("room1", "alice")] = `{"id":"u1"}`
-	fv.store[SubKey("room1", "bob")] = `{"id":"u2"}`
-	fv.store[SubKey("room1", "carol")] = `{"id":"u3"}`
+	fv := valkeyfake.New()
+	fv.Seed(SubKey("room1", "alice"), `{"id":"u1"}`, time.Minute)
+	fv.Seed(SubKey("room1", "bob"), `{"id":"u2"}`, time.Minute)
+	fv.Seed(SubKey("room1", "carol"), `{"id":"u3"}`, time.Minute)
 
 	BustSubs(context.Background(), fv, "room1", []string{"alice", "bob", "carol"})
 
-	assert.Equal(t, 1, fv.delHits, "must be exactly one Del round trip for all accounts")
-	_, aliceLeft := fv.store[SubKey("room1", "alice")]
-	_, bobLeft := fv.store[SubKey("room1", "bob")]
-	_, carolLeft := fv.store[SubKey("room1", "carol")]
+	assert.Equal(t, 1, fv.Calls().Del, "must be exactly one Del round trip for all accounts")
+	aliceLeft := fv.Has(SubKey("room1", "alice"))
+	bobLeft := fv.Has(SubKey("room1", "bob"))
+	carolLeft := fv.Has(SubKey("room1", "carol"))
 	assert.False(t, aliceLeft)
 	assert.False(t, bobLeft)
 	assert.False(t, carolLeft)
 }
 
 func TestBustSubs_EmptySlice_NoOp(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	BustSubs(context.Background(), fv, "room1", nil)
-	assert.Equal(t, 0, fv.delHits, "an empty account list must not call Del at all")
+	assert.Equal(t, 0, fv.Calls().Del, "an empty account list must not call Del at all")
 }
 
 func TestBustSubs_NilClient_NoPanic(t *testing.T) {
@@ -420,11 +355,11 @@ func TestBustSubs_NilClient_NoPanic(t *testing.T) {
 // hung Valkey must never stall the write path that triggered the invalidation.
 // The Del must therefore see a bounded context even when handed an unbounded one.
 func TestBustSubs_AppliesTheTierDeadline(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	var gotDeadline bool
-	fv.onDel = func(ctx context.Context) {
+	fv.OnDel(func(ctx context.Context) {
 		_, gotDeadline = ctx.Deadline()
-	}
+	})
 
 	BustSubs(context.Background(), fv, "room1", []string{"alice"})
 
@@ -432,12 +367,12 @@ func TestBustSubs_AppliesTheTierDeadline(t *testing.T) {
 }
 
 func TestBustSubs_ValkeyErrorSwallowed(t *testing.T) {
-	fv := newFakeValkey()
-	fv.delErr = errors.New("valkey down")
+	fv := valkeyfake.New()
+	fv.FailDel(errors.New("valkey down"))
 	assert.NotPanics(t, func() {
 		BustSubs(context.Background(), fv, "room1", []string{"alice", "bob"})
 	})
-	assert.Equal(t, 1, fv.delHits, "the Del must have been attempted, not skipped")
+	assert.Equal(t, 1, fv.Calls().Del, "the Del must have been attempted, not skipped")
 }
 
 // --- BustSubWithTimeout / BustSubsWithTimeout (shared timeout-wrapping) tests ---
@@ -452,7 +387,7 @@ func TestBustSubs_ValkeyErrorSwallowed(t *testing.T) {
 // service wires it with one call instead of hand-assembling both. A warm entry
 // must resolve without touching the loader at all.
 func TestTier_Resolve_ServesFromL2WithoutLoading(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	loads := 0
 	tier := NewTierWithLoader(fv, time.Hour, &spyRecorder{},
 		func(context.Context, string, string) (SubAuth, bool, error) {
@@ -473,7 +408,7 @@ func TestTier_Resolve_ServesFromL2WithoutLoading(t *testing.T) {
 // A loader failure (Mongo down, or the breaker refusing) propagates and is
 // never cached.
 func TestTier_Resolve_LoaderErrorPropagates(t *testing.T) {
-	fv := newFakeValkey()
+	fv := valkeyfake.New()
 	boom := errors.New("breaker open")
 	tier := NewTierWithLoader(fv, time.Hour, &spyRecorder{},
 		func(context.Context, string, string) (SubAuth, bool, error) {
@@ -483,7 +418,7 @@ func TestTier_Resolve_LoaderErrorPropagates(t *testing.T) {
 	_, _, err := tier.Resolve(context.Background(), "room1", "alice")
 
 	require.ErrorIs(t, err, boom)
-	assert.Equal(t, 0, fv.setHits, "a failed load must not populate L2")
+	assert.Equal(t, 0, fv.Calls().Set, "a failed load must not populate L2")
 }
 
 // --- refresh-on-read ---
@@ -492,7 +427,7 @@ func TestTier_Resolve_LoaderErrorPropagates(t *testing.T) {
 // write. That is the steady state, since the process-local L1 in front of this
 // tier means most L2 reads are already minutes apart.
 func TestTier_FreshEntryServedWithoutLoading(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	loads := 0
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		loads++
@@ -507,13 +442,13 @@ func TestTier_FreshEntryServedWithoutLoading(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, subscribed)
 	assert.Equal(t, 1, loads, "a fresh entry must not re-resolve")
-	assert.Equal(t, 1, fv.setHits, "a fresh entry must not be rewritten")
+	assert.Equal(t, 1, fv.Calls().Set, "a fresh entry must not be rewritten")
 }
 
 // Past the refresh window the entry is re-resolved, which is the only way a pod
 // whose reads are all L2 hits ever observes the source of truth's health.
 func TestTier_StaleEntryRefreshes(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	roles := []model.Role{model.RoleMember}
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		return SubAuth{ID: "u1", Account: "alice", Roles: roles}, true, nil
@@ -535,7 +470,7 @@ func TestTier_StaleEntryRefreshes(t *testing.T) {
 // deadline is re-armed and the cached decision keeps being served, so an
 // actively read room survives an outage of any length rather than one TTL.
 func TestTier_RefreshFailureServesCachedAndRearms(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	var loadErr error
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		if loadErr != nil {
@@ -553,15 +488,15 @@ func TestTier_RefreshFailureServesCachedAndRearms(t *testing.T) {
 	require.NoError(t, err, "a warm entry must survive a failed refresh")
 	assert.True(t, subscribed)
 	assert.Equal(t, "u1", got.ID)
-	assert.Equal(t, 1, fv.expireHits, "the deadline must be re-armed")
-	assert.Equal(t, 1, fv.setHits, "a failed refresh must not rewrite the value")
+	assert.Equal(t, 1, fv.Calls().Expire, "the deadline must be re-armed")
+	assert.Equal(t, 1, fv.Calls().Set, "a failed refresh must not rewrite the value")
 }
 
 // A refresh that comes back "not subscribed" means the subscription is gone and
 // a bust was missed. The entry must be deleted rather than left to expire, so
 // revoked access dies within the refresh window instead of the full TTL.
 func TestTier_RefreshFindingUnsubscribedEvictsTheEntry(t *testing.T) {
-	fv, clock := newFakeValkey(), newFakeClock(time.Now())
+	fv, clock := valkeyfake.New(), newFakeClock(time.Now())
 	subscribed := true
 	tier := newClockedTier(fv, time.Hour, clock, func(context.Context, string, string) (SubAuth, bool, error) {
 		if !subscribed {
@@ -578,19 +513,6 @@ func TestTier_RefreshFindingUnsubscribedEvictsTheEntry(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, stillSubscribed, "a revoked subscription must stop being served")
-	_, present := fv.store[SubKey("room1", "alice")]
+	present := fv.Has(SubKey("room1", "alice"))
 	assert.False(t, present, "the stale entry must be evicted, not left to expire")
-}
-
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeValkey) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
 }

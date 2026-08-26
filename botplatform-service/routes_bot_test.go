@@ -5,7 +5,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,39 +16,8 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
-	"github.com/hmchangw/chat/pkg/valkeyutil"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
-
-// wireCaptureClient records SetNX / IncrEx / Del so tests assert the chain ran end-to-end.
-type wireCaptureClient struct {
-	setNX int32
-	incr  int32
-	del   int32
-}
-
-func (w *wireCaptureClient) Get(context.Context, string) (string, error) { return "", nil }
-func (w *wireCaptureClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (w *wireCaptureClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	atomic.AddInt32(&w.setNX, 1)
-	return true, nil
-}
-func (w *wireCaptureClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	atomic.AddInt32(&w.incr, 1)
-	return 1, nil
-}
-func (w *wireCaptureClient) Del(context.Context, ...string) error {
-	atomic.AddInt32(&w.del, 1)
-	return nil
-}
-func (w *wireCaptureClient) Expire(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func (w *wireCaptureClient) Close() error { return nil }
-
-var _ valkeyutil.Client = (*wireCaptureClient)(nil)
 
 // successForwarder returns empty 2xx replies so idempotency Del fires.
 type successForwarder struct{}
@@ -129,7 +97,7 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 
 	for _, tc := range routes {
 		t.Run(tc.name, func(t *testing.T) {
-			valkey := &wireCaptureClient{}
+			valkey := valkeyfake.New()
 			r := gin.New()
 			registerBotRoutes(r, valkey, cfg, h)
 
@@ -141,9 +109,10 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 			r.ServeHTTP(w, req)
 
 			assert.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, int32(2), atomic.LoadInt32(&valkey.incr), "rate-limit IncrEx must run per-caller + global")
-			assert.Equal(t, int32(1), atomic.LoadInt32(&valkey.setNX), "idempotency SetNX must run")
-			assert.Equal(t, int32(1), atomic.LoadInt32(&valkey.del), "idempotency Del must run on 2xx")
+			calls := valkey.Calls()
+			assert.Equal(t, 2, calls.IncrEx, "rate-limit IncrEx must run per-caller + global")
+			assert.Equal(t, 1, calls.SetNX, "idempotency SetNX must run")
+			assert.Equal(t, 1, calls.Del, "idempotency Del must run on 2xx")
 		})
 	}
 }
@@ -210,19 +179,6 @@ func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
-}
-
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (w *wireCaptureClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := w.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
 }
 
 // Every authenticated bot request must resolve its session through the SAME

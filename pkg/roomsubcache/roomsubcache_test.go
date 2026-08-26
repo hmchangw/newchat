@@ -13,80 +13,13 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
-type fakeClient struct {
-	store    map[string]string
-	ttls     map[string]time.Duration
-	setErr   error
-	getErr   error
-	delErr   error
-	delCalls [][]string
-	expired  []string
-}
-
-func newFakeClient() *fakeClient {
-	return &fakeClient{
-		store: make(map[string]string),
-		ttls:  make(map[string]time.Duration),
-	}
-}
-
-func (f *fakeClient) Get(_ context.Context, key string) (string, error) {
-	if f.getErr != nil {
-		return "", f.getErr
-	}
-	v, ok := f.store[key]
-	if !ok {
-		return "", valkeyutil.ErrCacheMiss
-	}
-	return v, nil
-}
-
-func (f *fakeClient) Set(_ context.Context, key, value string, ttl time.Duration) error {
-	if f.setErr != nil {
-		return f.setErr
-	}
-	f.store[key] = value
-	f.ttls[key] = ttl
-	return nil
-}
-
-func (f *fakeClient) Del(_ context.Context, keys ...string) error {
-	f.delCalls = append(f.delCalls, keys)
-	if f.delErr != nil {
-		return f.delErr
-	}
-	for _, k := range keys {
-		delete(f.store, k)
-		delete(f.ttls, k)
-	}
-	return nil
-}
-func (f *fakeClient) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
-	f.expired = append(f.expired, key)
-	if _, ok := f.store[key]; !ok {
-		return false, nil // EXPIRE no-ops on an absent key
-	}
-	f.ttls[key] = ttl
-	return true, nil
-}
-
-func (f *fakeClient) Close() error { return nil }
-
-// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
-func (f *fakeClient) SetNX(_ context.Context, _, _ string, _ time.Duration) (bool, error) {
-	panic("roomsubcache.fakeClient.SetNX not implemented")
-}
-
-func (f *fakeClient) IncrEx(_ context.Context, _ string, _ time.Duration) (int64, error) {
-	panic("roomsubcache.fakeClient.IncrEx not implemented")
-}
-
 func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	members := []roomsubcache.Member{
@@ -103,22 +36,22 @@ func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
 
 func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "roomABC", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 
-	_, ok := client.store["room:v4:roomABC:subs"]
-	assert.True(t, ok, "expected cache key room:v4:roomABC:subs to be set; got keys: %v", keysOf(client.store))
+	ok := client.Has("room:v4:roomABC:subs")
+	assert.True(t, ok, "expected cache key room:v4:roomABC:subs to be set; got keys: %v", client.Keys())
 }
 
 func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", nil, 90*time.Second))
-	assert.Equal(t, 90*time.Second, client.ttls["room:v4:r1:subs"])
+	assert.Equal(t, 90*time.Second, mustTTL(t, client, "room:v4:r1:subs"))
 }
 
 // A pre-upgrade cache entry (written under the unversioned key by an older
@@ -129,17 +62,17 @@ func TestValkeyCache_Set_PropagatesTTL(t *testing.T) {
 // home site, not the member's).
 func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.store["room:roomABC:subs"] = `[{"id":"u1","account":"a"}]` // legacy unversioned key
+	client := valkeyfake.New()
+	client.Seed("room:roomABC:subs", `[{"id":"u1","account":"a"}]`, time.Minute) // legacy unversioned key
 	// v2 entry: siteId held the room's home site (the bug fixed by the v3 bump) —
 	// it must never be served as a member's home site.
-	client.store["room:v2:roomABC:subs"] = `[{"id":"u1","account":"a","siteId":"room-site"}]`
+	client.Seed("room:v2:roomABC:subs", `[{"id":"u1","account":"a","siteId":"room-site"}]`, time.Minute)
 	// v3 entry: a bare []Member array, the shape written before the value became
 	// the Entry{Members, CachedAt} envelope. Reusing v3 for the envelope would
 	// point two incompatible shapes at one key, so a rolling deploy would have
 	// old binaries unmarshalling an object into a slice and new binaries
 	// unmarshalling an array into a struct.
-	client.store["room:v3:roomABC:subs"] = `[{"id":"u1","account":"a","homeSiteId":"site-a"}]`
+	client.Seed("room:v3:roomABC:subs", `[{"id":"u1","account":"a","homeSiteId":"site-a"}]`, time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "roomABC")
@@ -148,7 +81,7 @@ func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 
 func TestValkeyCache_Get_Miss_ReturnsErrCacheMiss(t *testing.T) {
 	ctx := context.Background()
-	cache := roomsubcache.NewValkeyCache(newFakeClient())
+	cache := roomsubcache.NewValkeyCache(valkeyfake.New())
 
 	_, err := cache.Get(ctx, "missing")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -156,7 +89,7 @@ func TestValkeyCache_Get_Miss_ReturnsErrCacheMiss(t *testing.T) {
 
 func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	// Empty list is a valid cached value (negative cache for empty/deleted rooms).
@@ -170,8 +103,8 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 
 func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.store["room:v4:bad:subs"] = "{not json"
+	client := valkeyfake.New()
+	client.Seed("room:v4:bad:subs", "{not json", time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "bad")
@@ -181,8 +114,8 @@ func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
 
 func TestValkeyCache_Get_TransportError_IsWrapped(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.getErr = errors.New("boom")
+	client := valkeyfake.New()
+	client.FailGet(errors.New("boom"))
 	cache := roomsubcache.NewValkeyCache(client)
 
 	_, err := cache.Get(ctx, "r")
@@ -193,8 +126,8 @@ func TestValkeyCache_Get_TransportError_IsWrapped(t *testing.T) {
 
 func TestValkeyCache_Set_TransportError_IsWrapped(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.setErr = errors.New("boom")
+	client := valkeyfake.New()
+	client.FailSet(errors.New("boom"))
 	cache := roomsubcache.NewValkeyCache(client)
 
 	err := cache.Set(ctx, "r", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute)
@@ -204,7 +137,7 @@ func TestValkeyCache_Set_TransportError_IsWrapped(t *testing.T) {
 
 func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NoError(t, cache.Set(ctx, "r1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
@@ -215,8 +148,8 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	// and a single multi-key DEL would be a CROSSSLOT error against a real
 	// cluster — the client pipelines one DEL per key so it never is. That is the
 	// client's business now, not this package's.
-	require.Len(t, client.delCalls, 1)
-	assert.Equal(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.delCalls[0])
+	require.Len(t, client.DelBatches(), 1)
+	assert.Equal(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.DelBatches()[0])
 
 	_, err := cache.Get(ctx, "r1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -228,13 +161,13 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 // slot must not skip the other.
 func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
-	client.delErr = errors.New("boom")
+	client := valkeyfake.New()
+	client.FailDel(errors.New("boom"))
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NotPanics(t, func() { cache.Invalidate(ctx, "r1") })
-	require.Len(t, client.delCalls, 1)
-	assert.Len(t, client.delCalls[0], 2, "a failure must not drop either generation from the attempt")
+	require.Len(t, client.DelBatches(), 1)
+	assert.Len(t, client.DelBatches()[0], 2, "a failure must not drop either generation from the attempt")
 }
 
 // The reason this package routes through valkeyutil.BustKeys rather than
@@ -243,20 +176,20 @@ func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 // finishes at that instant skip the DEL — leaving the room's member list stale
 // for the full 90-minute TTL.
 func TestValkeyCache_Invalidate_RunsAfterCallerCancellation(t *testing.T) {
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	cache.Invalidate(ctx, "r1")
 
-	require.Len(t, client.delCalls, 1, "a cancelled caller must not skip the invalidation")
-	assert.Len(t, client.delCalls[0], 2, "both generations are still cleared")
+	require.Len(t, client.DelBatches(), 1, "a cancelled caller must not skip the invalidation")
+	assert.Len(t, client.DelBatches()[0], 2, "both generations are still cleared")
 }
 
 func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
 	ctx := context.Background()
-	cache := roomsubcache.NewValkeyCache(newFakeClient())
+	cache := roomsubcache.NewValkeyCache(valkeyfake.New())
 
 	tests := []struct {
 		name string
@@ -276,12 +209,12 @@ func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
 
 func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMaxValueBytes(100))
 
 	// Stash a value larger than the cap directly through the fake — simulates
 	// a compromised or misbehaving Valkey writer.
-	client.store["room:v4:big:subs"] = strings.Repeat("x", 101)
+	client.Seed("room:v4:big:subs", strings.Repeat("x", 101), time.Minute)
 
 	_, err := cache.Get(ctx, "big")
 	require.Error(t, err)
@@ -291,7 +224,7 @@ func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
 
 func TestValkeyCache_Get_BlobAtMaxSize_IsAllowed(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	// Use a max large enough to comfortably hold a small valid JSON array.
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMaxValueBytes(1024))
 
@@ -300,14 +233,6 @@ func TestValkeyCache_Get_BlobAtMaxSize_IsAllowed(t *testing.T) {
 	got, err := cache.Get(ctx, "ok")
 	require.NoError(t, err)
 	assert.Len(t, got.Members, 1)
-}
-
-func keysOf(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func TestMember_JSONRoundTrip_NewFields(t *testing.T) {
@@ -375,50 +300,46 @@ func TestMember_OmitemptyOnZeroValues(t *testing.T) {
 	assert.JSONEq(t, `{"id":"u1","account":"alice"}`, got)
 }
 
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
-}
-
 func TestValkeyCache_Slide_ReArmsTTLWithoutRewriting(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 	members := []roomsubcache.Member{{ID: "u1", Account: "alice"}}
 	require.NoError(t, cache.Set(ctx, "r1", members, time.Minute))
-	before := client.store["room:v4:r1:subs"]
+	before := client.Value("room:v4:r1:subs")
 
 	cache.Slide(ctx, "r1", time.Hour)
 
-	assert.Equal(t, []string{"room:v4:r1:subs"}, client.expired)
-	assert.Equal(t, time.Hour, client.ttls["room:v4:r1:subs"], "the deadline must move")
-	assert.Equal(t, before, client.store["room:v4:r1:subs"], "the value must not be rewritten")
+	assert.Equal(t, []string{"room:v4:r1:subs"}, client.ExpiredKeys())
+	assert.Equal(t, time.Hour, mustTTL(t, client, "room:v4:r1:subs"), "the deadline must move")
+	after := client.Value("room:v4:r1:subs")
+	assert.Equal(t, before, after, "the value must not be rewritten")
 }
 
 func TestValkeyCache_Slide_DoesNotResurrectAnEvictedEntry(t *testing.T) {
 	ctx := context.Background()
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 
 	// EXPIRE on an absent key must be a no-op, not a create — otherwise a room
 	// invalidated mid-outage would come back with its stale member list.
 	cache.Slide(ctx, "never-written", time.Hour)
-	assert.NotContains(t, client.store, "room:v3:never-written:subs")
+	assert.False(t, client.Has("room:v3:never-written:subs"))
 }
 
 // An empty roomID is a no-op rather than an error: Slide is best-effort and
 // has no caller left to inform.
 func TestValkeyCache_Slide_EmptyRoomID_IsANoOp(t *testing.T) {
-	client := newFakeClient()
+	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client)
 	cache.Slide(context.Background(), "", time.Hour)
-	assert.Empty(t, client.expired, "an empty roomID must not issue an EXPIRE")
+	assert.Empty(t, client.ExpiredKeys(), "an empty roomID must not issue an EXPIRE")
+}
+
+// mustTTL reads a key's TTL, failing the test when the key is absent.
+func mustTTL(t *testing.T, c *valkeyfake.Client, key string) time.Duration {
+	t.Helper()
+	ttl, ok := c.TTL(key)
+	require.True(t, ok, "expected %s to be present", key)
+	return ttl
 }

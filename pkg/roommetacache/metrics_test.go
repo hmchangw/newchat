@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -22,11 +23,11 @@ func (r *fakeRecorder) Miss(context.Context)  { r.misses++ }
 func (r *fakeRecorder) Error(context.Context) { r.errs++ }
 
 func TestReadL2_Hit(t *testing.T) {
-	fake := newFakeValkey()
+	fake := valkeyfake.New()
 	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 4}
 	raw, err := json.Marshal(valkeyutil.Box[Meta]{V: want, CachedAt: time.Now().UnixMilli()})
 	require.NoError(t, err)
-	fake.data[MetaKey("r1")] = string(raw)
+	fake.Seed(MetaKey("r1"), string(raw), time.Minute)
 	rec := &fakeRecorder{}
 
 	got, found := readL2(context.Background(), fake, "r1", rec)
@@ -39,7 +40,7 @@ func TestReadL2_Hit(t *testing.T) {
 }
 
 func TestReadL2_Miss(t *testing.T) {
-	fake := newFakeValkey() // empty store → ErrCacheMiss
+	fake := valkeyfake.New() // empty store → ErrCacheMiss
 	rec := &fakeRecorder{}
 
 	_, found := readL2(context.Background(), fake, "r1", rec)
@@ -51,8 +52,8 @@ func TestReadL2_Miss(t *testing.T) {
 }
 
 func TestReadL2_Error(t *testing.T) {
-	fake := newFakeValkey()
-	fake.getErr = errors.New("valkey down")
+	fake := valkeyfake.New()
+	fake.FailGet(errors.New("valkey down"))
 	rec := &fakeRecorder{}
 
 	_, found := readL2(context.Background(), fake, "r1", rec)

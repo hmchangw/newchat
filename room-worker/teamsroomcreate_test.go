@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 func newTeamsTestHandler(t *testing.T, store *MockSubscriptionStore) (*Handler, *[]publishedMsg) {
@@ -252,7 +253,7 @@ func TestReconcileTeamsRoom_HardRemove_BustsSubL2(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
 	h, _ := newTeamsTestHandler(t, store)
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h.valkey = fake
 
 	store.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
@@ -271,7 +272,7 @@ func TestReconcileTeamsRoom_HardRemove_BustsSubL2(t *testing.T) {
 	err := h.processTeamsRoomCreate(context.Background(), teamsCreateEvent(chat))
 	require.NoError(t, err)
 
-	assert.Contains(t, fake.dels, subauthcache.SubKey(idgen.DeterministicID([]byte("chat1")), "bob"),
+	assert.Contains(t, fake.DeletedKeys(), subauthcache.SubKey(idgen.DeterministicID([]byte("chat1")), "bob"),
 		"the departed member's subauthcache L2 entry must be busted")
 }
 

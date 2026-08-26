@@ -9,6 +9,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // Both handlers below are request/reply: nothing retries them automatically,
@@ -34,7 +35,7 @@ func TestUpdateRole_ResolvesTheFederationDestinationBeforeTheWrite(t *testing.T)
 	store.EXPECT().GetUserSiteID(gomock.Any(), "bob").Return("", errors.New("mongo down"))
 	store.EXPECT().SetOwnerRole(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, valkey: fake,
 		publishCore:     func(_ context.Context, _ string, _ []byte) error { return nil },
 		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
@@ -44,5 +45,5 @@ func TestUpdateRole_ResolvesTheFederationDestinationBeforeTheWrite(t *testing.T)
 		model.UpdateRoleRequest{Account: "bob", NewRole: model.RoleOwner})
 
 	require.Error(t, err, "the role must not commit when its federation destination is unknown")
-	require.Empty(t, fake.dels, "nothing was changed, so nothing needs busting")
+	require.Empty(t, fake.DeletedKeys(), "nothing was changed, so nothing needs busting")
 }

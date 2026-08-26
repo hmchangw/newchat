@@ -12,95 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
-
-// fakeL2Valkey is an in-memory valkeyutil.Client for tests. When now is set,
-// it honors the per-key TTL the way a real Valkey does, so tests can assert on
-// entries expiring (or being kept alive by a slide).
-type fakeL2Valkey struct {
-	store      map[string]string
-	expiry     map[string]time.Time
-	now        func() time.Time
-	getErr     error
-	setErr     error
-	delErr     error
-	getHits    int
-	setHits    int
-	delHits    int
-	expireHits int
-	// afterGet runs after a successful Get returns its value, letting a test
-	// interleave a concurrent write (e.g. a rotation's invalidate) between the
-	// read and whatever the caller does with the result.
-	afterGet func(key string)
-}
-
-func newFakeL2Valkey() *fakeL2Valkey {
-	return &fakeL2Valkey{store: map[string]string{}, expiry: map[string]time.Time{}}
-}
-
-func (f *fakeL2Valkey) Get(_ context.Context, key string) (string, error) {
-	f.getHits++
-	if f.getErr != nil {
-		return "", f.getErr
-	}
-	v, ok := f.store[key]
-	if !ok {
-		return "", valkeyutil.ErrCacheMiss
-	}
-	if exp, tracked := f.expiry[key]; f.now != nil && tracked && !f.now().Before(exp) {
-		delete(f.store, key)
-		delete(f.expiry, key)
-		return "", valkeyutil.ErrCacheMiss
-	}
-	if f.afterGet != nil {
-		f.afterGet(key)
-	}
-	return v, nil
-}
-
-func (f *fakeL2Valkey) Set(_ context.Context, key, value string, ttl time.Duration) error {
-	f.setHits++
-	if f.setErr != nil {
-		return f.setErr
-	}
-	f.store[key] = value
-	if f.now != nil && ttl > 0 {
-		f.expiry[key] = f.now().Add(ttl)
-	}
-	return nil
-}
-
-func (f *fakeL2Valkey) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	return false, nil
-}
-func (f *fakeL2Valkey) IncrEx(context.Context, string, time.Duration) (int64, error) { return 0, nil }
-func (f *fakeL2Valkey) Del(_ context.Context, keys ...string) error {
-	f.delHits++
-	if f.delErr != nil {
-		return f.delErr
-	}
-	for _, k := range keys {
-		delete(f.store, k)
-		delete(f.expiry, k)
-	}
-	return nil
-}
-
-// Expire mirrors Valkey: it re-arms an existing key's deadline and reports
-// whether the key was there, but never creates one.
-func (f *fakeL2Valkey) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
-	f.expireHits++
-	if _, ok := f.store[key]; !ok {
-		return false, nil
-	}
-	if f.now != nil && ttl > 0 {
-		f.expiry[key] = f.now().Add(ttl)
-	}
-	return true, nil
-}
-
-func (f *fakeL2Valkey) Close() error { return nil }
 
 // fakeInnerStore is an in-memory DEKStore standing in for Mongo.
 type fakeInnerStore struct {
@@ -203,7 +117,7 @@ func TestRefreshAfter_OutrunsTheInProcessDEKCache(t *testing.T) {
 }
 
 func TestL2DEKStore_Get_MissThenMongoPopulatesL2(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
@@ -212,12 +126,12 @@ func TestL2DEKStore_Get_MissThenMongoPopulatesL2(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, []byte("wrapped-ciphertext"), got.WrappedDEK)
 	assert.Equal(t, 1, inner.getCalls)
-	assert.Equal(t, 1, fv.setHits, "a found row must populate L2")
+	assert.Equal(t, 1, fv.Calls().Set, "a found row must populate L2")
 	assert.Equal(t, 1, rec.miss)
 }
 
 func TestL2DEKStore_Get_L2HitSkipsMongo(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
@@ -235,7 +149,7 @@ func TestL2DEKStore_Get_L2HitSkipsMongo(t *testing.T) {
 
 // The outage case this whole design exists for.
 func TestL2DEKStore_Get_ServesFromL2WhileMongoDown(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 	_, err := s.Get(context.Background(), "room1") // warm L2 while healthy
@@ -249,7 +163,7 @@ func TestL2DEKStore_Get_ServesFromL2WhileMongoDown(t *testing.T) {
 }
 
 func TestL2DEKStore_Get_ColdRoomDuringOutageErrors(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.getErr = errors.New("mongo unreachable")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
@@ -258,17 +172,17 @@ func TestL2DEKStore_Get_ColdRoomDuringOutageErrors(t *testing.T) {
 }
 
 func TestL2DEKStore_Get_AbsentRowNotCached(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
 	got, err := s.Get(context.Background(), "newroom")
 	require.NoError(t, err)
 	assert.Nil(t, got, "absent row must surface as (nil, nil) so the cipher lazily creates a DEK")
-	assert.Equal(t, 0, fv.setHits, "an absent row must never be cached")
+	assert.Equal(t, 0, fv.Calls().Set, "an absent row must never be cached")
 }
 
 func TestL2DEKStore_Get_BreakerOpenFastFailsWithoutMongo(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	s := NewL2DEKStore(inner, fv, time.Hour, openBreaker(t), rec)
 
 	_, err := s.Get(context.Background(), "coldroom")
@@ -277,8 +191,8 @@ func TestL2DEKStore_Get_BreakerOpenFastFailsWithoutMongo(t *testing.T) {
 }
 
 func TestL2DEKStore_Get_ValkeyErrorFailsOpenToMongo(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
-	fv.getErr = errors.New("valkey unreachable")
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
+	fv.FailGet(errors.New("valkey unreachable"))
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
@@ -295,8 +209,8 @@ func TestL2DEKStore_Get_NilClientAndNonPositiveTTLBypassL2(t *testing.T) {
 		ttl    time.Duration
 	}{
 		{"nil client", nil, time.Hour},
-		{"zero ttl", newFakeL2Valkey(), 0},
-		{"negative ttl", newFakeL2Valkey(), -time.Second},
+		{"zero ttl", valkeyfake.New(), 0},
+		{"negative ttl", valkeyfake.New(), -time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,9 +221,9 @@ func TestL2DEKStore_Get_NilClientAndNonPositiveTTLBypassL2(t *testing.T) {
 			got, err := s.Get(context.Background(), "room1")
 			require.NoError(t, err)
 			require.NotNil(t, got)
-			if fv, ok := tc.client.(*fakeL2Valkey); ok {
-				assert.Equal(t, 0, fv.getHits, "L2 disabled must not read Valkey")
-				assert.Equal(t, 0, fv.setHits, "L2 disabled must not write Valkey")
+			if fv, ok := tc.client.(*valkeyfake.Client); ok {
+				assert.Equal(t, 0, fv.Calls().Get, "L2 disabled must not read Valkey")
+				assert.Equal(t, 0, fv.Calls().Set, "L2 disabled must not write Valkey")
 			}
 		})
 	}
@@ -317,16 +231,16 @@ func TestL2DEKStore_Get_NilClientAndNonPositiveTTLBypassL2(t *testing.T) {
 
 // Rotation correctness: a stale wrapped DEK would fail to unwrap under the new KEK.
 func TestL2DEKStore_ReplaceInvalidatesL2(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 	_, err := s.Get(context.Background(), "room1") // warm
 	require.NoError(t, err)
-	require.NotEmpty(t, fv.store[DEKKey("room1")])
+	require.NotEmpty(t, fv.Value(DEKKey("room1")))
 
 	rotated := RoomDataKey{ID: "room1", WrappedDEK: []byte("rewrapped"), CreatedAt: time.Unix(1, 0).UTC()}
 	require.NoError(t, s.Replace(context.Background(), rotated))
-	assert.Empty(t, fv.store[DEKKey("room1")], "rotation must invalidate the stale L2 entry")
+	assert.Empty(t, fv.Value(DEKKey("room1")), "rotation must invalidate the stale L2 entry")
 
 	got, err := s.Get(context.Background(), "room1")
 	require.NoError(t, err)
@@ -335,14 +249,14 @@ func TestL2DEKStore_ReplaceInvalidatesL2(t *testing.T) {
 }
 
 func TestL2DEKStore_UpsertInvalidatesL2(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 	_, err := s.Get(context.Background(), "room1")
 	require.NoError(t, err)
 
 	require.NoError(t, s.Upsert(context.Background(), seedRow("room1")))
-	assert.Empty(t, fv.store[DEKKey("room1")], "upsert must invalidate the L2 entry")
+	assert.Empty(t, fv.Value(DEKKey("room1")), "upsert must invalidate the L2 entry")
 	assert.Equal(t, 1, inner.upsertHit)
 }
 
@@ -350,7 +264,7 @@ func TestL2DEKStore_UpsertInvalidatesL2(t *testing.T) {
 // breaker answers ErrOpen, and the entry is re-armed so the room stays alive.
 func TestL2DEKStore_StaleHitWithOpenBreakerSlidesWithoutMongo(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	b := circuitbreaker.New(1, time.Hour)
@@ -362,15 +276,15 @@ func TestL2DEKStore_StaleHitWithOpenBreakerSlidesWithoutMongo(t *testing.T) {
 	inner.getErr = errors.New("mongo down")
 	_, _ = s.Get(ctx, "coldroom") // one failure trips this breaker open
 	require.Equal(t, circuitbreaker.StateOpen, b.State())
-	beforeSets, beforeCalls := fv.setHits, inner.getCalls
+	beforeSets, beforeCalls := fv.Calls().Set, inner.getCalls
 
 	clock.Advance(pastRefresh)
 	got, err := s.Get(ctx, "room1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, beforeCalls, inner.getCalls, "an open breaker must not call Mongo")
-	assert.Equal(t, 1, fv.expireHits, "a stale hit during an outage must re-arm the TTL")
-	assert.Equal(t, beforeSets, fv.setHits, "re-arming must move the deadline, not rewrite the value")
+	assert.Equal(t, 1, fv.Calls().Expire, "a stale hit during an outage must re-arm the TTL")
+	assert.Equal(t, beforeSets, fv.Calls().Set, "re-arming must move the deadline, not rewrite the value")
 }
 
 // A slide moves a deadline; it must not write a value. Replace invalidates the
@@ -380,7 +294,7 @@ func TestL2DEKStore_StaleHitWithOpenBreakerSlidesWithoutMongo(t *testing.T) {
 // whole TTL. Re-arming a key that no longer exists must be a no-op.
 func TestL2DEKStore_SlideDoesNotResurrectAnInvalidatedEntry(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	b := circuitbreaker.New(1, time.Hour)
@@ -395,23 +309,22 @@ func TestL2DEKStore_SlideDoesNotResurrectAnInvalidatedEntry(t *testing.T) {
 
 	// Stand in for a rotation's invalidate landing between the L2 read and the
 	// slide: the entry is served, then deleted before the re-arm runs.
-	fv.afterGet = func(key string) {
-		delete(fv.store, key)
-		delete(fv.expiry, key)
-	}
+	fv.AfterGet(func(key string) {
+		_ = fv.Del(ctx, key)
+	})
 
 	clock.Advance(pastRefresh)
 	_, err = s.Get(ctx, "room1")
 	require.NoError(t, err)
 
-	_, present := fv.store[DEKKey("room1")]
+	present := fv.Has(DEKKey("room1"))
 	assert.False(t, present, "a slide must not recreate an invalidated entry")
 }
 
 // The L2 wire form is a cache contract: the envelope's own field and the
 // wrapped row's fields are all camelCase, not PascalCase Go field names.
 func TestL2DEKStore_L2WireFormIsCamelCaseJSON(t *testing.T) {
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), &spyL2Recorder{})
 
@@ -419,7 +332,7 @@ func TestL2DEKStore_L2WireFormIsCamelCaseJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(fv.store[DEKKey("room1")]), &raw))
+	require.NoError(t, json.Unmarshal([]byte(fv.Value(DEKKey("room1"))), &raw))
 	assert.Contains(t, raw, "cachedAt")
 	require.Contains(t, raw, "v")
 
@@ -447,9 +360,9 @@ func TestL2DEKStore_Get_EmptyWrappedDEKTreatedAsMiss(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+			fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 			inner.rows["room1"] = seedRow("room1")
-			fv.store[DEKKey("room1")] = tc.cached
+			fv.Seed(DEKKey("room1"), tc.cached, time.Hour)
 			s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
 			got, err := s.Get(context.Background(), "room1")
@@ -483,22 +396,22 @@ func TestL2DEKStore_EntryAgeSurvivesProcessRestart(t *testing.T) {
 	clock := newFakeClock(time.Now())
 
 	t.Run("entry written recently by another pod", func(t *testing.T) {
-		fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+		fv, inner := valkeyfake.New(), newFakeInnerStore()
 		inner.rows["room1"] = seedRow("room1")
-		fv.store[DEKKey("room1")] = mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-time.Minute).UnixMilli()})
+		fv.Seed(DEKKey("room1"), mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-time.Minute).UnixMilli()}), time.Hour)
 		s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
 
 		got, err := s.Get(ctx, "room1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, 0, inner.getCalls, "a recently confirmed entry needs no Mongo call")
-		assert.Equal(t, 0, fv.setHits, "a recently confirmed entry must not be re-armed")
+		assert.Equal(t, 0, fv.Calls().Set, "a recently confirmed entry must not be re-armed")
 	})
 
 	t.Run("entry older than the refresh interval", func(t *testing.T) {
-		fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+		fv, inner := valkeyfake.New(), newFakeInnerStore()
 		inner.rows["room1"] = rotatedRow("room1")
-		fv.store[DEKKey("room1")] = mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-pastRefresh).UnixMilli()})
+		fv.Seed(DEKKey("room1"), mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-pastRefresh).UnixMilli()}), time.Hour)
 		s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
 
 		got, err := s.Get(ctx, "room1")
@@ -514,7 +427,7 @@ func TestL2DEKStore_EntryAgeSurvivesProcessRestart(t *testing.T) {
 // orphan every message already encrypted under the cached one.
 func TestL2DEKStore_RefreshFindingNoRowKeepsCachedKey(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
@@ -545,9 +458,9 @@ func mustJSON(t *testing.T, v any) string {
 
 // newClockedStore wires one fake clock into both the store and the Valkey fake,
 // so cached-entry age and TTL expiry advance together under the test's control.
-func newClockedStore(t *testing.T, inner DEKStore, fv *fakeL2Valkey, ttl time.Duration, b *circuitbreaker.Breaker, clock *fakeClock) *l2DEKStore {
+func newClockedStore(t *testing.T, inner DEKStore, fv *valkeyfake.Client, ttl time.Duration, b *circuitbreaker.Breaker, clock *fakeClock) *l2DEKStore {
 	t.Helper()
-	fv.now = clock.Now
+	fv.SetClock(clock.Now)
 	return newL2DEKStoreWithClock(inner, fv, ttl, b, &spyL2Recorder{}, clock.Now)
 }
 
@@ -560,14 +473,14 @@ func rotatedRow(roomID string) RoomDataKey {
 // must be a pure read — no re-serialize, no round-trip, no re-arm.
 func TestL2DEKStore_HealthyHitsDoNotSlide(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
 
 	_, err := s.Get(ctx, "room1") // warm: one inner fetch, one populate
 	require.NoError(t, err)
-	require.Equal(t, 1, fv.setHits)
+	require.Equal(t, 1, fv.Calls().Set)
 
 	// Minutes later — long past any breaker cooldown, well inside the refresh
 	// interval — the entry is still confirmed-recent.
@@ -578,7 +491,7 @@ func TestL2DEKStore_HealthyHitsDoNotSlide(t *testing.T) {
 		require.NotNil(t, got)
 		assert.Equal(t, []byte("wrapped-ciphertext"), got.WrappedDEK)
 	}
-	assert.Equal(t, 1, fv.setHits, "a healthy steady-state hit must not re-arm the TTL")
+	assert.Equal(t, 1, fv.Calls().Set, "a healthy steady-state hit must not re-arm the TTL")
 	assert.Equal(t, 1, inner.getCalls, "a confirmed-recent hit must not reach Mongo")
 }
 
@@ -588,7 +501,7 @@ func TestL2DEKStore_HealthyHitsDoNotSlide(t *testing.T) {
 // Mongo health signal in steady state.
 func TestL2DEKStore_RefreshesEntryOlderThanRefreshInterval(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
@@ -605,19 +518,19 @@ func TestL2DEKStore_RefreshesEntryOlderThanRefreshInterval(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, []byte("rewrapped"), got.WrappedDEK, "a stale entry must re-resolve from the inner store")
 	assert.Equal(t, 2, inner.getCalls, "a refresh is exactly one inner fetch")
-	assert.Equal(t, 2, fv.setHits, "a refresh repopulates the L2")
+	assert.Equal(t, 2, fv.Calls().Set, "a refresh repopulates the L2")
 
 	// The refreshed entry is confirmed-now, so the next hit is a pure read again.
 	clock.Advance(time.Minute)
 	_, err = s.Get(ctx, "room1")
 	require.NoError(t, err)
 	assert.Equal(t, 2, inner.getCalls, "a just-refreshed entry must not refetch")
-	assert.Equal(t, 2, fv.setHits, "a just-refreshed entry must not re-arm")
+	assert.Equal(t, 2, fv.Calls().Set, "a just-refreshed entry must not re-arm")
 }
 
 func TestL2DEKStore_DoesNotRefreshFreshEntry(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
@@ -630,7 +543,7 @@ func TestL2DEKStore_DoesNotRefreshFreshEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 1, inner.getCalls, "an entry younger than the refresh interval must not refetch")
-	assert.Equal(t, 1, fv.setHits, "an entry younger than the refresh interval must not re-arm")
+	assert.Equal(t, 1, fv.Calls().Set, "an entry younger than the refresh interval must not re-arm")
 }
 
 // The outage the whole L2 exists for: with Mongo failing and the breaker open,
@@ -638,7 +551,7 @@ func TestL2DEKStore_DoesNotRefreshFreshEntry(t *testing.T) {
 // slide is what keeps the entry from expiring one TTL after the last populate.
 func TestL2DEKStore_OutageKeepsActivelyReadRoomAliveBeyondTTL(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	// Opens after 2 failures and stays open for the whole (wall-clock) test.
@@ -657,7 +570,7 @@ func TestL2DEKStore_OutageKeepsActivelyReadRoomAliveBeyondTTL(t *testing.T) {
 		assert.Equal(t, []byte("wrapped-ciphertext"), got.WrappedDEK)
 	}
 	assert.NotEqual(t, circuitbreaker.StateClosed, b.State(), "repeated refresh failures must open the breaker")
-	assert.NotEmpty(t, fv.store[DEKKey("room1")], "an actively read room must outlive its TTL during an outage")
+	assert.NotEmpty(t, fv.Value(DEKKey("room1")), "an actively read room must outlive its TTL during an outage")
 }
 
 // The property the refresh restores: a swallowed invalidation stops being
@@ -665,7 +578,7 @@ func TestL2DEKStore_OutageKeepsActivelyReadRoomAliveBeyondTTL(t *testing.T) {
 // DEK — until the entry ages past the refresh interval and self-heals.
 func TestL2DEKStore_SwallowedInvalidationSelfHealsWithinRefreshInterval(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
@@ -673,7 +586,7 @@ func TestL2DEKStore_SwallowedInvalidationSelfHealsWithinRefreshInterval(t *testi
 	_, err := s.Get(ctx, "room1") // warm
 	require.NoError(t, err)
 
-	fv.delErr = errors.New("valkey unreachable") // the invalidation is swallowed
+	fv.FailDel(errors.New("valkey unreachable")) // the invalidation is swallowed
 	require.NoError(t, s.Replace(ctx, rotatedRow("room1")))
 
 	got, err := s.Get(ctx, "room1")
@@ -693,7 +606,7 @@ func TestL2DEKStore_SwallowedInvalidationSelfHealsWithinRefreshInterval(t *testi
 // that stops being read expires on its TTL as designed.
 func TestL2DEKStore_IdleEntryExpiresOnTTL(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
@@ -711,7 +624,7 @@ func TestL2DEKStore_IdleEntryExpiresOnTTL(t *testing.T) {
 func TestL2DEKStore_NilRecorderDoesNotPanic(t *testing.T) {
 	inner := newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
-	s := NewL2DEKStore(inner, newFakeL2Valkey(), time.Hour, healthyBreaker(), nil)
+	s := NewL2DEKStore(inner, valkeyfake.New(), time.Hour, healthyBreaker(), nil)
 	got, err := s.Get(context.Background(), "room1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -722,29 +635,29 @@ func TestL2DEKStore_NilRecorderDoesNotPanic(t *testing.T) {
 // DefaultL2Recorder) so pkg/atrest's new L2 code clears the 90% floor.
 
 func TestL2DEKStore_Upsert_InnerErrorPropagatesWithoutInvalidating(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.upsertErr = errors.New("mongo unreachable")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
 	err := s.Upsert(context.Background(), seedRow("room1"))
 	require.Error(t, err)
-	assert.Equal(t, 0, fv.delHits, "an inner failure must not attempt an L2 invalidate")
+	assert.Equal(t, 0, fv.Calls().Del, "an inner failure must not attempt an L2 invalidate")
 }
 
 func TestL2DEKStore_Replace_InnerErrorPropagatesWithoutInvalidating(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.replaceErr = errors.New("mongo unreachable")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
 	err := s.Replace(context.Background(), seedRow("room1"))
 	require.Error(t, err)
-	assert.Equal(t, 0, fv.delHits, "an inner failure must not attempt an L2 invalidate")
+	assert.Equal(t, 0, fv.Calls().Del, "an inner failure must not attempt an L2 invalidate")
 }
 
 func TestL2DEKStore_Get_L2WriteErrorIsSwallowed(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
-	fv.setErr = errors.New("valkey unreachable")
+	fv.FailSet(errors.New("valkey unreachable"))
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 
 	got, err := s.Get(context.Background(), "room1")
@@ -754,13 +667,13 @@ func TestL2DEKStore_Get_L2WriteErrorIsSwallowed(t *testing.T) {
 }
 
 func TestL2DEKStore_Invalidate_DelErrorIsSwallowed(t *testing.T) {
-	fv, inner, rec := newFakeL2Valkey(), newFakeInnerStore(), &spyL2Recorder{}
+	fv, inner, rec := valkeyfake.New(), newFakeInnerStore(), &spyL2Recorder{}
 	inner.rows["room1"] = seedRow("room1")
 	s := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), rec)
 	_, err := s.Get(context.Background(), "room1") // warm
 	require.NoError(t, err)
 
-	fv.delErr = errors.New("valkey unreachable")
+	fv.FailDel(errors.New("valkey unreachable"))
 	require.NoError(t, s.Upsert(context.Background(), seedRow("room1")), "a best-effort Del failure must not fail Upsert")
 }
 
@@ -799,7 +712,7 @@ func TestCipherOverL2_DecryptsAfterL1ExpiryWhileMongoDown(t *testing.T) {
 
 	inner := newFakeInnerStore()
 	inner.rows["room1"] = RoomDataKey{ID: "room1", WrappedDEK: wrapped, CreatedAt: time.Unix(0, 0).UTC()}
-	fv := newFakeL2Valkey()
+	fv := valkeyfake.New()
 	l2 := NewL2DEKStore(inner, fv, time.Hour, healthyBreaker(), &spyL2Recorder{})
 
 	clock := newFakeClock(time.Now())
@@ -810,7 +723,7 @@ func TestCipherOverL2_DecryptsAfterL1ExpiryWhileMongoDown(t *testing.T) {
 	fields := EncryptedFields{Msg: "the quick brown fox"}
 	payload, meta, err := c.Encrypt(ctx, "room1", fields)
 	require.NoError(t, err)
-	require.NotEmpty(t, fv.store[DEKKey("room1")], "the healthy encrypt must populate the L2")
+	require.NotEmpty(t, fv.Value(DEKKey("room1")), "the healthy encrypt must populate the L2")
 	warmCalls := inner.getCalls
 
 	// Mongo goes away and the L1 entry ages out — the exact window this feature
@@ -836,19 +749,6 @@ func TestCipherOverL2_DecryptsAfterL1ExpiryWhileMongoDown(t *testing.T) {
 	assert.Equal(t, warmCalls, inner.getCalls, "no Get may reach the downed inner store")
 }
 
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeL2Valkey) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
-}
-
 // The DEK tier sits behind a process-local L1 whose TTL (1h by default) is
 // LONGER than the L2's refresh window (RefreshAfter(90m) = 67.5m). That ladder
 // silently defeats the tier: the L1 miss at 60m finds the L2 entry still fresh,
@@ -862,7 +762,7 @@ func (f *fakeL2Valkey) MGet(ctx context.Context, keys []string) (map[string]stri
 // meanwhile stays busted.
 func TestL2DEKStore_FreshServeReArmsTheDeadline(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	start := time.Now()
 	clock := newFakeClock(start)
@@ -879,8 +779,8 @@ func TestL2DEKStore_FreshServeReArmsTheDeadline(t *testing.T) {
 	require.NotNil(t, got)
 
 	assert.Equal(t, 1, inner.getCalls, "a fresh entry must still not refetch")
-	assert.Greater(t, fv.expireHits, 0, "a fresh serve must re-arm the deadline")
-	assert.True(t, fv.expiry[DEKKey("room1")].After(start.Add(ttl)),
+	assert.Greater(t, fv.Calls().Expire, 0, "a fresh serve must re-arm the deadline")
+	assert.True(t, mustDeadline(t, fv, DEKKey("room1")).After(start.Add(ttl)),
 		"the deadline must move past the original expiry, or the next L1 miss finds nothing")
 }
 
@@ -891,7 +791,7 @@ func TestL2DEKStore_FreshServeReArmsTheDeadline(t *testing.T) {
 // the breaker is opened first.
 func TestL2DEKStore_SurvivesAnL1LongerThanTheRefreshWindow(t *testing.T) {
 	ctx := context.Background()
-	fv, inner := newFakeL2Valkey(), newFakeInnerStore()
+	fv, inner := valkeyfake.New(), newFakeInnerStore()
 	inner.rows["room1"] = seedRow("room1")
 	clock := newFakeClock(time.Now())
 	b := circuitbreaker.New(2, time.Hour) // opens after 2 failures, stays open
@@ -909,4 +809,12 @@ func TestL2DEKStore_SurvivesAnL1LongerThanTheRefreshWindow(t *testing.T) {
 		require.NoError(t, err, "read %d during the outage must resolve from the L2", i)
 		require.NotNil(t, got, "read %d during the outage must resolve from the L2", i)
 	}
+}
+
+// mustDeadline reads a key's absolute expiry, failing when it has none.
+func mustDeadline(t *testing.T, c *valkeyfake.Client, key string) time.Time {
+	t.Helper()
+	d, ok := c.Deadline(key)
+	require.True(t, ok, "expected %s to carry a deadline", key)
+	return d
 }

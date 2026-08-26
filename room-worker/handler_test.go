@@ -31,6 +31,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 type publishedMsg struct {
@@ -7169,42 +7170,13 @@ func TestProcessRoomRename_GetRoomFails_FallsBackToGlobal(t *testing.T) {
 
 // --- bustRoomMeta tests ---
 
-type fakeBustClient struct {
-	dels     []string
-	delCalls int // count of Del *calls*, not keys — asserts round-trip batching
-	delErr   error
-}
-
-func (f *fakeBustClient) Get(context.Context, string) (string, error) { return "", nil }
-func (f *fakeBustClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
-	f.delCalls++
-	f.dels = append(f.dels, keys...)
-	return f.delErr
-}
-func (f *fakeBustClient) Expire(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func (f *fakeBustClient) Close() error { return nil }
-
-// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
-func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	panic("fakeBustClient.SetNX not implemented")
-}
-func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	panic("fakeBustClient.IncrEx not implemented")
-}
-
 func TestHandler_bustRoomMeta_CallsDel(t *testing.T) {
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := &Handler{valkey: fake}
 	h.bustRoomMeta(context.Background(), "r123")
 	// Both key generations: the unversioned key is the one deployed binaries
 	// write, and a rolling deploy runs both.
-	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.dels)
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.DeletedKeys())
 }
 
 func TestHandler_bustRoomMeta_NilClient_NoPanic(t *testing.T) {
@@ -7213,11 +7185,12 @@ func TestHandler_bustRoomMeta_NilClient_NoPanic(t *testing.T) {
 }
 
 func TestHandler_bustRoomMeta_FailOpen(t *testing.T) {
-	fake := &fakeBustClient{delErr: errors.New("valkey down")}
+	fake := valkeyfake.New()
+	fake.FailDel(errors.New("valkey down"))
 	h := &Handler{valkey: fake}
 	assert.NotPanics(t, func() { h.bustRoomMeta(context.Background(), "r123") })
 	// The Del was attempted (error swallowed inside BustMeta), not skipped.
-	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.dels)
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.DeletedKeys())
 }
 
 // --- bustSub tests ---
@@ -7247,14 +7220,14 @@ func TestHandler_ProcessRemoveIndividual_BustsSubL2(t *testing.T) {
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 	h.valkey = fake
 	req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
 	data, _ := json.Marshal(req)
 	require.NoError(t, h.processRemoveMember(context.Background(), data))
 
-	assert.Contains(t, fake.dels, subauthcache.SubKey(roomID, account), "removed member's subauthcache L2 entry must be busted")
+	assert.Contains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, account), "removed member's subauthcache L2 entry must be busted")
 }
 
 // TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted_BustsSubL2 covers
@@ -7280,14 +7253,14 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted_BustsSubL2(t *t
 		store.EXPECT().RemoveRole(gomock.Any(), account, roomID, model.RoleOwner).Return(nil),
 	)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 	h.valkey = fake
 	req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
 	data, _ := json.Marshal(req)
 	require.NoError(t, h.processRemoveMember(context.Background(), data))
 
-	assert.Contains(t, fake.dels, subauthcache.SubKey(roomID, account), "demoted dual-member's subauthcache L2 entry must be busted")
+	assert.Contains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, account), "demoted dual-member's subauthcache L2 entry must be busted")
 }
 
 // TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount covers the
@@ -7317,16 +7290,16 @@ func TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount(t *testing.T) 
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
 	h.valkey = fake
 	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel}
 	data, _ := json.Marshal(req)
 	require.NoError(t, h.processRemoveMember(context.Background(), data))
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey(roomID, "carol"), subauthcache.SubKey(roomID, "dave")},
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey(roomID, "carol"), subauthcache.SubKey(roomID, "dave")},
 		"the removed accounts' subauthcache L2 entries must be busted")
-	assert.NotContains(t, fake.dels, subauthcache.SubKey(roomID, "eve"), "the surviving member must not be busted")
+	assert.NotContains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, "eve"), "the surviving member must not be busted")
 }
 
 func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
@@ -7649,17 +7622,4 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
 	})
-}
-
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
 }

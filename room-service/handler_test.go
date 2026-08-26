@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // ptrBool returns a pointer to b, for constructing tri-state *bool fields
@@ -46,36 +47,6 @@ func ptrInt64(v int64) *int64 { return &v }
 func expectAllAccountsExist(store *MockRoomStore) *gomock.Call {
 	return store.EXPECT().FindExistingAccounts(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, accs []string) ([]string, error) { return accs, nil })
-}
-
-// fakeBustClient is a minimal valkeyutil.Client that records Del calls, for
-// asserting subauthcache L2 invalidation fires. SetNX/IncrEx panic on use —
-// bust helpers never call them.
-type fakeBustClient struct {
-	dels     []string
-	delCalls int // count of Del *calls*, not keys — asserts round-trip batching
-	delErr   error
-}
-
-func (f *fakeBustClient) Get(context.Context, string) (string, error) { return "", nil }
-func (f *fakeBustClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
-	f.delCalls++
-	f.dels = append(f.dels, keys...)
-	return f.delErr
-}
-func (f *fakeBustClient) Expire(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func (f *fakeBustClient) Close() error { return nil }
-func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	panic("fakeBustClient.SetNX not implemented")
-}
-func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	panic("fakeBustClient.IncrEx not implemented")
 }
 
 // --- bustSubs (batched) tests ---
@@ -100,7 +71,7 @@ func TestHandler_UpdateRole_BustsSubL2(t *testing.T) {
 		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleMember, model.RoleOwner}}, nil)
 	store.EXPECT().GetUserSiteID(gomock.Any(), "bob").Return("site-a", nil)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, valkey: fake,
 		publishCore:     func(context.Context, string, []byte) error { return nil },
 		publishToStream: func(context.Context, string, []byte, string) error { return nil },
@@ -110,7 +81,7 @@ func TestHandler_UpdateRole_BustsSubL2(t *testing.T) {
 	_, err := h.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
 	require.NoError(t, err)
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r1", "bob")},
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "bob")},
 		"the role-changed account's subauthcache L2 entry must be busted")
 }
 
@@ -6005,7 +5976,7 @@ func TestHandleRoomRestricted_BustsSubL2ForEverySubscriber(t *testing.T) {
 		{Account: "bob", SiteID: "site-a"},
 	}, nil)
 
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
 		func(_ context.Context, _ string, _ []byte) error { return nil },
@@ -6018,7 +5989,7 @@ func TestHandleRoomRestricted_BustsSubL2ForEverySubscriber(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
 		"every subscriber's subauthcache L2 entry must be busted (roles were bulk-rewritten)")
 }
 
@@ -8155,17 +8126,4 @@ func TestFederateOne_NoopWhenLocalOrEmpty(t *testing.T) {
 	require.NoError(t, h.federateOne(context.Background(), "r1", "", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	require.NoError(t, h.federateOne(context.Background(), "r1", "site-a", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	assert.False(t, called, "empty or local destination must not publish")
-}
-
-// MGet loops the fake's own Get so it cannot drift from single-key behaviour.
-func (f *fakeBustClient) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		v, err := f.Get(ctx, k)
-		if err != nil {
-			continue
-		}
-		out[k] = v
-	}
-	return out, nil
 }
