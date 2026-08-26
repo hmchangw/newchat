@@ -9,4 +9,6 @@ const (
 	AdminInvalidCredentials   Reason = "invalid_credentials"    // 401: /v1/login denied (unknown / wrong password / not admin / deactivated)
 	AdminOldPasswordMismatch  Reason = "old_password_mismatch"  // 401: /v1/password/change oldPassword wrong
 	AdminMixedDeactivatePatch Reason = "mixed_deactivate_patch" // 400: PATCH mixes active=false with other field updates
+	AdminUpstreamUnauthorized Reason = "upstream_unauthorized"  // 503: client-update-service refused this service's token
+	AdminUpstreamUnavailable  Reason = "upstream_unavailable"   // 503: client-update-service unreachable or failing
 )
