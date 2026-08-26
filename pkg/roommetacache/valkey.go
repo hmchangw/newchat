@@ -17,17 +17,19 @@ import (
 // interface, and cachemetrics.Recorder satisfies it.
 type Recorder = valkeyutil.CacheRecorder
 
-// cacheKeySchemaVersion namespaces cache keys by the stored value's shape,
-// mirroring pkg/roomsubcache. Bump whenever the value changes such that a
-// binary built against the other shape would decode it without error but with
-// the wrong contents — Valkey has no schema check, so the version segment is
-// what makes those entries miss and be repopulated instead. Bumped to v2 when
-// the value went from a bare Meta to the cachedMeta{Meta, CachedAt} envelope:
-// an older binary decodes that envelope into Meta with no JSON error (both
-// envelope fields are simply unknown) and every field zero, which during a
-// rolling deploy makes an old broadcast-worker drop fan-out on an empty room
-// type and an old message-gatekeeper read UserCount 0.
-const cacheKeySchemaVersion = "v2"
+// cacheKeySchemaVersion namespaces keys by the stored value's shape, as
+// roomsubcache does. Bump it whenever a binary built against the other shape
+// would decode the value without error but with the wrong contents — Valkey has
+// no schema check, so the version is what makes those entries miss instead.
+//
+// v2 wrapped the bare Meta in an envelope; v3 moved to the shared
+// valkeyutil.Box. Either mismatch decodes to an all-zero Meta with no JSON
+// error, which would have broadcast-worker drop fan-out on an empty room type.
+const cacheKeySchemaVersion = "v3"
+
+// legacyCacheKeySchemaVersion is the generation before it, kept only so a bust
+// clears both while a rolling deploy can have either binary live.
+const legacyCacheKeySchemaVersion = "v2"
 
 // MetaKey is the L2 (Valkey) key for a room's cached Meta. The {roomID}
 // hash tag colocates it in the same cluster slot as the room's encryption
@@ -37,13 +39,12 @@ func MetaKey(roomID string) string {
 	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
 }
 
-// legacyMetaKey is the pre-v2 key, still written and read by binaries that
-// predate the cachedMeta envelope. Only invalidation touches it: a bust must
-// clear both generations for as long as a rolling deploy can have both binaries
-// live, or an old pod serves a room that a new pod just renamed or deleted.
-// Delete this (and its use in BustMeta) once no pre-v2 binary can be running.
+// legacyMetaKey is the previous generation, still written and read by binaries
+// that predate the shared valkeyutil.Box envelope. Only invalidation touches it:
+// a bust must clear both while a rolling deploy can have either live, or an old
+// pod keeps serving a room a new pod just renamed. Drop it once none can run.
 func legacyMetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta"
+	return "room:{" + roomID + "}:meta:" + legacyCacheKeySchemaVersion
 }
 
 // tierOption configures a tier at construction. Unexported: every production
@@ -71,7 +72,7 @@ type tierOpts struct {
 // returned — three allocations on a path that runs once per message through
 // broadcast-worker's fan-out. Holding the tier moves that to startup.
 type L2Tier struct {
-	tier   valkeyutil.Tier[string, cachedMeta]
+	tier   valkeyutil.Tier[string, Meta]
 	client valkeyutil.Client
 }
 
@@ -100,34 +101,32 @@ func newL2TierWithClock(client valkeyutil.Client, rooms *mongo.Collection, ttl t
 		opt(&o)
 	}
 	t := &L2Tier{client: client}
-	t.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedMeta]{
+	t.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, Meta]{
 		Client: client,
 		TTL:    ttl,
 		Label:  "room meta",
 		Rec:    rec,
 		Key:    MetaKey,
-		Load: func(ctx context.Context, id string) (cachedMeta, bool, error) {
+		Load: func(ctx context.Context, id string) (Meta, bool, error) {
 			meta, err := fetchGuarded(ctx, &o, rooms, id)
 			switch {
-			// A missing room is a decision, not a failure, and must reach the tier
-			// as a confirmed absence: collapsing it into an error would make an
-			// outage indistinguishable from a deletion, and the tier evicts on one
-			// and keeps serving on the other.
+			// A missing room must arrive as "missing", not as an error, or a
+			// deletion and an outage look the same.
 			case errors.Is(err, mongo.ErrNoDocuments):
-				return cachedMeta{}, false, nil
+				return Meta{}, false, nil
 			case err != nil:
-				return cachedMeta{}, false, err
+				return Meta{}, false, err
 			}
-			return cachedMeta{Meta: meta}, true, nil
+			return meta, true, nil
 		},
-		Stamp: func(e cachedMeta, ms int64) cachedMeta { e.CachedAt = ms; return e },
+		Valid: usableMeta,
 	}, now)
 	return t
 }
 
 // Get resolves roomID.
 func (t *L2Tier) Get(ctx context.Context, roomID string) (Meta, error) {
-	entry, found, err := t.tier.Resolve(ctx, roomID)
+	meta, found, err := t.tier.Resolve(ctx, roomID)
 	if err != nil {
 		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
 	}
@@ -138,36 +137,13 @@ func (t *L2Tier) Get(ctx context.Context, roomID string) (Meta, error) {
 		// against mongo.ErrNoDocuments, which callers branch on.
 		return Meta{}, fmt.Errorf("l2 read-through: fetch room meta %s: %w", roomID, mongo.ErrNoDocuments)
 	}
-	return entry.Meta, nil
+	return meta, nil
 }
 
-// cachedMeta is the L2 envelope. The embedded Stamp records when Mongo last
-// confirmed the entry, which is what lets a reader tell a fresh entry from one
-// due for re-validation — and what makes surviving an outage possible rather
-// than waiting for the key to vanish. The field is declared rather
-// than embedded so composite literals keep working; see valkeyutil.Entry.
-type cachedMeta struct {
-	Meta     Meta  `json:"meta"`
-	CachedAt int64 `json:"cachedAt"`
-}
-
-// Stamped reports when Mongo last confirmed the entry.
-func (c cachedMeta) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: interface-required value receiver, see Usable
-
-// Usable requires both a non-empty room ID and a confirmation stamp.
-//
-// FetchFromMongo always populates the ID, so a zero Meta means the key holds
-// something that is not a Meta — and serving it would hand out an empty SiteID
-// and type, which downstream routing reads. The stamp check is what makes an
-// entry written before the envelope existed (a bare Meta) read as a miss and
-// reload, rather than being served with a zero CachedAt that would mark it
-// permanently stale.
-//
-// The value receiver is required, and so is the gocritic exemption below it:
-// valkeyutil.Entry is satisfied by the type the tier stores, and a value type's
-// method set excludes pointer-receiver methods. The copy is two per cache read,
-// against a Valkey round trip.
-func (c cachedMeta) Usable() bool { return c.Meta.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: see the note above
+// usableMeta needs a room ID: FetchFromMongo always sets one, so a zero Meta
+// means the key holds something else, and serving it would hand routing an
+// empty SiteID. The stamp is checked by valkeyutil.Box.
+func usableMeta(m *Meta) bool { return m.ID != "" }
 
 // fetchGuarded runs FetchFromMongo, inside guard when one was supplied. A nil
 // guard (the common case) calls straight through.

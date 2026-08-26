@@ -1297,7 +1297,7 @@ func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
 	evtData, _ := json.Marshal(evt)
 	require.NoError(t, h.HandleEvent(context.Background(), evtData))
 
-	assert.Equal(t, []string{subauthcache.SubKey("room-1", "bob")}, fake.dels)
+	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("room-1", "bob")})
 }
 
 // TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount covers the
@@ -1327,7 +1327,7 @@ func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
 
 	require.NoError(t, h.HandleEvent(context.Background(), data))
 
-	assert.ElementsMatch(t, []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")}, fake.dels)
+	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")})
 	assert.Equal(t, 1, fake.delCalls, "must be a single batched Del round trip for all removed accounts")
 }
 
@@ -1363,7 +1363,7 @@ func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *
 
 	require.NoError(t, h.HandleEvent(context.Background(), evt))
 
-	assert.ElementsMatch(t, []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")}, fake.dels,
+	assert.Subset(t, fake.dels, []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
 		"every local subscriber of the restricted room must be busted")
 	assert.NotContains(t, fake.dels, subauthcache.SubKey("other-room", "unrelated"),
 		"a subscriber of a different room must not be busted")

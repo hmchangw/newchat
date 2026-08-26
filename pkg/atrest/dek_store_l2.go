@@ -18,30 +18,20 @@ type L2Recorder = valkeyutil.CacheRecorder
 // DEKKey is the L2 key for a room's wrapped DEK. The {roomID} hash-tag
 // colocates it in the room's cluster slot, matching house convention.
 func DEKKey(roomID string) string {
-	return "dek:{" + roomID + "}"
+	return "dek:{" + roomID + "}:" + cacheKeySchemaVersion
 }
 
-// cachedDEK is the L2 wire form: the wrapped-DEK row plus the moment that row
-// was last confirmed against the inner (Mongo) store. CachedAt is a cache
-// bookkeeping field, unrelated to the row's own CreatedAt — it drives
-// refresh-on-read (see l2DEKStore.serveHit).
-//
-// An entry written by an older build (a bare RoomDataKey) decodes to a zero Row
-// here, which readL2 already treats as a miss, so the format change degrades to
-// one extra inner fetch per room rather than to a wrong key.
-type cachedDEK struct {
-	Row RoomDataKey `json:"row"`
-	// CachedAt is Unix milliseconds. Milliseconds, not nanos, keep the JSON
-	// stable-looking and are far finer than any refresh interval.
-	CachedAt int64 `json:"cachedAt"`
-}
+// cacheKeySchemaVersion namespaces keys by stored shape. v2 is the shared
+// valkeyutil.Box envelope; legacyDEKKey is the generation before it, cleared
+// alongside so a bust reaches a v1 binary's entry too. The version trails the
+// key so the {roomID} hash tag keeps its cluster slot.
+const cacheKeySchemaVersion = "v2"
 
-// Stamped reports when the inner store last confirmed the row.
-func (c cachedDEK) Stamped() int64 { return c.CachedAt }
+func legacyDEKKey(roomID string) string { return "dek:{" + roomID + "}" }
 
-// Usable rejects an entry with no wrapped key: serving it would fail Unwrap for
-// the entry's whole TTL.
-func (c cachedDEK) Usable() bool { return len(c.Row.WrappedDEK) > 0 }
+// usableDEK rejects an entry with no wrapped key: serving it would fail Unwrap
+// for the entry's whole TTL.
+func usableDEK(k *RoomDataKey) bool { return len(k.WrappedDEK) > 0 }
 
 // l2DEKStore decorates a DEKStore with a Valkey L2 tier holding the
 // Vault-WRAPPED DEK record. It exists so a room's key stays reachable while
@@ -73,7 +63,7 @@ type l2DEKStore struct {
 	// a Mongo read here. The 90m/1h defaults leave room.
 	ttl     time.Duration
 	breaker *circuitbreaker.Breaker
-	tier    valkeyutil.Tier[string, cachedDEK]
+	tier    valkeyutil.Tier[string, RoomDataKey]
 }
 
 // NewL2DEKStore wraps inner with a Valkey L2 tier. Pass a nil client (or a
@@ -89,14 +79,14 @@ func NewL2DEKStore(inner DEKStore, client valkeyutil.Client, ttl time.Duration, 
 // package's own refresh-window tests.
 func newL2DEKStoreWithClock(inner DEKStore, client valkeyutil.Client, ttl time.Duration, breaker *circuitbreaker.Breaker, rec L2Recorder, now func() time.Time) *l2DEKStore {
 	s := &l2DEKStore{inner: inner, client: client, ttl: ttl, breaker: breaker}
-	s.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedDEK]{
+	s.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, RoomDataKey]{
 		Client: client,
 		TTL:    ttl,
 		Label:  "dek",
 		Rec:    rec,
 		Key:    DEKKey,
 		Load:   s.loadEntry,
-		Stamp:  func(e cachedDEK, ms int64) cachedDEK { e.CachedAt = ms; return e },
+		Valid:  usableDEK,
 		// The in-process DEK cache lasts an hour but the reload window opens at
 		// 67.5m, so every miss there arrives before the window and the entry would
 		// expire at 90m without ever being extended. Sliding moves only the expiry.
@@ -111,15 +101,12 @@ func newL2DEKStoreWithClock(inner DEKStore, client valkeyutil.Client, ttl time.D
 
 // loadEntry adapts the inner store to the tier's three results. A nil row is
 // "missing", not an error, so the cipher can create one.
-func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (cachedDEK, bool, error) {
+func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (RoomDataKey, bool, error) {
 	row, err := s.fetchInner(ctx, roomID)
-	if err != nil {
-		return cachedDEK{}, false, err
+	if err != nil || row == nil {
+		return RoomDataKey{}, false, err
 	}
-	if row == nil {
-		return cachedDEK{}, false, nil
-	}
-	return cachedDEK{Row: *row}, true, nil
+	return *row, true, nil
 }
 
 func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
@@ -128,14 +115,14 @@ func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
 // cached — the cipher uses it to create one. Caching policy is
 // valkeyutil.Tier's; the two options above are where this tier differs.
 func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, error) {
-	entry, found, err := s.tier.Resolve(ctx, roomID)
+	row, found, err := s.tier.Resolve(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("dek l2 read-through for room %s: %w", roomID, err)
 	}
 	if !found {
 		return nil, nil
 	}
-	return &entry.Row, nil
+	return &row, nil
 }
 
 // fetchInner runs the inner Get under the breaker, so both the read-through and
@@ -177,7 +164,7 @@ func (s *l2DEKStore) invalidate(ctx context.Context, roomID string) {
 	if !s.l2Enabled() {
 		return
 	}
-	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID))
+	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID), legacyDEKKey(roomID))
 }
 
 // DefaultL2Recorder is the shared metrics recorder for the DEK L2 tier, so

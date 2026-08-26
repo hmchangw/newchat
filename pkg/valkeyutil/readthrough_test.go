@@ -11,20 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// thing is a stand-in for a real tier's envelope: a payload under its own JSON
-// name, plus a confirmation stamp. The payload's name matters — the point of
-// letting each envelope declare its own fields, rather than generating one, is
-// that "payload" here stays "payload" on the wire, so no live tier changes
-// format when it adopts a Tier.
+// thing is a stand-in for a cached value. The tier wraps it in a Box; the tests
+// assert on that wire form directly.
 type thing struct {
-	Payload  string `json:"payload"`
-	CachedAt int64  `json:"cachedAt"`
+	Payload string `json:"payload"`
 }
 
-func (t thing) Stamped() int64 { return t.CachedAt }
-func (t thing) Usable() bool   { return t.Payload != "" }
-
-func stampThing(t thing, ms int64) thing { t.CachedAt = ms; return t }
+func thingValid(t *thing) bool { return t.Payload != "" }
 
 // tierFake is an in-memory Client recording enough to assert on which arm of
 // the state machine ran: a SET is a rewrite, an EXPIRE is a slide, a DEL is an
@@ -75,9 +68,17 @@ func (f *tierFake) Del(_ context.Context, keys ...string) error {
 // test can place an entry precisely on either side of the refresh window.
 func (f *tierFake) seed(t *testing.T, key, payload string, stampedAt time.Time) {
 	t.Helper()
-	raw, err := json.Marshal(thing{Payload: payload, CachedAt: stampedAt.UnixMilli()})
+	raw, err := json.Marshal(Box[thing]{V: thing{Payload: payload}, CachedAt: stampedAt.UnixMilli()})
 	require.NoError(t, err)
 	f.store[key] = string(raw)
+}
+
+// storedBox decodes what the tier last wrote, so a test can assert on the stamp.
+func (f *tierFake) storedBox(t *testing.T, key string) Box[thing] {
+	t.Helper()
+	var b Box[thing]
+	require.NoError(t, json.Unmarshal([]byte(f.store[key]), &b))
+	return b
 }
 
 const tierTTL = 90 * time.Minute
@@ -87,7 +88,7 @@ const tierTTL = 90 * time.Minute
 var fixedNow = time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 type loadResult struct {
-	entry thing
+	value thing
 	found bool
 	err   error
 }
@@ -105,9 +106,9 @@ func newTestTier(fake Client, results ...loadResult) (Tier[string, thing], *int)
 		Load: func(_ context.Context, _ string) (thing, bool, error) {
 			r := results[calls]
 			calls++
-			return r.entry, r.found, r.err
+			return r.value, r.found, r.err
 		},
-		Stamp: stampThing,
+		Valid: thingValid,
 	}, func() time.Time { return fixedNow })
 	return tr, &calls
 }
@@ -133,7 +134,7 @@ func TestTier_FreshHitIsServedWithoutTouchingTheSource(t *testing.T) {
 func TestTier_StaleHitRevalidatesAndRewrites(t *testing.T) {
 	fake := newTierFake()
 	fake.seed(t, "thing:a", "old", fixedNow.Add(-RefreshAfter(tierTTL)-time.Minute))
-	tr, calls := newTestTier(fake, loadResult{entry: thing{Payload: "new"}, found: true})
+	tr, calls := newTestTier(fake, loadResult{value: thing{Payload: "new"}, found: true})
 
 	got, found, err := tr.Resolve(context.Background(), "a")
 
@@ -145,9 +146,7 @@ func TestTier_StaleHitRevalidatesAndRewrites(t *testing.T) {
 
 	// The rewrite must restamp, or the entry stays permanently stale and every
 	// later read pays a source round-trip.
-	var stored thing
-	require.NoError(t, json.Unmarshal([]byte(fake.store["thing:a"]), &stored))
-	assert.Equal(t, fixedNow.UnixMilli(), stored.CachedAt)
+	assert.Equal(t, fixedNow.UnixMilli(), fake.storedBox(t, "thing:a").CachedAt)
 }
 
 // The branch the whole tier exists for.
@@ -189,7 +188,7 @@ func TestTier_KeepOnAbsentRestampsInsteadOfEvicting(t *testing.T) {
 		Client: fake, TTL: tierTTL, Label: "thing",
 		Key:          func(id string) string { return "thing:" + id },
 		Load:         func(context.Context, string) (thing, bool, error) { return thing{}, false, nil },
-		Stamp:        stampThing,
+		Valid:        thingValid,
 		KeepOnAbsent: true,
 	}, func() time.Time { return fixedNow })
 
@@ -201,10 +200,9 @@ func TestTier_KeepOnAbsentRestampsInsteadOfEvicting(t *testing.T) {
 	assert.Zero(t, fake.delCalls, "the entry must survive")
 	assert.Equal(t, 1, fake.setCalls, "restamped, so the retry is once per window")
 
-	var stored thing
-	require.NoError(t, json.Unmarshal([]byte(fake.store["thing:a"]), &stored))
+	stored := fake.storedBox(t, "thing:a")
 	assert.Equal(t, fixedNow.UnixMilli(), stored.CachedAt)
-	assert.Equal(t, "cached", stored.Payload, "the cached payload is kept, not replaced")
+	assert.Equal(t, "cached", stored.V.Payload, "the cached payload is kept, not replaced")
 }
 
 // SlideOnFresh is for a tier whose L1 TTL outlives the refresh window, where
@@ -220,7 +218,7 @@ func TestTier_SlideOnFreshRearmsWithoutRestamping(t *testing.T) {
 		Load: func(context.Context, string) (thing, bool, error) {
 			return thing{}, false, errors.New("must not be called")
 		},
-		Stamp:        stampThing,
+		Valid:        thingValid,
 		SlideOnFresh: true,
 	}, func() time.Time { return fixedNow })
 
@@ -234,14 +232,12 @@ func TestTier_SlideOnFreshRearmsWithoutRestamping(t *testing.T) {
 
 	// The staleness bound must NOT move: only a real re-validation may advance
 	// CachedAt, or a slid entry would look freshly confirmed forever.
-	var stored thing
-	require.NoError(t, json.Unmarshal([]byte(fake.store["thing:a"]), &stored))
-	assert.Equal(t, stampedAt.UnixMilli(), stored.CachedAt)
+	assert.Equal(t, stampedAt.UnixMilli(), fake.storedBox(t, "thing:a").CachedAt)
 }
 
 func TestTier_ColdMissLoadsAndPopulates(t *testing.T) {
 	fake := newTierFake()
-	tr, calls := newTestTier(fake, loadResult{entry: thing{Payload: "loaded"}, found: true})
+	tr, calls := newTestTier(fake, loadResult{value: thing{Payload: "loaded"}, found: true})
 
 	got, found, err := tr.Resolve(context.Background(), "a")
 
@@ -251,10 +247,9 @@ func TestTier_ColdMissLoadsAndPopulates(t *testing.T) {
 	assert.Equal(t, 1, *calls)
 	assert.Equal(t, 1, fake.setCalls)
 
-	var stored thing
-	require.NoError(t, json.Unmarshal([]byte(fake.store["thing:a"]), &stored))
+	stored := fake.storedBox(t, "thing:a")
 	assert.Equal(t, fixedNow.UnixMilli(), stored.CachedAt)
-	assert.Equal(t, "loaded", stored.Payload)
+	assert.Equal(t, "loaded", stored.V.Payload)
 }
 
 // Positive-only: a confirmed absence is never written, so the tier can never
@@ -276,7 +271,7 @@ func TestTier_ColdMissDoesNotCacheAnAbsence(t *testing.T) {
 // round trip per read and caching nothing.
 func TestTier_UnusableLoadResultIsServedButNotCached(t *testing.T) {
 	fake := newTierFake()
-	tr, _ := newTestTier(fake, loadResult{entry: thing{Payload: ""}, found: true})
+	tr, _ := newTestTier(fake, loadResult{value: thing{Payload: ""}, found: true})
 
 	got, found, err := tr.Resolve(context.Background(), "a")
 
@@ -305,8 +300,8 @@ func TestTier_ColdMissSurfacesTheSourceError(t *testing.T) {
 // hand out a zero value for the rest of its TTL.
 func TestTier_UnusableEntryReloads(t *testing.T) {
 	fake := newTierFake()
-	fake.store["thing:a"] = `{"payload":"","cachedAt":` + itoa(fixedNow.UnixMilli()) + `}`
-	tr, calls := newTestTier(fake, loadResult{entry: thing{Payload: "loaded"}, found: true})
+	fake.store["thing:a"] = `{"v":{"payload":""},"cachedAt":` + itoa(fixedNow.UnixMilli()) + `}`
+	tr, calls := newTestTier(fake, loadResult{value: thing{Payload: "loaded"}, found: true})
 
 	got, found, err := tr.Resolve(context.Background(), "a")
 
@@ -316,11 +311,29 @@ func TestTier_UnusableEntryReloads(t *testing.T) {
 	assert.Equal(t, 1, *calls, "an unusable entry must not be served")
 }
 
+// An entry with no stamp is a miss for every tier, not just the ones that
+// remembered to check. Before Box, each tier wrote its own predicate and two of
+// four omitted this — so a pre-envelope entry was served as infinitely stale and
+// reloaded from the source on every read, forever.
+func TestTier_UnstampedEntryIsAMiss(t *testing.T) {
+	fake := newTierFake()
+	fake.store["thing:a"] = `{"v":{"payload":"cached"},"cachedAt":0}`
+	tr, calls := newTestTier(fake, loadResult{value: thing{Payload: "loaded"}, found: true})
+
+	got, found, err := tr.Resolve(context.Background(), "a")
+
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "loaded", got.Payload)
+	assert.Equal(t, 1, *calls)
+	assert.Equal(t, fixedNow.UnixMilli(), fake.storedBox(t, "thing:a").CachedAt, "and it is replaced, not left to reload forever")
+}
+
 // A broken cache must never fail a lookup the source of truth can serve.
 func TestTier_ReadFailureFallsThroughToTheSource(t *testing.T) {
 	fake := newTierFake()
 	fake.getErr = errors.New("valkey down")
-	tr, calls := newTestTier(fake, loadResult{entry: thing{Payload: "loaded"}, found: true})
+	tr, calls := newTestTier(fake, loadResult{value: thing{Payload: "loaded"}, found: true})
 
 	got, found, err := tr.Resolve(context.Background(), "a")
 
@@ -353,7 +366,7 @@ func TestTier_DisabledGoesStraightToTheSource(t *testing.T) {
 					calls++
 					return thing{Payload: "loaded"}, true, nil
 				},
-				Stamp: stampThing,
+				Valid: thingValid,
 			})
 
 			got, found, err := tr.Resolve(context.Background(), "a")
@@ -382,7 +395,7 @@ func TestTier_BustDeletesAndTolerantOfDisabled(t *testing.T) {
 	disabled := NewTier(TierConfig[string, thing]{
 		Key:   func(id string) string { return "thing:" + id },
 		Load:  func(context.Context, string) (thing, bool, error) { return thing{}, false, nil },
-		Stamp: stampThing,
+		Valid: thingValid,
 	})
 	require.NotPanics(t, func() { disabled.bust(context.Background(), "a") })
 }

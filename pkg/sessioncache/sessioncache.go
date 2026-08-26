@@ -47,27 +47,23 @@ type Loader func(ctx context.Context, hash string) (*session.Session, error)
 // Key is the Valkey key for a hashed token. The hash — never the token — is the
 // key material: it arrives already hashed, and a reader of Valkey therefore
 // learns no credential they could authenticate with.
-func Key(hash string) string { return "session:" + hash }
+func Key(hash string) string { return "session:" + hash + ":" + cacheKeySchemaVersion }
 
-// cachedSession is the stored envelope. CachedAt is when MongoDB last confirmed
-// the session, which decides whether it can be served or needs a re-check.
-type cachedSession struct {
-	Session  session.Session `json:"session"`
-	CachedAt int64           `json:"cachedAt"`
-}
+// cacheKeySchemaVersion namespaces keys by stored shape. v2 is the shared
+// valkeyutil.Box envelope; legacyKey is the generation before it, cleared
+// alongside so a bust reaches a v1 binary's entry too.
+const cacheKeySchemaVersion = "v2"
 
-// Stamped reports when MongoDB last confirmed the session.
-func (c cachedSession) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: value receiver required by valkeyutil.Entry
+func legacyKey(hash string) string { return "session:" + hash }
 
-// Usable rejects an entry with no session ID (it would authenticate nobody for a
-// full TTL) or no stamp (written before the envelope existed, so it would read
-// as permanently stale).
-func (c cachedSession) Usable() bool { return c.Session.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: value receiver required by valkeyutil.Entry
+// usableSession rejects an entry with no session ID: it would authenticate
+// nobody in particular for a full TTL.
+func usableSession(v *session.Session) bool { return v.ID != "" }
 
 // Cache is a read-through Valkey tier over a session Loader.
 type Cache struct {
 	load Loader
-	tier valkeyutil.Tier[string, cachedSession]
+	tier valkeyutil.Tier[string, session.Session]
 	// client is kept only for Bust; the tier owns every other use.
 	client valkeyutil.Client
 }
@@ -81,31 +77,31 @@ func New(load Loader, client valkeyutil.Client, ttl time.Duration) *Cache {
 
 func newWithClock(load Loader, client valkeyutil.Client, ttl time.Duration, now func() time.Time) *Cache {
 	c := &Cache{load: load, client: client}
-	c.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedSession]{
+	c.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, session.Session]{
 		Client: client,
 		TTL:    ttl,
 		Label:  "session",
 		Rec:    cachemetrics.For("session", "l2"),
 		Key:    Key,
 		Load:   c.loadEntry,
-		Stamp:  func(e cachedSession, ms int64) cachedSession { e.CachedAt = ms; return e },
+		Valid:  usableSession,
 	}, now)
 	return c
 }
 
 // loadEntry adapts Loader to the tier's three results. ErrNotFound must arrive
 // as "missing", not as an error, or a revocation and an outage look the same.
-func (c *Cache) loadEntry(ctx context.Context, hash string) (cachedSession, bool, error) {
+func (c *Cache) loadEntry(ctx context.Context, hash string) (session.Session, bool, error) {
 	s, err := c.load(ctx, hash)
 	switch {
 	case errors.Is(err, session.ErrNotFound):
-		return cachedSession{}, false, nil
+		return session.Session{}, false, nil
 	case err != nil:
-		return cachedSession{}, false, err
+		return session.Session{}, false, err
 	case s == nil:
-		return cachedSession{}, false, nil
+		return session.Session{}, false, nil
 	}
-	return cachedSession{Session: *s}, true, nil
+	return *s, true, nil
 }
 
 // Bust drops a session's entry. Revocation paths should call it so a revoked
@@ -115,7 +111,7 @@ func Bust(ctx context.Context, client valkeyutil.Client, hash string) {
 	if hash == "" {
 		return
 	}
-	valkeyutil.BustKeys(ctx, client, "session", Key(hash))
+	valkeyutil.BustKeys(ctx, client, "session", Key(hash), legacyKey(hash))
 }
 
 // BustMany invalidates every supplied session hash. Empty hashes are skipped,
@@ -127,10 +123,10 @@ func Bust(ctx context.Context, client valkeyutil.Client, hash string) {
 // during a source outage the TTL slide re-arms it on every read, so it never
 // elapses at all.
 func BustMany(ctx context.Context, client valkeyutil.Client, hashes []string) {
-	keys := make([]string, 0, len(hashes))
+	keys := make([]string, 0, len(hashes)*2)
 	for _, h := range hashes {
 		if h != "" {
-			keys = append(keys, Key(h))
+			keys = append(keys, Key(h), legacyKey(h))
 		}
 	}
 	if len(keys) == 0 {
@@ -143,12 +139,12 @@ func BustMany(ctx context.Context, client valkeyutil.Client, hashes []string) {
 // session.ErrNotFound only when MongoDB said so, so a caller cannot mistake an
 // outage for an invalid token. Caching policy is valkeyutil.Tier's.
 func (c *Cache) FindByHash(ctx context.Context, hash string) (*session.Session, error) {
-	entry, found, err := c.tier.Resolve(ctx, hash)
+	sess, found, err := c.tier.Resolve(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return nil, session.ErrNotFound
 	}
-	return &entry.Session, nil
+	return &sess, nil
 }

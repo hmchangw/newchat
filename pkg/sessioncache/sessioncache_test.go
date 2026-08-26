@@ -295,7 +295,9 @@ func TestBust_DropsTheEntry(t *testing.T) {
 
 	Bust(ctx, vk, hash)
 	assert.NotContains(t, vk.data, Key(hash))
-	assert.Equal(t, []string{Key(hash)}, vk.dels)
+	// Both generations: a rolling deploy can still have a binary writing the
+	// pre-Box key, and a revocation has to reach that entry too.
+	assert.Equal(t, []string{Key(hash), legacyKey(hash)}, vk.dels)
 }
 
 func TestBust_NilClientIsNoOp(t *testing.T) {
@@ -311,7 +313,7 @@ func TestCache_StoredEntryCarriesOnlyThePrincipal(t *testing.T) {
 
 	var entry map[string]any
 	require.NoError(t, json.Unmarshal([]byte(vk.data[Key(hash)]), &entry))
-	sess, ok := entry["session"].(map[string]any)
+	sess, ok := entry["v"].(map[string]any)
 	require.True(t, ok)
 	// Whatever the shape, nothing secret may be written: the token itself never
 	// reaches this tier, only its hash, and that lives in the key.

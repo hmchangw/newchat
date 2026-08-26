@@ -180,7 +180,10 @@ func seedRow(roomID string) RoomDataKey {
 }
 
 func TestDEKKey(t *testing.T) {
-	assert.Equal(t, "dek:{room1}", DEKKey("room1"))
+	assert.Equal(t, "dek:{room1}:v2", DEKKey("room1"))
+	assert.Equal(t, "dek:{room1}", legacyDEKKey("room1"))
+	// The version trails the key so the hash tag keeps the room's cluster slot.
+	assert.Contains(t, DEKKey("room1"), "{room1}")
 }
 
 // The refresh window has to outrun the cipher's in-process DEK cache, which
@@ -419,17 +422,17 @@ func TestL2DEKStore_L2WireFormIsCamelCaseJSON(t *testing.T) {
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(fv.store[DEKKey("room1")]), &raw))
 	assert.Contains(t, raw, "cachedAt")
-	require.Contains(t, raw, "row")
+	require.Contains(t, raw, "v")
 
 	var row map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw["row"], &row))
+	require.NoError(t, json.Unmarshal(raw["v"], &row))
 	assert.Contains(t, row, "id")
 	assert.Contains(t, row, "wrappedDek")
 	assert.Contains(t, row, "createdAt")
 }
 
 // A foreign or truncated value under the DEK key decodes cleanly into a
-// zero-valued cachedDEK; treating that as a hit would fail Unwrap for the
+// zero-valued valkeyutil.Box[RoomDataKey]; treating that as a hit would fail Unwrap for the
 // entry's whole TTL, so it must fall through to the inner store instead. An
 // entry written by an older build (a bare row, no envelope) lands in the same
 // bucket, which is what makes the format change safe to roll out.
@@ -483,9 +486,7 @@ func TestL2DEKStore_EntryAgeSurvivesProcessRestart(t *testing.T) {
 	t.Run("entry written recently by another pod", func(t *testing.T) {
 		fv, inner := newFakeL2Valkey(), newFakeInnerStore()
 		inner.rows["room1"] = seedRow("room1")
-		fv.store[DEKKey("room1")] = mustJSON(t, cachedDEK{
-			Row: seedRow("room1"), CachedAt: clock.Now().Add(-time.Minute).UnixMilli(),
-		})
+		fv.store[DEKKey("room1")] = mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-time.Minute).UnixMilli()})
 		s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
 
 		got, err := s.Get(ctx, "room1")
@@ -498,9 +499,7 @@ func TestL2DEKStore_EntryAgeSurvivesProcessRestart(t *testing.T) {
 	t.Run("entry older than the refresh interval", func(t *testing.T) {
 		fv, inner := newFakeL2Valkey(), newFakeInnerStore()
 		inner.rows["room1"] = rotatedRow("room1")
-		fv.store[DEKKey("room1")] = mustJSON(t, cachedDEK{
-			Row: seedRow("room1"), CachedAt: clock.Now().Add(-pastRefresh).UnixMilli(),
-		})
+		fv.store[DEKKey("room1")] = mustJSON(t, valkeyutil.Box[RoomDataKey]{V: seedRow("room1"), CachedAt: clock.Now().Add(-pastRefresh).UnixMilli()})
 		s := newClockedStore(t, inner, fv, time.Hour, healthyBreaker(), clock)
 
 		got, err := s.Get(ctx, "room1")

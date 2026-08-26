@@ -57,8 +57,10 @@ func TestRevokeAllSessions_BustsEveryRevokedHash(t *testing.T) {
 	setupSessionRouter(h).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/sessions?account=alice", nil))
 	require.Equal(t, http.StatusOK, w.Code)
 
-	assert.ElementsMatch(t,
-		[]string{sessioncache.Key("hash-a"), sessioncache.Key("hash-b")}, bust.dels,
+	// Subset, not equality: a bust also clears the pre-Box generation, which is
+	// sessioncache's own bookkeeping (pinned by its TestBust_DropsTheEntry) and
+	// will be deleted once no such binary can run.
+	assert.Subset(t, bust.dels, []string{sessioncache.Key("hash-a"), sessioncache.Key("hash-b")},
 		"every revoked session must be evicted from the cache that authorizes it")
 }
 
@@ -74,7 +76,7 @@ func TestRevokeSession_BustsTheSessionHash(t *testing.T) {
 	setupSessionRouter(h).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/sessions/hash-a?account=alice", nil))
 	require.Equal(t, http.StatusOK, w.Code)
 
-	assert.Equal(t, []string{sessioncache.Key("hash-a")}, bust.dels,
+	assert.Subset(t, bust.dels, []string{sessioncache.Key("hash-a")},
 		"the path parameter IS the token hash, so it is the cache key")
 }
 

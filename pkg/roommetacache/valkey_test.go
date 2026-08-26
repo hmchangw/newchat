@@ -96,7 +96,7 @@ func (f *fakeValkey) IncrEx(_ context.Context, _ string, _ time.Duration) (int64
 
 // TestMetaKey pins both halves of the key contract. The version segment is what
 // keeps a rolling deploy safe: the value under this key changed from a bare Meta
-// to the cachedMeta envelope, and an old binary decodes that envelope into Meta
+// to the valkeyutil.Box[Meta] envelope, and an old binary decodes that envelope into Meta
 // with no JSON error and every field zero — an unversioned key would hand old
 // broadcast-worker pods an empty room type and old gatekeeper pods UserCount 0.
 // The {roomID} hash tag must survive the change so the entry stays in the same
@@ -111,7 +111,7 @@ func TestMetaKey(t *testing.T) {
 func TestReadThrough_L2Hit(t *testing.T) {
 	fake := newFakeValkey()
 	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 7}
-	raw, err := json.Marshal(cachedMeta{Meta: want, CachedAt: time.Now().UnixMilli()})
+	raw, err := json.Marshal(valkeyutil.Box[Meta]{V: want, CachedAt: time.Now().UnixMilli()})
 	require.NoError(t, err)
 	fake.data[MetaKey("r1")] = string(raw)
 
@@ -131,7 +131,7 @@ func TestReadThrough_L2Hit(t *testing.T) {
 func TestReadThrough_L2Hit_DoesNotPopulate(t *testing.T) {
 	fake := newFakeValkey()
 	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 3}
-	raw, err := json.Marshal(cachedMeta{Meta: want, CachedAt: time.Now().UnixMilli()})
+	raw, err := json.Marshal(valkeyutil.Box[Meta]{V: want, CachedAt: time.Now().UnixMilli()})
 	require.NoError(t, err)
 	fake.data[MetaKey("r1")] = string(raw)
 
@@ -149,7 +149,7 @@ func TestReadThrough_L2Hit_DoesNotPopulate(t *testing.T) {
 func TestReadThrough_FetchGuard_NotAppliedToL2Hit(t *testing.T) {
 	fake := newFakeValkey()
 	want := Meta{ID: "r1", Type: model.RoomTypeChannel, Name: "general", SiteID: "site-a", UserCount: 7}
-	raw, err := json.Marshal(cachedMeta{Meta: want, CachedAt: time.Now().UnixMilli()})
+	raw, err := json.Marshal(valkeyutil.Box[Meta]{V: want, CachedAt: time.Now().UnixMilli()})
 	require.NoError(t, err)
 	fake.data[MetaKey("r1")] = string(raw)
 
@@ -285,16 +285,16 @@ func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.C
 // production no longer has a caller for either — valkeyutil.Tier owns both — and
 // a test helper must not sit in production code.
 //
-// They deliberately reuse cachedMeta.Usable and MetaKey, so a change to what
+// They deliberately reuse valkeyutil.Box[Meta].Usable and MetaKey, so a change to what
 // this package considers a usable entry, or to where it stores one, moves the
 // helpers with it instead of letting them drift into testing a private fiction.
-func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (cachedMeta, bool) {
+func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (valkeyutil.Box[Meta], bool) {
 	return valkeyutil.ReadCachedJSON(ctx, client, MetaKey(roomID), "room meta", rec,
-		func(c *cachedMeta) bool { return c.Usable() }, "room_id", roomID)
+		func(b *valkeyutil.Box[Meta]) bool { return b.CachedAt != 0 && usableMeta(&b.V) }, "room_id", roomID)
 }
 
 func writeL2(ctx context.Context, client valkeyutil.Client, roomID string, meta *Meta, ttl time.Duration, now time.Time) {
-	entry := cachedMeta{Meta: *meta, CachedAt: now.UnixMilli()}
+	entry := valkeyutil.Box[Meta]{V: *meta, CachedAt: now.UnixMilli()}
 	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), entry, ttl); err != nil {
 		panic(err) // a fake client that cannot store makes every test below meaningless
 	}

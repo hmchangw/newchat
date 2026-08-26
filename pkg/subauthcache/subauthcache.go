@@ -35,22 +35,9 @@ type SubAuth struct {
 	HistorySharedSince *int64       `json:"historySharedSince,omitempty"` // epoch millis; nil = full access
 }
 
-// cachedAuth is the stored envelope: the decision plus when it was last
-// confirmed. An entry from an older build decodes to a zero Auth, which Usable
-// treats as a miss, so the format change costs one reload per (room, account).
-
-type cachedAuth struct {
-	Auth SubAuth `json:"auth"`
-	// CachedAt is Unix milliseconds.
-	CachedAt int64 `json:"cachedAt"`
-}
-
-// Stamped reports when the source of truth last confirmed the decision.
-func (c cachedAuth) Stamped() int64 { return c.CachedAt }
-
-// Usable rejects an entry with no user ID: its presence means "subscribed", so a
-// zero value would grant access to nobody in particular for a full TTL.
-func (c cachedAuth) Usable() bool { return c.Auth.ID != "" }
+// usableAuth rejects an entry with no user ID: its presence means "subscribed",
+// so a zero value would grant access to nobody in particular for a full TTL.
+func usableAuth(a *SubAuth) bool { return a.ID != "" }
 
 // Recorder records the outcome of an L2 cache lookup. An alias of
 // valkeyutil.CacheRecorder: every tier in this repo records against one
@@ -66,6 +53,23 @@ type Loader func(ctx context.Context, roomID, account string) (SubAuth, bool, er
 // SubKey is the L2 key for a (roomID, account) subscription. The {roomID}
 // hash-tag colocates it in the room's cluster slot, matching house convention.
 func SubKey(roomID, account string) string {
+	return "sub:{" + roomID + "}:" + account + ":" + cacheKeySchemaVersion
+}
+
+// cacheKeySchemaVersion namespaces keys by stored shape, as roomsubcache and
+// roommetacache do. v2 is the shared valkeyutil.Box envelope; a v1 binary would
+// decode it into a bare SubAuth with every field zero and no JSON error, so the
+// version is what makes those entries miss instead.
+//
+// The version trails the key so the {roomID} hash tag still groups a room's
+// subscribers into one cluster slot, which BustSubs depends on.
+const cacheKeySchemaVersion = "v2"
+
+// legacySubKey is the pre-Box generation, which carried no version segment.
+// Only invalidation touches it: while such a binary can still be live, a bust
+// must clear both or it keeps serving a subscription that just changed. Drop it
+// once none can be running.
+func legacySubKey(roomID, account string) string {
 	return "sub:{" + roomID + "}:" + account
 }
 
@@ -121,9 +125,9 @@ func BustSubs(ctx context.Context, client valkeyutil.Client, roomID string, acco
 	if client == nil || len(accounts) == 0 {
 		return
 	}
-	keys := make([]string, len(accounts))
-	for i, account := range accounts {
-		keys[i] = SubKey(roomID, account)
+	keys := make([]string, 0, len(accounts)*2)
+	for _, account := range accounts {
+		keys = append(keys, SubKey(roomID, account), legacySubKey(roomID, account))
 	}
 	valkeyutil.BustKeys(ctx, client, "subauth", keys...)
 }
@@ -149,7 +153,7 @@ type Tier struct {
 	// ttl also fixes the refresh window, via valkeyutil.RefreshAfter. That
 	// window must exceed the process-local L1 TTL in front of this tier (two
 	// minutes in both services), or every L1 miss would pay a refresh.
-	inner  valkeyutil.Tier[subID, cachedAuth]
+	inner  valkeyutil.Tier[subID, SubAuth]
 	client valkeyutil.Client
 	loader Loader
 }
@@ -182,26 +186,22 @@ func NewTierWithLoader(client valkeyutil.Client, ttl time.Duration, rec Recorder
 // package's own refresh-window tests.
 func newTierWithClock(client valkeyutil.Client, ttl time.Duration, rec Recorder, loader Loader, now func() time.Time) *Tier {
 	t := &Tier{client: client, loader: loader}
-	t.inner = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[subID, cachedAuth]{
+	t.inner = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[subID, SubAuth]{
 		Client: client,
 		TTL:    ttl,
 		Label:  "subauth",
 		Rec:    rec,
 		Key:    func(id subID) string { return SubKey(id.roomID, id.account) },
 		Load:   t.loadEntry,
-		Stamp:  func(e cachedAuth, ms int64) cachedAuth { e.CachedAt = ms; return e },
+		Valid:  usableAuth,
 	}, now)
 	return t
 }
 
 // loadEntry adapts Loader to the tier's three results. A confirmed
 // non-subscriber is "missing", not an error, or an outage looks like a removal.
-func (t *Tier) loadEntry(ctx context.Context, id subID) (cachedAuth, bool, error) {
-	auth, subscribed, err := t.loader(ctx, id.roomID, id.account)
-	if err != nil {
-		return cachedAuth{}, false, err
-	}
-	return cachedAuth{Auth: auth}, subscribed, nil
+func (t *Tier) loadEntry(ctx context.Context, id subID) (SubAuth, bool, error) {
+	return t.loader(ctx, id.roomID, id.account)
 }
 
 // Resolve returns the caller's authorization for a room: (auth, true, nil) when
@@ -209,9 +209,5 @@ func (t *Tier) loadEntry(ctx context.Context, id subID) (cachedAuth, bool, error
 // source could not answer. A non-subscriber is never cached, so the cache can
 // only grant access MongoDB already granted.
 func (t *Tier) Resolve(ctx context.Context, roomID, account string) (SubAuth, bool, error) {
-	entry, subscribed, err := t.inner.Resolve(ctx, subID{roomID: roomID, account: account})
-	if err != nil {
-		return SubAuth{}, false, err
-	}
-	return entry.Auth, subscribed, nil
+	return t.inner.Resolve(ctx, subID{roomID: roomID, account: account})
 }
