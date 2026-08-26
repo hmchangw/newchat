@@ -88,12 +88,25 @@ func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	return circuitbreaker.Do1(m.breaker, func() (*model.Room, error) {
 		filter := bson.M{"_id": roomID}
 		var room model.Room
-		if err := m.roomCol.FindOne(ctx, filter).Decode(&room); err != nil {
+		if err := m.roomCol.FindOne(ctx, filter, roomWithoutPreview).Decode(&room); err != nil {
 			return nil, fmt.Errorf("find room %s: %w", roomID, err)
 		}
 		return &room, nil
 	})
 }
+
+// roomWithoutPreview excludes the sealed preview from every GetRoom decode. The
+// callers (edit, delete, reaction, thread mutation) read ID/Type/Name/SiteID/
+// Accounts/CrossSite and none of the preview fields, but previewCiphertext holds
+// a whole sealed message body plus its attachments — the only unbounded thing on
+// the document — so an unprojected read moves and allocates it per event.
+//
+// Exclusion rather than an allow-list: the callers between them touch most of the
+// document, and an allow-list that silently omits a field a future caller adds
+// fails as a nil rather than a compile error.
+var roomWithoutPreview = options.FindOne().SetProjection(bson.M{
+	"previewMeta": 0, "previewCiphertext": 0, "previewNonce": 0,
+})
 
 // ListRoomMembers reads through the shared roomsubcache. The Lookup owns the
 // Mongo fallback, so during an outage a warm room still fans out from L2.

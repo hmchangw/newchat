@@ -594,3 +594,28 @@ func TestHandler_PreviewForInserted_SealsWhenTheCallerHasNoDeadline(t *testing.T
 	assert.False(t, failed, "a deadline-free caller must not read as an exhausted budget")
 	require.NotNil(t, sealed, "the seal must run")
 }
+
+// A panic in the flush must not take the process down. This is the one write in
+// this service that is explicitly optional and droppable, and the service exists
+// to keep fan-out alive — crashing over a room-list preview inverts that.
+func TestPreviewWriter_FlushPanicDoesNotKillTheLoop(t *testing.T) {
+	bulk := &panickingBulkWriter{}
+	w := newPreviewWriter(bulk)
+	w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-1", At: time.Now().UTC()})
+
+	assert.NotPanics(t, func() { w.guardedFlush(context.Background(), "boom") })
+	assert.Equal(t, 1, bulk.calls, "the flush was attempted")
+
+	// And the writer is still usable: the next interval buffers and flushes normally.
+	w.buffer(roomPreview{RoomID: "r-2", MsgID: "m-2", At: time.Now().UTC()})
+	assert.NotPanics(t, func() { w.guardedFlush(context.Background(), "boom") })
+	assert.Equal(t, 2, bulk.calls)
+}
+
+// panickingBulkWriter stands in for a write that blows up on user-derived data.
+type panickingBulkWriter struct{ calls int }
+
+func (p *panickingBulkWriter) BulkUpdateRoomPreview(context.Context, map[string]roomPreviewUpdate) error {
+	p.calls++
+	panic("bulk write exploded")
+}

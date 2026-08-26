@@ -227,18 +227,10 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 	}
 }
 
-// shouldUseThreadFanOut reports whether a message should be routed through the
-// thread fan-out path (thread subscribers + @-mentions) rather than the room
-// broadcast path. True when the message is a thread reply hidden from the main
-// channel (TShow=false).
-func shouldUseThreadFanOut(msg *model.Message) bool {
-	return msg.IsHiddenThreadReply()
-}
-
 func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadCreated(ctx, evt)
 	}
 
@@ -392,7 +384,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("updated event missing EditedAt or UpdatedAt: %s", msg.ID)
 	}
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadUpdated(ctx, evt)
 	}
 
@@ -710,7 +702,7 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("deleted event missing UpdatedAt: %s", msg.ID)
 	}
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadDeleted(ctx, evt)
 	}
 

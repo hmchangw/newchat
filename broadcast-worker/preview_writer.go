@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/preview"
 )
@@ -188,15 +189,26 @@ func (w *previewWriter) Run(ctx context.Context, interval, finalTimeout time.Dur
 		select {
 		case <-ctx.Done():
 			finalCtx, cancel := context.WithTimeout(context.Background(), finalTimeout)
-			if err := w.Flush(finalCtx); err != nil {
-				slog.Error("final flush of room preview buffer failed", "error", err)
-			}
+			w.guardedFlush(finalCtx, "final flush of room preview buffer failed")
 			cancel()
 			return
 		case <-t.C:
-			if err := w.Flush(ctx); err != nil {
-				slog.Error("flush room preview buffer failed", "error", err)
-			}
+			w.guardedFlush(ctx, "flush room preview buffer failed")
 		}
 	}
+}
+
+// guardedFlush runs one flush with panic recovery. This goroutine drives
+// user-derived data — a preview composed from message content — through
+// BulkWrite, and an unrecovered panic here would take the whole process down.
+// That is not a proportionate outcome for the one write in this service that is
+// explicitly optional and droppable: it would stop message fan-out for the
+// entire site over a room-list preview. Recover, log, keep ticking; the room
+// simply has no stored preview, which the reader already handles by walking.
+func (w *previewWriter) guardedFlush(ctx context.Context, failMsg string) {
+	jobguard.Guard("room preview flush", func() {
+		if err := w.Flush(ctx); err != nil {
+			slog.ErrorContext(ctx, failMsg, "error", err)
+		}
+	})
 }
