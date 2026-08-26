@@ -20,11 +20,13 @@ function selectFile(input, file) {
   fireEvent.change(input, { target: { files: [file] } })
 }
 
+const logout = vi.fn()
+
 beforeEach(() => {
   vi.clearAllMocks()
   useAuth.mockReturnValue({
     session: { authToken: 'tok', account: 'root', siteId: 'site-1' },
-    logout: vi.fn(),
+    logout,
   })
 })
 
@@ -140,5 +142,21 @@ describe('UpdatesPage', () => {
     expect(uploadClientVersion).toHaveBeenCalledWith(
       'tok', expect.any(File), expect.any(File), expect.any(Function),
     )
+  })
+
+  // An upload runs for minutes, so the session can expire mid-flight. Matches the
+  // invalid_token handling every other admin form gets from useHandleAdminError.
+  it('logs the admin out instead of showing a banner on invalid_token', async () => {
+    uploadClientVersion.mockRejectedValue(
+      new AsyncJobError('expired', { code: 'unauthenticated', reason: 'invalid_token' }),
+    )
+    render(<UpdatesPage />)
+
+    selectFile(screen.getByLabelText(/config file/i), yaml())
+    selectFile(screen.getByLabelText(/executable/i), exe())
+    fireEvent.click(screen.getByRole('button', { name: /upload/i }))
+
+    await waitFor(() => expect(logout).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
