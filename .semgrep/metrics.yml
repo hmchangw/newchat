@@ -43,10 +43,22 @@ rules:
     # Observe(value, ...ObserveOption) with no context — and an observable
     # callback runs once per collection interval for the life of the process,
     # so an inline set there costs the same in a shape that is easy to miss.
+    #
+    # attribute.NewSet is a source in its own right, not only when nested
+    # directly inside WithAttributeSet. It is the expensive half — the sort and
+    # the allocation are there, the option wrapper is free — so the flow has to
+    # be followed from the set itself:
+    #
+    #     set := attribute.NewSet(attribute.String("site", site))
+    #     opt := metric.WithAttributeSet(set)
+    #     c.Add(ctx, 1, opt)
+    #
+    # With only the nested spelling as a source, splitting it across locals took
+    # the whole flow out of reach, and so did the single-local form.
     pattern-sources:
       - pattern-either:
           - pattern: metric.WithAttributes(...)
-          - pattern: metric.WithAttributeSet(attribute.NewSet(...))
+          - pattern: attribute.NewSet(...)
     #
     # The sinks match the option in any argument position, not just as the last
     # or only one. Add/Record/Observe are variadic, and a call that passes a

@@ -379,3 +379,21 @@ func twoOptionsOneCall(ctx context.Context, c metric.Int64Counter, precomputed m
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.String("site", v)), precomputed)
 }
+
+// The set hoisted a step further out. metric.WithAttributeSet(attribute.NewSet(...))
+// was a source only in its nested spelling, so splitting it across two locals
+// took the whole flow out of the rule's reach — and attribute.NewSet is the
+// expensive half, not the option wrapper around it.
+func perCallSetViaTwoLocals(ctx context.Context, c metric.Int64Counter, v string) {
+	set := attribute.NewSet(attribute.String("site", v))
+	opt := metric.WithAttributeSet(set)
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, opt)
+}
+
+// The same set passed straight into the option, one local instead of two.
+func perCallSetViaOneLocal(ctx context.Context, c metric.Int64Counter, v string) {
+	set := attribute.NewSet(attribute.String("site", v))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributeSet(set))
+}
