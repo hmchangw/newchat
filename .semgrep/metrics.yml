@@ -1,5 +1,6 @@
 rules:
   - id: metrics-no-per-call-attribute-set
+    mode: taint
     languages: [go]
     severity: ERROR
     message: >
@@ -23,19 +24,34 @@ rules:
         # "data-migration/**" as anchored anyway and warns about the ambiguity,
         # so say which one is meant.
         - "/data-migration/**"
-    patterns:
+    # Taint mode, for the same reason the cardinality rule uses it: an option
+    # hoisted into a local one line above the call is still built per call, and
+    # the structural form could not see it.
+    #
+    #     opt := metric.WithAttributes(attribute.String("site", site))
+    #     c.Add(ctx, 1, opt)
+    #
+    # I found that hole in this rule myself, while fixing search-service's
+    # fallback, and left it open — closing it is the point of the taint form.
+    #
+    # Taint is intraprocedural, which is exactly the line worth drawing:
+    # constructing the option in the same function that records is per-call;
+    # building it in a constructor and looking it up here is the pattern this
+    # rule wants, and that stays silent because the source is somewhere else.
+    #
+    # Observe still needs its own sink — its signature is
+    # Observe(value, ...ObserveOption) with no context — and an observable
+    # callback runs once per collection interval for the life of the process,
+    # so an inline set there costs the same in a shape that is easy to miss.
+    pattern-sources:
       - pattern-either:
-          - pattern: $C.Add($CTX, $N, metric.WithAttributes(...))
-          - pattern: $C.Add($CTX, $N, metric.WithAttributeSet(attribute.NewSet(...)))
-          - pattern: $C.Record($CTX, $V, metric.WithAttributes(...))
-          - pattern: $C.Record($CTX, $V, metric.WithAttributeSet(attribute.NewSet(...)))
-          # Observe takes no context — its signature is Observe(value, ...ObserveOption)
-          # — so it needs its own patterns rather than reusing the two above. An
-          # observable callback runs once per collection interval for as long as
-          # the process lives, so building the set inline there is the same cost
-          # in a shape that is easy to miss.
-          - pattern: $C.Observe($V, metric.WithAttributes(...))
-          - pattern: $C.Observe($V, metric.WithAttributeSet(attribute.NewSet(...)))
+          - pattern: metric.WithAttributes(...)
+          - pattern: metric.WithAttributeSet(attribute.NewSet(...))
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $C.Add($CTX, $N, $OPT)
+          - pattern: $C.Record($CTX, $V, $OPT)
+          - pattern: $C.Observe($V, $OPT)
 
   - id: metrics-no-unbounded-label
     mode: taint

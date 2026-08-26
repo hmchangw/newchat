@@ -295,3 +295,31 @@ func boundedViaLocalVariable(ctx context.Context, c metric.Int64Counter, v strin
 	errType := attribute.Key("error_type").String(v)
 	_ = attribute.NewSet(errType)
 }
+
+// --- metrics-no-per-call-attribute-set: the option hoisted into a local ---
+
+// The same hop that defeated the cardinality rule defeats this one, and I
+// pointed it out myself while fixing search-service's fallback without closing
+// it here. An option built one line above the recording call is built per call;
+// the variable changes nothing about the cost.
+func perCallOptionViaLocal(
+	ctx context.Context,
+	c metric.Int64Counter,
+	h metric.Float64Histogram,
+	o metric.Int64Observer,
+	seconds float64,
+	n int64,
+	v string,
+) {
+	addOpt := metric.WithAttributes(attribute.String("site", v))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, addOpt)
+
+	recOpt := metric.WithAttributeSet(attribute.NewSet(attribute.String("site", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	h.Record(ctx, seconds, recOpt)
+
+	obsOpt := metric.WithAttributes(attribute.String("site", v))
+	// ruleid: metrics-no-per-call-attribute-set
+	o.Observe(n, obsOpt)
+}
