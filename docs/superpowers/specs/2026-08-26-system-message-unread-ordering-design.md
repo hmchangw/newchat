@@ -37,7 +37,9 @@ persisted to Cassandra and rendered in the timeline, so the ceiling must keep mo
 4. The actor keeps not seeing their own action as unread (status quo: the system
    message's "sender" gets `lastSeenAt` advanced).
 5. No data migration. Deploy order is NOT free, though: writers first and
-   fully drained, then readers — see Rollout below.
+   fully drained, then readers — and that includes room-service at every remote
+   site, whose rooms.info reply is a reader's only source of a cross-site room's
+   lastUserMsgAt. See Rollout below.
 
 ## Rejected approaches
 
@@ -159,8 +161,8 @@ No migration: the field is additive and every reader coalesces
 treats *any* non-nil `lastUserMsgAt` as authoritative and an old writer cannot
 maintain it.
 
-**Required order: broadcast-worker fleet first and fully drained, then the
-readers (user-service, room-service) — then the client.**
+**Required order: broadcast-worker fleet first and fully drained, then
+room-service at every site, then the user-service readers — then the client.**
 
 - **Writer overlap is the one unsafe window.** Old and new broadcast-worker
   replicas share the MESSAGES-CANONICAL queue group, so a room's writes can
@@ -177,6 +179,17 @@ readers (user-service, room-service) — then the client.**
 - **Rolling the writer back** after the field has been written, while readers
   stay new, is the same failure as the overlap and does not self-heal at all
   until the writer is redeployed.
+- **A lagging remote room-service is a second unsafe window.** A cross-site
+  room's `lastUserMsgAt` reaches a reader only through the peer site's
+  `rooms.info` reply. An old room-service omits the field even when its own room
+  document carries it, so the reader coalesces to `lastMsgAt` and a system event
+  after user activity marks cross-site members unread and reorders the room —
+  for exactly as long as that one peer lags. Unlike the writer window this is
+  not self-healing through message traffic; it clears only when the remote
+  room-service is upgraded. Upgrade room-service at **every** site before
+  enabling the new user-service readers. Distinguishing "old peer" from "legacy
+  room" would need a versioned rooms.info response; the field's absence alone
+  cannot tell them apart.
 - **New server + old client.** Safe for the badge itself, but not free. An old
   client never reads `hasUnread` and folds unread locally from the
   full-activity `lastMsgAt` it already had, so after any system message its
