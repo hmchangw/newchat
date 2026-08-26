@@ -21,8 +21,8 @@ import (
 // withFetcherForTest overrides the read-through's Mongo fetch so this package's
 // cache decisions can be exercised without a Mongo. It lives here rather than
 // in valkey.go because a test-only hook must not ship in the binary.
-func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta, error)) ReadThroughOption {
-	return func(o *readThroughOpts) { o.fetch = f }
+func withFetcherForTest(f func(context.Context, *mongo.Collection, string) (Meta, error)) tierOption {
+	return func(o *tierOpts) { o.fetch = f }
 }
 
 // fakeValkey is an in-memory valkeyutil.Client for unit tests.
@@ -116,7 +116,7 @@ func TestReadThrough_L2Hit(t *testing.T) {
 	fake.data[MetaKey("r1")] = string(raw)
 
 	// nil *mongo.Collection is safe: on an L2 hit, Mongo is never touched.
-	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
+	got, err := readThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 }
@@ -136,7 +136,7 @@ func TestReadThrough_L2Hit_DoesNotPopulate(t *testing.T) {
 	fake.data[MetaKey("r1")] = string(raw)
 
 	// nil *mongo.Collection is safe on a hit — Mongo must never be touched.
-	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
+	got, err := readThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{})
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	assert.Empty(t, fake.sets, "Set must not be called on a cache hit")
@@ -154,8 +154,8 @@ func TestReadThrough_FetchGuard_NotAppliedToL2Hit(t *testing.T) {
 	fake.data[MetaKey("r1")] = string(raw)
 
 	guardCalls := 0
-	got, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{},
-		WithFetchGuard(func(func() error) error {
+	got, err := readThrough(context.Background(), fake, nil, "r1", time.Minute, &fakeRecorder{},
+		withFetchGuard(func(func() error) error {
 			guardCalls++
 			return errors.New("guard refused")
 		}))
@@ -172,8 +172,8 @@ func TestReadThrough_FetchGuard_WrapsMongoFetch(t *testing.T) {
 	errRefused := errors.New("guard refused")
 
 	guardCalls := 0
-	_, err := ReadThrough(context.Background(), fake, nil, "missing", time.Minute, &fakeRecorder{},
-		WithFetchGuard(func(func() error) error {
+	_, err := readThrough(context.Background(), fake, nil, "missing", time.Minute, &fakeRecorder{},
+		withFetchGuard(func(func() error) error {
 			guardCalls++
 			return errRefused
 		}))
@@ -200,8 +200,8 @@ func TestReadThrough_ZeroValueL2Entry_TreatedAsMiss(t *testing.T) {
 			rec := &fakeRecorder{}
 
 			guardCalls := 0
-			_, err := ReadThrough(context.Background(), fake, nil, "r1", time.Minute, rec,
-				WithFetchGuard(func(func() error) error {
+			_, err := readThrough(context.Background(), fake, nil, "r1", time.Minute, rec,
+				withFetchGuard(func(func() error) error {
 					guardCalls++
 					return errors.New("fell through to the source of truth")
 				}))
@@ -257,6 +257,49 @@ func (f *fakeValkey) MGet(ctx context.Context, keys []string) (map[string]string
 	return out, nil
 }
 
+// withFetchGuard and withFetcherForTest are the raw tier options. Production
+// takes a breaker (see NewL2Tier) and never needs either; these exist so a test
+// can drive the guard's three outcomes — pass through, fail fast, count calls —
+// without standing up a breaker and tripping it, and so cache decisions can be
+// exercised without a live Mongo. They live here because nothing but a test
+// constructs them.
+func withFetchGuard(guard func(fn func() error) error) tierOption {
+	return func(o *tierOpts) { o.guard = guard }
+}
+
+// readThrough and readThroughAt build a one-shot L2Tier per call. They exist
+// only so these tests keep reading as one call per scenario; production holds a
+// tier (see L2Tier's doc for why building one per read is not free), which is
+// exactly why these shims live in the test file rather than beside it.
+func readThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, opts ...tierOption) (Meta, error) {
+	return newL2TierWithClock(client, rooms, ttl, rec, time.Now, opts...).Get(ctx, roomID)
+}
+
+func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, now time.Time, opts ...tierOption) (Meta, error) {
+	return newL2TierWithClock(client, rooms, ttl, rec, func() time.Time { return now }, opts...).Get(ctx, roomID)
+}
+
+// readL2 and writeL2 are the cache-side halves these tests drive directly, to
+// place an entry on a chosen side of the refresh window and to inspect what a
+// read-through left behind. They live here rather than in valkey.go because
+// production no longer has a caller for either — valkeyutil.Tier owns both — and
+// a test helper must not sit in production code.
+//
+// They deliberately reuse cachedMeta.Usable and MetaKey, so a change to what
+// this package considers a usable entry, or to where it stores one, moves the
+// helpers with it instead of letting them drift into testing a private fiction.
+func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (cachedMeta, bool) {
+	return valkeyutil.ReadCachedJSON(ctx, client, MetaKey(roomID), "room meta", rec,
+		func(c *cachedMeta) bool { return c.Usable() }, "room_id", roomID)
+}
+
+func writeL2(ctx context.Context, client valkeyutil.Client, roomID string, meta *Meta, ttl time.Duration, now time.Time) {
+	entry := cachedMeta{Meta: *meta, CachedAt: now.UnixMilli()}
+	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), entry, ttl); err != nil {
+		panic(err) // a fake client that cannot store makes every test below meaningless
+	}
+}
+
 // TestReadThroughAt_StaleEntrySurvivesFetchOutageViaTTLSlide is the guarantee
 // that keeps channel delivery alive: broadcast-worker treats a room-meta failure
 // as fatal, so an entry that merely expires mid-outage stops delivery for that
@@ -269,7 +312,7 @@ func TestReadThroughAt_StaleEntrySurvivesFetchOutageViaTTLSlide(t *testing.T) {
 	writeL2(ctx, client, "r1", &meta, time.Hour, now)
 
 	got, err := readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, now.Add(59*time.Minute),
-		WithFetchGuard(func(func() error) error { return errors.New("mongo down") }))
+		withFetchGuard(func(func() error) error { return errors.New("mongo down") }))
 	require.NoError(t, err, "a warm room must survive the fetch being down")
 	assert.Equal(t, meta, got)
 	assert.Positive(t, client.expires, "the deadline must be re-armed, not left to expire")
@@ -284,7 +327,7 @@ func TestReadThroughAt_FreshEntryDoesNotRefetch(t *testing.T) {
 
 	fetched := false
 	got, err := readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, now.Add(time.Minute),
-		WithFetchGuard(func(fn func() error) error { fetched = true; return fn() }))
+		withFetchGuard(func(fn func() error) error { fetched = true; return fn() }))
 	require.NoError(t, err)
 	assert.Equal(t, meta, got)
 	assert.False(t, fetched, "a fresh entry must not re-validate")
@@ -299,7 +342,7 @@ func TestReadThroughAt_PreEnvelopeEntryIsTreatedAsMiss(t *testing.T) {
 	require.NoError(t, client.Set(ctx, MetaKey("r1"), string(raw), time.Hour))
 
 	_, err = readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, time.Now(),
-		WithFetchGuard(func(func() error) error { return errors.New("mongo down") }))
+		withFetchGuard(func(func() error) error { return errors.New("mongo down") }))
 	require.Error(t, err, "an un-stamped entry must reload rather than be served forever")
 }
 
@@ -323,7 +366,7 @@ func TestReadThroughAt_StaleEntryRefreshesWhenFetchHealthy(t *testing.T) {
 	// Re-read at the same instant: the fresh stamp must make it a pure read.
 	fetched := false
 	got, err = readThroughAt(ctx, client, nil, "r1", time.Hour, &fakeRecorder{}, stale,
-		WithFetchGuard(func(fn func() error) error { fetched = true; return fn() }))
+		withFetchGuard(func(fn func() error) error { fetched = true; return fn() }))
 	require.NoError(t, err)
 	assert.Equal(t, fresh, got)
 	assert.False(t, fetched, "the rewrite must reset the refresh window")

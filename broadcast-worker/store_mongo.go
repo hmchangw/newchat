@@ -34,11 +34,10 @@ type mongoStore struct {
 	roomCol       *mongo.Collection
 	subCol        *mongo.Collection
 	threadRoomCol *mongo.Collection
-	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
-	metaTTL       time.Duration
-	metaRec       roommetacache.Recorder
-	metaOpts      []roommetacache.ReadThroughOption
-	members       *roomsubcache.Lookup
+	// metaTier is built once: a tier's closures escape to the heap, so
+	// constructing one per GetRoomMeta would allocate on the fan-out path.
+	metaTier *roommetacache.L2Tier
+	members  *roomsubcache.Lookup
 	// breaker fences the reads that have no cache tier of their own. Nil is
 	// "protection off" — circuitbreaker.Do1 passes through — so tests and a
 	// breaker-less config both work without a branch at each call site.
@@ -56,21 +55,16 @@ func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, va
 	if valkey != nil {
 		subCache = roomsubcache.NewValkeyCache(valkey)
 	}
-	s := &mongoStore{
+	return &mongoStore{
 		roomCol:       roomCol,
 		subCol:        subCol,
 		threadRoomCol: threadRoomCol,
-		valkey:        valkey,
-		metaTTL:       metaTTL,
-		metaRec:       cachemetrics.For("roommeta", "l2"),
+		metaTier: roommetacache.NewL2Tier(valkey, roomCol, metaTTL,
+			mongoBreaker, cachemetrics.For("roommeta", "l2")),
 		members: roomsubcache.NewLookup(subCache,
 			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol, userCol), mongoBreaker), subTTL),
 		breaker: mongoBreaker,
 	}
-	if mongoBreaker != nil {
-		s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(mongoBreaker.Do)}
-	}
-	return s
 }
 
 // mongoBreakerFailure is the failure predicate this service's single Mongo
@@ -123,7 +117,7 @@ func (m *mongoStore) ListRoomMembers(ctx context.Context, roomID string) ([]room
 // opened it the L2 is the only tier that can answer — and this read gates
 // delivery for every message in the room.
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec, m.metaOpts...)
+	return m.metaTier.Get(ctx, roomID)
 }
 
 // BulkUpdateRoomPreview applies a batch of room-preview updates in one unordered

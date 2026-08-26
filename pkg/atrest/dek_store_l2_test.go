@@ -550,9 +550,7 @@ func mustJSON(t *testing.T, v any) string {
 func newClockedStore(t *testing.T, inner DEKStore, fv *fakeL2Valkey, ttl time.Duration, b *circuitbreaker.Breaker, clock *fakeClock) *l2DEKStore {
 	t.Helper()
 	fv.now = clock.Now
-	s := NewL2DEKStore(inner, fv, ttl, b, &spyL2Recorder{}).(*l2DEKStore)
-	s.now = clock.Now
-	return s
+	return newL2DEKStoreWithClock(inner, fv, ttl, b, &spyL2Recorder{}, clock.Now)
 }
 
 func rotatedRow(roomID string) RoomDataKey {

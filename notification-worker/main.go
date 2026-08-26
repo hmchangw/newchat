@@ -140,11 +140,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	metaRec := cachemetrics.For("roommeta", "l2")
-	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL,
-		func(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-			return roommetacache.ReadThrough(ctx, valkeyClient, roomsCol, roomID, cfg.RoomMetaL2TTL, metaRec)
-		})
+	// Built here rather than inside the loader: the tier's closures escape to the
+	// heap, so constructing one per L1 miss would allocate on every cold room.
+	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2TTL,
+		nil, cachemetrics.For("roommeta", "l2"))
+	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)
 	if err != nil {
 		slog.Error("init room-meta cache failed", "error", err)
 		os.Exit(1)

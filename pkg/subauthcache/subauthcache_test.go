@@ -131,17 +131,13 @@ var (
 )
 
 func newClockedTier(c valkeyutil.Client, ttl time.Duration, clock *fakeClock, loader Loader) *Tier {
-	tier := NewTierWithLoader(c, ttl, &spyRecorder{}, loader)
-	tier.now = clock.Now
-	return tier
+	return newTierWithClock(c, ttl, &spyRecorder{}, loader, clock.Now)
 }
 
 // newTestTier is the fixed-clock form for tests that do not exercise refresh.
 func newTestTier(c valkeyutil.Client, ttl time.Duration, rec Recorder, loader Loader) *Tier {
-	tier := NewTierWithLoader(c, ttl, rec, loader)
 	frozen := time.Now()
-	tier.now = func() time.Time { return frozen }
-	return tier
+	return newTierWithClock(c, ttl, rec, loader, func() time.Time { return frozen })
 }
 
 func TestSubKey(t *testing.T) {

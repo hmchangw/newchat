@@ -29,7 +29,6 @@ package sessioncache
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
@@ -50,21 +49,35 @@ type Loader func(ctx context.Context, hash string) (*session.Session, error)
 // learns no credential they could authenticate with.
 func Key(hash string) string { return "session:" + hash }
 
-// cachedSession is the stored envelope. CachedAt records when MongoDB last
-// confirmed the session, which is what separates an entry that can be served
-// directly from one due for re-validation.
+// cachedSession is the stored envelope. The embedded Stamp records when MongoDB
+// last confirmed the session, which is what separates an entry that can be
+// served directly from one due for re-validation. The field is declared rather than
+// embedded so composite literals keep working; see valkeyutil.Entry.
 type cachedSession struct {
 	Session  session.Session `json:"session"`
 	CachedAt int64           `json:"cachedAt"`
 }
 
+// Stamped reports when MongoDB last confirmed the session.
+func (c cachedSession) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: interface-required value receiver, see Usable
+
+// Usable rejects an entry with no session ID or no confirmation stamp: serving
+// one would authenticate an identity-less principal for the rest of its TTL, and
+// an unstamped entry (written before the envelope existed) would read as
+// permanently stale.//
+// The value receiver is required, and so is the gocritic exemption below it:
+// valkeyutil.Entry is satisfied by the type the tier stores, and a value type's
+// method set excludes pointer-receiver methods. The copy is two per cache read,
+// against a Valkey round trip.
+func (c cachedSession) Usable() bool { return c.Session.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: see the note above
+
 // Cache is a read-through Valkey tier over a session Loader.
 type Cache struct {
-	load    Loader
-	client  valkeyutil.Client // nil disables the tier entirely
-	ttl     time.Duration
-	metrics Recorder
-	now     func() time.Time
+	load Loader
+	tier valkeyutil.Tier[string, cachedSession]
+	// client is retained only so Bust has something to hand BustKeys; the tier
+	// owns every other use of it.
+	client valkeyutil.Client
 }
 
 // New returns a Cache over load. A nil client (or a non-positive ttl) makes
@@ -75,16 +88,35 @@ func New(load Loader, client valkeyutil.Client, ttl time.Duration) *Cache {
 }
 
 func newWithClock(load Loader, client valkeyutil.Client, ttl time.Duration, now func() time.Time) *Cache {
-	return &Cache{
-		load:    load,
-		client:  client,
-		ttl:     ttl,
-		metrics: cachemetrics.For("session", "l2"),
-		now:     now,
-	}
+	c := &Cache{load: load, client: client}
+	c.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedSession]{
+		Client: client,
+		TTL:    ttl,
+		Label:  "session",
+		Rec:    cachemetrics.For("session", "l2"),
+		Key:    Key,
+		Load:   c.loadEntry,
+		Stamp:  func(e cachedSession, ms int64) cachedSession { e.CachedAt = ms; return e },
+	}, now)
+	return c
 }
 
-func (c *Cache) enabled() bool { return c.client != nil && c.ttl > 0 }
+// loadEntry adapts the session Loader to the tier's three-way contract.
+// ErrNotFound is a decision — the session is genuinely gone — and must reach the
+// tier as a confirmed absence rather than an error, or an outage and a
+// revocation would be indistinguishable and the tier would evict on both.
+func (c *Cache) loadEntry(ctx context.Context, hash string) (cachedSession, bool, error) {
+	s, err := c.load(ctx, hash)
+	switch {
+	case errors.Is(err, session.ErrNotFound):
+		return cachedSession{}, false, nil
+	case err != nil:
+		return cachedSession{}, false, err
+	case s == nil:
+		return cachedSession{}, false, nil
+	}
+	return cachedSession{Session: *s}, true, nil
+}
 
 // Bust drops a session's entry. Revocation paths should call it so a revoked
 // token stops working immediately rather than at the TTL; until they do,
@@ -122,71 +154,16 @@ func BustMany(ctx context.Context, client valkeyutil.Client, hashes []string) {
 // It returns session.ErrNotFound only when the source of truth said so — an
 // outage surfaces as a different error, so a caller cannot read "MongoDB is
 // down" as "this token is invalid".
+// The refresh-and-survive policy behind this — serve a fresh entry, re-validate
+// a stale one, slide on failure, evict on a confirmed revocation — is
+// valkeyutil.Tier's, shared with every other L2 tier in the repo.
 func (c *Cache) FindByHash(ctx context.Context, hash string) (*session.Session, error) {
-	if !c.enabled() {
-		return c.load(ctx, hash)
-	}
-	if entry, found := c.read(ctx, hash); found {
-		return c.serveHit(ctx, hash, &entry)
-	}
-	s, err := c.load(ctx, hash)
+	entry, found, err := c.tier.Resolve(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
-	c.write(ctx, hash, s)
-	return s, nil
-}
-
-// serveHit decides what a cache hit means.
-//
-// Confirmed within the refresh window, it is served as a pure read. Older than
-// that it is re-validated, and the three outcomes differ in what they mean:
-//
-//   - Not found: the session was genuinely revoked. Evict and reject, so
-//     revocation takes effect now rather than at the TTL.
-//   - Failure: MongoDB is unreachable. Re-arm the deadline and keep serving —
-//     this is the branch the whole tier exists for. EXPIRE rather than SET, so
-//     an entry busted since the read stays busted.
-//   - Success: rewrite with a fresh stamp, picking up any change.
-func (c *Cache) serveHit(ctx context.Context, hash string, entry *cachedSession) (*session.Session, error) {
-	if valkeyutil.Fresh(entry.CachedAt, c.now(), c.ttl) {
-		return &entry.Session, nil
+	if !found {
+		return nil, session.ErrNotFound
 	}
-	s, err := c.load(ctx, hash)
-	switch {
-	case errors.Is(err, session.ErrNotFound):
-		Bust(ctx, c.client, hash)
-		return nil, err
-	case err != nil:
-		c.slide(ctx, hash)
-		return &entry.Session, nil //nolint:nilerr // fail-open by design; see above
-	default:
-		c.write(ctx, hash, s)
-		return s, nil
-	}
-}
-
-// read returns a usable entry, or reports a miss. An entry without a
-// confirmation stamp or an ID is unusable and reloads rather than being served.
-func (c *Cache) read(ctx context.Context, hash string) (cachedSession, bool) {
-	return valkeyutil.ReadCachedJSON[cachedSession](ctx, c.client, Key(hash), "session",
-		c.metrics, func(e *cachedSession) bool { return e.Session.ID != "" && e.CachedAt != 0 })
-}
-
-// write stores the session with a fresh confirmation stamp. Best-effort: the
-// caller already has the value and the next read repopulates. Absence is never
-// written — a negative entry would outlive the session being created.
-func (c *Cache) write(ctx context.Context, hash string, s *session.Session) {
-	if s == nil || s.ID == "" {
-		return
-	}
-	entry := cachedSession{Session: *s, CachedAt: c.now().UnixMilli()}
-	if err := valkeyutil.SetJSONWithTTL(ctx, c.client, Key(hash), entry, c.ttl); err != nil {
-		slog.WarnContext(ctx, "session L2 write failed (TTL will reconcile)", "error", err)
-	}
-}
-
-// slide re-arms the entry's deadline without rewriting it.
-func (c *Cache) slide(ctx context.Context, hash string) {
-	valkeyutil.SlideTTL(ctx, c.client, Key(hash), c.ttl, "session")
+	return &entry.Session, nil
 }

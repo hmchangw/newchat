@@ -17,13 +17,11 @@ import (
 
 type MongoStore struct {
 	rooms   *mongo.Collection
-	valkey  valkeyutil.Client // nil disables the L2 tier (pure Mongo)
-	metaTTL time.Duration
-	metaRec roommetacache.Recorder
 	subTier *subauthcache.Tier // owns the subscription L2 + its own breaker
-	// metaOpts is built once: the guard is a method value, so passing it inline
-	// on every GetRoomMeta would heap-allocate it on the message-send hot path.
-	metaOpts []roommetacache.ReadThroughOption
+	// metaTier is built once, for the same reason its fetch guard always was: a
+	// tier's closures escape to the heap, so constructing one per GetRoomMeta
+	// would allocate on the message-send hot path.
+	metaTier *roommetacache.L2Tier
 }
 
 // NewMongoStore wires the subscription and room-meta reads behind two
@@ -31,16 +29,14 @@ type MongoStore struct {
 // room-meta L2 hit must not reset the subscription breaker's failure count, or
 // cold subscription misses would never trip fast-fail during a Mongo outage.
 func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, subBreaker, metaBreaker *circuitbreaker.Breaker) *MongoStore {
-	s := &MongoStore{
-		rooms:   db.Collection("rooms"),
-		valkey:  valkey,
-		metaTTL: metaTTL,
-		metaRec: cachemetrics.For("roommeta", "l2"),
+	rooms := db.Collection("rooms")
+	return &MongoStore{
+		rooms: rooms,
 		subTier: subauthcache.NewTier(valkey, db.Collection("subscriptions"), subTTL,
 			subBreaker, cachemetrics.For("subauth", "l2")),
+		metaTier: roommetacache.NewL2Tier(valkey, rooms, metaTTL,
+			metaBreaker, cachemetrics.For("roommeta", "l2")),
 	}
-	s.metaOpts = []roommetacache.ReadThroughOption{roommetacache.WithFetchGuard(metaBreaker.Do)}
-	return s
 }
 
 func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
@@ -64,7 +60,7 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 // The "a missing room is not a Mongo failure" rule rides on the breaker itself
 // (see metaBreakerFailure), so the guard is just its Do.
 func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	meta, err := roommetacache.ReadThrough(ctx, s.valkey, s.rooms, roomID, s.metaTTL, s.metaRec, s.metaOpts...)
+	meta, err := s.metaTier.Get(ctx, roomID)
 	if err != nil {
 		return roommetacache.Meta{}, fmt.Errorf("get room meta for %s: %w", roomID, err)
 	}

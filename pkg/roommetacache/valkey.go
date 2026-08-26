@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -46,129 +46,141 @@ func legacyMetaKey(roomID string) string {
 	return "room:{" + roomID + "}:meta"
 }
 
-// readL2 attempts the L2 (Valkey) read. An entry with no room ID is not usable:
-// FetchFromMongo always populates it, so a zero Meta means the key holds
-// something that is not a Meta — and serving it would hand out an empty SiteID
-// and type, which downstream routing reads.
-// readL2 requires both a non-empty ID and a confirmation stamp. The stamp check
-// is what makes an entry written before the envelope existed (a bare Meta) read
-// as a miss and reload, rather than being served with a zero CachedAt that would
-// mark it permanently stale.
-func readL2(ctx context.Context, client valkeyutil.Client, roomID string, rec Recorder) (cachedMeta, bool) {
-	return valkeyutil.ReadCachedJSON(ctx, client, MetaKey(roomID), "room meta", rec,
-		func(c *cachedMeta) bool { return c.Meta.ID != "" && c.CachedAt != 0 }, "room_id", roomID)
-}
+// tierOption configures a tier at construction. Unexported: every production
+// caller passes a breaker, which NewL2Tier takes directly. These exist so this
+// package's own tests can drive the guard and the fetch without a live Mongo,
+// and the constructors for them live in the test file.
+type tierOption func(*tierOpts)
 
-// ReadThroughOption configures a ReadThrough call.
-type ReadThroughOption func(*readThroughOpts)
-
-type readThroughOpts struct {
+type tierOpts struct {
 	guard func(func() error) error
 	// fetch defaults to FetchFromMongo. Overridden only by this package's tests,
 	// so the read-through's cache decisions can be exercised without a Mongo.
 	fetch func(context.Context, *mongo.Collection, string) (Meta, error)
 }
 
-// WithFetchGuard runs the Mongo fetch inside guard — typically a circuit
-// breaker's Do — so a cold miss fast-fails during an outage instead of stalling
-// on Mongo's own timeout.
+// L2Tier resolves a room Meta through the L2 (Valkey) tier: GET on the cache
+// key, and on miss (or any L2 error) fall back to Mongo and repopulate L2 with
+// the configured TTL. Fail-open — a nil client or any Valkey error degrades to a
+// direct Mongo read; only the Mongo result governs the returned error. Intended
+// as the terminal loader behind the L1 roommetacache.Cache.
 //
-// The guard deliberately wraps only the fetch, never the L2 read. Fencing the
-// whole read-through would make an open breaker refuse cached rooms too,
-// disabling the L2 at precisely the moment it is the only tier that can answer.
-func WithFetchGuard(guard func(fn func() error) error) ReadThroughOption {
-	return func(o *readThroughOpts) { o.guard = guard }
+// Construct it ONCE per store and hold it. It was a per-call free function
+// until the shared tier landed, and the closures a tier is configured with
+// (Load, Stamp, the clock) escape to the heap however the tier itself is
+// returned — three allocations on a path that runs once per message through
+// broadcast-worker's fan-out. Holding the tier moves that to startup.
+type L2Tier struct {
+	tier   valkeyutil.Tier[string, cachedMeta]
+	client valkeyutil.Client
 }
 
-// ReadThrough resolves a room Meta through the L2 (Valkey) tier: GET on the
-// cache key, and on miss (or any L2 error) fall back to Mongo and repopulate
-// L2 with the given TTL. It is fail-open — a nil client or any Valkey error
-// degrades to a direct Mongo read; only the Mongo result governs the returned
-// error. Intended to be the terminal loader behind the L1 roommetacache.Cache.
+// NewL2Tier wires the tier over a rooms collection.
+//
+// breaker fences the Mongo fetch so a cold miss fast-fails during an outage
+// instead of stalling on Mongo's own timeout. A nil breaker fences nothing.
+// It fences ONLY the fetch, never the L2 read in front of it: an open breaker
+// must still serve cached rooms, since during the outage that opened it they are
+// the only tier that can answer.
+//
+// The breaker is a positional parameter, in this position, rather than an
+// option: subauthcache.NewTier and atrest.NewL2DEKStore both take (…, ttl,
+// breaker, rec), and roomsubcache.GuardLoader takes the breaker itself too. This package used to take a bare func(func() error) error, which
+// made every caller write WithFetchGuard(breaker.Do) and leaked the mechanism
+// into the call site. No production caller ever passed anything but a breaker's
+// Do; only the tests did, and they still can (see tierOption).
 //
 // rec records L2 hit/miss/error outcomes; callers pass a shared
 // cachemetrics.For("roommeta", "l2") so every service emits the same series.
 // A nil client (L2 disabled) records nothing — there is no L2 to hit or miss.
-func ReadThrough(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, opts ...ReadThroughOption) (Meta, error) {
-	return readThroughAt(ctx, client, rooms, roomID, ttl, rec, time.Now(), opts...)
+func NewL2Tier(client valkeyutil.Client, rooms *mongo.Collection, ttl time.Duration, breaker *circuitbreaker.Breaker, rec Recorder) *L2Tier {
+	var opts []tierOption
+	if breaker != nil {
+		opts = append(opts, func(o *tierOpts) { o.guard = breaker.Do })
+	}
+	return newL2TierWithClock(client, rooms, ttl, rec, time.Now, opts...)
 }
 
-// cachedMeta is the L2 envelope. CachedAt records when Mongo last confirmed the
-// entry, which is what lets a reader tell a fresh entry from one due for
-// re-validation — and what makes surviving an outage possible rather than
-// waiting for the key to vanish.
+// newL2TierWithClock is NewL2Tier with an injected clock and raw options, for
+// this package's own refresh-window and guard tests.
+func newL2TierWithClock(client valkeyutil.Client, rooms *mongo.Collection, ttl time.Duration, rec Recorder, now func() time.Time, opts ...tierOption) *L2Tier {
+	o := tierOpts{fetch: FetchFromMongo}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	t := &L2Tier{client: client}
+	t.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedMeta]{
+		Client: client,
+		TTL:    ttl,
+		Label:  "room meta",
+		Rec:    rec,
+		Key:    MetaKey,
+		Load: func(ctx context.Context, id string) (cachedMeta, bool, error) {
+			meta, err := fetchGuarded(ctx, &o, rooms, id)
+			switch {
+			// A missing room is a decision, not a failure, and must reach the tier
+			// as a confirmed absence: collapsing it into an error would make an
+			// outage indistinguishable from a deletion, and the tier evicts on one
+			// and keeps serving on the other.
+			case errors.Is(err, mongo.ErrNoDocuments):
+				return cachedMeta{}, false, nil
+			case err != nil:
+				return cachedMeta{}, false, err
+			}
+			return cachedMeta{Meta: meta}, true, nil
+		},
+		Stamp: func(e cachedMeta, ms int64) cachedMeta { e.CachedAt = ms; return e },
+	}, now)
+	return t
+}
+
+// Get resolves roomID.
+func (t *L2Tier) Get(ctx context.Context, roomID string) (Meta, error) {
+	entry, found, err := t.tier.Resolve(ctx, roomID)
+	if err != nil {
+		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
+	}
+	if !found {
+		// Rebuilt rather than threaded through the tier, which reports an absence
+		// as a bool by design. The wording matches FetchFromMongo's so a caller
+		// cannot tell which path produced it, and it stays errors.Is-checkable
+		// against mongo.ErrNoDocuments, which callers branch on.
+		return Meta{}, fmt.Errorf("l2 read-through: fetch room meta %s: %w", roomID, mongo.ErrNoDocuments)
+	}
+	return entry.Meta, nil
+}
+
+// cachedMeta is the L2 envelope. The embedded Stamp records when Mongo last
+// confirmed the entry, which is what lets a reader tell a fresh entry from one
+// due for re-validation — and what makes surviving an outage possible rather
+// than waiting for the key to vanish. The field is declared rather
+// than embedded so composite literals keep working; see valkeyutil.Entry.
 type cachedMeta struct {
 	Meta     Meta  `json:"meta"`
 	CachedAt int64 `json:"cachedAt"`
 }
 
-func readThroughAt(ctx context.Context, client valkeyutil.Client, rooms *mongo.Collection, roomID string, ttl time.Duration, rec Recorder, now time.Time, opts ...ReadThroughOption) (Meta, error) {
-	o := readThroughOpts{fetch: FetchFromMongo}
-	for _, opt := range opts {
-		opt(&o)
-	}
+// Stamped reports when Mongo last confirmed the entry.
+func (c cachedMeta) Stamped() int64 { return c.CachedAt } //nolint:gocritic // hugeParam: interface-required value receiver, see Usable
 
-	if client == nil {
-		return fetchGuarded(ctx, &o, rooms, roomID)
-	}
-
-	if entry, found := readL2(ctx, client, roomID, rec); found {
-		// Fresh: serve as a pure read.
-		if valkeyutil.Fresh(entry.CachedAt, now, ttl) {
-			return entry.Meta, nil
-		}
-		// Stale: re-validate. The three outcomes are not interchangeable.
-		//
-		//   - Confirmed gone: Mongo answered, and the room no longer exists.
-		//     Serving the cached entry here would keep a deleted room alive
-		//     indefinitely, because every later read lands on this same branch and
-		//     re-arms the deadline again — the entry outlives its TTL for as long
-		//     as anyone reads it. Evict and fail, which is what the cold path
-		//     below already does with the same error.
-		//   - Unreachable: keep serving and re-arm the deadline. broadcast-worker
-		//     treats a room-meta failure as fatal, so letting the entry lapse
-		//     mid-outage stops delivery for the room entirely. EXPIRE rather than
-		//     SET so an entry busted since the read stays busted.
-		//   - Healthy: rewrite, picking up whatever a missed bust left behind.
-		meta, err := fetchGuarded(ctx, &o, rooms, roomID)
-		switch {
-		case errors.Is(err, mongo.ErrNoDocuments):
-			BustMeta(ctx, client, roomID)
-			return Meta{}, fmt.Errorf("l2 read-through: %w", err)
-		case err != nil:
-			slideL2(ctx, client, roomID, ttl)
-			return entry.Meta, nil //nolint:nilerr // fail-open by design; see above
-		}
-		writeL2(ctx, client, roomID, &meta, ttl, now)
-		return meta, nil
-	}
-
-	meta, err := fetchGuarded(ctx, &o, rooms, roomID)
-	if err != nil {
-		return Meta{}, fmt.Errorf("l2 read-through: %w", err)
-	}
-	writeL2(ctx, client, roomID, &meta, ttl, now)
-	return meta, nil
-}
-
-// writeL2 stores meta with a fresh confirmation stamp. Best-effort: the caller
-// already has the value and the next read repopulates.
-func writeL2(ctx context.Context, client valkeyutil.Client, roomID string, meta *Meta, ttl time.Duration, now time.Time) {
-	entry := cachedMeta{Meta: *meta, CachedAt: now.UnixMilli()}
-	if err := valkeyutil.SetJSONWithTTL(ctx, client, MetaKey(roomID), entry, ttl); err != nil {
-		slog.WarnContext(ctx, "room meta L2 populate failed (TTL will reconcile)",
-			"room_id", roomID, "error", err)
-	}
-}
-
-// slideL2 re-arms the entry's deadline without rewriting it.
-func slideL2(ctx context.Context, client valkeyutil.Client, roomID string, ttl time.Duration) {
-	valkeyutil.SlideTTL(ctx, client, MetaKey(roomID), ttl, "room meta")
-}
+// Usable requires both a non-empty room ID and a confirmation stamp.
+//
+// FetchFromMongo always populates the ID, so a zero Meta means the key holds
+// something that is not a Meta — and serving it would hand out an empty SiteID
+// and type, which downstream routing reads. The stamp check is what makes an
+// entry written before the envelope existed (a bare Meta) read as a miss and
+// reload, rather than being served with a zero CachedAt that would mark it
+// permanently stale.
+//
+// The value receiver is required, and so is the gocritic exemption below it:
+// valkeyutil.Entry is satisfied by the type the tier stores, and a value type's
+// method set excludes pointer-receiver methods. The copy is two per cache read,
+// against a Valkey round trip.
+func (c cachedMeta) Usable() bool { return c.Meta.ID != "" && c.CachedAt != 0 } //nolint:gocritic // hugeParam: see the note above
 
 // fetchGuarded runs FetchFromMongo, inside guard when one was supplied. A nil
 // guard (the common case) calls straight through.
-func fetchGuarded(ctx context.Context, o *readThroughOpts, rooms *mongo.Collection, roomID string) (Meta, error) {
+func fetchGuarded(ctx context.Context, o *tierOpts, rooms *mongo.Collection, roomID string) (Meta, error) {
 	if o.guard == nil {
 		return o.fetch(ctx, rooms, roomID)
 	}

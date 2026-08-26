@@ -3,7 +3,6 @@ package atrest
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
@@ -37,6 +36,13 @@ type cachedDEK struct {
 	CachedAt int64 `json:"cachedAt"`
 }
 
+// Stamped reports when the inner store last confirmed the row.
+func (c cachedDEK) Stamped() int64 { return c.CachedAt }
+
+// Usable rejects an entry with no wrapped key: serving it would fail Unwrap for
+// the entry's whole TTL.
+func (c cachedDEK) Usable() bool { return len(c.Row.WrappedDEK) > 0 }
+
 // l2DEKStore decorates a DEKStore with a Valkey L2 tier holding the
 // Vault-WRAPPED DEK record. It exists so a room's key stays reachable while
 // MongoDB is unavailable: the in-process DEK cache expires on a fixed TTL
@@ -62,19 +68,20 @@ type cachedDEK struct {
 type l2DEKStore struct {
 	inner  DEKStore
 	client valkeyutil.Client
-	// ttl also fixes the refresh window, via valkeyutil.RefreshAfter. That
-	// window MUST exceed the cipher's in-process DEK cache TTL
-	// (ATREST_DEK_CACHE_TTL), because that L1 sits in front and does not slide:
-	// this tier is consulted at most once per room per L1 TTL per pod. Were the
-	// window the shorter of the two, every L2 hit would be older than it and the
-	// refresh would degenerate into a Mongo read plus a full SET on every L1
-	// miss — precisely the load the L2 exists to absorb. The 90m/1h defaults
-	// stay comfortably apart.
+	// ttl is retained only so l2Enabled and invalidate can answer without
+	// reaching into the tier; the tier owns every other use of it.
+	//
+	// It also fixes the refresh window, via valkeyutil.RefreshAfter. That window
+	// MUST exceed the cipher's in-process DEK cache TTL (ATREST_DEK_CACHE_TTL),
+	// because that L1 sits in front and does not slide: this tier is consulted at
+	// most once per room per L1 TTL per pod. Were the window the shorter of the
+	// two, every L2 hit would be older than it and the refresh would degenerate
+	// into a Mongo read plus a full SET on every L1 miss — precisely the load the
+	// L2 exists to absorb. The 90m/1h defaults stay comfortably apart, and
+	// SlideOnFresh below covers the gap that remains.
 	ttl     time.Duration
 	breaker *circuitbreaker.Breaker
-	metrics L2Recorder
-
-	now func() time.Time // overridden in tests
+	tier    valkeyutil.Tier[string, cachedDEK]
 }
 
 // NewL2DEKStore wraps inner with a Valkey L2 tier. Pass a nil client (or a
@@ -83,92 +90,70 @@ type l2DEKStore struct {
 // periodic refresh alike — so a fetch during an outage fast-fails instead of
 // stalling; it must not be nil.
 func NewL2DEKStore(inner DEKStore, client valkeyutil.Client, ttl time.Duration, breaker *circuitbreaker.Breaker, rec L2Recorder) DEKStore {
-	if rec == nil {
-		rec = valkeyutil.NoopRecorder{}
+	return newL2DEKStoreWithClock(inner, client, ttl, breaker, rec, time.Now)
+}
+
+// newL2DEKStoreWithClock is NewL2DEKStore with an injected clock, for this
+// package's own refresh-window tests.
+func newL2DEKStoreWithClock(inner DEKStore, client valkeyutil.Client, ttl time.Duration, breaker *circuitbreaker.Breaker, rec L2Recorder, now func() time.Time) *l2DEKStore {
+	s := &l2DEKStore{inner: inner, client: client, ttl: ttl, breaker: breaker}
+	s.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, cachedDEK]{
+		Client: client,
+		TTL:    ttl,
+		Label:  "dek",
+		Rec:    rec,
+		Key:    DEKKey,
+		Load:   s.loadEntry,
+		Stamp:  func(e cachedDEK, ms int64) cachedDEK { e.CachedAt = ms; return e },
+		// Both deviations from the default tier behaviour, and both load-bearing.
+		//
+		// SlideOnFresh: the DEK L1 is an hour while the refresh window opens at
+		// RefreshAfter(90m) = 67.5m, so every L1 miss lands BEFORE the window.
+		// Without a slide the entry would be served, never re-armed, and expire at
+		// 90m — with the next L1 miss at 120m finding nothing, exactly during the
+		// outage this tier exists to survive. Safe because Fresh() is computed from
+		// CachedAt, which only a real re-validation advances: this moves the
+		// eviction deadline, not the revalidation one.
+		SlideOnFresh: true,
+		// KeepOnAbsent: nothing deletes DEK rows, so "no such row" is lag or an
+		// anomaly. Honoring it would evict, and the cipher would then mint a second
+		// DEK — orphaning every message already encrypted under the first.
+		KeepOnAbsent: true,
+	}, now)
+	return s
+}
+
+// loadEntry adapts the inner store to the tier's three-way contract. A nil row
+// is "no DEK yet", which the cipher turns into lazy creation, so it must reach
+// the tier as a confirmed absence rather than an error.
+func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (cachedDEK, bool, error) {
+	row, err := s.fetchInner(ctx, roomID)
+	if err != nil {
+		return cachedDEK{}, false, err
 	}
-	return &l2DEKStore{
-		inner: inner, client: client, ttl: ttl,
-		breaker: breaker, metrics: rec,
-		now: time.Now,
+	if row == nil {
+		return cachedDEK{}, false, nil
 	}
+	return cachedDEK{Row: *row}, true, nil
 }
 
 func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
 
-func (s *l2DEKStore) nowMilli() int64 { return s.now().UnixMilli() }
-
+// Get resolves a room's wrapped DEK. A nil row (no error) means "no DEK yet" and
+// is never cached — that value is what drives lazy DEK creation in the cipher.
+//
+// The refresh-and-survive policy is valkeyutil.Tier's, shared with every other
+// L2 tier in the repo; the two ways this tier differs from the default are
+// declared as options in the constructor above.
 func (s *l2DEKStore) Get(ctx context.Context, roomID string) (*RoomDataKey, error) {
-	if s.l2Enabled() {
-		if entry, found := s.readL2(ctx, roomID); found {
-			return s.serveHit(ctx, roomID, entry), nil
-		}
-	}
-
-	row, err := s.fetchInner(ctx, roomID)
+	entry, found, err := s.tier.Resolve(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("dek l2 read-through for room %s: %w", roomID, err)
 	}
-	// A nil row means "no DEK yet" — never cached; the cipher creates one.
-	if row != nil && s.l2Enabled() {
-		s.writeL2(ctx, roomID, cachedDEK{Row: *row, CachedAt: s.nowMilli()}, "populate")
+	if !found {
+		return nil, nil
 	}
-	return row, nil
-}
-
-// serveHit resolves an L2 hit, and is where both of the tier's guarantees live.
-//
-// An entry confirmed within the refresh window is served as a pure read: no Mongo
-// call, no write. That is the steady state, since the cipher's in-process cache
-// means most L2 hits are already minutes apart.
-//
-// An older entry is re-resolved through the breaker, which is the only way the
-// breaker ever observes Mongo's health on a hit-serving pod:
-//
-//   - Success replaces the entry and restamps CachedAt, so a missed
-//     invalidation self-heals within one refresh window.
-//   - Failure (a Mongo error, or ErrOpen when the breaker has already given up)
-//     re-arms the TTL and leaves CachedAt alone, so the room stays alive and
-//     the next read retries. The breaker throttles those retries: while open it
-//     answers ErrOpen without touching Mongo, and lets a single probe through
-//     once its cooldown elapses — which is how recovery is noticed on a pod
-//     whose reads are all L2 hits.
-func (s *l2DEKStore) serveHit(ctx context.Context, roomID string, entry cachedDEK) *RoomDataKey {
-	if valkeyutil.Fresh(entry.CachedAt, s.now(), s.ttl) {
-		// Re-arm on a fresh serve too, so the entry's survival does not depend on
-		// the TTL of whatever L1 sits in front of it. The DEK L1 is an hour while
-		// the refresh window opens at RefreshAfter(90m) = 67.5m, so every L1 miss
-		// lands BEFORE the window: without this the entry would be served, never
-		// re-armed, and expire at 90m — with the next L1 miss at 120m finding
-		// nothing, exactly during the outage this tier exists to survive.
-		//
-		// Safe because the two clocks are separate: Fresh() is computed from
-		// CachedAt, which only a real re-validation advances, so the staleness
-		// bound is unchanged — this moves the eviction deadline, not the
-		// revalidation one. And SlideTTL issues EXPIRE, which no-ops on an absent
-		// key, so an entry invalidated since the read stays invalidated.
-		s.slideL2(ctx, roomID)
-		return &entry.Row
-	}
-
-	row, err := s.fetchInner(ctx, roomID)
-	if err != nil {
-		s.slideL2(ctx, roomID)
-		return &entry.Row
-	}
-	if row == nil {
-		// Mongo answered "no such row" for a room we hold a key for. Nothing
-		// deletes DEK rows, so this is lag or an anomaly, and honoring it would
-		// send the cipher off to mint a second DEK — orphaning every message
-		// already encrypted under this one. Keep serving the cached key, and
-		// restamp so the retry is once per interval rather than once per read.
-		slog.WarnContext(ctx, "dek L2 refresh found no row, keeping cached key",
-			"room_id", roomID)
-		entry.CachedAt = s.nowMilli()
-		s.writeL2(ctx, roomID, entry, "norow-restamp")
-		return &entry.Row
-	}
-	s.writeL2(ctx, roomID, cachedDEK{Row: *row, CachedAt: s.nowMilli()}, "refresh")
-	return row
+	return &entry.Row, nil
 }
 
 // fetchInner runs the inner Get under the breaker, so both the read-through and
@@ -203,37 +188,6 @@ func (s *l2DEKStore) Replace(ctx context.Context, key RoomDataKey) error { //nol
 	}
 	s.invalidate(ctx, key.ID)
 	return nil
-}
-
-// readL2 attempts the L2 read. An entry with no wrapped key is not usable:
-// serving it would fail Unwrap for the entry's whole TTL.
-func (s *l2DEKStore) readL2(ctx context.Context, roomID string) (cachedDEK, bool) {
-	return valkeyutil.ReadCachedJSON(ctx, s.client, DEKKey(roomID), "dek", s.metrics,
-		func(c *cachedDEK) bool { return len(c.Row.WrappedDEK) > 0 }, "room_id", roomID)
-}
-
-// slideL2 re-arms the entry's deadline with EXPIRE rather than re-writing it.
-// Replace invalidates this key on KEK rotation so the pre-rotation wrapped DEK
-// stops being served; a slide racing that Del would re-Set the ciphertext it had
-// already read, bringing back a key that no longer unwraps for a full TTL.
-// EXPIRE on an absent key is a no-op, so a lost race leaves it deleted.
-//
-// Best-effort: a failure is logged and swallowed — the value was already served,
-// and the next successful refresh repopulates with a fresh deadline.
-func (s *l2DEKStore) slideL2(ctx context.Context, roomID string) {
-	valkeyutil.SlideTTL(ctx, s.client, DEKKey(roomID), s.ttl, "dek")
-}
-
-// writeL2 stores the entry with a full TTL. Best-effort: a failure is logged and
-// swallowed — the caller already has the value, and the next read repopulates.
-// phase is a coarse tag ("populate"/"refresh"/"norow-restamp"); the caller decides
-// whether the entry's CachedAt advances, since only a confirmed fetch may reset
-// the refresh clock.
-func (s *l2DEKStore) writeL2(ctx context.Context, roomID string, entry cachedDEK, phase string) {
-	if err := valkeyutil.SetJSONWithTTL(ctx, s.client, DEKKey(roomID), entry, s.ttl); err != nil {
-		slog.WarnContext(ctx, "dek L2 write failed (TTL will reconcile)",
-			"room_id", roomID, "phase", phase, "error", err)
-	}
 }
 
 // invalidate best-effort deletes the L2 entry after an authoritative write.
