@@ -97,7 +97,7 @@ This doc covers the public client-facing API surface only.
 **Out of scope (backend-internal — clients never see these):**
 
 - Backend-only JetStream subjects (MESSAGES, MESSAGES-CANONICAL, INBOX, ROOMS, OUTBOX streams).
-- Server-to-server subjects (`chat.server.request.…`).
+- Server-to-server subjects (`chat.server.request.…`) and their replies (`chat.server.response.…`).
 
 Room-encryption key events that clients consume are documented under the RPC that triggers them (Create Room, Add Members, Remove Member) and in [§5 Room Encryption](#5-room-encryption). Multi-site federation is transparent to clients: a cross-site action delivers the **same** events on the same `chat.user.{account}.…` / `chat.room.…` subjects as a same-site action, so this doc does not distinguish them.
 

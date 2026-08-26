@@ -4,9 +4,11 @@ package natsutil_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
@@ -15,6 +17,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/natsutil"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
 
@@ -134,4 +137,46 @@ func hasLinkToTrace(spans []sdktrace.ReadOnlySpan, traceID oteltrace.TraceID) bo
 		}
 	}
 	return false
+}
+
+// TestConnectSetsServerInboxPrefix pins the reply namespace every backend
+// connection uses. Without it, replies fall back to the library default
+// _INBOX.<nuid>, which is indistinguishable from client reply traffic and
+// cannot be scoped by a future per-service credential.
+func TestConnectSetsServerInboxPrefix(t *testing.T) {
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	conn, err := natsutil.Connect(context.Background(), testutil.NATS(t), "", tp, propagation.TraceContext{}, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.NatsConn().Close() })
+
+	nc := conn.NatsConn()
+	require.Equal(t, subject.ServerInboxPrefix, nc.Opts.InboxPrefix)
+
+	// The option is only useful if nats.go actually builds the reply subject
+	// from it — assert on a real round trip, not just the stored option.
+	gotReply := make(chan string, 1)
+	sub, err := nc.Subscribe("chat.server.request.test.ping", func(m *nats.Msg) {
+		select {
+		case gotReply <- m.Reply:
+		default:
+		}
+		_ = m.Respond([]byte("pong"))
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	require.NoError(t, nc.Flush())
+
+	resp, err := nc.Request("chat.server.request.test.ping", []byte("ping"), 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "pong", string(resp.Data))
+
+	select {
+	case reply := <-gotReply:
+		require.True(t, strings.HasPrefix(reply, subject.ServerInboxPrefix+"."),
+			"reply subject %q must sit under %q", reply, subject.ServerInboxPrefix)
+	case <-time.After(5 * time.Second):
+		t.Fatal("responder never observed the request")
+	}
 }

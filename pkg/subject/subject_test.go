@@ -1352,3 +1352,16 @@ func TestRoomThreadEventTargets_TransitionGrace(t *testing.T) {
 	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
 	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, after))
 }
+
+func TestServerInboxPrefix(t *testing.T) {
+	// Server-to-server request/reply replies ride this prefix, so a backend
+	// connection's inbox is chat.server.response.<nuid>.<token>. It sits under
+	// the chat.server namespace alongside chat.server.request.…, and nothing
+	// subscribes to a chat.server wildcard, so it cannot collide.
+	assert.Equal(t, "chat.server.response", subject.ServerInboxPrefix)
+
+	// Must be a valid inbox prefix for nats.go: no wildcards, no trailing dot.
+	assert.NotContains(t, subject.ServerInboxPrefix, "*")
+	assert.NotContains(t, subject.ServerInboxPrefix, ">")
+	assert.False(t, strings.HasSuffix(subject.ServerInboxPrefix, "."))
+}

@@ -14,6 +14,8 @@ All subjects are dot-delimited and organized into four namespaces:
 |--------|-------|-------------|
 | `chat.user.{account}.*` | Per-user | Events, streams, and requests scoped to a single user |
 | `chat.room.{roomID}.*` | Per-room | Events and streams scoped to a single room |
+| `chat.server.request.*` | Backend | Server-to-server RPC requests |
+| `chat.server.response.*` | Backend | Server-to-server RPC replies — every backend connection's inbox prefix (`natsutil.Connect`), so a reply is `chat.server.response.{nuid}.{token}` rather than the library default `_INBOX.{nuid}` |
 | `fanout.{siteID}.*` | Backend | Internal message fan-out (JetStream only) |
 | `chat.inbox.{siteID}.*` | Backend | Cross-site federation — direct inbox publish (JetStream only) |
 

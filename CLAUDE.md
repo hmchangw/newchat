@@ -265,6 +265,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 ### NATS Subject Naming
 - Dot-delimited hierarchical subjects — use `pkg/subject` builders, never raw `fmt.Sprintf`
 - User-scoped: `chat.user.{account}.…`
+- Server-to-server replies: `chat.server.response.…` — `natsutil.Connect` sets `subject.ServerInboxPrefix` as every backend connection's inbox prefix, so backend request/reply never uses the library default `_INBOX`. Any NATS account or gateway permission that allow-lists `_INBOX.>` for backend traffic must allow `chat.server.response.>` instead.
 - Room-scoped: `chat.room.{roomID}.…`
 - MESSAGES-CANONICAL: `chat.msg.canonical.{siteID}.created` (`.edited`, `.deleted` for future)
 - Inbox (cross-site, remote-origin): `chat.inbox.{destSiteID}.external.{eventType}` — published directly into the destination site's INBOX

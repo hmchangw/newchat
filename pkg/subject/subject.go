@@ -138,6 +138,18 @@ func MsgGetIDs(account, roomID, siteID string) string {
 	return fmt.Sprintf("chat.user.%s.request.room.%s.%s.msg.get.ids", account, roomID, siteID)
 }
 
+// ServerInboxPrefix is the reply namespace for server-to-server request/reply.
+// natsutil.Connect sets it as every backend connection's inbox prefix, so a
+// reply lands on chat.server.response.<nuid>.<token> instead of the library
+// default _INBOX.<nuid>.<token>.
+//
+// It is a plain constant, not a builder, because nats.go takes the prefix once
+// per connection and appends the per-request tokens itself. Nothing subscribes
+// to a chat.server wildcard, so this cannot collide with the
+// chat.server.request.… subjects it sits beside; the per-connection nuid keeps
+// services from colliding with each other.
+const ServerInboxPrefix = "chat.server.response"
+
 // RoomsGet is the server-to-server request subject for the rooms.get batch RPC:
 // user-service asks history-service for each room's last message. Account-agnostic
 // (roomIds batch in the body); the publish and subscribe forms are identical, like

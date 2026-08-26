@@ -13,6 +13,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 const (
@@ -78,6 +80,12 @@ func connect(ctx context.Context, url, credsFile string, tp trace.TracerProvider
 	connState := metrics.Connection()
 	baseOpts := []nats.Option{
 		nats.Name(name),
+		// Server-to-server replies ride chat.server.response.<nuid>.<token>
+		// rather than the library default _INBOX.<nuid>.<token>, so backend
+		// reply traffic is identifiable by subject. nats.go creates the mux
+		// lazily on the first Request, so a service that only consumes
+		// JetStream pays nothing for this.
+		nats.CustomInboxPrefix(subject.ServerInboxPrefix),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(defaultReconnectWait),
 		nats.DrainTimeout(defaultDrainTimeout),
