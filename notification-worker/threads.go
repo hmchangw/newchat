@@ -48,16 +48,23 @@ func (m *mongoThreadFollowers) Lookup(ctx context.Context, parentMessageID strin
 		}
 		return ThreadRoomInfo{}, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
 	}
-	out := make(map[string]struct{}, len(doc.ReplyAccounts))
-	for _, a := range doc.ReplyAccounts {
+	return threadRoomInfoFrom(doc.ReplyAccounts, doc.ThreadParentCreatedAt), nil
+}
+
+// threadRoomInfoFrom builds the projection, mapping a zero parent timestamp to nil.
+// model.ThreadRoom.ThreadParentCreatedAt is a non-pointer time.Time, so an
+// unresolved parent persists as the zero value rather than as absent.
+func threadRoomInfoFrom(replyAccounts []string, parentCreatedAt time.Time) ThreadRoomInfo {
+	out := make(map[string]struct{}, len(replyAccounts))
+	for _, a := range replyAccounts {
 		if a != "" {
 			out[a] = struct{}{}
 		}
 	}
 	info := ThreadRoomInfo{Followers: out}
-	if !doc.ThreadParentCreatedAt.IsZero() {
-		at := doc.ThreadParentCreatedAt.UTC()
+	if !parentCreatedAt.IsZero() {
+		at := parentCreatedAt.UTC()
 		info.ParentCreatedAt = &at
 	}
-	return info, nil
+	return info
 }

@@ -216,7 +216,9 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			_, follows := followers[m.Account]
 			// The parent author is always notified of replies to their own thread, even before thread_rooms
 			// exists; the restricted-room gate still applies but never excludes them (they authored the parent).
-			if m.Account == parentSenderAccount {
+			// The empty guard matters on the thread-room-resolved path, where the parent
+			// sender is commonly unknown — "" must never match a member with no account.
+			if parentSenderAccount != "" && m.Account == parentSenderAccount {
 				follows = true
 			}
 			if !follows && !mentioned {

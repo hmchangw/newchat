@@ -756,6 +756,48 @@ func TestHandle_ThreadOnlyReply_MissingSenderAccount_FallsBackToFetch(t *testing
 		"parent author from fetch fallback is notified")
 }
 
+// On the thread-room-resolved path the parent sender account stays empty (the
+// thread room carries the createdAt but not the author). A member whose Account is
+// empty must not be silently promoted to follower by that "" == "" comparison.
+func TestHandle_ThreadOnlyReply_EmptyParentSender_DoesNotPromoteEmptyAccount(t *testing.T) {
+	parentCreatedAt := time.UnixMilli(1700000000000).UTC()
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice"}, // reply sender
+			{ID: "ghost", Account: ""},      // no account: neither follower nor mentioned
+			{ID: "bob", Account: "bob"},     // real follower
+		},
+	}}
+	followers := &stubFollowers{
+		out:      map[string]map[string]struct{}{"parent-1": {"bob": {}}},
+		parentAt: map[string]*time.Time{"parent-1": &parentCreatedAt},
+	}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          followers,
+		Parent:             failIfCalledParent{t}, // the thread room resolved createdAt
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		LargeRoomThreshold: 500,
+	})
+
+	evt := model.MessageEvent{
+		Message: model.Message{
+			ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+			ThreadParentMessageID: "parent-1",
+			TShow:                 false,
+			Content:               "thread reply",
+		},
+		SiteID: "site-a",
+	}
+	data, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+	assert.ElementsMatch(t, []string{"bob"}, emit.accounts(),
+		"only the real follower is notified; the empty account is not promoted")
+}
+
 type errFollowers struct{}
 
 func (errFollowers) Lookup(context.Context, string) (ThreadRoomInfo, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,4 +39,21 @@ func TestThreadFollowers_PropagatesError(t *testing.T) {
 	s := &stubThreadLookup{err: errors.New("mongo down")}
 	_, err := s.Lookup(context.Background(), "parent-1")
 	assert.Error(t, err)
+}
+
+// A zero threadParentCreatedAt must surface as nil, never as the epoch: isRestricted
+// treats a nil parent time as "not visible" (fail closed), while time.Time{} would
+// compare older than every historySharedSince and notify every mentionee.
+func TestThreadRoomInfo_ZeroParentCreatedAtIsUnknown(t *testing.T) {
+	info := threadRoomInfoFrom([]string{"alice", "bob"}, time.Time{})
+	assert.Nil(t, info.ParentCreatedAt)
+	assert.Len(t, info.Followers, 2)
+}
+
+func TestThreadRoomInfo_RealParentCreatedAtIsCarried(t *testing.T) {
+	at := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	info := threadRoomInfoFrom([]string{"alice", ""}, at)
+	require.NotNil(t, info.ParentCreatedAt)
+	assert.Equal(t, at, *info.ParentCreatedAt)
+	assert.Len(t, info.Followers, 1, "empty accounts are skipped")
 }
