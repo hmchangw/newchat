@@ -60,3 +60,35 @@ Cross-check vs docs: at the modeled ~52/s average canonical rate none of this bi
 3. **medium** — route `AdvanceSubscriptionLastSeen` through a coalescing buffer keyed (roomID, account) with `$max` semantics.
 4. **medium** — add a semaphore to `publishToThreadAccounts`; give mutation paths a projected/cached room read.
 5. **low** — cache negative subscription lookups (~10s TTL); add hot-thread and reaction-burst scenarios to `docs/load-testing/common/workload-model.md`.
+
+---
+
+## 2. MongoDB load hotspots (score 4/5)
+
+The Mongo layer is disciplined: precise projections almost everywhere, indexes matched to filter shapes with cross-service ownership (`WarnMissingIndexes`), documented read-preference tiering (`docs/mongo-read-preference.md`), explicit pool config (`pkg/mongoutil/poolconfig.go`), coalesced room-doc writes, and four cache layers (roommetacache / roomsubcache / badgecache in Valkey, userstore LRU) shielding fan-out reads.
+
+### Top 3 at-risk collections
+
+1. **`subscriptions`** — the hottest collection: per-message writes (sender `lastSeenAt` `$max`, mention UpdateMany, `threadUnread` `$addToSet`), per-read FindOneAndUpdate, every chatlist/badge read, fan-out member loads, and 8+ indexes in room-service alone (every write updates all of them).
+2. **`rooms`** — each busy room is one hot document receiving coalesced lastMsg/preview writes, read-floor writes, and member-count deltas while serving cache misses; single-document write serialization is the ceiling.
+3. **`thread_subscriptions` / `thread_rooms`** — two UpdateOnes per reply per recipient, `replyAccounts` `$addToSet`, and a pre-limit double-`$lookup` inbox pipeline.
+
+### Findings
+
+- **high** — `message-gatekeeper/store_mongo.go:36-46`: `GetSubscription` on the per-send hot path has **no projection** — it decodes the full subscription doc including the unbounded `threadUnread` array; a member with thousands of unread threads inflates every send's read+decode.
+- **high** — `message-worker/store_mongo.go:183-194` (`AddThreadUnread`): `$addToSet threadUnread` per thread reply with **no size cap**, cleared only on read (`room-service/store_mongo.go:1794,1814`). Inactive members of thread-heavy rooms accumulate ever-growing arrays → doc/index bloat + write amplification, and the array rides along in the gatekeeper hot-path read above.
+- **medium** — `broadcast-worker/store_mongo.go:197-205` (`SetSubscriptionMentions`): `@all` in a 5k-member channel is an UpdateMany touching 5k subscription docs per message, synchronously in the canonical consumer; a burst of `@all` messages stalls the fan-out lane behind Mongo.
+- **medium** — `user-service/mongorepo/subscriptions.go:295-302` (`AggregateSubscriptions`): phase 1 fetches **all** of an account's subscriptions, no limit, on the **primary**, per chatlist call; reconnect storms concentrate this on the primary.
+- **medium** — `history-service/internal/mongorepo/pipelines.go:56-116`: thread-inbox pipeline runs two `$lookup`s per thread-subscription **before** `$limit` and sorts in-memory on an unindexable looked-up field; O(threads followed) per page.
+- **medium** — `room-service/handler.go:1345-1476` (`messageRead`): 4–5 Mongo ops per read event; when the read floor moves, `UpdateRoomMinUserLastSeenAt` targets the same hot rooms doc as the coalescer flush — successive readers of a caught-up room serialize on that document (the `sameFloor` guard at `:1458` mitigates; watch p99 under read storms).
+- **low** — `room-worker/store_mongo.go:89-90` (`ListByRoom`): unprojected, unbounded full sub docs for a whole room; rename-only, so occasional. `broadcast-worker/store_mongo.go:63-75` similar but DM-only (cosmetic).
+- **nitpick** — `sso_tokens` has no TTL index; growth is capped by the unique `username` index, so acceptable.
+
+### Recommendations
+
+1. **high** — add a projection to gatekeeper `GetSubscription` (membership/mute/roomType only; exclude `threadUnread`).
+2. **high** — bound `threadUnread` (`$push`+`$slice` cap, overflow ⇒ recompute from `thread_subscriptions`); alert on p99 array size now.
+3. **medium** — gate `@all` by room size/role, or move the mention UpdateMany off the ack-critical path (best-effort goroutine like `federateMentions`).
+4. **medium** — cap subscriptions per account (product limit) or page phase 1 of `AggregateSubscriptions`.
+5. **medium** — denormalize `lastMsgAt` onto `thread_subscriptions` so the thread inbox sorts from an index and both `$lookup`s move after `$limit`.
+6. **low** — project `room-worker.ListByRoom` to `u.account`; dashboard coalescer flush latency vs read-floor write rate per room to catch hot-doc serialization before users do.
