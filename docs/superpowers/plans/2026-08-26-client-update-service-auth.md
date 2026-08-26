@@ -1194,26 +1194,35 @@ func TestConfig_AuthDefaults(t *testing.T) {
 		"the read timeout must cover a full upload body, matching the write timeout default")
 }
 
-func TestConfig_RequiresAuthSettings(t *testing.T) {
-	for _, missing := range []string{"SVCJWT_PUBLIC_KEY", "ALLOWED_SERVICE_ACCOUNTS"} {
-		t.Run("missing "+missing, func(t *testing.T) {
-			t.Setenv("SITE_ID", "site-local")
-			t.Setenv("MINIO_ENDPOINT", "minio:9000")
-			t.Setenv("MINIO_ACCESS_KEY", "key")
-			t.Setenv("MINIO_SECRET_KEY", "secret")
-			t.Setenv("MINIO_BUCKET", "chat-updates")
-			t.Setenv("SVCJWT_PUBLIC_KEY", "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmE=")
-			t.Setenv("ALLOWED_SERVICE_ACCOUNTS", "svc-updater")
-			t.Setenv(missing, "")
-
-			_, err := env.ParseAs[config]()
-			assert.Error(t, err, "%s must be required — an empty allowlist or key must not start the service", missing)
-		})
-	}
-}
+// NOTE: do NOT test a missing required var with t.Setenv(k, "") — env/v11 treats
+// an empty string as "defined", so such a test passes vacuously. The existing
+// TestConfig_RequiresEachRequiredVar in this file documents the correct idiom:
+// seed every required var, then os.Unsetenv the one under test. That existing
+// test is extended below rather than duplicated here.
 ```
 
-Ensure `config_test.go` imports `time`, `github.com/caarlos0/env/v11`, and testify's `assert`/`require` (add any that are missing).
+Then extend the EXISTING `TestConfig_RequiresEachRequiredVar` in the same file: add the two
+new variables to its `required` slice, so the missing-var loop covers them using the
+`os.Unsetenv` idiom it already implements:
+
+```go
+	required := []string{
+		"SITE_ID", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET",
+		"SVCJWT_PUBLIC_KEY", "ALLOWED_SERVICE_ACCOUNTS",
+	}
+```
+
+And extend the EXISTING `TestConfig_Defaults` in the same file — it calls
+`env.ParseAs[config]()` with only the five MinIO/site vars and will now fail, because the two
+new variables are required. Add them to its setup:
+
+```go
+	t.Setenv("SVCJWT_PUBLIC_KEY", "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmE=")
+	t.Setenv("ALLOWED_SERVICE_ACCOUNTS", "svc-updater")
+```
+
+`config_test.go` already imports `os`, `time`, `env/v11`, `assert` and `require` — no import
+changes are needed.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1493,6 +1502,7 @@ works with no credential at all."
 Append to `admin-service/config_test.go`. Match the existing file's helper for setting the base required env vars — if it has one (e.g. `setRequiredEnv(t)`), reuse it; otherwise set `SITE_ID`, `MONGO_URI` and `NATS_URL` as the existing tests do.
 
 ```go
+// TestLoadConfig_ClientUpdateDefaults covers a site that HAS opted in.
 func TestLoadConfig_ClientUpdateDefaults(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
@@ -1510,20 +1520,38 @@ func TestLoadConfig_ClientUpdateDefaults(t *testing.T) {
 	assert.Equal(t, 10*time.Minute, cfg.ClientUpdateUploadTimeout)
 }
 
-// TestLoadConfig_ClientUpdateRequired proves the upload cannot be half-configured:
-// a missing key or base URL must stop startup, not surface as a runtime 503.
-func TestLoadConfig_ClientUpdateRequired(t *testing.T) {
-	for _, missing := range []string{
-		"SVCJWT_PRIVATE_KEY", "CLIENT_UPDATE_BASE_URL", "CLIENT_UPDATE_SERVICE_ACCOUNT",
-	} {
-		t.Run("missing "+missing, func(t *testing.T) {
+// TestLoadConfig_ClientUpdateOptional pins that publishing is opt-in per site.
+// admin-service runs everywhere; requiring the signing key would put a copy of
+// the Ed25519 PRIVATE key on every site merely to boot.
+func TestLoadConfig_ClientUpdateOptional(t *testing.T) {
+	t.Setenv("SITE_ID", "site-local")
+	t.Setenv("MONGO_URI", "mongodb://mongo:27017")
+	t.Setenv("NATS_URL", "nats://nats:4222")
+
+	cfg, err := loadConfig()
+	require.NoError(t, err, "a site that does not publish client updates must still start")
+	assert.Empty(t, cfg.ClientUpdateBaseURL)
+	assert.Empty(t, cfg.SvcJWTPrivateKey)
+}
+
+// TestLoadConfig_ClientUpdateHalfConfigured proves opt-in is all-or-nothing: a
+// site that sets the base URL but omits the key or the account fails at startup
+// rather than at the first upload.
+func TestLoadConfig_ClientUpdateHalfConfigured(t *testing.T) {
+	tests := []struct {
+		name, key, account string
+	}{
+		{"base URL without signing key", "", "svc-updater"},
+		{"base URL without service account", "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmE=", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SITE_ID", "site-local")
 			t.Setenv("MONGO_URI", "mongodb://mongo:27017")
 			t.Setenv("NATS_URL", "nats://nats:4222")
-			t.Setenv("SVCJWT_PRIVATE_KEY", "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmE=")
 			t.Setenv("CLIENT_UPDATE_BASE_URL", "http://client-update-service:8080")
-			t.Setenv("CLIENT_UPDATE_SERVICE_ACCOUNT", "svc-updater")
-			t.Setenv(missing, "")
+			t.Setenv("SVCJWT_PRIVATE_KEY", tc.key)
+			t.Setenv("CLIENT_UPDATE_SERVICE_ACCOUNT", tc.account)
 
 			_, err := loadConfig()
 			assert.Error(t, err)
@@ -1564,7 +1592,12 @@ Add to the `Config` struct in `admin-service/config.go`:
 	// SvcJWTPrivateKey signs the service-account tokens this service presents to
 	// client-update-service. Private half only lives here; client-update-service
 	// holds the public key and can verify but never mint.
-	SvcJWTPrivateKey string        `env:"SVCJWT_PRIVATE_KEY,required"`
+	//
+	// Optional, NOT required: admin-service runs at every site, but client updates
+	// are published from one. Requiring it would force every site to hold a copy of
+	// the signing key merely to boot, multiplying the private key across sites for
+	// no benefit. Half-configured is still rejected — see checkClientUpdateConfig.
+	SvcJWTPrivateKey string        `env:"SVCJWT_PRIVATE_KEY" envDefault:""`
 	SvcJWTIssuer     string        `env:"SVCJWT_ISSUER" envDefault:"admin-service"`
 	// SvcJWTTTL only has to cover mint -> the downstream's middleware reading the
 	// request headers, which is milliseconds. The body may then stream for as
@@ -1573,9 +1606,11 @@ Add to the `Config` struct in `admin-service/config.go`:
 	// match the upload timeout — it would enlarge the forgery window for nothing.
 	SvcJWTTTL        time.Duration `env:"SVCJWT_TTL" envDefault:"5m"`
 
-	ClientUpdateBaseURL        string `env:"CLIENT_UPDATE_BASE_URL,required"`
+	// ClientUpdateBaseURL empty means client-update publishing is disabled at this
+	// site: no forwarder is built and the upload route answers 503.
+	ClientUpdateBaseURL        string `env:"CLIENT_UPDATE_BASE_URL" envDefault:""`
 	ClientUpdateAudience       string `env:"CLIENT_UPDATE_AUDIENCE" envDefault:"client-update-service"`
-	ClientUpdateServiceAccount string `env:"CLIENT_UPDATE_SERVICE_ACCOUNT,required"`
+	ClientUpdateServiceAccount string `env:"CLIENT_UPDATE_SERVICE_ACCOUNT" envDefault:""`
 	// ClientUpdateUploadTimeout is the per-request deadline the upload route
 	// installs for itself via extendDeadlines. It is deliberately NOT passed
 	// through checkHandlerTimeout: that guard keeps handler budgets under the 40s
@@ -1585,10 +1620,44 @@ Add to the `Config` struct in `admin-service/config.go`:
 
 Do **not** add `checkHandlerTimeout` calls for `ClientUpdateUploadTimeout` in `loadConfig` — the test above pins that.
 
+Add the paired validation instead, and call it from `loadConfig` after the existing checks:
+
+```go
+// checkClientUpdateConfig rejects a half-configured forwarder. The feature is
+// opt-in per site (an empty base URL disables it), but a site that opts in and
+// omits the signing key or the service account would fail at the first upload
+// rather than at startup — so that combination is a startup error.
+func checkClientUpdateConfig(c Config) error { //nolint:gocritic // hugeParam: startup value, called once
+	if c.ClientUpdateBaseURL == "" {
+		return nil
+	}
+	if c.SvcJWTPrivateKey == "" {
+		return errors.New("CLIENT_UPDATE_BASE_URL is set but SVCJWT_PRIVATE_KEY is empty: client update publishing cannot sign its requests")
+	}
+	if c.ClientUpdateServiceAccount == "" {
+		return errors.New("CLIENT_UPDATE_BASE_URL is set but CLIENT_UPDATE_SERVICE_ACCOUNT is empty: client update publishing has no identity to present")
+	}
+	return nil
+}
+```
+
+In `loadConfig`, after `checkHandlerTimeout("FANOUT_TIMEOUT", …)`:
+
+```go
+	if err := checkClientUpdateConfig(c); err != nil {
+		return Config{}, err
+	}
+```
+
+Add `errors` to the file's imports.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `make test SERVICE=admin-service`
-Expected: PASS.
+Expected: PASS — including the four pre-existing `loadConfig` tests, which set only
+`SITE_ID`/`MONGO_URI`/`NATS_URL`. They keep passing precisely because the new variables are
+optional; if you made them `required` instead, those four would break. That is the signal the
+optional decision is load-bearing, not cosmetic.
 
 - [ ] **Step 5: Commit**
 
@@ -2494,26 +2563,37 @@ Add `time` to the imports.
 In `admin-service/main.go`, after the `nc`/`js`/`publishInbox` setup and before `h := newHandler(...)`:
 
 ```go
-	signer, err := svcjwt.NewSigner(cfg.SvcJWTPrivateKey, cfg.SvcJWTIssuer)
-	if err != nil {
-		return fmt.Errorf("build service-token signer: %w", err)
-	}
-	// Minted per forward and never returned to a caller, so no bearer credential
-	// for client-update-service ever leaves this process.
-	mintClientUpdateToken := func() (string, error) {
-		token, _, err := signer.Sign(cfg.ClientUpdateServiceAccount, cfg.ClientUpdateAudience, cfg.SvcJWTTTL)
+	// Client-update publishing is opt-in per site: an empty base URL leaves the
+	// forwarder nil and the upload route answers 503. loadConfig has already
+	// rejected a half-configured opt-in, so reaching here with a base URL means
+	// the key and account are present too.
+	var handlerOpts []handlerOption
+	if cfg.ClientUpdateBaseURL == "" {
+		slog.Warn("client update publishing is disabled: CLIENT_UPDATE_BASE_URL is unset",
+			"site", cfg.SiteID)
+	} else {
+		signer, err := svcjwt.NewSigner(cfg.SvcJWTPrivateKey, cfg.SvcJWTIssuer)
 		if err != nil {
-			return "", fmt.Errorf("sign client-update token: %w", err)
+			return fmt.Errorf("build service-token signer: %w", err)
 		}
-		return token, nil
+		// Minted per forward and never returned to a caller, so no bearer
+		// credential for client-update-service ever leaves this process.
+		mintClientUpdateToken := func() (string, error) {
+			token, _, err := signer.Sign(cfg.ClientUpdateServiceAccount, cfg.ClientUpdateAudience, cfg.SvcJWTTTL)
+			if err != nil {
+				return "", fmt.Errorf("sign client-update token: %w", err)
+			}
+			return token, nil
+		}
+		handlerOpts = append(handlerOpts,
+			withClientUpdate(newClientUpdateForwarder(cfg.ClientUpdateBaseURL, cfg.ClientUpdateUploadTimeout, mintClientUpdateToken)))
 	}
-	forwarder := newClientUpdateForwarder(cfg.ClientUpdateBaseURL, cfg.ClientUpdateUploadTimeout, mintClientUpdateToken)
 ```
 
 Change the handler construction and route registration:
 
 ```go
-	h := newHandler(st, sessStore, cfg, nc, publishInbox, withClientUpdate(forwarder))
+	h := newHandler(st, sessStore, cfg, nc, publishInbox, handlerOpts...)
 ```
 
 ```go
