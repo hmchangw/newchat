@@ -296,15 +296,33 @@ and the reasoning is the standard to hold new ones to:
 
 - `chat.nats.publish.retries` — no path in this repo loops around its own
   publish, so it could never leave zero.
-- `chat.nats.consumer.redeliveries` — the broker already publishes
-  `jetstream_consumer_num_redelivered`, and which event type keeps failing is
-  carried by `chat_nats_consumer_messages_total{event_type,outcome="nak"}`, the
-  nak being what causes the redelivery.
-- the publish **success** half of `chat.nats.publish.attempts` — for a JetStream
-  destination `jetstream_stream_total_messages` is the acceptance count any
-  failure ratio needs, and for a Core NATS destination a nil error only means
-  the message entered the client's write or reconnect buffer, so a "success"
-  there never meant delivery. What remains is `chat.nats.publish.failures`.
+- `chat.nats.consumer.redeliveries` — deleted as an accepted blind spot, **not**
+  because the broker covers it. It does not.
+  `jetstream_consumer_num_redelivered` counts redelivered messages *not yet
+  acknowledged*, once per message however many times it was redelivered, and the
+  count resets on ack (`jetstream/consumer_config.go`), so it is a current-state
+  gauge: a redelivery that completes between two scrapes leaves nothing behind.
+  `chat_nats_consumer_messages_total{outcome="nak"}` is not a substitute either,
+  because redelivery also follows AckWait expiry, cancellation and process
+  crashes, none of which nak. **The uncovered case:** a worker finishes a side
+  effect, then exceeds AckWait or crashes before acking; the retry acks; metrics
+  show only an ack, and duplicate processing is invisible.
+- the publish **success** half of `chat.nats.publish.attempts` — likewise an
+  accepted blind spot. `jetstream_stream_total_messages` is the number of
+  messages *stored in* the stream (`jetstream/stream_config.go`), which is
+  current depth, not cumulative acceptances: a `Nats-Msg-Id` deduplicated PubAck
+  succeeds without increasing it — and this repo publishes with `WithMsgID` in
+  room-service, room-worker, message-worker and message-gatekeeper, so that is
+  the normal path — while WorkQueue/Interest retention and `MaxAge` walk it back
+  toward zero. For a Core NATS destination a nil error only means the message
+  entered the client's write or reconnect buffer, so a "success" there never
+  meant delivery; if the process dies before reconnecting the message is lost
+  and nothing records it. What remains is `chat.nats.publish.failures`.
+
+Both were deleted knowingly, on the owner's decision, after the reasoning above
+was corrected. The point of stating the real blind spot rather than the
+substitute that does not exist: a future reader must not re-derive "the broker
+already has this" and design an SLI on it.
 
 Similarly, the counters that used to shadow the two RPC histograms
 (`chat.nats.requests`, `chat.nats.request.handled`) are gone: a histogram
@@ -379,15 +397,21 @@ different things per destination, and the difference decides how F07a/F07b are
 read:
 
 - **JetStream destinations** (`canonical`, `outbox`, `inbox`, `push`) wait for a
-  PubAck. Success is broker-confirmed — and already counted, by the broker, as
-  `jetstream_stream_total_messages`.
+  PubAck, so success is broker-confirmed — but nothing counts it cumulatively.
+  `jetstream_stream_total_messages` is current stream depth, not accepted
+  publishes: dedup, retention and `MaxAge` all decouple the two (§4). **So F07a
+  and F07b have no denominator.** Read the failure counter as a rate against
+  itself over time, not as a ratio.
 - **Core NATS destinations** (`recipient_event`, `client_response`) return nil as
   soon as the message enters the client's write or reconnect buffer. nats.go
   buffers publishes across a disconnect, so a complete broker outage would
   produce a rising "success" count until the reconnect buffer overflows.
 
 A Core NATS success was therefore never proof a recipient was reached, which is
-what made it not worth a series. Read `chat_nats_publish_failures_total`
+what made it not worth a series. The cost of not counting it is that during a
+disconnect the failure counter reads exactly zero, so nothing distinguishes zero
+at-risk publishes from thousands — an accepted blind spot, not a covered one.
+Read `chat_nats_publish_failures_total`
 alongside the client connection metrics below, treat any interval overlapping
 `disconnected`, or any `buffer_full` publish outcome, as unproven for recipient
 delivery, and take the denominator from the broker (JetStream) or from the
@@ -583,10 +607,10 @@ The **Read by** column is the load-bearing one. A metric nobody reads still
 costs a permanent series in the backend, an attribute set on a hot path, and
 reviewer time on every PR that touches it. Two instruments were deleted for
 exactly that: `chat.nats.publish.retries` never had a producer, and
-`chat.nats.consumer.redeliveries` duplicated `jetstream_consumer_num_redelivered`
-while `chat.nats.consumer.messages{event_type,outcome="nak"}` already carried
-the event-type breakdown. Both would have been stopped here, because neither
-could have been given a reader.
+`chat.nats.consumer.redeliveries` was cut as an accepted blind spot (§4 — the
+broker gauge is *not* an equivalent, and saying it was is what nearly let this
+go by unexamined). The retries family would have been stopped here, because it
+could never have been given a reader.
 
 **Appears** distinguishes an instrument visible from process start from one
 that only materialises once something happens — a counter does not exist in
