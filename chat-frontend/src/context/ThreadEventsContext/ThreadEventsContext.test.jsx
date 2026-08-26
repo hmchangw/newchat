@@ -69,6 +69,15 @@ vi.mock('@/context/DegradedContext', () => ({
   useDegraded: () => degradedMock,
 }))
 
+// Module-scoped, so every describe in this file shares one instance. Reset it
+// here rather than inside a single describe's beforeEach, or a describe that
+// later adds a degraded assertion inherits the previous block's calls.
+beforeEach(() => {
+  degradedMock.historyDegraded = false
+  degradedMock.noteHistoryFailure.mockClear()
+  degradedMock.noteHistorySuccess.mockClear()
+})
+
 function Probe() {
   const t = useThreadEvents()
   return (
@@ -119,7 +128,6 @@ describe('ThreadEventsContext', () => {
     callOrder.length = 0
     threadEventHandler = null
     responseHandlers.clear()
-    degradedMock.noteHistoryFailure.mockClear()
   })
 
   afterEach(() => {
@@ -218,6 +226,20 @@ describe('ThreadEventsContext', () => {
     expect(screen.getByText('count:0')).toBeInTheDocument()
   })
 
+  // Retrying is what the user does *during* the outage, so its success is the
+  // earliest recovery signal the session gets.
+  it('a successful retry clears the degraded flag too', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    publish.mockImplementationOnce(() => { throw new Error('Not connected') })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('send').click() })
+    degradedMock.noteHistorySuccess.mockClear()
+    await act(async () => { screen.getByText('retry').click() })
+    await act(async () => { respondToSend({ status: 'ok' }) })
+    expect(degradedMock.noteHistorySuccess).toHaveBeenCalled()
+  })
+
   it('a gatekeeper refusal mid-compose (thread_start_unavailable) arms the degraded flag via noteHistoryFailure', async () => {
     request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
     setup()
@@ -232,6 +254,18 @@ describe('ThreadEventsContext', () => {
     )
   })
 
+  it('a refusal leaves the composed text on screen — nothing the user typed is lost', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('send').click() })
+    await act(async () => {
+      respondToSend({ error: 'nope', code: 'unavailable', reason: 'thread_start_unavailable' })
+    })
+    expect(screen.getByText('count:1')).toBeInTheDocument()
+    expect(screen.getByText('firstContent:hi')).toBeInTheDocument()
+  })
+
   it('a synchronous publish throw also reports to noteHistoryFailure', async () => {
     request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
     publish.mockImplementation(() => { throw new Error('Not connected') })
@@ -241,6 +275,52 @@ describe('ThreadEventsContext', () => {
     expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Not connected' })
     )
+  })
+  // openThread's fetch is history-service reading the same Cassandra as every
+  // other history call, and a thread panel that won't open is the most
+  // thread-relevant evidence in the app that thread delivery is broken.
+  it('openThread history success clears the degraded flag via noteHistorySuccess', async () => {
+    request.mockResolvedValueOnce({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    expect(degradedMock.noteHistorySuccess).toHaveBeenCalled()
+    expect(degradedMock.noteHistoryFailure).not.toHaveBeenCalled()
+  })
+
+  it('openThread history failure arms the degraded flag via noteHistoryFailure', async () => {
+    const err = Object.assign(new Error('no responders'), { code: '503' })
+    request.mockRejectedValueOnce(err)
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(err)
+    expect(degradedMock.noteHistorySuccess).not.toHaveBeenCalled()
+  })
+
+  it('a stale openThread result reports nothing — the generation guard covers the degraded call too', async () => {
+    let rejectFirst
+    request.mockReturnValueOnce(new Promise((_, rej) => { rejectFirst = rej }))
+    request.mockResolvedValueOnce({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    // Second open advances the generation; the first fetch's rejection is now stale.
+    await act(async () => { screen.getByText('open-p2').click() })
+    degradedMock.noteHistoryFailure.mockClear()
+    await act(async () => { rejectFirst(Object.assign(new Error('late'), { code: 'internal' })) })
+    expect(degradedMock.noteHistoryFailure).not.toHaveBeenCalled()
+  })
+
+  // Design §6: the flag clears on the next successful history load OR send. A
+  // reply the gatekeeper accepted means it resolved the parent, which is the
+  // recovery signal — without this the user waits out the full TTL.
+  it('a successful reply send clears the degraded flag via noteHistorySuccess', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    degradedMock.noteHistorySuccess.mockClear()
+    await act(async () => { screen.getByText('send').click() })
+    expect(degradedMock.noteHistorySuccess).not.toHaveBeenCalled()
+    await act(async () => { respondToSend({ status: 'ok' }) })
+    expect(degradedMock.noteHistorySuccess).toHaveBeenCalled()
   })
 })
 

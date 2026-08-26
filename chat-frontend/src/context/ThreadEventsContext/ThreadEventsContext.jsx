@@ -40,7 +40,7 @@ export function ThreadEventsProvider({ children }) {
   const nats = useNats()
   const { user } = nats
   const roomDispatch = useRoomDispatch()
-  const { noteHistoryFailure } = useDegraded()
+  const { noteHistoryFailure, noteHistorySuccess } = useDegraded()
   const { decrypt, ensureKey } = useRoomKeys()
   const registerThreadReplyHandler = useRegisterThreadReplyHandler()
   const registerThreadMessageMutationHandler = useRegisterThreadMessageMutationHandler()
@@ -181,6 +181,7 @@ export function ThreadEventsProvider({ children }) {
           // The api op already normalises into broadcast shape (id/content);
           // hand it straight to the reducer.
           dispatch({ type: 'HISTORY_LOADED', parentId: parent.messageId, resp })
+          noteHistorySuccess()
         })
         .catch((err) => {
           if (myGen !== generationRef.current) return
@@ -189,9 +190,13 @@ export function ThreadEventsProvider({ children }) {
             parentId: parent.messageId,
             error: err?.message ?? String(err),
           })
+          // Same history-service, same Cassandra as the room lane's three
+          // sites — and a thread panel that won't open is the most
+          // thread-relevant evidence there is that thread delivery is down.
+          noteHistoryFailure(err)
         })
     },
-    [user, nats, closeThreadSub, applyReply, applyMutation]
+    [user, nats, closeThreadSub, applyReply, applyMutation, noteHistoryFailure, noteHistorySuccess]
   )
 
   const closeThread = useCallback(() => {
@@ -250,6 +255,10 @@ export function ThreadEventsProvider({ children }) {
       try {
         publishReply(id, content.trim(), opts)
           .then(() => {
+            // An accepted reply means the gatekeeper resolved the parent, so
+            // history is answering again — the design's "cleared on the next
+            // successful load or send" recovery signal.
+            noteHistorySuccess()
             if (parent) {
               // replyId lets the room reducer dedupe the inbound echo on tcount.
               roomDispatch({
@@ -273,7 +282,7 @@ export function ThreadEventsProvider({ children }) {
         noteHistoryFailure(err)
       }
     },
-    [user, publishReply, roomDispatch, noteHistoryFailure]
+    [user, publishReply, roomDispatch, noteHistoryFailure, noteHistorySuccess]
   )
 
   const retryReply = useCallback(
@@ -293,16 +302,20 @@ export function ThreadEventsProvider({ children }) {
           row.quotedParentMessage
             ? { quotedParentMessageId: row.quotedParentMessage.messageId ?? row.quotedParentMessage.id }
             : undefined
-        ).catch((err) => {
-          dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: formatAsyncJobError(err) })
-          noteHistoryFailure(err)
-        })
+        )
+          // A retry landing is the earliest recovery signal a session gets —
+          // it is the thing the user does while the outage is on.
+          .then(noteHistorySuccess)
+          .catch((err) => {
+            dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: formatAsyncJobError(err) })
+            noteHistoryFailure(err)
+          })
       } catch (err) {
         dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: err?.message ?? String(err) })
         noteHistoryFailure(err)
       }
     },
-    [publishReply, noteHistoryFailure]
+    [publishReply, noteHistoryFailure, noteHistorySuccess]
   )
 
   const dismissReply = useCallback((messageId) => {

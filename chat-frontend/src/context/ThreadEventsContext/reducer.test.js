@@ -194,6 +194,20 @@ describe('threadEventsReducer — REPLY_SEND_FAILED / REPLY_RETRIED / REPLY_DISM
     )
   })
 
+  // The point of the whole change: a refused send must never take the user's
+  // text with it. Everything else here is bookkeeping around this one line.
+  it('REPLY_SEND_FAILED keeps the row and its draft content intact', () => {
+    const out = threadEventsReducer(sent, {
+      type: 'REPLY_SEND_FAILED',
+      messageId: 'opt',
+      error: "Message history is unavailable — you can't start a new thread right now. Try again shortly.",
+    })
+    expect(out.messages).toHaveLength(1)
+    expect(out.messages[0].id).toBe('opt')
+    expect(out.messages[0].content).toBe('x')
+    expect(out.messages[0]._local).toBe(true)
+  })
+
   it('REPLY_RETRIED clears _status on the matching id', () => {
     const failed = threadEventsReducer(sent, { type: 'REPLY_SEND_FAILED', messageId: 'opt', error: 'nope' })
     const out = threadEventsReducer(failed, { type: 'REPLY_RETRIED', messageId: 'opt' })
