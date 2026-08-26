@@ -62,18 +62,10 @@ type Tier struct {
 // to panic on the first lookup.
 func NewTier(client valkeyutil.Client, ttl time.Duration, rec Recorder) *Tier {
 	if rec == nil {
-		rec = nopRecorder{}
+		rec = valkeyutil.NoopRecorder{}
 	}
 	return &Tier{client: client, ttl: ttl, metrics: rec}
 }
-
-// nopRecorder discards cache outcomes, for a deployment (or a test) that wires
-// no metrics.
-type nopRecorder struct{}
-
-func (nopRecorder) Hit(context.Context)   {}
-func (nopRecorder) Miss(context.Context)  {}
-func (nopRecorder) Error(context.Context) {}
 
 // enabled reports whether the tier is in play. A non-positive ttl bypasses it
 // entirely: Valkey reads ttl==0 as "store forever", so honoring the repo's

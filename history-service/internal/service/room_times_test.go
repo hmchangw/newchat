@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
 )
@@ -30,25 +31,24 @@ func TestResolveRoomTimes(t *testing.T) {
 		name        string
 		meta        *models.RoomMeta
 		mongoCalls  int
-		wantLast    time.Time
 		wantCreated time.Time
 	}{
-		{name: "no meta → mongo fallback", meta: nil, mongoCalls: 1, wantLast: last, wantCreated: created},
-		{name: "both meta valid → no mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(created)}, mongoCalls: 0, wantLast: last, wantCreated: created},
-		{name: "lastMsgAt missing → mongo fallback for both", meta: &models.RoomMeta{CreatedAt: tsPtr(created)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		{name: "no meta → mongo fallback", meta: nil, mongoCalls: 1, wantCreated: created},
+		{name: "both meta valid → no mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(created)}, mongoCalls: 0, wantCreated: created},
+		{name: "lastMsgAt missing → mongo fallback for both", meta: &models.RoomMeta{CreatedAt: tsPtr(created)}, mongoCalls: 1, wantCreated: created},
 		// Relaxation: a usable lastMsgAt hint alone is sufficient — createdAt only feeds
 		// walkBounds' floor (clamped to now-historyFloor), so this must NOT read Mongo;
 		// createdAt comes back zero rather than Mongo's value.
-		{name: "createdAt missing → lastMsgAt hint alone skips mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last)}, mongoCalls: 0, wantLast: last, wantCreated: time.Time{}},
-		{name: "lastMsgAt too far in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(future), CreatedAt: tsPtr(created)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		{name: "createdAt missing → lastMsgAt hint alone skips mongo", meta: &models.RoomMeta{LastMsgAt: tsPtr(last)}, mongoCalls: 0, wantCreated: time.Time{}},
+		{name: "lastMsgAt too far in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(future), CreatedAt: tsPtr(created)}, mongoCalls: 1, wantCreated: created},
 		// Same relaxation as above: lastMsgAt alone is valid, so an out-of-range createdAt
 		// hint is simply dropped (zero), not fetched from Mongo.
-		{name: "createdAt in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(future)}, mongoCalls: 0, wantLast: last, wantCreated: time.Time{}},
-		{name: "implausibly old values (pre-2020) → ignored", meta: &models.RoomMeta{LastMsgAt: msPtr(0), CreatedAt: msPtr(0)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		{name: "createdAt in future → ignored", meta: &models.RoomMeta{LastMsgAt: tsPtr(last), CreatedAt: tsPtr(future)}, mongoCalls: 0, wantCreated: time.Time{}},
+		{name: "implausibly old values (pre-2020) → ignored", meta: &models.RoomMeta{LastMsgAt: msPtr(0), CreatedAt: msPtr(0)}, mongoCalls: 1, wantCreated: created},
 		// Hint pair is internally inconsistent (createdAt > lastMsgAt). Both meta are
 		// individually sane, so they pass sanitization; the consistency-refetch path
 		// kicks in and replaces both with Mongo's coherent values.
-		{name: "createdAt > lastMsgAt → mongo refetch", meta: &models.RoomMeta{LastMsgAt: tsPtr(created), CreatedAt: tsPtr(last)}, mongoCalls: 1, wantLast: last, wantCreated: created},
+		{name: "createdAt > lastMsgAt → mongo refetch", meta: &models.RoomMeta{LastMsgAt: tsPtr(created), CreatedAt: tsPtr(last)}, mongoCalls: 1, wantCreated: created},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,19 +61,18 @@ func TestResolveRoomTimes(t *testing.T) {
 				Times(tc.mongoCalls)
 
 			s := &HistoryService{rooms: mockResolver, roomTimes: nopRoomTimesCache{}}
-			gotLast, gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", tc.meta, now)
+			gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", tc.meta, now)
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantLast.UTC(), gotLast.UTC())
 			assert.Equal(t, tc.wantCreated.UTC(), gotCreated.UTC())
 		})
 	}
 }
 
-// Mongo has no lastMsgAt recorded (zero) — "unknown", NOT "empty room": the room
-// may hold messages (legacy docs, failed lastMsgAt update). The resolver must
-// return the zero untouched rather than collapsing it to createdAt, which would
-// drag the consistency logic below into a false inversion.
-func TestResolveRoomTimes_MissingLastMsgAt_StaysUnknown(t *testing.T) {
+// A room with no lastMsgAt recorded (zero) has createdAt > lastMsgAt legitimately —
+// "unknown", NOT "empty room". That inversion must not be mistaken for an incoherent
+// hint and re-read: the pair already came from Mongo, so a second read of the same
+// document would return the same two values.
+func TestResolveRoomTimes_MissingLastMsgAt_DoesNotRefetch(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	created := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 
@@ -85,15 +84,16 @@ func TestResolveRoomTimes_MissingLastMsgAt_StaysUnknown(t *testing.T) {
 		Times(1)
 
 	s := &HistoryService{rooms: mockResolver, roomTimes: nopRoomTimesCache{}}
-	gotLast, gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", nil, now)
+	gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", nil, now)
 	require.NoError(t, err)
-	assert.True(t, gotLast.IsZero(), "missing lastMsgAt must stay zero, got %v", gotLast)
 	assert.Equal(t, created, gotCreated.UTC())
 }
 
-// A createdAt hint on a no-lastMsgAt room triggers the consistency refetch
-// (hint created > zero last); after the refetch the zero must still survive.
-func TestResolveRoomTimes_MissingLastMsgAt_CreatedHintRefetchKeepsUnknown(t *testing.T) {
+// The same room WITH a createdAt hint. This used to cost two identical Mongo reads:
+// the hint's createdAt was kept over Mongo's, which then read as inverted against the
+// zero lastMsgAt and triggered a consistency refetch of the document just read. One
+// read now — the read takes Mongo's createdAt, so there is nothing left to reconcile.
+func TestResolveRoomTimes_MissingLastMsgAt_CreatedHintCostsOneRead(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	created := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	hintMs := now.Add(-30 * 24 * time.Hour).UnixMilli()
@@ -103,13 +103,12 @@ func TestResolveRoomTimes_MissingLastMsgAt_CreatedHintRefetchKeepsUnknown(t *tes
 	mockResolver.EXPECT().
 		GetRoomTimes(gomock.Any(), "room-1").
 		Return(time.Time{}, created, nil).
-		Times(2)
+		Times(1)
 
 	s := &HistoryService{rooms: mockResolver, roomTimes: nopRoomTimesCache{}}
-	gotLast, gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", &models.RoomMeta{CreatedAt: &hintMs}, now)
+	gotCreated, err := s.resolveRoomTimes(context.Background(), "room-1", &models.RoomMeta{CreatedAt: &hintMs}, now)
 	require.NoError(t, err)
-	assert.True(t, gotLast.IsZero(), "missing lastMsgAt must stay zero after refetch, got %v", gotLast)
-	assert.Equal(t, created, gotCreated.UTC())
+	assert.Equal(t, created, gotCreated.UTC(), "Mongo's createdAt wins over the hint's")
 }
 
 func TestWalkBounds(t *testing.T) {
@@ -150,7 +149,7 @@ func TestResolveRoomTimes_MongoError(t *testing.T) {
 		Times(1)
 
 	s := &HistoryService{rooms: mockResolver, roomTimes: nopRoomTimesCache{}}
-	_, _, err := s.resolveRoomTimes(context.Background(), "room-1", nil, now)
+	_, err := s.resolveRoomTimes(context.Background(), "room-1", nil, now)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, wantErr, "wrapped mongo error must propagate via errors.Is")
 }
@@ -360,4 +359,18 @@ func TestResolveRoomTimesOrError_CancelledCallerSkipsTheFallback(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Zero(t, tier.fallbacks)
+}
+
+// config's bucket-budget validation sizes the walk from WalkCeilingSkewHours.
+// If this constant ever moves independently, that validation silently stops
+// describing the walk it is meant to guard — so pin the two together here,
+// where the walk actually uses the value.
+func TestClockSkewTolerance_MatchesTheValidatedWalkCeiling(t *testing.T) {
+	assert.Equal(t, time.Duration(config.WalkCeilingSkewHours)*time.Hour, clockSkewTolerance)
+
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	s := &HistoryService{historyFloor: 90 * 24 * time.Hour}
+	ceiling, _ := s.walkBounds(time.Time{}, now)
+	assert.Equal(t, now.Add(time.Duration(config.WalkCeilingSkewHours)*time.Hour), ceiling,
+		"the walk's ceiling is what config sizes the bucket budget against")
 }

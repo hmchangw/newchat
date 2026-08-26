@@ -119,22 +119,16 @@ func (s *HistoryService) fillLazyPreviews(
 	return ctx.Err()
 }
 
-// walkTimesFromRow derives the walk's bounds from the batched read directly. The row IS
-// the room document, so what it holds is what Mongo says, not an unknown to go re-read:
-// routing it through RoomMeta made resolveRoomTimes fetch the same document again, once
-// per never-messaged room per request (#291). Never degraded — the read that produced
-// this row succeeded, so the walk keeps the full configured floor.
-//
-// rt.LastMsgAt is deliberately dropped: it bounds a Cassandra walk at neither end (see
-// walkTimes), and the row supplying it first-hand does not make it any less lagging.
-func walkTimesFromRow(rt mongorepo.RoomTimes) walkTimes {
-	return walkTimes{createdAt: rt.CreatedAt}
-}
-
 // resolvePreview resolves one room the lazy way, through the cache when installed.
 // The cache is positives-only, so empty and degraded walks re-resolve rather than cache.
 func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt mongorepo.RoomTimes, now time.Time) (models.PreviewMessage, bool) {
-	times := walkTimesFromRow(rt)
+	// Straight off the batched read: the row IS the room document, so what it holds is
+	// what Mongo says, not an unknown to go re-read — routing it through RoomMeta made
+	// resolveRoomTimes fetch the same document again, once per never-messaged room per
+	// request (#291). rt.LastMsgAt is deliberately dropped: it bounds a Cassandra walk at
+	// neither end (see walkTimes), and the row supplying it first-hand does not make it
+	// any less lagging.
+	times := walkTimes{createdAt: rt.CreatedAt}
 	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
 		w := s.walkForPreview(ctx, roomID, times, now)
 		if w.State == previewFound {

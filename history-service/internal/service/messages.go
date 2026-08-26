@@ -72,12 +72,8 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	g.Go(func() error {
 		var pErr error
 		if accessSince == nil {
-			// Clamp createdAt to historyFloor so a client hint can't push the walk further back than configured.
-			historyFloor := now.Add(-s.historyFloor)
-			walkFloor := times.createdAt
-			if walkFloor.IsZero() || walkFloor.Before(historyFloor) {
-				walkFloor = historyFloor
-			}
+			// Floor only: `before` is the caller's own ceiling, already clamped above.
+			_, walkFloor := s.walkBounds(times.createdAt, now)
 			page, pErr = s.msgReader.GetMessagesBefore(gctx, roomID, before, walkFloor, pageReq)
 		} else {
 			page, pErr = s.msgReader.GetMessagesBetweenDesc(gctx, roomID, *accessSince, before, pageReq)

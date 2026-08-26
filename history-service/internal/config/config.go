@@ -12,6 +12,14 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
+// WalkCeilingSkewHours is the clock-skew pad the reader adds above `now` when it
+// starts a Cassandra bucket walk (service.clockSkewTolerance is derived from it,
+// and a test there pins the two together). It lives in config rather than beside
+// the walk because the bucket-budget check below is the only thing that can catch
+// a budget too small to cover it, and a validation that carries its own guess at
+// the reader's ceiling is a validation that silently stops matching it.
+const WalkCeilingSkewHours = 1
+
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
 type CassandraConfig struct {
 	Hosts    string `env:"HOSTS"    required:"true"`
@@ -209,21 +217,28 @@ func validate(cfg *Config) error {
 	// returned row, so an empty page carries no continuation and the client
 	// cannot advance. That is silent history loss, so refuse to start instead.
 	//
-	// maxBuckets-1 because the walk's first bucket is the partial one holding
-	// the ceiling; the remainder is what actually travels down to the floor.
+	// The budget must cover the walk the READER performs, which is wider than the
+	// history floor in two ways. It starts at now+WalkCeilingSkewHours, not now;
+	// and buckets are absolute time windows, so where that span falls relative to
+	// a boundary decides how many partitions it touches. A span of S hours over a
+	// W-hour window touches at most floor(S/W)+2 partitions — +1 for the partial
+	// bucket at each end. Sizing on S alone passes configurations whose walk
+	// exhausts the budget one partition short of the floor, and only near a
+	// boundary, which is the worst way to find out.
 	//
 	// The positive guards are for callers that build a Config directly; at
 	// startup main's checkConfig has already rejected a non-positive value for
 	// all three, so this relational check cannot be skipped by zeroing one.
 	if cfg.MessageBucketHours > 0 && cfg.MessageReadMaxBuckets > 0 && cfg.MessageHistoryFloorDays > 0 {
-		reachHours := (cfg.MessageReadMaxBuckets - 1) * cfg.MessageBucketHours
-		if needHours := cfg.MessageHistoryFloorDays * 24; reachHours < needHours {
+		spanHours := WalkCeilingSkewHours + cfg.MessageHistoryFloorDays*24
+		if needBuckets := spanHours/cfg.MessageBucketHours + 2; cfg.MessageReadMaxBuckets < needBuckets {
 			return fmt.Errorf(
-				"MESSAGE_READ_MAX_BUCKETS (%d) x MESSAGE_BUCKET_HOURS (%d) reaches only %dh, "+
-					"short of MESSAGE_HISTORY_FLOOR_DAYS (%d = %dh); a history read would stop "+
+				"MESSAGE_READ_MAX_BUCKETS (%d) is short of the %d buckets a worst-case walk needs: "+
+					"MESSAGE_HISTORY_FLOOR_DAYS (%d) plus the %dh walk skew spans %dh, which at "+
+					"MESSAGE_BUCKET_HOURS (%d) touches up to %d partitions; a history read would stop "+
 					"before the floor and return an empty page the client cannot page past",
-				cfg.MessageReadMaxBuckets, cfg.MessageBucketHours, reachHours,
-				cfg.MessageHistoryFloorDays, needHours)
+				cfg.MessageReadMaxBuckets, needBuckets, cfg.MessageHistoryFloorDays,
+				WalkCeilingSkewHours, spanHours, cfg.MessageBucketHours, needBuckets)
 		}
 	}
 	if cfg.SubL2TTL < 0 {

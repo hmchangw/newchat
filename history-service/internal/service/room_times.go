@@ -9,6 +9,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
+	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
 )
@@ -45,7 +46,7 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	meta *models.RoomMeta,
 	now time.Time,
 ) (walkTimes, error) {
-	_, createdAt, err := s.resolveRoomTimes(ctx, roomID, meta, now)
+	createdAt, err := s.resolveRoomTimes(ctx, roomID, meta, now)
 	if err == nil {
 		return walkTimes{createdAt: createdAt}, nil
 	}
@@ -72,7 +73,7 @@ func (s *HistoryService) resolveRoomTimesOrError(
 
 // clockSkewTolerance bounds how far in the future a client LastMsgAt hint may sit before the
 // Mongo fallback kicks in; it also pads the server-clock ceilings (walkBounds, GetThreadMessages).
-const clockSkewTolerance = time.Hour
+const clockSkewTolerance = config.WalkCeilingSkewHours * time.Hour
 
 // minPlausibleEpoch rejects bogus millis (*ms == 0 → 1970) — time.UnixMilli(0) is a real time IsZero misses.
 var minPlausibleEpoch = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -118,76 +119,82 @@ func clampToCeiling(t, now time.Time) time.Time {
 	return t
 }
 
-// resolveRoomTimes returns lastMsgAt/createdAt for roomID: sanitized client hints are trusted,
-// missing or invalid ones fall back to Mongo. now is injected for deterministic testing.
+// resolveRoomTimes returns createdAt for roomID: a sanitized client hint is trusted,
+// a missing or invalid one falls back to Mongo. now is injected for deterministic testing.
 //
-// A usable lastMsgAt hint is sufficient on its own to skip Mongo entirely — createdAt only
-// feeds walkBounds' floor, which is clamped to now-historyFloor, so a zero createdAt (the
-// case when no hint supplied one) simply collapses the floor to that clamp. A missing or
-// invalid lastMsgAt forces the per-room Mongo read (which then also fills createdAt when
-// the hint didn't supply a usable one). One further case forces a read: if the hint supplies
-// BOTH times but they are mutually inconsistent (createdAt later than lastMsgAt), the pair is
-// re-fetched from Mongo to resolve the inconsistency (see the consistency block below).
+// createdAt is the only value resolved. It feeds walkBounds' floor, which is clamped to
+// now-historyFloor, so a zero value (the case when no hint supplied one and Mongo was not
+// consulted) simply collapses the floor to that clamp.
+//
+// lastMsgAt is read but never returned — it bounds a Cassandra walk at neither end (see
+// walkTimes). It survives here as the gate on the Mongo read and as the one signal that a
+// hinted createdAt is incoherent: a room cannot be created after its own last message.
+// A usable lastMsgAt hint is therefore sufficient to skip Mongo entirely; a missing or
+// invalid one forces the read, and an inconsistent pair (createdAt later than lastMsgAt)
+// forces it too, to settle the inconsistency authoritatively.
 func (s *HistoryService) resolveRoomTimes(
 	ctx context.Context,
 	roomID string,
 	meta *models.RoomMeta,
 	now time.Time,
-) (lastMsgAt, createdAt time.Time, err error) {
+) (createdAt time.Time, err error) {
 	var last, created *time.Time
-	var metaLast, metaCreated bool
 	if meta != nil {
-		if v := sanitizeLastMsgAt(meta.LastMsgAt, now); v != nil {
-			last = v
-			metaLast = true
-		}
-		if v := sanitizeCreatedAt(meta.CreatedAt, now); v != nil {
-			created = v
-			metaCreated = true
-		}
+		last = sanitizeLastMsgAt(meta.LastMsgAt, now)
+		created = sanitizeCreatedAt(meta.CreatedAt, now)
 	}
 
+	// fromMongo records that this call already holds an authoritative pair, so the
+	// consistency check below cannot re-read the document it just read.
+	fromMongo := false
 	if last == nil {
 		l, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
 		if gerr != nil {
-			return time.Time{}, time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, gerr)
+			return time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, gerr)
 		}
-		// Seeded here, at the only place an authoritative answer arrives. A
-		// client hint short-circuits this read, and must never reach the shared
-		// tier: it would become another reader's degraded walk floor.
+		// Seeded from the repository read, never from a client hint — a hint must
+		// not reach the shared tier, where it would become another reader's
+		// degraded walk floor.
+		//
+		// Note what this read is NOT: authoritative-per-call. In production
+		// s.rooms is a readcache.RoomCache, so c may be up to
+		// HISTORY_ROOM_CACHE_TTL old rather than straight from Mongo, and this
+		// then seeds a 90-minute shared tier from a process-local L1.
+		//
+		// That is safe for exactly one reason: createdAt is immutable. A value
+		// the L1 read from Mongo ten seconds ago is the same value Mongo holds
+		// now, so age cannot make it wrong — only absent, and the L1 does not
+		// cache errors. The safety therefore rests on WHAT is stored, not on
+		// where this call sits. Anything mutable added to this tier breaks it:
+		// lastMsgAt in particular, which is why the tier takes only createdAt
+		// and pkg/roomtimescache has a test pinning that.
 		s.roomTimes.Store(ctx, roomID, c)
-		last = &l
-		if created == nil {
-			created = &c
-		}
+		// Mongo's createdAt wins over the hint's, rather than only filling a gap:
+		// the two describe an immutable value, so a hint that disagrees is stale
+		// or bogus, and taking it would return a floor different from the one just
+		// cached a line above. Taking c also settles the inconsistency below
+		// without a second read of the same document.
+		last, created = &l, &c
+		fromMongo = true
 	}
 	if created == nil {
 		created = &time.Time{}
 	}
 
-	// A merged hint+Mongo pair can be internally inconsistent (created > last): refetch from
-	// Mongo when a hint was involved; if still inverted with a real lastMsgAt, normalise.
-	if created.After(*last) {
-		if metaLast || metaCreated {
-			l, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
-			if gerr != nil {
-				return time.Time{}, time.Time{}, fmt.Errorf("resolve room times for %s (consistency refetch): %w", roomID, gerr)
-			}
-			s.roomTimes.Store(ctx, roomID, c)
-			last = &l
-			created = &c
+	// A hinted pair can be internally inconsistent (created > last, impossible for a
+	// real room): settle it against Mongo. Skipped when the pair already came from
+	// Mongo — a never-messaged room has createdAt > a zero lastMsgAt legitimately,
+	// and re-reading the same document would only return the same two values.
+	if !fromMongo && created.After(*last) {
+		_, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
+		if gerr != nil {
+			return time.Time{}, fmt.Errorf("resolve room times for %s (consistency refetch): %w", roomID, gerr)
 		}
-		// Still inverted with a real lastMsgAt — corrupt pair; collapse the
-		// range. A zero lastMsgAt stays zero: "not recorded" means UNKNOWN,
-		// not "empty room" — the room may hold messages (legacy docs, failed
-		// lastMsgAt update). Nothing bounds a walk with it either way — the
-		// ceiling is the clock — so zero is simply carried through.
-		if !last.IsZero() && created.After(*last) {
-			last = created
-		}
+		s.roomTimes.Store(ctx, roomID, c)
+		created = &c
 	}
 
-	return *last, *created, nil
+	return *created, nil
 }
 
 // sanitizeLastMsgAt allows up to now+clockSkewTolerance — a fast client clock may know a newer lastMsgAt.

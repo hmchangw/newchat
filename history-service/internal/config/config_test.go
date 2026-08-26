@@ -320,3 +320,48 @@ func TestValidate_AcceptsTheDefaultWalkBudget(t *testing.T) {
 
 	require.NoError(t, validate(&cfg))
 }
+
+// The bucket budget has to cover the walk the READER actually performs, and that
+// walk starts at now+clockSkewTolerance, not at now. Near a bucket boundary the
+// extra hour pushes the DESC walk onto one more partition than the span alone
+// implies, so a budget sized on the span exhausts before reaching the floor and
+// the read returns an empty page over a room that has rows.
+//
+// 24h buckets, a 2-day floor, 3 buckets: the old span-only check computed
+// (3-1)*24 = 48h >= 48h and passed. The real worst-case walk spans
+// bucket(now+1h) down to bucket(now-48h) — four partitions.
+func TestValidate_RejectsBucketBudgetThatIgnoresTheWalkSkew(t *testing.T) {
+	cfg := baseValid()
+	cfg.MessageBucketHours = 24
+	cfg.MessageHistoryFloorDays = 2
+	cfg.MessageReadMaxBuckets = 3
+
+	err := validate(&cfg)
+	require.Error(t, err, "a boundary-aligned walk needs 4 buckets, not 3")
+	assert.Contains(t, err.Error(), "MESSAGE_READ_MAX_BUCKETS")
+}
+
+func TestValidate_AcceptsBucketBudgetThatCoversTheWalkSkew(t *testing.T) {
+	cfg := baseValid()
+	cfg.MessageBucketHours = 24
+	cfg.MessageHistoryFloorDays = 2
+	cfg.MessageReadMaxBuckets = 4
+
+	require.NoError(t, validate(&cfg))
+}
+
+// The shipped defaults must stay comfortably inside the rule — a validation that
+// rejects the values every deployment runs is worse than no validation. Loaded
+// rather than hand-built, since the defaults live on the env tags.
+func TestLoad_ProductionDefaultsCoverTheWalk(t *testing.T) {
+	setRequiredEnv(t)
+	for _, k := range []string{"MESSAGE_BUCKET_HOURS", "MESSAGE_READ_MAX_BUCKETS", "MESSAGE_HISTORY_FLOOR_DAYS"} {
+		unsetEnv(t, k)
+	}
+
+	cfg, err := Load()
+	require.NoError(t, err, "the shipped defaults must satisfy their own validation")
+	assert.Equal(t, 360, cfg.MessageBucketHours)
+	assert.Equal(t, 122, cfg.MessageReadMaxBuckets)
+	assert.Equal(t, 730, cfg.MessageHistoryFloorDays)
+}
