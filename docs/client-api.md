@@ -148,7 +148,7 @@ Each rung includes the ones below it. The header propagates across every service
 ### Reply patterns
 
 - **Standard NATS request/reply** — the NATS client library auto-generates a reply subject under `chat.user.{account}.>` (from the connection's `inboxPrefix`, see §2.1) and routes the reply back to the caller. Used by every method in §3.
-- **Async reply on `chat.user.{account}.response.{requestID}`** — carries every deferred result: the `msg.send` reply (§4) and the [AsyncJobResult](#asyncjobresult) terminal of the two-phase room operations (Create Room, Add Members, Remove Member, Remove Org, Update Member Role, Rename Room). The server reads `requestId` from the payload and publishes the reply there. The client must hold a subscription matching that subject to receive **any** of them — the `chat.user.{account}.>` wildcard is one way, but a narrower subscription works and is what the frontend uses. A client that skips this subscription never learns a room operation's outcome.
+- **Async reply on `chat.user.{account}.response.{requestID}`** — carries every deferred result: the `msg.send` reply (§4) and the [AsyncJobResult](#asyncjobresult) terminal of the two-phase room operations (Create Room, Add Members, Remove Member, Remove Org, Update Member Role, Rename Room). The request ID comes from a different place per flow: `msg.send` reads `requestId` from its own JSON payload, while a room operation reuses the request's `X-Request-ID` and publishes its `AsyncJobResult` **only when that header was present** — a client that omits it gets the synchronous accept/reject and never the outcome. The client must hold a subscription matching that subject to receive **any** of them — the `chat.user.{account}.>` wildcard is one way, but a narrower subscription works and is what the frontend uses. A client that skips this subscription never learns a room operation's outcome.
   What differs is only the first phase: `msg.send` is a plain publish with **no synchronous request/reply response**, while the room operations answer their request synchronously (the accept/reject) and then deliver the outcome here.
 
 ### Timestamps
@@ -5149,9 +5149,11 @@ favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
 **sortMode**: `"custom"` (sort the section's chats by `subscription.sectionOrder`) or
 `"mostRecent"` (sort by last **user** activity — the default and fallback; same key as
 [`subscription.list`](#subscriptionlist): `room.lastUserMsgAt` descending, falling back to
-`room.lastMsgAt` for rooms that predate it, then the room's `createdAt`. Sorting on
-`lastMsgAt` alone would let a system message — a rename, a member change — resurface a
-dormant room above one with newer real conversation).
+`room.lastMsgAt` for rooms that predate it. Sorting on `lastMsgAt` alone would let a system
+message — a rename, a member change — resurface a dormant room above one with newer real
+conversation. A room with neither timestamp needs no third client-side rung: the server
+already orders it by its `createdAt`, and an `added` payload carries that value in
+`lastUserMsgAt`.)
 
 ##### Client read model
 
@@ -5163,7 +5165,7 @@ dormant room above one with newer real conversation).
    favorite/bot). A `sectionId` pointing at a section not in the definitions renders in
    **chats** (orphan tolerance — a deleted section leaves its members orphaned, no cascade).
 4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last user
-   activity (`lastUserMsgAt ?? lastMsgAt ?? createdAt`, descending — see **sortMode** above).
+   activity (`lastUserMsgAt ?? lastMsgAt`, descending — see **sortMode** above).
 5. Live updates: `subscription.update` (a chat's membership/order changed) and
    `chatlist.update` (a section def changed) each replace their own scope, guarded by
    their timestamp (last-write-wins, no deltas).

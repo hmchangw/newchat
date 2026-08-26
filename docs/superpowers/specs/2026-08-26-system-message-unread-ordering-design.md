@@ -36,7 +36,8 @@ persisted to Cassandra and rendered in the timeline, so the ceiling must keep mo
 3. System messages still render in the room timeline, live and after reload.
 4. The actor keeps not seeing their own action as unread (status quo: the system
    message's "sender" gets `lastSeenAt` advanced).
-5. No data migration; either deploy order is safe.
+5. No data migration. Deploy order is NOT free, though: writers first and
+   fully drained, then readers — see Rollout below.
 
 ## Rejected approaches
 
@@ -79,7 +80,7 @@ they are touched.
     (unguarded, same accepted regression semantics as `lastMsgAt`);
   - window is system-only → **sticky freeze**, a pipeline `$set` evaluated against the
     pre-update document:
-    `lastUserMsgAt = $ifNull($lastUserMsgAt, $lastMsgAt, $createdAt, $$REMOVE)` (variadic — MongoDB ≥4.4; the repo runs 7)
+    `lastUserMsgAt = $ifNull($lastUserMsgAt, $lastMsgAt, $createdAt, $$REMOVE)` (variadic — MongoDB ≥5.0; the repo runs 7)
     — set once to the room's pre-system position; a brand-new channel (no `lastMsgAt`
     yet) pins to its `createdAt`.
   - This makes the previews-off mode a pipeline update too (was a plain `$set`; the
