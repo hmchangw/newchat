@@ -136,3 +136,26 @@ func TestValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestConfig_GraphProxyCredentials covers the authenticating-proxy settings.
+// They are kept out of GRAPH_PROXY_URL so a password carrying URL
+// metacharacters needs no percent-encoding, and so the secret is a field of its
+// own rather than half of a connection string.
+func TestConfig_GraphProxyCredentials(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
+	t.Setenv("GRAPH_PROXY_USERNAME", "proxyuser")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "p@ss:w/rd")
+	cfg, err := env.ParseAs[Config]()
+	require.NoError(t, err)
+	assert.Equal(t, "proxyuser", cfg.GraphProxyUsername)
+	assert.Equal(t, "p@ss:w/rd", cfg.GraphProxyPassword)
+}
+
+func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := env.ParseAs[Config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
+	assert.Empty(t, cfg.GraphProxyPassword)
+}

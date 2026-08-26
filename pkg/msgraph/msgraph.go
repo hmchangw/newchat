@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,7 +70,7 @@ type UserLister interface {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -133,6 +134,15 @@ type Config struct {
 	// ignore it and rely on the standard proxy env vars. Must include a scheme
 	// and host (e.g. "http://proxy.corp:8080").
 	ProxyURL string
+	// ProxyUsername and ProxyPassword authenticate to ProxyURL with HTTP Basic
+	// (Proxy-Authorization, emitted by net/http on both the plain-HTTP hop and
+	// the CONNECT tunnel). They override any userinfo embedded in ProxyURL, so a
+	// password carrying URL metacharacters needs no percent-encoding — the
+	// reason they are separate settings. Setting either without ProxyURL, or a
+	// password without a username, is a configuration error and is rejected at
+	// construction. ProxyPassword is a secret: never log it.
+	ProxyUsername string
+	ProxyPassword string
 	// UserAgent overrides the User-Agent header sent on every Graph request. When
 	// empty the client falls back to defaultUserAgent (a browser string). Honored
 	// by both the app-only client (New) and the presence client
@@ -287,7 +297,7 @@ func New(cfg Config, opts ...Option) Client {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -304,7 +314,7 @@ func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewMeetingsDirectoryClient(cfg Config, opts ...Option) (Client, DirectoryReader, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
 		return nil, nil, err
 	}
 	return g, g, nil
@@ -331,22 +341,35 @@ func mutableTransport(hc *http.Client) *http.Transport {
 	return tr
 }
 
-// applyProxyURL points hc's transport at rawProxyURL (overriding
-// HTTPS_PROXY/HTTP_PROXY) when it is non-empty. The URL must include a scheme
-// and host; an invalid value is reported so the caller fails fast at
-// construction rather than surfacing an opaque per-request error. No-op when
-// rawProxyURL is empty.
-func applyProxyURL(hc *http.Client, rawProxyURL string) error {
-	if rawProxyURL == "" {
+// applyProxy points hc's transport at cfg.ProxyURL (overriding
+// HTTPS_PROXY/HTTP_PROXY) when it is non-empty, authenticating with
+// cfg.ProxyUsername/ProxyPassword when they are set. The URL must include a
+// scheme and host; an invalid value — or credentials that cannot apply to any
+// proxy — is reported so the caller fails fast at construction rather than
+// surfacing an opaque per-request error. No-op when the proxy settings are all
+// empty. No error message carries the password.
+func applyProxy(hc *http.Client, cfg *Config) error {
+	if cfg.ProxyURL == "" {
+		// Credentials with nowhere to go: the ambient HTTPS_PROXY carries its own
+		// userinfo, so silently dropping these would egress unauthenticated.
+		if cfg.ProxyUsername != "" || cfg.ProxyPassword != "" {
+			return errors.New("graph proxy credentials set without a proxy url")
+		}
 		return nil
 	}
-	proxyURL, err := url.Parse(rawProxyURL)
+	if cfg.ProxyUsername == "" && cfg.ProxyPassword != "" {
+		return errors.New("graph proxy password set without a username")
+	}
+	proxyURL, err := url.Parse(cfg.ProxyURL)
 	if err != nil {
 		return fmt.Errorf("parse graph proxy url: %w", err)
 	}
 	if proxyURL.Scheme == "" || proxyURL.Host == "" {
 		// Redacted() masks any embedded proxy credentials before it reaches logs.
 		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
+	}
+	if cfg.ProxyUsername != "" {
+		proxyURL.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)
 	}
 	tr := mutableTransport(hc)
 	if tr == nil {

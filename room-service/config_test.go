@@ -177,3 +177,33 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 		})
 	}
 }
+
+// TestConfig_GraphProxyCredentials covers the authenticating-proxy settings for
+// the meetings Graph client. They are kept out of GRAPH_PROXY_URL so a password
+// carrying URL metacharacters needs no percent-encoding, and so the secret is a
+// field of its own rather than half of a connection string.
+func TestConfig_GraphProxyCredentials(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("GRAPH_PROXY_URL", "http://proxy.corp:8080")
+	t.Setenv("GRAPH_PROXY_USERNAME", "proxyuser")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "p@ss:w/rd")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
+	assert.Equal(t, "proxyuser", cfg.GraphProxyUsername)
+	assert.Equal(t, "p@ss:w/rd", cfg.GraphProxyPassword)
+}
+
+func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	require.NoError(t, os.Unsetenv("GRAPH_PROXY_USERNAME"))
+	require.NoError(t, os.Unsetenv("GRAPH_PROXY_PASSWORD"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
+	assert.Empty(t, cfg.GraphProxyPassword)
+}

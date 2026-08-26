@@ -81,7 +81,14 @@ type config struct {
 	// proxy explicitly (overriding HTTPS_PROXY/HTTP_PROXY). Must include a scheme
 	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
 	// proxy env vars.
-	GraphProxyURL        string `env:"GRAPH_PROXY_URL" envDefault:""`
+	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
+	// GraphProxyUsername and GraphProxyPassword authenticate to GRAPH_PROXY_URL
+	// with HTTP Basic. Kept separate from the URL so a password carrying URL
+	// metacharacters needs no percent-encoding; they override any userinfo
+	// embedded in the URL. GRAPH_PROXY_PASSWORD is a secret — never log it.
+	// Setting either without GRAPH_PROXY_URL fails at client construction.
+	GraphProxyUsername   string `env:"GRAPH_PROXY_USERNAME" envDefault:""`
+	GraphProxyPassword   string `env:"GRAPH_PROXY_PASSWORD" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
@@ -246,6 +253,8 @@ func main() {
 			ClientSecret:          cfg.TeamsClientSecret,
 			TLSInsecureSkipVerify: cfg.TeamsTLSInsecure,
 			ProxyURL:              cfg.GraphProxyURL,
+			ProxyUsername:         cfg.GraphProxyUsername,
+			ProxyPassword:         cfg.GraphProxyPassword,
 			UserAgent:             cfg.GraphUserAgent,
 		}
 		if cfg.TeamsTLSInsecure {

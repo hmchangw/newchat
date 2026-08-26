@@ -25,6 +25,8 @@ derive organizer/attendee addresses):
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
 | `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev. Used only by the deep-link call RPCs — meetings resolve real object IDs (below). |
 | `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
+| `GRAPH_PROXY_USERNAME` | Optional. Basic-auth user for `GRAPH_PROXY_URL`. Overrides any userinfo embedded in the URL. |
+| `GRAPH_PROXY_PASSWORD` | Optional. Basic-auth password for `GRAPH_PROXY_URL`. **Secret** — store it in a k8s Secret, never a ConfigMap. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
 need only `TEAMS_EMAIL_DOMAIN`); the meetings RPC returns a not-configured
@@ -60,6 +62,29 @@ empty value.
 room-service constructs this client via `NewMeetingsClient(cfg)`, which honors
 `Config.ProxyURL` (from `GRAPH_PROXY_URL`) and fails fast on a malformed proxy
 value at startup.
+
+### Authenticating proxies
+
+Set `GRAPH_PROXY_USERNAME`/`GRAPH_PROXY_PASSWORD` alongside `GRAPH_PROXY_URL`
+and the client sends `Proxy-Authorization: Basic` on every hop — the token
+request and the Graph request alike, through the CONNECT tunnel. Credentials
+embedded in the URL (`http://user:pass@proxy:8080`) still work and stay
+supported, but the separate vars are preferred:
+
+- A password containing `@ : / ? # %` needs no percent-encoding.
+- Only the password is a secret, so `GRAPH_PROXY_URL` can stay in a ConfigMap.
+- Rotating the password touches one value, not a connection string.
+
+The explicit vars win over embedded userinfo. Two misconfigurations fail fast at
+construction rather than silently egressing unauthenticated: credentials with no
+`GRAPH_PROXY_URL`, and a password with no username. Only **Basic** is supported
+— Go's transport has no NTLM/Kerberos/Digest proxy auth.
+
+Applied by every constructor that honors `ProxyURL`: `NewMeetingsClient`,
+`NewMeetingsDirectoryClient`, `NewUserListerClient`, `NewChatsClient`,
+`NewChatMembersClient`, `NewPresenceClient`. The bare `New`,
+`NewDirectoryClient` and `NewGroupReaderClient` still ignore all proxy config
+and rely on `HTTPS_PROXY`/`HTTP_PROXY`.
 
 ## Resolving object IDs (app-only directory reader)
 

@@ -2,6 +2,7 @@ package msgraph
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -686,7 +688,7 @@ func TestWithMaxIdleConns_NonPositiveNoop(t *testing.T) {
 
 func TestNewChatsClient_MaxIdleConnsSurvivesProxy(t *testing.T) {
 	// NewChatsClient applies the options (WithMaxIdleConns) inside New, then wires
-	// the proxy afterwards. applyProxyURL must reuse that transport so the idle
+	// the proxy afterwards. applyProxy must reuse that transport so the idle
 	// pool size is not lost when a proxy is configured.
 	c, err := NewChatsClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
@@ -841,4 +843,216 @@ func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
+}
+
+// proxyTargetOf resolves the proxy URL a constructed client's transport would
+// dial for a Graph request, so tests can assert on the credentials carried in
+// its userinfo. c must be one of the *graphClient-backed surfaces.
+func proxyTargetOf(t *testing.T, c any) *url.URL {
+	t.Helper()
+	g, ok := c.(*graphClient)
+	require.True(t, ok, "client must be backed by *graphClient")
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "transport must be *http.Transport")
+	require.NotNil(t, tr.Proxy, "proxy must be configured on the transport")
+	req, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	require.NoError(t, err)
+	u, err := tr.Proxy(req)
+	require.NoError(t, err)
+	require.NotNil(t, u, "proxy must resolve for a Graph request")
+	return u
+}
+
+// TestProxyCredentials_SentAsBasicAuth is the end-to-end assertion behind
+// GRAPH_PROXY_USERNAME/GRAPH_PROXY_PASSWORD: an authenticating proxy must
+// receive a Proxy-Authorization: Basic header on every hop (token and Graph
+// alike). The proxy serves canned responses keyed by path, so neither the token
+// host nor the Graph host has to be reachable.
+func TestProxyCredentials_SentAsBasicAuth(t *testing.T) {
+	var mu sync.Mutex
+	proxyAuthByHost := map[string]string{}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxyAuthByHost[r.Host] = r.Header.Get("Proxy-Authorization")
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/users") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"value": []GraphUser{{ID: "u1", UserPrincipalName: "u1@corp.com"}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "ptok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer proxy.Close()
+
+	lister, err := NewUserListerClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL:      proxy.URL,
+			ProxyUsername: "proxyuser",
+			ProxyPassword: "proxypass",
+		},
+		WithTokenURL("http://login.example.test/token"),
+		WithBaseURL("http://graph.example.test"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, lister.ListUsers(context.Background(), 10, func([]GraphUser) error { return nil }))
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:proxypass"))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, want, proxyAuthByHost["login.example.test"], "token hop must authenticate to the proxy")
+	assert.Equal(t, want, proxyAuthByHost["graph.example.test"], "graph hop must authenticate to the proxy")
+}
+
+// TestProxyCredentials_SpecialCharactersNeedNoEncoding is the reason the
+// credentials are separate env vars rather than userinfo embedded in
+// GRAPH_PROXY_URL: a password containing URL metacharacters would corrupt the
+// parsed host if it were inlined, so it must survive verbatim here.
+func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
+	const password = "p@ss:w/rd?#%"
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyUsername: "corp\\svc",
+		ProxyPassword: password,
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	assert.Equal(t, "proxy.corp:8080", u.Host, "host must survive a password full of URL metacharacters")
+	require.NotNil(t, u.User)
+	assert.Equal(t, "corp\\svc", u.User.Username())
+	got, ok := u.User.Password()
+	require.True(t, ok)
+	assert.Equal(t, password, got)
+}
+
+// TestProxyCredentials_OverrideEmbeddedUserinfo pins precedence: the explicit
+// credentials win over anything already inlined in the URL, so rotating the
+// password means changing one secret rather than two settings that can drift.
+func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://olduser:oldpass@proxy.corp:8080",
+		ProxyUsername: "newuser",
+		ProxyPassword: "newpass",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "newuser", u.User.Username())
+	got, _ := u.User.Password()
+	assert.Equal(t, "newpass", got)
+}
+
+// TestProxyCredentials_EmbeddedUserinfoPreserved is the backward-compatibility
+// guard: deployments already authenticating via userinfo in GRAPH_PROXY_URL
+// keep working when the new vars are unset.
+func TestProxyCredentials_EmbeddedUserinfoPreserved(t *testing.T) {
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL: "http://embedded:secret@proxy.corp:8080",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "embedded", u.User.Username())
+	got, _ := u.User.Password()
+	assert.Equal(t, "secret", got)
+}
+
+// TestProxyCredentials_WithoutProxyURLFails fails fast on a half-configured
+// deployment: credentials with no GRAPH_PROXY_URL would otherwise be silently
+// dropped while traffic egressed through the ambient HTTPS_PROXY unauthenticated.
+func TestProxyCredentials_WithoutProxyURLFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "username only", username: "proxyuser"},
+		{name: "password only", password: "proxypass"},
+		{name: "both", username: "proxyuser", password: "proxypass"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyUsername: tc.username,
+				ProxyPassword: tc.password,
+			}
+			_, err := NewMeetingsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatMembersClient(cfg)
+			require.Error(t, err)
+			_, err = NewUserListerClient(cfg)
+			require.Error(t, err)
+			_, _, err = NewMeetingsDirectoryClient(cfg)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestProxyCredentials_PasswordWithoutUsernameFails rejects a password with no
+// username: Basic auth has no such form, so it is a misconfiguration rather
+// than an anonymous-proxy request.
+func TestProxyCredentials_PasswordWithoutUsernameFails(t *testing.T) {
+	_, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyPassword: "proxypass",
+	})
+	require.Error(t, err)
+}
+
+// TestProxyCredentials_ErrorNeverLeaksPassword guards the one path where the
+// proxy settings reach a log line. errcode.Classify writes construction errors
+// to the server log, and CLAUDE.md forbids logging passwords.
+func TestProxyCredentials_ErrorNeverLeaksPassword(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      proxy,
+				ProxyUsername: "proxyuser",
+				ProxyPassword: password,
+			})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "proxy password must never reach an error string")
+		})
+	}
+}
+
+// TestProxyCredentials_HonoredByPresenceClient covers the one constructor
+// outside msgraph.go that applies the proxy, so the presence lane authenticates
+// with the same credentials as the app-only lanes.
+func TestProxyCredentials_HonoredByPresenceClient(t *testing.T) {
+	pc, err := NewPresenceClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL:      "http://proxy.corp:8080",
+			ProxyUsername: "proxyuser",
+			ProxyPassword: "proxypass",
+		},
+		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
+	)
+	require.NoError(t, err)
+
+	p, ok := pc.(*presenceClient)
+	require.True(t, ok)
+	tr, ok := p.hc.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.Proxy)
+	req, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	require.NoError(t, err)
+	u, err := tr.Proxy(req)
+	require.NoError(t, err)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "proxyuser", u.User.Username())
 }

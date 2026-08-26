@@ -30,7 +30,7 @@ type ChatsReader interface {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewChatsClient(cfg Config, opts ...Option) (ChatsReader, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
 		return nil, err
 	}
 	return g, nil
