@@ -856,3 +856,119 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 	assert.Equal(t, msgTime.UnixMilli(), payload.MentionedAt)
 	assert.NotZero(t, payload.Timestamp)
 }
+
+// A system message must advance lastMsgAt/lastMsgId (the history ceiling)
+// without moving lastUserMsgAt off the room's last real USER message, end to
+// end through the coalescer + Mongo write.
+func TestBroadcastWorker_SystemMessageFreezesLastUserMsgAt_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-sys", Name: "general", Type: model.RoomTypeChannel, UserCount: 2, SiteID: "site-a",
+	})
+	require.NoError(t, err)
+	seedUsers(t, db)
+
+	inner := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, false)
+	cached, err := newCachedMetaStore(inner, 10, time.Minute)
+	require.NoError(t, err)
+	coalescer := newCoalescingStore(cached, inner)
+
+	pub := &recordingPublisher{}
+	h := NewHandler(coalescer, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false, subject.RouteGlobal)
+
+	var got struct {
+		LastMsgAt     time.Time  `bson:"lastMsgAt"`
+		LastMsgID     string     `bson:"lastMsgId"`
+		LastUserMsgAt *time.Time `bson:"lastUserMsgAt"`
+	}
+
+	userTime := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
+	userEvt := model.MessageEvent{
+		Event:     model.EventCreated,
+		Timestamp: userTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-user", RoomID: "r-sys", UserID: "u-alice", UserAccount: "alice",
+			Content: "hi", CreatedAt: userTime,
+		},
+	}
+	data, err := json.Marshal(userEvt)
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+	require.NoError(t, coalescer.Flush(ctx))
+
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-sys"}).Decode(&got))
+	assert.Equal(t, "msg-user", got.LastMsgID)
+	assert.WithinDuration(t, userTime, got.LastMsgAt, time.Millisecond)
+	require.NotNil(t, got.LastUserMsgAt)
+	assert.WithinDuration(t, userTime, *got.LastUserMsgAt, time.Millisecond)
+
+	sysTime := userTime.Add(time.Minute)
+	sysEvt := model.MessageEvent{
+		Event:     model.EventCreated,
+		Timestamp: sysTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-sys", RoomID: "r-sys", UserID: "u-alice", UserAccount: "alice",
+			Content: "alice added bob", CreatedAt: sysTime, Type: model.MessageTypeMembersAdded,
+		},
+	}
+	data, err = json.Marshal(sysEvt)
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+	require.NoError(t, coalescer.Flush(ctx))
+
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-sys"}).Decode(&got))
+	assert.Equal(t, "msg-sys", got.LastMsgID, "lastMsgId still follows the newest message, system included")
+	assert.WithinDuration(t, sysTime, got.LastMsgAt, time.Millisecond, "lastMsgAt is the history ceiling, system included")
+	require.NotNil(t, got.LastUserMsgAt)
+	assert.WithinDuration(t, userTime, *got.LastUserMsgAt, time.Millisecond, "lastUserMsgAt stays frozen on the last real user message")
+}
+
+// A brand-new room (createdAt set, no prior lastMsgAt) receiving only a system
+// message pins lastUserMsgAt to the room's createdAt rather than leaving it unset.
+func TestBroadcastWorker_SystemMessageOnNewRoomFreezesToCreatedAt_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	createdAt := time.Date(2026, 5, 18, 9, 0, 0, 0, time.UTC)
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-new", Name: "general", Type: model.RoomTypeChannel, UserCount: 2, SiteID: "site-a",
+		CreatedAt: createdAt,
+	})
+	require.NoError(t, err)
+	seedUsers(t, db)
+
+	inner := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, false)
+	cached, err := newCachedMetaStore(inner, 10, time.Minute)
+	require.NoError(t, err)
+	coalescer := newCoalescingStore(cached, inner)
+
+	pub := &recordingPublisher{}
+	h := NewHandler(coalescer, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false, subject.RouteGlobal)
+
+	sysTime := createdAt.Add(time.Hour)
+	sysEvt := model.MessageEvent{
+		Event:     model.EventCreated,
+		Timestamp: sysTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-sys-new", RoomID: "r-new", UserID: "u-alice", UserAccount: "alice",
+			Content: "alice added bob", CreatedAt: sysTime, Type: model.MessageTypeMembersAdded,
+		},
+	}
+	data, err := json.Marshal(sysEvt)
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+	require.NoError(t, coalescer.Flush(ctx))
+
+	var got struct {
+		LastMsgAt     time.Time  `bson:"lastMsgAt"`
+		LastMsgID     string     `bson:"lastMsgId"`
+		LastUserMsgAt *time.Time `bson:"lastUserMsgAt"`
+	}
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-new"}).Decode(&got))
+	assert.Equal(t, "msg-sys-new", got.LastMsgID)
+	assert.WithinDuration(t, sysTime, got.LastMsgAt, time.Millisecond)
+	require.NotNil(t, got.LastUserMsgAt)
+	assert.WithinDuration(t, createdAt, *got.LastUserMsgAt, time.Millisecond, "no prior user message → freeze pins to the room's createdAt")
+}

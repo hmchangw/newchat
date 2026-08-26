@@ -96,7 +96,7 @@ func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, upd roomLastMess
 //
 //nolint:gocritic // hugeParam: matches UpdateRoomLastMessage's by-value contract.
 func asBuffered(upd roomLastMessage) roomLastMsgUpdate {
-	return roomLastMsgUpdate{
+	b := roomLastMsgUpdate{
 		msgID:            upd.MsgID,
 		at:               upd.At,
 		lastMentionAllAt: mentionAllAt(upd),
@@ -104,6 +104,11 @@ func asBuffered(upd roomLastMessage) roomLastMsgUpdate {
 		pvwFailed:        upd.PreviewFailed,
 		pvwAt:            upd.At,
 	}
+	if !upd.SystemMsg {
+		b.userAt = upd.At
+		b.userMsgID = upd.MsgID
+	}
+	return b
 }
 
 // mentionAllAt renders the flag as the timestamp the buffered form carries.
@@ -123,6 +128,7 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(updates))
+	//nolint:gocritic // rangeValCopy: updates is a map, so indexing buys nothing over the copy
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
@@ -135,7 +141,9 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 }
 
 // lastMessageUpdate renders one room's update: $set with previews off, a pipeline with
-// them on. lastMsgAt/lastMsgId stay unguarded — a bad future one would freeze ordering.
+// them on — except a system-only window, which always takes the pipeline form (in both
+// modes) since pinning lastUserMsgAt needs the "$ifNull" read-before-write expression.
+// lastMsgAt/lastMsgId stay unguarded — a bad future one would freeze ordering.
 func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 	fields := bson.M{
 		"lastMsgAt": u.at,
@@ -145,7 +153,11 @@ func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 	if !u.lastMentionAllAt.IsZero() {
 		fields["lastMentionAllAt"] = u.lastMentionAllAt
 	}
-	if !m.previews {
+	systemOnly := u.userAt.IsZero()
+	if !systemOnly {
+		fields["lastUserMsgAt"] = u.userAt
+	}
+	if !m.previews && !systemOnly {
 		return bson.M{"$set": fields}
 	}
 
@@ -155,6 +167,19 @@ func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 			fields[k] = bson.M{"$literal": s}
 		}
 	}
+	if systemOnly {
+		// Sticky freeze: pin lastUserMsgAt ONCE to the room's pre-system
+		// position. Every $set expression reads the pre-update document, so
+		// "$lastMsgAt" here is the position BEFORE this write advances it; a
+		// brand-new room (no lastMsgAt yet) pins to its createdAt, which is
+		// what makes the room unread for members who have never opened it
+		// while never re-flagging members who have.
+		fields["lastUserMsgAt"] = bson.M{"$ifNull": bson.A{"$lastUserMsgAt", "$lastMsgAt", "$createdAt", "$$REMOVE"}}
+	}
+	if !m.previews {
+		return mongo.Pipeline{{{Key: "$set", Value: fields}}}
+	}
+
 	asOf := u.at.UnixMilli()
 	// The preview rides its own clock, and the flush must not collapse the two. u.at names
 	// the room's NEWEST message, which may be a later ineligible one; the body was
