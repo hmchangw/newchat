@@ -16,8 +16,11 @@ import (
 
 // countingStore records how many calls actually reached the backing store.
 type countingStore struct {
-	calls        int
-	user         *model.User
+	calls int
+	user  *model.User
+	// users, when set, is what the batch lookup returns — for tests that need a
+	// batch wider than one record.
+	users        []model.User
 	err          error
 	lastAccounts []string
 }
@@ -37,6 +40,9 @@ func (c *countingStore) FindUsersByAccounts(_ context.Context, accounts []string
 	c.lastAccounts = accounts
 	if c.err != nil {
 		return nil, c.err
+	}
+	if c.users != nil {
+		return c.users, nil
 	}
 	return []model.User{*c.user}, nil
 }

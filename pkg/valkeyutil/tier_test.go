@@ -272,3 +272,85 @@ func TestSlideTTL_NonPositiveTTLNeverExpiresTheKey(t *testing.T) {
 		assert.Empty(t, c.expired, "a non-positive TTL must not issue EXPIRE (it would delete the key)")
 	}
 }
+
+// setManyClient implements the optional multi-set capability.
+type setManyClient struct {
+	Client
+	calls [][]KV
+	err   error
+}
+
+func (c *setManyClient) MSet(_ context.Context, entries []KV, _ time.Duration) error {
+	c.calls = append(c.calls, entries)
+	return c.err
+}
+
+// plainClient does not, so SetMany must fall back to one Set per key.
+type plainClient struct {
+	Client
+	setKeys []string
+	err     error
+}
+
+func (c *plainClient) Set(_ context.Context, key, _ string, _ time.Duration) error {
+	c.setKeys = append(c.setKeys, key)
+	return c.err
+}
+
+// The point of the capability: a caller writing N entries pays one round trip,
+// not N. Mention lists are attacker-influenced in size and sit on the message
+// hot path, so the difference is not academic.
+func TestSetMany_UsesOneRoundTripWhenTheClientCan(t *testing.T) {
+	c := &setManyClient{}
+	entries := []KV{{"user:id:u1", "a"}, {"user:acct:alice", "a"}, {"user:id:u2", "b"}}
+
+	SetMany(context.Background(), c, entries, time.Minute, "user")
+
+	require.Len(t, c.calls, 1, "one call regardless of key count or slot spread")
+	assert.Equal(t, entries, c.calls[0])
+}
+
+// A client without the capability still has to work — every test fake in this
+// repo is one, and so is any future non-cluster client.
+func TestSetMany_FallsBackToPerKeySet(t *testing.T) {
+	c := &plainClient{}
+
+	SetMany(context.Background(), c, []KV{{"k1", "a"}, {"k2", "b"}}, time.Minute, "user")
+
+	assert.Equal(t, []string{"k1", "k2"}, c.setKeys)
+}
+
+// Failures are swallowed on both paths: a cache write is best-effort and the
+// caller already has the value it was trying to store.
+func TestSetMany_SwallowsFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		client Client
+	}{
+		{"multi-set path", &setManyClient{err: errors.New("valkey down")}},
+		{"fallback path", &plainClient{err: errors.New("valkey down")}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				SetMany(context.Background(), tt.client, []KV{{"k1", "a"}}, time.Minute, "user")
+			})
+		})
+	}
+}
+
+func TestSetMany_NilClientAndEmptyEntriesAreNoOps(t *testing.T) {
+	require.NotPanics(t, func() {
+		SetMany(context.Background(), nil, []KV{{"k1", "a"}}, time.Minute, "user")
+	})
+	c := &setManyClient{}
+	SetMany(context.Background(), c, nil, time.Minute, "user")
+	assert.Empty(t, c.calls, "an empty entry set must not round-trip")
+}
+
+// A non-positive TTL would store without expiry on the Set path and is almost
+// certainly a misconfiguration, so it is refused rather than written.
+func TestSetMany_RefusesANonPositiveTTL(t *testing.T) {
+	c := &setManyClient{}
+	SetMany(context.Background(), c, []KV{{"k1", "a"}}, 0, "user")
+	assert.Empty(t, c.calls)
+}

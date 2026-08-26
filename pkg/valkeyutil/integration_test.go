@@ -143,6 +143,41 @@ func TestClusterRedisClient_Integration_DelCrossSlot(t *testing.T) {
 	assert.Empty(t, got, "every key must be gone, not just the first slot's")
 }
 
+// The write-side counterpart of MGetCrossSlot: a bulk fill spans slots, and the
+// pipeline must store every entry rather than failing on the first foreign one.
+func TestClusterRedisClient_Integration_MSetCrossSlot(t *testing.T) {
+	client := setupClusterClient(t)
+	ctx := context.Background()
+
+	// Client has no MSet: it is an optional capability (see multiSetter), and
+	// the cluster client is what provides it.
+	ms, ok := client.(multiSetter)
+	require.True(t, ok, "the cluster client must provide the bulk-write capability")
+
+	entries := make([]KV, 0, 32)
+	keys := make([]string, 0, 32)
+	want := make(map[string]string, 32)
+	for i := 0; i < 32; i++ {
+		k := fmt.Sprintf("user:acct:mset-%d", i)
+		v := fmt.Sprintf("value-%d", i)
+		entries = append(entries, KV{Key: k, Value: v})
+		keys = append(keys, k)
+		want[k] = v
+	}
+
+	require.NoError(t, ms.MSet(ctx, entries, time.Hour))
+
+	got, err := client.MGet(ctx, keys)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "every entry must land, not just the first slot's")
+}
+
+func TestClusterRedisClient_Integration_MSetEmptyEntries(t *testing.T) {
+	ms, ok := setupClusterClient(t).(multiSetter)
+	require.True(t, ok)
+	require.NoError(t, ms.MSet(context.Background(), nil, time.Hour))
+}
+
 func TestClusterRedisClient_Integration_MGetEmptyKeys(t *testing.T) {
 	client := setupClusterClient(t)
 

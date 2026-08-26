@@ -106,6 +106,53 @@ func BustKeys(ctx context.Context, client Client, label string, keys ...string) 
 	}
 }
 
+// KV is one key/value pair for SetMany.
+type KV struct {
+	Key   string
+	Value string
+}
+
+// multiSetter is an optional Client capability: storing many keys in one round
+// trip. It is deliberately NOT part of Client — sixteen test doubles implement
+// that interface, and widening it would churn all of them to reach one call
+// site. clusterClient satisfies this; anything that does not still works
+// through SetMany's fallback.
+type multiSetter interface {
+	MSet(ctx context.Context, entries []KV, ttl time.Duration) error
+}
+
+// SetMany stores every entry under one TTL, in a single round trip where the
+// client supports it and a Set loop where it does not.
+//
+// The read side has always been one round trip (see Client.MGet); the write
+// side was one per key. That asymmetry is only visible under load: a bulk fill
+// writes one entry per user in a mention list, whose size the sender chooses,
+// on the message hot path — so a serialized loop turns a wide mention into a
+// long chain of round trips right where latency is most visible.
+//
+// Best-effort, like every other cache write: a failure warns and is swallowed,
+// since the caller already holds the values it was trying to store and the
+// source of truth can answer again. A non-positive ttl is refused — Set with a
+// zero TTL stores without expiry, which for a cache is a leak, not a long life.
+func SetMany(ctx context.Context, client Client, entries []KV, ttl time.Duration, label string) {
+	if client == nil || len(entries) == 0 || ttl <= 0 {
+		return
+	}
+	if ms, ok := client.(multiSetter); ok {
+		if err := ms.MSet(ctx, entries, ttl); err != nil {
+			slog.WarnContext(ctx, label+" L2 bulk write failed (TTL will reconcile)",
+				"count", len(entries), "error", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if err := client.Set(ctx, e.Key, e.Value, ttl); err != nil {
+			slog.WarnContext(ctx, label+" L2 write failed (TTL will reconcile)",
+				"key", e.Key, "error", err)
+		}
+	}
+}
+
 // NoopRecorder satisfies CacheRecorder and does nothing, for tiers constructed
 // without metrics. Saves each package hand-writing three empty methods.
 type NoopRecorder struct{}

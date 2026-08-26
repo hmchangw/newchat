@@ -215,11 +215,11 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	}
 
 	fresh, ferr := l.inner.FindUsersByAccounts(ctx, fetch)
+	// A rewrite restamps CachedAt. Sliding instead would keep an obsolete record
+	// alive for as long as it kept being mentioned, since a slide moves only the
+	// eviction deadline and never the revalidation one.
+	l.writeMany(ctx, fresh)
 	for i := range fresh {
-		// A rewrite restamps CachedAt. Sliding instead would keep an obsolete
-		// record alive for as long as it kept being mentioned, since a slide moves
-		// only the eviction deadline and never the revalidation one.
-		l.write(ctx, &fresh[i])
 		delete(stale, fresh[i].Account)
 	}
 
@@ -273,26 +273,39 @@ func (l *l2Store) readL2(ctx context.Context, key string) (cachedUser, bool) {
 // repopulates. Absence is never cached — a negative entry would outlive the
 // user actually being created.
 func (l *l2Store) write(ctx context.Context, u *model.User) {
-	if u == nil || u.ID == "" {
-		return
+	valkeyutil.SetMany(ctx, l.client, l.entries(ctx, u), l.ttl, "user")
+}
+
+// writeMany fills every user in one round trip. The bulk path's batch is sized
+// by the caller's mention list, so writing them one at a time would put a chain
+// of round trips on the message hot path.
+func (l *l2Store) writeMany(ctx context.Context, users []model.User) {
+	entries := make([]valkeyutil.KV, 0, 2*len(users))
+	for i := range users {
+		entries = append(entries, l.entries(ctx, &users[i])...)
 	}
-	// Marshalled once and reused: the two key spaces hold the identical envelope,
-	// so encoding it per key would double the serialization cost of every write.
+	valkeyutil.SetMany(ctx, l.client, entries, l.ttl, "user")
+}
+
+// entries encodes one user into the pairs that represent it in L2: the same
+// envelope under both key spaces, so a fetch by either resolves.
+//
+// Marshalled once and reused — the two keys hold the identical envelope, so
+// encoding per key would double the serialization cost of every write.
+func (l *l2Store) entries(ctx context.Context, u *model.User) []valkeyutil.KV {
+	if u == nil || u.ID == "" {
+		return nil
+	}
 	data, err := json.Marshal(cachedUser{User: *u, CachedAt: l.now().UnixMilli()})
 	if err != nil {
 		slog.WarnContext(ctx, "user L2 encode failed (TTL will reconcile)", "user_id", u.ID, "error", err)
-		return
+		return nil
 	}
-	keys := []string{idKey(u.ID)}
+	out := []valkeyutil.KV{{Key: idKey(u.ID), Value: string(data)}}
 	if u.Account != "" {
-		keys = append(keys, accountKey(u.Account))
+		out = append(out, valkeyutil.KV{Key: accountKey(u.Account), Value: string(data)})
 	}
-	for _, k := range keys {
-		if err := l.client.Set(ctx, k, string(data), l.ttl); err != nil {
-			slog.WarnContext(ctx, "user L2 write failed (TTL will reconcile)",
-				"user_id", u.ID, "key", k, "error", err)
-		}
-	}
+	return out
 }
 
 // slide re-arms the entry's deadline with EXPIRE rather than re-writing it, so

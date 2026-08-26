@@ -148,6 +148,25 @@ func (r *clusterClient) Set(ctx context.Context, key, value string, ttl time.Dur
 	return nil
 }
 
+// MSet stores every entry through a pipeline, the write-side counterpart of
+// MGet: go-redis groups the commands by node and runs the groups concurrently,
+// so entries spanning slots cost about one round trip per node rather than one
+// per key. Satisfies the optional multiSetter capability behind SetMany.
+func (r *clusterClient) MSet(ctx context.Context, entries []KV, ttl time.Duration) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	if _, err := r.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, e := range entries {
+			p.Set(ctx, e.Key, e.Value, ttl)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("valkey mset: %w", err)
+	}
+	return nil
+}
+
 func (r *clusterClient) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
 	// SetArgs with Mode:"NX" replaces deprecated SetNX; redis.Nil = refusal, surfaced as (false, nil).
 	res, err := r.c.SetArgs(ctx, key, value, redis.SetArgs{Mode: "NX", TTL: ttl}).Result()

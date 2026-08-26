@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ type fakeValkey struct {
 	mgetKeys int
 	expires  int
 	delCalls [][]string
+	sets     int
+	msets    [][]valkeyutil.KV
 }
 
 func newFakeValkey() *fakeValkey {
@@ -50,11 +53,26 @@ func (f *fakeValkey) Get(_ context.Context, key string) (string, error) {
 }
 
 func (f *fakeValkey) Set(_ context.Context, key, value string, ttl time.Duration) error {
+	f.sets++
 	if f.setErr != nil {
 		return f.setErr
 	}
 	f.data[key] = value
 	f.ttls[key] = ttl
+	return nil
+}
+
+// MSet makes the fake a multiSetter, so these tests exercise the same one-round-
+// trip path production takes rather than SetMany's per-key fallback.
+func (f *fakeValkey) MSet(ctx context.Context, entries []valkeyutil.KV, ttl time.Duration) error {
+	f.msets = append(f.msets, entries)
+	if f.setErr != nil {
+		return f.setErr
+	}
+	for _, e := range entries {
+		f.data[e.Key] = e.Value
+		f.ttls[e.Key] = ttl
+	}
 	return nil
 }
 
@@ -571,4 +589,36 @@ func mustEncodeCachedUser(t *testing.T, u *model.User, cachedAt time.Time) strin
 	raw, err := json.Marshal(cachedUser{User: *u, CachedAt: cachedAt.UnixMilli()})
 	require.NoError(t, err)
 	return string(raw)
+}
+
+// A bulk fill must cost one write round trip, not one per user (nor two, since
+// each user occupies both key spaces). Mention lists are sized by the sender
+// and sit on the message hot path, so a serialized loop here is a chain of
+// round trips at exactly the wrong moment.
+func TestL2Store_FindUsersByAccounts_FillsInOneRoundTrip(t *testing.T) {
+	vk := newFakeValkey()
+	users := make([]model.User, 0, 25)
+	for i := range cap(users) {
+		id := strconv.Itoa(i)
+		users = append(users, model.User{ID: "u" + id, Account: "acct" + id})
+	}
+	inner := &countingStore{users: users}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	accounts := make([]string, 0, len(users))
+	for _, u := range users {
+		accounts = append(accounts, u.Account)
+	}
+
+	got, err := s.FindUsersByAccounts(context.Background(), accounts)
+	require.NoError(t, err)
+	require.Len(t, got, len(users))
+
+	require.Len(t, vk.msets, 1, "one bulk write for the whole batch")
+	assert.Len(t, vk.msets[0], 2*len(users), "both key spaces for every user, in that one call")
+	assert.Zero(t, vk.sets, "no per-key Set may leak onto the bulk path")
+	for _, u := range users {
+		assert.Contains(t, vk.data, idKey(u.ID))
+		assert.Contains(t, vk.data, accountKey(u.Account))
+	}
 }
