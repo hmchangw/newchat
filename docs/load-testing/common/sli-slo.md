@@ -344,14 +344,25 @@ partition slice). Targets: §1.
 
   ```promql
   # good  — succeeded within the bound
-  sum(rate(rpc_server_call_duration_seconds_bucket{
-        rpc_method="thread_open", error_type="", le="0.25"}[28d]))
+  sum by (site) (rate(rpc_server_call_duration_seconds_bucket{
+        service_name="history-service", rpc_method="thread_open",
+        error_type="", le="0.25"}[28d]))
   /
   # valid — success + budget-burning failures, never the 4xx classes
-  sum(rate(rpc_server_call_duration_seconds_count{
-        rpc_method="thread_open",
+  sum by (site) (rate(rpc_server_call_duration_seconds_count{
+        service_name="history-service", rpc_method="thread_open",
         error_type=~"|internal|unavailable|too_many_requests"}[28d]))
   ```
+
+  **`by (site)` is not decoration.** §0.1 scopes every SLO to a site, and a bare
+  `sum()` collapses them: one site failing every thread open reads as a small dip
+  once the other sites' healthy traffic is added underneath it, and the busier the
+  fleet the smaller the dip. Grouping makes the recording rule emit one series per
+  site, which is what the error budget is defined against.
+  `service_name="history-service"` pins the emitter for the same reason — the
+  label is resource-derived, so it is present on every series, and without it any
+  other `natsrouter` service that ever registers a `.msg.thread` route joins this
+  SLO silently.
 
   The empty alternative in that regex is the success series. `requestResultFromError`
   emits exactly nine `error_type` values: `bad_request`, `unauthenticated`,

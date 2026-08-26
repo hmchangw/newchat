@@ -32,8 +32,15 @@ Owners:
 ## 2. Naming, Labels, and Cardinality
 
 OTel instruments use dotted names; Prometheus families below show the expected
-normalized export. Project-owned metrics use a `chat_` prefix except existing
-loadgen families, which retain `loadgen_` for compatibility.
+normalized export. The **shared cross-service families in this document** — the
+consumer, publish and connection lanes — use a `chat_` prefix, because they are
+emitted by many services and the prefix is what groups them. A **domain family
+owned by one service** is prefixed with that service instead
+(`message_gatekeeper_*`, `broadcast_worker_*`, `search_service_*`,
+`search_sync_worker_*`, `notification_worker_*`), and a family owned by a shared
+package takes that package's name (`room_key_*`, `cache_*`,
+`nats_slow_consumer_*`). Existing loadgen families retain `loadgen_` for
+compatibility.
 
 One further exception, and it takes precedence: **an instrument that implements
 an OpenTelemetry semantic convention uses the convention's name, labels and unit
@@ -455,10 +462,18 @@ The first core-message campaign targets the following minimum instrumentation.
 
 | Service | Consume path | Publish/side effect | Required additions |
 |---|---|---|---|
-| `message-gatekeeper` | `MESSAGES` durable, default AckWait 30s / MaxDeliver 5 | canonical JetStream PubAck | loop gauge; delivery outcome; canonical publish attempt; Nak/redelivery; terminal exhaustion evidence |
-| `message-worker` | user canonical durable, default AckWait 30s / MaxDeliver 5 | Cassandra writes and downstream events | loop gauge; delivery outcome/redelivery; terminal failure; Cassandra batch metrics from the storage contract |
+| `message-gatekeeper` | `MESSAGES` durable, default AckWait 30s / MaxDeliver 5 | canonical JetStream PubAck | loop gauge; delivery outcome incl. `outcome="nak"`; canonical publish failures; terminal exhaustion evidence |
+| `message-worker` | user canonical durable, default AckWait 30s / MaxDeliver 5 | Cassandra writes and downstream events | loop gauge; delivery outcome; terminal failure; Cassandra batch metrics from the storage contract |
 | `broadcast-worker` | user canonical durable, default AckWait 30s / MaxDeliver 5 | channel/DM recipient Core NATS publishes | loop gauge; delivery outcome; fanout-size histogram; recipient publish success/failure; partial-fanout terminal failure |
 | `notification-worker` | user canonical durable, default AckWait 30s / MaxDeliver 5 | notification and push events | loop gauge; delivery outcome; sent/suppressed/publish-failed counters |
+
+**Redelivery-source attribution is not on this list, and cannot be.** §4 records
+why: the application counter was deleted as an accepted blind spot, and neither
+`outcome="nak"` nor the broker's gauge substitutes for it. `nak` is a real
+signal and worth having — it is the redeliveries the application asked for — but
+an AckWait expiry, a cancellation or a crash redelivers without one, so no row
+here may be read as requiring evidence of *why* a message came back.
+
 
 Recommended domain additions:
 
@@ -652,10 +667,10 @@ a second series built from a second attribute set.
 **`rpc.method` coverage is partial.** All ten `natsrouter` services emit the
 histogram, but the label is derived by
 `natsmetrics.RequestOperationFromSubject`, whose operation vocabulary covers
-room-service and history-service only. The other seven (user-service,
-search-service, media-service, bot-message-handler, bot-room-service,
-translation-service, user-presence-service) record `rpc_method="unknown"` on
-every route — their latency and `error.type` are still real — so SLO-4/5 can
+room-service and history-service only. The other eight (user-service,
+search-service, media-service, room-worker, bot-message-handler,
+bot-room-service, translation-service, user-presence-service) record
+`rpc_method="unknown"` on every route — their latency and `error.type` are still real — so SLO-4/5 can
 slice by method for room-service and history-service and nowhere else. Extending
 the vocabulary to the other seven is deliberately a separate change: it is a
 decision about how fine `rpc.method` should be and what that costs in
