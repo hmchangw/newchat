@@ -125,6 +125,7 @@ func TestPreviewMeta_BSONRoundTrip(t *testing.T) {
 		Sender:    Participant{Account: "alice"},
 		CreatedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
 		Mentions:  []Participant{{Account: "bob"}, {Account: "carol"}},
+		VisibleTo: "u1,u2",
 	}
 
 	raw, err := bson.Marshal(meta)

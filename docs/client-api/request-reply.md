@@ -2278,6 +2278,7 @@ and quoted message; variant determined by optional fields.
 | `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
+| `visibleTo` | string | no | Opaque visibility marker, ≤ 4096 bytes. Stored and surfaced verbatim; the backend never filters on it. Oversize rejected with `bad_request`. |
 
 #### Async success response
 
@@ -2296,6 +2297,7 @@ Delivered on `chat.user.{account}.response.{requestId}`.
 | `threadParentMessageCreatedAt` | string | Optional. RFC 3339. Server-resolved best-effort; absent when unresolved at send time. |
 | `tshow` | boolean | Present only when `tshow: true` on a thread reply. |
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Present only for a quoted send. |
+| `visibleTo` | string | Present only when the request set `visibleTo` — echoed verbatim. |
 
 #### Async error response
 
@@ -2304,6 +2306,7 @@ error table. Key errors:
 
 - `"invalid requestId"` (`bad_request`)
 - `"content must not be empty"` / `"content exceeds maximum size of 20480 bytes"`
+- `"visibleTo exceeds maximum size of 4096 bytes"` (`bad_request`)
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
 

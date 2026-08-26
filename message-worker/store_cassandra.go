@@ -101,21 +101,21 @@ func (s *CassandraStore) SaveMessage(ctx context.Context, msg *model.Message, se
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, msg, site_id, updated_at,
 		    mentions, type, sys_msg_data, tshow, quoted_parent_message,
-		    attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    attachments, card, card_action, visible_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, msg.Content, siteID, msg.CreatedAt,
 		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
-		msg.Attachments, msg.Card, msg.CardAction,
+		msg.Attachments, msg.Card, msg.CardAction, msg.VisibleTo,
 	)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		   (message_id, created_at, room_id, sender, msg, site_id, updated_at,
 		    mentions, type, sys_msg_data, tshow, quoted_parent_message,
-		    attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    attachments, card, card_action, visible_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, msg.Content, siteID, msg.CreatedAt,
 		mentions, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
-		msg.Attachments, msg.Card, msg.CardAction,
+		msg.Attachments, msg.Card, msg.CardAction, msg.VisibleTo,
 	)
 	if err := s.executeBatch(ctx, batch); err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -151,22 +151,22 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 	batch.Query(
 		`INSERT INTO messages_by_room
 		   (room_id, bucket, created_at, message_id, sender, site_id, updated_at,
-		    mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		    mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		    msg, attachments, card, card_action,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
 	)
 	batch.Query(
 		`INSERT INTO messages_by_id
 		   (message_id, created_at, room_id, sender, site_id, updated_at,
-		    mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		    mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		    msg, attachments, card, card_action,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt,
-		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
 	)
 	if err := s.executeBatch(ctx, batch); err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -195,22 +195,22 @@ func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Messa
 		`INSERT INTO messages_by_id
 		 (message_id, created_at, room_id, sender, msg, site_id, updated_at, mentions,
 		  thread_room_id, thread_parent_id, thread_parent_created_at, type, sys_msg_data, tshow, quoted_parent_message,
-		  attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  attachments, card, card_action, visible_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, msg.Content, siteID, msg.CreatedAt, mentions,
 		threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
-		msg.Attachments, msg.Card, msg.CardAction,
+		msg.Attachments, msg.Card, msg.CardAction, msg.VisibleTo,
 	)
 	batch.Query(
 		`INSERT INTO thread_messages_by_thread
 		 (thread_room_id, created_at, message_id, room_id, thread_parent_id, sender, msg,
 		  site_id, updated_at, mentions, type, sys_msg_data, tshow, quoted_parent_message,
-		  attachments, card, card_action)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  attachments, card, card_action, visible_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		threadRoomID, msg.CreatedAt, msg.ID, msg.RoomID, msg.ThreadParentMessageID,
 		sender, msg.Content, siteID, msg.CreatedAt, mentions,
 		msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
-		msg.Attachments, msg.Card, msg.CardAction,
+		msg.Attachments, msg.Card, msg.CardAction, msg.VisibleTo,
 	)
 	// TShow ("also send to channel"): dual-write the reply into messages_by_room
 	// so it shows up in the parent room's channel timeline on history loads.
@@ -225,11 +225,11 @@ func (s *CassandraStore) SaveThreadMessage(ctx context.Context, msg *model.Messa
 			`INSERT INTO messages_by_room
 			 (room_id, bucket, created_at, message_id, sender, msg, site_id, updated_at, mentions,
 			  thread_room_id, thread_parent_id, thread_parent_created_at, type, sys_msg_data, tshow, quoted_parent_message,
-			  attachments, card, card_action)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			  attachments, card, card_action, visible_to)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			msg.RoomID, s.bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID, sender, msg.Content, siteID, msg.CreatedAt, mentions,
 			threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.SysMsgData, msg.TShow, msg.QuotedParentMessage,
-			msg.Attachments, msg.Card, msg.CardAction,
+			msg.Attachments, msg.Card, msg.CardAction, msg.VisibleTo,
 		)
 	}
 	if err := s.executeBatch(ctx, batch); err != nil {
@@ -266,23 +266,23 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 		`INSERT INTO messages_by_id
 		 (message_id, created_at, room_id, sender, site_id, updated_at, mentions,
 		  thread_room_id, thread_parent_id, thread_parent_created_at, type, tshow,
-		  quoted_parent_message, sys_msg_data,
+		  quoted_parent_message, sys_msg_data, visible_to,
 		  msg, attachments, card, card_action,
 		  enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt, mentions,
 		threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.TShow,
-		cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+		cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
 	)
 	batch.Query(
 		`INSERT INTO thread_messages_by_thread
 		 (thread_room_id, created_at, message_id, room_id, thread_parent_id,
-		  sender, site_id, updated_at, mentions, type, tshow, quoted_parent_message, sys_msg_data,
+		  sender, site_id, updated_at, mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		  msg, attachments, card, card_action,
 		  enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 		threadRoomID, msg.CreatedAt, msg.ID, msg.RoomID, msg.ThreadParentMessageID,
-		sender, siteID, msg.CreatedAt, mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData,
+		sender, siteID, msg.CreatedAt, mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo,
 		payload, encMeta,
 	)
 	// TShow dual-write into messages_by_room — see SaveThreadMessage for the
@@ -294,13 +294,13 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 			`INSERT INTO messages_by_room
 			 (room_id, bucket, created_at, message_id, sender, site_id, updated_at, mentions,
 			  thread_room_id, thread_parent_id, thread_parent_created_at, type, tshow,
-			  quoted_parent_message, sys_msg_data,
+			  quoted_parent_message, sys_msg_data, visible_to,
 			  msg, attachments, card, card_action,
 			  enc_payload, enc_meta)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, null, ?, ?)`,
 			msg.RoomID, s.bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt, mentions,
 			threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.TShow,
-			cm.QuotedParentMessage, msg.SysMsgData, payload, encMeta,
+			cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
 		)
 	}
 	if err := s.executeBatch(ctx, batch); err != nil {

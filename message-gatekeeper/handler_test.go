@@ -298,6 +298,54 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			wantInfra: false,
 		},
 		{
+			name:    "visibleTo passthrough — set verbatim on the canonical message",
+			account: validAccount,
+			roomID:  validRoomID,
+			siteID:  validSiteID,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{ID: validID, Content: validContent, RequestID: validRequestID, VisibleTo: "u1,u2"}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), validAccount, validRoomID).Return(sub, nil)
+				s.EXPECT().GetRoomMeta(gomock.Any(), validRoomID).Return(roommetacache.Meta{ID: validRoomID, UserCount: 1}, nil)
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				assert.Equal(t, "u1,u2", msg.VisibleTo)
+				require.Len(t, published, 1)
+				var evt model.MessageEvent
+				require.NoError(t, json.Unmarshal(published[0].data, &evt))
+				assert.Equal(t, "u1,u2", evt.Message.VisibleTo)
+			},
+		},
+		{
+			name:    "visibleTo exceeds cap — rejected before publish",
+			account: validAccount,
+			roomID:  validRoomID,
+			siteID:  validSiteID,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{ID: validID, Content: validContent, RequestID: validRequestID, VisibleTo: strings.Repeat("x", maxVisibleToBytes+1)}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantInfra:     false,
+			wantNoPublish: true,
+		},
+		{
 			name:    "user not in room",
 			account: validAccount,
 			roomID:  validRoomID,
