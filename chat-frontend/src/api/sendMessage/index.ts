@@ -41,7 +41,9 @@ interface ErrorEnvelope {
  * refused send looked identical to a successful one.
  *
  * @throws {AsyncJobError} `.kind` is 'async-error' for a typed refusal (with `.code`
- *   and `.reason` from the envelope) or 'async-timeout' when no reply arrives.
+ *   and `.reason` from the envelope), 'async-timeout' when no reply arrives, or
+ *   'sync-error' when `publish` itself throws (e.g. not connected) — a local
+ *   transport failure, never a remote one, so it carries no `.code`/`.reason`.
  */
 export function sendMessage(
   { user, publish, subscribe }: Nats,
@@ -73,6 +75,16 @@ export function sendMessage(
       fn()
     }
 
-    publish(msgSend(user.account, roomId, siteId), payload)
+    try {
+      publish(msgSend(user.account, roomId, siteId), payload)
+    } catch (err) {
+      // A local transport failure (e.g. not connected) — not a remote
+      // refusal, so it gets the same kind requestWithAsyncResult uses for
+      // its synchronous request phase, not AsyncError/AsyncTimeout.
+      settle(() => {
+        const msg = err instanceof Error ? err.message : String(err)
+        reject(new AsyncJobError(msg, ASYNC_JOB_ERROR_KINDS.SyncError, { cause: err }))
+      })
+    }
   })
 }

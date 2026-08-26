@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { sendMessage } from './index'
+import { AsyncJobError } from '../_transport/asyncJob'
 
 function natsDouble(reply?: unknown, opts: { delayMs?: number } = {}) {
   const handlers: Record<string, (data: unknown) => void> = {}
@@ -65,5 +66,17 @@ describe('sendMessage', () => {
     await sendMessage(nats as never, args)
     const sub = nats.subscribe.mock.results[0].value
     expect(sub.unsubscribe).toHaveBeenCalled()
+  })
+
+  it('rejects with an AsyncJobError and unsubscribes when publish throws synchronously', async () => {
+    const unsubscribe = vi.fn()
+    const subscribe = vi.fn(() => ({ unsubscribe }))
+    const publish = vi.fn(() => {
+      throw new Error('Not connected')
+    })
+    const nats = { user: { account: 'alice' }, subscribe, publish }
+
+    await expect(sendMessage(nats as never, args)).rejects.toBeInstanceOf(AsyncJobError)
+    expect(unsubscribe).toHaveBeenCalled()
   })
 })

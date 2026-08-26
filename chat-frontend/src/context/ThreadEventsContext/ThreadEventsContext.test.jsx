@@ -1,5 +1,5 @@
 import { render, screen, act } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ThreadEventsProvider, useThreadEvents } from './ThreadEventsContext'
 
 const request = vi.fn()
@@ -93,6 +93,11 @@ const respondToSend = (reply) => {
 
 describe('ThreadEventsContext', () => {
   beforeEach(() => {
+    // sendReply/retryReply drive sendMessage's internal setTimeout
+    // (default 10s). Fake timers keep any un-settled send from leaving a
+    // real timer pending past the test — a real one can fire during a
+    // later test file's run under vitest's shared worker pool.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     request.mockReset()
     publish.mockReset()
     registerThreadReplyHandler.mockClear()
@@ -102,6 +107,10 @@ describe('ThreadEventsContext', () => {
     callOrder.length = 0
     threadEventHandler = null
     responseHandlers.clear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('openThread sets activeParent and fires msg.thread RPC; on success dispatches HISTORY_LOADED', async () => {
@@ -199,10 +208,16 @@ describe('ThreadEventsContext', () => {
 
 describe('ThreadEventsContext — cross-dispatch OWN_THREAD_REPLY_SENT', () => {
   beforeEach(() => {
+    // See the fake-timers comment in the describe block above — same reason.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     request.mockReset()
     publish.mockReset()
     roomDispatch.mockClear()
     responseHandlers.clear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('on successful sendReply, dispatches OWN_THREAD_REPLY_SENT to RoomEventsContext once the gatekeeper confirms', async () => {
