@@ -105,6 +105,7 @@ type EnrichedSubscription struct {
 	UserCount         int        `json:"-" bson:"userCount,omitempty"`
 	LastMsgAt         *time.Time `json:"-" bson:"lastMsgAt,omitempty"`
 	LastMsgID         string     `json:"-" bson:"lastMsgId,omitempty"`
+	LastUserMsgAt     *time.Time `json:"-" bson:"lastUserMsgAt,omitempty"`
 	LastMentionAllAt  *time.Time `json:"-" bson:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *time.Time `json:"-" bson:"minUserLastSeenAt,omitempty"`
 	AppCount          int        `json:"-" bson:"appCount,omitempty"`
@@ -138,8 +139,12 @@ type SubscriptionRoom struct {
 	// RFC3339 timestamps (*time.Time). The room-service RPC delivers them as epoch
 	// millis; enrichment converts at the seam (the local $lookup baseline already
 	// carries *time.Time).
-	LastMsgAt        *time.Time `json:"lastMsgAt,omitempty" bson:"-"`
-	LastMsgID        string     `json:"lastMsgId,omitempty" bson:"-"`
+	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"-"`
+	LastMsgID string     `json:"lastMsgId,omitempty" bson:"-"`
+	// LastUserMsgAt is the last NON-system message time — what hasUnread and
+	// sidebar ordering are computed from; nil for rooms with no user messages
+	// since the field shipped (clients fall back to LastMsgAt).
+	LastUserMsgAt    *time.Time `json:"lastUserMsgAt,omitempty" bson:"-"`
 	LastMentionAllAt *time.Time `json:"lastMentionAllAt,omitempty" bson:"-"`
 	// MinUserLastSeenAt is the oldest read position across the room's members (the
 	// room-wide "everyone has read up to here" floor), mirrored from the room doc.

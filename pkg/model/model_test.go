@@ -330,12 +330,14 @@ func TestOrigin_BSONOnly(t *testing.T) {
 
 func TestRoomJSON(t *testing.T) {
 	lastMsg := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 1, 1, 18, 0, 0, 0, time.UTC)
 	lastMention := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	minSeen := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	r := model.Room{
 		ID: "r1", Name: "general", Type: model.RoomTypeChannel,
 		SiteID: "site-a", UserCount: 5,
 		LastMsgAt:         &lastMsg,
+		LastUserMsgAt:     &lastUserMsg,
 		LastMsgID:         "m1",
 		LastMentionAllAt:  &lastMention,
 		MinUserLastSeenAt: &minSeen,
@@ -361,6 +363,9 @@ func TestRoomJSON_NilTimestampsOmitted(t *testing.T) {
 	_, hasMsg := raw["lastMsgAt"]
 	assert.False(t, hasMsg, "nil LastMsgAt must be omitted from JSON")
 
+	_, hasUserMsg := raw["lastUserMsgAt"]
+	assert.False(t, hasUserMsg, "nil LastUserMsgAt must be omitted from JSON")
+
 	_, hasMention := raw["lastMentionAllAt"]
 	assert.False(t, hasMention, "nil LastMentionAllAt must be omitted from JSON")
 
@@ -370,6 +375,7 @@ func TestRoomJSON_NilTimestampsOmitted(t *testing.T) {
 	var dst model.Room
 	require.NoError(t, json.Unmarshal(data, &dst))
 	assert.Nil(t, dst.LastMsgAt, "absent JSON field must unmarshal to nil pointer")
+	assert.Nil(t, dst.LastUserMsgAt, "absent JSON field must unmarshal to nil pointer")
 	assert.Nil(t, dst.LastMentionAllAt, "absent JSON field must unmarshal to nil pointer")
 	assert.Nil(t, dst.MinUserLastSeenAt, "absent JSON field must unmarshal to nil pointer")
 }
@@ -1029,6 +1035,7 @@ func TestRoomEventJSON(t *testing.T) {
 			Mentions:   []model.Participant{{Account: "user-2", ChineseName: "user-2", EngName: "user-2"}, {Account: "user-3", ChineseName: "user-3", EngName: "user-3"}},
 			MentionAll: true,
 			HasMention: true,
+			SystemMsg:  true,
 			Message:    &model.ClientMessage{Message: msg, Sender: &model.Participant{UserID: "user-1", Account: "alice", ChineseName: "愛麗絲", EngName: "Alice Wang"}},
 		}
 
@@ -1043,6 +1050,15 @@ func TestRoomEventJSON(t *testing.T) {
 		if !reflect.DeepEqual(src, dst) {
 			t.Errorf("round-trip mismatch:\n  got  %+v\n  want %+v", dst, src)
 		}
+	})
+
+	t.Run("systemMsg omitted when false", func(t *testing.T) {
+		data, err := json.Marshal(model.RoomEvent{Type: model.RoomEventNewMessage, RoomID: "room-3"})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["systemMsg"]
+		assert.False(t, present, "omitempty must drop systemMsg=false")
 	})
 
 	t.Run("nil message and empty mentions omitted", func(t *testing.T) {
@@ -2158,6 +2174,7 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 		pk := "dGVzdC1wcml2YXRlLWtleS1iYXNlNjQ="
 		kv := 7
 		lastMsg := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+		lastUserMsg := time.Date(2025, 1, 1, 18, 0, 0, 0, time.UTC)
 		lastMention := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
 		minSeen := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 		r := model.SubscriptionRoom{
@@ -2166,6 +2183,7 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 			UserCount:         42,
 			AppCount:          3,
 			LastMsgAt:         &lastMsg,
+			LastUserMsgAt:     &lastUserMsg,
 			LastMsgID:         "m-100",
 			LastMentionAllAt:  &lastMention,
 			MinUserLastSeenAt: &minSeen,
@@ -2177,15 +2195,17 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 
 	t.Run("timestamps serialize as RFC3339 strings", func(t *testing.T) {
 		lastMsg := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+		lastUserMsg := time.Date(2025, 1, 1, 2, 3, 4, 0, time.UTC)
 		lastMention := time.Date(2025, 1, 3, 6, 7, 8, 0, time.UTC)
 		minSeen := time.Date(2025, 1, 4, 9, 10, 11, 0, time.UTC)
-		r := model.SubscriptionRoom{LastMsgAt: &lastMsg, LastMentionAllAt: &lastMention, MinUserLastSeenAt: &minSeen}
+		r := model.SubscriptionRoom{LastMsgAt: &lastMsg, LastUserMsgAt: &lastUserMsg, LastMentionAllAt: &lastMention, MinUserLastSeenAt: &minSeen}
 		// #nosec G117 -- test roundtrip on a model whose PrivateKey field is part of the wire schema
 		data, err := json.Marshal(&r)
 		require.NoError(t, err)
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
 		assert.Equal(t, "2025-01-02T03:04:05Z", raw["lastMsgAt"], "lastMsgAt must be RFC3339, not epoch millis")
+		assert.Equal(t, "2025-01-01T02:03:04Z", raw["lastUserMsgAt"], "lastUserMsgAt must be RFC3339, not epoch millis")
 		assert.Equal(t, "2025-01-03T06:07:08Z", raw["lastMentionAllAt"], "lastMentionAllAt must be RFC3339, not epoch millis")
 		assert.Equal(t, "2025-01-04T09:10:11Z", raw["minUserLastSeenAt"], "minUserLastSeenAt must be RFC3339, not epoch millis")
 	})
@@ -2338,6 +2358,7 @@ func TestRoomInfoJSON(t *testing.T) {
 		pk := "dGVzdC1wcml2YXRlLWtleS1iYXNlNjQ="
 		kv := 7
 		lastMsg := int64(1735689600000)
+		lastUserMsg := int64(1735686000000)
 		lastMention := int64(1735693200000)
 		src := model.RoomInfo{
 			RoomID:           "r1",
@@ -2347,6 +2368,7 @@ func TestRoomInfoJSON(t *testing.T) {
 			UserCount:        42,
 			AppCount:         3,
 			LastMsgAt:        &lastMsg,
+			LastUserMsgAt:    &lastUserMsg,
 			LastMsgID:        "m-100",
 			LastMentionAllAt: &lastMention,
 			PrivateKey:       &pk,
