@@ -64,3 +64,28 @@
   top: calc(100% + 4px);
   right: 0;
 }
+
+/* Blocked thread-start: aria-disabled keeps the button focusable (see
+   MessageActions.jsx), so the disabled *look* has to be painted here — the
+   native :disabled styling no longer applies. */
+.message-action[aria-disabled='true'],
+.message-action[aria-disabled='true']:hover {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--text-secondary);
+}
+/* Visually-hidden description target for aria-describedby. Not `display:none`
+   / `visibility:hidden` — either would drop it from the accessibility tree,
+   which is the one thing it exists for. */
+.message-action-hint {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

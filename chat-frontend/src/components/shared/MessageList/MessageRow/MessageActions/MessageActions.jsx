@@ -1,9 +1,15 @@
+import { useId } from 'react'
 import { useDegraded } from '@/context/DegradedContext'
 import MessageActionMenu from './MessageActionMenu/MessageActionMenu'
 import './style.css'
 
+/** Same wording as formatAsyncJobError's thread_start_unavailable copy, so the
+ *  pre-emptive block and the refusal that would follow read identically. */
+const THREAD_BLOCKED_REASON =
+  "Message history is unavailable — you can't start a new thread right now. Try again shortly."
+
 export default function MessageActions({
-  message, room, context = 'main', isOwn,
+  message, room, context, isOwn,
   onThread, onReply, onEdit, onDelete,
 }) {
   // Thread: only opens new threads from the main feed. Inside the thread
@@ -16,6 +22,7 @@ export default function MessageActions({
   const showEdit = !!isOwn
   const showDelete = !!isOwn
 
+  const hintId = useId()
   const { historyDegraded } = useDegraded()
   // The gatekeeper only refuses a thread-start in a channel room with no
   // existing thread (see message-gatekeeper/handler.go: meta.Type !=
@@ -34,16 +41,28 @@ export default function MessageActions({
   return (
     <div className="message-actions" role="toolbar" aria-label="Message actions">
       {showThread && (
-        <button
-          type="button"
-          className="message-action message-action-thread"
-          aria-label="Reply in thread"
-          title={threadStartBlocked ? 'Threads are temporarily unavailable' : undefined}
-          disabled={threadStartBlocked}
-          onClick={() => onThread?.(message)}
-        >
-          Thread
-        </button>
+        <>
+          {/* aria-disabled, not `disabled`: a disabled button leaves the tab
+              order, so a keyboard user can neither focus it nor hover it, and
+              the reason becomes unreachable by every assistive path. Staying
+              focusable means the description below is announced — at the cost
+              of having to refuse the click ourselves, which aria-disabled
+              does not do. */}
+          <button
+            type="button"
+            className="message-action message-action-thread"
+            aria-label="Reply in thread"
+            aria-disabled={threadStartBlocked || undefined}
+            aria-describedby={threadStartBlocked ? hintId : undefined}
+            title={threadStartBlocked ? THREAD_BLOCKED_REASON : 'Reply in thread'}
+            onClick={() => { if (!threadStartBlocked) onThread?.(message) }}
+          >
+            Thread
+          </button>
+          {threadStartBlocked && (
+            <span id={hintId} className="message-action-hint">{THREAD_BLOCKED_REASON}</span>
+          )}
+        </>
       )}
       {showReply && (
         <button

@@ -116,36 +116,78 @@ describe('MessageActions — Edit / Delete visibility', () => {
   })
 })
 
-describe('MessageActions — thread start while history is degraded', () => {
-  it('disables "reply in thread" on a message with no replies while degraded', () => {
-    renderWithDegraded(
-      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} onThread={() => {}} />,
-      { degraded: true }
-    )
-    expect(screen.getByRole('button', { name: /thread/i })).toBeDisabled()
-  })
+const BLOCKED_COPY =
+  "Message history is unavailable — you can't start a new thread right now. Try again shortly."
 
-  it('keeps "reply in thread" enabled on a message that already has replies', () => {
-    renderWithDegraded(
-      <MessageActions message={{ id: 'm1', tcount: 3 }} room={{ type: 'channel' }} onThread={() => {}} />,
-      { degraded: true }
-    )
-    expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
+describe('MessageActions — thread start while history is degraded', () => {
+  // room type × tcount matrix. Only a channel message with no existing thread
+  // is refusable by the gatekeeper (channel + no thread_rooms document); every
+  // other combination resolves from Mongo and must stay enabled.
+  const cases = [
+    { name: 'channel, no replies', room: 'channel', tcount: 0, blocked: true },
+    { name: 'channel, tcount undefined (field absent on the wire)', room: 'channel', tcount: undefined, blocked: true },
+    { name: 'channel, thread already exists', room: 'channel', tcount: 3, blocked: false },
+    { name: 'dm', room: 'dm', tcount: 0, blocked: false },
+    { name: 'botDM', room: 'botDM', tcount: 0, blocked: false },
+    { name: 'discussion', room: 'discussion', tcount: 0, blocked: false },
+  ]
+
+  cases.forEach(({ name, room, tcount, blocked }) => {
+    it(`${blocked ? 'blocks' : 'keeps'} "reply in thread" — ${name}`, () => {
+      renderWithDegraded(
+        <MessageActions message={{ id: 'm1', tcount }} room={{ type: room }} context="main" onThread={() => {}} />,
+        { degraded: true }
+      )
+      const btn = screen.getByRole('button', { name: /reply in thread/i })
+      if (blocked) expect(btn).toHaveAttribute('aria-disabled', 'true')
+      else expect(btn).not.toHaveAttribute('aria-disabled')
+    })
   })
 
   it('keeps "reply in thread" enabled when healthy', () => {
     renderWithDegraded(
-      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} onThread={() => {}} />,
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} context="main" onThread={() => {}} />,
       { degraded: false }
     )
-    expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /reply in thread/i })).not.toHaveAttribute('aria-disabled')
   })
 
-  it('keeps "reply in thread" enabled in a DM room while degraded — the gatekeeper never refuses DM thread starts', () => {
+  // The disable has to be functional, not cosmetic: aria-disabled does not stop
+  // a click on its own, so the handler must refuse it explicitly.
+  it('a click on the blocked button never reaches onThread', () => {
+    const onThread = vi.fn()
     renderWithDegraded(
-      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'dm' }} onThread={() => {}} />,
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} context="main" onThread={onThread} />,
       { degraded: true }
     )
-    expect(screen.getByRole('button', { name: /thread/i })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: /reply in thread/i }))
+    expect(onThread).not.toHaveBeenCalled()
+  })
+
+  it('exposes the reason to assistive tech and keeps the button focusable', () => {
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} context="main" onThread={() => {}} />,
+      { degraded: true }
+    )
+    const btn = screen.getByRole('button', { name: /reply in thread/i })
+    // A real `disabled` button is out of the tab order, so neither the
+    // description nor the title tooltip is reachable by keyboard.
+    expect(btn).not.toBeDisabled()
+    btn.focus()
+    expect(btn).toHaveFocus()
+    expect(btn).toHaveAccessibleDescription(BLOCKED_COPY)
+  })
+
+  it('carries no description while healthy — nothing to explain', () => {
+    renderWithDegraded(
+      <MessageActions message={{ id: 'm1', tcount: 0 }} room={{ type: 'channel' }} context="main" onThread={() => {}} />,
+      { degraded: false }
+    )
+    const btn = screen.getByRole('button', { name: /reply in thread/i })
+    expect(btn).not.toHaveAccessibleDescription(BLOCKED_COPY)
+    // The healthy hover tooltip predates the degraded work and must survive it.
+    // (It is also what the accessible description falls back to, absent
+    // aria-describedby.)
+    expect(btn).toHaveAttribute('title', 'Reply in thread')
   })
 })
