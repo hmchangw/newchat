@@ -92,3 +92,50 @@ func TestIntegration_DownloadServesFromCacheOnSecondHit(t *testing.T) {
 	}
 	assert.Equal(t, 1, cs.opens, "second download must be served from cache, not re-opened")
 }
+
+// A full round-trip through the real router and a real MinIO: the credential
+// gates the write, and the artifact that lands is byte-identical.
+func TestIntegration_UploadRequiresServiceAccountThenRoundTrips(t *testing.T) {
+	client, bucket := testutil.MinIO(t, "clientupdate")
+	store := newMinioVersionStore(client, bucket, 30*time.Second)
+	h := NewHandler(store, newBlobCache(4, time.Hour, 1<<20))
+
+	tokens := map[string]string{"admin-service": "0123456789abcdef"}
+	r := gin.New()
+	registerRoutes(r, h, tokens)
+
+	newUpload := func() (*http.Request, error) {
+		body, ct := multipartBody(t, map[string]fileSpec{
+			"configFile":  {name: "itest.yaml", content: "version: 1"},
+			"executeFile": {name: "itest.bin", content: "MZbinarypayload"},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/version", body)
+		req.Header.Set("Content-Type", ct)
+		return req, nil
+	}
+
+	// Unauthenticated: rejected, and nothing is stored.
+	req, err := newUpload()
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	getW := httptest.NewRecorder()
+	r.ServeHTTP(getW, httptest.NewRequest(http.MethodGet, "/api/v1/version/itest.yaml", nil))
+	require.Equal(t, http.StatusNotFound, getW.Code,
+		"a rejected upload must not have written anything to MinIO")
+
+	// Authenticated: stored, and downloadable without a credential.
+	req, err = newUpload()
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	getW = httptest.NewRecorder()
+	r.ServeHTTP(getW, httptest.NewRequest(http.MethodGet, "/api/v1/version/itest.bin", nil))
+	require.Equal(t, http.StatusOK, getW.Code)
+	assert.Equal(t, "MZbinarypayload", getW.Body.String())
+}
