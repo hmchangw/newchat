@@ -745,6 +745,7 @@ to this contract.
 | `room_key_store_errors_total` | counter | room-worker | on first failure | Mongo driver metrics cover I/O broadly, not this operation | room-key store health |
 | `room_key_absent_errors_total` | counter | room-worker | on first occurrence | none | distinguishes "no key" from "store broken" |
 | `cache_hits_total` / `cache_misses_total` / `cache_errors_total` | counter | 4 workers + history-service via `pkg/cachemetrics` | on first access | none | **already on the cache-hit-rates dashboard** |
+| `http_requests_shed_total` | counter | user-service | on first shed request | partial: `http.server.request.duration{http.response.status_code="429"}` from the o11y Gin middleware counts 429s, but not which ones the in-flight cap rejected rather than a handler | admission-cap health: a rising rate means the HTTP cap is the binding constraint, which is the signal for raising it or scaling out. Unlabelled — the cap is process-wide, so there is no bounded dimension to slice it by |
 | `search_service_requests_total`<br><sub>`search_service_requests`</sub> | counter | search-service | on first search | none | SLO-7 |
 | `search_service_request_duration_seconds`<br><sub>`search_service_request_duration`</sub> | histogram | search-service | on first search | none | **SLO-8** (needs the status label, roadmap P4) |
 | `search_service_es_duration_seconds`<br><sub>`search_service_es_duration`</sub> | histogram | search-service | on first search | ES `_nodes/stats` is cluster-wide, not per-query | SLO-8 attribution |
