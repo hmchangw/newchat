@@ -2488,7 +2488,7 @@ func (h *Handler) fanOutRoomKeyToSurvivors(ctx context.Context, roomID string, p
 // absence and returns a permanent error so nothing keyless is ever published.
 func requireKeyPair(ctx context.Context, pair *roomkeystore.VersionedKeyPair) error {
 	if pair == nil {
-		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
+		roomkeymetrics.RecordKeyAbsent(ctx, "")
 		return permanent(errcode.Internal("room key absent", errcode.WithCause(errRoomKeyAbsent)))
 	}
 	return nil

@@ -17,7 +17,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
@@ -499,8 +498,7 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 	if pair == nil {
 		// No slot and no archive entry: the only signal retention was too short.
 		// op separates this from room-worker's unrelated use of the same counter.
-		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1,
-			metric.WithAttributes(attribute.String("op", "GetByVersion")))
+		roomkeymetrics.RecordKeyAbsent(ctx, "GetByVersion")
 		return nil, errRoomKeyAbsent
 	}
 	// #nosec G117 -- RoomKeyGetResponse.PrivateKey is the intended payload: on-demand key delivery to the authorized room member over an auth-callout-gated per-user NATS subject, not a leak

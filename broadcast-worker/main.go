@@ -322,7 +322,7 @@ func main() {
 		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
 		if err != nil {
 			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Attempt(ctx, destination, operation, err)
+			publishMetrics.Failure(ctx, destination, operation, err)
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil

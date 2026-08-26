@@ -10,8 +10,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 )
@@ -334,8 +332,7 @@ func (s *mongoStore) archiveRetired(ctx context.Context, roomID string, version 
 		options.UpdateOne().SetUpsert(true),
 	)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1,
-			metric.WithAttributes(attribute.String("op", "ArchiveRetired")))
+		roomkeymetrics.RecordStoreError(ctx, "ArchiveRetired")
 		slog.ErrorContext(ctx, "archive retired room key failed",
 			"room_id", roomID, "version", version, "error", err)
 	}

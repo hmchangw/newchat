@@ -136,3 +136,55 @@ func TestRecordStoreError_LabelsOnlyBoundedOperations(t *testing.T) {
 		})
 	}
 }
+
+// KeyAbsentErrors was poked directly at its two call sites, one of them with an
+// inline attribute set built per call. It needs the same bounded recorder as
+// StoreErrors: room-service tags its lookup so "retention was too short" stays
+// separable from room-worker's unrelated use of the same counter, and
+// room-worker passes nothing because it has no operation to name.
+func TestRecordKeyAbsent_LabelsOnlyBoundedOperations(t *testing.T) {
+	const name = "room_key_absent_errors_total"
+
+	tests := []struct {
+		name string
+		op   string
+		want attribute.Set
+	}{
+		{name: "get by version", op: "GetByVersion", want: opSet("GetByVersion")},
+		{name: "empty op drops the label", op: "", want: *attribute.EmptySet()},
+		{name: "unknown op drops the label", op: "DropDatabase", want: *attribute.EmptySet()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := counterTotal(t, name, tt.want)
+			unbounded := counterTotal(t, name, opSet(tt.op))
+
+			RecordKeyAbsent(context.Background(), tt.op)
+
+			assert.Equal(t, int64(1), counterTotal(t, name, tt.want)-before)
+			if tt.want.Len() == 0 {
+				assert.Zero(t, counterTotal(t, name, opSet(tt.op))-unbounded,
+					"an unrecognised op must not open a series of its own")
+			}
+		})
+	}
+}
+
+// The two ops main added with #281 must be labelled, not collapsed — a store
+// failure that cannot say which operation failed is most of the value gone.
+func TestRecordStoreError_CoversTheOpsAddedWithCommitRotation(t *testing.T) {
+	const name = "room_key_store_errors_total"
+
+	for _, op := range []string{"SetIfAbsent", "ArchiveRetired"} {
+		t.Run(op, func(t *testing.T) {
+			want := opSet(op)
+			before := counterTotal(t, name, want)
+
+			RecordStoreError(context.Background(), op)
+
+			assert.Equal(t, int64(1), counterTotal(t, name, want)-before,
+				"%s must keep its op label", op)
+		})
+	}
+}
