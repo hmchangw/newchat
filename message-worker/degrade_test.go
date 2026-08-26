@@ -455,3 +455,66 @@ func TestDegradeTracker_SetLosingToConcurrentClearDoesNotResurrect(t *testing.T)
 	assert.True(t, tr.Degraded() || !synced,
 		"a Set that raced a Clear must not report itself synced while local state says healthy")
 }
+
+// TestStartDegradeTracker_AdoptsMarkerBeforeReturning pins the cold-start contract.
+//
+// The refresher's first tick lands one interval after it starts, so a tracker that
+// only polls begins life believing the site is healthy. A pod restarted mid-outage
+// starts consuming inside that window and replays an outage's worth of events with
+// the marker's protections off: unresolvable quotes are dropped permanently instead
+// of retried, and hours-old thread badges are re-notified to users.
+//
+// Making the window small is not a fix — a restart storm during an incident is when
+// this matters most. The adoption has to happen before the caller can consume.
+func TestStartDegradeTracker_AdoptsMarkerBeforeReturning(t *testing.T) {
+	t.Run("adopts a marker set by a sibling pod", func(t *testing.T) {
+		store := &fakeDegradeStore{marker: &histdegrade.Marker{SiteID: "site-a", DegradedSince: 1700000000000}}
+		m, err := newMetrics()
+		require.NoError(t, err)
+
+		// An interval far beyond the test's lifetime: nothing but the synchronous
+		// read can be what makes this tracker degraded.
+		tr, stop := startDegradeTracker(context.Background(), store, "site-a",
+			func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, m, time.Hour)
+		defer stop()
+
+		assert.True(t, tr.Degraded(),
+			"a restarted pod must adopt the site's marker before it can process a single replay row")
+	})
+
+	t.Run("a healthy site starts healthy", func(t *testing.T) {
+		m, err := newMetrics()
+		require.NoError(t, err)
+		tr, stop := startDegradeTracker(context.Background(), &fakeDegradeStore{}, "site-a",
+			func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, m, time.Hour)
+		defer stop()
+		assert.False(t, tr.Degraded())
+	})
+
+	t.Run("an unreadable marker starts healthy rather than blocking startup", func(t *testing.T) {
+		// Mongo being down must not stop the pod persisting messages to Cassandra:
+		// the marker is advisory, and refusing to boot without it would trade a
+		// degraded recovery for a total outage. The refresher retries on its ticker.
+		m, err := newMetrics()
+		require.NoError(t, err)
+		tr, stop := startDegradeTracker(context.Background(), &getErrDegradeStore{}, "site-a",
+			func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, m, time.Hour)
+		defer stop()
+		assert.False(t, tr.Degraded())
+	})
+
+	t.Run("stop terminates the refresher", func(t *testing.T) {
+		m, err := newMetrics()
+		require.NoError(t, err)
+		_, stop := startDegradeTracker(context.Background(), &fakeDegradeStore{}, "site-a",
+			func(context.Context) (uint64, uint64, error) { return 0, 0, nil }, m, time.Hour)
+		stop() // startTicker's stop is synchronous; a leaked goroutine hangs the race detector's exit
+	})
+}
+
+// getErrDegradeStore fails every marker read.
+type getErrDegradeStore struct{ fakeDegradeStore }
+
+func (s *getErrDegradeStore) Get(context.Context, string) (*histdegrade.Marker, error) {
+	return nil, errors.New("mongo unavailable")
+}

@@ -296,3 +296,24 @@ func (t *degradeTracker) Refresh(ctx context.Context) {
 func startDegradeRefresher(ctx context.Context, t *degradeTracker, every time.Duration) func() {
 	return startTicker(ctx, every, tickAfterInterval, t.Refresh)
 }
+
+// startDegradeTracker builds the tracker, adopts the site's current marker, and only
+// then starts the background refresher.
+//
+// The adoption is synchronous on purpose. The refresher's first tick lands a full
+// interval after it starts, so a tracker that only polls spends that interval
+// believing the site is healthy — and a pod restarted mid-outage begins consuming
+// inside it, replaying an outage's worth of events with the marker's protections
+// off: unresolvable quotes dropped permanently instead of retried, hours-old thread
+// badges re-notified. Shortening the interval does not fix it; a restart storm during
+// an incident is exactly when it bites. Reading before the caller can consume does.
+//
+// A failed read is not fatal. The marker is advisory, and refusing to boot without it
+// would trade a degraded recovery for a total one — Refresh logs the failure and the
+// ticker retries.
+func startDegradeTracker(ctx context.Context, store DegradeStore, siteID string,
+	backlog backlogFunc, m *metrics, every time.Duration) (*degradeTracker, func()) {
+	t := newDegradeTracker(store, siteID, backlog, m, nil)
+	t.Refresh(ctx)
+	return t, startDegradeRefresher(ctx, t, every)
+}

@@ -267,7 +267,10 @@ func main() {
 		return cons.Info(ctx)
 	}, 15*time.Second)
 
-	degradeTr := newDegradeTracker(histdegrade.NewStore(db), cfg.SiteID,
+	// The marker is adopted synchronously here, before the consume loop below can
+	// process a single replayed row: a pod restarted mid-outage must not spend its
+	// first refresh interval acting as though the site were healthy.
+	degradeTr, stopDegradeRefresher := startDegradeTracker(ctx, histdegrade.NewStore(db), cfg.SiteID,
 		func(ctx context.Context) (uint64, uint64, error) {
 			ci, err := cons.Info(ctx)
 			if err != nil {
@@ -278,8 +281,7 @@ func main() {
 			// redelivery.
 			// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
 			return ci.NumPending, uint64(ci.NumAckPending), nil
-		}, mtr, nil)
-	stopDegradeRefresher := startDegradeRefresher(ctx, degradeTr, cfg.DegradeRefresh)
+		}, mtr, cfg.DegradeRefresh)
 
 	handler := NewHandler(store, us, threadStore, cfg.SiteID, publishFn, mtr, degradeTr,
 		newDropPolicy(cfg.InvalidRetryWindow, cfg.HistoryDropEnabled, cfg.MaxDropsPerMinute, nil),
