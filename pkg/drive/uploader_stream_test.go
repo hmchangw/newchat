@@ -254,7 +254,8 @@ func TestClient_UploadGroupImages_UnicodeFilename(t *testing.T) {
 		// assert (never require) here: the handler runs off the test goroutine,
 		// where FailNow is not allowed.
 		var n wireNames
-		if err := r.ParseMultipartForm(1 << 20); assert.NoError(t, err, "parse multipart") {
+		// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
+		if err := r.ParseMultipartForm(10 << 20); assert.NoError(t, err, "parse multipart") {
 			if fhs := r.MultipartForm.File["files[0].file"]; assert.Len(t, fhs, 1, "file part") {
 				n.part = fhs[0].Filename
 			}
