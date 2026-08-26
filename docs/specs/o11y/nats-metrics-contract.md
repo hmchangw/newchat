@@ -597,6 +597,45 @@ business reconciliation must complete.
 Threshold values are owned by the campaign/SLO documents, not hardcoded into
 the metric implementation.
 
+### 11.1 Rolling-deploy window for the renamed families
+
+This release renames or removes seven families that `main` still emits, so
+during a rolling deploy both vocabularies are live at once — old replicas emit
+the left column, new ones the right.
+
+| Emitted by replicas on `main` | Emitted here |
+|---|---|
+| `chat.nats.publish.attempts` | `chat.nats.publish.failures` (failures only, not a like-for-like rename) |
+| `chat.nats.publish.retries` | removed, no replacement |
+| `chat.nats.consumer.redeliveries` | removed, no replacement |
+| `chat.nats.requests`, `chat.nats.request.duration` | `rpc.client.call.duration` |
+| `chat.nats.request.handled`, `chat.nats.request.handler.duration` | `rpc.server.call.duration` |
+
+One alert in the table above reads a renamed family: `NATSReconnectBufferFull`
+queries `chat_nats_publish_failures_total{outcome="buffer_full"}`, which
+un-rolled replicas do not emit. Their buffer-full publishes land in
+`chat_nats_publish_attempts_total{outcome="buffer_full"}` and are invisible to
+the alert for the length of the rollout — precisely the window in which
+client-side loss is most likely, since a deploy is when connections drop.
+
+Two ways to close it, and the choice belongs to whoever owns the rollout, not
+to this document:
+
+- **Union query for the transition**, removed once every replica is on the new
+  build:
+
+  ```promql
+  sum(increase({__name__=~"chat_nats_publish_(attempts|failures)_total",
+                outcome="buffer_full"}[5m])) > 0
+  ```
+
+- **Coordinated cutover** — no mixed-version window, and the alert switches to
+  the new family with the deploy.
+
+The additive metrics need no such handling: `chat_nats_client_connected` is
+simply absent on old replicas, and `NATSClientDisconnected` fires on `== 0`, so
+an absent series means no coverage for those replicas rather than a false page.
+
 ## 12. Verification Requirements
 
 Every new application metric requires unit tests for:
