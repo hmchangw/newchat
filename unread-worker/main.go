@@ -14,6 +14,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
@@ -98,8 +99,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Majority, enforced here rather than left to the URI: the flusher acks a
+	// batch's JetStream messages once BulkWrite returns, so a write that a
+	// primary failover rolls back is one no redelivery will ever replace. The
+	// unread state it carried — badges, lastMsgAt, lastSeenAt — is simply lost.
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithWriteConcern(writeconcern.Majority()))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
