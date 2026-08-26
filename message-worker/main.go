@@ -59,9 +59,8 @@ type config struct {
 	PProfEnabled       bool          `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr        string        `env:"METRICS_ADDR"         envDefault:":9090"`
 	Valkey             valkeyutil.Config
-	DEKL2TTL           time.Duration           `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
-	MongoBreakerFails  int                     `env:"MONGO_BREAKER_FAILS"         envDefault:"5"`
-	MongoBreakerCool   time.Duration           `env:"MONGO_BREAKER_COOLDOWN"      envDefault:"10s"`
+	DEKL2TTL           time.Duration `env:"ATREST_DEK_L2_TTL"           envDefault:"90m"`
+	Breaker            mongoutil.BreakerConfig
 	DEKBreakerFails    int                     `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
 	DEKBreakerCooldown time.Duration           `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -154,8 +153,7 @@ func main() {
 		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2TTL > 0, "dek_ttl", cfg.DEKL2TTL)
 	}
 
-	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "user"),
+	userBreaker := cfg.Breaker.New(ctx, "user",
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	us, err := userstore.Resilient(db.Collection("users"), userBreaker,
 		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)

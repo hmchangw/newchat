@@ -4,12 +4,11 @@ import (
 	"context"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // breakerRoomRepo fences every room-metadata read behind a circuit breaker.
@@ -37,7 +36,7 @@ func newBreakerRoomRepo(inner service.RoomRepository, b *circuitbreaker.Breaker)
 // A missing room is a healthy answer that history-service turns into a 404;
 // counting it would let requests for deleted rooms open the breaker and degrade
 // every other room's read.
-var roomBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments)
+var roomBreakerFailure = mongoutil.BreakerFailure()
 
 func (r *breakerRoomRepo) GetRoomTimes(ctx context.Context, roomID string) (lastMsgAt, createdAt time.Time, err error) {
 	var l, c time.Time

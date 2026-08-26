@@ -88,8 +88,7 @@ func run() error {
 	// One breaker for every Mongo read in this service: they are all evidence
 	// about the same fact — is Mongo reachable — so they share a failure budget
 	// rather than each re-learning the outage.
-	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "mongo"),
+	mongoBreaker := cfg.Breaker.New(ctx, "mongo",
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCacheTTL)
 	subStore := newMongoSubscriptionStore(db, mongoBreaker)

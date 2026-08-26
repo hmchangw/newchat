@@ -5,13 +5,14 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // BreakerFailure is the failure predicate a user-store breaker must be built
 // with: a missing user is a healthy answer from a healthy Mongo, not evidence
 // that Mongo is unwell. A new healthy-absence sentinel belongs in this list,
 // not in a predicate of its own.
-var BreakerFailure = circuitbreaker.FailureExcept(ErrUserNotFound)
+var BreakerFailure = mongoutil.BreakerFailure(ErrUserNotFound)
 
 // breakerStore fences a UserStore behind a circuit breaker so a stalled Mongo
 // costs one server-selection timeout rather than one per call.

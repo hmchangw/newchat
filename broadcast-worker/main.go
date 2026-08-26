@@ -61,20 +61,19 @@ type config struct {
 	// cross-site. Generous by design: the subscription list serves ordering from a
 	// cache with a far longer TTL, so a position a few seconds behind is
 	// indistinguishable from a fresh one. Non-positive announces on every message.
-	RoomActivityRefreshInterval time.Duration `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
-	UserCacheSize               int           `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL                time.Duration `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	UserL2TTL                   time.Duration `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
-	RoomMetaCacheSize           int           `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL            time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomKeyGracePeriod          time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	RoomKeyCacheTTL             time.Duration `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
-	RoomKeyCacheSize            int           `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	MongoBreakerFails           int           `env:"BROADCAST_MONGO_BREAKER_FAILS"    envDefault:"5"`
-	MongoBreakerCooldown        time.Duration `env:"BROADCAST_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
-	RoomKeyRetiredTTL           time.Duration `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
-	RoomMetaL2TTL               time.Duration `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
-	RoomSubCacheTTL             time.Duration `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"` // shared key; see pkg/roomsubcache docs
+	RoomActivityRefreshInterval time.Duration           `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
+	UserCacheSize               int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL                time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	UserL2TTL                   time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
+	RoomMetaCacheSize           int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL            time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomKeyGracePeriod          time.Duration           `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	RoomKeyCacheTTL             time.Duration           `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
+	RoomKeyCacheSize            int                     `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	Breaker                     mongoutil.BreakerConfig `envPrefix:"BROADCAST_"`
+	RoomKeyRetiredTTL           time.Duration           `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
+	RoomMetaL2TTL               time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
+	RoomSubCacheTTL             time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"` // shared key; see pkg/roomsubcache docs
 	Valkey                      valkeyutil.Config
 	ValkeyKeyGracePeriod        time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
 	HealthAddr                  string          `env:"HEALTH_ADDR"              envDefault:":8081"`
@@ -186,8 +185,7 @@ func main() {
 	// which is the delay the breaker exists to remove. Call sites differ only in
 	// which "healthy absence" they can return, and mongoBreakerFailure exempts
 	// all of them.
-	mongoBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
-		circuitbreaker.Tracked(ctx, "mongo"),
+	mongoBreaker := cfg.Breaker.New(ctx, "mongo",
 		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	// subscriptions is pinned to primary: it feeds roomsubcache, a SHARED
 	// 90-minute entry that notification-worker reads too, so a replica-lagged

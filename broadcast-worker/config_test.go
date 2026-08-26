@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/require"
@@ -107,4 +108,19 @@ func TestConfig_PoolValidate(t *testing.T) {
 	cfg, err = env.ParseAs[config]()
 	require.NoError(t, err)
 	require.NoError(t, cfg.Pool.Validate()) // envDefault applies
+}
+
+// The breaker knobs moved onto the shared mongoutil.BreakerConfig, mounted
+// under this service's own envPrefix. The operator-facing names must be
+// byte-identical to what they were before the move — this pins that, since a
+// silent rename would leave a tuned deployment running the default.
+func TestConfig_BreakerEnvNamesUnchanged(t *testing.T) {
+	t.Setenv("MODE", "user")
+	t.Setenv("BROADCAST_MONGO_BREAKER_FAILS", "9")
+	t.Setenv("BROADCAST_MONGO_BREAKER_COOLDOWN", "45s")
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, 9, cfg.Breaker.Fails)
+	require.Equal(t, 45*time.Second, cfg.Breaker.Cooldown)
 }

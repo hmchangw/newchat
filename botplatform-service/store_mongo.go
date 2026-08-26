@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessioncache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -52,8 +53,7 @@ func newStoreMongo(db *mongo.Database, breaker *circuitbreaker.Breaker, valkey v
 // a working Mongo, not evidence it is down. session.ErrNotFound especially —
 // without it, a run of invalid bot tokens would open the breaker on its own and
 // fence a database that is perfectly healthy.
-var mongoBreakerFailure = circuitbreaker.FailureExcept(
-	mongo.ErrNoDocuments, model.ErrSubscriptionNotFound, session.ErrNotFound)
+var mongoBreakerFailure = mongoutil.BreakerFailure(model.ErrSubscriptionNotFound, session.ErrNotFound)
 
 func (s *storeMongo) FindUserByAccount(ctx context.Context, account string) (*model.User, error) {
 	var u model.User

@@ -47,8 +47,7 @@ type config struct {
 	Valkey             valkeyutil.Config
 	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"90m"`
 	SubL2TTL           time.Duration           `env:"GATEKEEPER_SUB_L2_TTL"        envDefault:"90m"`
-	MongoBreakerFails  int                     `env:"GATEKEEPER_MONGO_BREAKER_FAILS"    envDefault:"5"`
-	MongoBreakerCool   time.Duration           `env:"GATEKEEPER_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+	Breaker            mongoutil.BreakerConfig `envPrefix:"GATEKEEPER_"`
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
 	UserL2TTL          time.Duration           `env:"USER_L2_TTL" envDefault:"90m"` // shared key across services; 90m matches the other L2 tiers, 0 disables
@@ -127,10 +126,8 @@ func main() {
 	// Separate instances so a warm room-meta L2 hit can't reset the subscription
 	// breaker's failure count. Each reports under its own name, so the two health
 	// signals stay distinguishable on the shared gauge.
-	subBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "subscription"))
-	metaBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "roommeta"),
+	subBreaker := cfg.Breaker.New(ctx, "subscription")
+	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
 		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
 	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2TTL, cfg.SubL2TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
@@ -146,8 +143,7 @@ func main() {
 	// Fenced inside the cache, not outside it: an open breaker must still serve
 	// warm entries. Unfenced, the display-name lookup pays a server-selection
 	// timeout on every send for as long as Mongo is down.
-	userBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "user"),
+	userBreaker := cfg.Breaker.New(ctx, "user",
 		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
 	users, err := userstore.Resilient(db.Collection("users"), userBreaker,
 		valkeyClient, cfg.UserL2TTL, cfg.UserCacheSize, cfg.UserCacheTTL)

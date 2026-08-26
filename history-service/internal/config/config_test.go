@@ -43,8 +43,8 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.PreviewCacheSize = 0
 	cfg.PreviewCacheTTL = 0
 	cfg.SubL2TTL = 0
-	cfg.MongoBreakerFails = 0
-	cfg.MongoBreakerCooldown = 0
+	cfg.Breaker.Fails = 0
+	cfg.Breaker.Cooldown = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -184,8 +184,8 @@ func TestValidate_RejectsNegativeValues(t *testing.T) {
 		wantEnv string
 	}{
 		{"sub L2 TTL", func(c *Config) { c.SubL2TTL = -time.Second }, "HISTORY_SUB_L2_TTL"},
-		{"mongo breaker fails", func(c *Config) { c.MongoBreakerFails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
-		{"mongo breaker cooldown", func(c *Config) { c.MongoBreakerCooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
+		{"mongo breaker fails", func(c *Config) { c.Breaker.Fails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
+		{"mongo breaker cooldown", func(c *Config) { c.Breaker.Cooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
 		{"DEK L2 TTL", func(c *Config) { c.DEKL2TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
 		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
 		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
@@ -364,4 +364,18 @@ func TestLoad_ProductionDefaultsCoverTheWalk(t *testing.T) {
 	assert.Equal(t, 360, cfg.MessageBucketHours)
 	assert.Equal(t, 122, cfg.MessageReadMaxBuckets)
 	assert.Equal(t, 730, cfg.MessageHistoryFloorDays)
+}
+
+// The breaker knobs moved onto the shared mongoutil.BreakerConfig under this
+// service's HISTORY_ envPrefix. Pinned because a silent rename would leave a
+// tuned deployment running the default.
+func TestLoad_BreakerEnvNamesUnchanged(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("HISTORY_MONGO_BREAKER_FAILS", "9")
+	t.Setenv("HISTORY_MONGO_BREAKER_COOLDOWN", "45s")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 9, cfg.Breaker.Fails)
+	assert.Equal(t, 45*time.Second, cfg.Breaker.Cooldown)
 }

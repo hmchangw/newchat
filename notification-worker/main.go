@@ -15,7 +15,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
-	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -52,9 +51,8 @@ type config struct {
 	RoomMetaCacheTTL       time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
 	RoomMetaL2TTL          time.Duration `env:"ROOM_META_L2_TTL"          envDefault:"90m"`
 	Valkey                 valkeyutil.Config
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
-	MongoBreakerFails      int                     `env:"MONGO_BREAKER_FAILS"       envDefault:"5"`
-	MongoBreakerCool       time.Duration           `env:"MONGO_BREAKER_COOLDOWN"    envDefault:"10s"`
+	RoomSubCacheTTL        time.Duration `env:"ROOMSUBCACHE_TTL"          envDefault:"90m"`
+	Breaker                mongoutil.BreakerConfig
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
@@ -155,8 +153,7 @@ func main() {
 	// survives an outage that outlasts its deadline.
 	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
 	// Guard the loader, not the Lookup: an open breaker must still serve L2 hits.
-	memberBreaker := circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCool,
-		circuitbreaker.Tracked(ctx, "roomsub"))
+	memberBreaker := cfg.Breaker.New(ctx, "roomsub")
 	memberLookup := roomsubcache.NewLookup(cache,
 		roomsubcache.GuardLoader(loader, memberBreaker), cfg.RoomSubCacheTTL)
 

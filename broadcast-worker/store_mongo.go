@@ -13,6 +13,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
@@ -73,7 +74,7 @@ func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, va
 // answer from a working Mongo, not evidence it is unwell. A new fenced call
 // site with its own not-found sentinel must be added here rather than given a
 // breaker of its own, or it re-splits the failure budget.
-var mongoBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments, userstore.ErrUserNotFound)
+var mongoBreakerFailure = mongoutil.BreakerFailure(userstore.ErrUserNotFound)
 
 // GetRoom backs the edit path, which has no cache tier to fall back on. It is
 // fenced so a Mongo outage fast-fails instead of spending a server-selection

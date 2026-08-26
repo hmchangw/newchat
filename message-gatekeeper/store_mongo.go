@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -71,4 +72,4 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 // constructed with. A room that does not exist is a healthy answer from a
 // healthy Mongo; counting it would let a burst of requests for deleted or
 // mistyped rooms open the breaker and degrade every other room's meta read.
-var metaBreakerFailure = circuitbreaker.FailureExcept(mongo.ErrNoDocuments)
+var metaBreakerFailure = mongoutil.BreakerFailure()

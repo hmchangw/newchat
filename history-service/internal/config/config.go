@@ -115,12 +115,9 @@ type Config struct {
 	// access decision through a Mongo outage. 0 disables the L2 tier.
 	SubL2TTL time.Duration `env:"HISTORY_SUB_L2_TTL" envDefault:"90m"`
 
-	// MongoBreakerFails/MongoBreakerCooldown configure the circuit breaker
-	// guarding the subauthcache Mongo loader: opens after MongoBreakerFails
-	// consecutive failures and stays open for MongoBreakerCooldown before a
-	// half-open probe.
-	MongoBreakerFails    int           `env:"HISTORY_MONGO_BREAKER_FAILS"    envDefault:"5"`
-	MongoBreakerCooldown time.Duration `env:"HISTORY_MONGO_BREAKER_COOLDOWN" envDefault:"10s"`
+	// Breaker guards this service's Mongo reads — the subauthcache loader and the
+	// room repository, each with its own instance off these shared knobs.
+	Breaker mongoutil.BreakerConfig `envPrefix:"HISTORY_"`
 
 	// DEKL2TTL is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
 	// outage buffer for decrypting history. The in-process DEK cache expires on
@@ -244,11 +241,8 @@ func validate(cfg *Config) error {
 	if cfg.SubL2TTL < 0 {
 		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2TTL)
 	}
-	if cfg.MongoBreakerFails < 0 {
-		return fmt.Errorf("HISTORY_MONGO_BREAKER_FAILS must be >= 0, got %d", cfg.MongoBreakerFails)
-	}
-	if cfg.MongoBreakerCooldown < 0 {
-		return fmt.Errorf("HISTORY_MONGO_BREAKER_COOLDOWN must be >= 0, got %s", cfg.MongoBreakerCooldown)
+	if err := cfg.Breaker.Validate("HISTORY_"); err != nil {
+		return err
 	}
 	if cfg.RoomTimesL2TTL < 0 {
 		return fmt.Errorf("ROOM_TIMES_L2_TTL must be >= 0, got %s", cfg.RoomTimesL2TTL)

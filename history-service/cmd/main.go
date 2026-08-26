@@ -239,8 +239,7 @@ func main() {
 	// outage TTL-slide can extend that further.
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2TTL,
-		circuitbreaker.New(cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
-			circuitbreaker.Tracked(ctx, "subscription")),
+		cfg.Breaker.New(ctx, "subscription"),
 		cachemetrics.For("subauth", "l2"))
 	// history-service needs only the access-window bound out of the shared
 	// projection, so this adapts the tier's SubAuth to that narrower shape.
@@ -274,21 +273,19 @@ func main() {
 		slog.Info("subscription cache enabled",
 			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
 			"sub_l2_ttl", cfg.SubL2TTL,
-			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+			"mongo_breaker_fails", cfg.Breaker.Fails, "mongo_breaker_cooldown", cfg.Breaker.Cooldown,
 		)
 	} else {
 		slog.Info("subscription L1 cache disabled; L2/breaker outage survival remains active",
 			"sub_l2_ttl", cfg.SubL2TTL,
-			"mongo_breaker_fails", cfg.MongoBreakerFails, "mongo_breaker_cooldown", cfg.MongoBreakerCooldown,
+			"mongo_breaker_fails", cfg.Breaker.Fails, "mongo_breaker_cooldown", cfg.Breaker.Cooldown,
 		)
 	}
 
 	// Fence the room reads before the L1 cache wraps them: they fail open, but
 	// only once they fail FAST (see breakerRoomRepo). Its own breaker, so
 	// room-read health and subscription-read health cannot mask each other.
-	guardedRooms := newBreakerRoomRepo(roomRepo, circuitbreaker.New(
-		cfg.MongoBreakerFails, cfg.MongoBreakerCooldown,
-		circuitbreaker.Tracked(ctx, "roomtimes"),
+	guardedRooms := newBreakerRoomRepo(roomRepo, cfg.Breaker.New(ctx, "roomtimes",
 		circuitbreaker.WithFailurePredicate(roomBreakerFailure)))
 
 	// Room-times L2. Reuses the client already connected for the subauth tier; a
