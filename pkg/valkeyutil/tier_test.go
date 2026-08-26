@@ -3,6 +3,7 @@ package valkeyutil
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -206,6 +207,31 @@ func TestBustKeys_OneFailingGroupDoesNotSkipTheOthers(t *testing.T) {
 func TestBustKeys_SwallowsFailures(t *testing.T) {
 	c := &bustClient{err: errors.New("valkey down")}
 	require.NotPanics(t, func() { BustKeys(context.Background(), c, "test", "k1") })
+}
+
+// A room-wide bust can name one key per member per generation. Without a cap it
+// would build one DEL proportional to room size and hand the single-threaded
+// server that as one unit of work.
+func TestBustKeys_SplitsALargeGroupIntoBoundedBatches(t *testing.T) {
+	c := &bustClient{}
+	keys := make([]string, 0, bustBatchSize*2+5)
+	for i := range cap(keys) {
+		// One shared hash tag, so slot grouping cannot do the splitting for us.
+		keys = append(keys, "sub:{room1}:acct"+strconv.Itoa(i))
+	}
+
+	BustKeys(context.Background(), c, "test", keys...)
+
+	require.Len(t, c.calls, 3, "two full batches and the remainder")
+	assert.Len(t, c.calls[0], bustBatchSize)
+	assert.Len(t, c.calls[1], bustBatchSize)
+	assert.Len(t, c.calls[2], 5)
+
+	var got []string
+	for _, b := range c.calls {
+		got = append(got, b...)
+	}
+	assert.Equal(t, keys, got, "every key is deleted, in order, exactly once")
 }
 
 func TestBustKeys_NilClientAndEmptyKeysAreNoOps(t *testing.T) {

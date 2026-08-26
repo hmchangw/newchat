@@ -3,6 +3,7 @@ package valkeyutil
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +22,12 @@ import (
 // path that triggered it. The authoritative write has already landed by then and
 // the entry's TTL reconciles a missed bust, so waiting buys nothing.
 const bustTimeout = 2 * time.Second
+
+// bustBatchSize caps the keys in one DEL. A room-wide mutation busts one key per
+// member per key generation, so an unbounded DEL would build a command
+// proportional to room size and hand the single-threaded server one huge unit of
+// work. Batching keeps both bounded; the extra round trips are off the hot path.
+const bustBatchSize = 256
 
 // RefreshAfter is how long an entry may be served before it is re-validated:
 // three quarters of its TTL.
@@ -91,12 +98,11 @@ func hashTag(key string) string {
 // Fail-open: a nil client or no keys is a no-op, and any error warns and is
 // swallowed, since the TTL reconciles a missed bust.
 //
-// Keys are grouped by cluster slot and issued as one DEL per group. Valkey
-// rejects a cross-slot multi-key DEL outright — clearing NONE of the keys
+// Keys are grouped by cluster slot and issued as DELs of at most bustBatchSize.
+// Valkey rejects a cross-slot multi-key DEL outright — clearing NONE of the keys
 // rather than some — and leaving that to each caller has already cost one
-// production defect and produced three different hand-rolled obediences. A
-// bust runs off the hot path after the authoritative write, so the extra round
-// trips for untagged keys are free. Callers may pass any key set.
+// production defect and produced three hand-rolled obediences. A bust runs off
+// the hot path, so the extra round trips are free. Callers may pass any key set.
 func BustKeys(ctx context.Context, client Client, label string, keys ...string) {
 	if client == nil || len(keys) == 0 {
 		return
@@ -121,11 +127,12 @@ func BustKeys(ctx context.Context, client Client, label string, keys ...string) 
 		groups[tag] = append(groups[tag], k)
 	}
 	for _, tag := range order {
-		group := groups[tag]
-		// Each group is independent: one failing slot must not skip the rest.
-		if err := client.Del(bustCtx, group...); err != nil {
-			slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",
-				"count", len(group), "error", err)
+		for batch := range slices.Chunk(groups[tag], bustBatchSize) {
+			// Each batch is independent: one failure must not skip the rest.
+			if err := client.Del(bustCtx, batch...); err != nil {
+				slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",
+					"count", len(batch), "error", err)
+			}
 		}
 	}
 }
