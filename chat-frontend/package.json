@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "smoke": "node --experimental-strip-types smoke-test.mjs",
     "smoke:asyncjob": "node --experimental-strip-types scripts/asyncJob.smoke.mjs",
-    "smoke:livestack": "node --experimental-strip-types scripts/liveStack.smoke.mjs"
+    "smoke:livestack": "node --experimental-strip-types scripts/liveStack.smoke.mjs",
+    "smoke:threadoutage": "node --experimental-strip-types scripts/threadOutage.smoke.mjs"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
