@@ -23,7 +23,10 @@ services:
       - BCRYPT_COST=${BCRYPT_COST:-10}
       - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
       - CLIENT_UPDATE_URL=${CLIENT_UPDATE_URL:-http://client-update-service:8080}
-      # Dev-only credential. Must match client-update-service's UPLOAD_TOKENS entry.
+      # Dev-only credential. Shares the CLIENT_UPDATE_TOKEN override variable
+      # with client-update-service/deploy/docker-compose.yml (there it becomes
+      # the token half of an account:token UPLOAD_TOKENS entry), so setting it
+      # once (e.g. in docker-local/.env) configures both sides.
       - CLIENT_UPDATE_TOKEN=${CLIENT_UPDATE_TOKEN:-local-dev-token-0123456789}
       - CLIENT_UPDATE_UPLOAD_TIMEOUT=10m
     volumes:

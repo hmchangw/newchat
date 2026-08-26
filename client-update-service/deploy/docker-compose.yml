@@ -25,8 +25,12 @@ services:
       - CACHE_MAX_ENTRIES=4
       - CACHE_TTL=24h
       - CACHE_MAX_OBJECT_BYTES=536870912
-      # Dev-only credential. Must match admin-service's CLIENT_UPDATE_TOKEN.
-      - UPLOAD_TOKENS=${CLIENT_UPDATE_TOKENS:-admin-service:local-dev-token-0123456789}
+      # Dev-only credential. Shares the CLIENT_UPDATE_TOKEN override variable
+      # with admin-service/deploy/docker-compose.yml, so setting it once (e.g.
+      # in docker-local/.env) configures both sides; only the account-name
+      # prefix below is service-specific (UPLOAD_TOKENS is account:token, not
+      # a bare token).
+      - UPLOAD_TOKENS=admin-service:${CLIENT_UPDATE_TOKEN:-local-dev-token-0123456789}
     networks:
       - chat-local
 

@@ -74,8 +74,21 @@ func mapUpstreamStatus(status int, body string) error {
 			errcode.WithCause(fmt.Errorf("client-update-service rejected this service's credential with status %d", status)))
 	default:
 		return errcode.Unavailable("client update service is unavailable",
-			errcode.WithCause(fmt.Errorf("client-update-service returned status %d", status)))
+			errcode.WithCause(fmt.Errorf("client-update-service returned status %d: %s", status, truncateUpstreamBody(body))))
 	}
+}
+
+// maxUpstreamBodyLogLen caps how much of an upstream error body reaches the
+// cause on the default (unexpected-status) branch, so a large error page
+// cannot bloat a log line.
+const maxUpstreamBodyLogLen = 256
+
+// truncateUpstreamBody trims body to maxUpstreamBodyLogLen bytes for logging.
+func truncateUpstreamBody(body string) string {
+	if len(body) <= maxUpstreamBodyLogLen {
+		return body
+	}
+	return body[:maxUpstreamBodyLogLen] + "...(truncated)"
 }
 
 // upstreamMessage lifts the human-readable text out of an errcode envelope. The

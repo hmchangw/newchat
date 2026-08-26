@@ -19,8 +19,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
+	o11ygin "github.com/flywindy/o11y/gin"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/session"
 )
@@ -78,6 +83,41 @@ func TestMapUpstreamStatus(t *testing.T) {
 				assert.Equal(t, tt.wantMsg, ec.Message)
 			}
 		})
+	}
+}
+
+// The default branch (an unexpected upstream status) is the only place a
+// non-2xx body reaches our logs at all today. Without an echo of it, an
+// operator debugging a 500 from client-update-service sees only the status
+// code and nothing else.
+func TestMapUpstreamStatus_DefaultBranchLogsUpstreamBody(t *testing.T) {
+	err := mapUpstreamStatus(500, `{"error":"minio is down"}`)
+	require.Error(t, err)
+	cause := errors.Unwrap(err)
+	require.Error(t, cause)
+	assert.Contains(t, cause.Error(), "minio is down")
+}
+
+// The upstream body is capped so a large error page cannot bloat a log line.
+func TestMapUpstreamStatus_DefaultBranchTruncatesLongBody(t *testing.T) {
+	longBody := strings.Repeat("x", 1000)
+	err := mapUpstreamStatus(500, longBody)
+	require.Error(t, err)
+	cause := errors.Unwrap(err)
+	require.Error(t, cause)
+	assert.LessOrEqual(t, len(cause.Error()), len(longBody))
+	assert.Contains(t, cause.Error(), "truncated")
+}
+
+// A 401/403 body may quote a credential rejection — it must never reach the
+// cause, unlike the default branch above.
+func TestMapUpstreamStatus_401And403StayBodyFree(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		err := mapUpstreamStatus(status, `{"error":"credential xyz123 rejected"}`)
+		require.Error(t, err)
+		cause := errors.Unwrap(err)
+		require.Error(t, cause)
+		assert.NotContains(t, cause.Error(), "credential xyz123 rejected")
 	}
 }
 
@@ -263,13 +303,17 @@ func sessionForTest() session.Session {
 	}
 }
 
-// uploadTestServer builds the real router (base middleware + a stubbed admin
-// principal) around a live server, so deadlines and streaming behave as in prod.
+// uploadTestServer builds the real router (base middleware, including the real
+// o11ygin chain wired the same way main.go does, + a stubbed admin principal)
+// around a live server, so deadlines and streaming behave as in prod. In
+// particular, this exercises whatever c.Writer wrapping o11ygin/otelgin do —
+// see TestUploadClientVersion_ExtendsItsOwnDeadlines.
 func uploadTestServer(t *testing.T, h *Handler) *httptest.Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	applyBaseMiddleware(r, nil)
+	obsMW := o11ygin.Middleware("admin-service", tracenoop.NewTracerProvider(), noop.NewMeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
+	applyBaseMiddleware(r, obsMW)
 	r.POST("/v1/admin/client-updates", func(c *gin.Context) {
 		c.Set(ctxPrincipal, sessionForTest())
 		c.Next()

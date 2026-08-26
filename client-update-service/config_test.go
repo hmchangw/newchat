@@ -77,6 +77,7 @@ func TestValidateUploadTokens(t *testing.T) {
 		{"empty token", map[string]string{"admin-service": ""}, true},
 		{"token under 16 chars", map[string]string{"admin-service": "short"}, true},
 		{"token exactly 16 chars", map[string]string{"admin-service": "0123456789abcdef"}, false},
+		{"duplicate token across accounts", map[string]string{"a": "0123456789abcdef", "b": "0123456789abcdef"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,6 +95,20 @@ func TestValidateUploadTokens_ErrorNeverLeaksTheToken(t *testing.T) {
 	const secret = "supersecrettoken0123"
 	err := validateUploadTokens(map[string]string{"": secret})
 	require.Error(t, err)
+	assert.NotContains(t, err.Error(), secret,
+		"a config error must never carry the token value — it reaches the logs")
+}
+
+// A shared token makes attribution in the access log map-iteration-dependent
+// (lookupAccount scans every entry and keeps the last match). The error must
+// name both accounts so an operator can find the misconfiguration, but never
+// the token value itself.
+func TestValidateUploadTokens_DuplicateToken_NamesAccountsNotToken(t *testing.T) {
+	const secret = "duplicatetoken01234"
+	err := validateUploadTokens(map[string]string{"account-a": secret, "account-b": secret})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "account-a")
+	assert.Contains(t, err.Error(), "account-b")
 	assert.NotContains(t, err.Error(), secret,
 		"a config error must never carry the token value — it reaches the logs")
 }

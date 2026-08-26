@@ -567,6 +567,8 @@ describe('uploadClientVersion', () => {
     upload = { onprogress: null as ((e: ProgressEvent) => void) | null }
     onload: (() => void) | null = null
     onerror: (() => void) | null = null
+    onabort: (() => void) | null = null
+    ontimeout: (() => void) | null = null
     status = 0
     responseText = ''
     method = ''
@@ -682,5 +684,21 @@ describe('uploadClientVersion', () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
     MockXHR.instances[0].onerror?.()
     await expect(promise).rejects.toBeInstanceOf(Error)
+  })
+
+  // Without an onabort handler the promise never settles and the console's
+  // submit button stays disabled forever.
+  it('rejects on abort', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].onabort?.()
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // Without an ontimeout handler the promise never settles and the console's
+  // submit button stays disabled forever.
+  it('rejects on timeout', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].ontimeout?.()
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
   })
 })

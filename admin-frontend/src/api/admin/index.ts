@@ -402,6 +402,8 @@ export function uploadClientVersion(
       reject(uploadEnvelopeError(xhr.status, xhr.responseText))
     }
     xhr.onerror = () => reject(new AsyncJobError('upload failed: could not reach the server'))
+    xhr.onabort = () => reject(new AsyncJobError('upload was aborted'))
+    xhr.ontimeout = () => reject(new AsyncJobError('upload timed out'))
 
     xhr.send(form)
   })
