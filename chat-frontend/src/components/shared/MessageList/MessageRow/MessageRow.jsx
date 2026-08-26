@@ -147,7 +147,7 @@ export default function MessageRow({
         )}
         {message._status === 'failed' && (
           <div className="message-row-failed">
-            <span className="message-row-failed-label">Failed to send.</span>
+            <span className="message-row-failed-label">{message._error || 'Failed to send.'}</span>
             <button type="button" aria-label="Retry sending message" onClick={() => onRetry?.(message.id)}>⟳</button>
             <button type="button" aria-label="Dismiss failed message" onClick={() => onDismiss?.(message.id)}>✕</button>
           </div>

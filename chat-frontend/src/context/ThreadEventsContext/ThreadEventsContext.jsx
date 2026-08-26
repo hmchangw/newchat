@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef } from 'react'
 import { v4 as uuidv4 } from 'uuid'
 import { useNats } from '../NatsContext/NatsContext'
+import { useDegraded } from '@/context/DegradedContext'
 import {
   useRoomDispatch,
   useRegisterThreadReplyHandler,
@@ -39,6 +40,7 @@ export function ThreadEventsProvider({ children }) {
   const nats = useNats()
   const { user } = nats
   const roomDispatch = useRoomDispatch()
+  const { noteHistoryFailure } = useDegraded()
   const { decrypt, ensureKey } = useRoomKeys()
   const registerThreadReplyHandler = useRegisterThreadReplyHandler()
   const registerThreadMessageMutationHandler = useRegisterThreadMessageMutationHandler()
@@ -259,13 +261,19 @@ export function ThreadEventsProvider({ children }) {
             }
           })
           .catch((err) => {
+            // The refusal is reported to DegradedContext here too — an outage
+            // that starts mid-compose is otherwise invisible to the client
+            // until the next history load fails, and this refusal is
+            // earlier, first-hand evidence of the same outage.
             dispatch({ type: 'REPLY_SEND_FAILED', messageId: id, error: formatAsyncJobError(err) })
+            noteHistoryFailure(err)
           })
       } catch (err) {
         dispatch({ type: 'REPLY_SEND_FAILED', messageId: id, error: err?.message ?? String(err) })
+        noteHistoryFailure(err)
       }
     },
-    [user, publishReply, roomDispatch]
+    [user, publishReply, roomDispatch, noteHistoryFailure]
   )
 
   const retryReply = useCallback(
@@ -287,12 +295,14 @@ export function ThreadEventsProvider({ children }) {
             : undefined
         ).catch((err) => {
           dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: formatAsyncJobError(err) })
+          noteHistoryFailure(err)
         })
       } catch (err) {
         dispatch({ type: 'REPLY_SEND_FAILED', messageId, error: err?.message ?? String(err) })
+        noteHistoryFailure(err)
       }
     },
-    [publishReply]
+    [publishReply, noteHistoryFailure]
   )
 
   const dismissReply = useCallback((messageId) => {

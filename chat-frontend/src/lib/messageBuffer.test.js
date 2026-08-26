@@ -28,12 +28,18 @@ describe('mergeById', () => {
     expect(result).toEqual([{ id: 'a' }, { id: 'b', content: 'new-b' }, { id: 'c' }])
   })
 
-  it('preserves _local: true on the existing row when an incoming row with the same id arrives', () => {
-    const existing = [{ id: 'a', _local: true, _status: 'failed' }]
+  it('preserves _local: true and _error on the existing row when an incoming row with the same id arrives', () => {
+    const existing = [{ id: 'a', _local: true, _status: 'failed', _error: 'temporarily unavailable' }]
     const incoming = [{ id: 'a', content: 'server-confirmed' }]
     const result = mergeById(existing, incoming)
     expect(result).toHaveLength(1)
-    expect(result[0]).toEqual({ id: 'a', content: 'server-confirmed', _local: true, _status: 'failed' })
+    expect(result[0]).toEqual({
+      id: 'a',
+      content: 'server-confirmed',
+      _local: true,
+      _status: 'failed',
+      _error: 'temporarily unavailable',
+    })
   })
 
   it('does not invent _local on rows that never had it', () => {

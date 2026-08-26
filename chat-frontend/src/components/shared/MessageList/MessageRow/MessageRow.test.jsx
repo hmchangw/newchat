@@ -260,6 +260,35 @@ describe('MessageRow — failed-row UI', () => {
     )
     expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
   })
+
+  it('shows the curated _error text on the failed row when present', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, _status: 'failed', _local: true, _error: "you can't start a new thread right now" }}
+        room={room}
+        context="thread"
+        onRetry={() => {}}
+        onDismiss={() => {}}
+        onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}}
+      />
+    )
+    expect(screen.getByText(/you can't start a new thread right now/i)).toBeInTheDocument()
+    expect(screen.queryByText('Failed to send.')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the generic "Failed to send." label when no _error is present', () => {
+    render(
+      <MessageRow
+        message={{ ...msg, _status: 'failed', _local: true }}
+        room={room}
+        context="thread"
+        onRetry={() => {}}
+        onDismiss={() => {}}
+        onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}}
+      />
+    )
+    expect(screen.getByText('Failed to send.')).toBeInTheDocument()
+  })
 })
 
 describe('MessageRow — reply-count badge', () => {

@@ -10,8 +10,8 @@ export function appendBounded(messages, msg) {
 }
 
 // mergeById merges `incoming` ahead of `existing`, dedupes by `id`, and
-// preserves any `_local` / `_status` markers that live only on the existing
-// rows (the server doesn't know about them). Caller convention: `incoming`
+// preserves any `_local` / `_status` / `_error` markers that live only on the
+// existing rows (the server doesn't know about them). Caller convention: `incoming`
 // is the older slice (e.g. a fresh history page) and `existing` is the
 // newer tail. Order: incoming first (in their natural order), then existing
 // rows that aren't in incoming. When the merged length exceeds MAX_CACHED,
@@ -25,6 +25,7 @@ export function mergeById(existing, incoming) {
       const out = { ...m }
       if (ex._local) out._local = ex._local
       if (ex._status) out._status = ex._status
+      if (ex._error) out._error = ex._error
       merged.push(out)
     } else {
       merged.push(m)

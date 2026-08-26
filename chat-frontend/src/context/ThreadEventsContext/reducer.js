@@ -23,6 +23,7 @@ function unsetStatus(messages, messageId) {
   if (idx < 0) return messages
   const next = { ...messages[idx] }
   delete next._status
+  delete next._error
   const out = [...messages]
   out[idx] = next
   return out
@@ -105,7 +106,10 @@ export function threadEventsReducer(state, action) {
       return { ...state, messages: [...state.messages, msg] }
     }
     case 'REPLY_SEND_FAILED':
-      return { ...state, messages: setMessage(state.messages, action.messageId, { _status: 'failed' }) }
+      return {
+        ...state,
+        messages: setMessage(state.messages, action.messageId, { _status: 'failed', _error: action.error }),
+      }
     case 'REPLY_RETRIED':
       return { ...state, messages: unsetStatus(state.messages, action.messageId) }
     case 'REPLY_DISMISSED':

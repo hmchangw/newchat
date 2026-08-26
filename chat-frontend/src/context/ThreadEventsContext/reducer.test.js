@@ -183,10 +183,27 @@ describe('threadEventsReducer — REPLY_SEND_FAILED / REPLY_RETRIED / REPLY_DISM
     expect(out.messages[0]._status).toBe('failed')
   })
 
+  it('REPLY_SEND_FAILED stores the curated error text as _error on the matching id', () => {
+    const out = threadEventsReducer(sent, {
+      type: 'REPLY_SEND_FAILED',
+      messageId: 'opt',
+      error: "Message history is unavailable — you can't start a new thread right now. Try again shortly.",
+    })
+    expect(out.messages[0]._error).toBe(
+      "Message history is unavailable — you can't start a new thread right now. Try again shortly."
+    )
+  })
+
   it('REPLY_RETRIED clears _status on the matching id', () => {
     const failed = threadEventsReducer(sent, { type: 'REPLY_SEND_FAILED', messageId: 'opt', error: 'nope' })
     const out = threadEventsReducer(failed, { type: 'REPLY_RETRIED', messageId: 'opt' })
     expect(out.messages[0]._status).toBeUndefined()
+  })
+
+  it('REPLY_RETRIED clears _error along with _status', () => {
+    const failed = threadEventsReducer(sent, { type: 'REPLY_SEND_FAILED', messageId: 'opt', error: 'nope' })
+    const out = threadEventsReducer(failed, { type: 'REPLY_RETRIED', messageId: 'opt' })
+    expect(out.messages[0]._error).toBeUndefined()
   })
 
   it('REPLY_DISMISSED removes the row', () => {

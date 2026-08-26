@@ -57,6 +57,18 @@ vi.mock('../RoomEventsContext/RoomEventsContext', () => ({
   useRegisterThreadMessageMutationHandler: () => registerThreadMessageMutationHandler,
 }))
 
+// A refusal arriving mid-compose (e.g. thread_start_unavailable) is the only
+// signal some sessions get that an outage has started — sendReply/retryReply
+// must report it to DegradedContext, not just tag the row _status: 'failed'.
+const degradedMock = {
+  historyDegraded: false,
+  noteHistoryFailure: vi.fn(),
+  noteHistorySuccess: vi.fn(),
+}
+vi.mock('@/context/DegradedContext', () => ({
+  useDegraded: () => degradedMock,
+}))
+
 function Probe() {
   const t = useThreadEvents()
   return (
@@ -107,6 +119,7 @@ describe('ThreadEventsContext', () => {
     callOrder.length = 0
     threadEventHandler = null
     responseHandlers.clear()
+    degradedMock.noteHistoryFailure.mockClear()
   })
 
   afterEach(() => {
@@ -203,6 +216,31 @@ describe('ThreadEventsContext', () => {
     await act(async () => { screen.getByText('send').click() })
     await act(async () => { screen.getByText('dismiss').click() })
     expect(screen.getByText('count:0')).toBeInTheDocument()
+  })
+
+  it('a gatekeeper refusal mid-compose (thread_start_unavailable) arms the degraded flag via noteHistoryFailure', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('send').click() })
+    expect(degradedMock.noteHistoryFailure).not.toHaveBeenCalled()
+    await act(async () => {
+      respondToSend({ error: 'nope', code: 'unavailable', reason: 'thread_start_unavailable' })
+    })
+    expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'unavailable', reason: 'thread_start_unavailable' })
+    )
+  })
+
+  it('a synchronous publish throw also reports to noteHistoryFailure', async () => {
+    request.mockResolvedValue({ messages: [], hasNext: false, nextCursor: null })
+    publish.mockImplementation(() => { throw new Error('Not connected') })
+    setup()
+    await act(async () => { screen.getByText('open').click() })
+    await act(async () => { screen.getByText('send').click() })
+    expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Not connected' })
+    )
   })
 })
 
