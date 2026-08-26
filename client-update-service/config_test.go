@@ -35,7 +35,11 @@ func TestConfig_RequiresEachRequiredVar(t *testing.T) {
 	for _, missing := range required {
 		t.Run("missing_"+missing, func(t *testing.T) {
 			for _, k := range required {
-				t.Setenv(k, "seed") // t.Setenv restores the original value on cleanup
+				seed := "seed"
+				if k == "UPLOAD_TOKENS" {
+					seed = "seed:0123456789abcdef" // well-formed key:value for map parsing
+				}
+				t.Setenv(k, seed) // t.Setenv restores the original value on cleanup
 			}
 			require.NoError(t, os.Unsetenv(missing))
 			_, err := env.ParseAs[config]()
