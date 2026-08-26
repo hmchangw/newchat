@@ -112,15 +112,12 @@ func BustSub(ctx context.Context, client valkeyutil.Client, roomID, account stri
 }
 
 // BustSubs best-effort deletes many (roomID, account) subscription L2 entries
-// in a single round trip. Called from write sites that mutate every
-// subscriber of a room at once — room-service's roomRestricted, room-worker's
+// in one round trip. Called from write sites that mutate every subscriber of a
+// room at once — room-service's roomRestricted, room-worker's
 // processRemoveOrg/reconcileTeamsRoom, inbox-worker's handleMemberRemoved and
-// handleRoomVisibilityChanged — instead of one Del per account. Safe in Valkey
-// cluster mode specifically because SubKey hash-tags on {roomID}, so every key
-// for one room's subscribers lands in the same cluster slot and a multi-key
-// DEL is valid there (no CROSSSLOT). Fail-open: a nil client or an empty
-// accounts slice is a no-op, and a Valkey error logs at warn and is swallowed —
-// the configured L2 TTL reconciles a missed bust.
+// handleRoomVisibilityChanged — instead of one Del per account. Fail-open: a
+// nil client or an empty accounts slice is a no-op, and a Valkey error logs at
+// warn and is swallowed — the configured L2 TTL reconciles a missed bust.
 func BustSubs(ctx context.Context, client valkeyutil.Client, roomID string, accounts []string) {
 	if client == nil || len(accounts) == 0 {
 		return

@@ -150,58 +150,41 @@ func TestBustKeys_RunsAfterCallerCancellation(t *testing.T) {
 	assert.True(t, c.sawDelay, "the delete must still carry a deadline")
 }
 
-// Valkey rejects a cross-slot multi-key DEL outright, clearing NONE of the
-// keys rather than some. Leaving that to each caller has already produced one
-// production defect and three different hand-rolled obediences, so BustKeys
-// groups the keys itself: same hash tag batches, everything else gets its own
-// DEL. A bust is off the hot path, so the extra round trips cost nothing.
-func TestBustKeys_GroupsKeysByHashTag(t *testing.T) {
+// Callers hand over any key set, however its keys hash. Spreading them across
+// cluster slots belongs to the client (clusterClient.Del pipelines one DEL per
+// key), so BustKeys must not re-derive it — a caller that splits the keys
+// itself pays a round trip per group for nothing, which is what the three
+// hand-rolled obediences in this repo did.
+func TestBustKeys_PassesMixedSlotKeysStraightThrough(t *testing.T) {
 	tests := []struct {
 		name string
 		keys []string
-		want [][]string
 	}{
-		{
-			name: "one shared hash tag batches into a single DEL",
-			keys: []string{"sub:{r1}:alice", "sub:{r1}:bob"},
-			want: [][]string{{"sub:{r1}:alice", "sub:{r1}:bob"}},
-		},
-		{
-			name: "untagged keys never share a DEL",
-			keys: []string{"user:id:u1", "user:acct:alice"},
-			want: [][]string{{"user:id:u1"}, {"user:acct:alice"}},
-		},
-		{
-			name: "different tags are separate DELs, each batched",
-			keys: []string{"sub:{r1}:alice", "sub:{r2}:bob", "sub:{r1}:carol"},
-			want: [][]string{{"sub:{r1}:alice", "sub:{r1}:carol"}, {"sub:{r2}:bob"}},
-		},
-		{
-			name: "a tagged and an untagged key do not batch",
-			keys: []string{"room:{r1}:meta:v2", "room:v3:r1:subs"},
-			want: [][]string{{"room:{r1}:meta:v2"}, {"room:v3:r1:subs"}},
-		},
-		{
-			name: "an empty tag is not a tag",
-			keys: []string{"a:{}:1", "b:{}:2"},
-			want: [][]string{{"a:{}:1"}, {"b:{}:2"}},
-		},
+		{"one shared hash tag", []string{"sub:{r1}:alice", "sub:{r1}:bob"}},
+		{"untagged keys", []string{"user:id:u1", "user:acct:alice"}},
+		{"several tags interleaved", []string{"sub:{r1}:alice", "sub:{r2}:bob", "sub:{r1}:carol"}},
+		{"tagged alongside untagged", []string{"room:{r1}:meta:v2", "room:v3:r1:subs"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := &bustClient{}
 			BustKeys(context.Background(), c, "test", tt.keys...)
-			assert.Equal(t, tt.want, c.calls)
+			assert.Equal(t, [][]string{tt.keys}, c.calls, "one call, keys unreordered")
 		})
 	}
 }
 
-// Grouping must not let one failing slot swallow the others: each group is an
-// independent DEL and a failure in one cannot skip the rest.
-func TestBustKeys_OneFailingGroupDoesNotSkipTheOthers(t *testing.T) {
+// A failing batch must not skip the ones after it.
+func TestBustKeys_OneFailingBatchDoesNotSkipTheOthers(t *testing.T) {
 	c := &bustClient{err: errors.New("valkey down")}
-	BustKeys(context.Background(), c, "test", "user:id:u1", "user:acct:alice")
-	assert.Len(t, c.calls, 2, "every group must be attempted")
+	keys := make([]string, bustBatchSize+1)
+	for i := range keys {
+		keys[i] = "user:acct:" + strconv.Itoa(i)
+	}
+
+	BustKeys(context.Background(), c, "test", keys...)
+
+	assert.Len(t, c.calls, 2, "every batch must be attempted")
 }
 
 func TestBustKeys_SwallowsFailures(t *testing.T) {
@@ -210,13 +193,11 @@ func TestBustKeys_SwallowsFailures(t *testing.T) {
 }
 
 // A room-wide bust can name one key per member per generation. Without a cap it
-// would build one DEL proportional to room size and hand the single-threaded
-// server that as one unit of work.
-func TestBustKeys_SplitsALargeGroupIntoBoundedBatches(t *testing.T) {
+// would build one pipeline proportional to room size.
+func TestBustKeys_SplitsALargeKeySetIntoBoundedBatches(t *testing.T) {
 	c := &bustClient{}
 	keys := make([]string, 0, bustBatchSize*2+5)
 	for i := range cap(keys) {
-		// One shared hash tag, so slot grouping cannot do the splitting for us.
 		keys = append(keys, "sub:{room1}:acct"+strconv.Itoa(i))
 	}
 

@@ -174,11 +174,23 @@ func (r *clusterClient) IncrEx(ctx context.Context, key string, ttl time.Duratio
 	return n, nil
 }
 
+// Del issues one DEL per key through a pipeline, for the same reason MGet does:
+// go-redis groups the pipelined commands by node and runs the groups
+// concurrently, so keys spanning slots — which a single multi-key DEL rejects
+// with CROSSSLOT, clearing none of them — cost about one round-trip per node.
+// Callers may therefore hand over any key set without grouping it first.
 func (r *clusterClient) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	if err := r.c.Del(ctx, keys...).Err(); err != nil {
+	// A missing key is not an error — DEL reports a count — so any error here is
+	// a genuine transport or server failure.
+	if _, err := r.c.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, k := range keys {
+			p.Del(ctx, k)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("valkey del: %w", err)
 	}
 	return nil

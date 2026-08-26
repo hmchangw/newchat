@@ -233,8 +233,8 @@ func (c *valkeyCache) Set(ctx context.Context, roomID string, members []Member, 
 
 // Invalidate removes the cached entry for roomID, in both key generations —
 // see legacyCacheKeySchemaVersion. Those keys carry no hash tag and so land in
-// different cluster slots; BustKeys groups by slot and issues one DEL per
-// group, so neither delete can take the other down with a CROSSSLOT rejection.
+// different cluster slots; the client pipelines one DEL per key, so neither
+// delete can take the other down with a CROSSSLOT rejection.
 //
 // Best-effort, like every other tier's invalidation: a bust runs after the
 // authoritative write has committed, and BustKeys is what strips the caller's

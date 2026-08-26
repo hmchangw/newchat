@@ -120,6 +120,29 @@ func TestClusterRedisClient_Integration_MGetCrossSlot(t *testing.T) {
 	assert.Equal(t, want, got, "present keys come back; absent ones are simply omitted")
 }
 
+// The Del counterpart of MGetCrossSlot, and the reason invalidation callers can
+// hand over any key set: these keys hash to different slots, which a plain
+// multi-key DEL rejects with CROSSSLOT — clearing none of them rather than some.
+func TestClusterRedisClient_Integration_DelCrossSlot(t *testing.T) {
+	client := setupClusterClient(t)
+	ctx := context.Background()
+
+	keys := make([]string, 0, 32)
+	for i := 0; i < 32; i++ {
+		k := fmt.Sprintf("user:acct:del-%d", i)
+		keys = append(keys, k)
+		require.NoError(t, client.Set(ctx, k, "v", time.Hour))
+	}
+	// An absent key among them must not fail the call: DEL counts, it does not error.
+	keys = append(keys, "user:acct:del-never-written")
+
+	require.NoError(t, client.Del(ctx, keys...))
+
+	got, err := client.MGet(ctx, keys)
+	require.NoError(t, err)
+	assert.Empty(t, got, "every key must be gone, not just the first slot's")
+}
+
 func TestClusterRedisClient_Integration_MGetEmptyKeys(t *testing.T) {
 	client := setupClusterClient(t)
 

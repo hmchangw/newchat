@@ -86,9 +86,8 @@ func newL2StoreWithClock(store UserStore, client valkeyutil.Client, ttl time.Dur
 // (hr-sync-worker) is the single choke point that should call it.
 func Bust(ctx context.Context, client valkeyutil.Client, userID, account string) {
 	// These keys carry no hash tag, so the two key spaces land in different
-	// cluster slots. BustKeys groups by slot and issues one DEL per group, so
-	// passing both here is safe — it cannot collapse into a CROSSSLOT DEL that
-	// would clear neither.
+	// cluster slots. Passing both is still safe: the client pipelines one DEL
+	// per key rather than issuing a multi-key DEL that would go CROSSSLOT.
 	keys := make([]string, 0, 2)
 	if userID != "" {
 		keys = append(keys, idKey(userID))

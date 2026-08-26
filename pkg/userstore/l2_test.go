@@ -268,12 +268,11 @@ func TestL2Store_BustRemovesBothKeys(t *testing.T) {
 
 	Bust(ctx, vk, "u-alice", "alice")
 	assert.Empty(t, vk.data, "both key spaces must be dropped or one serves a stale user")
-	// One Del per key space. "user:id:…" and "user:acct:…" carry no hash tag, so
-	// they hash to different cluster slots and a single multi-key DEL fails with
-	// CROSSSLOT against a real cluster — dropping neither key rather than both.
-	require.Len(t, vk.delCalls, 2, "one Del per key — a batched DEL is CROSSSLOT in cluster mode")
-	assert.Equal(t, []string{idKey("u-alice")}, vk.delCalls[0])
-	assert.Equal(t, []string{accountKey("alice")}, vk.delCalls[1])
+	// Both key spaces go in one call. They carry no hash tag and so hash to
+	// different cluster slots, which a multi-key DEL would reject — the client
+	// pipelines one DEL per key instead, which is not this package's concern.
+	require.Len(t, vk.delCalls, 1)
+	assert.Equal(t, []string{idKey("u-alice"), accountKey("alice")}, vk.delCalls[0])
 }
 
 // A caller that supplies only one identifier must issue exactly one Del, not an

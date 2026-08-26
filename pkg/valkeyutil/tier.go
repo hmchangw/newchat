@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -23,10 +22,10 @@ import (
 // the entry's TTL reconciles a missed bust, so waiting buys nothing.
 const bustTimeout = 2 * time.Second
 
-// bustBatchSize caps the keys in one DEL. A room-wide mutation busts one key per
-// member per key generation, so an unbounded DEL would build a command
-// proportional to room size and hand the single-threaded server one huge unit of
-// work. Batching keeps both bounded; the extra round trips are off the hot path.
+// bustBatchSize caps the keys in one invalidation call. A room-wide mutation
+// busts one key per member per key generation, so an unbounded call would build
+// a pipeline proportional to room size. Batching keeps it bounded; the extra
+// round trips are off the hot path.
 const bustBatchSize = 256
 
 // RefreshAfter is how long an entry may be served before it is re-validated:
@@ -78,31 +77,13 @@ func SlideTTL(ctx context.Context, client Client, key string, ttl time.Duration,
 	}
 }
 
-// hashTag returns the cluster-slot grouping key for a Valkey key: the text
-// between the first '{' and the next '}' when that span is non-empty, else the
-// whole key. This mirrors the server's own slot rule, so two keys share a
-// return value exactly when they are guaranteed to share a slot.
-func hashTag(key string) string {
-	open := strings.IndexByte(key, '{')
-	if open < 0 {
-		return key
-	}
-	end := strings.IndexByte(key[open+1:], '}')
-	if end <= 0 { // no closing brace, or an empty {} — neither is a tag
-		return key
-	}
-	return key[open+1 : open+1+end]
-}
-
 // BustKeys best-effort deletes entries an authoritative write has made wrong.
 // Fail-open: a nil client or no keys is a no-op, and any error warns and is
 // swallowed, since the TTL reconciles a missed bust.
 //
-// Keys are grouped by cluster slot and issued as DELs of at most bustBatchSize.
-// Valkey rejects a cross-slot multi-key DEL outright — clearing NONE of the keys
-// rather than some — and leaving that to each caller has already cost one
-// production defect and produced three hand-rolled obediences. A bust runs off
-// the hot path, so the extra round trips are free. Callers may pass any key set.
+// Callers may pass any key set. Spreading the keys across cluster slots is the
+// client's job (see clusterClient.Del) — leaving it to each caller had already
+// cost one production defect and produced three hand-rolled obediences.
 func BustKeys(ctx context.Context, client Client, label string, keys ...string) {
 	if client == nil || len(keys) == 0 {
 		return
@@ -112,27 +93,15 @@ func BustKeys(ctx context.Context, client Client, label string, keys ...string) 
 	// request skip the DEL and leave the cache serving what that write just
 	// invalidated, for a full TTL. The timeout still bounds the call — only
 	// cancellation is dropped, never the deadline. One budget covers every
-	// group, so a slow Valkey cannot multiply the bound by the group count.
+	// batch, so a slow Valkey cannot multiply the bound by the batch count.
 	bustCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bustTimeout)
 	defer cancel()
 
-	// Grouped in first-appearance order so the DELs a caller sees are stable.
-	order := make([]string, 0, len(keys))
-	groups := make(map[string][]string, len(keys))
-	for _, k := range keys {
-		tag := hashTag(k)
-		if _, seen := groups[tag]; !seen {
-			order = append(order, tag)
-		}
-		groups[tag] = append(groups[tag], k)
-	}
-	for _, tag := range order {
-		for batch := range slices.Chunk(groups[tag], bustBatchSize) {
-			// Each batch is independent: one failure must not skip the rest.
-			if err := client.Del(bustCtx, batch...); err != nil {
-				slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",
-					"count", len(batch), "error", err)
-			}
+	for batch := range slices.Chunk(keys, bustBatchSize) {
+		// Each batch is independent: one failure must not skip the rest.
+		if err := client.Del(bustCtx, batch...); err != nil {
+			slog.WarnContext(ctx, label+" L2 invalidate failed (TTL will reconcile)",
+				"count", len(batch), "error", err)
 		}
 	}
 }

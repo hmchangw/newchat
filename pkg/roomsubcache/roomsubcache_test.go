@@ -210,15 +210,13 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.NoError(t, cache.Set(ctx, "r1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 	cache.Invalidate(ctx, "r1")
 
-	// Both generations are dropped, but in SEPARATE Del calls. These keys carry
-	// no hash tag, so "room:v4:r1:subs" and "room:v3:r1:subs" hash to different
-	// cluster slots and a single multi-key DEL is a CROSSSLOT error against a
-	// real cluster — which would fail every invalidation, not just the legacy
-	// half. The split is now enforced by valkeyutil.BustKeys, which groups the
-	// keys it is given by hash tag, rather than by this package hand-obeying it.
-	require.Len(t, client.delCalls, 2, "one Del per key — a batched DEL is CROSSSLOT in cluster mode")
-	assert.Equal(t, []string{"room:v4:r1:subs"}, client.delCalls[0])
-	assert.Equal(t, []string{"room:v3:r1:subs"}, client.delCalls[1])
+	// Both generations are dropped in one call. These keys carry no hash tag, so
+	// "room:v4:r1:subs" and "room:v3:r1:subs" hash to different cluster slots
+	// and a single multi-key DEL would be a CROSSSLOT error against a real
+	// cluster — the client pipelines one DEL per key so it never is. That is the
+	// client's business now, not this package's.
+	require.Len(t, client.delCalls, 1)
+	assert.Equal(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.delCalls[0])
 
 	_, err := cache.Get(ctx, "r1")
 	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
@@ -235,7 +233,8 @@ func TestValkeyCache_Invalidate_TransportError_IsSwallowed(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client)
 
 	require.NotPanics(t, func() { cache.Invalidate(ctx, "r1") })
-	assert.Len(t, client.delCalls, 2, "a failure on one generation must not skip the other")
+	require.Len(t, client.delCalls, 1)
+	assert.Len(t, client.delCalls[0], 2, "a failure must not drop either generation from the attempt")
 }
 
 // The reason this package routes through valkeyutil.BustKeys rather than
@@ -251,7 +250,8 @@ func TestValkeyCache_Invalidate_RunsAfterCallerCancellation(t *testing.T) {
 
 	cache.Invalidate(ctx, "r1")
 
-	assert.Len(t, client.delCalls, 2, "a cancelled caller must not skip the invalidation")
+	require.Len(t, client.delCalls, 1, "a cancelled caller must not skip the invalidation")
+	assert.Len(t, client.delCalls[0], 2, "both generations are still cleared")
 }
 
 func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
