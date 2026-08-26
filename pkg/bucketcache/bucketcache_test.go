@@ -387,3 +387,64 @@ func TestKey_HashTagStable(t *testing.T) {
 	assert.Equal(t, "hist:{room-xyz}:bkt:-5", Key("room-xyz", -5))
 	assert.Equal(t, "hist:{r}:bkt:"+strconv.FormatInt(1<<40, 10), Key("r", 1<<40))
 }
+
+// An empty sealed bucket is the entry most worth caching — it is what a room
+// with intermittent history makes the walk cross, and a hit removes a Cassandra
+// query outright. Storing it as gob would cost ~1.8 KB of Message type
+// descriptors for zero rows, so it gets a one-byte marker instead.
+func TestCache_EmptyBucket_StoredAsMarker(t *testing.T) {
+	fv := newFakeValkey()
+	c := newCache(t, fv)
+	ctx := context.Background()
+
+	c.Put(ctx, "r1", 100, nil)
+
+	fv.mu.Lock()
+	stored := fv.data[Key("r1", 100)]
+	fv.mu.Unlock()
+	assert.Len(t, stored, 1, "an empty bucket must not pay the gob type-descriptor floor")
+
+	msgs, res := c.Get(ctx, "r1", 100)
+	assert.Equal(t, Hit, res, "an empty bucket is a hit, not a miss — the walk skips it without querying")
+	assert.Empty(t, msgs)
+}
+
+// A Put of zero rows and a Put of some rows must be distinguishable, and both
+// distinguishable from a cold key. Getting this wrong would either re-query
+// every empty bucket or serve an empty page for a populated one.
+func TestCache_EmptyVersusPopulatedVersusCold(t *testing.T) {
+	fv := newFakeValkey()
+	c := newCache(t, fv)
+	ctx := context.Background()
+
+	c.Put(ctx, "r1", 1, nil)
+	c.Put(ctx, "r1", 2, bucketOf("has-rows"))
+
+	empty, res := c.Get(ctx, "r1", 1)
+	assert.Equal(t, Hit, res)
+	assert.Empty(t, empty)
+
+	full, res := c.Get(ctx, "r1", 2)
+	require.Equal(t, Hit, res)
+	require.Len(t, full, 1)
+	assert.Equal(t, "has-rows", full[0].Msg)
+
+	_, res = c.Get(ctx, "r1", 3)
+	assert.Equal(t, Miss, res, "a cold key stays a miss")
+}
+
+// The marker shares the key, so a bust clears it like any other value and the
+// bucket is re-decided on the next read.
+func TestCache_Bust_ClearsEmptyMarker(t *testing.T) {
+	fv := newFakeValkey()
+	c := newCache(t, fv)
+	ctx := context.Background()
+
+	c.Put(ctx, "r1", 100, nil)
+	require.True(t, fv.has(Key("r1", 100)))
+
+	c.Bust(ctx, "r1", 100)
+	assert.False(t, fv.has(Key("r1", 100)))
+	_, res := c.Get(ctx, "r1", 100)
+	assert.Equal(t, Miss, res)
+}

@@ -11,7 +11,11 @@
 //
 // A bucket too dense to cache gets a one-byte "oversized" marker under the same
 // key (PutOversized), so the walker learns that verdict from the cache instead
-// of re-running the full-bucket probe on every read.
+// of re-running the full-bucket probe on every read. An EMPTY sealed bucket gets
+// a one-byte marker too: gob writes ~1.8 KB of Message type descriptors even for
+// zero rows, and an empty bucket is the entry most worth keeping — it is what a
+// room with intermittent history makes the walk cross, and serving it from cache
+// removes a Cassandra query outright rather than making one faster.
 //
 // Every Valkey interaction is fail-open: a nil client or any Valkey error
 // degrades to a miss (Get) or is swallowed (Put/PutOversized/Bust); the caller
@@ -94,11 +98,21 @@ const (
 	// fall to interpret's unknown-tag case and degrade to a plain miss.
 	tagBucket    byte = 3
 	tagOversized byte = 2
+	// tagEmpty marks a sealed bucket known to hold no rows. It gets its own tag
+	// rather than riding tagBucket because the gob body for zero rows is still
+	// ~1.8 KB of Message type descriptors — pure overhead for the entry that is
+	// most worth having. An empty sealed bucket is what the walk crosses in a
+	// room with intermittent history, and skipping it is a Cassandra query
+	// saved outright, not a slice served faster.
+	tagEmpty byte = 4
 )
 
 // oversizedMarker is the entire stored value for a known-oversized bucket: one
 // byte, so a dense room costs almost nothing to remember.
 var oversizedMarker = []byte{tagOversized}
+
+// emptyMarker is the entire stored value for a sealed bucket with no rows.
+var emptyMarker = []byte{tagEmpty}
 
 // Invalidator is the write side of the cache: it removes cached buckets and
 // nothing else. It is split out so a service that only invalidates — a writer
@@ -179,10 +193,14 @@ func (c *Cache) Put(ctx context.Context, roomID string, bucket int64, msgs []cas
 	if c.valkey == nil {
 		return
 	}
-	blob, err := encode(msgs)
-	if err != nil {
-		slog.WarnContext(ctx, "bucketcache: encode failed, not caching", "error", err)
-		return
+	blob := emptyMarker
+	if len(msgs) > 0 {
+		encoded, err := encode(msgs)
+		if err != nil {
+			slog.WarnContext(ctx, "bucketcache: encode failed, not caching", "error", err)
+			return
+		}
+		blob = encoded
 	}
 	if err := c.valkey.Set(ctx, Key(roomID, bucket), string(blob), c.ttl); err != nil {
 		slog.WarnContext(ctx, "bucketcache: populate failed (TTL will reconcile)", "error", err)
@@ -228,6 +246,10 @@ func interpret(blob []byte) (msgs []cassandra.Message, res Lookup, ok bool) {
 	switch blob[0] {
 	case tagOversized:
 		return nil, Oversized, true
+	case tagEmpty:
+		// A Hit with no rows: the walk skips this bucket without querying
+		// Cassandra, which is the whole point of storing it.
+		return []cassandra.Message{}, Hit, true
 	case tagBucket:
 		msgs, err := decode(blob[1:])
 		if err != nil {
