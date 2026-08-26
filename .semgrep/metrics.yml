@@ -47,11 +47,24 @@ rules:
       - pattern-either:
           - pattern: metric.WithAttributes(...)
           - pattern: metric.WithAttributeSet(attribute.NewSet(...))
+    #
+    # The sinks match the option in any argument position, not just as the last
+    # or only one. Add/Record/Observe are variadic, and a call that passes a
+    # precomputed option alongside a freshly built one is exactly the mixed
+    # shape where the fresh one still costs per call:
+    #
+    #     c.Add(ctx, 1, precomputed, metric.WithAttributes(...))
+    #
+    # A fixed-position sink misses both orderings. focus-metavariable narrows
+    # the finding back onto the option itself so the report points at the
+    # argument that is built per call rather than at the whole call.
     pattern-sinks:
-      - pattern-either:
-          - pattern: $C.Add($CTX, $N, $OPT)
-          - pattern: $C.Record($CTX, $V, $OPT)
-          - pattern: $C.Observe($V, $OPT)
+      - patterns:
+          - pattern-either:
+              - pattern: $C.Add($CTX, $N, ..., $OPT, ...)
+              - pattern: $C.Record($CTX, $V, ..., $OPT, ...)
+              - pattern: $C.Observe($V, ..., $OPT, ...)
+          - focus-metavariable: $OPT
 
   - id: metrics-no-unbounded-label
     mode: taint

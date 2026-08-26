@@ -91,18 +91,21 @@ func logSlowConsumer(log *slog.Logger, sub *nats.Subscription) {
 	if sub == nil {
 		return
 	}
-	// The remaining suppression is deliberate: unlike a per-item failure loop this
-	// fires once per slow-consumer episode with no loop around it, so there is
-	// nothing to precompute against — the label set is per-subscription and the
-	// subscription set is not known at init.
-	// nosemgrep: metrics-no-per-call-attribute-set
 	slowConsumerEvents.Add(context.Background(), 1,
-		// The rule matches the label key and cannot see that the value is
-		// bounded. subjectLabel collapses response inboxes to a constant, and
-		// TestSubjectLabel_CollapsesResponseInboxes is what keeps that true —
-		// the earlier suppression here claimed boundedness without anything
-		// enforcing it, which is how the leak survived.
-		// nosemgrep: metrics-no-unbounded-label
+		// Both suppressions are about the option below, and both rules report on
+		// it, so they share one directive.
+		//
+		// metrics-no-per-call-attribute-set: unlike a per-item failure loop this
+		// fires once per slow-consumer episode with no loop around it, so there
+		// is nothing to precompute against — the label set is per-subscription
+		// and the subscription set is not known at init.
+		//
+		// metrics-no-unbounded-label: the rule matches the label key and cannot
+		// see that the value is bounded. subjectLabel collapses response inboxes
+		// to a constant, and TestSubjectLabel_CollapsesResponseInboxes is what
+		// keeps that true — the earlier suppression here claimed boundedness
+		// without anything enforcing it, which is how the leak survived.
+		// nosemgrep: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
 		metric.WithAttributes(
 			attribute.String("subject", subjectLabel(sub.Subject)),
 			attribute.String("queue", sub.Queue),

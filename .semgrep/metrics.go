@@ -323,3 +323,14 @@ func perCallOptionViaLocal(
 	// ruleid: metrics-no-per-call-attribute-set
 	o.Observe(n, obsOpt)
 }
+
+// Two options in one call. The sink must not depend on the option being the
+// last or only argument — Add/Record/Observe are variadic, and a caller passing
+// a precomputed set alongside a freshly built one is exactly the mixed case
+// where the fresh one still costs per call.
+func twoOptionsOneCall(ctx context.Context, c metric.Int64Counter, precomputed metric.MeasurementOption, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, precomputed, metric.WithAttributes(attribute.String("site", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("site", v)), precomputed)
+}
