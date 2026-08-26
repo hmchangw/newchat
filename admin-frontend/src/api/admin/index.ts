@@ -2,7 +2,7 @@
 // responses throw `AsyncJobError` via `parseHttpEnvelopeError`.
 
 import { ADMIN_SERVICE_URL } from '@/lib/runtimeConfig'
-import { parseHttpEnvelopeError } from '@/api'
+import { AsyncJobError, parseHttpEnvelopeError } from '@/api'
 
 /** Admin-facing user projection (mirrors admin-service's `userView` — never the bcrypt hash);
  * `normalizeUser` fills defaults for the server's `omitempty` fields. */
@@ -361,4 +361,68 @@ export async function listPermissions(
     limit: params.limit,
   })
   return adminFetch<ListPermissionsResponse>(authToken, 'GET', `/permissions${qs}`)
+}
+
+/**
+ * Uploads a client update artifact pair. Unlike every other call here this uses
+ * `XMLHttpRequest`, because `fetch` cannot report upload progress and these
+ * artifacts are large enough that a silent UI would look hung.
+ *
+ * @throws {AsyncJobError} on a non-2xx response or a transport failure.
+ */
+export function uploadClientVersion(
+  authToken: string,
+  configFile: File,
+  executeFile: File,
+  onProgress?: (percent: number) => void,
+): Promise<void> {
+  const form = new FormData()
+  form.append('configFile', configFile)
+  form.append('executeFile', executeFile)
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${ADMIN_SERVICE_URL}/v1/admin/client-updates`)
+    xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
+    // Content-Type is deliberately unset: the browser writes the multipart
+    // boundary, and overriding it produces a body the server cannot parse.
+
+    if (onProgress) {
+      xhr.upload.onprogress = (e: ProgressEvent) => {
+        if (!e.lengthComputable || !e.total) return
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve()
+        return
+      }
+      reject(uploadEnvelopeError(xhr.status, xhr.responseText))
+    }
+    xhr.onerror = () => reject(new AsyncJobError('upload failed: could not reach the server'))
+
+    xhr.send(form)
+  })
+}
+
+/** Builds an `AsyncJobError` from an XHR error body, mirroring `parseHttpEnvelopeError`. */
+function uploadEnvelopeError(status: number, responseText: string): AsyncJobError {
+  const fallback = `upload failed with status ${status}`
+  try {
+    const body = JSON.parse(responseText) as {
+      error?: string
+      code?: string
+      reason?: string
+      metadata?: Record<string, string>
+    }
+    return new AsyncJobError(body.error || fallback, {
+      code: body.code,
+      reason: body.reason,
+      metadata: body.metadata,
+    })
+  } catch {
+    return new AsyncJobError(fallback)
+  }
 }

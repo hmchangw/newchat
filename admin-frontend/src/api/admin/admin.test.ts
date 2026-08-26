@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AsyncJobError } from '@/api'
 import {
   createPermissions,
@@ -14,6 +14,7 @@ import {
   revokeSession,
   setPassword,
   updateUser,
+  uploadClientVersion,
 } from './index'
 
 function mockResponse(status: number, body: unknown): Response {
@@ -557,5 +558,129 @@ describe('resyncUser', () => {
     const res = await resyncUser('tok', 'a')
 
     expect(res).toEqual({ syncFailures: ['site-b'], hrSyncFailed: true })
+  })
+})
+
+describe('uploadClientVersion', () => {
+  class MockXHR {
+    static instances: MockXHR[] = []
+    upload = { onprogress: null as ((e: ProgressEvent) => void) | null }
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    status = 0
+    responseText = ''
+    method = ''
+    url = ''
+    headers: Record<string, string> = {}
+    body: FormData | null = null
+
+    constructor() {
+      MockXHR.instances.push(this)
+    }
+    open(method: string, url: string) {
+      this.method = method
+      this.url = url
+    }
+    setRequestHeader(k: string, v: string) {
+      this.headers[k] = v
+    }
+    send(body: FormData) {
+      this.body = body
+    }
+    // Test helpers
+    succeed(status = 200, text = '{"result":"success"}') {
+      this.status = status
+      this.responseText = text
+      this.onload?.()
+    }
+    fail(status: number, text: string) {
+      this.status = status
+      this.responseText = text
+      this.onload?.()
+    }
+  }
+
+  beforeEach(() => {
+    MockXHR.instances = []
+    vi.stubGlobal('XMLHttpRequest', MockXHR)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const cfgFile = () => new File(['version: 1'], 'app.yaml', { type: 'text/yaml' })
+  const exeFile = () => new File(['MZ'], 'app.exe', { type: 'application/octet-stream' })
+
+  it('posts both files as multipart with the bearer token', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.succeed()
+    await promise
+
+    expect(xhr.method).toBe('POST')
+    expect(xhr.url).toContain('/v1/admin/client-updates')
+    expect(xhr.headers.Authorization).toBe('Bearer tok-123')
+    expect(xhr.body?.get('configFile')).toBeInstanceOf(File)
+    expect(xhr.body?.get('executeFile')).toBeInstanceOf(File)
+  })
+
+  // The browser must write its own multipart boundary; setting Content-Type by
+  // hand produces a body the server cannot parse.
+  it('never sets Content-Type by hand', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.succeed()
+    await promise
+
+    const keys = Object.keys(xhr.headers).map((k) => k.toLowerCase())
+    expect(keys).not.toContain('content-type')
+  })
+
+  it('reports upload progress as a percentage', async () => {
+    const seen: number[] = []
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile(), (pct) => seen.push(pct))
+    const xhr = MockXHR.instances[0]
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 200 } as ProgressEvent)
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 200, total: 200 } as ProgressEvent)
+    xhr.succeed()
+    await promise
+
+    expect(seen).toEqual([25, 100])
+  })
+
+  it('ignores progress events whose total is unknown', async () => {
+    const seen: number[] = []
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile(), (pct) => seen.push(pct))
+    const xhr = MockXHR.instances[0]
+    xhr.upload.onprogress?.({ lengthComputable: false, loaded: 50, total: 0 } as ProgressEvent)
+    xhr.succeed()
+    await promise
+
+    expect(seen).toEqual([])
+  })
+
+  it('throws AsyncJobError carrying the envelope on a non-2xx response', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.fail(400, '{"code":"bad_request","error":"configFile must be a .yaml or .yml file"}')
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'AsyncJobError',
+      code: 'bad_request',
+      message: 'configFile must be a .yaml or .yml file',
+    })
+  })
+
+  it('throws AsyncJobError when the response body is not JSON', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].fail(502, '<html>gateway</html>')
+    await expect(promise).rejects.toBeInstanceOf(Error)
+  })
+
+  it('rejects on a transport error', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].onerror?.()
+    await expect(promise).rejects.toBeInstanceOf(Error)
   })
 })

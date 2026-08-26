@@ -24,6 +24,7 @@ export {
   revokeSession,
   setPassword,
   updateUser,
+  uploadClientVersion,
 } from './admin'
 export type {
   AdminSession,
