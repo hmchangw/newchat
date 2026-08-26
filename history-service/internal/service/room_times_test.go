@@ -252,7 +252,10 @@ func (f *fakeRoomTimesTier) Fallback(_ context.Context, roomID string) (time.Tim
 
 // A confirmed source-of-truth answer is what seeds the tier — that is the only
 // write path, so nothing a client said can ever become another client's hint.
-func TestResolveRoomTimesOrError_HealthyReadPopulatesTheTier(t *testing.T) {
+// The service reads the tier on the degraded path but never writes it: seeding
+// belongs to the repository decorator beneath the process-local room cache, or a
+// cache hit would write Valkey on every request that lands here.
+func TestResolveRoomTimesOrError_HealthyReadDoesNotWriteTheTier(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	last := now.Add(-30 * 24 * time.Hour)
 	created := now.Add(-400 * 24 * time.Hour)
@@ -269,7 +272,7 @@ func TestResolveRoomTimesOrError_HealthyReadPopulatesTheTier(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, created, got.createdAt)
-	assert.Equal(t, created, tier.stored["room-1"], "only the immutable time is cacheable")
+	assert.Empty(t, tier.stored, "the service must not write the tier")
 }
 
 // A client-supplied hint short-circuits the Mongo read. It must not reach the

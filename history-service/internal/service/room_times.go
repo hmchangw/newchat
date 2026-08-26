@@ -152,28 +152,14 @@ func (s *HistoryService) resolveRoomTimes(
 		if gerr != nil {
 			return time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, gerr)
 		}
-		// Seeded from the repository read, never from a client hint — a hint must
-		// not reach the shared tier, where it would become another reader's
-		// degraded walk floor.
+		// Seeding is the repository decorator's job, beneath the process-local room
+		// cache (history-service/cmd/roomtimesSeeder). Storing from here would write
+		// Valkey on every request that reaches this branch, including the hits that
+		// cache exists to serve.
 		//
-		// Note what this read is NOT: authoritative-per-call. In production
-		// s.rooms is a readcache.RoomCache, so c may be up to
-		// HISTORY_ROOM_CACHE_TTL old rather than straight from Mongo, and this
-		// then seeds a 90-minute shared tier from a process-local L1.
-		//
-		// That is safe for exactly one reason: createdAt is immutable. A value
-		// the L1 read from Mongo ten seconds ago is the same value Mongo holds
-		// now, so age cannot make it wrong — only absent, and the L1 does not
-		// cache errors. The safety therefore rests on WHAT is stored, not on
-		// where this call sits. Anything mutable added to this tier breaks it:
-		// lastMsgAt in particular, which is why the tier takes only createdAt
-		// and pkg/roomtimescache has a test pinning that.
-		s.roomTimes.Store(ctx, roomID, c)
-		// Mongo's createdAt wins over the hint's, rather than only filling a gap:
-		// the two describe an immutable value, so a hint that disagrees is stale
-		// or bogus, and taking it would return a floor different from the one just
-		// cached a line above. Taking c also settles the inconsistency below
-		// without a second read of the same document.
+		// Mongo's createdAt wins over the hint's rather than only filling a gap: the
+		// value is immutable, so a hint that disagrees is stale, and taking c also
+		// settles the inconsistency below without a second read.
 		last, created = &l, &c
 		fromMongo = true
 	}
@@ -190,7 +176,6 @@ func (s *HistoryService) resolveRoomTimes(
 		if gerr != nil {
 			return time.Time{}, fmt.Errorf("resolve room times for %s (consistency refetch): %w", roomID, gerr)
 		}
-		s.roomTimes.Store(ctx, roomID, c)
 		created = &c
 	}
 

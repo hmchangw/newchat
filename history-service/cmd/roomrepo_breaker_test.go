@@ -16,13 +16,16 @@ import (
 )
 
 type stubRoomRepo struct {
-	err   error
-	calls int
+	err error
+	// last and created are what GetRoomTimes returns; the zero values keep every
+	// test that predates the seeder behaving as before.
+	last, created time.Time
+	calls         int
 }
 
 func (s *stubRoomRepo) GetRoomTimes(context.Context, string) (time.Time, time.Time, error) {
 	s.calls++
-	return time.Time{}, time.Time{}, s.err
+	return s.last, s.created, s.err
 }
 
 func (s *stubRoomRepo) GetMinUserLastSeenAt(context.Context, string) (*time.Time, error) {

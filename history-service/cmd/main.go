@@ -300,9 +300,27 @@ func main() {
 		circuitbreaker.Tracked(ctx, "roomtimes"),
 		circuitbreaker.WithFailurePredicate(roomBreakerFailure)))
 
-	var roomSource service.RoomRepository = guardedRooms
+	// Room-times L2. Reuses the client already connected for the subauth tier; a
+	// nil client or a zero TTL leaves the service's no-op in place, so the bucket
+	// walk simply stays as wide as the configured history floor.
+	var roomTimes service.RoomTimesCache
+	if subValkey != nil && cfg.RoomTimesL2TTL > 0 {
+		roomTimes = roomtimescache.NewTier(subValkey, cfg.RoomTimesL2TTL, cachemetrics.For("roomtimes", "l2"))
+	}
+	slog.Info("room-times L2 configured",
+		"enabled", roomTimes != nil, "ttl", cfg.RoomTimesL2TTL)
+
+	// The seeder goes BENEATH the room cache, so only an authoritative read
+	// writes the tier. Above it, a cache hit would write Valkey on every history
+	// request that has no usable client hint.
+	roomReader := service.RoomRepository(guardedRooms)
+	if roomTimes != nil {
+		roomReader = roomTimesSeeder{RoomRepository: guardedRooms, times: roomTimes}
+	}
+
+	roomSource := roomReader
 	if cfg.RoomCacheSize > 0 && cfg.RoomCacheTTL > 0 {
-		rc, err := readcache.NewRoomCache(guardedRooms, cfg.RoomCacheSize, cfg.RoomCacheTTL)
+		rc, err := readcache.NewRoomCache(roomReader, cfg.RoomCacheSize, cfg.RoomCacheTTL)
 		if err != nil {
 			slog.Error("init room cache failed", "error", err)
 			os.Exit(1)
@@ -334,15 +352,10 @@ func main() {
 	}
 	opts = append(opts, service.WithPageBudget(pageBudget))
 
-	// Room-times L2. Reuses the client already connected for the subauth tier;
-	// a nil client or a zero TTL leaves the service's no-op in place, so the
-	// bucket walk simply stays as wide as the configured history floor.
-	if subValkey != nil && cfg.RoomTimesL2TTL > 0 {
-		opts = append(opts, service.WithRoomTimesCache(
-			roomtimescache.NewTier(subValkey, cfg.RoomTimesL2TTL, cachemetrics.For("roomtimes", "l2"))))
+	// The service reads the tier on the degraded path; the seeder above writes it.
+	if roomTimes != nil {
+		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
-	slog.Info("room-times L2 configured",
-		"enabled", subValkey != nil && cfg.RoomTimesL2TTL > 0, "ttl", cfg.RoomTimesL2TTL)
 
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
 
