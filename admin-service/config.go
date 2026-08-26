@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -47,6 +48,18 @@ type Config struct {
 	// no cross-site fanout — correct for single-site dev.
 	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`
 
+	// ClientUpdateURL is the base URL of the LOCAL site's client-update-service,
+	// whose upload endpoint only this service's account may call.
+	ClientUpdateURL string `env:"CLIENT_UPDATE_URL,required"`
+	// ClientUpdateToken is admin-service's entry in that service's UPLOAD_TOKENS.
+	// Never logged, never returned to a caller.
+	ClientUpdateToken string `env:"CLIENT_UPDATE_TOKEN,required"`
+	// ClientUpdateTimeout bounds one artifact upload end to end. It is
+	// deliberately far ABOVE httpWriteTimeout: the upload handler extends its own
+	// read/write deadlines (client_update.go) rather than raising the server's,
+	// so this value must NOT be passed through checkHandlerTimeout.
+	ClientUpdateTimeout time.Duration `env:"CLIENT_UPDATE_UPLOAD_TIMEOUT" envDefault:"10m"`
+
 	// Pool caps the Mongo connection pool. NOTE: admin-service deliberately takes
 	// NO shared HTTP request-timeout (ginutil.TimeoutConfig): its permission
 	// handlers pin their own budget via withRequestBudget (requestBudget, just
@@ -70,6 +83,9 @@ func loadConfig() (Config, error) {
 	if err := c.Pool.Validate(); err != nil {
 		return Config{}, err
 	}
+	if err := validateClientUpdate(c); err != nil {
+		return Config{}, err
+	}
 	return c, nil
 }
 
@@ -82,6 +98,25 @@ func checkHandlerTimeout(name string, d time.Duration) error {
 	}
 	if d >= httpWriteTimeout {
 		return fmt.Errorf("invalid %s %s: must be below the %s HTTP write timeout", name, d, httpWriteTimeout)
+	}
+	return nil
+}
+
+// validateClientUpdate checks the relay's configuration at startup. Error text
+// names the field only — never the token, which would reach the logs.
+func validateClientUpdate(c Config) error { //nolint:gocritic // hugeParam: startup value, called once
+	u, err := url.Parse(c.ClientUpdateURL)
+	if err != nil {
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute URL with scheme and host", c.ClientUpdateURL)
+	}
+	if c.ClientUpdateToken == "" {
+		return fmt.Errorf("CLIENT_UPDATE_TOKEN must not be empty")
+	}
+	if c.ClientUpdateTimeout <= 0 {
+		return fmt.Errorf("invalid CLIENT_UPDATE_UPLOAD_TIMEOUT %s: must be > 0", c.ClientUpdateTimeout)
 	}
 	return nil
 }

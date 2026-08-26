@@ -12,6 +12,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	cfg, err := loadConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "8082", cfg.Port)
@@ -39,6 +41,8 @@ func TestLoadConfig_TimeoutOverrides(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	t.Setenv("ROOM_RPC_TIMEOUT", "12s")
 	t.Setenv("FANOUT_TIMEOUT", "20s")
 	cfg, err := loadConfig()
@@ -68,6 +72,8 @@ func TestLoadConfig_RejectsUnusableHandlerTimeouts(t *testing.T) {
 				t.Setenv("SITE_ID", "site-local")
 				t.Setenv("MONGO_URI", "mongodb://x")
 				t.Setenv("NATS_URL", "nats://x:4222")
+				t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+				t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 				t.Setenv(envName, tc.value)
 				_, err := loadConfig()
 				require.Error(t, err)
@@ -81,7 +87,57 @@ func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
 	_, err := loadConfig()
 	assert.Error(t, err)
+}
+
+func TestValidateClientUpdate(t *testing.T) {
+	base := func() Config {
+		return Config{
+			ClientUpdateURL:     "http://client-update-service:8080",
+			ClientUpdateToken:   "0123456789abcdef",
+			ClientUpdateTimeout: 10 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"valid", func(*Config) {}, false},
+		{"unparseable url", func(c *Config) { c.ClientUpdateURL = "://nope" }, true},
+		{"url without scheme", func(c *Config) { c.ClientUpdateURL = "client-update-service:8080" }, true},
+		{"empty token", func(c *Config) { c.ClientUpdateToken = "" }, true},
+		{"zero timeout", func(c *Config) { c.ClientUpdateTimeout = 0 }, true},
+		{"negative timeout", func(c *Config) { c.ClientUpdateTimeout = -time.Second }, true},
+		// Deliberately ABOVE httpWriteTimeout — that is the whole point of the
+		// per-route deadline extension. checkHandlerTimeout must not be applied.
+		{"timeout far above httpWriteTimeout", func(c *Config) { c.ClientUpdateTimeout = 30 * time.Minute }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(&cfg)
+			err := validateClientUpdate(cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateClientUpdate_ErrorNeverLeaksTheToken(t *testing.T) {
+	cfg := Config{
+		ClientUpdateURL:     "://nope",
+		ClientUpdateToken:   "supersecrettoken0123",
+		ClientUpdateTimeout: time.Minute,
+	}
+	err := validateClientUpdate(cfg)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecrettoken0123")
 }
