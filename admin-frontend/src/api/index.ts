@@ -3,6 +3,7 @@
 
 export {
   AsyncJobError,
+  envelopeErrorFromBody,
   formatAsyncJobError,
   parseHttpEnvelopeError,
 } from './_transport/httpEnvelope'

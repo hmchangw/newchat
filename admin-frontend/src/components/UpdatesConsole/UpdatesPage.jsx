@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { uploadClientVersion, formatAsyncJobError } from '@/api'
+import { uploadClientVersion } from '@/api'
 import { useAuth } from '@/context/AuthContext'
+import { useHandleAdminError } from '@/hooks/useHandleAdminError'
 import './style.css'
 
 // Publishes a client update artifact pair. Validation of the files themselves
@@ -8,6 +9,7 @@ import './style.css'
 // extensions — the server's message is what the admin sees.
 export default function UpdatesPage() {
   const { session } = useAuth()
+  const handleAdminError = useHandleAdminError()
   const [configFile, setConfigFile] = useState(null)
   const [executeFile, setExecuteFile] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -26,7 +28,10 @@ export default function UpdatesPage() {
       await uploadClientVersion(session.authToken, configFile, executeFile, setPercent)
       setDone(`Uploaded ${configFile.name} and ${executeFile.name}.`)
     } catch (err) {
-      setError(formatAsyncJobError(err))
+      // An upload runs for minutes, so a session can expire mid-flight: the shared
+      // hook logs out on invalid_token rather than leaving a stale banner on a dead form.
+      const message = handleAdminError(err)
+      if (message !== null) setError(message)
     } finally {
       setBusy(false)
     }

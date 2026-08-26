@@ -83,7 +83,7 @@ func loadConfig() (Config, error) {
 	if err := c.Pool.Validate(); err != nil {
 		return Config{}, err
 	}
-	if err := validateClientUpdate(c); err != nil {
+	if err := validateClientUpdate(c.ClientUpdateURL, c.ClientUpdateToken, c.ClientUpdateTimeout); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -104,19 +104,19 @@ func checkHandlerTimeout(name string, d time.Duration) error {
 
 // validateClientUpdate checks the relay's configuration at startup. Error text
 // names the field only — never the token, which would reach the logs.
-func validateClientUpdate(c Config) error { //nolint:gocritic // hugeParam: startup value, called once
-	u, err := url.Parse(c.ClientUpdateURL)
+func validateClientUpdate(rawURL, token string, timeout time.Duration) error {
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid CLIENT_UPDATE_URL: %w", err)
 	}
 	if u.Scheme == "" || u.Host == "" {
-		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute URL with scheme and host", c.ClientUpdateURL)
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute URL with scheme and host", rawURL)
 	}
-	if c.ClientUpdateToken == "" {
+	if token == "" {
 		return fmt.Errorf("CLIENT_UPDATE_TOKEN must not be empty")
 	}
-	if c.ClientUpdateTimeout <= 0 {
-		return fmt.Errorf("invalid CLIENT_UPDATE_UPLOAD_TIMEOUT %s: must be > 0", c.ClientUpdateTimeout)
+	if timeout <= 0 {
+		return fmt.Errorf("invalid CLIENT_UPDATE_UPLOAD_TIMEOUT %s: must be > 0", timeout)
 	}
 	return nil
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,11 +95,8 @@ func truncateUpstreamBody(body string) string {
 // service and its own clients, and re-emitting another service's would put
 // undocumented codes into admin-service's surface.
 func upstreamMessage(body, fallback string) string {
-	var env struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(body), &env); err == nil && env.Error != "" {
-		return env.Error
+	if remote, ok := errcode.Parse([]byte(body)); ok {
+		return remote.Message
 	}
 	return fallback
 }
@@ -110,8 +106,9 @@ const clientUpdateAuditAction = "client_update.upload"
 
 // quoteEscaper mirrors mime/multipart's own escaping for Content-Disposition
 // values, so a filename containing a quote or backslash cannot break out of the
-// header it is written into.
-var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+// header it is written into. CR and LF become %0D/%0A for the same reason,
+// matching pkg/drive/multipart.go's escaper rather than diverging from it.
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "%0D", "\n", "%0A")
 
 // relayResult carries the relay goroutine's outcome back to the handler. The
 // filenames travel on the channel rather than a shared map so the handler can

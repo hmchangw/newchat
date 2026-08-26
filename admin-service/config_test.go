@@ -121,7 +121,7 @@ func TestValidateClientUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := base()
 			tt.mutate(&cfg)
-			err := validateClientUpdate(cfg)
+			err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -137,7 +137,7 @@ func TestValidateClientUpdate_ErrorNeverLeaksTheToken(t *testing.T) {
 		ClientUpdateToken:   "supersecrettoken0123",
 		ClientUpdateTimeout: time.Minute,
 	}
-	err := validateClientUpdate(cfg)
+	err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "supersecrettoken0123")
 }

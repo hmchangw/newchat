@@ -2,7 +2,7 @@
 // responses throw `AsyncJobError` via `parseHttpEnvelopeError`.
 
 import { ADMIN_SERVICE_URL } from '@/lib/runtimeConfig'
-import { AsyncJobError, parseHttpEnvelopeError } from '@/api'
+import { AsyncJobError, envelopeErrorFromBody, parseHttpEnvelopeError } from '@/api'
 
 /** Admin-facing user projection (mirrors admin-service's `userView` — never the bcrypt hash);
  * `normalizeUser` fills defaults for the server's `omitempty` fields. */
@@ -409,22 +409,15 @@ export function uploadClientVersion(
   })
 }
 
-/** Builds an `AsyncJobError` from an XHR error body, mirroring `parseHttpEnvelopeError`. */
+/** Builds an `AsyncJobError` from an XHR error body. The envelope shape itself is owned by
+ * `envelopeErrorFromBody`; only the JSON parse differs, since XHR gives text rather than a Response. */
 function uploadEnvelopeError(status: number, responseText: string): AsyncJobError {
   const fallback = `upload failed with status ${status}`
+  let body: unknown
   try {
-    const body = JSON.parse(responseText) as {
-      error?: string
-      code?: string
-      reason?: string
-      metadata?: Record<string, string>
-    }
-    return new AsyncJobError(body.error || fallback, {
-      code: body.code,
-      reason: body.reason,
-      metadata: body.metadata,
-    })
+    body = JSON.parse(responseText)
   } catch {
-    return new AsyncJobError(fallback)
+    body = undefined
   }
+  return envelopeErrorFromBody(body, fallback)
 }

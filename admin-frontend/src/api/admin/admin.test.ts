@@ -589,13 +589,9 @@ describe('uploadClientVersion', () => {
     send(body: FormData) {
       this.body = body
     }
-    // Test helpers
-    succeed(status = 200, text = '{"result":"success"}') {
-      this.status = status
-      this.responseText = text
-      this.onload?.()
-    }
-    fail(status: number, text: string) {
+    // Test helper: settle the request. Success and failure differ only in the
+    // status and body the server would have sent, so one method covers both.
+    respond(status = 200, text = '{"result":"success"}') {
       this.status = status
       this.responseText = text
       this.onload?.()
@@ -617,7 +613,7 @@ describe('uploadClientVersion', () => {
   it('posts both files as multipart with the bearer token', async () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
     const xhr = MockXHR.instances[0]
-    xhr.succeed()
+    xhr.respond()
     await promise
 
     expect(xhr.method).toBe('POST')
@@ -632,7 +628,7 @@ describe('uploadClientVersion', () => {
   it('never sets Content-Type by hand', async () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
     const xhr = MockXHR.instances[0]
-    xhr.succeed()
+    xhr.respond()
     await promise
 
     const keys = Object.keys(xhr.headers).map((k) => k.toLowerCase())
@@ -645,7 +641,7 @@ describe('uploadClientVersion', () => {
     const xhr = MockXHR.instances[0]
     xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 200 } as ProgressEvent)
     xhr.upload.onprogress?.({ lengthComputable: true, loaded: 200, total: 200 } as ProgressEvent)
-    xhr.succeed()
+    xhr.respond()
     await promise
 
     expect(seen).toEqual([25, 100])
@@ -656,7 +652,7 @@ describe('uploadClientVersion', () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile(), (pct) => seen.push(pct))
     const xhr = MockXHR.instances[0]
     xhr.upload.onprogress?.({ lengthComputable: false, loaded: 50, total: 0 } as ProgressEvent)
-    xhr.succeed()
+    xhr.respond()
     await promise
 
     expect(seen).toEqual([])
@@ -665,7 +661,7 @@ describe('uploadClientVersion', () => {
   it('throws AsyncJobError carrying the envelope on a non-2xx response', async () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
     const xhr = MockXHR.instances[0]
-    xhr.fail(400, '{"code":"bad_request","error":"configFile must be a .yaml or .yml file"}')
+    xhr.respond(400, '{"code":"bad_request","error":"configFile must be a .yaml or .yml file"}')
 
     await expect(promise).rejects.toMatchObject({
       name: 'AsyncJobError',
@@ -676,7 +672,7 @@ describe('uploadClientVersion', () => {
 
   it('throws AsyncJobError when the response body is not JSON', async () => {
     const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
-    MockXHR.instances[0].fail(502, '<html>gateway</html>')
+    MockXHR.instances[0].respond(502, '<html>gateway</html>')
     await expect(promise).rejects.toBeInstanceOf(Error)
   })
 
