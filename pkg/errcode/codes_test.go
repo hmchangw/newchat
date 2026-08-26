@@ -14,6 +14,7 @@ var allReasons = []Reason{
 	RoomAlreadyOwner, RoomCannotDemoteLastOwner, RoomPromoteRequiresIndividual,
 	RoomNonChannelOperation,
 	MessageLargeRoomPostRestricted, MessageNotSubscribed, MessageOutsideAccessWindow,
+	MessageThreadStartUnavailable,
 	PinDisabled, PinLimitReached, PinRoomTooLarge,
 	UserAppNotFound, UserAppDisabled, UserSubscriptionNotFound, UserSSOTokenNotFound,
 	AuthTokenExpired, AuthInvalidToken, AuthInvalidRequest, AuthInvalidNKey, AuthMissingFields,

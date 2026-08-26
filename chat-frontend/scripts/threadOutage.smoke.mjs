@@ -2,17 +2,21 @@
 // Cassandra outage, and that starting a brand-new thread while Cassandra is
 // down is refused rather than silently dropped.
 //
-// What this proves (docs/superpowers/sdd/2026-08-25-thread-delivery-cassandra-outage):
+// What this proves (docs/superpowers/specs/2026-08-25-thread-delivery-cassandra-outage-design.md):
 //   - broadcast-worker / notification-worker resolve a thread's parent from
 //     the thread_rooms MongoDB doc, not history-service (which reads
 //     Cassandra) — so a thread that already exists keeps delivering replies
 //     while Cassandra is unreachable.
-//   - message-gatekeeper refuses a reply that would START a new thread while
-//     history is unreachable (errcode.Unavailable, reason
+//   - message-gatekeeper refuses a reply that would START a new channel thread
+//     while history is unreachable (errcode.Unavailable, reason
 //     thread_start_unavailable) — nobody could resolve that parent, so the
 //     reply would reach nobody.
 //   - chat-frontend's sendMessage settles on the gatekeeper's reply instead
 //     of publishing blind, so that refusal is observable to a client.
+//   - the refusal is scoped to the only sends it can save: channel replies
+//     with tshow=false. A tshow=true reply takes the room broadcast path and
+//     a DM reply fans out to every member, neither resolving a parent — so
+//     both are accepted during the outage, and both are asserted below.
 //
 // Why this script does NOT import `sendMessage` (src/api/sendMessage/) or
 // `requestWithAsyncResult` (src/api/_transport/asyncJob.ts), even though
@@ -63,7 +67,7 @@
 import readline from 'node:readline'
 import { connect, StringCodec, jwtAuthenticator, headers as natsHeaders } from 'nats.ws'
 import { createUser } from 'nkeys.js'
-import { roomCreate, userRoomEvent, msgSend, userResponse } from '../src/api/_transport/subjects.ts'
+import { roomCreate, roomEvent, userRoomEvent, msgSend, userResponse } from '../src/api/_transport/subjects.ts'
 import { generateMessageID } from '../src/lib/idgen.js'
 import { isDMExistsReply } from '../src/lib/constants.js'
 import { v4 as uuidv4 } from 'uuid'
@@ -102,7 +106,9 @@ async function devLogin(account) {
 // room-worker's AsyncJobResult on that same subject. Mirrors
 // `requestWithAsyncResult`'s logic exactly, minus the OpenTelemetry spans
 // this script has no use for.
-async function createDMRoom(nc, account, counterpartAccount, siteId) {
+// name: '' creates a DM with the single counterpart; a non-empty name creates a
+// channel. The DM-exists dedup short-circuit only ever fires on the DM path.
+async function createRoom(nc, account, { name, users }, siteId) {
   const requestId = uuidv4()
   const responseSubject = userResponse(account, requestId)
   const sub = nc.subscribe(responseSubject, { max: 1 })
@@ -119,7 +125,7 @@ async function createDMRoom(nc, account, counterpartAccount, siteId) {
   h.set('X-Request-ID', requestId)
   const resp = await nc.request(
     roomCreate(account, siteId),
-    sc.encode(JSON.stringify({ name: '', users: [counterpartAccount], orgs: [], channels: [] })),
+    sc.encode(JSON.stringify({ name, users, orgs: [], channels: [] })),
     { timeout: 5000, headers: h }
   )
   const syncReply = JSON.parse(sc.decode(resp.data))
@@ -221,42 +227,59 @@ async function main() {
   const bob = { nc: bobNc, account: bobAuth.user.account }
   check('bob connected', !!bobNc, bobNc.getServer())
 
-  // ── create a DM room between alice and bob ──────────────────────────────
-  console.log('\n[2] create a DM room (alice + bob)')
+  // ── create the rooms ────────────────────────────────────────────────────
+  // The channel carries every thread assertion: the gatekeeper's refusal and
+  // broadcast-worker's thread_rooms fallback are both channel-only paths. The
+  // DM exists solely to prove the refusal does NOT reach it.
+  console.log('\n[2] create a channel (alice + bob) and a DM (alice + bob)')
   let roomId
+  let dmRoomId
   try {
-    roomId = await createDMRoom(aliceNc, alice.account, bob.account, SITE_ID)
+    roomId = await createRoom(aliceNc, alice.account, { name: `threadoutage-${Date.now()}`, users: [bob.account] }, SITE_ID)
+    dmRoomId = await createRoom(aliceNc, alice.account, { name: '', users: [bob.account] }, SITE_ID)
   } catch (e) {
-    check('DM room created', false, e.message)
+    check('rooms created', false, e.message)
     await aliceNc.drain()
     await bobNc.drain()
     process.exit(2)
   }
-  check('DM room created', !!roomId, `roomId=${roomId}`)
+  check('channel created', !!roomId, `roomId=${roomId}`)
+  check('DM created', !!dmRoomId, `roomId=${dmRoomId}`)
 
-  // ── bob captures every event on his user-room-event lane ────────────────
-  // (DM thread replies fan out via subject.UserRoomEvent per member —
-  // broadcast-worker's publishDMEvents — unencrypted, so no decrypt step.)
+  // ── bob captures every event that can reach him ─────────────────────────
+  // Two lanes, one buffer:
+  //   * chat.user.{bob}.event.room — per-subscriber lane; carries channel
+  //     thread replies (new_thread_message) and every DM event.
+  //   * the channel's room subject — carries top-level channel new_message.
+  // Both namespaces are subscribed because a same-site room routes to
+  // chat.local.room.… while a cross-site one stays global (subjects.roomEvent).
+  // ENCRYPTION_ENABLED is off in docker-local/, so no decrypt step.
   const bobEvents = []
   const bobWaiters = []
-  const bobEventSub = bobNc.subscribe(userRoomEvent(bob.account))
-  ;(async () => {
-    for await (const msg of bobEventSub) {
-      let evt
-      try {
-        evt = JSON.parse(sc.decode(msg.data))
-      } catch {
-        continue // skip malformed messages
-      }
-      bobEvents.push(evt)
-      for (let i = bobWaiters.length - 1; i >= 0; i--) {
-        if (bobWaiters[i].predicate(evt)) {
-          bobWaiters[i].resolve(evt)
-          bobWaiters.splice(i, 1)
+  const bobSubs = [
+    bobNc.subscribe(userRoomEvent(bob.account)),
+    bobNc.subscribe(roomEvent(roomId, true)),
+    bobNc.subscribe(roomEvent(roomId, false)),
+  ]
+  for (const sub of bobSubs) {
+    ;(async () => {
+      for await (const msg of sub) {
+        let evt
+        try {
+          evt = JSON.parse(sc.decode(msg.data))
+        } catch {
+          continue // skip malformed messages
+        }
+        bobEvents.push(evt)
+        for (let i = bobWaiters.length - 1; i >= 0; i--) {
+          if (bobWaiters[i].predicate(evt)) {
+            bobWaiters[i].resolve(evt)
+            bobWaiters.splice(i, 1)
+          }
         }
       }
-    }
-  })()
+    })()
+  }
 
   // Resolves with the first already-captured (or future) event matching
   // `predicate`, or `null` after `timeoutMs` — never rejects, so callers can
@@ -298,9 +321,9 @@ async function main() {
   }
 
   // Sends a plain top-level message via sendViaGatekeeper and returns its id.
-  async function sendTopLevel(sender, roomId, content) {
+  async function sendTopLevel(sender, targetRoomId, content) {
     const id = generateMessageID()
-    await sendViaGatekeeper(sender.nc, sender.account, roomId, SITE_ID, { id, content, requestId: uuidv4() })
+    await sendViaGatekeeper(sender.nc, sender.account, targetRoomId, SITE_ID, { id, content, requestId: uuidv4() })
     return id
   }
 
@@ -308,23 +331,28 @@ async function main() {
   // threadParentMessageCreatedAt is intentionally omitted — the gatekeeper
   // resolves the authoritative value server-side and ignores any
   // client-sent one.
-  async function sendThreadReply(sender, roomId, parentId, content) {
+  async function sendThreadReply(sender, targetRoomId, parentId, content, { tshow = false } = {}) {
     const id = generateMessageID()
-    await sendViaGatekeeper(sender.nc, sender.account, roomId, SITE_ID, {
+    await sendViaGatekeeper(sender.nc, sender.account, targetRoomId, SITE_ID, {
       id,
       content,
       requestId: uuidv4(),
       threadParentMessageId: parentId,
+      ...(tshow ? { tshow: true } : {}),
     })
     return id
   }
 
-  // ── Phase 1 — seed a thread while the stack is healthy, so message-worker
-  // creates its thread_rooms document. This is the thread that must survive.
-  console.log('\n[3] Phase 1 — seed a thread while Cassandra is healthy')
+  // ── Phase 1 — seed a channel thread while the stack is healthy, so
+  // message-worker creates its thread_rooms document. bob sends the first
+  // reply, which makes him a thread follower — a channel thread reply fans out
+  // to the sender, the parent author and the followers, so this is what puts
+  // alice's later replies on bob's lane at all.
+  console.log('\n[3] Phase 1 — seed a channel thread while Cassandra is healthy')
   const parentId = await sendTopLevel(alice, roomId, 'thread parent')
-  await waitForRoomEvent(parentId, 5000)
-  await sendThreadReply(alice, roomId, parentId, 'first reply (healthy)')
+  const parentSeen = await waitForRoomEvent(parentId, 5000)
+  check('channel parent message delivered', !!parentSeen)
+  await sendThreadReply(bob, roomId, parentId, 'first reply (healthy)')
   const seeded = await waitForThreadEvent(parentId, 5000)
   check('healthy thread reply delivered', !!seeded)
 
@@ -339,7 +367,7 @@ async function main() {
   check('existing thread still delivers during the outage', !!during,
     during ? '' : 'bob received no thread event')
 
-  // Assert 2: starting a NEW thread is refused, not silently swallowed.
+  // Assert 2: starting a NEW channel thread is refused, not silently swallowed.
   const freshId = await sendTopLevel(alice, roomId, 'a message with no replies')
   let refusal = null
   try {
@@ -347,16 +375,49 @@ async function main() {
   } catch (err) {
     refusal = err
   }
-  check('new thread start refused with a typed reason',
+  check('new channel thread start refused with a typed reason',
     refusal?.reason === 'thread_start_unavailable',
     refusal ? `got reason=${refusal.reason}` : 'the send was accepted — it should have been refused')
 
-  // ── Phase 3 — recovery restores thread starts.
+  // Assert 3: the refusal is scoped. A tshow=true reply skips broadcast-worker's
+  // thread fan-out entirely (shouldUseThreadFanOut requires !TShow) and a DM
+  // reply fans out to every member — neither resolves a parent, so refusing
+  // either would break a send the outage never touched.
+  let tshowErr = null
+  try {
+    await sendThreadReply(alice, roomId, freshId, 'tshow reply during outage', { tshow: true })
+  } catch (err) {
+    tshowErr = err
+  }
+  check('tshow=true thread start accepted during the outage', tshowErr === null,
+    tshowErr ? `refused with reason=${tshowErr.reason}` : '')
+
+  const dmParentId = await sendTopLevel(alice, dmRoomId, 'dm message with no replies')
+  let dmErr = null
+  let dmReplyId = null
+  try {
+    dmReplyId = await sendThreadReply(alice, dmRoomId, dmParentId, 'dm thread start during outage')
+  } catch (err) {
+    dmErr = err
+  }
+  check('DM thread start accepted during the outage', dmErr === null,
+    dmErr ? `refused with reason=${dmErr.reason}` : '')
+  if (dmReplyId) {
+    const dmDelivered = await waitForEvent(
+      (evt) => evt?.type === 'new_thread_message' && evt?.message?.id === dmReplyId, 5000)
+    check('DM thread start still delivers during the outage', !!dmDelivered,
+      dmDelivered ? '' : 'bob received no DM thread event')
+  }
+
+  // ── Phase 3 — recovery restores channel thread starts.
   console.log('\n[5] Phase 3 — recovery')
   await confirmCassandraStarted()
-  await sendThreadReply(alice, roomId, freshId, 'first reply after recovery')
-  const recovered = await waitForThreadEvent(freshId, 10000)
-  check('new thread start works again after recovery', !!recovered)
+  // bob sends it: the fan-out always includes the reply author, so bob sees his
+  // own reply even though nobody follows this thread yet.
+  const recoveredId = await sendThreadReply(bob, roomId, freshId, 'first reply after recovery')
+  const recovered = await waitForEvent(
+    (evt) => evt?.type === 'new_thread_message' && evt?.message?.id === recoveredId, 10000)
+  check('new channel thread start works again after recovery', !!recovered)
 
   await aliceNc.drain()
   await bobNc.drain()

@@ -2309,7 +2309,7 @@ error table. Key errors:
 - `"visibleTo exceeds maximum size of 4096 bytes"` (`bad_request`)
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
-- `"cannot start a new thread while message history is unavailable"` (`unavailable`, `thread_start_unavailable`) — starting a *new* thread (parent `tcount: 0`) while message history is unreachable; replies to existing threads are unaffected
+- `"cannot start a new thread while message history is unavailable"` (`unavailable`, `thread_start_unavailable`) — starting a *new* thread (parent `tcount: 0`) in a **channel** room with `tshow: false`, while message history is unreachable; replies to existing threads, `tshow: true` replies and all `dm`/`botDM` thread replies are unaffected. Replied and acked, never redelivered — resend by hand once history recovers
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 
