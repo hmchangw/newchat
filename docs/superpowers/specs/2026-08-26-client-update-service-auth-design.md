@@ -33,7 +33,6 @@ action — has no route for it.
 - Authorization is carried by an Ed25519-signed JWT minted by `admin-service`
   and verified by `client-update-service`; the allowlist of permitted service
   accounts lives on `client-update-service`.
-- An admin can mint a service-account token through an admin-only endpoint.
 - `admin-service` exposes an upload endpoint that forwards the artifact pair to
   `POST /api/v1/version`, authenticating itself, with peak memory independent of
   file size.
@@ -49,6 +48,8 @@ action — has no route for it.
   library.
 - No revocation list. Tokens are short-lived and bounded by `exp`; the
   allowlist on `client-update-service` is the revocation mechanism.
+- **No token-issuing endpoint.** `admin-service` mints a token in-process on
+  every upload, so nothing else needs one; see §3.
 - **No `admin-frontend` UI in this change.** The endpoints and their
   documentation are the deliverable; the React upload page is separate
   follow-up work (§10). *This is an assumption — see §10 if it is wrong.*
@@ -61,7 +62,8 @@ action — has no route for it.
 | Who is authorized | Allowlisted service accounts | The JWT `sub` must appear in `client-update-service`'s `ALLOWED_SERVICE_ACCOUNTS`. |
 | Auth scope | Upload only | Download stays open; see §2 non-goals. |
 | Token source for the proxy | Minted in-process per request | `admin-service` already holds the private key. The browser never handles a JWT. |
-| Allowlist ownership | `client-update-service` only | `admin-service` will mint a token for any requested subject; only `client-update-service` decides what a subject may do. One source of truth, no drift between two services. |
+| Allowlist ownership | `client-update-service` only | One source of truth for who may upload, and the revocation mechanism: removing an account from the list refuses it immediately, whatever tokens exist. |
+| No token-issuing endpoint | Mint in-process, per request | An admin-only "issue me a token" route would exist solely for out-of-band use. Dropping it means the private key never produces a token that leaves the cluster, and no admin-facing route hands out a bearer credential. The trade-off is accepted deliberately: `client-update-service` can no longer be driven by hand, so every upload — and therefore every audit entry — goes through `admin-service`. |
 
 ## 4. Architecture — `pkg/svcjwt`
 
@@ -224,47 +226,26 @@ than left as a trap the new upload path walks into:
 
 ## 6. admin-service
 
-Both new routes join the existing `/v1/admin` group, so `requireAdmin` already
-gates them — no middleware changes.
+The new route joins the existing `/v1/admin` group, so `requireAdmin` already
+gates it — no middleware changes.
 
 ```go
-cu := admin.Group("/client-update")
-cu.POST("/token", h.issueServiceToken)
-cu.POST("/version", extendDeadlines(cfg.ClientUpdateUploadTimeout), h.uploadClientVersion)
+admin.POST("/client-update/version",
+    extendDeadlines(cfg.ClientUpdateUploadTimeout), h.uploadClientVersion)
 ```
 
-### 6.1 `POST /v1/admin/client-update/token`
+### 6.1 `POST /v1/admin/client-update/version`
 
-The admin-only token generator.
-
-**Request**
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `serviceAccount` | string | yes | becomes the JWT `sub` |
-| `ttlSeconds` | int | no | default `CLIENT_UPDATE_TOKEN_TTL` (1h); capped at `CLIENT_UPDATE_TOKEN_MAX_TTL` (24h) |
-
-**Response** `200`
-
-| Field | Type | Notes |
-|---|---|---|
-| `token` | string | the signed JWT |
-| `serviceAccount` | string | echoes `sub` |
-| `expiresAt` | int64 | unix seconds |
-
-`400` for an empty `serviceAccount` or a non-positive/over-cap `ttlSeconds`.
-
-`admin-service` mints a token for **any** requested subject. Authorization
-lives entirely in `client-update-service`'s allowlist (§3), so a token for an
-unlisted subject is signed but useless — and there is exactly one place to
-change when the set of permitted accounts changes.
-
-### 6.2 `POST /v1/admin/client-update/version`
-
-Accepts the same `multipart/form-data` pair the downstream expects
-(`configFile`, `executeFile`), mints a short-lived JWT in-process for
+The only client-update route on `admin-service`. It accepts the same
+`multipart/form-data` pair the downstream expects (`configFile`,
+`executeFile`), mints a short-lived JWT in-process for
 `CLIENT_UPDATE_SERVICE_ACCOUNT` with `SVCJWT_TTL` (5m), and forwards to
-`POST {CLIENT_UPDATE_BASE_URL}/api/v1/version`. The browser never sees a JWT.
+`POST {CLIENT_UPDATE_BASE_URL}/api/v1/version`.
+
+The JWT is created per request and lives only for the duration of the forward.
+It is never returned to the caller, so the browser — and any other client of
+`admin-service` — never handles a bearer credential for
+`client-update-service`.
 
 Downstream status mapping:
 
@@ -275,7 +256,7 @@ Downstream status mapping:
 | `401` / `403` | `503`, reason `upstream_unauthorized` | This is a *configuration* fault — a key mismatch or a missing allowlist entry — not the admin's credential failing. Relaying `401` would tell an authenticated admin their own session was rejected, sending them to debug the wrong thing entirely. |
 | transport error, `5xx` | `503`, reason `upstream_unavailable` | |
 
-### 6.3 Streaming the forward (`forwarder.go`)
+### 6.2 Streaming the forward (`forwarder.go`)
 
 Gin's `c.FormFile` buffers to memory up to `MaxMultipartMemory` and spills the
 rest to local disk — unacceptable for a large `.exe` in a pod with a fixed disk
@@ -285,7 +266,7 @@ Instead the handler reads the inbound body with `r.MultipartReader()` and
 re-encodes each part directly into the outbound request through an `io.Pipe`.
 Nothing is buffered whole and nothing touches disk; peak memory is one copy
 buffer regardless of artifact size. Parts are streamed in the order they
-arrive, so the field names are known for the audit entry (§6.5) without
+arrive, so the field names are known for the audit entry (§6.4) without
 materialising the files.
 
 The outbound call uses a raw `*http.Client` obtained from
@@ -306,7 +287,7 @@ reject a malformed submission before spending the upload. The audit trail is
 the reason this endpoint exists inside `admin-service` at all, so the extra
 ~80 lines are bought deliberately.
 
-### 6.4 Timeouts
+### 6.3 Timeouts
 
 `admin-service` runs `ReadTimeout: 15s` and `WriteTimeout: 40s`
 (`httpWriteTimeout`), and `checkHandlerTimeout` enforces that every handler
@@ -324,19 +305,21 @@ one request's read and write deadlines out to
 `CLIENT_UPDATE_UPLOAD_TIMEOUT`. Every other route keeps today's behaviour
 exactly.
 
-### 6.5 Audit
+### 6.4 Audit
 
-Both endpoints append through the existing `h.audit` helper.
+The endpoint appends through the existing `h.audit` helper.
 
 | Action | Details |
 |---|---|
-| `client_update.token_issued` | `serviceAccount`, `expiresAt` |
 | `client_update.upload` | `configFile`, `executeFile` (names only) |
 
-`AuditEntry.Details` holds non-secret context only, per its own doc comment: the
-token is never recorded.
+Because §3 removes every other route to `client-update-service`, this entry is
+a complete record: no artifact can reach MinIO without one.
 
-### 6.6 Config additions
+`AuditEntry.Details` holds non-secret context only, per its own doc comment: the
+minted token is never recorded.
+
+### 6.5 Config additions
 
 | Env var | Default | Notes |
 |---|---|---|
@@ -346,18 +329,16 @@ token is never recorded.
 | `CLIENT_UPDATE_BASE_URL` | *required* | e.g. `http://client-update-service:8080` |
 | `CLIENT_UPDATE_AUDIENCE` | `client-update-service` | JWT `aud` |
 | `CLIENT_UPDATE_SERVICE_ACCOUNT` | *required* | `sub` admin-service mints for itself |
-| `CLIENT_UPDATE_TOKEN_TTL` | `1h` | default TTL for admin-issued tokens |
-| `CLIENT_UPDATE_TOKEN_MAX_TTL` | `24h` | hard cap on `ttlSeconds` |
 | `CLIENT_UPDATE_UPLOAD_TIMEOUT` | `10m` | per-request deadline on the upload route |
 
 Secrets are marked `required` and never defaulted, per CLAUDE.md. Note that
 `CLIENT_UPDATE_UPLOAD_TIMEOUT` is deliberately **not** passed through
 `checkHandlerTimeout`: that guard exists to keep handler budgets under the
-40s server write timeout, and this route escapes that timeout by design (§6.4).
+40s server write timeout, and this route escapes that timeout by design (§6.3).
 
-### 6.7 New error reasons
+### 6.6 New error reasons
 
-`pkg/errcode/codes_admin.go` gains the two reasons §6.2 maps upstream failures
+`pkg/errcode/codes_admin.go` gains the two reasons §6.1 maps upstream failures
 onto, alongside the existing admin reasons:
 
 ```go
@@ -387,9 +368,9 @@ client-update-service ── requireServiceAccount ── svcjwt.Verify + allowl
 MinIO
 ```
 
-The out-of-band path is the same minus the proxy: an admin calls
-`POST /v1/admin/client-update/token`, receives a JWT, and presents it directly
-to `client-update-service`.
+There is no second path. `admin-service` is the only holder of the private key
+and exposes no route that returns a token, so this flow is the only way an
+artifact reaches MinIO.
 
 ## 8. Testing
 
@@ -416,10 +397,11 @@ explicit test that `GET /api/v1/version/:fileName` still succeeds with **no**
 regression test.
 
 **`admin-service/clientupdate_test.go`** — against an `httptest` upstream:
-token endpoint happy path, empty `serviceAccount`, over-cap `ttlSeconds`;
-upload happy path with the audit entry asserted, missing part, upstream `400`
-relayed, upstream `401` mapped to `503`, upstream transport failure mapped to
-`503`. `requireAdmin` rejection is already covered by `middleware_test.go`.
+upload happy path with the audit entry asserted and the forwarded
+`Authorization` header checked to carry a token the matching verifier accepts;
+missing part; upstream `400` relayed; upstream `401` mapped to `503`; upstream
+transport failure mapped to `503`. `requireAdmin` rejection is already covered
+by `middleware_test.go`.
 
 **Integration** — `client-update-service/integration_test.go` gains an
 authenticated upload against the real MinIO container, plus a rejected
@@ -432,8 +414,8 @@ unauthenticated upload.
 - `docs/client-api.md` §12: the upload gains an **Auth** row and its `401`/`403`
   cases. The blanket "UNAUTHENTICATED in v1" warning is narrowed to the
   download only, since the write hole is now closed.
-- `docs/client-api.md` §9 (Admin Service): both new endpoints, with request and
-  response field tables and JSON examples, per the house style.
+- `docs/client-api.md` §9 (Admin Service): the new upload endpoint, with request
+  and response field tables and a JSON example, per the house style.
 - Neither `docs/client-api/request-reply.md` nor `docs/client-api/events.md`
   changes — both are derived views of the NATS `chat.user.` surface, and this
   change adds no NATS subject and touches no `pkg/model` wire struct.
