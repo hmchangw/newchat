@@ -190,7 +190,12 @@ func (f *fakeUploader) Upload(_ context.Context, contentType string, body io.Rea
 		return f.err
 	}
 	if readErr != nil {
-		return readErr
+		// Mirrors restyVersionUploader: a failure draining the body surfaces as
+		// this service's own Unavailable, never as the pipe's raw error. The
+		// handler's errors.Is guard depends on that — an uploader that echoed the
+		// pipe error back verbatim would make a client-side fault indistinguishable
+		// from an upstream one.
+		return errcode.Unavailable("client update service is unavailable", errcode.WithCause(readErr))
 	}
 	return nil
 }
@@ -199,6 +204,21 @@ func (f *fakeUploader) wasCalled() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.called
+}
+
+// relayedContentType and relayedBody read what Upload recorded under the mutex
+// that guards it. The HTTP round-trip happens to order the goroutines today, but
+// reading the fields bare is still a race the detector is entitled to catch.
+func (f *fakeUploader) relayedContentType() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.contentType
+}
+
+func (f *fakeUploader) relayedBody() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]byte(nil), f.body...)
 }
 
 // recordingAuditStore captures audit writes; every other AdminStore method is
@@ -280,15 +300,20 @@ func uploadBody(t *testing.T, parts map[string]struct{ filename, content, conten
 	return body, w.FormDataContentType()
 }
 
-func postUpload(t *testing.T, srv *httptest.Server, body *bytes.Buffer, contentType string) *http.Response {
+// postUpload returns the status and the response body, closing the body here so
+// callers neither can nor need to. Returning *http.Response instead would leave
+// every caller looking like a leak to bodyclose.
+func postUpload(t *testing.T, srv *httptest.Server, body *bytes.Buffer, contentType string) (int, []byte) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", contentType)
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = resp.Body.Close() })
-	return resp
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, respBody
 }
 
 func TestUploadClientVersion_Success(t *testing.T) {
@@ -301,11 +326,11 @@ func TestUploadClientVersion_Success(t *testing.T) {
 		"configFile":  {"app.yaml", "version: 1", "text/yaml"},
 		"executeFile": {"app.exe", "MZbinary", ""},
 	})
-	resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
+	status, _ := postUpload(t, srv, body, ct)
 
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, status)
 	assert.True(t, up.wasCalled())
-	assert.Contains(t, up.contentType, "multipart/form-data; boundary=")
+	assert.Contains(t, up.relayedContentType(), "multipart/form-data; boundary=")
 
 	entries := store.audited()
 	require.Len(t, entries, 1)
@@ -327,10 +352,10 @@ func TestUploadClientVersion_PreservesPartContentTypes(t *testing.T) {
 		"configFile":  {"app.yaml", "version: 1", "text/yaml"},
 		"executeFile": {"app.exe", "MZbinary", ""},
 	})
-	resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	status, _ := postUpload(t, srv, body, ct)
+	require.Equal(t, http.StatusOK, status)
 
-	relayed := parseRelayed(t, up.body, up.contentType)
+	relayed := parseRelayed(t, up.relayedBody(), up.relayedContentType())
 	assert.Equal(t, "text/yaml", relayed["configFile"].contentType,
 		"a declared part Content-Type must survive the relay")
 	assert.Empty(t, relayed["executeFile"].contentType,
@@ -367,9 +392,10 @@ func parseRelayed(t *testing.T, body []byte, contentType string) map[string]rela
 	return out
 }
 
-// A body far larger than any internal buffer must arrive intact — proof the
-// relay streams rather than truncating at a buffer boundary.
-func TestUploadClientVersion_StreamsLargeBodyIntact(t *testing.T) {
+// A body far larger than any internal buffer must arrive intact. This proves
+// integrity, not streaming — a fully buffering handler would pass it too. The
+// streaming claim is pinned by TestUploadClientVersion_RelaysBeforeBodyIsComplete.
+func TestUploadClientVersion_LargeBodyArrivesIntact(t *testing.T) {
 	const size = 4 << 20 // 4 MiB
 	up := &fakeUploader{}
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
@@ -380,10 +406,10 @@ func TestUploadClientVersion_StreamsLargeBodyIntact(t *testing.T) {
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", big, ""},
 	})
-	resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	status, _ := postUpload(t, srv, body, ct)
+	require.Equal(t, http.StatusOK, status)
 
-	relayed := parseRelayed(t, up.body, up.contentType)
+	relayed := parseRelayed(t, up.relayedBody(), up.relayedContentType())
 	assert.Len(t, relayed["executeFile"].content, size)
 	assert.Equal(t, big, relayed["executeFile"].content)
 }
@@ -409,9 +435,9 @@ func TestUploadClientVersion_UpstreamErrorsAreMapped(t *testing.T) {
 				"configFile":  {"app.yaml", "version: 1", ""},
 				"executeFile": {"app.exe", "MZ", ""},
 			})
-			resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
+			status, _ := postUpload(t, srv, body, ct)
 
-			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantStatus, status)
 			assert.Empty(t, store.audited(),
 				"a failed upload must not be recorded as a published artifact")
 		})
@@ -441,9 +467,9 @@ func TestUploadClientVersion_UnconfiguredUploaderIsUnavailable(t *testing.T) {
 	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
 		"configFile": {"app.yaml", "version: 1", ""},
 	})
-	resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
+	status, _ := postUpload(t, srv, body, ct)
 
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, http.StatusServiceUnavailable, status)
 }
 
 // The handler pushes its own read/write deadlines past the server's 15s/40s.
@@ -459,8 +485,193 @@ func TestUploadClientVersion_ExtendsItsOwnDeadlines(t *testing.T) {
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", "MZ", ""},
 	})
-	resp := postUpload(t, srv, body, ct) //nolint:bodyclose // postUpload closes the body via t.Cleanup
+	status, _ := postUpload(t, srv, body, ct)
 
-	require.Equal(t, http.StatusOK, resp.StatusCode,
+	require.Equal(t, http.StatusOK, status,
 		"a 500 here means SetReadDeadline/SetWriteDeadline returned ErrNotSupported")
+}
+
+// errTestTornDown ends a deliberately unfinished request body at test cleanup.
+var errTestTornDown = errors.New("test torn down")
+
+// streamProbeUploader closes saw on its first non-empty read, then drains the
+// rest. A handler that buffered the request body would not even call Upload
+// until the body was complete, so the signal arriving while the test is still
+// holding the body open is what distinguishes streaming from buffering.
+type streamProbeUploader struct {
+	saw  chan struct{}
+	once sync.Once
+}
+
+func (s *streamProbeUploader) Upload(_ context.Context, _ string, body io.Reader) error {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			s.once.Do(func() { close(s.saw) })
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// writeHeldBody writes the first part, waits for release, then writes the second
+// and terminates the body — so the request is deliberately incomplete until the
+// test says otherwise.
+func writeHeldBody(mw *multipart.Writer, bodyW *io.PipeWriter, release <-chan struct{}) error {
+	first := textproto.MIMEHeader{}
+	first.Set("Content-Disposition", `form-data; name="configFile"; filename="app.yaml"`)
+	fw, err := mw.CreatePart(first)
+	if err != nil {
+		return err
+	}
+	// Comfortably past the transport's and the multipart reader's buffers, so a
+	// pass cannot be an artefact of something small sitting in a buffer.
+	if _, err := io.WriteString(fw, strings.Repeat("A", 64<<10)); err != nil {
+		return err
+	}
+
+	<-release
+
+	second := textproto.MIMEHeader{}
+	second.Set("Content-Disposition", `form-data; name="executeFile"; filename="app.exe"`)
+	fw2, err := mw.CreatePart(second)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(fw2, "MZ"); err != nil {
+		return err
+	}
+	if err := mw.Close(); err != nil {
+		return err
+	}
+	return bodyW.Close()
+}
+
+// Streaming is this branch's central performance claim, so it gets a test that
+// only a streaming handler can pass: the request body is driven from a test-side
+// pipe and deliberately left incomplete, and the uploader must already have seen
+// bytes before the remainder is written. A handler that did io.ReadAll on the
+// request body and handed Upload a buffer would block here until the timeout.
+func TestUploadClientVersion_RelaysBeforeBodyIsComplete(t *testing.T) {
+	up := &streamProbeUploader{saw: make(chan struct{})}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	bodyR, bodyW := io.Pipe()
+	mw := multipart.NewWriter(bodyW)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseBody := func() { releaseOnce.Do(func() { close(release) }) }
+	writeErr := make(chan error, 1)
+	go func() { writeErr <- writeHeldBody(mw, bodyW, release) }()
+
+	// Without this, a buffering regression would time out below and then hang the
+	// suite: httptest.Server.Close waits for the in-flight request, whose body
+	// never ends. Releasing the writer and tearing down both pipe ends lets the
+	// handler unwind so the failure is reported promptly. All no-ops on success.
+	t.Cleanup(func() {
+		releaseBody()
+		_ = bodyW.CloseWithError(errTestTornDown)
+		_ = bodyR.CloseWithError(errTestTornDown)
+	})
+
+	type result struct {
+		status int
+		err    error
+	}
+	got := make(chan result, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", bodyR)
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		got <- result{status: resp.StatusCode}
+	}()
+
+	select {
+	case <-up.saw:
+	case r := <-got:
+		t.Fatalf("request finished before any part reached the uploader: status=%d err=%v", r.status, r.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("no bytes reached the uploader while the request body was still open — the handler buffered instead of streaming")
+	}
+
+	releaseBody() // only now does the rest of the body exist
+	require.NoError(t, <-writeErr)
+
+	select {
+	case r := <-got:
+		require.NoError(t, r.err)
+		assert.Equal(t, http.StatusOK, r.status)
+	case <-time.After(10 * time.Second):
+		t.Fatal("request did not complete after the body was finished")
+	}
+}
+
+// A truncated client body is the admin's fault, not an upstream outage. The
+// relay's pipe close propagates its read error into Upload, which maps it to
+// Unavailable — so without the handler's errors.Is guard this would answer 503
+// and send ops chasing a phantom outage while the upstream is healthy.
+func TestUploadClientVersion_TruncatedBodyIsBadRequest(t *testing.T) {
+	up := &fakeUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	// Hand-built rather than truncated from uploadBody's output, so it is
+	// unambiguous where the body stops: mid-part, with no closing boundary.
+	const boundary = "truncatedbodyboundary"
+	raw := "--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"configFile\"; filename=\"app.yaml\"\r\n\r\n" +
+		"version: 1"
+
+	status, body := postUpload(t, srv, bytes.NewBufferString(raw), "multipart/form-data; boundary="+boundary)
+
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, string(body), "could not read the uploaded files")
+}
+
+// abortingUploader reads one chunk and then rejects, the way an upstream that
+// validates the first part does — leaving the relay still writing, so the
+// handler's pr.CloseWithError injects the upstream's own error into the pipe and
+// res.err comes back wrapping it.
+type abortingUploader struct{ err error }
+
+func (a *abortingUploader) Upload(_ context.Context, _ string, body io.Reader) error {
+	var buf [16]byte
+	_, _ = body.Read(buf[:])
+	return a.err
+}
+
+// The mirror of the truncation case: when the upstream is the one that rejects
+// mid-body, its message must survive rather than being replaced by the generic
+// client-side one. Swapping the two checks unconditionally would break this.
+func TestUploadClientVersion_UpstreamRejectionSurvivesTheRelayAbort(t *testing.T) {
+	up := &abortingUploader{err: errcode.BadRequest("configFile must be a .yaml or .yml file")}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	// Large enough that the relay is certainly still writing when Upload returns.
+	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+		"executeFile": {"app.exe", strings.Repeat("A", 4<<20), ""},
+	})
+	status, respBody := postUpload(t, srv, body, ct)
+
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, string(respBody), "configFile must be a .yaml or .yml file")
+	assert.NotContains(t, string(respBody), "could not read the uploaded files",
+		"the upstream's own message must not be replaced by the client-side one")
 }

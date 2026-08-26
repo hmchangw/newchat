@@ -148,17 +148,31 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 		done <- relayResult{names: names, err: relayErr}
 	}()
 
-	uploadErr := h.uploader.Upload(ctx, mw.FormDataContentType(), pr)
+	// Deferred as well as called inline: the inline close is what unblocks the
+	// goroutine before <-done, and the defer is what unblocks it if Upload panics
+	// and gin.Recovery unwinds this frame — otherwise the relay would park on
+	// pw.Write forever, pinning the request body reader.
+	var uploadErr error
+	defer func() { _ = pr.CloseWithError(uploadErr) }()
+
+	uploadErr = h.uploader.Upload(ctx, mw.FormDataContentType(), pr)
 	// Unblocks the goroutine if the upload gave up mid-body; a no-op otherwise.
 	_ = pr.CloseWithError(uploadErr)
 	res := <-done
 
-	if uploadErr != nil {
-		errhttp.Write(ctx, c, uploadErr)
+	// res.err first, but only when the relay failed on its own terms — the
+	// client's body — rather than because we closed the pipe after the upstream
+	// rejected the request. pr.CloseWithError injects uploadErr into the pipe, so
+	// on a genuine upstream failure res.err wraps it and errors.Is is true; on a
+	// truncated or malformed client body res.err is an independent request-side
+	// read error. Without this split, a bad client body reports as an upstream
+	// outage and sends ops chasing a phantom one.
+	if res.err != nil && !errors.Is(res.err, uploadErr) {
+		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
 		return
 	}
-	if res.err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
+	if uploadErr != nil {
+		errhttp.Write(ctx, c, uploadErr)
 		return
 	}
 
