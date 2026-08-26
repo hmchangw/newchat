@@ -136,8 +136,16 @@ func (s *MongoStore) DeleteForAccount(ctx context.Context, siteID, account strin
 // deleteAndReportIDs collects the _ids a filter matches, then deletes by that
 // same FILTER rather than by the collected ids. The order matters: deleting by
 // the filter still removes a session inserted between the two calls, so a
-// concurrent login cannot survive a revoke. Such a late arrival is simply
-// absent from the returned ids — it has no cache entry worth busting yet.
+// concurrent login cannot survive a revoke.
+//
+// KNOWN GAP, deliberately open: such a late arrival is absent from the returned
+// ids, so the caller's sessioncache bust never names it. It CAN hold a cache
+// entry by then — a bot authenticates immediately after login, and that first
+// validation populates L2 — so the session is gone from MongoDB while its token
+// keeps working from cache for a TTL, or longer if a source outage keeps
+// sliding it. Closing this needs the delete and the invalidation to agree on
+// one set (drain in a loop, a transaction, or an account-level generation).
+// Deferred: revocation latency is an accepted trade in this deployment.
 func (s *MongoStore) deleteAndReportIDs(ctx context.Context, filter bson.M, what string) ([]string, error) {
 	cur, err := s.coll.Find(ctx, filter, options.Find().SetProjection(bson.M{"_id": 1}))
 	if err != nil {
