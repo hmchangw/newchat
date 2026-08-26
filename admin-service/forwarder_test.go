@@ -235,3 +235,37 @@ func TestForward_RejectsUnknownField(t *testing.T) {
 	require.ErrorAs(t, err, &ec)
 	assert.Equal(t, http.StatusBadRequest, ec.HTTPStatus())
 }
+
+// TestForward_RespAuthoritativeEvenWhenCopierSeesClosedPipe guards the
+// canonical case the 401/403 mapping exists for: client-update-service's auth
+// middleware rejects the token and answers 401 before reading the body at
+// all. net/http's Do returns as soon as response headers arrive, racing
+// ahead of the still-uploading executeFile; when the connection then tears
+// down mid-write, req.Body closes underneath the copier and it observes
+// io.ErrClosedPipe. That must never override the 401 the server actually
+// sent — the response is authoritative whenever doErr is nil.
+func TestForward_RespAuthoritativeEvenWhenCopierSeesClosedPipe(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Deliberately do NOT read r.Body — this is the shape of an auth
+		// rejection that answers before it ever looks at the payload.
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"unauthenticated","error":"invalid service token"}`))
+	}))
+	defer upstream.Close()
+
+	f := newClientUpdateForwarder(upstream.URL, 30*time.Second, staticToken("tok"))
+	// 8MiB is well past net/http server's 256KiB auto-drain-on-finish
+	// threshold, so the write cannot complete before the response is
+	// written and the connection is torn down mid-copy.
+	src, _ := fwdTestForm(t, []struct{ field, name, body, contentType string }{
+		{configFileField, "app.yaml", "version: 3", "application/x-yaml"},
+		{executeFileField, "app.exe", strings.Repeat("x", 8<<20), ""},
+	})
+
+	_, err := f.Forward(context.Background(), src)
+	require.Error(t, err)
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, http.StatusServiceUnavailable, ec.HTTPStatus())
+	assert.Equal(t, errcode.AdminUpstreamUnauthorized, ec.Reason)
+}

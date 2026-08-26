@@ -74,6 +74,18 @@ func (f *clientUpdateForwarder) Forward(ctx context.Context, src *multipart.Read
 
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
+
+	// Built before the copier goroutine starts, and using only pr (which
+	// already exists): an error here (e.g. a malformed configured baseURL)
+	// returns before anything is spawned, so there is no reader-less
+	// goroutine left blocked forever on its first pw.Write.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+"/api/v1/version", pr)
+	if err != nil {
+		return uploadedNames{}, fmt.Errorf("build client-update request: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+
 	// Buffered so the copier never blocks handing back what it saw.
 	done := make(chan struct {
 		names uploadedNames
@@ -94,13 +106,6 @@ func (f *clientUpdateForwarder) Forward(ctx context.Context, src *multipart.Read
 		_ = pw.CloseWithError(err)
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+"/api/v1/version", pr)
-	if err != nil {
-		return uploadedNames{}, fmt.Errorf("build client-update request: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+token)
-
 	resp, doErr := f.http.Do(req)
 	// net/http closes req.Body on the way out, which unblocks the copier if it
 	// is mid-write, so this receive cannot deadlock.
@@ -113,8 +118,8 @@ func (f *clientUpdateForwarder) Forward(ctx context.Context, src *multipart.Read
 	// req.Body (our pr) synchronously on several failure paths — notably a
 	// dial failure, before RoundTrip even returns — and that race reliably
 	// wins over the copier goroutine. In that case the copier's error is
-	// itself a downstream symptom of doErr, not an independent cause, so fall
-	// through to classifying the transport failure instead.
+	// itself a downstream symptom, not an independent cause, so fall through
+	// and let doErr / resp settle it.
 	if copied.err != nil && !errors.Is(copied.err, io.ErrClosedPipe) {
 		if resp != nil {
 			_ = resp.Body.Close()
@@ -125,14 +130,12 @@ func (f *clientUpdateForwarder) Forward(ctx context.Context, src *multipart.Read
 		return copied.names, errcode.Unavailable("client-update-service is unreachable",
 			errcode.WithReason(errcode.AdminUpstreamUnavailable), errcode.WithCause(doErr))
 	}
-	if copied.err != nil {
-		// Pipe closed but Do still reported success — shouldn't happen in
-		// practice, but surface it rather than silently discarding it.
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return copied.names, fmt.Errorf("stream upload body: %w", copied.err)
-	}
+	// doErr == nil means resp is the authoritative answer, even if the copier
+	// also saw io.ErrClosedPipe: net/http's roundTrip returns as soon as
+	// response headers arrive, racing ahead of the still-in-flight request
+	// write — the canonical case being an upstream that rejects the request
+	// (401/403) before reading the body at all. That ErrClosedPipe carries no
+	// information the response doesn't, so it must never override resp.
 	defer resp.Body.Close()
 	return copied.names, classifyUpstream(resp)
 }
