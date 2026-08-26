@@ -873,6 +873,41 @@ func TestHandleUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
 	require.Len(t, roomEvt.Mentions, 1, "edit event must carry the resolved mention")
 	assert.Equal(t, "bob", roomEvt.Mentions[0].Account)
+	assert.False(t, roomEvt.MentionAll, "no @all in the edited content")
+}
+
+// An edit whose content adds @all carries MentionAll on the message_edited event
+// (mirrors the create/new-thread events), even with no individual mentions.
+func TestHandleUpdated_AttachesMentionAllToEditEvent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+	keyStore := NewMockRoomKeyProvider(ctrl)
+
+	roomID := "r1"
+	store.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+	// Pure @all: no individual accounts → no user lookup, no per-account badge.
+
+	edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+	evt := model.MessageEvent{
+		Event: model.EventUpdated, SiteID: "site-a", Timestamp: edited.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+			Content: "heads up @all", CreatedAt: edited.Add(-time.Hour),
+			EditedAt: &edited, UpdatedAt: &edited,
+		},
+	}
+	data, err := json.Marshal(&evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	require.Len(t, pub.records, 1)
+	var roomEvt model.EditRoomEvent
+	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+	assert.True(t, roomEvt.MentionAll, "edit that adds @all must carry MentionAll")
 }
 
 func TestHandleUpdated_RelaysPreviewObject(t *testing.T) {
