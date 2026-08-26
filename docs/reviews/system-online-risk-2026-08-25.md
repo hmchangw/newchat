@@ -92,3 +92,29 @@ The Mongo layer is disciplined: precise projections almost everywhere, indexes m
 4. **medium** — cap subscriptions per account (product limit) or page phase 1 of `AggregateSubscriptions`.
 5. **medium** — denormalize `lastMsgAt` onto `thread_subscriptions` so the thread inbox sorts from an index and both `$lookup`s move after `$limit`.
 6. **low** — project `room-worker.ListByRoom` to `u.account`; dashboard coalescer flush latency vs read-floor write rate per room to catch hot-doc serialization before users do.
+
+---
+
+## 3. Cassandra / message-history load (score 3/5)
+
+The read path is genuinely well engineered — bucketed partitions with TWCS aligned to the bucket window, adaptive bounded bucket-walk (floor 730 days ≈ 49 buckets < `maxBuckets` 122, fanned 8-wide ⇒ worst case ~7 concurrent waves, not 49 serial reads), explicit projections, opaque page-state cursors, no ALLOW FILTERING outside tests, minimal LWT. The risk concentrates in thread hot-partitions and bucket sizing for busy rooms.
+
+### Findings
+
+- **high** — O(N) full-partition scan on every thread-reply write. `pkg/threadcount/count.go:33-66` scans the entire `thread_messages_by_thread` partition (no LIMIT) on every reply add (`message-worker/store_cassandra.go:374-387`) and delete (`history-service/internal/cassrepo/write.go:405-417`). A 100k-reply thread costs 20 round-trips of read per single write — cumulative O(N²) focused on one partition's three replicas; past the 15s backstop it becomes a timeout → NAK → redelivery storm aimed at exactly the hottest replicas. (Same root cause as hot-path finding #1.)
+- **high** — `thread_messages_by_thread` is an unbounded single partition (`docs/cassandra_message_model.md:172-201`): no bucket, no reply cap. A long-lived support/bot thread at 2k replies/day × ~1KB ≈ 60MB/month crosses the ~100MB wide-partition guidance in ~2 months and grows forever, compounding the scan above.
+- **high** — busy-room bucket can exceed healthy partition size. 360h = 15-day buckets (`history-service/internal/config/config.go:53`, `message-worker/main.go:46`); at ~1KB/row, 5k msg/day ≈ 75MB/bucket (borderline), a 20k msg/day firehose/bot room ≈ 300MB+. The window is table-global — one hot room can't be tuned without repartitioning everyone.
+- **medium** — `MESSAGE_BUCKET_HOURS` drift has silent-data-loss blast radius and no runtime guard: five binaries parse it independently (`message-worker/main.go:46`, `bot-message-worker/main.go:37`, history-service, `tools/cdc-verify`, es-index-migrator — the latter `required`, no default). A writer/reader mismatch targets different partitions: messages persist but never render. `compaction_window_size` is also hardcoded `'360'` in the DDL, and changing the window live orphans all prior buckets. Contrast: `ROOM_KEY_RETIRED_TTL` got a startup cross-check; this more dangerous knob has none.
+- **medium** — routine mutations of sealed TWCS windows: every reply UPDATEs the parent row's `tcount`/`thread_last_msg_at` in its original (often years-old) bucket (`write.go:384-401`, `store_cassandra.go:352-369`); edits/reactions/pins do the same. TWCS assumes immutable windows — these writes scatter cells across many windows' SSTables, inflating read SSTable-touch counts and blocking clean window drops.
+- **low** — encrypted inserts write 4 explicit-null tombstone cells per row per table (`store_cassandra.go:157,167` + thread variants): ~400 tombstones per 100-row history page; under the 1000 warn threshold, deliberate, but accrues with edit/delete nulling.
+- **low** — multi-partition UnloggedBatches (`store_cassandra.go:99-119`, `reactions.go:36`, `pin.go:69`): 2–3 statements spanning partitions force coordinator fan-out; documented and small.
+- **nitpick** — `defaultWalkFanout` (8) equals per-host `NumConns` (8, `cassutil/cass.go:18`): one sparse-room walk can monopolize a host's pool; the 10s per-round-trip timeout is generous, so slow-node pileups hold worker goroutines long.
+
+### Recommendations
+
+1. **high** — replace the per-write full-partition COUNT with an incremental mechanism (counter column, or accept drift and recount only on delete); at minimum add a circuit breaker (stop recounting past N rows) so mega-threads can't NAK-loop.
+2. **high** — bucket `thread_messages_by_thread` (or cap thread length product-side) before any thread reaches wide-partition territory; add max-partition-bytes metrics/alerts for both message tables now.
+3. **high** — startup bucket-window guard: persist the canonical window in a Cassandra metadata row; every service verifies `MESSAGE_BUCKET_HOURS` against it and refuses to start on mismatch (same pattern as broadcast-worker's `ROOM_KEY_RETIRED_TTL` check).
+4. **medium** — monitor TWCS efficacy under mutation churn (SSTablesPerRead p99 on `messages_by_room`); if old-window rewrites are material, serve `tcount`/`thread_last_msg_at` from `messages_by_id` only.
+5. **medium** — write the per-room msgs/day ceiling the 360h window assumes into the schema doc; consider a smaller window at next major migration for known-hot rooms.
+6. **low** — revisit explicit-null binds on the encrypted insert path (a read-side `IS NOT NULL` branch already exists).
