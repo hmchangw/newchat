@@ -70,9 +70,11 @@ func (p *Publisher) PublishMigration(ctx context.Context, subj string, data []by
 }
 
 func (p *Publisher) recordFailure(ctx context.Context, subj string, err error) {
-	// A successful JetStream publish is already counted by the broker as
-	// jetstream_stream_total_messages, so classify only when there is a
-	// failure to attribute — PublishLabelsFromSubject allocates.
+	// Classify only when there is a failure to attribute, because
+	// PublishLabelsFromSubject allocates and this runs on every publish.
+	// Successes go uncounted anywhere — jetstream_stream_total_messages is
+	// stream depth, not accepted publishes — which is an accepted blind spot,
+	// not broker coverage. See Publisher.Failure in pkg/natsmetrics.
 	if err == nil || p.metrics == nil {
 		return
 	}

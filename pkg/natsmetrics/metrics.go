@@ -568,14 +568,22 @@ func (m *Metrics) Publisher(site string) Publisher {
 // Failure records a publish that did not succeed, by bounded cause. A nil err
 // records nothing, so callers pass the publish result directly.
 //
-// Successes are deliberately not counted. For a JetStream destination the
-// broker already counts every acceptance as jetstream_stream_total_messages,
-// which is the denominator any failure ratio needs. For a Core NATS
-// destination a nil error only means the message entered the client's write or
-// reconnect buffer — nats.go buffers publishes across a disconnect and fails
-// only once the reconnect buffer overflows — so a success there never meant
-// delivery and was never worth a series. Read this family alongside the
-// connection-state metrics in pkg/natsutil.
+// Successes are deliberately not counted, and that leaves two blind spots the
+// owner accepted rather than gaps something else covers.
+//
+// There is no cumulative acceptance denominator. jetstream_stream_total_messages
+// is current stream depth, not accepted publishes: a Nats-Msg-Id deduplicated
+// PubAck succeeds without raising it — and this repo publishes with WithMsgID in
+// four services — while retention and MaxAge walk it back down. So read this
+// family as a rate against itself over time, never as a ratio.
+//
+// For a Core NATS destination a nil error only means the message entered the
+// client's write or reconnect buffer — nats.go buffers publishes across a
+// disconnect and fails only once the reconnect buffer overflows — so a success
+// there never meant delivery. The cost is that during a disconnect this counter
+// reads exactly zero, which does not distinguish zero at-risk publishes from
+// thousands; the connection-state metrics in pkg/natsutil are what show the
+// outage. §4 and §7.1 of the contract carry the full reasoning.
 //
 // The cost mattered: the fan-out paths in broadcast-worker and
 // pkg/roomkeysender call this once per recipient.
