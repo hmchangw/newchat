@@ -30,8 +30,11 @@ vi.mock('@/context/RoomKeysContext', () => ({
 // (e.g. loadHistory) keep a stable identity across renders.
 const degradedMock = {
   historyDegraded: false,
-  noteHistoryFailure: () => {},
-  noteHistorySuccess: () => {},
+  // vi.fn(), not bare no-ops: RoomEventsContext.tsx wires these calls into
+  // loadHistory / loadOlderHistory / jumpToMessage, and tests below assert
+  // on them directly so a regression that silently drops a call is caught.
+  noteHistoryFailure: vi.fn(),
+  noteHistorySuccess: vi.fn(),
 }
 vi.mock('@/context/DegradedContext', () => ({
   useDegraded: () => degradedMock,
@@ -40,7 +43,11 @@ vi.mock('@/context/DegradedContext', () => ({
 // The provider now write-throughs its subscription state to localStorage and
 // hydrates from it on mount. Without this, one test's persisted sidebar would
 // warm-start the next one's provider.
-beforeEach(() => window.localStorage.clear())
+beforeEach(() => {
+  window.localStorage.clear()
+  degradedMock.noteHistoryFailure.mockClear()
+  degradedMock.noteHistorySuccess.mockClear()
+})
 
 /** Turn an inline "room-shaped" fixture into a subscription record that
  *  the new bootstrap (3 subscription RPCs) returns. The real user-service
@@ -157,6 +164,9 @@ describe('RoomEventsProvider', () => {
       'chat.user.alice.request.room.a.site-A.msg.history',
       { limit: 50 }
     )
+    // A successful history load reports to DegradedContext so a prior
+    // outage flag clears (or, on a genuinely healthy load, stays clear).
+    await waitFor(() => expect(degradedMock.noteHistorySuccess).toHaveBeenCalled())
   })
 
   it('loadHistory routes to the room home site for a cross-site room, not the user home site', async () => {
@@ -220,6 +230,11 @@ describe('RoomEventsProvider', () => {
       screen.getByText('load').click()
     })
     await waitFor(() => expect(screen.getByTestId('error').textContent).toBe('boom'))
+    // The failed load must reach DegradedContext with the thrown error so it
+    // can classify it as an outage signal (or not).
+    expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'boom' }),
+    )
   })
 
   it('useRoomEvents returns a stable loadHistory across renders for the same roomId', async () => {
@@ -730,6 +745,49 @@ describe('RoomEventsProvider jumpToMessage / resetToLiveTail', () => {
     )
     expect(screen.getByTestId('focus').textContent).toBe('m11')
     expect(screen.getByTestId('mode').textContent).toBe(BUFFER_MODE.HISTORICAL)
+    // A successful jump is a history-load signal too — it hits the same
+    // history-service/Cassandra dependency as loadHistory/loadOlderHistory.
+    expect(degradedMock.noteHistorySuccess).toHaveBeenCalled()
+  })
+
+  it('reports a failed jump via noteHistoryFailure', async () => {
+    const rooms = [
+      { id: 'r1', name: 'general', type: 'channel', siteId: 'site-B', userCount: 2, lastMsgAt: null },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.includes('.msg.surrounding')) {
+        return Promise.reject(new Error('surrounding boom'))
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    function Probe() {
+      const { jumpToMessage } = useRoomEvents('r1')
+      const { summaries } = useRoomSummaries()
+      return (
+        <div>
+          <button onClick={() => jumpToMessage('m11').catch(() => {})}>jump</button>
+          <div data-testid="summaries">{summaries.length}</div>
+        </div>
+      )
+    }
+
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(screen.getByTestId('summaries').textContent).toBe('1'))
+
+    await act(async () => {
+      screen.getByText('jump').click()
+    })
+
+    await waitFor(() =>
+      expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'surrounding boom' }),
+      ),
+    )
   })
 
   it('exposes pendingCount when in historical mode and live messages arrive', async () => {
@@ -1895,6 +1953,10 @@ describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () =>
     await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('true'))
     // Buffer starts at the newest page, oldest-first.
     expect(screen.getByTestId('messages').textContent.startsWith('n0,n1')).toBe(true)
+    // The initial load already reported success — clear so the assertion
+    // below is unambiguously about the older-page fetch's own report, not a
+    // leftover from the initial load.
+    degradedMock.noteHistorySuccess.mockClear()
 
     await act(async () => { screen.getByText('older').click() })
     await waitFor(() =>
@@ -1909,6 +1971,36 @@ describe('RoomEventsProvider loadOlderHistory (older-message pagination)', () =>
     )
     // Older page was short (3 < 50) → no more older remain.
     await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('false'))
+    expect(degradedMock.noteHistorySuccess).toHaveBeenCalled()
+  })
+
+  it('reports a failed older-page fetch via noteHistoryFailure', async () => {
+    // Initial page succeeds and is full (50) → hasMoreOlder true, so the
+    // older-page fetch actually fires. The older fetch itself then fails.
+    const first = serverPage('n', 50, 10)
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.includes('.msg.history')) {
+        if (payload?.before) return Promise.reject(new Error('older boom'))
+        return Promise.resolve({ messages: first })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      throw new Error('unexpected subject: ' + subject)
+    })
+    const nats = mockNats({ request })
+
+    render(wrap(<OlderProbe />, nats))
+    await act(async () => { screen.getByText('load').click() })
+    await waitFor(() => expect(screen.getByTestId('hasMore').textContent).toBe('true'))
+    // The initial load itself succeeded — clear that call so the assertion
+    // below is unambiguously about the older-page failure.
+    degradedMock.noteHistoryFailure.mockClear()
+
+    await act(async () => { screen.getByText('older').click() })
+    await waitFor(() =>
+      expect(degradedMock.noteHistoryFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'older boom' }),
+      ),
+    )
   })
 
   it('no-ops when the initial page was short (hasMoreOlder false)', async () => {

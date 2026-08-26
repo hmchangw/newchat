@@ -50,4 +50,24 @@ describe('DegradedContext', () => {
     act(() => vi.advanceTimersByTime(60_000))
     expect(result.current.historyDegraded).toBe(false)
   })
+
+  it('a repeated failure re-arms the TTL so a flapping outage does not prematurely clear', () => {
+    const { result } = renderHook(() => useDegraded(), { wrapper })
+    act(() => result.current.noteHistoryFailure({ code: 'unavailable' }))
+    act(() => vi.advanceTimersByTime(30_000))
+    expect(result.current.historyDegraded).toBe(true)
+    // A second failure at t=30s must reset the TTL window rather than
+    // stacking a second timer alongside the first.
+    act(() => result.current.noteHistoryFailure({ code: 'unavailable' }))
+    // Advance past the ORIGINAL 60s window (30s + 40s = 70s elapsed since the
+    // first failure). If the flag cleared here, the re-arm would have failed
+    // to reset the timer and a flapping outage could prematurely re-enable
+    // thread starts.
+    act(() => vi.advanceTimersByTime(40_000))
+    expect(result.current.historyDegraded).toBe(true)
+    // The re-armed timer (started at t=30s) expires at t=90s; the remaining
+    // 20s clears it.
+    act(() => vi.advanceTimersByTime(20_000))
+    expect(result.current.historyDegraded).toBe(false)
+  })
 })
