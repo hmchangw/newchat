@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -97,7 +98,11 @@ func run() error {
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publish)
+	// No retries and no SetContentLength on this client — see newRestyVersionUploader.
+	uploader := newRestyVersionUploader(restyutil.New(cfg.ClientUpdateURL,
+		restyutil.WithBearerToken(cfg.ClientUpdateToken),
+		restyutil.WithTimeout(cfg.ClientUpdateTimeout)))
+	h := newHandler(st, sessStore, cfg, nc, publish, withVersionUploader(uploader))
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

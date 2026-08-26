@@ -675,3 +675,41 @@ func TestUploadClientVersion_UpstreamRejectionSurvivesTheRelayAbort(t *testing.T
 	assert.NotContains(t, string(respBody), "could not read the uploaded files",
 		"the upstream's own message must not be replaced by the client-side one")
 }
+
+// The route must sit inside the /v1/admin group so requireAdmin gates it. A
+// non-admin caller must be turned away before any byte reaches the upstream.
+func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
+	up := &fakeUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+
+	sessions := &fakeSessionStore{
+		FindByHashFn: func(context.Context, string) (*session.Session, error) {
+			return &session.Session{
+				ID: "s1", UserID: "u1", Account: "someone", SiteID: "site-A",
+				Roles: []string{"user"}, // not an admin
+			}, nil
+		},
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	applyBaseMiddleware(r, nil)
+	registerRoutes(r, h, sessions, "site-A")
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+		"configFile":  {"app.yaml", "version: 1", ""},
+		"executeFile": {"app.exe", "MZ", ""},
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer some-session-token")
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.False(t, up.wasCalled(), "a non-admin request must never reach the upstream")
+}
