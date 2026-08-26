@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import MessageRow from './MessageRow'
+import { DegradedProvider } from '@/context/DegradedContext'
 
 // Mock the existing read-receipt kebab so MessageRow tests don't depend on
 // NatsContext (the kebab calls useNats internally). We still want to assert
@@ -63,7 +64,10 @@ describe('MessageRow', () => {
   })
 
   it('mounts the read-receipt kebab (MessageActionMenu) on hover and forwards message + room', () => {
-    const { container } = render(<MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />)
+    const { container } = render(
+      <MessageRow message={msg} room={room} context="main" onThread={() => {}} onReply={() => {}} onJumpToMessage={() => {}} />,
+      { wrapper: DegradedProvider }
+    )
     // Menu is JS-driven; only in the DOM while bubble is hovered. Simulate
     // mouseenter so the toolbar (and the kebab inside it) mounts.
     fireEvent.mouseEnter(container.querySelector('.message-bubble-wrap'))
@@ -98,7 +102,10 @@ describe('MessageRow', () => {
   it('forwards Thread/Reply clicks via MessageActions (after hover-reveal)', () => {
     const onThread = vi.fn()
     const onReply = vi.fn()
-    const { container } = render(<MessageRow message={msg} room={room} context="main" onThread={onThread} onReply={onReply} onJumpToMessage={() => {}} />)
+    const { container } = render(
+      <MessageRow message={msg} room={room} context="main" onThread={onThread} onReply={onReply} onJumpToMessage={() => {}} />,
+      { wrapper: DegradedProvider }
+    )
     // Hover to mount the action toolbar; clicking Thread / Reply otherwise
     // doesn't find the buttons (they aren't in the DOM until hover).
     fireEvent.mouseEnter(container.querySelector('.message-bubble-wrap'))

@@ -1,8 +1,9 @@
+import { useDegraded } from '@/context/DegradedContext'
 import MessageActionMenu from './MessageActionMenu/MessageActionMenu'
 import './style.css'
 
 export default function MessageActions({
-  message, room, context, isOwn,
+  message, room, context = 'main', isOwn,
   onThread, onReply, onEdit, onDelete,
 }) {
   // Thread: only opens new threads from the main feed. Inside the thread
@@ -14,6 +15,12 @@ export default function MessageActions({
   const showReply = true
   const showEdit = !!isOwn
   const showDelete = !!isOwn
+
+  const { historyDegraded } = useDegraded()
+  // A message with no replies has no thread_rooms document, so a reply to it
+  // cannot be delivered while history is down and the gatekeeper will refuse it.
+  // tcount > 0 means the thread exists and resolves from Mongo — leave it alone.
+  const threadStartBlocked = historyDegraded && !(message.tcount > 0)
 
   // If nothing would render and the kebab is hidden too (others' message),
   // skip the toolbar entirely so we don't paint an empty floating bar.
@@ -28,7 +35,8 @@ export default function MessageActions({
           type="button"
           className="message-action message-action-thread"
           aria-label="Reply in thread"
-          title="Reply in thread"
+          title={threadStartBlocked ? 'Threads are temporarily unavailable' : undefined}
+          disabled={threadStartBlocked}
           onClick={() => onThread?.(message)}
         >
           Thread
