@@ -148,6 +148,62 @@ func TestIntegration_StaleReplayDoesNotRegressRoomPointer(t *testing.T) {
 	assert.WithinDuration(t, newer, room["lastMsgAt"].(bson.DateTime).Time(), time.Millisecond)
 }
 
+// Two messages at the SAME millisecond, arriving in separate flush batches so
+// the in-memory coalescer cannot break the tie for us — the server guard has to.
+// The rule is msgbucket.NewerRow: equal created_at, higher message id wins.
+//
+// It has to be that rule specifically, because broadcast-worker's preview writer
+// uses the same comparator to stamp previewForMsgId, and history-service serves
+// a stored preview only while previewForMsgId equals lastMsgId. A guard that
+// refused every same-instant write would leave lastMsgId on whichever message
+// landed first while the preview named the other, and that room would read as a
+// miss until a newer message arrived.
+func TestIntegration_SameInstantTieBreaksOnTheMessageID(t *testing.T) {
+	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+
+	// Both arrival orders: the outcome must not depend on which landed first.
+	for _, order := range [][2]string{{"m-1", "m-2"}, {"m-2", "m-1"}} {
+		t.Run(order[0]+" then "+order[1], func(t *testing.T) {
+			store, db := setupStore(t)
+			seedRoom(t, db, "r1")
+
+			for _, id := range order {
+				flushOne(t, store, eventProjection{
+					Event:   model.EventCreated,
+					Message: messageProjection{ID: id, RoomID: "r1", UserAccount: "alice", CreatedAt: at},
+				})
+			}
+
+			room := readRoom(t, db, "r1")
+			assert.Equal(t, "m-2", room["lastMsgId"],
+				"the higher id wins the tie regardless of arrival order")
+		})
+	}
+}
+
+// The same-instant clause must not become a way for an OLDER message to win:
+// it admits equal timestamps only, so a strictly older replay is still refused
+// however high its id sorts.
+func TestIntegration_HigherIDCannotRegressAnOlderPointer(t *testing.T) {
+	store, db := setupStore(t)
+	older := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	seedRoom(t, db, "r1")
+
+	flushOne(t, store, eventProjection{
+		Event:   model.EventCreated,
+		Message: messageProjection{ID: "m-aaa", RoomID: "r1", UserAccount: "alice", CreatedAt: newer},
+	})
+	flushOne(t, store, eventProjection{
+		Event:   model.EventCreated,
+		Message: messageProjection{ID: "m-zzz", RoomID: "r1", UserAccount: "alice", CreatedAt: older},
+	})
+
+	room := readRoom(t, db, "r1")
+	assert.Equal(t, "m-aaa", room["lastMsgId"], "a higher id at an older instant must still lose")
+	assert.WithinDuration(t, newer, room["lastMsgAt"].(bson.DateTime).Time(), time.Millisecond)
+}
+
 // The room pointer and the @all badge are independent dimensions. A batch
 // carrying an @all message can be Nak'd once (a Mongo blip, a step-down, a
 // flush that outran FLUSH_TIMEOUT) and redelivered after a later plain message

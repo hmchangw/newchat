@@ -27,13 +27,33 @@ func NewMongoStore(roomCol, subCol *mongo.Collection) *mongoStore {
 	}
 }
 
-// roomLastMsgFilter matches a room only when its stored lastMsgAt is not already
-// at or beyond at, so a redelivered older message cannot regress the pointer.
-// $not/$gte (not $lt) so it still matches a missing or null lastMsgAt.
-func roomLastMsgFilter(roomID string, at time.Time) bson.M {
+// roomLastMsgFilter matches a room only when (at, msgID) sorts newer than the
+// stored pointer, so a redelivered older message cannot regress it.
+//
+// This is msgbucket.NewerRow rendered in BSON, and it has to be: the in-memory
+// coalescer breaks ties with that comparator, and so does broadcast-worker's
+// preview writer, which stamps previewForMsgId. history-service serves a stored
+// preview only while previewForMsgId equals lastMsgId, so a guard that ordered
+// ties differently from those two would leave the pointer on whichever message
+// of a same-millisecond pair happened to land first while the preview named the
+// other — a permanent miss for that room until a newer message arrives. Two
+// messages at one millisecond reach this separately whenever they fall in
+// different flush batches or one is redelivered.
+//
+// The two clauses:
+//   - strictly older (or absent): $not/$gte rather than $lt, so a room whose
+//     lastMsgAt is missing or null still matches — $lt would skip it and the
+//     pointer would never be set at all.
+//   - same instant, lower id: the case the first clause refuses. BSON dates are
+//     millisecond-precision and the driver truncates on encode, so this equality
+//     compares at exactly the granularity NewerRow does.
+func roomLastMsgFilter(roomID, msgID string, at time.Time) bson.M {
 	return bson.M{
-		"_id":       roomID,
-		"lastMsgAt": bson.M{"$not": bson.M{"$gte": at}},
+		"_id": roomID,
+		"$or": []bson.M{
+			{"lastMsgAt": bson.M{"$not": bson.M{"$gte": at}}},
+			{"lastMsgAt": at, "lastMsgId": bson.M{"$lt": msgID}},
+		},
 	}
 }
 
@@ -55,7 +75,7 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 	models := make([]mongo.WriteModel, 0, len(updates))
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(roomLastMsgFilter(roomID, u.at)).
+			SetFilter(roomLastMsgFilter(roomID, u.msgID, u.at)).
 			SetUpdate(bson.M{"$set": bson.M{
 				"lastMsgAt": u.at,
 				"lastMsgId": u.msgID,
@@ -80,9 +100,8 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 }
 
 func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
-	if len(updates) == 0 {
-		return nil
-	}
+	// No empty guard: the typed collection supplies it (see the file header), which
+	// is why the two sibling methods below don't carry one either.
 	_, err := m.roomCol.BulkWrite(ctx, roomLastMsgModels(updates))
 	return err
 }

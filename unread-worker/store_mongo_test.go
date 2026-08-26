@@ -14,14 +14,37 @@ import (
 func TestRoomLastMsgFilter_RejectsStaleReplay(t *testing.T) {
 	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 
-	got := roomLastMsgFilter("r1", at)
+	got := roomLastMsgFilter("r1", "m-5", at)
 
-	// $not/$gte (not $lt) so the filter still matches a room whose lastMsgAt is
-	// missing or null — a plain $lt would skip those and never set the pointer.
+	// Two admitting clauses, together spelling msgbucket.NewerRow in BSON.
+	//
+	// $not/$gte (not $lt) on the first so the filter still matches a room whose
+	// lastMsgAt is missing or null — a plain $lt would skip those and never set
+	// the pointer. The second admits the same-instant case the first refuses,
+	// when this message sorts after the stored one by id.
 	assert.Equal(t, bson.M{
-		"_id":       "r1",
-		"lastMsgAt": bson.M{"$not": bson.M{"$gte": at}},
+		"_id": "r1",
+		"$or": []bson.M{
+			{"lastMsgAt": bson.M{"$not": bson.M{"$gte": at}}},
+			{"lastMsgAt": at, "lastMsgId": bson.M{"$lt": "m-5"}},
+		},
 	}, got)
+}
+
+// The guard has to break a same-instant tie the same way the in-memory
+// coalescer does, and the same way broadcast-worker's preview writer does —
+// all three are msgbucket.NewerRow. Two messages at one millisecond landing in
+// separate flush batches would otherwise leave lastMsgId on whichever arrived
+// first while broadcast-worker stamped previewForMsgId with the higher id, and
+// history-service serves a stored preview only while those two agree. The room
+// then reads as a permanent miss until a newer message arrives.
+func TestRoomLastMsgFilter_AdmitsAHigherIDAtTheSameInstant(t *testing.T) {
+	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+
+	tie := roomLastMsgFilter("r1", "m-2", at)["$or"].([]bson.M)[1]
+
+	assert.Equal(t, bson.M{"lastMsgAt": at, "lastMsgId": bson.M{"$lt": "m-2"}}, tie,
+		"a same-instant write must land when its id sorts after the stored one")
 }
 
 func TestMentionFilter_SkipsAccountsThatAlreadyRead(t *testing.T) {
@@ -65,7 +88,7 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 	require.Len(t, models, 2, "the pointer and the badge need different filters, so they are separate writes")
 
 	pointerFilter, pointerUpdate := modelParts(t, models[0])
-	assert.Equal(t, roomLastMsgFilter("r1", at), pointerFilter)
+	assert.Equal(t, roomLastMsgFilter("r1", "m1", at), pointerFilter)
 	assert.Equal(t, bson.M{"$set": bson.M{
 		"lastMsgAt": at, "lastMsgId": "m1", "updatedAt": at,
 	}}, pointerUpdate, "the badge must not be inside the guarded $set")
@@ -89,7 +112,7 @@ func TestRoomLastMsgModels_NoGroupMentionEmitsPointerWriteOnly(t *testing.T) {
 
 	require.Len(t, models, 1)
 	filter, update := modelParts(t, models[0])
-	assert.Equal(t, roomLastMsgFilter("r1", at), filter)
+	assert.Equal(t, roomLastMsgFilter("r1", "m1", at), filter)
 	assert.Equal(t, bson.M{"$set": bson.M{
 		"lastMsgAt": at, "lastMsgId": "m1", "updatedAt": at,
 	}}, update)
