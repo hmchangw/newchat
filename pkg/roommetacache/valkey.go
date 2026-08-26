@@ -22,14 +22,11 @@ type Recorder = valkeyutil.CacheRecorder
 // would decode the value without error but with the wrong contents — Valkey has
 // no schema check, so the version is what makes those entries miss instead.
 //
-// v2 wrapped the bare Meta in an envelope; v3 moved to the shared
-// valkeyutil.Box. Either mismatch decodes to an all-zero Meta with no JSON
-// error, which would have broadcast-worker drop fan-out on an empty room type.
+// The deployed shape is a bare Meta under an unversioned key; v3 is the shared
+// valkeyutil.Box envelope. Decoding either as the other yields an all-zero Meta
+// with no JSON error, which would have broadcast-worker drop fan-out on an empty
+// room type. (v1 and v2 were intermediate shapes on this branch and never ran.)
 const cacheKeySchemaVersion = "v3"
-
-// legacyCacheKeySchemaVersion is the generation before it, kept only so a bust
-// clears both while a rolling deploy can have either binary live.
-const legacyCacheKeySchemaVersion = "v2"
 
 // MetaKey is the L2 (Valkey) key for a room's cached Meta. The {roomID}
 // hash tag colocates it in the same cluster slot as the room's encryption
@@ -39,12 +36,13 @@ func MetaKey(roomID string) string {
 	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
 }
 
-// legacyMetaKey is the previous generation, still written and read by binaries
-// that predate the shared valkeyutil.Box envelope. Only invalidation touches it:
-// a bust must clear both while a rolling deploy can have either live, or an old
-// pod keeps serving a room a new pod just renamed. Drop it once none can run.
+// legacyMetaKey is the deployed generation: unversioned, written and read by
+// every binary that predates the version segment. Only invalidation touches it —
+// a bust must clear both while a rolling deploy can have either live, or a pod
+// that has not been replaced yet keeps serving a room a new pod just renamed.
+// Drop it once no such binary can run.
 func legacyMetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta:" + legacyCacheKeySchemaVersion
+	return "room:{" + roomID + "}:meta"
 }
 
 // tierOption configures a tier at construction. Unexported: every production

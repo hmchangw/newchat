@@ -7202,9 +7202,9 @@ func TestHandler_bustRoomMeta_CallsDel(t *testing.T) {
 	fake := &fakeBustClient{}
 	h := &Handler{valkey: fake}
 	h.bustRoomMeta(context.Background(), "r123")
-	// Both key generations: the pre-v2 key is still live for binaries that
-	// predate the cachedMeta envelope, and a rolling deploy runs both.
-	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta:v2"}, fake.dels)
+	// Both key generations: the unversioned key is the one deployed binaries
+	// write, and a rolling deploy runs both.
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.dels)
 }
 
 func TestHandler_bustRoomMeta_NilClient_NoPanic(t *testing.T) {
@@ -7217,7 +7217,7 @@ func TestHandler_bustRoomMeta_FailOpen(t *testing.T) {
 	h := &Handler{valkey: fake}
 	assert.NotPanics(t, func() { h.bustRoomMeta(context.Background(), "r123") })
 	// The Del was attempted (error swallowed inside BustMeta), not skipped.
-	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta:v2"}, fake.dels)
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.dels)
 }
 
 // --- bustSub tests ---

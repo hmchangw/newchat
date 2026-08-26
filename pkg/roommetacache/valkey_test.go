@@ -232,6 +232,26 @@ func TestBustMeta_CallsDel(t *testing.T) {
 	assert.False(t, legacyPresent, "pre-v2 key must be evicted during the rolling-deploy window")
 }
 
+// The generation actually running in production is the UNVERSIONED key: that is
+// what main writes. A bust that misses it lets every not-yet-replaced pod keep
+// serving a room it just renamed or restricted, for a full TTL — which is the
+// whole rolling-deploy window, the one moment the legacy key exists for.
+//
+// Pinned as a string literal on purpose. TestBustMeta_CallsDel asserts through
+// legacyMetaKey(), so it passes whichever generation that constant happens to
+// name — which is exactly how this was missed.
+func TestBustMeta_ClearsTheShippedUnversionedKey(t *testing.T) {
+	const shipped = "room:{r1}:meta" // origin/main's MetaKey
+	fake := newFakeValkey()
+	fake.data[shipped] = "{}"
+
+	BustMeta(context.Background(), fake, "r1")
+
+	assert.Contains(t, fake.dels, shipped, "the deployed generation must be invalidated")
+	_, present := fake.data[shipped]
+	assert.False(t, present, "an old pod must not keep serving stale metadata")
+}
+
 func TestBustMeta_NilClient_NoPanic(t *testing.T) {
 	assert.NotPanics(t, func() { BustMeta(context.Background(), nil, "r1") })
 }
