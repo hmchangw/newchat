@@ -323,21 +323,35 @@ func TestEverySubscriptionSubjectIsBounded(t *testing.T) {
 var subscribeCall = regexp.MustCompile(
 	`\.((?:Queue)?Subscribe(?:Sync)?)\((?:[Cc]tx|context\.\w+\(\))?,?\s*([^,)]+)`)
 
-// boundedSubjectArg accepts the two shapes that cannot grow without limit: a
-// pkg/subject builder (its arguments are site ids and wildcards, never entity
-// ids) and a plain field or identifier holding a route pattern registered at
-// startup. A composed string, a Sprintf, or a call from any other package is
-// rejected — those are how an id gets in.
+// boundedSubjectArg accepts only shapes whose boundedness something enforces.
+//
+//   - A pkg/subject builder, provided its arguments name no entity. The prefix
+//     alone is not enough: subject.RoomEvents(roomID) is a builder call and is
+//     one series per room, so the arguments are checked against the same
+//     identity vocabulary the cardinality semgrep rule uses.
+//   - routerSubjectExpr, and nothing else shaped like it. A bare identifier
+//     could hold anything — subj := fmt.Sprintf("chat.room.%s...", roomID) is
+//     the shape that would slip through — so identifiers are rejected in
+//     general. This one is admitted because parsePattern replaces every
+//     {placeholder} with "*" before the subject reaches Subscribe, and
+//     TestParsePattern_NatsSubjectNeverKeepsAPlaceholder is what keeps that
+//     true. That is the difference between an exception and a hole.
 func boundedSubjectArg(arg string) bool {
-	switch {
-	case strings.HasPrefix(arg, "subject."):
+	if arg == routerSubjectExpr {
 		return true
-	case strings.Contains(arg, `"`), strings.Contains(arg, "+"), strings.Contains(arg, "Sprintf"):
-		return false
-	case strings.Contains(arg, "("):
-		return false
-	default:
-		// A bare identifier or selector: r.natsSubject, rt.natsSubject, subj.
-		return regexp.MustCompile(`^[A-Za-z_][\w.]*$`).MatchString(arg)
 	}
+	if !strings.HasPrefix(arg, "subject.") {
+		return false
+	}
+	return !entityArg.MatchString(arg)
 }
+
+// routerSubjectExpr is natsrouter's registered route pattern, bounded by
+// parsePattern rather than by its spelling. See boundedSubjectArg.
+const routerSubjectExpr = "rt.natsSubject"
+
+// entityArg matches an argument naming a per-entity value. The roots are the
+// identity prefixes from the contract's forbidden-label list, so a subject
+// builder taking a room, account, user or message id fails here for the same
+// reason such a key fails the semgrep rule.
+var entityArg = regexp.MustCompile(`(?i)\b(room|account|user|message|msg|thread|device|session|recipient)(id)?\b`)
