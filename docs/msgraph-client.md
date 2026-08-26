@@ -80,11 +80,17 @@ construction rather than silently egressing unauthenticated: credentials with no
 `GRAPH_PROXY_URL`, and a password with no username. Only **Basic** is supported
 — Go's transport has no NTLM/Kerberos/Digest proxy auth.
 
-Applied by every constructor that honors `ProxyURL`: `NewMeetingsClient`,
+Every error-returning constructor applies it: `NewMeetingsClient`,
 `NewMeetingsDirectoryClient`, `NewUserListerClient`, `NewChatsClient`,
-`NewChatMembersClient`, `NewPresenceClient`. The bare `New`,
-`NewDirectoryClient` and `NewGroupReaderClient` still ignore all proxy config
-and rely on `HTTPS_PROXY`/`HTTP_PROXY`.
+`NewChatMembersClient`, `NewPresenceClient`, `NewDirectoryClient` and
+`NewGroupReaderClient`. Only the bare `New` ignores proxy config and relies on
+`HTTPS_PROXY`/`HTTP_PROXY` — every service-facing constructor returns an error
+precisely so a bad proxy value stops the pod at startup instead of failing the
+first Graph call.
+
+So no Graph traffic depends on the ambient `HTTPS_PROXY` any more: set
+`GRAPH_PROXY_URL` (plus credentials where the proxy authenticates) and every
+service's Graph egress uses it.
 
 ## Resolving object IDs (app-only directory reader)
 

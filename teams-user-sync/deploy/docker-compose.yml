@@ -14,6 +14,15 @@ services:
       - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
       - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
       - GRAPH_PAGE_SIZE=500
+      # Graph egress proxy (optional). GRAPH_PROXY_URL takes precedence over the
+      # standard HTTPS_PROXY/HTTP_PROXY vars; the credentials are for a proxy
+      # that authenticates with Basic.
+      - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
+      - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
+      - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
       # Local dev points both lanes at the same MongoDB; production may split
       # them across a read replica and a primary.
       - MONGO_READ_URI=mongodb://mongodb:27017

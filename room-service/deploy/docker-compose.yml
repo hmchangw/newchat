@@ -38,6 +38,15 @@ services:
       - TEAMS_TENANT_ID=${TEAMS_TENANT_ID:-}
       - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID:-}
       - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET:-}
+      # Graph egress proxy (optional). GRAPH_PROXY_URL takes precedence over the
+      # standard HTTPS_PROXY/HTTP_PROXY vars; the credentials are for a proxy
+      # that authenticates with Basic.
+      - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
+      - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
+      - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
       - ROOM_MEMBERS_LIMIT=${ROOM_MEMBERS_LIMIT:-500}
       - ROOM_MEMBERS_CALL_LIMIT=${ROOM_MEMBERS_CALL_LIMIT:-20}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}

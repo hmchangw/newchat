@@ -17,7 +17,13 @@ services:
       - GRAPH_ROPC_USERNAME=${GRAPH_ROPC_USERNAME}
       - GRAPH_ROPC_PASSWORD=${GRAPH_ROPC_PASSWORD}
       - GRAPH_TLS_INSECURE_SKIP_VERIFY=${GRAPH_TLS_INSECURE_SKIP_VERIFY:-false}
-      # Proxy (optional) is taken from the standard env vars via ProxyFromEnvironment.
+      # Graph egress proxy (optional). GRAPH_PROXY_URL takes precedence over the
+      # standard proxy env vars below; the credentials are for a proxy that
+      # authenticates with Basic.
+      - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
+      - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
+      - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}
+      # Fallback for any non-Graph egress.
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}

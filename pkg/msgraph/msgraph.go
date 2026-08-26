@@ -46,11 +46,17 @@ type DirectoryReader interface {
 }
 
 // NewDirectoryClient returns an app-only directory reader (shares the graph
-// client used for meetings; New always returns a *graphClient).
+// client used for meetings; New always returns a *graphClient). Honors
+// cfg.ProxyURL and the proxy credentials, reporting an invalid value at
+// construction rather than surfacing an opaque per-request error.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewDirectoryClient(cfg Config, opts ...Option) DirectoryReader {
-	return New(cfg, opts...).(*graphClient)
+func NewDirectoryClient(cfg Config, opts ...Option) (DirectoryReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // UserLister walks the tenant's user directory page by page. Kept separate
@@ -126,13 +132,12 @@ type Config struct {
 	// only (e.g. a self-signed cert fronting Graph). Never enable in production.
 	TLSInsecureSkipVerify bool
 	// ProxyURL, when non-empty, routes the client's HTTP requests through this
-	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by the presence, chats,
-	// chat-members, user-lister and meetings clients — each NewXxxClient
-	// (NewPresenceClient / NewChatsClient / NewChatMembersClient /
-	// NewUserListerClient / NewMeetingsClient) applies it and reports an invalid
-	// value at construction. The bare New and NewDirectoryClient constructors
-	// ignore it and rely on the standard proxy env vars. Must include a scheme
-	// and host (e.g. "http://proxy.corp:8080").
+	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by every error-returning
+	// NewXxxClient constructor — presence, chats, chat-members, user-lister,
+	// meetings, directory and group-reader — each applies it and reports an
+	// invalid value at construction. Only the bare New ignores it and relies on
+	// the standard proxy env vars. Must include a scheme and host
+	// (e.g. "http://proxy.corp:8080").
 	ProxyURL string
 	// ProxyUsername and ProxyPassword authenticate to ProxyURL with HTTP Basic
 	// (Proxy-Authorization, emitted by net/http on both the plain-HTTP hop and
@@ -305,8 +310,8 @@ func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 
 // NewMeetingsDirectoryClient returns the meetings (Client) and directory
 // (DirectoryReader) surfaces backed by a single app-only graphClient — one
-// token cache serves both. Honors cfg.ProxyURL like NewMeetingsClient (the bare
-// NewDirectoryClient does not). Both return values are the same instance.
+// token cache serves both, so one proxy and one token round-trip cover both.
+// Both return values are the same instance.
 // room-service uses this so the meeting organizer/attendee object-ID lookup runs
 // on the same app-only User.Read.All Service Principal that creates the meeting,
 // with no resource-owner (ROPC) credentials.

@@ -33,11 +33,15 @@ func newTestClient(tokenURL, baseURL string) Client {
 
 // newTestDirectory wires a DirectoryReader at the given token + graph servers.
 func newTestDirectory(tokenURL, baseURL string) DirectoryReader {
-	return NewDirectoryClient(
+	c, err := NewDirectoryClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
+	if err != nil {
+		panic(err)
+	}
+	return c
 }
 
 func TestCreateOnlineMeeting_Success(t *testing.T) {
@@ -329,7 +333,8 @@ func TestResolveAccountIDs_ChunksLargeInput(t *testing.T) {
 }
 
 func TestResolveAccountIDs_Empty(t *testing.T) {
-	c := NewDirectoryClient(Config{TenantID: "t"})
+	c, err := NewDirectoryClient(Config{TenantID: "t"})
+	require.NoError(t, err)
 	got, err := c.ResolveAccountIDs(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -994,6 +999,10 @@ func TestProxyCredentials_WithoutProxyURLFails(t *testing.T) {
 			require.Error(t, err)
 			_, _, err = NewMeetingsDirectoryClient(cfg)
 			require.Error(t, err)
+			_, err = NewDirectoryClient(cfg)
+			require.Error(t, err)
+			_, err = NewGroupReaderClient(cfg)
+			require.Error(t, err)
 		})
 	}
 }
@@ -1055,4 +1064,43 @@ func TestProxyCredentials_HonoredByPresenceClient(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u.User)
 	assert.Equal(t, "proxyuser", u.User.Username())
+}
+
+// TestNewDirectoryClient_RoutesThroughAuthenticatedProxy closes the last
+// app-only gap: the standalone directory reader used to ignore every proxy
+// setting and fall back to the ambient HTTPS_PROXY, so a deployment moving to
+// an authenticating proxy would have had to configure the same credentials
+// twice — once here as URL userinfo, once as GRAPH_PROXY_*.
+func TestNewDirectoryClient_RoutesThroughAuthenticatedProxy(t *testing.T) {
+	c, err := NewDirectoryClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyUsername: "proxyuser",
+		ProxyPassword: "p@ss:w/rd",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	assert.Equal(t, "proxy.corp:8080", u.Host)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "proxyuser", u.User.Username())
+	got, ok := u.User.Password()
+	require.True(t, ok)
+	assert.Equal(t, "p@ss:w/rd", got)
+}
+
+func TestNewDirectoryClient_EmptyProxyIsNoOp(t *testing.T) {
+	c, err := NewDirectoryClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+func TestNewDirectoryClient_InvalidProxyURL(t *testing.T) {
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			c, err := NewDirectoryClient(Config{TenantID: "t", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.Nil(t, c)
+		})
+	}
 }

@@ -14,11 +14,15 @@ import (
 
 // newTestGroupReader wires a GroupReader at the given token + graph servers.
 func newTestGroupReader(tokenURL, baseURL string) GroupReader {
-	return NewGroupReaderClient(
+	c, err := NewGroupReaderClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
+	if err != nil {
+		panic(err)
+	}
+	return c
 }
 
 func newTokenServer(t *testing.T) *httptest.Server {
@@ -191,4 +195,51 @@ func TestListGroupMembers_RetriesOn503(t *testing.T) {
 	assert.Equal(t, 2, calls, "a 503 must be retried, not surfaced")
 	require.Len(t, got, 1)
 	assert.Equal(t, "u1", got[0].ID)
+}
+
+// TestNewGroupReaderClient_RoutesThroughAuthenticatedProxy closes the
+// teams-hr-sync gap: the group reader used to ignore every proxy setting and
+// fall back to the ambient HTTPS_PROXY, leaving one Graph consumer that could
+// not use the same credentials as the rest.
+func TestNewGroupReaderClient_RoutesThroughAuthenticatedProxy(t *testing.T) {
+	c, err := NewGroupReaderClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyUsername: "proxyuser",
+		ProxyPassword: "p@ss:w/rd",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	assert.Equal(t, "proxy.corp:8080", u.Host)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "proxyuser", u.User.Username())
+	got, ok := u.User.Password()
+	require.True(t, ok)
+	assert.Equal(t, "p@ss:w/rd", got)
+}
+
+func TestNewGroupReaderClient_EmptyProxyIsNoOp(t *testing.T) {
+	c, err := NewGroupReaderClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+func TestNewGroupReaderClient_InvalidProxyURL(t *testing.T) {
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			c, err := NewGroupReaderClient(Config{TenantID: "t", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.Nil(t, c)
+		})
+	}
+}
+
+func TestNewGroupReaderClient_CredentialsWithoutProxyURLFails(t *testing.T) {
+	_, err := NewGroupReaderClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyUsername: "proxyuser",
+		ProxyPassword: "proxypass",
+	})
+	require.Error(t, err)
 }

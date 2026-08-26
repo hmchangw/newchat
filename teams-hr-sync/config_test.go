@@ -125,3 +125,28 @@ func TestParseSiteOverrides(t *testing.T) {
 		})
 	}
 }
+
+// TestConfig_GraphProxy covers the proxy settings this service previously
+// lacked entirely — its Graph traffic could only be proxied via the ambient
+// HTTPS_PROXY, so an authenticating proxy meant a second place to keep the
+// same credentials.
+func TestConfig_GraphProxy(t *testing.T) {
+	e := validEnv()
+	e["GRAPH_PROXY_URL"] = "http://proxy.corp:8080"
+	e["GRAPH_PROXY_USERNAME"] = "proxyuser"
+	e["GRAPH_PROXY_PASSWORD"] = "p@ss:w/rd"
+
+	cfg, err := env.ParseAsWithOptions[config](env.Options{Environment: e})
+	require.NoError(t, err)
+	assert.Equal(t, "http://proxy.corp:8080", cfg.GraphProxyURL)
+	assert.Equal(t, "proxyuser", cfg.GraphProxyUsername)
+	assert.Equal(t, "p@ss:w/rd", cfg.GraphProxyPassword)
+}
+
+func TestConfig_GraphProxyDefaultsEmpty(t *testing.T) {
+	cfg, err := env.ParseAsWithOptions[config](env.Options{Environment: validEnv()})
+	require.NoError(t, err)
+	assert.Empty(t, cfg.GraphProxyURL, "GRAPH_PROXY_URL defaults to empty (fall back to HTTPS_PROXY/HTTP_PROXY)")
+	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
+	assert.Empty(t, cfg.GraphProxyPassword)
+}

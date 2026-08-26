@@ -135,7 +135,10 @@ func run() error {
 		ProxyPassword:         cfg.GraphProxyPassword,
 		UserAgent:             cfg.GraphUserAgent,
 	}
-	users := msgraph.NewDirectoryClient(graphCfg)
+	users, err := msgraph.NewDirectoryClient(graphCfg)
+	if err != nil {
+		return fmt.Errorf("build directory client: %w", err)
+	}
 	pres, err := msgraph.NewPresenceClient(graphCfg, msgraph.ROPCCredentials{Username: cfg.GraphROPCUser, Password: cfg.GraphROPCPassword})
 	if err != nil {
 		return fmt.Errorf("build presence client: %w", err)
