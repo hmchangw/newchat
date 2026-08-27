@@ -23,9 +23,16 @@ func NewSubscriptionRepo(db *mongo.Database) *SubscriptionRepo {
 	}
 }
 
-// GetSubscription returns the full subscription for a user in a room, or (nil, nil) when not subscribed.
+// subscriptionReadProjection trims the ~30-field doc to what service/pin.go reads.
+// The excluded top-level _id is not sub.User.ID — that is u._id, inside u.
+var subscriptionReadProjection = bson.M{"u": 1, "roles": 1, "_id": 0}
+
+// GetSubscription returns a projected subscription, or (nil, nil) when not subscribed.
 func (r *SubscriptionRepo) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
-	return r.subscriptions.FindOne(ctx, bson.M{"u.account": account, "roomId": roomID})
+	return r.subscriptions.FindOne(ctx,
+		bson.M{"u.account": account, "roomId": roomID},
+		mongoutil.WithProjection(subscriptionReadProjection),
+	)
 }
 
 // GetHistorySharedSince returns (nil, true, nil) = full access; (&t, true, nil) = restricted; (nil, false, nil) = not subscribed.
