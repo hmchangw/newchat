@@ -410,7 +410,7 @@ func (c *soakRPCClient) Call(
 	}
 	if err := ctx.Err(); err != nil {
 		result.ErrorClass = classifySoakRPCError(err)
-		return result, carry(err)
+		return result, carry(soakInterruptedError(request.Action, err, nil))
 	}
 	if !validSoakRPCAction(request.Action) {
 		result.ErrorClass = soakErrorInternal
@@ -422,6 +422,10 @@ func (c *soakRPCClient) Call(
 		return result, carry(fmt.Errorf("marshal %s request: %w", request.Action, err))
 	}
 
+	// The failure that sent the last attempt back for a retry. A cancellation
+	// stops the retrying without explaining anything, so both exits below name
+	// this too — otherwise the message contradicts the class kept with it.
+	var lastRequestErr error
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			// Only when no attempt reached the wire. Once one has failed, that
@@ -431,7 +435,9 @@ func (c *soakRPCClient) Call(
 			if result.ErrorClass == "" {
 				result.ErrorClass = classifySoakRPCError(err)
 			}
-			return result, carry(err)
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
 		}
 		result.Attempts++
 		reply, requestErr := c.transport.Request(
@@ -490,9 +496,12 @@ func (c *soakRPCClient) Call(
 			))
 		}
 
+		lastRequestErr = requestErr
 		delay := c.backoff(result.Retries)
 		if err := c.sleeper.Sleep(ctx, delay); err != nil {
-			return result, carry(fmt.Errorf("wait to retry %s: %w", request.Action, err))
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
 		}
 		result.Retries++
 	}
@@ -520,6 +529,18 @@ func (c *soakRPCClient) shouldRetryAmbiguous(
 		return false, false, err
 	}
 	return retryNeeded, !retryNeeded, nil
+}
+
+// soakInterruptedError names both halves of an interrupted request: why the
+// operation failed, and why it stopped being retried. Reporting only the
+// cancellation would leave the message disagreeing with the error class, which
+// is kept from the attempt that actually reached the wire.
+func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("%s interrupted: %w", action, cancelErr)
+	}
+	return fmt.Errorf("%s retry interrupted: %w: last attempt: %w",
+		action, cancelErr, lastErr)
 }
 
 func transientSoakError(class soakErrorClass) bool {

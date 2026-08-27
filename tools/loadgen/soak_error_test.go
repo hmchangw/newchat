@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -373,4 +374,59 @@ func TestSoakRoomReader_ACanceledReadIsRecordedAsAFailure(t *testing.T) {
 	require.Len(t, recorder.samples, 1)
 	assert.Equal(t, soakErrorCanceled, recorder.samples[0].ErrorClass,
 		"an empty class makes soakReadCollectorRecorder count this as succeeded")
+}
+
+// Keeping the failed attempt's class while reporting only the cancellation
+// leaves the log line contradicting itself: error="context canceled" beside
+// error_class=timeout, with the transport error that caused the retrying gone.
+// Both causes have to survive, at both exits.
+func TestSoakRPCClient_InterruptedRetryReportsBothCauses(t *testing.T) {
+	for name, sleeper := range map[string]soakSleeper{
+		"canceled before the next attempt": &soakIgnoringSleeper{},
+		"canceled during the backoff":      &soakRecordingSleeper{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			transport := &soakCancelingTransport{cancel: cancel, inner: &soakRPCFakeTransport{
+				replies: []soakRPCFakeReply{{err: nats.ErrTimeout}},
+			}}
+			client := newSoakRPCClient(transport, soakRetryConfig{
+				MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+			}, sleeper, func() float64 { return 0 })
+
+			result, err := client.Call(ctx, soakRPCRequest{
+				Action: soakRPCSubscriptionList, Subject: "chat.test",
+				Account: "grace", Timeout: time.Second, RetryMode: soakRetrySafe,
+			}, nil)
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, context.Canceled, "why the retrying stopped")
+			assert.ErrorIs(t, err, nats.ErrTimeout, "why the operation failed")
+			assert.Equal(t, soakErrorTimeout, result.ErrorClass,
+				"the class must agree with the cause the message reports")
+
+			got := attrMap(t, soakErrorAttrs(err))
+			assert.Equal(t, "grace", got["account"])
+		})
+	}
+}
+
+// With no attempt behind it there is no second cause to name, and the message
+// must still say more than the bare context error.
+func TestSoakRPCClient_CancellationBeforeAnyAttemptNamesTheAction(t *testing.T) {
+	client := newCarrierTestClient(&soakRPCFakeTransport{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := client.Call(ctx, soakRPCRequest{
+		Action: soakRPCSubscriptionList, Subject: "chat.test",
+		Account: "grace", Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), string(soakRPCSubscriptionList))
+	assert.Equal(t, 1, strings.Count(err.Error(), string(soakRPCSubscriptionList)),
+		"Call names the action once; got %q", err.Error())
 }
