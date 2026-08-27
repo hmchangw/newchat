@@ -326,6 +326,10 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 		// has member.id = deptId. Checking only sectId would miss that case
 		// and report HasOrgMembership=false, causing the remove flow to drop
 		// the user's subscription even though they are still org-attached.
+		// $lookup justification: single-document read whose two joins resolve
+		// one user's membership and subscription in one round trip, each
+		// sub-pipeline $limit 1. Splitting it would triple the round trips on
+		// the remove path's first call.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -342,6 +346,8 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 			},
 			"as": "orgMembership",
 		}}},
+		// $lookup justification: see above — same single-user, single-round-trip
+		// read; this half answers "does the user still hold a subscription".
 		{{Key: "$lookup", Value: bson.M{
 			"from": "subscriptions",
 			"let":  bson.M{"acct": "$account"},
@@ -382,12 +388,28 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 	return &result, nil
 }
 
-func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error) {
-	pipeline := mongo.Pipeline{
+// orgMembersPipeline builds the org-member status aggregation. It is separated
+// from the query so the stage order — in particular that the narrowing $project
+// precedes the two correlated $lookups — is unit-testable without Mongo.
+func orgMembersPipeline(roomID, orgID string) mongo.Pipeline {
+	return mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"$or": bson.A{
 			bson.M{"sectId": orgID},
 			bson.M{"deptId": orgID},
 		}}}},
+		// Narrow before the joins: both lookups run once per matched user, so a
+		// full user document here is carried through the whole pipeline. Only the
+		// fields later stages actually read survive (_id is implicit).
+		{{Key: "$project", Value: bson.M{
+			"account":    1,
+			"siteId":     1,
+			"sectId":     1,
+			"deptId":     1,
+			"deptName":   1,
+			"sectName":   1,
+			"deptTCName": 1,
+			"sectTCName": 1,
+		}}},
 		{{Key: "$addFields", Value: bson.M{
 			"isDept": bson.M{"$eq": bson.A{"$deptId", orgID}},
 			"name": bson.M{"$cond": bson.A{
@@ -395,6 +417,9 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 			"tcName": bson.M{"$cond": bson.A{
 				bson.M{"$eq": bson.A{"$deptId", orgID}}, "$deptTCName", "$sectTCName"}},
 		}}},
+		// $lookup justification: the individual-membership flag must be computed
+		// per user in the same pass. The alternative is one extra round trip per
+		// org member; this join's sub-pipeline is $limit 1 projecting only _id.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"uid": "$_id"},
@@ -415,6 +440,9 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 		// being removed)? If yes, the user remains a member via that sibling
 		// even after the current org is dropped, so processRemoveOrg must NOT
 		// delete their subscription.
+		// $lookup justification: same-pass sibling-org check. It cannot be
+		// denormalised onto the user because the answer depends on the room being
+		// modified, and a per-member query would be one round trip per member.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -444,7 +472,10 @@ func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, room
 			"hasOtherOrgMembership":   bson.M{"$gt": bson.A{bson.M{"$size": "$otherOrgMembership"}, 0}},
 		}}},
 	}
-	cursor, err := s.users.Aggregate(ctx, pipeline)
+}
+
+func (s *MongoStore) GetOrgMembersWithIndividualStatus(ctx context.Context, roomID, orgID string) ([]OrgMemberStatus, error) {
+	cursor, err := s.users.Aggregate(ctx, orgMembersPipeline(roomID, orgID))
 	if err != nil {
 		return nil, fmt.Errorf("aggregate org members: %w", err)
 	}
