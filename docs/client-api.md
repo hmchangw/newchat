@@ -8688,6 +8688,10 @@ Only `admin-service` is provisioned; browsers and end-user clients never call th
 endpoint directly — they go through
 [`POST /v1/admin/client-updates`](#916-http--post-v1adminclient-updates).
 
+`UPLOAD_TOKENS` is **optional**. Unset or empty authorizes nobody: the service
+starts normally and answers **every** upload with `401`, so a site that does not
+publish client updates can deploy without it. Downloads are unaffected.
+
 Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
 and streamed straight to MinIO (no size cap). An upload of an existing file name
 overwrites it and evicts any cached copy.

@@ -18,14 +18,19 @@ type config struct {
 	MinioBucket          string        `env:"MINIO_BUCKET,required"`
 	MinioDownloadTimeout time.Duration `env:"MINIO_DOWNLOAD_TIMEOUT" envDefault:"5m"`
 
-	// UploadTokens authorizes POST /api/v1/version, as account->token. Required:
-	// an unset value would leave the upload endpoint open. A token must not
-	// contain ",", the pair separator: caarlos0/env splits the whole env var on
-	// "," first, so a comma inside a token breaks the entry and fails at parse
-	// time, before validateUploadTokens ever runs. A ":" inside a token is fine
-	// — caarlos0/env v11.4.0 splits each entry on the first ":" only
-	// (strings.SplitN(part, sep, 2)), so the rest of the token survives intact.
-	UploadTokens map[string]string `env:"UPLOAD_TOKENS,required" envSeparator:"," envKeyValSeparator:":"`
+	// UploadTokens authorizes POST /api/v1/version, as account->token. Optional:
+	// unset or empty authorizes NOBODY, so the service starts and rejects every
+	// upload rather than crash-looping a site that never publishes client
+	// updates. It never leaves the endpoint open — requireServiceAccount matches
+	// against this table, and an empty table matches nothing. Downloads are
+	// unaffected; they are deliberately unauthenticated either way.
+	//
+	// A token must not contain ",", the pair separator: caarlos0/env splits the
+	// whole env var on "," first, so a comma inside a token breaks the entry and
+	// fails at parse time, before validateUploadTokens ever runs. A ":" inside a
+	// token is fine — caarlos0/env v11.4.0 splits each entry on the first ":"
+	// only (strings.SplitN(part, sep, 2)), so the rest survives intact.
+	UploadTokens map[string]string `env:"UPLOAD_TOKENS" envSeparator:"," envKeyValSeparator:":"`
 
 	HTTPWriteTimeout time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"10m"`
 
@@ -38,16 +43,15 @@ type config struct {
 // placeholder left in a deploy manifest.
 const minUploadTokenLen = 16
 
-// validateUploadTokens fails fast on a token table that would authorize nothing
-// or, worse, authorize the empty string, or that leaves two accounts sharing
-// one token (lookupAccount has no early break, so which account gets
-// attributed in the access log for a shared token is map-iteration-dependent).
-// Error text names the account(s) only — never the token, which would reach
-// the logs.
+// validateUploadTokens fails fast on a table that would authorize the empty
+// string, or that leaves two accounts sharing one token (lookupAccount has no
+// early break, so which account gets attributed in the access log for a shared
+// token is map-iteration-dependent). An EMPTY table is not an error — it means
+// uploads are disabled. Error text names the account(s) only — never the token,
+// which would reach the logs.
 func validateUploadTokens(tokens map[string]string) error {
-	if len(tokens) == 0 {
-		return fmt.Errorf("UPLOAD_TOKENS must define at least one account:token pair")
-	}
+	// An empty table is a valid configuration meaning "uploads disabled", not an
+	// error. main.go warns about it at startup so the state is visible.
 	accountsByToken := make(map[string][]string, len(tokens))
 	for account, token := range tokens {
 		if account == "" {

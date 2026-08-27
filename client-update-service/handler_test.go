@@ -180,3 +180,50 @@ func TestRoutes_DownloadStaysUnauthenticated(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// An unset or empty UPLOAD_TOKENS starts the service but authorizes nobody:
+// every upload is rejected and nothing reaches MinIO. This is the deliberate
+// alternative to failing startup, so a site that never publishes client updates
+// can deploy without the variable.
+func TestRoutes_EmptyTokenTableRefusesEveryUpload(t *testing.T) {
+	for _, tokens := range []map[string]string{nil, {}} {
+		ctrl := gomock.NewController(t)
+		store := NewMockversionStore(ctrl)
+		// No EXPECT(): gomock fails the test if Put is called.
+		h := NewHandler(store, testCache(1024))
+
+		r := gin.New()
+		registerRoutes(r, h, tokens)
+
+		body, ct := multipartBody(t, map[string]fileSpec{
+			"configFile":  {name: "app.yaml", content: "config"},
+			"executeFile": {name: "app.exe", content: "bin!"},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/version", body)
+		req.Header.Set("Content-Type", ct)
+		// Even a well-formed bearer token cannot succeed against an empty table.
+		req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	}
+}
+
+// Downloads stay open even with uploads disabled — the client fleet holds no
+// credential and must keep pulling updates already published.
+func TestRoutes_EmptyTokenTableStillServesDownloads(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	store.EXPECT().Open(gomock.Any(), objectKey("app.yaml")).
+		Return(rc("config"), blobInfo{Size: 6, ContentType: "application/x-yaml"}, nil)
+	h := NewHandler(store, testCache(1024))
+
+	r := gin.New()
+	registerRoutes(r, h, nil)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/version/app.yaml", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}

@@ -31,7 +31,7 @@ func TestConfig_Defaults(t *testing.T) {
 func TestConfig_RequiresEachRequiredVar(t *testing.T) {
 	// env/v11 treats an empty string as "defined", so a missing-var test must
 	// os.Unsetenv the target rather than rely on the host environment being clean.
-	required := []string{"SITE_ID", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET", "UPLOAD_TOKENS"}
+	required := []string{"SITE_ID", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET"}
 	for _, missing := range required {
 		t.Run("missing_"+missing, func(t *testing.T) {
 			for _, k := range required {
@@ -72,7 +72,11 @@ func TestValidateUploadTokens(t *testing.T) {
 	}{
 		{"one valid entry", map[string]string{"admin-service": "0123456789abcdef"}, false},
 		{"two valid entries", map[string]string{"a": "0123456789abcdef", "b": "fedcba9876543210"}, false},
-		{"empty map", map[string]string{}, true},
+		// An empty table is valid and disables uploads: the service starts and
+		// refuses every upload, rather than crash-looping a deployment that does
+		// not publish client updates.
+		{"empty map disables uploads", map[string]string{}, false},
+		{"nil map disables uploads", nil, false},
 		{"empty account name", map[string]string{"": "0123456789abcdef"}, true},
 		{"empty token", map[string]string{"admin-service": ""}, true},
 		{"token under 16 chars", map[string]string{"admin-service": "short"}, true},

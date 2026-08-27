@@ -42,6 +42,13 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
+	// Logged after obs.Init so it lands in the JSON handler. An operator who sees
+	// uploads 401 needs to know the table is empty rather than their token wrong.
+	if len(cfg.UploadTokens) == 0 {
+		slog.Warn("UPLOAD_TOKENS is empty — POST /api/v1/version will reject every upload; downloads are unaffected",
+			"site", cfg.SiteID)
+	}
+
 	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("minio connect: %w", err)
