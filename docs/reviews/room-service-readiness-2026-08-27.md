@@ -202,3 +202,63 @@ Excluding `store_mongo.go` the figure is 79.9%. Integration tests reach ~48 of 5
 - **[medium]** Add a table-driven test over the cross-site envelope decoder covering the non-canonical-code fallback and metadata propagation (`memberlist_client.go:118-133`).
 - **[medium]** Add integration tests for `InsertTeamsMeeting`/`GetTeamsMeeting` that provoke the real E11000 against the `(roomId,siteId)` unique index, replacing reliance on `errStubDuplicateKey`.
 - **[low]** Add a `Register` wiring test asserting the exact set of subscribed subjects (a fake `natsrouter.Router` recording registrations), so a dropped or mistyped subject fails the unit gate.
+
+---
+
+# 4. Maintainability — 2 / 5
+
+The service works and is internally consistent, but it costs far more to change than its peers of identical size. Two comparable request/reply services already moved to the sanctioned sub-package layout; room-service kept everything in `package main` and now carries a 2,643-line handler, a 47-method store interface and an 8,048-line test file. Nothing in CI arrests further growth.
+
+## Metrics
+
+| | Production | Tests |
+|---|---:|---:|
+| Files | 9 | 14 |
+| LOC | **6,314** | **15,595** |
+
+| File | Lines | Funcs |
+|------|------:|------:|
+| `handler.go` | **2,643** | 53 (48 `*Handler` methods), 27 RPCs registered at `:115-143` |
+| `store_mongo.go` | **2,046** | 62 |
+| `main.go` | 382 | 2 (32 `env:` tags) |
+| `store.go` | 337 | — |
+| `handler_teams.go` | 334 | 12 |
+| `helper.go` | 253 | 12 |
+| `memberlist_client.go` | 143 | 4 |
+| `reader_history.go` | 115 | 4 |
+| `bootstrap.go` | 61 | 1 |
+
+**Longest functions:** `addMembers` **165 lines** (`handler.go:867-1031`, ~27 branch points), `roomRestricted` **148** (`:2021-2168`, ~30), `messageRead` **135** (`:1345-1479`), `moveChat` **126** (`:2306-2431`), `messageThreadRead` **116** (`:1628-1743`), `updateRole` 95 (`:741-835`), `removeMember` 90 (`:651-740`), `messageReadReceipt` 90 (`:1538-1627`). Store: `ListMentionableSubscriptions` 103 (`store_mongo.go:1667-1769`), `GetSubscriptionWithMembership` 88 (`:286-373`), `getRoomMembers` 83 (`:523-605`), `EnsureIndexes` 78 (`:102-179`).
+
+**Interfaces:** `RoomStore` = **47 methods** (`store.go:61-282`); four others are small (`RoomKeyStore` 4, `TeamsMeetingStore` 2, `MessageReader` 1, `DEKProvisioner` 1). 19 exported top-level symbols (4 funcs, 15 types). `Handler` struct **22 fields**; `NewHandler` **14 params** (`handler.go:90`).
+
+**Tests:** `handler_test.go` 8,048 lines / 273 test funcs; `integration_test.go` 4,434 / 88.
+
+**Peer comparison:** `user-service` 6,893 LOC across 41 files (largest 867); `history-service` 7,123 across 33 files (largest 993). room-service is the same total size in **9 files with a 2,643-line one**.
+
+## Findings
+
+- **[high] Service has outgrown the flat layout its peers already abandoned** — `room-service/handler.go:1` — at 6,314 LOC it matches `user-service` (6,893) and `history-service` (7,123), both of which use the sanctioned `config/ models/ mongorepo/ service/` split with no file over 993 lines. room-service keeps everything in `package main`, so `handler.go` is 2.7× the largest file in either peer.
+- **[high] 47-method `RoomStore` god interface** — `room-service/store.go:61-282` — spans rooms, subscriptions, thread-subscriptions, thread-rooms, room-members, users, apps and bot-cmd-menus. Every new RPC widens it, regenerates a 958-line `mock_store_test.go`, and forces all 273 handler tests through one mock. Splitting by aggregate (RoomReader / SubscriptionStore / ThreadStore / AppDirectory) is the standard fix.
+- **[high] `handler.go` mixes eight unrelated domains in one file** — `room-service/handler.go:115-143` — create/members/roles, read position & receipts, threads, encryption keys, chatlist sections, app tabs & bot menus, restricted-room admin, plus federation plumbing. `handler_teams.go` already proves the by-domain split works; nothing was carried further.
+- **[high] Driver types leak across the store boundary** — `room-service/handler.go:18` (imports `mongo-driver/v2/mongo`), `:774,1978,1990,2050,2492`, `handler_teams.go:192` — the contract is also inconsistent: `GetSubscription` maps to `model.ErrSubscriptionNotFound` (`store_mongo.go:253-264`) but `GetRoom` wraps the raw driver error (`store_mongo.go:235-242`) despite `ErrRoomNotFound` existing at `store.go:16`. `handler.go:774` and `:1990` defensively test *both*, which is the smell.
+- **[medium] Two-phase construction with no compile-time completeness check** — `room-service/main.go:335-342` vs `handler.go:90` — 14 constructor args plus 8 fields assigned afterwards (`dekProvisioner`, `badge`, `graphClient`, `directoryClient`, `teamsMeetingStore`, `teamsEmailDomain`, `roomMembersLimit`, `roomMembersCallLimit`). Forgetting one yields a nil-panic or a silently disabled feature at runtime.
+- **[medium] No complexity linting anywhere in the repo** — `.golangci.yml:1-40` — `funlen`, `gocyclo`/`cyclop`, `gocognit`, `dupl` and `maintidx` are all absent, so a 165-line, ~27-branch handler passes CI cleanly and nothing arrests further growth.
+- **[medium] Federation epilogue duplicated 10×** — `room-service/handler.go:823,1419,1722,1800,2129,2238,2290,2402,2423,2472` — each site repeats `GetUserSiteID` → `!= h.siteID` → build event → `json.Marshal` → `federateOne` → `fmt.Errorf("federate X: %w")` (7 `GetUserSiteID` call sites at `:818,1657,1769,2213,2275,2359,2457`). `moveChat` carries two near-identical copies (`:2385-2410`, `:2407-2427`). A generic `federateSubscriptionEvent(ctx, account, roomID, eventType, payload)` collapses all ten.
+- **[medium] Near-duplicate 54-line aggregation pipelines** — `room-service/store_mongo.go:1379-1431` vs `:1438-1490` — `ListReadReceipts`/`ListThreadReadReceipts` differ only in collection, match keys and bot-regex; identical `$lookup`/`$unwind`/`$replaceWith`/`$limit` tail and identical decode loop. Same room/thread mirroring in `MinSubscriptionLastSeenByRoomID` (`:1322`) vs `MinThreadSubscriptionLastSeenByThreadRoomID` (`:1977`), and `UpdateRoomMinUserLastSeenAt` (`:1366`) vs `UpdateThreadRoomMinUserLastSeenAt` (`:2005`).
+- **[medium] Adding one room RPC touches six or more places** — a `pkg/subject` pattern, the registration block (`handler.go:115-143`), a new ~100-line method in the already-2,643-line file, `store.go` interface method #48, the `store_mongo.go` implementation, `make generate` for the 958-line mock, `helper.go` sentinels, and `docs/client-api.md`. The store/mock regeneration step is what makes small changes expensive.
+- **[low] Repeated per-handler boilerplate** — `room-service/handler.go` — `var ctx context.Context = c` 22×, the `if span := trace.SpanFromContext(ctx); span.IsRecording()` block 11×, and the optional-body decode `if c.Msg != nil && len(c.Msg.Data) > 0 { … errcode.BadRequest("invalid request") }` 4× (`:435,470,571,610`). All are middleware or helper candidates.
+- **[low] Error message no longer matches behavior** — `room-service/helper.go:77` vs `handler.go:635-637` — `errMentionableLimitInvalid` says `"limit must be > 0 and <= room user count + app count"`, but an over-cap limit is now clamped (`limit = min(limit, mentionableCap)`), never rejected. `docs/client-api.md:2044` already documents the clamp, so the string is the stale artifact.
+- **[low] 8,048-line `handler_test.go` with 273 test funcs** — no per-domain test files despite `handler_teams_test.go` existing; a failing run is hard to bisect and the file is a merge-conflict magnet.
+- **[nitpick] Documentation obligations are actually met** — every `chat.user.…` RPC has a `docs/client-api.md` section (`:1210-2794`); `rooms.info`/`thread.info`/`key.ensure` are `chat.server.` subjects and correctly exempt. (Content drift is reported separately under Integration.)
+- **[nitpick] Ad-hoc test-file names** — `debug_log_test.go`, `store_section_order_test.go`, `store_mongo_readpref_test.go` sit outside the documented `handler_test.go`/`integration_test.go` convention. All three are legitimate, well-scoped concern-tests — not a problem in themselves, but a signal that the flat layout is being worked around.
+
+## Recommendations
+
+- **[high]** Adopt the sanctioned sub-package layout used by `user-service`/`history-service`: move config out of `main.go:33-131` into `config/`, the Mongo implementation into `mongorepo/`, and the handlers into `service/` with per-domain files (`rooms.go`, `members.go`, `read.go`, `threads.go`, `keys.go`, `sections.go`, `apps.go`, `teams.go`). Target no file over ~600 lines.
+- **[high]** Split `RoomStore` (`store.go:61`) into 4–5 aggregate-scoped interfaces defined next to their consumers; generate mocks per interface so a members-only change stops regenerating a 958-line file the read-path tests depend on.
+- **[high]** Close the driver leak: give `GetRoom`/`GetRoomAppRead` (`store_mongo.go:235-251`) the same `ErrRoomNotFound` mapping `GetSubscription` already does, document the duplicate-key contract as a store-level sentinel, then delete the `mongo` import from `handler.go:18` and `handler_teams.go:12` and drop the belt-and-braces double-checks at `:774` and `:1990`.
+- **[medium]** Enable `funlen` (~80 lines), `gocyclo`/`cyclop` (~15) and `dupl` in `.golangci.yml`, with a time-boxed nolint baseline for the eight offenders listed above so the debt is visible and cannot grow.
+- **[medium]** Extract a `federateSubscriptionEvent` helper covering the 10 call sites (`handler.go:823`…`:2472`) and a `readReceiptRows(coll, match, lookupKey, limit)` helper for `store_mongo.go:1379`/`:1438`; both are mechanical and each removes ~150 lines.
+- **[medium]** Replace `NewHandler`'s 14 args plus 8 post-construction assignments (`handler.go:90`, `main.go:335-342`) with a `HandlerDeps` struct or functional options, validating required deps in the constructor so a mis-wired binary fails at startup rather than at first RPC.
+- **[low]** Fix `errMentionableLimitInvalid`'s text (`helper.go:77`) to match the clamp behavior, and split `handler_test.go` along the same domain boundaries as the handler split so tests move with their subject.
