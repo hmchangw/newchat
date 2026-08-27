@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"github.com/caarlos0/env/v11"
@@ -16,11 +17,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
 	t.Setenv("MONGO_READ_URI", "mongodb://read:27017")
 	t.Setenv("MONGO_WRITE_URI", "mongodb://write:27017")
-	// Cleared so the default-value assertions don't depend on the host env; the
-	// proxy tests set them explicitly.
-	t.Setenv("GRAPH_PROXY_URL", "")
-	t.Setenv("GRAPH_PROXY_USERNAME", "")
-	t.Setenv("GRAPH_PROXY_PASSWORD", "")
+	unsetProxyEnv(t)
 }
 
 func TestConfig_Defaults(t *testing.T) {
@@ -115,4 +112,18 @@ func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
 
 	assert.Empty(t, cfg.GraphProxyUsername, "an unauthenticated proxy stays the default")
 	assert.Empty(t, cfg.GraphProxyPassword)
+}
+
+// unsetProxyEnv removes the Graph proxy vars for the duration of the test,
+// restoring any prior value on cleanup. t.Setenv has no unset counterpart, and
+// an explicitly empty value is a different input from an absent one — the
+// default assertions are about the absent case.
+func unsetProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"GRAPH_PROXY_URL", "GRAPH_PROXY_USERNAME", "GRAPH_PROXY_PASSWORD"} {
+		if prev, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { require.NoError(t, os.Setenv(k, prev)) })
+		}
+		require.NoError(t, os.Unsetenv(k))
+	}
 }
