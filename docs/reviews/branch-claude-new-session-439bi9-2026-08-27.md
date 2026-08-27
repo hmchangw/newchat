@@ -186,3 +186,32 @@ No `critical`, no `high`. Every claim below was traced to source.
 - **[nitpick] Package-level `bson.D` shared across concurrent requests** — the driver only marshals them, so there is no race, but a stray mutation would be process-wide.
 
 **Other lens items:** no swallowed errors introduced — all new `opts` paths keep the existing `errors.Is(mongo.ErrNoDocuments)` sentinels. No injection surface: projections are static literals with no user input. No logging change, no new config.
+
+---
+
+# Performance
+
+**Verdict: directionally correct, correctly implemented, regression-free — but the two biggest wins in the code it touches are left on the table.**
+
+## Do the projections deliver? (ranked)
+
+- **Real win — `getRoomSubscriptions`** (`room-service/store_mongo.go:733`) — `Subscription` has ~30 persisted BSON fields (`pkg/model/subscription.go:26-86`, including 5 `*time.Time`, `threadUnread []string` and 8 booleans); the projection keeps 5. Per-member decode drops ~25 reflect-driven field decodes. For a 1000-member room that is ~25k field decodes and (est. 500–700 B → ~150 B/doc) roughly **0.5 MB of wire traffic avoided per `room.members` call**.
+- **Win — `GetUser`** (`store_mongo.go:896`) — drops 19 of 24 fields, including `settings`, `permissions`, `chatlist` (unbounded sub-documents; `chatlist` grows with section count) and `services` (bcrypt). A security win as much as a performance one.
+- **Moderate — `GetApp`** (`store_mongo.go:916`) — drops the `appViewUrl` map, `sponsors` and `channelTab`; called once **per bot** at `handler.go:919`, so N× per `addMembers`.
+- **Noise — `FindDMSubscription`** (`store_mongo.go:935`) and **`GetThreadSubscriptionByParent`** (`store_mongo.go:1537`) — single-document reads on non-hot paths. Justified only as consistency plus the drift guard.
+
+## Findings
+
+- **[high] The covered-query win is one index field away and dwarfs what was banked** — `room-service/store_mongo.go:142-143` — the `subscriptions (roomId, joinedAt, _id)` index backs the sort, but the new projection also needs `u._id`, `u.account` and `roles`, so every row still FETCHes the document. Note `roles` is `[]Role` → **multikey, and MongoDB cannot cover a projection of a multikey field**, so covering is impossible while `roles` is projected. But `roles` is read **only when `enrich==true`** (`store_mongo.go:753-755`), and callers pass `enrich=false` at `handler_teams.go:62`, `handler_teams.go:128` and `handler.go:1123`. Split into enrich/non-enrich projections and extend the index to `(roomId, joinedAt, _id, u.account, u._id)`: the non-enrich path becomes an index-only scan, eliminating ~N document fetches (1000 for a 1000-member room).
+- **[medium] `getRoomSubscriptions` is still unbounded when `limit == nil`** — `room-service/store_mongo.go:720-733` — `handler_teams.go:62` and `:128` pass nil, so a large room streams every subscription into `[]model.Subscription` and then `[]model.RoomMember` (two full slices). The projection shrinks each row, not the count.
+- **[medium] `ListRoomMembers` does 2 serial Mongo round trips on every member list** — `room-service/store_mongo.go:509-521` — an existence probe followed by the real query.
+- **[medium] N+1 `GetApp` per bot, sequential** — `room-service/handler.go:915-929` — `store_mongo.go:855` (`findAppsForDisplay`) already has the `$in` batch shape to reuse.
+- **[low] `GetUser` then `GetRoom` run serially** — `room-service/handler.go:1971-1978`, `:2040-2047` — `handler.go:1645-1660` already demonstrates the `errgroup` pattern.
+- **[nitpick] Still decodes into full `model.Subscription`** — `room-service/store_mongo.go:739` — though only 5 fields land; a narrow row struct would cut per-member allocation further.
+- **[nitpick] `FindDMSubscription` could be covered** — `room-service/store_mongo.go:137` — `(u.account, name)` plus projection `{_id, roomId}`; `roomType` is filtered but unindexed so it still fetches. `(u.account, name, roomType, roomId)` would cover it. One document — low value.
+
+`GetUser` and `GetApp` are not coverable (5 fields / a whole `assistant` sub-document); nothing to do there.
+
+## Regressions
+
+**None found.** All five are pure projection additions. The `{joinedAt, _id}` index-backed sort is unaffected — projection applies post-sort, and the 32 MB sort limit is still avoided. No query was previously covered, so none was un-covered. The `u._id` nested path is correct (`SubscriptionUser.ID` → `bson:"_id"`, `pkg/model/subscription.go:21`); a `u.id` typo would have silently zeroed `Member.ID`, and the new test pins it.
