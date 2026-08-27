@@ -238,3 +238,54 @@ No `critical`, no `high`. Every claim below was traced to source.
 **Secret-leak claim holds.** The inclusion projection at `store_mongo.go:890-894` lists only `_id, account, engName, chineseName, roles`; Mongo inclusion semantics exclude everything else, so `Services` (`pkg/model/user.go:69`, the bcrypt block) never leaves Mongo on this path. Pinned at `integration_test.go:231`. Strict improvement.
 
 **ctx / request-ID propagation: no finding.** All five methods pass `ctx` through unchanged; callers derive IDs via `natsutil.RequestIDFromContext(ctx)` (`handler.go:155`, `:286`) and Mongo spans nest under the handler span via ctx. The diff introduces no log statements and no `fmt.Println`/`log.Println`.
+
+---
+
+# Prioritized action list
+
+Ordered by severity, then impact ÷ effort. Items 1–4 are cheap and belong on this PR; 5–7 are follow-ups; 8–9 are optional polish.
+
+### 1. `high` — Decide how the projection guard actually runs
+**Dimension:** Observability + Test automation · **Evidence:** `room-service/integration_test.go:1`, `room-service/deploy/azure-pipelines.yml:44`
+
+All five guards are `//go:build integration`; the pipeline runs `go test` with no `-tags integration` and has no integration lane. They also have **never been executed** — Docker was unavailable when the branch was written. So a change whose failure mode is silent field-zeroing currently has zero automated verification anywhere. Minimum bar before merge: run `make test-integration SERVICE=room-service` on a machine with Docker. Better: add the integration lane, or state plainly in the PR that the guard is local-only.
+
+### 2. `high` — Add a no-build-tag projection/bson-tag test
+**Dimension:** Test automation · **Evidence:** `room-service/store_mongo.go:713-714`
+
+The exact failure the author called out — `u.id` projecting nothing where `u._id` was meant — is pure bson-tag arithmetic and needs no Mongo. A plain `store_test.go` that reflects each dotted key in the five projection vars against the target struct's `bson` tags, failing on any key resolving to no field, runs on every commit and closes most of the gap from item 1 at a fraction of the cost. Highest impact ÷ effort item in this review.
+
+### 3. `medium` — Fix the false comment
+**Dimension:** all four lenses flagged it · **Evidence:** `room-service/integration_test.go:334`
+
+Says "the fallback (enrich=false) build" but the call passes `enrich=true`, which the `IsOwner` assertion requires. A comment that contradicts its code is worse than no comment. One-line fix.
+
+### 4. `medium` — Make the ListRoomMembers test able to fail
+**Dimension:** Test automation · **Evidence:** `room-service/integration_test.go:341-364`, `room-service/store_mongo.go:733`
+
+It asserts only included fields, so deleting `opts.SetProjection(roomMemberSubProjection)` leaves it green — it guards drift, not the projection. The other four pin exclusions and do fail. Either assert exclusions through a raw `Find`, or relabel it honestly as a drift guard. While there, assert the fallback path was actually taken (`store_mongo.go:511-517`), since the test reaches `getRoomSubscriptions` only incidentally.
+
+### 5. `medium` — Record `active` and the partial-struct contract
+**Dimensions:** Go, Observability, room-service generalist · **Evidence:** `room-service/store_mongo.go:890-894`, `room-service/store.go:197-220`
+
+Two related documentation gaps with real teeth. `userReadProjection` omits `active`, and `Active *bool` nil means active — so a future `IsActive()` check fails **open**, silently passing a deactivated account. And `store.go` still documents all four methods as returning the entity, so a future caller reading `requester.SiteID` gets `""` with no signal. Add "if you need `IsActive`, add `active` here" to the projection comment, and a projection line to each of the four interface docs — following the precedent `GetRoomAppRead` (`store.go:63`) already sets.
+
+### 6. `medium` — One `GetUser` identity warn, and nothing more
+**Dimension:** Observability · **Evidence:** `room-service/store_mongo.go:896`, `room-service/handler.go:2044`
+
+A dropped `roles` key turns a real admin's request into a 403 that no log distinguishes from a genuine non-admin. After a successful decode, warn when `u.ID == ""` or `u.Account == ""` — both are non-optional on every user document, so empty-after-success is unambiguously a bug. Deliberately do **not** instrument the other four: single-field consumers and a hot list path don't justify it.
+
+### 7. `high` (deferred) — Take the covered-query win
+**Dimension:** Performance · **Evidence:** `room-service/store_mongo.go:142-143`, `:753-755`
+
+`roles` is `[]Role` → multikey, so no projection including it can ever be covered. But `roles` is read only when `enrich==true`, and three callers pass `enrich=false` (`handler_teams.go:62`, `:128`, `handler.go:1123`). Split into enrich/non-enrich projections and extend the index to `(roomId, joinedAt, _id, u.account, u._id)` — the non-enrich path becomes an index-only scan, eliminating ~1000 document fetches for a 1000-member room. This dwarfs the decode saving already banked, but it is an index change and belongs in its own PR.
+
+### 8. `medium` (deferred) — The three perf items this diff left in the code it touched
+**Dimension:** Performance · **Evidence:** `room-service/store_mongo.go:720-733`, `:509-521`, `room-service/handler.go:915-929`
+
+`getRoomSubscriptions` is still unbounded when `limit == nil` (two Teams callers pass nil); `ListRoomMembers` still pays 2 serial round trips per call; `addMembers` still N+1s one `GetApp` per bot. All are out of scope for a projection PR — the projection shrinks each row, not the row count — but they are the next three things worth doing to these functions.
+
+### 9. `low` — Use `_id: 0` where no caller reads the id
+**Dimension:** Go, Bug & security · **Evidence:** `room-service/store_mongo.go:912`, `:931`, `:1534`
+
+`{_id: 1}` is a no-op — Mongo returns `_id` unless excluded. For `appAssistantReadProjection`, `dmDedupProjection` and `threadSubParentProjection` no caller reads the id, so the file's own narrow-read idiom (`store_mongo.go:477`, `:835`, `:1337`) says `_id: 0`. `userReadProjection` and `roomMemberSubProjection` legitimately keep it.
