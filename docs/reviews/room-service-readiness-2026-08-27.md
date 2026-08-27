@@ -262,3 +262,49 @@ The service works and is internally consistent, but it costs far more to change 
 - **[medium]** Extract a `federateSubscriptionEvent` helper covering the 10 call sites (`handler.go:823`…`:2472`) and a `readReceiptRows(coll, match, lookupKey, limit)` helper for `store_mongo.go:1379`/`:1438`; both are mechanical and each removes ~150 lines.
 - **[medium]** Replace `NewHandler`'s 14 args plus 8 post-construction assignments (`handler.go:90`, `main.go:335-342`) with a `HandlerDeps` struct or functional options, validating required deps in the constructor so a mis-wired binary fails at startup rather than at first RPC.
 - **[low]** Fix `errMentionableLimitInvalid`'s text (`helper.go:77`) to match the clamp behavior, and split `handler_test.go` along the same domain boundaries as the handler split so tests move with their subject.
+
+---
+
+# 5. Integration — 3 / 5
+
+Subject construction, federation routing and event-struct contracts are essentially flawless. The score is held down by one real cross-site correctness bug, a mute event that lands on a consumer that cannot handle it, and four documentation drifts against `docs/client-api.md` — including canonical and derived views disagreeing with each other, which CLAUDE.md Section 5 explicitly forbids.
+
+## Verified clean
+
+Zero raw `fmt.Sprintf` subjects — all 27 registrations and 12 publishes go through `pkg/subject`. Every federated type (`InboxRoleUpdated`, `SubscriptionRead`, `ThreadRead`, `ThreadReadAll`, `MuteToggled`, `FavoriteToggled`, `SectionMoved`, `Opened`, `RoomRestricted`) is in exactly one partition set (`pkg/outbox/outbox.go:22-45`). No INBOX creation. Every published event struct carries `Timestamp` set with `time.Now().UTC().UnixMilli()` at the publish site. `encoding/json` throughout — correct, this is not a sonic hot-path service. No `map[string]interface{}`. IDs via `idgen.GenerateID`/`BuildDMRoomID`/`MessageIDFromRequestID`. No Cassandra or `messages_by_room` access. `ROOM_KEY_RETIRED_TTL=20m` is consistent across room-service, room-worker, bot-room-service and broadcast-worker.
+
+## `docs/client-api.md` check
+
+room-service registers 27 handlers (`handler.go:115-142`); 21 are client-facing `chat.user.…`.
+
+**Documented and accurate (20):** create, member.add, member.remove, member.role-update, room.rename, member.list, member.statuses, subscription.mentionable, message.read, message.thread.read, message.read-receipt, mute.toggle, favorite.toggle, open, orgs.members, app.tabs, app.cmd-menu, teams.call, teams.meeting, teams.call.user.
+
+**Not client-facing, no doc obligation:** `RoomRestricted`, `RoomsInfoBatchSubscribe`, `ThreadRoomInfoBatch`, `RoomThreadReadAllSubscribe`, `RoomKeyEnsure`.
+
+**Drifts:**
+
+- **[high] Drift 1 — error text.** `errNotRoomMember` is `"only room members can perform this action"` (`room-service/helper.go:41`), but the docs publish `"only room members can list members"` at `docs/client-api.md:1363,2293,2350,2388,6776` and `docs/client-api/request-reply.md:682,734,2375` (mute.toggle, chat.move, open, key.get, member.add). Clients matching on text break.
+- **[medium] Drift 2 — `subscription.update` action enum.** `docs/client-api.md:1380` omits `"section_moved"`, which room-service publishes (`handler.go:2398,2416`); the derived `docs/client-api/events.md:111` *does* list it, so canonical and derived views disagree. The `roomName` omission list (`:1381`, `:1386`) likewise omits `section_moved`.
+- **[medium] Drift 3 — index gaps.** `chat.move` is absent from the §3.1 index (`docs/client-api.md:1186-1208`) but present in the derived index (`request-reply.md:311`); `key.get` is in neither index (documented only in §5, `:6736`).
+- **[medium] Drift 4 — `sectionOrder` nullability.** Documented as "Omitted on a remove" (`docs/client-api.md:2338`, `request-reply.md:711`), but `MoveChatResponse.SectionOrder` has no `omitempty` and `pkg/model/event.go:644-647` explicitly states it must always be sent.
+
+## Findings
+
+- **[high] Rebalanced `section_moved` events collapse to one OUTBOX publish** — `room-service/handler.go:2402` — `federateOne` derives the dedup ID via `natsutil.InboxDedupID` (`pkg/natsutil/request_id.go:144-151`), which uses `dedupSeed` **only** when the request ID is empty; the natsrouter `RequestID()` middleware always stamps one (`pkg/natsrouter/middleware.go:42`). Every row in the rebalance loop therefore publishes with the identical `Nats-Msg-Id` (`{requestID}:{destSite}`) and JetStream's duplicate window silently drops all but the first — a cross-site user's home replica keeps stale `sectionOrder` for every renumbered sibling. `handler_test.go:6570` discards `msgID`, so the test cannot catch it.
+- **[medium] Mute member-events land on room-worker's unfiltered ROOMS consumer** — `room-service/handler.go:2208` — `chat.room.canonical.{site}.event.member.muted` falls inside `stream.Rooms`' `chat.room.canonical.{site}.>` binding, and room-worker creates its consumer with no `FilterSubject` (`room-worker/main.go:287`, `buildConsumerConfig:433`), so every mute/unmute hits `default: slog.Warn("unknown member operation")` (`room-worker/handler.go:274`).
+- **[medium] Startup verifies only one of three streams it publishes to** — `room-service/bootstrap.go:43-61` — the fail-fast `js.Stream()` check covers ROOMS only; `OUTBOX-{siteID}` (`pkg/outbox/outbox.go:108`) and `MESSAGES-CANONICAL-{siteID}` (`handler_teams.go:269`) surface a misprovisioned deploy as a runtime 500. (Also reported under Architecture.)
+- **[low] `subject.UserRoomEvent` does not `EncodeAccount`** — `pkg/subject/subject.go:493` — unlike `SubscriptionUpdate` (`:257`) and `RoomKeyUpdate` (`:497`); safe today only because `publishDMEvents`/`publishThreadDMEvents` (`handler.go:1532,1905`) fire on `RoomTypeDM` only.
+- **[low] Dead RPC surface** — `room-service/handler.go:138` — `chat.server.request.room.{siteID}.key.ensure` has no caller anywhere in the repo; its comment (`handler.go:1913`, `pkg/subject/subject.go:537`) still says keys live "in Valkey" though `roomkeystore.OpenMongo` is used (`main.go`).
+- **[low] Event structs missing `bson` tags** — `pkg/model/event.go:113,260,273` (`CanonicalMemberEvent`, `ThreadReadEvent`, `ThreadReadAllEvent`) — CLAUDE.md Section 3 requires both `json` and `bson` tags.
+- **[nitpick] `SubscriptionUpdateEvent.Action` doc comment** — `pkg/model/event.go:84` — omits `"opened"` and `"section_moved"`.
+- **[nitpick] `message_read`/`thread_message_read` triggered-event docs** — `docs/client-api.md:2104,2180` — name only `chat.room.{roomID}.event`, omitting the `chat.local.…` target `subject.RoomEventTargets` emits under `ROOM_SUBJECT_MODE=dual|local`, unlike the member-event docs (`:1455`, `:1584`).
+
+## Recommendations
+
+- **[high]** Make `federateOne` compose the dedup ID from the request ID **and** `dedupSeed` (e.g. `InboxDedupID(ctx, dest, seed)` → `base + ":" + seed + ":" + dest`), or pass `requestID+":"+row.RoomID` at `handler.go:2402`; extend `handler_test.go:6570` to assert the captured `msgID`s are distinct.
+- **[high]** Fix the `errNotRoomMember` text at all eight doc sites, then add a test or lint step that greps `docs/client-api*.md` for the sentinel strings defined in `helper.go`, so this class of drift fails CI.
+- **[medium]** Add `section_moved` to `docs/client-api.md:1380-1386`, add `chat.move` and `key.get` to the §3.1 index, and correct the `sectionOrder` "omitted on remove" note in both canonical and derived views.
+- **[medium]** Give room-worker `cc.FilterSubjects = []string{…create, .member.add, .member.remove, .room.rename}` in `buildConsumerConfig`, or move the mute member-event onto its own subject outside `chat.room.canonical.{site}.>`.
+- **[medium]** Extend `bootstrapStreams` to verify `stream.Outbox(siteID)` and `stream.MessagesCanonical(siteID)` exist — verify-only; creation stays with their owning services.
+- **[low]** Add `EncodeAccount` to `subject.UserRoomEvent` for parity with the other per-user builders, updating broadcast-worker's four call sites in the same PR.
+- **[low]** Delete the unused `key.ensure` registration and its subject builder, or document it in `docs/architecture.md` with its intended caller; fix the stale "Valkey" comments while there.
