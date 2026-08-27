@@ -166,3 +166,100 @@ until it does.
 7. **`nitpick`** — Rename `cap` → `limit` in `cappedUnion`; migrate the two `sort.*` calls to
    `slices.SortFunc` and `chunkStrings` to `slices.Chunk`; correct the `httpSvc` comment in
    `main.go` to say which repos are *not* on the HTTP pool.
+
+---
+
+# Chapter 3 — Architecture
+
+**Score: 4.0 / 5**
+
+Solid, disciplined architecture with above-house-average shutdown and DI hygiene. The deductions
+are cross-service config coherence and a lossy federation path — not layering.
+
+## Verified clean
+
+- **Subjects** — zero `fmt.Sprintf` on subjects in non-test code; every subject comes from
+  `pkg/subject` (`service/service.go:233-261`, `roomclient/client.go:44,67,89,109`,
+  `presenceclient/client.go:36`, `historyclient/client.go:38,64`).
+- **Consumer-defined interfaces** — all ten in `service/service.go:20-124`; the HTTP handler's own
+  slice in `store.go:13`. Compile-time assertions at `main.go:45-59`.
+- **No JetStream consumer exists** (no `.Consume(` / `.Messages()` anywhere), so the
+  consumer-pattern rules are N/A — `user-service` is request/reply + publisher only.
+- **Config discipline** — a single `env.ParseAs` at `config/config.go:179`, no `os.Getenv`, 20+
+  cross-field validations.
+- **Shutdown** (`main.go:298-330`) — readiness flip → bounded HTTP drain + `cancelInFlight` →
+  `router.Shutdown` → `natsutil.Drain` → Mongo → Valkey → health → o11y. Correct ordering, and the
+  self-SIGTERM on listener death (`main.go:398-404`) is better than the peer service.
+
+## Findings
+
+**`high` — Badge-cache writer contract diverges across services.** `main.go:213` builds the cache
+with `WithMarkerTTL(10m)` and `BADGE_COUNT_CAP`; the other two writers of the same Valkey keyspace
+build it with neither — `room-service/main.go:300` and `inbox-worker/main.go:862` both call
+`badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)`, so their marker
+inherits `ttl` (24h, `pkg/badgecache/badgecache.go:106`). `config/config.go:124-128` states the
+marker's lifetime *is* the maximum badge staleness; a peer's `Seed` therefore marks the set fresh
+for 24h, not 10m. That silently invalidates the premise of `BADGE_COUNT_CACHE_FIRST`
+(`config/config.go:133-137`). `BADGE_COUNT_CAP` agrees only by coincidence of defaults (both 10)
+and diverges the moment ops tunes it.
+
+**`medium` — Cross-site federation is direct, lossy, and in the request path.**
+`service/status.go:117`, `service/settings.go:154`, `service/chatlist.go:218` loop `allSiteIDs`
+and blocking-`PublishMsg` into each remote INBOX, logging failures as WARN. CLAUDE.md does list
+`user-service` as a sanctioned direct publisher, but `room-service`'s request/reply federation was
+moved behind OUTBOX for exactly this loss mode. A down gateway drops a settings/chatlist replica
+until the user's *next* mutation, and N serial PubAcks run inside the 15s `HandlerTimeout`
+(`main.go:257`) on the caller's critical path. *(Independently flagged by Integration and
+Performance — see Chapters 6 and 7.)*
+
+**`medium` — A duplicated service instance duplicates unowned state.** `main.go:226` and
+`main.go:234` build two `UserService`s; each `NewSubscriptionRepo` allocates its own LRU
+(`mongorepo/subscriptions.go:67` → `mongorepo/sortkeycache.go:35`), so
+`SUBS_SORTKEY_CACHE_SIZE=100000` costs 2×100k entries, and both register the same
+`cachemetrics.For("sub_sortkey","l1")` series, blending two hit rates. `httpSvc` also silently
+omits `WithPageBudget` and reuses `threadSubRepo`/`ssoTokenRepo` bound to the *NATS* pool —
+undermining the isolation `main.go:229-233` claims if the HTTP surface grows.
+
+**`medium` — Overload knobs bypass the shared house type.** `pkg/natsrouter/guard.go` exists
+(`GuardConfig`, `DefaultGuarded`) precisely so a service cannot wire half the protection;
+`main.go:243-257` hand-assembles it against bespoke `MAX_CONCURRENCY` / `HANDLER_TIMEOUT` fields
+(`config/config.go:72,92`). The fleet now has two operator-facing names for one knob
+(`REQUEST_TIMEOUT` elsewhere vs `HANDLER_TIMEOUT` here, plus `HTTP_HANDLER_TIMEOUT`).
+
+**`medium` — The domain layer depends on the process config struct.** `service/service.go:13,180`:
+`New(..., cfg *config.Config, ...)` — 14 positional params, of which `pub, clientPub
+EventPublisher` are adjacent and identically typed. Transposing them compiles and silently sends
+federation events over unpersisted core NATS and client events over JetStream. The peer
+(`room-service/handler.go:90`) passes discrete values and imports no config package.
+
+**`low` — No `bootstrap.go` / `Bootstrap bootstrapConfig`.** Correct in effect (INBOX is
+`inbox-worker`'s, and a remote stream cannot be verified across the gateway), but there is no
+startup assertion of any kind; contrast `room-service/bootstrap.go:56`, which fail-fasts on a
+missing stream. A mis-provisioned INBOX surfaces only as runtime WARNs.
+
+**`low` — The hybrid layout blurs the sanctioned exception.** The sub-package layout (`config/`,
+`models/`, `mongorepo/`, `service/`, `service/mocks/`) coexists with a flat root transport layer.
+Defensible for a second (HTTP) transport, but `store.go:13` holds a service-layer interface, not a
+store, and `main.go:66-85` re-declares `badgeCache` plus a `noopBadgeCache` purely because
+`service.badgeCache` is unexported. `startHTTPServer` (`main.go:347`) belongs in `httpserver.go`.
+
+## Recommendations
+
+1. **`high`** — Add `BADGE_MARKER_TTL` (and `BADGE_COUNT_CAP`) to `room-service` and
+   `inbox-worker` and pass `badgecache.WithMarkerTTL`; keep `BADGE_COUNT_CACHE_FIRST=false` until
+   then.
+2. **`medium`** — Route `user_status_updated` / `user_settings_updated` / `user_chatlist_updated`
+   through OUTBOX via `outbox.Publish` (concurrent partition), or at minimum move the fan-out off
+   the request path.
+3. **`medium`** — Split the sort-key cache (and any shared repo) out of the second `service.New`,
+   or share one `SubscriptionRepo` cache between instances; give `httpSvc` the same
+   `WithPageBudget` treatment or document the asymmetry in code.
+4. **`medium`** — Replace the hand-rolled router options with `natsrouter.GuardConfig` +
+   `DefaultGuarded`, aliasing `HANDLER_TIMEOUT` → `REQUEST_TIMEOUT` for one deploy cycle.
+5. **`medium`** — Convert `service.New` to an options struct, removing the `*config.Config` import
+   from `service/` and the adjacent same-typed publisher hazard.
+6. **`low`** — Add `bootstrap.go` with the standard `Bootstrap bootstrapConfig` that verifies the
+   *local* `INBOX-{siteID}` (or explicitly documents why none is needed) so misprovisioning fails
+   at startup.
+7. **`low`** — Rename `store.go` → `service_iface.go`, export `service.BadgeCache` to delete the
+   `main.go` duplicate, and move `startHTTPServer` into `httpserver.go`.
