@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/models"
 	"github.com/hmchangw/chat/user-service/service/mocks"
 )
@@ -20,6 +23,9 @@ import (
 // are optional overrides (nil ⇒ default all-miss/no-op); the call slices record
 // which accounts each method was invoked for, in order.
 type fakeBadgeCache struct {
+	// mu guards the call records: BadgeCountBatch seeds misses concurrently, so
+	// Seed lands from many goroutines at once.
+	mu        sync.Mutex
 	bumpBatch func(accounts []string, roomID string) map[string]int
 	seed      func(account string, roomIDs []string, trigger string) (int, bool)
 	reseed    func(account string, roomIDs []string)
@@ -38,7 +44,9 @@ type fakeBadgeCache struct {
 }
 
 func (f *fakeBadgeCache) BumpBatch(_ context.Context, accounts []string, roomID string) map[string]int {
+	f.mu.Lock()
 	f.bumpCalls = append(f.bumpCalls, accounts)
+	f.mu.Unlock()
 	if f.bumpBatch != nil {
 		return f.bumpBatch(accounts, roomID)
 	}
@@ -46,7 +54,9 @@ func (f *fakeBadgeCache) BumpBatch(_ context.Context, accounts []string, roomID 
 }
 
 func (f *fakeBadgeCache) Seed(_ context.Context, account string, roomIDs []string, trigger string) (int, bool) {
+	f.mu.Lock()
 	f.seedCalls = append(f.seedCalls, account)
+	f.mu.Unlock()
 	if f.seed != nil {
 		return f.seed(account, roomIDs, trigger)
 	}
@@ -54,7 +64,9 @@ func (f *fakeBadgeCache) Seed(_ context.Context, account string, roomIDs []strin
 }
 
 func (f *fakeBadgeCache) Count(_ context.Context, account string) (int, bool) {
+	f.mu.Lock()
 	f.countCalls = append(f.countCalls, account)
+	f.mu.Unlock()
 	if f.count != nil {
 		return f.count(account)
 	}
@@ -62,8 +74,10 @@ func (f *fakeBadgeCache) Count(_ context.Context, account string) (int, bool) {
 }
 
 func (f *fakeBadgeCache) Reseed(_ context.Context, account string, roomIDs []string) {
+	f.mu.Lock()
 	f.reseedCalls = append(f.reseedCalls, account)
 	f.reseedRoomIDs = append(f.reseedRoomIDs, roomIDs)
+	f.mu.Unlock()
 	if f.reseed != nil {
 		f.reseed(account, roomIDs)
 	}
@@ -232,6 +246,10 @@ func TestBadgeCountBatch_BudgetSpentMidBatch_StopsAndRemainingAbsent(t *testing.
 		seed: func(account string, roomIDs []string, trigger string) (int, bool) { return 1, true },
 	}
 	svc := newBadgeService(t, subs, badge)
+	// Serialized: with one seed in flight at a time, an account the loop has not
+	// reached is exactly an account not yet started. The concurrent equivalent is
+	// TestBadgeCountBatch_BudgetSpentMidBatch_UnstartedSeedsSkipped.
+	svc.badgeFanout = 1
 	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
 	require.NoError(t, err, "a spent budget degrades the rest — it must not fail the whole batch")
 	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
@@ -264,6 +282,10 @@ func TestBadgeCountBatch_BudgetSpentMidBatch_LaterCacheHitStillServed(t *testing
 	// "b" misses and sits past the spent budget — its expensive recompute must be skipped.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "b", gomock.Any()).Times(0)
 	svc := newBadgeService(t, subs, badge)
+	// Serialized: with one seed in flight at a time, an account the loop has not
+	// reached is exactly an account not yet started. The concurrent equivalent is
+	// TestBadgeCountBatch_BudgetSpentMidBatch_UnstartedSeedsSkipped.
+	svc.badgeFanout = 1
 	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c"}})
 	require.NoError(t, err)
 	assert.Contains(t, resp.Counts, "a", "the account computed before the budget was spent still answers")
@@ -313,4 +335,178 @@ func TestCappedUnion(t *testing.T) {
 			assert.Equal(t, tc.want, cappedUnion(tc.ids, tc.trigger, tc.cap))
 		})
 	}
+}
+
+// seedBarrier blocks every GetActiveSubscriptions call until `width` of them are
+// in flight at once, then releases all of them. It records the peak concurrency
+// so a test can assert both that seeds overlap and that they stay within the
+// configured bound. Serialized code never reaches `width`, so waitFull fails.
+type seedBarrier struct {
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+	arrived  chan struct{}
+	release  chan struct{}
+	width    int
+}
+
+func newSeedBarrier(width int) *seedBarrier {
+	return &seedBarrier{arrived: make(chan struct{}, 64), release: make(chan struct{}), width: width}
+}
+
+// enter records one in-flight call and blocks until the barrier is released.
+func (b *seedBarrier) enter() {
+	b.mu.Lock()
+	b.inFlight++
+	if b.inFlight > b.peak {
+		b.peak = b.inFlight
+	}
+	b.mu.Unlock()
+	b.arrived <- struct{}{}
+	<-b.release
+	b.mu.Lock()
+	b.inFlight--
+	b.mu.Unlock()
+}
+
+// waitFull waits for `width` concurrent arrivals, then releases them all.
+func (b *seedBarrier) waitFull(t *testing.T) {
+	t.Helper()
+	for i := 0; i < b.width; i++ {
+		select {
+		case <-b.arrived:
+		case <-time.After(5 * time.Second):
+			close(b.release)
+			t.Fatalf("only %d of %d seeds were in flight at once — misses are being computed serially", i, b.width)
+		}
+	}
+	close(b.release)
+}
+
+func (b *seedBarrier) peakConcurrency() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.peak
+}
+
+// expectBarrieredSeeds wires every GetActiveSubscriptions call through the barrier.
+func expectBarrieredSeeds(subs *mocks.MockSubscriptionRepository, b *seedBarrier) {
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, account string, _ int) ([]models.ActiveSubscription, error) {
+			b.enter()
+			return []models.ActiveSubscription{localUnreadSub(account, "r-"+account, "site-a")}, nil
+		}).AnyTimes()
+}
+
+// Each cache miss costs a rooms aggregate plus per-site RPCs. Computing them one
+// after another makes a notification batch's latency the SUM of every miss,
+// against a single shared handler deadline — so the misses must overlap.
+func TestBadgeCountBatch_SeedsMissesConcurrently(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	accounts := []string{"a", "b", "c", "d"}
+	barrier := newSeedBarrier(len(accounts))
+	expectBarrieredSeeds(subs, barrier)
+	badge := &fakeBadgeCache{
+		seed: func(string, []string, string) (int, bool) { return 1, true },
+	}
+	svc := newBadgeService(t, subs, badge)
+	svc.badgeFanout = len(accounts)
+
+	done := make(chan *model.BadgeCountBatchResponse, 1)
+	go func() {
+		resp, err := svc.BadgeCountBatch(ctx("", "site-a"), model.BadgeCountBatchRequest{RoomID: "r1", Accounts: accounts})
+		assert.NoError(t, err)
+		done <- resp
+	}()
+	barrier.waitFull(t)
+
+	resp := <-done
+	require.NotNil(t, resp)
+	assert.Equal(t, map[string]int{"a": 1, "b": 1, "c": 1, "d": 1}, resp.Counts,
+		"every account must still be answered when the misses run concurrently")
+}
+
+// The overlap must stay inside MAX_BADGE_SEED_FANOUT: each concurrent seed holds
+// a Mongo connection and fires cross-site RPCs, so an unbounded fan-out would
+// trade a latency problem for pool exhaustion.
+func TestBadgeCountBatch_SeedConcurrencyNeverExceedsFanout(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	const fanout = 2
+	accounts := []string{"a", "b", "c", "d", "e", "f"}
+	barrier := newSeedBarrier(fanout)
+	expectBarrieredSeeds(subs, barrier)
+	badge := &fakeBadgeCache{
+		seed: func(string, []string, string) (int, bool) { return 1, true },
+	}
+	svc := newBadgeService(t, subs, badge)
+	svc.badgeFanout = fanout
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := svc.BadgeCountBatch(ctx("", "site-a"), model.BadgeCountBatchRequest{RoomID: "r1", Accounts: accounts})
+		assert.NoError(t, err)
+	}()
+	barrier.waitFull(t)
+	<-done
+
+	assert.LessOrEqual(t, barrier.peakConcurrency(), fanout,
+		"concurrent seeds must never exceed the configured fanout")
+}
+
+// A spent budget stops seeds that have not STARTED yet; ones already in flight
+// run to completion and still answer. This is the concurrent counterpart of
+// TestBadgeCountBatch_BudgetSpentMidBatch_StopsAndRemainingAbsent.
+func TestBadgeCountBatch_BudgetSpentMidBatch_UnstartedSeedsSkipped(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	cctx, cancel := context.WithCancel(context.Background())
+	c := ctx("", "site-a")
+	c.SetContext(cctx)
+	var mu sync.Mutex
+	started := map[string]bool{}
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, account string, _ int) ([]models.ActiveSubscription, error) {
+			mu.Lock()
+			started[account] = true
+			mu.Unlock()
+			cancel() // the shared handler deadline elapses during the first seed
+			return []models.ActiveSubscription{localUnreadSub(account, "r-"+account, "site-a")}, nil
+		}).AnyTimes()
+	badge := &fakeBadgeCache{
+		seed: func(string, []string, string) (int, bool) { return 1, true },
+	}
+	svc := newBadgeService(t, subs, badge)
+	svc.badgeFanout = 1
+
+	resp, err := svc.BadgeCountBatch(c, model.BadgeCountBatchRequest{RoomID: "r1", Accounts: []string{"a", "b", "c", "d"}})
+
+	require.NoError(t, err, "a spent budget degrades the remainder — it must not fail the batch")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, started, 1, "no seed may start once the budget is spent")
+	for account := range resp.Counts {
+		assert.True(t, started[account], "only an account whose seed actually ran may be answered")
+	}
+}
+
+// The seed semaphore sends before spawning its receiver, so a capacity of zero
+// is an unbuffered channel that blocks forever — the same hazard fanout() guards.
+func TestBadgeSeedFanout_NormalisesNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		assert.Equal(t, defaultBadgeSeedFanout, (&UserService{badgeFanout: n}).badgeSeedFanout())
+	}
+	assert.Equal(t, 3, (&UserService{badgeFanout: 3}).badgeSeedFanout())
+}
+
+// The operator-facing knob must actually reach the seed bound; left unwired,
+// every deployment would silently run the default.
+func TestNew_WiresBadgeSeedFanoutFromConfig(t *testing.T) {
+	cfg := &config.Config{SiteID: "site-a", MaxBadgeSeedFanout: 3}
+
+	svc := New(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, cfg)
+
+	assert.Equal(t, 3, svc.badgeSeedFanout())
 }
