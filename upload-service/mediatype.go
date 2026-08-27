@@ -168,3 +168,40 @@ func sniffMediaType(r io.ReadSeeker) (string, error) {
 	}
 	return normalizeMediaType(http.DetectContentType(head[:n])), nil
 }
+
+// inconclusiveSniffTypes are the results http.DetectContentType returns for
+// whole families of formats: every OOXML document sniffs as application/zip and
+// every text-based format as text/plain or text/xml. Specific enough to stop a
+// naive sniff-first resolution, so the extension gets to answer these instead.
+var inconclusiveSniffTypes = map[string]struct{}{
+	"application/zip":          {},
+	"application/octet-stream": {},
+	"text/plain":               {},
+	"text/xml":                 {},
+	"text/html":                {},
+}
+
+// resolveMediaType picks the MIME type to record for an upload. A specific
+// declared type wins — the client knows its own file. Otherwise the bytes and
+// then the name decide, so a client that says nothing (or the generic
+// application/octet-stream a browser sends for any file the OS cannot type)
+// still gets a real type instead of an opaque one. r is rewound before return.
+func resolveMediaType(declared, filename string, r io.ReadSeeker) (string, error) {
+	if d := normalizeMediaType(declared); d != "" && d != defaultUploadContentType {
+		return d, nil
+	}
+	sniffed, err := sniffMediaType(r)
+	if err != nil {
+		return "", fmt.Errorf("detect media type from file contents: %w", err)
+	}
+	if _, weak := inconclusiveSniffTypes[sniffed]; sniffed != "" && !weak {
+		return sniffed, nil
+	}
+	if byExt := mediaTypeByExtension(filename); byExt != "" {
+		return byExt, nil
+	}
+	if sniffed != "" {
+		return sniffed, nil
+	}
+	return defaultUploadContentType, nil
+}

@@ -139,3 +139,97 @@ func TestSniffMediaType_ReadError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, readErr)
 }
+
+func TestResolveMediaType(t *testing.T) {
+	tests := []struct {
+		name, declared, filename string
+		data                     []byte
+		want                     string
+	}{
+		{
+			name:     "a specific declared type wins over the bytes",
+			declared: "text/csv", filename: "data.bin", data: pdfBytes, want: "text/csv",
+		},
+		{
+			name:     "declared type keeps only its base, not its parameters",
+			declared: "text/csv; charset=utf-8", filename: "data.csv", data: []byte("a,b\n1,2"), want: "text/csv",
+		},
+		{
+			name:     "octet-stream is resolved from the bytes",
+			declared: "application/octet-stream", filename: "photo.png", data: png64x48, want: "image/png",
+		},
+		{
+			name:     "octet-stream is matched case-insensitively",
+			declared: "APPLICATION/OCTET-STREAM", filename: "photo.png", data: png64x48, want: "image/png",
+		},
+		{
+			name:     "an absent declared type is resolved from the bytes",
+			declared: "", filename: "photo.jpg", data: jpeg32x32, want: "image/jpeg",
+		},
+		{
+			name:     "a zip sniff defers to the extension, so docx is not application/zip",
+			declared: "application/octet-stream", filename: "report.docx", data: zipBytes,
+			want: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		},
+		{
+			name:     "a genuine zip still resolves to zip via its own extension",
+			declared: "application/octet-stream", filename: "bundle.zip", data: zipBytes, want: "application/zip",
+		},
+		{
+			name:     "an xml sniff defers to the extension, so svg is not text/xml",
+			declared: "application/octet-stream", filename: "logo.svg", data: svgBytes, want: "image/svg+xml",
+		},
+		{
+			name:     "a text sniff defers to the extension",
+			declared: "application/octet-stream", filename: "notes.csv", data: []byte("a,b\n1,2"), want: "text/csv",
+		},
+		{
+			name:     "a conclusive sniff beats a lying extension",
+			declared: "application/octet-stream", filename: "report.docx", data: pdfBytes, want: "application/pdf",
+		},
+		{
+			name:     "an inconclusive sniff with an unknown extension keeps the sniff result",
+			declared: "application/octet-stream", filename: "notes.zzz", data: []byte("hello"), want: "text/plain",
+		},
+		{
+			name:     "opaque bytes with no usable extension stay octet-stream",
+			declared: "application/octet-stream", filename: "blob", data: []byte{0x00, 0x01, 0xff}, want: "application/octet-stream",
+		},
+		{
+			name:     "an empty file falls back to its extension",
+			declared: "", filename: "empty.docx", data: []byte{},
+			want: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bytes.NewReader(tc.data)
+			got, err := resolveMediaType(tc.declared, tc.filename, r)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+
+			rest, err := io.ReadAll(r)
+			require.NoError(t, err)
+			assert.Equal(t, tc.data, rest, "reader must be left at the start for the upload")
+		})
+	}
+}
+
+// A specific declared type is answered without touching the reader at all.
+func TestResolveMediaType_SpecificDeclaredTypeSkipsTheSniff(t *testing.T) {
+	r := &seekFailReader{Reader: bytes.NewReader(pdfBytes), seekErr: errors.New("seek boom")}
+
+	got, err := resolveMediaType("application/pdf", "report.pdf", r)
+	require.NoError(t, err)
+	assert.Equal(t, "application/pdf", got)
+	assert.Zero(t, r.seeks, "a specific declared type must not read the file")
+}
+
+func TestResolveMediaType_RewindError(t *testing.T) {
+	seekErr := errors.New("seek boom")
+	r := &seekFailReader{Reader: bytes.NewReader(png64x48), seekErr: seekErr}
+
+	_, err := resolveMediaType("application/octet-stream", "photo.png", r)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, seekErr)
+}
