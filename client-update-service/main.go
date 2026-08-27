@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
 	o11ygin "github.com/flywindy/o11y/gin"
@@ -26,7 +25,7 @@ func main() {
 }
 
 func run() error {
-	cfg, err := env.ParseAs[config]()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}

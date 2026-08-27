@@ -2,9 +2,14 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/caarlos0/env/v11"
 )
 
 type config struct {
@@ -37,6 +42,49 @@ type config struct {
 	CacheMaxEntries     int           `env:"CACHE_MAX_ENTRIES" envDefault:"4"`
 	CacheTTL            time.Duration `env:"CACHE_TTL" envDefault:"24h"`
 	CacheMaxObjectBytes int64         `env:"CACHE_MAX_OBJECT_BYTES" envDefault:"536870912"`
+}
+
+// loadConfig parses the environment into config.
+//
+// int64 fields go through parseByteSize rather than env's own strconv.ParseInt,
+// so a byte count that arrives in float form still starts the service. Only
+// CacheMaxObjectBytes is an int64 here; time.Duration is a distinct type and
+// keeps env's duration parser.
+func loadConfig() (config, error) {
+	return env.ParseAsWithOptions[config](env.Options{
+		FuncMap: map[reflect.Type]env.ParserFunc{
+			reflect.TypeOf(int64(0)): func(v string) (interface{}, error) {
+				return parseByteSize(v)
+			},
+		},
+	})
+}
+
+// maxInt64AsFloat is 2^63 — one past math.MaxInt64, which float64 cannot hold
+// exactly. A float at or above it does not fit in an int64.
+const maxInt64AsFloat = float64(1 << 63)
+
+// parseByteSize reads a byte count, accepting the float spelling that YAML
+// tooling produces for a large unquoted integer (Helm and friends round-trip
+// 536870912 through a float64 and emit "5.36870912e+08"). The value must still
+// be a whole number of bytes: a genuinely fractional one is a misconfiguration,
+// and rounding it would hide that.
+func parseByteSize(v string) (int64, error) {
+	s := strings.TrimSpace(v)
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n, nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a byte count", s)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, fmt.Errorf("%q is not a whole number of bytes", s)
+	}
+	if f >= maxInt64AsFloat || f < -maxInt64AsFloat {
+		return 0, fmt.Errorf("%q does not fit in a byte count", s)
+	}
+	return int64(f), nil
 }
 
 // minUploadTokenLen rejects a token short enough to be brute-forced or to be a
