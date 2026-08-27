@@ -2946,7 +2946,7 @@ func TestHandleThreadUpdated_ChannelRoom_FansOutToFollowers(t *testing.T) {
 
 // The thread-edit event must carry resolved mentions[] just like the top-level
 // edit (TestHandleUpdated_AttachesMentionsToEditEvent) — without this a regression
-// dropping edit.Mentions from handleThreadUpdated would go unnoticed.
+// dropping edit.Mentions or edit.MentionAll from handleThreadUpdated would go unnoticed.
 func TestHandleThreadUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
@@ -2970,7 +2970,7 @@ func TestHandleThreadUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 		Event: model.EventUpdated, SiteID: "site-a", Timestamp: editedAt.UnixMilli(),
 		Message: model.Message{
 			ID: "reply-1", RoomID: "r1", UserAccount: "alice",
-			Content: "@bob thread edit", CreatedAt: msgTime,
+			Content: "@bob @all thread edit", CreatedAt: msgTime,
 			EditedAt: &editedAt, UpdatedAt: &editedAt,
 			ThreadParentMessageID: "parent-1", TShow: false,
 		},
@@ -2983,8 +2983,12 @@ func TestHandleThreadUpdated_AttachesMentionsToEditEvent(t *testing.T) {
 	require.NotEmpty(t, pub.records)
 	var roomEvt model.EditRoomEvent
 	require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
-	require.Len(t, roomEvt.Mentions, 1, "thread edit event must carry the resolved mention")
-	assert.Equal(t, "bob", roomEvt.Mentions[0].Account)
+	mentionedAccounts := make([]string, len(roomEvt.Mentions))
+	for i, m := range roomEvt.Mentions {
+		mentionedAccounts[i] = m.Account
+	}
+	assert.Contains(t, mentionedAccounts, "bob", "thread edit event must carry the resolved mention")
+	assert.True(t, roomEvt.MentionAll, "thread edit with @all must carry MentionAll (guards the thread branch's assignment)")
 }
 
 func TestHandleThreadUpdated_ChannelExcludesRestrictedAndNonMemberMentions(t *testing.T) {

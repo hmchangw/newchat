@@ -3449,6 +3449,7 @@ The payload is flat (no zero-valued room fields):
 | `newContent` | string | Optional. New plaintext content. Present for DMs and unencrypted channels. Omitted for encrypted channels — see `encryptedNewContent`. |
 | `encryptedNewContent` | [EncryptedMessage](#encryptedmessage) | Optional. For encrypted channel rooms. Omitted otherwise. |
 | `mentions` | [Participant](#participant)[] | Optional. `@`-mentions resolved from the edited content, so an edit that adds a mention renders like a fresh message. Omitted when none. |
+| `mentionAll` | boolean | Optional. `true` if the edited content mentions `@all` (or `@here`), so an edit that adds or removes `@all` conveys it like a fresh message. Omitted when `false`. |
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
