@@ -277,3 +277,57 @@ A complete `cassandra.Message → pkgmodel.Message` mapper already exists at `in
 5. **`medium`** — Fold `cmd/main.go:38 checkConfig` into `config.validate()`, delete `MetricsAddr`, and add `config/` tests covering the merged positive-integer checks.
 6. **`medium`** — Add `bootstrap.go` plus `Bootstrap` config plus `BOOTSTRAP_STREAMS=true` in `deploy/docker-compose.yml`, matching the 11 sibling services.
 7. **`low`** — Add a `clampLimit(req, def int) int` helper to replace the five clamp copies; split `internal/service/messages_test.go` to mirror the production files; move `toWireMessage`/`toWireParticipant`/`botAwareDisplayName` out of `reactions.go` into a `wire.go`; and fix the comment placement at `readcache.go:56-65`.
+
+---
+
+# 5. Integration — 4 / 5
+
+Strong on every mechanical rule: **zero** raw-`fmt.Sprintf` subjects, exemplary error-envelope discipline, correct bucket math throughout, and complete client-API documentation. Points come off for event-delivery durability, the missing stream-bootstrap convention, and one unbudgeted server-to-server reply.
+
+## Verified clean
+
+- **Subject usage.** All 17 registrations come from `pkg/subject` builders (`internal/service/service.go:226-262`), and so do all five publish subjects (`messages.go:556,636`, `pin.go:139,181`, `reactions.go:114`). The only `Sprintf` calls in the service are a log field (`cassrepo/utils.go:162`) and an error string (`service/threads.go:299`) — neither builds a subject.
+- **JetStream consumer pattern — not applicable.** Pure request/reply: no `Consume()`, `Messages()`, `Nak()`, `jsretry`, or hardcoded `cc.BackOff` anywhere in the tree, so none of the redelivery-backoff rules can be violated. Admission control and per-request deadlines come from `natsrouter.GuardConfig` (`cmd/main.go:222-226`, defaults `MAX_CONCURRENCY=256` / `REQUEST_TIMEOUT=10s`), and `cassrepo` bounds its own fan-out (`walker.go:18` fanout 8 ≤ `CASSANDRA_NUM_CONNS`; `messages_by_id.go:66` `errgroup.SetLimit`).
+- **Cassandra.** Every bucketed read and write derives the bucket from `r.bucket` (a `msgbucket.Sizer`) — `messages_by_room.go:94-201`, `write.go:211,226,393`, `pin.go:79,99`, `reactions.go:39,62`. `thread_messages_by_thread` correctly queries by `thread_room_id` alone with no bucket walk (`thread_messages.go:29`). The three-way alignment (`docs/cassandra_message_model.md` ↔ `pkg/model/cassandra/message.go` ↔ init DDL) holds for all four tables, and projections are explicit (`messages_by_room.go:13-18`, `thread_messages.go:14-18`) — no `SELECT *`.
+- **`MESSAGE_BUCKET_HOURS` agrees fleet-wide.** `config.go:53` `envDefault:"360"` matches `message-worker/main.go:46` and `bot-message-worker/main.go:37`. No mismatch, so no `critical` finding here.
+- **Outbox/inbox.** No INBOX or OUTBOX publish, consume, or stream creation, so `inbox-worker`'s sole ownership is trivially respected.
+- **IDs.** The service generates no IDs (read and mutate only) — nothing to violate.
+- **Client API docs.** All 14 `chat.user.…` RPCs appear in `docs/client-api.md` and `docs/client-api/request-reply.md`; field tables match `internal/models/message.go`, including `sizeLimited` (`client-api.md:3088,3242`) present exactly where the code sets it and absent where the code omits it. Every history `reason` in `pkg/errcode/codes_message.go:6-16` is catalogued (`client-api.md:6884-6889`). **No drift found** — no `high` documentation finding.
+- **Errors.** 100% Tier 1: typed constructors returned to the router, zero `errnats.Reply`, zero log-and-return in this dimension's scope, and `WithCause` only over infra errors (`cassrepo/utils.go:74`, `service/threads.go:331`).
+- **Shutdown.** `shutdown.Wait(ctx, 25s, …)` in the correct order — router → drain → Mongo → Cassandra → Vault → health → obs (`cmd/main.go:242-256`).
+
+## Findings
+
+### `high` — Canonical mutation events are fire-and-forget on the request context
+`publisher.Publish` is called with the *request* context (`internal/service/messages.go:736`, reached from `messages.go:556,636`, `pin.go:139,181`, `reactions.go:114`) and every failure is swallowed by a `slog.Warn` (`messages.go:737-740`). Two consequences:
+
+- `broadcast-worker/handler.go:170-172` and `search-sync-worker/messages.go:129,318` are the only consumers of `.updated`/`.deleted`/`.pinned`/`.reacted`. A NATS blip means the mutation is committed in Cassandra but **never** reaches connected clients and never reaches the search index — permanently, with no OUTBOX buffer and no retry, unlike `room-worker`, `message-worker` and `broadcast-worker`.
+- Because the context is the request context, a request that has already burned its 10s `REQUEST_TIMEOUT` on Cassandra publishes into a cancelled context and fails immediately. Contrast the preview write, which correctly takes a fresh bounded budget (`messages.go:688`, `rooms.go:169`).
+
+### `medium` — No `bootstrap.go` or `BOOTSTRAP_STREAMS` despite publishing to MESSAGES-CANONICAL
+`CLAUDE.md` §6 requires every service that publishes to a stream to carry `Bootstrap bootstrapConfig` plus a `bootstrapStreams` helper. `internal/config/config.go` has no `Bootstrap` field, there is no `history-service/bootstrap.go` (11 peers have one), and `deploy/docker-compose.yml` never sets `BOOTSTRAP_STREAMS`. The service cannot stand up against a fresh NATS, and against a missing stream every canonical publish degrades to the silent `Warn` above — the two findings compound.
+
+### `medium` — `ListThreadSubscriptions` reply is unbudgeted
+`internal/service/threads.go:195` returns up to 100 items, each carrying two fully marshalled messages (`threads.go:261-262`), with no `pagefit` pass — even though `pageBudget` is wired (`service.go:180`) and used for `msg.history` (`messages.go:99`) and `msg.surrounding` (`messages.go:375`). `user-service/service/threads.go:120` trims the *merged* result, which cannot help: an oversize leaf reply never arrives, so the whole site drops into `unavailableSites` rather than returning a short page. The same gap exists with lower blast radius on `msg.next` (`messages.go:167`), `msg.get.ids` (`messages.go:482`), `msg.pinned.list` (`pin.go:212`) and `msg.thread` (`threads.go:141`) — but those are documented as intentional at `docs/client-api.md:6845`, so they are acceptable as-is.
+
+### `low` — `GetSubscription` fetches whole documents
+`internal/mongorepo/subscription.go:28` issues `FindOne` with no projection, violating §6's "always project precisely". Its sibling three lines down does it correctly (`subscription.go:33-35`). It is on the pin/unpin hot path (`service/pin.go:38`) and is deliberately *not* cached (`readcache/readcache.go:150-151`). Same line as the code-quality chapter's `high` finding; that chapter carries the higher tag and the recommendation.
+
+### `low` — Event `Timestamp` reuses the domain timestamp
+`internal/service/messages.go:549` (`editedAtMs`), `messages.go:628` (`deletedAtMs`), `reactions.go:100` and `pin.go:137` set the event-level `Timestamp` from the mutation's own time rather than at the publish site, as §6's "Event Timestamps" rule requires. `migration.go:80,124` do it correctly and comment on the distinction — so the codebase disagrees with itself. Semantically near-identical in practice; flagged for consistency.
+
+### `low` — `MESSAGE_BUCKET_HOURS` not pinned in this service's compose file
+The fleet-wide value agrees (all three services default to 360), but `history-service/deploy/docker-compose.yml` omits it while `bot-message-worker/deploy/docker-compose.yml:18` pins it. Pinning makes the cross-service invariant visible rather than implied by three independently-declared `envDefault`s.
+
+### `nitpick` — Stale primary-key comments
+`internal/service/migration.go:87,95` and `internal/cassrepo/write.go:48` assert the `messages_by_id` primary key is `(message_id, created_at)`. The source of truth says `PRIMARY KEY(message_id)` (`docs/cassandra_message_model.md:270`, `docker-local/cassandra/init/13-table-messages_by_id.cql:28`), and the queries agree (`messages_by_id.go:21`).
+
+## Recommendations
+
+1. **`high`** — Buffer the canonical mutation events durably. Publish an `OutboxEvent` for `.updated`/`.deleted`/`.pinned`/`.unpinned`/`.reacted` — adding the types to exactly one `pkg/outbox` partition set, as the convention requires — so `outbox-worker` retries them. At minimum, give `publishCanonicalBestEffort` its own `context.WithTimeout(context.WithoutCancel(c), …)` plus a bounded in-process retry, and emit a metric on final failure so the divergence is at least observable.
+2. **`medium`** — Add `history-service/bootstrap.go` with a `bootstrapStreams(ctx, js, siteID, enabled)` helper creating only `stream.MessagesCanonical(siteID)`'s `Name + Subjects`, a `Bootstrap` field in `config.Config`, and `BOOTSTRAP_STREAMS=true` in `deploy/docker-compose.yml`.
+3. **`medium`** — Apply `pagefit.Fit` to `ListThreadSubscriptions` (`threads.go:195`), blanking oversize rows with `Truncated: true` exactly as `user-service/service/threads.go:339-344` does, so a fat page degrades to a short page instead of taking the whole site offline.
+4. **`low`** — Add `mongoutil.WithProjection` to `internal/mongorepo/subscription.go:28`, limited to the fields `pin.go` actually reads.
+5. **`low`** — Compute the event `Timestamp` at the publish site (`messages.go:549,628`, `reactions.go:100`, `pin.go:137`), matching `migration.go:80`.
+6. **`low`** — Pin `MESSAGE_BUCKET_HOURS=360` explicitly in `deploy/docker-compose.yml`.
+7. **`nitpick`** — Correct the `messages_by_id` primary-key comments (`migration.go:87,95`, `write.go:48`), and dedupe `req.MessageIDs` before `GetMessagesByIDs` (`messages.go:463`) so duplicates don't each cost a Cassandra read.
