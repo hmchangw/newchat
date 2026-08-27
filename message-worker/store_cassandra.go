@@ -11,6 +11,7 @@ import (
 	"github.com/gocql/gocql"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -58,15 +59,45 @@ func toMentionSet(mentions []model.Participant) []*cassParticipant {
 
 // CassandraStore implements Store using a Cassandra session.
 type CassandraStore struct {
-	cassSession  *gocql.Session
-	bucket       msgbucket.Sizer
-	cipher       atrest.Cipher // nil when ATREST_ENABLED=false
+	cassSession *gocql.Session
+	bucket      msgbucket.Sizer
+	cipher      atrest.Cipher // nil when ATREST_ENABLED=false
+	// bucketCache invalidates history-service's per-bucket read cache after this
+	// worker writes into a bucket that service may have cached. Nil disables it
+	// (staleness then bounded by the cache TTL) — see bustParentBucket.
+	bucketCache  *bucketcache.Invalidator
 	newBatch     func(context.Context) *gocql.Batch
 	executeBatch func(context.Context, *gocql.Batch) error
 }
 
-func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{
+// WithBucketCacheInvalidator wires the history-service bucket-cache invalidator.
+// Pass nil (or omit) to leave invalidation off.
+func WithBucketCacheInvalidator(inv *bucketcache.Invalidator) func(*CassandraStore) {
+	return func(s *CassandraStore) { s.bucketCache = inv }
+}
+
+// bustParentBucket invalidates history-service's cached copy of the bucket
+// holding a thread parent this worker just rewrote.
+//
+// A thread parent is usually old enough that its bucket has sealed, and
+// history-service caches sealed buckets whole — including tcount,
+// thread_last_msg_at and thread_room_id, the three columns the thread paths
+// here update. Without this the cached copy serves the pre-reply values until
+// its TTL, and because the client gates the thread affordance on tcount > 0, a
+// first reply on such a parent shows no reply count at all.
+//
+// Best-effort by construction: the Cassandra write has already committed, so a
+// failed DEL must not fail the handler and cause a redelivery that rewrites a
+// row that is already correct. The TTL is the backstop.
+func (s *CassandraStore) bustParentBucket(ctx context.Context, roomID string, parentCreatedAt time.Time) {
+	if s.bucketCache == nil {
+		return
+	}
+	s.bucketCache.Bust(ctx, roomID, s.bucket.Of(parentCreatedAt))
+}
+
+func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher, opts ...func(*CassandraStore)) *CassandraStore {
+	s := &CassandraStore{
 		cassSession: session,
 		bucket:      bucket,
 		cipher:      cipher,
@@ -77,6 +108,10 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 			return o11ycassandra.ExecuteBatch(ctx, session, batch)
 		},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // SaveMessage inserts msg into both messages_by_room and messages_by_id via a
@@ -365,6 +400,7 @@ func (s *CassandraStore) setParentTcountAndTlm(ctx context.Context, msg *model.M
 	).WithContext(ctx).Exec(); err != nil {
 		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
 	}
+	s.bustParentBucket(ctx, msg.RoomID, parentCreatedAt)
 	return nil
 }
 
@@ -422,7 +458,11 @@ func (s *CassandraStore) UpdateParentMessageThreadRoomID(ctx context.Context, pa
 			"parentCreatedAt", parentCreatedAt,
 			"threadRoomID", threadRoomID,
 		)
+		// Nothing changed, so nothing cached can be stale. Busting here would
+		// evict a still-correct bucket for every reader.
+		return nil
 	}
+	s.bustParentBucket(ctx, roomID, parentCreatedAt)
 	return nil
 }
 

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gocql/gocql"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
@@ -54,10 +56,38 @@ type CassandraStore struct {
 	sess   *gocql.Session
 	bucket msgbucket.Sizer
 	cipher atrest.Cipher
+	// bucketCache invalidates history-service's per-bucket read cache after this
+	// worker writes into a bucket that service may have cached. Nil disables it
+	// (staleness then bounded by the cache TTL) — see bustParentBucket.
+	bucketCache *bucketcache.Invalidator
 }
 
-func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher) *CassandraStore {
-	return &CassandraStore{sess: sess, bucket: bucket, cipher: cipher}
+func NewCassandraStore(sess *gocql.Session, bucket msgbucket.Sizer, cipher atrest.Cipher, opts ...func(*CassandraStore)) *CassandraStore {
+	s := &CassandraStore{sess: sess, bucket: bucket, cipher: cipher}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// WithBucketCacheInvalidator wires the history-service bucket-cache invalidator.
+// Pass nil (or omit) to leave invalidation off.
+func WithBucketCacheInvalidator(inv *bucketcache.Invalidator) func(*CassandraStore) {
+	return func(s *CassandraStore) { s.bucketCache = inv }
+}
+
+// bustParentBucket invalidates history-service's cached copy of the bucket
+// holding a thread parent this worker just rewrote. A thread parent is usually
+// old enough that its bucket has sealed, and history-service caches sealed
+// buckets whole — including the tcount and thread_last_msg_at this path writes.
+//
+// Best-effort: the Cassandra write has already committed, so a failed DEL must
+// not fail the handler. The cache TTL is the backstop.
+func (s *CassandraStore) bustParentBucket(ctx context.Context, roomID string, parentCreatedAt time.Time) {
+	if s.bucketCache == nil {
+		return
+	}
+	s.bucketCache.Bust(ctx, roomID, s.bucket.Of(parentCreatedAt))
 }
 
 // SaveMessage inserts into messages_by_room + messages_by_id via one UnloggedBatch.
@@ -267,6 +297,7 @@ func (s *CassandraStore) countAndSetParentTcount(ctx context.Context, msg *model
 	).WithContext(ctx).Exec(); err != nil {
 		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
 	}
+	s.bustParentBucket(ctx, msg.RoomID, parentCreatedAt)
 	return nil
 }
 

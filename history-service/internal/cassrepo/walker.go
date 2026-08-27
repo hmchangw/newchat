@@ -86,20 +86,39 @@ func (r pageResult[T]) toPage() Page[T] {
 // letting callers apply a per-call predicate (e.g. created_at < before) only where needed.
 type bucketQueryFn func(bucket int64, firstBucket bool) *gocql.Query
 
-// bucketPage is one bucket's fetched rows plus the gocql page state needed to
-// resume mid-bucket. resumeState is non-empty only when the bucket holds more
-// rows than were returned, so the walk can distinguish "bucket drained" from
-// "page capped by limit" unambiguously.
+// bucketPage is one bucket's fetched rows plus what the walk needs to continue.
+//
+// Whether the bucket holds rows beyond the ones returned — the distinction
+// between "bucket drained" and "page capped by limit", and so what
+// pageResult.HasNext is built from — is read via moreInBucket, never off either
+// field directly. resumeState is the gocql page state that resumes mid-bucket;
+// hasMore carries the same fact for a fetcher that has no such state.
+//
+// The two are separate because a fetcher serving a bucket from memory knows rows
+// remain but has nothing to resume from. Reading the fact off resumeState alone
+// made such a page indistinguishable from a drained one, and the walk then
+// advanced past the floor and reported a terminal page with rows unread.
 type bucketPage[T any] struct {
 	rows        []T
+	hasMore     bool
 	resumeState []byte
+}
+
+// moreInBucket reports whether the bucket still holds rows this page did not
+// return. A live fetch signals that with its gocql page state; a fetcher serving
+// the bucket from memory has no such state and sets hasMore instead. Each
+// fetcher uses exactly one of the two.
+func (p bucketPage[T]) moreInBucket() bool {
+	return p.hasMore || len(p.resumeState) > 0
 }
 
 // bucketFetcher fetches up to limit fully-materialized rows from a single
 // bucket. firstBucket selects the caller's first-bucket predicate; pageState
 // resumes a partially consumed bucket. It MUST honor limit exactly — returning
-// min(limit, rowsInBucket) rows and draining short driver pages internally — so
-// that a non-empty resumeState unambiguously means "more rows remain here".
+// min(limit, rowsInBucket) rows and draining short driver pages internally —
+// and MUST report, via a non-empty resumeState or hasMore, that it withheld
+// rows the bucket still holds, so that bucketPage.moreInBucket unambiguously
+// means "more rows remain here".
 type bucketFetcher[T any] func(ctx context.Context, bucket int64, firstBucket bool, pageState []byte, limit int) (bucketPage[T], error)
 
 // gocqlBucketFetcher adapts a bucketQueryFn + scan into a bucketFetcher backed
@@ -352,6 +371,11 @@ func (w *bucketWalk[T]) fetchWave(ctx context.Context, buckets []int64) ([]bucke
 //   - the bucket holds more rows than were prefetched: resume within the bucket.
 //   - the bucket drained exactly at the page boundary: resume at the next bucket,
 //     or terminate if that crosses the floor.
+//
+// Only a drained bucket may advance the walk. A bucket that still holds rows
+// resumes at itself, even when the fetcher had no gocql state to resume from —
+// the cursor is then a bucket anchor rather than an intra-bucket token, but
+// HasNext stays truthful, which is what every caller of the DESC reads acts on.
 func (w *bucketWalk[T]) resumeAfterFill(ctx context.Context, rows []T, bucket int64, page bucketPage[T], taken int) (pageResult[T], error) {
 	if taken < len(page.rows) {
 		aligned, err := w.fetch(ctx, bucket, bucket == w.startBucket, w.baseState(bucket), taken)
@@ -360,7 +384,7 @@ func (w *bucketWalk[T]) resumeAfterFill(ctx context.Context, rows []T, bucket in
 		}
 		return resumeAtBucket(rows, bucket, aligned.resumeState)
 	}
-	if len(page.resumeState) > 0 {
+	if page.moreInBucket() {
 		return resumeAtBucket(rows, bucket, page.resumeState)
 	}
 	next := w.advance(bucket)

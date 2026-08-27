@@ -96,12 +96,75 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// Per-bucket read cache (Cassandra sealed-bucket LoadHistory reads), stored
+	// in Valkey and shared by every replica. Only sealed buckets (strictly older
+	// than the current one) are cached; the hot current bucket is always read
+	// live.
+	//
+	// BucketCacheOptIn gates the whole feature. VALKEY_ADDRS alone is not the
+	// gate: it is a fleet-wide variable that several other services already
+	// consume, so a deployment that injects it everywhere would switch this
+	// cache on for history-service as a side effect of merging rather than as a
+	// decision.
+	//
+	// BEFORE ENABLING THIS, weigh two known gaps. None is a bug in the cache's
+	// own logic; each is a case where a sealed bucket can change without the
+	// cache learning, so reads serve a stale row until the entry expires:
+	//
+	//  1. Cache-aside refill race (#250). A reader that missed can Put a
+	//     pre-mutation snapshot back after a concurrent Bust found the key
+	//     absent.
+	//  2. Wall-clock sealing. A bucket is sealed when bucket < sizer.Of(now);
+	//     nothing makes the partition immutable in Cassandra, so a create that
+	//     lands after the boundary — a federation replay, or a JetStream
+	//     redelivery, whose backoff runs to minutes — writes into a bucket a
+	//     cached copy already claims to hold completely.
+	//
+	// Until those are addressed, BucketCacheTTL is the mutation-visibility
+	// bound for sealed buckets. Enabling this is an operator's deliberate
+	// choice to accept that bound.
+	//
+	// Two gaps that were on this list are now closed. Cross-replica L1
+	// staleness is closed by construction: one shared Valkey tier, no
+	// per-replica copy, so a Bust is authoritative for every reader
+	// immediately. Thread state written by message-worker / bot-message-worker
+	// is closed by those workers busting the parent's bucket on write — which
+	// is why HISTORY_BUCKET_CACHE_ENABLED gates them too, and why enabling the
+	// cache without also enabling it there would reintroduce stale reply
+	// counts with no signal.
+	BucketCacheOptIn bool          `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
+	ValkeyAddrs      []string      `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword   string        `env:"VALKEY_PASSWORD"              envDefault:""`
+	BucketCacheTTL   time.Duration `env:"HISTORY_BUCKET_CACHE_TTL" envDefault:"10m"`
+	// BucketCacheMaxRows caps how many rows a bucket may hold to be cacheable;
+	// larger (dense) buckets are read live instead of cached whole. The default
+	// sits just above the largest ordinary page (surroundingPageSize 50), which
+	// is where caching stops paying: the walker fills a page from a dense start
+	// bucket in one query with no speculative reads, so caching such a bucket
+	// saves no round trip while making every hit decode the whole partition.
+	// Below the cap, a page spans several buckets and the walk is what the cache
+	// collapses.
+	BucketCacheMaxRows int `env:"HISTORY_BUCKET_CACHE_MAX_ROWS" envDefault:"50"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
 	// DebugLog gates the X-Debug ladder rate cap and DEBUG_LOG_PAYLOADS
 	// (dev-only full request/reply payload logging). Default: payloads off.
 	DebugLog logctx.Config `envPrefix:"DEBUG_LOG_"`
+}
+
+// BucketCacheEnabled reports whether the per-bucket sealed-read cache should be
+// stood up. It requires an explicit opt-in (see BucketCacheOptIn) on top of
+// usable knobs. Zero is the documented disable value for each knob, so any one
+// of them at zero keeps Valkey unconnected and the cache uninstalled — including
+// MaxRows, where a zero cap would otherwise install a cache that classifies
+// every non-empty bucket as oversized and so can never serve a hit.
+func (c *Config) BucketCacheEnabled() bool {
+	return c.BucketCacheOptIn &&
+		len(c.ValkeyAddrs) > 0 &&
+		c.BucketCacheTTL > 0 &&
+		c.BucketCacheMaxRows > 0
 }
 
 // Load parses environment variables into Config; returns an error when required vars are absent.
@@ -142,6 +205,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.BucketCacheTTL < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_TTL must be >= 0, got %s", cfg.BucketCacheTTL)
+	}
+	if cfg.BucketCacheMaxRows < 0 {
+		return fmt.Errorf("HISTORY_BUCKET_CACHE_MAX_ROWS must be >= 0, got %d", cfg.BucketCacheMaxRows)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)

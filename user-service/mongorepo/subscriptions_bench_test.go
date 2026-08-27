@@ -67,8 +67,8 @@ func benchSeed(b *testing.B, db *mongo.Database, n int) {
 			"lastMsgId": "bench-msg-0000000001",
 		})
 		subs = append(subs, bson.M{
-			"_id": fmt.Sprintf("bench-sub-%06d", i),
-			"u":   bson.M{"_id": "bench-user-id", "account": benchAccount},
+			"_id":    fmt.Sprintf("bench-sub-%06d", i),
+			"u":      bson.M{"_id": "bench-user-id", "account": benchAccount},
 			"roomId": roomID, "siteId": "site-a", "roomType": "channel",
 			"name": fmt.Sprintf("room-%06d", i), "open": true,
 			"joinedAt": t0, "roles": bson.A{"member"},

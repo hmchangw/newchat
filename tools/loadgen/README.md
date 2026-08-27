@@ -564,6 +564,12 @@ seed-time and read-time bucket math agree.
 | `history-small`  | 5     | 100       | 1 day   | 0           | smoke / dev          |
 | `history-medium` | 100   | 5 000     | 7 days  | 5%          | sustained-throughput |
 | `history-large`  | 1 000 | 50 000    | 30 days | 10%         | partition fan-out    |
+| `history-sparse` | 1 000 | 240       | 360 days| 5%          | per-bucket read cache |
+
+`history-sparse` is not a throughput preset — 240 messages per room is
+deliberately tiny. It models a long-lived, low-traffic room, which is the
+only shape that exercises history-service's per-bucket read cache; see
+"Measuring the per-bucket read cache" below.
 
 Top-level messages are placed uniformly across the span with ±50% jitter
 on the gap so they don't align to bucket boundaries. Thread replies land
@@ -597,6 +603,64 @@ most reads.
 - Errors broken out by class (`timeout`, `reply`, `bad`); the
   `no-thread-parents` counter is informational (thread requests that
   landed on a room with no seeded parents and fell back to history).
+
+### Measuring the per-bucket read cache
+
+history-service can cache whole **sealed** buckets
+(`HISTORY_BUCKET_CACHE_ENABLED`, off by default). Two of its defaults decide
+whether a preset can measure that cache at all, and the small/medium/large
+presets fail both by one to two orders of magnitude:
+
+| preset | rows/bucket @360h | sealed buckets | can measure the cache? |
+|---|---:|---:|---|
+| `history-small`  |    100 |  0 | no |
+| `history-medium` |  5 000 |  0 | no |
+| `history-large`  | 25 000 |  1 | no |
+| `history-sparse` |     10 | 23 | **yes** |
+
+- Above `HISTORY_BUCKET_CACHE_MAX_ROWS` (50) every bucket is declined as
+  oversized and read live, so the cache serves nothing.
+- A span shorter than one bucket width puts the whole room in the *current*
+  bucket, which is never cached.
+
+`HistoryRowsPerBucket` / `HistorySealedBuckets` compute both, and
+`TestHistoryPresets_BucketShape` pins the table above. Re-check it if you
+change `MESSAGE_BUCKET_HOURS` — the shape moves with the bucket width.
+
+A/B the cache with everything else held constant:
+
+```bash
+loadgen seed --workload=history --preset=history-sparse
+
+# baseline: cache off on history-service
+loadgen history-sustained --preset=history-sparse --rate=200 --duration=30m \
+  --mix=history:100 --before-mode=scrollback:100 --warmup --csv
+
+# then restart history-service with HISTORY_BUCKET_CACHE_ENABLED=true and repeat
+```
+
+`--before-mode=scrollback:100` matters: `open` re-reads the top of a room,
+which is the current (never-cached) bucket. Only scrollback walks `before`
+back into sealed buckets.
+
+Read three things, in this order:
+
+1. **`bucket-walk depth`** in loadgen's summary. If multi-bucket replies are
+   near zero the preset is wrong and the latency comparison is meaningless.
+2. **Cache hit ratio** — must be well above zero, or the cache never engaged:
+   ```promql
+   sum(rate(cache_hits_total{cache="history_bucket"}[5m]))
+     / sum(rate(cache_hits_total{cache="history_bucket"}[5m])
+         + rate(cache_misses_total{cache="history_bucket"}[5m]))
+   ```
+3. **Cassandra operation rate** for history-service — the work the cache is
+   meant to remove. This is the honest signal; per-request latency alone can
+   mislead, since a cache hit still pays a gob decode
+   (`pkg/bucketcache` `BenchmarkDecode`: ~113µs for 10 rows, ~169µs for 50).
+
+Run for at least 2× `HISTORY_BUCKET_CACHE_TTL` (default 10m) or you measure a
+permanently cold cache, and run each arm twice — one pair of numbers on a
+shared box will not separate the effect from noise.
 
 ## Thread-read workload (GetThreadMessages benchmark)
 

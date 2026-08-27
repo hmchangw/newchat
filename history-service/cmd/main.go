@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/readcache"
 	"github.com/hmchangw/chat/history-service/internal/service"
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -30,6 +31,7 @@ import (
 	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // checkConfig validates positive-integer config knobs and exits the process on
@@ -156,7 +158,41 @@ func main() {
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
-	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
+	// Per-bucket Valkey read cache for the sealed Cassandra LoadHistory reads,
+	// shared by every replica. Off unless HISTORY_BUCKET_CACHE_ENABLED. The cache
+	// lives inside cassRepo: sealed buckets are served from it, the current bucket
+	// and mutations always hit Cassandra, and the write path busts affected
+	// buckets synchronously.
+	var (
+		msgValkey valkeyutil.Client
+		repoOpts  []cassrepo.Option
+	)
+	if cfg.BucketCacheEnabled() {
+		// The cache is an optimization, never a dependency: a Valkey outage must not
+		// keep this replica from serving reads Cassandra can already answer. Degrade
+		// to uncached reads instead of exiting, or a Valkey blip during a rolling
+		// restart would take out every replacement replica. There is no in-process
+		// fallback tier, so an outage means no caching at all rather than a set of
+		// replicas each serving its own divergent copy.
+		msgValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+			valkeyutil.WithObservability(sdk), valkeyutil.WithRequireParentSpan(true))
+		if err != nil {
+			slog.Warn("valkey connect (per-bucket cache) failed, serving uncached reads", "error", err)
+			msgValkey = nil
+		} else {
+			bc, cerr := bucketcache.NewCache(msgValkey, cfg.BucketCacheTTL)
+			if cerr != nil {
+				// Not a dependency outage — the knobs themselves are unusable, and
+				// config validation should already have rejected them. Fail loudly.
+				slog.Error("init per-bucket cache failed", "error", cerr)
+				os.Exit(1)
+			}
+			repoOpts = append(repoOpts, cassrepo.WithBucketCache(bc, cfg.BucketCacheMaxRows))
+			slog.Info("per-bucket cache enabled", "ttl", cfg.BucketCacheTTL, "maxRows", cfg.BucketCacheMaxRows)
+		}
+	}
+
+	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher, repoOpts...)
 	db := mongoClient.Database(cfg.Mongo.DB)
 	subRepo := mongorepo.NewSubscriptionRepo(db)
 	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch})
@@ -246,6 +282,7 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
+		func(ctx context.Context) error { valkeyutil.Disconnect(msgValkey); return nil },
 		func(ctx context.Context) error {
 			if vaultWrapper != nil {
 				return vaultWrapper.Close()

@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/bucketcache"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -21,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -35,6 +37,11 @@ type config struct {
 	CassandraNumConns int    `env:"CASSANDRA_NUM_CONNS" envDefault:"4"`
 
 	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
+	// Mirrors history-service: this worker writes thread state into buckets that
+	// service caches, so the same env var gates the cache and its invalidation.
+	BucketCacheEnabled bool     `env:"HISTORY_BUCKET_CACHE_ENABLED" envDefault:"false"`
+	ValkeyAddrs        []string `env:"VALKEY_ADDRS"                 envSeparator:","`
+	ValkeyPassword     string   `env:"VALKEY_PASSWORD"              envDefault:""`
 
 	MaxWorkers int                     `env:"MAX_WORKERS" envDefault:"100"`
 	Consumer   stream.ConsumerSettings `envPrefix:"CONSUMER_"`
@@ -121,7 +128,22 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
-	store := NewCassandraStore(cassSess, bucket, cipher)
+	// See message-worker: the thread path rewrites a parent row in a bucket
+	// history-service may have cached, so invalidate on write.
+	var botValkey valkeyutil.Client
+	var storeOpts []func(*CassandraStore)
+	if cfg.BucketCacheEnabled && len(cfg.ValkeyAddrs) > 0 {
+		v, vErr := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword)
+		if vErr != nil {
+			slog.Warn("valkey connect (history bucket-cache invalidation) failed; thread reply counts stay stale until the cache TTL", "error", vErr)
+		} else {
+			botValkey = v
+			storeOpts = append(storeOpts, WithBucketCacheInvalidator(bucketcache.NewInvalidator(v)))
+			slog.Info("history bucket-cache invalidation enabled")
+		}
+	}
+
+	store := NewCassandraStore(cassSess, bucket, cipher, storeOpts...)
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
@@ -161,6 +183,7 @@ func run() error {
 
 	slog.Info("bot-message-worker running", "site", cfg.SiteID)
 	shutdown.Wait(ctx, 25*time.Second,
+		func(ctx context.Context) error { valkeyutil.Disconnect(botValkey); return nil },
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(dctx context.Context) error {
 			done := make(chan struct{})
