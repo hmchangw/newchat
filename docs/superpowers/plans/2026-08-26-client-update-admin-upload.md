@@ -2331,7 +2331,7 @@ Change the `### POST /api/v1/version` auth line from `**Auth:** none (v1)` to:
 entry in the service's `UPLOAD_TOKENS` table (`account:token`, comma-separated).
 Only `admin-service` is provisioned; browsers and end-user clients never call this
 endpoint directly — they go through
-[`POST /v1/admin/client-updates`](#916-http--post-v1adminclient-updates).
+[`POST /v1/admin/client-updates`](#917-http--post-v1adminclient-updates).
 ```
 
 Add to that endpoint's response table, above the `500` row:
@@ -2391,7 +2391,7 @@ name and extension rules live there and are reported back verbatim on a `400`.
 `client_update.upload` and `details` naming both uploaded file names.
 ```
 
-Add `- [9.16 POST /v1/admin/client-updates](#916-http--post-v1adminclient-updates)` to the §9 line in the table of contents, matching how §9.13-§9.15 are listed.
+Add `- [9.17 POST /v1/admin/client-updates](#917-http--post-v1adminclient-updates)` to the §9 line in the table of contents, matching how §9.13-§9.15 are listed.
 
 - [ ] **Step 3: Update `docs/client-api/request-reply.md`**
 

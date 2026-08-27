@@ -737,14 +737,21 @@ describe('uploadClientVersion cancellation and budget', () => {
     responseText = ''
     timeout = 0
     aborted = false
+    sent = false
     constructor() {
       AbortableXHR.instances.push(this)
     }
     open() {}
     setRequestHeader() {}
-    send() {}
+    send() {
+      this.sent = true
+    }
+    // Per the XHR spec, abort() fires abort/loadend only for a request that was
+    // actually sent. A mock that fires them unconditionally hides a caller that
+    // relies on the event to settle its promise before send().
     abort() {
       this.aborted = true
+      if (!this.sent) return
       this.onabort?.()
       this.onloadend?.()
     }
@@ -788,6 +795,9 @@ describe('uploadClientVersion cancellation and budget', () => {
     const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
 
     expect(AbortableXHR.instances[0].aborted).toBe(true)
+    // A request that was never sent fires no abort event, so the promise has to
+    // be settled by the caller — otherwise the console stays busy forever.
+    expect(AbortableXHR.instances[0].sent).toBe(false)
     await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
   })
 

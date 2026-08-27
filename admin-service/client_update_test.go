@@ -884,3 +884,44 @@ func TestRelayParts_AuditsOnlyTheContractFields(t *testing.T) {
 	// The unknown part is still relayed — admin-service validates nothing.
 	assert.Contains(t, out.String(), "junk.bin")
 }
+
+// slowUploader answers only after the delay elapses, without failing early —
+// the shape of resty's own outbound timeout firing on a stalled upstream.
+type slowUploader struct {
+	after time.Duration
+	err   error
+}
+
+func (s *slowUploader) Upload(_ context.Context, _ string, body io.Reader) error {
+	_, _ = io.Copy(io.Discard, body)
+	<-time.After(s.after)
+	return s.err
+}
+
+// The outbound upload timeout and this request's write deadline are both derived
+// from ClientUpdateTimeout, but the write deadline starts FIRST, at handler
+// entry. Were they equal, the connection would already be unwritable by the time
+// a stalled upstream produced an error to report, and the admin would get a
+// transport failure instead of the documented 503 envelope. uploadResponseMargin
+// is what keeps the connection writable long enough to answer.
+func TestUploadClientVersion_AnswersAfterTheOutboundBudgetExpires(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateTimeout = 200 * time.Millisecond
+	up := &slowUploader{after: 700 * time.Millisecond, err: errcode.Unavailable("client update service is unavailable")}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+		"configFile":  {"app.yaml", "version: 1", ""},
+		"executeFile": {"app.exe", "MZ", ""},
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err, "the write deadline expired before the handler could write its envelope")
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}

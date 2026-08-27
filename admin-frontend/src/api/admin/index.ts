@@ -428,8 +428,13 @@ export function uploadClientVersion(
     // both backend connections and the selected files alive for minutes, and
     // returning can start a second invisible upload alongside the first.
     if (signal) {
+      // Reject explicitly rather than leaning on xhr.abort(): a request that was
+      // opened but never sent fires no abort event, so relying on the handler
+      // above would leave this promise — and the console's Upload button —
+      // pending forever.
       if (signal.aborted) {
         xhr.abort()
+        reject(new AsyncJobError('upload was aborted'))
         return
       }
       const onAbort = () => xhr.abort()

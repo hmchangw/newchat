@@ -79,7 +79,7 @@ paths.
    - [PUT /api/v1/emoji/:shortcode](#put-apiv1emojishortcode)
 8. [Presence](#8-presence)
 9. [Admin Service](#9-admin-service)
-    - [9.16 POST /v1/admin/client-updates](#916-http--post-v1adminclient-updates)
+    - [9.17 POST /v1/admin/client-updates](#917-http--post-v1adminclient-updates)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
@@ -8123,7 +8123,42 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `recordedBy` | string | The admin account that recorded this row (from the session token). |
 | `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
-### 9.16 HTTP — POST /v1/admin/client-updates
+### 9.16 Resync user
+
+**Endpoint:** `POST /v1/admin/users/:account/resync`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Re-delivers the account's current home-site state on both sync lanes: the durable HR identity bootstrap plus the `user_account_updated` snapshot to every remote site's INBOX. Re-delivery only — no user write and no audit entry — and idempotent on the receivers (the snapshot re-stamps the watermark with the same field values). Only home-site accounts qualify; a replica homed elsewhere returns `404 user_not_found`.
+
+#### Request body
+
+None.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | string | Always `"ok"`. |
+| `syncFailures` | string[] | Remote site IDs whose snapshot publish was not acknowledged. Omitted when every destination landed. The durable HR feed delivers identity fields only, so sites named here lack roles/status (or the whole account, when `hrSyncFailed` is also set) until a later resync or edit lands. |
+| `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. |
+
+```json
+{
+  "status": "ok"
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 404 | `not_found` | `user_not_found` | No user with that account homed at this site (unknown account, or a cross-site replica). |
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role. |
+
+### 9.17 HTTP — POST /v1/admin/client-updates
 
 **Auth:** admin session (`Authorization: Bearer <session token>`), same as every `/v1/admin/…` route.
 
@@ -8167,42 +8202,15 @@ name and extension rules live there and are reported back verbatim on a `400`.
 **Audit:** a successful upload appends an `AuditEntry` with action
 `client_update.upload` and `details` naming both uploaded file names.
 
+**Timeouts** are ordered so that whichever budget expires first, the admin still
+gets an envelope rather than a dropped connection:
+`client-update-service`'s `HTTP_WRITE_TIMEOUT` ≤ this service's
+`CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`, also this request's read deadline)
+< that value + 30s (this request's write deadline) < the browser's own upload
+timeout. Raising one without the others reintroduces a window where a published
+upload is reported as a failure.
+
 ---
-
-### 9.16 Resync user
-
-**Endpoint:** `POST /v1/admin/users/:account/resync`
-**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
-
-Re-delivers the account's current home-site state on both sync lanes: the durable HR identity bootstrap plus the `user_account_updated` snapshot to every remote site's INBOX. Re-delivery only — no user write and no audit entry — and idempotent on the receivers (the snapshot re-stamps the watermark with the same field values). Only home-site accounts qualify; a replica homed elsewhere returns `404 user_not_found`.
-
-#### Request body
-
-None.
-
-#### Success response
-
-`HTTP 200`
-
-| Field | Type | Notes |
-|---|---|---|
-| `status` | string | Always `"ok"`. |
-| `syncFailures` | string[] | Remote site IDs whose snapshot publish was not acknowledged. Omitted when every destination landed. The durable HR feed delivers identity fields only, so sites named here lack roles/status (or the whole account, when `hrSyncFailed` is also set) until a later resync or edit lands. |
-| `hrSyncFailed` | boolean | `true` when the durable HR identity publish failed. Omitted when it landed. |
-
-```json
-{
-  "status": "ok"
-}
-```
-
-#### Errors
-
-| HTTP | `code` | `reason` | When |
-|---|---|---|---|
-| 404 | `not_found` | `user_not_found` | No user with that account homed at this site (unknown account, or a cross-site replica). |
-| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
-| 403 | `forbidden` | `not_admin` | Session lacks the admin role. |
 
 ## 10. Botplatform Service
 
@@ -8686,7 +8694,7 @@ TTL+size in-memory cache.
 entry in the service's `UPLOAD_TOKENS` table (`account:token`, comma-separated).
 Only `admin-service` is provisioned; browsers and end-user clients never call this
 endpoint directly — they go through
-[`POST /v1/admin/client-updates`](#916-http--post-v1adminclient-updates).
+[`POST /v1/admin/client-updates`](#917-http--post-v1adminclient-updates).
 
 `UPLOAD_TOKENS` is **optional**. Unset or empty authorizes nobody: the service
 starts normally and answers **every** upload with `401`, so a site that does not

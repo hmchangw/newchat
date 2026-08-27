@@ -174,10 +174,15 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 	done := make(chan relayResult, 1)
 	go func() {
 		names, relayErr := relayParts(mr, mw)
+		// Publish BEFORE closing, onto the buffered channel so this never blocks.
+		// CloseWithError is what wakes Upload, so anything that observes the close
+		// — including an Upload that returns because of it — must already be able
+		// to see this result; otherwise awaitRelay's non-blocking receive races the
+		// send and a genuine bad-body error reports as an upstream outage.
+		done <- relayResult{names: names, err: relayErr}
 		// Closing the pipe is what unblocks the reader, so it must happen on every
 		// path out of this goroutine.
 		_ = pw.CloseWithError(relayErr)
-		done <- relayResult{names: names, err: relayErr}
 	}()
 
 	// Deferred as well as called inline: the inline close is what unblocks the
@@ -247,18 +252,42 @@ func (h *Handler) awaitRelay(c *gin.Context, done <-chan relayResult, uploadErr 
 	return <-done, true
 }
 
-// extendUploadDeadlines pushes this request's read and write deadlines out to d.
+// uploadResponseMargin is how much longer this request's WRITE deadline runs
+// than its read deadline, which is what keeps the budgets strictly ordered:
+//
+//	client-update-service's own write timeout
+//	  < CLIENT_UPDATE_UPLOAD_TIMEOUT (this service's outbound resty timeout,
+//	    and this request's read deadline)
+//	  < that timeout + uploadResponseMargin (this request's write deadline)
+//	  < the browser's upload timeout (admin-frontend adds its own margin)
+//
+// Without it the outbound timeout and the write deadline are equal, and the
+// write deadline starts FIRST — at handler entry, before the outbound request
+// exists. A stalled upstream would then produce its error only after the
+// connection had gone unwritable, and the admin would see a transport failure
+// instead of the 503 envelope this handler took the trouble to build.
+const uploadResponseMargin = 30 * time.Second
+
+// uploadDeadlines returns one upload's read and write deadlines: d bounds how
+// long the client may take to send, and the write deadline outlives it by
+// uploadResponseMargin so the verdict on that send is always reportable.
+func uploadDeadlines(now time.Time, d time.Duration) (read, write time.Time) {
+	return now.Add(d), now.Add(d + uploadResponseMargin)
+}
+
+// extendUploadDeadlines pushes this request's read and write deadlines out past
+// the server's 15s/40s, per uploadDeadlines.
 // Verified reachable: gin's responseWriter implements Unwrap, and neither
 // o11ygin nor otelgin replaces c.Writer. A failure here is fatal rather than
 // ignored — a silent no-op would kill every large upload at the server's 15s
 // read timeout, with nothing in the logs to explain it.
 func extendUploadDeadlines(c *gin.Context, d time.Duration) error {
 	rc := http.NewResponseController(c.Writer)
-	deadline := time.Now().Add(d)
-	if err := rc.SetReadDeadline(deadline); err != nil {
+	read, write := uploadDeadlines(time.Now(), d)
+	if err := rc.SetReadDeadline(read); err != nil {
 		return fmt.Errorf("extend upload read deadline: %w", err)
 	}
-	if err := rc.SetWriteDeadline(deadline); err != nil {
+	if err := rc.SetWriteDeadline(write); err != nil {
 		return fmt.Errorf("extend upload write deadline: %w", err)
 	}
 	return nil

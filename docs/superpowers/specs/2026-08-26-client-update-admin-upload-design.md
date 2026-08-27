@@ -62,25 +62,34 @@ holds the service-account token and never reaches `client-update-service`.
 ### 1.1 Config (`config.go`)
 
 ```go
-UploadTokens map[string]string `env:"UPLOAD_TOKENS,required" envSeparator:"," envKeyValSeparator:":"`
+UploadTokens map[string]string `env:"UPLOAD_TOKENS" envSeparator:"," envKeyValSeparator:":"`
 // UPLOAD_TOKENS=admin-service:<token>
 ```
 
 `caarlos0/env` v11 parses this shape already (`pkg/obs` uses it for
-`OTEL_EXPORTER_OTLP_HEADERS`). Required, with no `envDefault` — CLAUDE.md §6:
-never default a secret, fail fast on missing required config.
+`OTEL_EXPORTER_OTLP_HEADERS`). No `envDefault` — CLAUDE.md §6: never default a
+secret.
+
+**Not** `required`: an unset or empty table is a valid configuration meaning
+"uploads disabled". It authorizes nobody — every upload answers `401`, because
+an empty map matches no token — so a site that does not publish client updates
+deploys without provisioning one. Downloads are unaffected. `run()` logs a
+warning at startup when the table is empty, so the state is visible rather than
+mysterious.
 
 A `validateUploadTokens` runs from `run()` immediately after `env.ParseAs`, and
 rejects:
 
 - an empty account name,
-- an empty token — `UPLOAD_TOKENS=admin-service:` otherwise silently authorizes
-  the empty string,
-- a token shorter than 16 characters.
+- a token shorter than 16 characters (which also covers the empty token in
+  `UPLOAD_TOKENS=admin-service:`, that would otherwise authorize the empty string),
+- the same token shared by two accounts, naming the accounts but never the token.
 
-Tokens may contain neither `,` nor `:`; a value that does is mangled by the
-separator split and trips one of the checks above. Documented in the compose file
-and in `docs/client-api.md` §12.
+A token may not contain `,` — that is the entry separator, and a value
+containing one is mangled into entries that trip the checks above. A `:` is fine:
+`env` v11 splits each entry on the FIRST colon only (`env.go:781`, `SplitN(…, 2)`),
+so everything after it is the token. Documented in the compose file and in
+`docs/client-api.md` §12.
 
 ### 1.2 Middleware (`middleware.go`)
 
@@ -367,7 +376,7 @@ an unauthenticated rejection.
 
 ## 5. Docs (same PR)
 
-- `docs/client-api.md`: new §9.16 for `POST /v1/admin/client-updates`; rows in the
+- `docs/client-api.md`: new §9.17 for `POST /v1/admin/client-updates`; rows in the
   reason-code table; §12 rewritten — the blanket "UNAUTHENTICATED in v1" banner
   becomes an auth line on `POST` plus a `401` row, with the warning narrowed to
   the still-open `GET`. TOC updated.

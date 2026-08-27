@@ -58,6 +58,12 @@ type Config struct {
 	// deliberately far ABOVE httpWriteTimeout: the upload handler extends its own
 	// read/write deadlines (client_update.go) rather than raising the server's,
 	// so this value must NOT be passed through checkHandlerTimeout.
+	//
+	// One link of the budget chain is this service's to set, and one is a
+	// deployment constraint (see uploadResponseMargin for the whole ordering):
+	// it MUST be >= client-update-service's HTTP_WRITE_TIMEOUT (default 10m), so
+	// that a slow upstream answers with its own status rather than having this
+	// service abandon a request whose artifacts may already have been written.
 	ClientUpdateTimeout time.Duration `env:"CLIENT_UPDATE_UPLOAD_TIMEOUT" envDefault:"10m"`
 
 	// Pool caps the Mongo connection pool. NOTE: admin-service deliberately takes
