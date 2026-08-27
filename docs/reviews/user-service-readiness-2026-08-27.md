@@ -610,3 +610,119 @@ JetStream-interacting services carry the toggle.
 5. **`low`** — Move the 5s RPC timeouts into `config` (`ROOM_RPC_TIMEOUT`, `HISTORY_RPC_TIMEOUT`,
    `PRESENCE_RPC_TIMEOUT`), validated against `HANDLER_TIMEOUT`.
 6. **`low`** — Add `bson:"..."` tags to `SettingsUpdateEvent` and `ChatlistUpdateEvent`.
+
+---
+
+# Chapter 7 — Performance
+
+**Score: 3.5 / 5**
+
+Strong fundamentals — every fan-out but one is bounded and degradation-tolerant, every RPC has a
+5s timeout plus `ctx`, projections are disciplined in `users.go`, the sort-key LRU is correctly
+TTL'd and bounded, and there are **no goroutine leaks and no `time.Sleep` synchronization
+anywhere**. Points lost on three unbounded or serial hot paths and two `$lookup` pipelines that do
+per-candidate work before paging.
+
+## Findings
+
+**`high` — `BadgeCountBatch` runs the full unread recompute serially, once per cache-missing
+account.** `service/badge.go:24-41` loops `req.Accounts` and calls `s.unreadRooms(c, account)`
+inline. Each call is `GetActiveSubscriptions` (an aggregate with a `$lookup` over up to
+`MAX_SUBSCRIPTION_LIMIT=1000` rows, `service/subscriptions.go:772`) **plus** per-site
+`GetRoomsMeta` RPCs. On a cold Valkey — or with `VALKEY_ADDRS` empty, the documented Phase-A
+default — a 50-account notification batch becomes 50 sequential heavy aggregations inside one
+`HANDLER_TIMEOUT=15s`. **This is the notification hot path.**
+
+**`high` — The badge `$lookup` fetches 11 room fields (including the E2E key blob) per row and
+keeps one.** `mongorepo/subscriptions.go:797-810` reuses `roomsEnrichStages()` (`:88-135`), which
+projects `name, userCount, appCount, lastMsgAt, lastMsgId, lastMentionAllAt, minUserLastSeenAt,
+createdAt, encKey.priv, encKey.ver, crossSite` — but `activeSubscriptionProjection()` (`:783`)
+keeps only `lastMsgAt`. Up to 1000 room documents' worth of bytes, including 32-byte binary keys,
+materialized and discarded per account per badge seed.
+
+**`high` — `subscription.list` phase 1 is an unbounded fetch and an unbounded `$in`.**
+`mongorepo/subscriptions.go:295` `Find(ctx, match, subscriptionLiteProjection())` has no `$limit`
+— it reads *every* matching subscription for the account. `maxSubs` bounds only the page, not the
+scan. `resolveSortKeys` then batches all cache misses into one `$in` (`:490,:496`) whose operand
+is unbounded. A user in 20k channels with a cold cache (15s TTL, so common) produces a
+20k-element `$in` against `rooms` plus a 20k-row in-process sort. The design is sound; the missing
+input bound is not.
+
+**`medium` — `ListApps` runs a correlated `$lookup` over the *entire* apps collection before
+sorting and paging.** `mongorepo/apps.go:91-111`: `$lookup` → `$addFields` → `$project` →
+`$sort {name:1}`, and `AggregatePagedHasMore` appends `$skip`/`$limit` *after* all of it
+(`pkg/mongoutil/collection.go:145-148`). So a 20-row page costs one subscriptions lookup per app
+in the catalog. `EnsureIndexes` (`apps.go:66-78`) creates only `assistant.name` — there is no
+`apps.name` index, so the `$sort` is a blocking in-memory sort with no `allowDiskUse`. The
+sub-pipeline also has no `$limit:1` / `$project`, materializing whole subscription docs just to
+test `$size > 0`.
+
+**`medium` — `FindChannelsByMembers` does two correlated `$lookup`s per candidate, then a
+non-indexable sort, all before paging.** `mongorepo/subscriptions.go:636-690`: `roomMatchStages()`
+joins `rooms` per candidate, then the co-member self-join (`:663`) joins `subscriptions` per
+candidate, then `$sort` on `__matchedRoom.createdAt` (`:686`) — a computed lookup field, so
+necessarily a blocking sort — and only then `$skip`/`$limit`. For an account in N channels this is
+2N joins per request regardless of page size. The self-join's `$expr` mixes `$eq`, `$regexMatch`
+and `$in` in one `$and`, which likely defeats `$lookup` index pushdown onto
+`roomId_1_u.account_1`.
+
+**`medium` — Cross-site fanouts do serial blocking JetStream publishes inside request handlers.**
+`service/status.go:101`, `service/chatlist.go:202` and `service/settings.go:138` each loop
+`s.allSiteIDs` calling `s.pub.Publish`, which is `js.PublishMsg` — blocking on PubAck
+(`publisher/publisher.go:26`). With N remote sites across a supercluster gateway, that is N
+serialized cross-WAN round trips added to a user-facing `settings.set` / `status.set`.
+*(Independently flagged by Architecture and Integration.)*
+
+**`low` — `GetAppsByAssistants` has no projection** (`mongorepo/apps.go:140`) — the only
+`FindMany` in the service without one, against CLAUDE.md's "always project precisely". It is on
+the `subscription.list` hot path (once per page) and on `priorityContactExists`, which needs only
+`Name`. Over-fetch is limited to `channelTab`, so impact is small — but the rule is absolute.
+*(Independently flagged by Code quality.)*
+
+**`low` — `GetThreadUnreadSummary` fans out with no semaphore.** `service/threadunread.go:60-61`:
+`wg.Add(1); go func(){…}` with no `sem` and no pre-spawn `c.Err()` check — the only fan-out in the
+service that skips both (compare `:154-160`, `subscriptions.go:507`, `threads.go:232`). Bounded by
+distinct site count, so small, but inconsistent with the established pattern.
+
+**`nitpick` — Reflect-based sorts on the hottest slices.** `mongorepo/subscriptions.go:398`
+(`sort.SliceStable` over every one of the account's rows) and `service/threads.go:102`
+(`sort.Slice`) use the `reflectlite` swapper; `slices.SortStableFunc` / `slices.SortFunc` are
+typed and measurably faster at the 10k+ row sizes the list path reaches.
+
+## Measured benchmarks
+
+Non-integration benches, audit machine:
+
+| Benchmark | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| `BenchmarkPageMarshal` 40 rows | 285µs | 46.8 KB | 121 |
+| `BenchmarkPageMarshal` 200 rows | 1.12ms | 226 KB | 601 |
+| `BenchmarkPageMarshal` 400 rows | 1.61ms | 461 KB | 1201 |
+
+Allocations scale at exactly 3/row — clean. `BenchmarkPageMarshalGzip`'s 1.1–1.7 MB/op reflects
+unpooled writers **in the benchmark only**; production pools them (`pkg/ginutil/gzip.go:17-37`),
+so that number is not a production signal. `mongorepo` benches are `//go:build integration` and
+need Docker — not run.
+
+## Recommendations
+
+1. **`high`** — Parallelize `BadgeCountBatch`'s miss loop with the existing `s.fanout()` semaphore
+   pattern, or better, issue one batched `GetActiveSubscriptions` for all missing accounts
+   (`u.account: {$in: accounts}`) and group in Go — turning N aggregations into 1.
+2. **`high`** — Give `activeSubscriptionPipeline` its own `$lookup` projecting only
+   `{lastMsgAt: 1}` instead of reusing `roomsEnrichStages()`. Cheapest win in the service.
+3. **`high`** — Cap `AggregateSubscriptions`' phase-1 `Find` (e.g. `.SetLimit(maxSubs + 1)`,
+   surfaced as `hasMore`) and chunk `resolveSortKeys`' `$in` at ~1000 ids, mirroring
+   `roomBatchChunk`.
+4. **`medium`** — Reorder `ListApps` to `$sort → $skip → $limit → $lookup`, and add the
+   `{name:1, _id:1}` index on `apps` that `fab_domain_mapping` already has. Add `$limit:1` +
+   `$project:{_id:1}` to the sub-pipeline.
+5. **`medium`** — Run `explain("executionStats")` on `FindChannelsByMembers` at realistic channel
+   counts; if the co-member `$expr` does not use `roomId_1_u.account_1`, split the
+   `$regexMatch`/`$in` out of the `$and` into a second `$match` stage so the equality can drive the
+   index.
+6. **`medium`** — Move the status/settings/chatlist cross-site fanouts onto the OUTBOX lane (as
+   `room-service` and `room-worker` already do), or at minimum publish the N destinations
+   concurrently — the handler should not pay N serialized gateway RTTs.
+7. **`low`** — Add a projection to `GetAppsByAssistants`, and bring `GetThreadUnreadSummary`'s
+   fan-out in line with the `sem` + `c.Err()` pattern used everywhere else.
