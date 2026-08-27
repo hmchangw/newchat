@@ -82,10 +82,10 @@ func (s *MongoStore) EnableRoomMetaCache(size int, ttl time.Duration) error {
 	return nil
 }
 
-// ListByRoom returns all subscriptions for roomID across every site. Not part
-// of SubscriptionStore — the handler's hot paths only need accounts (see
-// GetSubscriptionAccounts); this full-document read is retained for integration
-// test verification.
+// ListByRoom returns all subscriptions for roomID across every site. Only the
+// Teams reconcile path uses it, because it diffs per-subscription state
+// (joinedAt) rather than just membership; every other path needs accounts alone
+// and must use the projected GetSubscriptionAccounts instead.
 func (s *MongoStore) ListByRoom(ctx context.Context, roomID string) ([]model.Subscription, error) {
 	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID})
 	if err != nil {
