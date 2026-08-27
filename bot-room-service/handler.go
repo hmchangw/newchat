@@ -490,13 +490,19 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	// stranded-federation gap this handler already documents: the remote site
 	// still shows them subscribed, but they cannot read anything new.
 	if len(removed) > 0 {
-		// Set before the call, not after: a failure here is already being
-		// returned to the caller, so the deferred safety net must not run it a
-		// second time.
-		rotated = true
+		// Set only AFTER the call succeeds. Returning the error here does not
+		// hand the problem to the caller's retry — that retry finds every
+		// committed delete reporting wasThere=false, so `removed` comes back
+		// empty and the rotation is skipped for good. This request is the last
+		// moment anything still knows a key must be rotated, so a failure must
+		// fall through to the deferred net for one more attempt rather than
+		// suppress it. A second rotation on an already-rotated key costs a spare
+		// version, which retired_room_keys expires; not rotating at all leaves a
+		// removed member reading every future message.
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
 			return nil, err
 		}
+		rotated = true
 	}
 	for _, f := range pendingFederations {
 		if err := h.federateMemberRemoved(c, roomID, f.userID, f.account, f.destSiteID); err != nil {
