@@ -351,7 +351,149 @@ claim advisory-grade completeness.
 
 ---
 
-## 7. Summary
+## 7. Can loadgen produce a first SLO number?
+
+Yes — for five of the nine, and the framing that makes it legitimate is:
+
+> **loadgen is the traffic source, not the instrument.** The number comes from the
+> *production counters* over the run window, using the *production predicates*.
+> loadgen's own L1 measurements are used only where no production counter exists,
+> and then only as a one-sided bound (see below).
+
+This is exactly what `sli-slo.md` §10 requires before loadgen may be said to
+*validate* anything: "the same production source counters and good/valid
+predicates, evaluated over isolated run-window deltas — not the 28-day aggregate
+rule, and not loadgen-local metrics."
+
+**The local overlay already scrapes everything needed.**
+`tools/loadgen/deploy/prometheus/prometheus.yml` collects the o11y SDK endpoint
+(`:2112`) off every service by Docker SD — which is where all the domain counters
+land — plus the per-service `:9090` counters, cAdvisor, **and a JetStream
+exporter sidecar**. So the P3 backlog signal that staging lacks is present on
+docker-local. Nothing new has to be built to run this.
+
+### Per-SLO verdict
+
+| SLO | Where loadgen sits vs the SLO's boundary | First number? |
+|---|---|---|
+| **1a** persist | Both counters exist and bracket the boundary exactly | ✅ **Real number.** `message_worker_persistence_total{message_kind=~"user\|thread_reply",result="success"}` ÷ `message_gatekeeper_messages_total{result="accepted"}`, as run-window deltas |
+| **1b** channel enqueue | No enqueue counter; loadgen observes hop 9, downstream of the boundary | ⚠️ **One-sided bound only** — see below |
+| **2** enqueue ≤ 1 s | Same | ⚠️ **One-sided bound only** — see below |
+| **3** login | loadgen drives the real HTTP leg; `http.server.request.duration` is the production counter | ✅ **Real number.** `max-rps --workload=login` |
+| **4** enter channel | Production counter lands **#337**; and loadgen is the caller, so it can measure the better boundary | ✅ **Real number, and better than production's** — see below |
+| **5** enter thread | Same | ✅ Same |
+| **6** push handoff | Counter is per-message, not per-recipient; no PUSH observer in loadgen | ❌ |
+| **7** search ok | `search_service_requests_total{kind,status}` exists | ✅ **Real number.** `max-rps --workload=search` |
+| **8** search ≤ 1 s | Histogram has no `status`; loadgen scores it client-side | ⚠️ **loadgen-side number only**, a different boundary from the eventual SLI |
+| **9** federation | Single-site driver, no counters | ❌ |
+
+### Why SLO-1b/2 still give you something worth having
+
+loadgen's **E2** stage is `publish → RoomEvent received`: it starts at hop 1 and
+ends at hop 9. SLO-2's interval is `canonical accepted → enqueue`: hop 3 to hop 6.
+
+```text
+hop 1 ────────── 3 ───────── 6 ───────── 9
+      │          │           │           │
+      │          └── SLO-2 ──┘           │
+      └──────────── loadgen E2 ──────────┘
+```
+
+**SLO-2's interval is strictly inside loadgen's.** E2 starts earlier and ends
+later, so `E2 ≥ SLO-2's age`, always. Therefore:
+
+- **E2 ≤ 1 s ⟹ the enqueue age was ≤ 1 s.** A pass is conclusive.
+- **E2 > 1 s does not mean SLO-2 failed** — the extra time could be entirely in
+  fan-out or delivery, hops SLO-2 does not own.
+
+The same logic gives SLO-1b a lower bound: observing the RoomEvent proves the
+enqueue succeeded, so loadgen's received count is a floor under the
+enqueue-accepted count.
+
+So the honest report is:
+
+> *At 100 msg/s, ≥ 99.4 % of accepted sends were received by a room member within
+> 1 s. SLO-2's true good-ratio is at least this. If the target is missed, this run
+> cannot say whether the miss is SLO-2's or the delivery lane's.*
+
+That is a real, defensible statement, and it is enough to answer the question
+calibration actually needs: **is the drafted target reachable at all?**
+
+**Use the production denominator even here.** loadgen's own send count and
+`message_gatekeeper_messages_total{result="accepted"}` are not the same set — a
+rejected send leaves no canonical message. Pin the denominator to the accepted
+counter so the ratio matches the SLO's definition.
+
+### Where loadgen is a *better* instrument than production
+
+SLO-4/5's known weakness is that the histogram's timer stops after `Respond`
+returns, so a reply lost after the handler returned reads as a fast success and
+lands in neither numerator nor denominator (§2).
+
+**loadgen is the caller.** Its own request/reply timing measures the
+caller-visible boundary — request sent → answer in hand — which is the boundary
+the SLO actually wants and production cannot see. A run can therefore report
+both, and the gap between them *is* the size of the blind spot:
+
+```text
+loadgen client-side p95  −  rpc_server_call_duration p95  =  the unmeasured tail
+```
+
+That comparison is worth doing once and writing down; it tells you how much to
+trust the production SLI later.
+
+### The run protocol that makes the numbers legitimate
+
+Five things, all from `sli-slo.md` §10 and `end-to-end-plan.md` §0. Skip any one
+and the number is not an SLI, it is a graph.
+
+1. **Traffic isolation.** A dedicated test `SITE_ID` (or a separate Prometheus
+   tenant). Counters are monotonic and shared — `increase()` over the window
+   excludes *history*, not *concurrent* traffic.
+2. **Warm-up → drain → baseline snapshot → send window → settle window.** Snapshot
+   every counter at the warm-up boundary and measure the delta; otherwise warm-up
+   completions inflate the numerator.
+3. **Asymmetric window.** Denominator over the send window; numerator waited out to
+   the max SLO deadline plus a scrape margin, because an async numerator lands
+   after the sender stops.
+4. **`O11Y_ENABLED=true`** with `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and a
+   **fixed, recorded** sampler arg. Unset means 100 % and distorts what you are
+   measuring.
+5. **Backlog must be flat.** Every durable's `num_pending` bounded and not
+   monotonically growing over the window — the exporter is right there in the
+   overlay. A latency number taken while a consumer is backing up is measuring a
+   queue, not a service.
+
+### What the number is, and what it is not
+
+| It is | It is not |
+|---|---|
+| An **achievability check**: at load X, the system achieved Y | An SLO verdict — that is a 28-day window over production traffic |
+| The **input to calibration** (Track 1.2/1.3): evidence that a drafted target is or is not reachable before anyone commits to it | Proof the target is right |
+| A **regression baseline** for later runs on the same box | Comparable across machines |
+| Box-relative on docker-local; production-representative only on staging | An absolute capacity number |
+
+**Report it as a run-window SLI with the load and the window stated**, e.g.
+*"SLO-1a run-window SLI = 99.94 % at 100 msg/s over 30 min, isolated site,
+sampler 0.1, backlog flat"*. Never as "SLO-1a = 99.94 %".
+
+### Suggested shape of the first run
+
+1. Fixed load at the declared baseline (I1 = 100 msg/s) through
+   `--inject=frontdoor`, `realistic` preset, encryption on, 30–60 min.
+2. Compute the five available ratios from the production counters as run-window
+   deltas, plus the two one-sided bounds.
+3. Record the loadgen-vs-production gap for SLO-4/5.
+4. Then ramp (`max-rps`, explicit `--steps=100,250,500,1k,2k,5k`) and repeat the
+   ratios at each step — that turns the achievability check into "at what load
+   does each SLI first miss its drafted target", which is Track 2's question and
+   comes almost free once step 2 works.
+
+Steps 1–3 need **no code change**. Step 4 needs none either.
+
+---
+
+## 8. Summary
 
 | SLO | Numerator today | Denominator today | Verdict | Missing |
 |---|---|---|---|---|
@@ -374,7 +516,7 @@ partial.
 
 ---
 
-## 8. Sibling documents
+## 9. Sibling documents
 
 - [`common/sli-slo.md`](common/sli-slo.md) — the SLO definitions this maps
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what to build for J1's gaps
