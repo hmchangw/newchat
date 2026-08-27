@@ -11,15 +11,13 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
     return <div className="rooms-table-status">No rooms found.</div>
   }
 
-  // Both server-side rules the console can know up front: room-service restricts
-  // channels only, and refuses the off→on transition below this floor. A room it
+  // room-service refuses the off→on transition below this floor, so a room it
   // would reject gets no button rather than a guaranteed error.
   const minMembers = ondutyMinMembers()
-  const canSet = (room) => room.type === 'channel' && room.userCount >= minMembers
 
   return (
     <div className="rooms-table-wrap">
-      <table className="rooms-table">
+      <table className="data-table rooms-table">
         <thead>
           <tr>
             <th>_id</th>
@@ -38,23 +36,30 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
               <td>{room.type}</td>
               <td>{room.userCount}</td>
               <td>
-                {room.restricted && <span className="rooms-status-badge">onduty</span>}
+                {room.restricted && <span className="status-badge is-onduty">onduty</span>}
               </td>
               <td className="rooms-table-actions">
-                {room.type === 'channel' && room.restricted && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => onUnsetOnDuty(room)}
-                  >
-                    unset onduty
-                  </button>
-                )}
-                {!room.restricted && canSet(room) && (
-                  <button type="button" className="btn btn-ghost" onClick={() => onSetOnDuty(room)}>
-                    set onduty
-                  </button>
-                )}
+                {/* Channels only — room-service rejects a DM with non_channel_operation. */}
+                {room.type === 'channel' &&
+                  (room.restricted ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => onUnsetOnDuty(room)}
+                    >
+                      unset onduty
+                    </button>
+                  ) : (
+                    room.userCount >= minMembers && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => onSetOnDuty(room)}
+                      >
+                        set onduty
+                      </button>
+                    )
+                  ))}
               </td>
             </tr>
           ))}

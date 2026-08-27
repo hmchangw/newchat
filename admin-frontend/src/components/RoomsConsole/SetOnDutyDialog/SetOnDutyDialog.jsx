@@ -4,6 +4,9 @@ import AccountPicker from '@/components/shared/AccountPicker'
 import { listRoomMembers, setRoomOnDuty } from '@/api'
 import { useHandleAdminError } from '@/hooks/useHandleAdminError'
 
+// Mirrors AccountPicker's own SEARCH_LIMIT for the listUsers-backed path.
+const MAX_SUGGESTIONS = 10
+
 // Turns duty on for one channel. The owner is picked from the room's own members
 // because room-service validates the designated owner against exactly that roster
 // — offering any other account would only earn a 400.
@@ -32,10 +35,12 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
   }, [authToken, room.id])
 
   // Filters the already-loaded roster rather than querying: the list is bounded,
-  // so a round trip per keystroke would buy nothing.
+  // so a round trip per keystroke would buy nothing. Capped at the same count the
+  // server-backed picker returns — a big channel would otherwise render a
+  // thousand-option listbox on a single common letter.
   const searchMembers = async (q) => {
     const needle = q.toLowerCase()
-    return members.filter((m) => m.account.toLowerCase().includes(needle))
+    return members.filter((m) => m.account.toLowerCase().includes(needle)).slice(0, MAX_SUGGESTIONS)
   }
 
   const handleConfirm = async () => {

@@ -1485,20 +1485,14 @@ func TestIntegration_ListRoomMembers(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Run("returns only that room's members, account-sorted", func(t *testing.T) {
+	t.Run("returns only that room's members, account-sorted, with the bot flag", func(t *testing.T) {
 		results, err := st.ListRoomMembers(ctx, "room-1")
 		require.NoError(t, err)
 		require.Len(t, results, 3)
-		accounts := []string{results[0].User.Account, results[1].User.Account, results[2].User.Account}
+		accounts := []string{results[0].Account, results[1].Account, results[2].Account}
 		assert.Equal(t, []string{"alice", "bob", "helperbot"}, accounts)
-	})
-
-	t.Run("carries the bot flag", func(t *testing.T) {
-		results, err := st.ListRoomMembers(ctx, "room-1")
-		require.NoError(t, err)
-		require.Len(t, results, 3)
-		assert.False(t, results[0].User.IsBot)
-		assert.True(t, results[2].User.IsBot)
+		assert.False(t, results[0].IsBot)
+		assert.True(t, results[2].IsBot)
 	})
 
 	t.Run("a room with no subscriptions returns an empty slice", func(t *testing.T) {

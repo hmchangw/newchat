@@ -14,7 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// setupRoomsRouter wires just the room-listing routes with a fixed admin principal.
+// setupRoomsRouter wires just the room-listing routes.
 func setupRoomsRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	r.GET("/rooms", h.listRooms)
@@ -154,9 +154,9 @@ func TestHandler_listRoomMembers(t *testing.T) {
 			roomID: "r1",
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().ListRoomMembers(gomock.Any(), "r1").
-					Return([]model.Subscription{
-						{User: model.SubscriptionUser{Account: "alice"}},
-						{User: model.SubscriptionUser{Account: "helperbot", IsBot: true}},
+					Return([]model.SubscriptionUser{
+						{Account: "alice"},
+						{Account: "helperbot", IsBot: true},
 					}, nil)
 			},
 			wantStatus: http.StatusOK,
@@ -179,7 +179,7 @@ func TestHandler_listRoomMembers(t *testing.T) {
 			roomID: "r-empty",
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().ListRoomMembers(gomock.Any(), "r-empty").
-					Return([]model.Subscription{}, nil)
+					Return([]model.SubscriptionUser{}, nil)
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {

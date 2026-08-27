@@ -171,26 +171,6 @@ interface UserViewWire {
   requirePasswordChange?: boolean
 }
 
-/** Raw shape of admin-service's `roomView` — `restricted` is a plain bool server-side,
- * but normalizing keeps the console's branching honest if that ever gains `omitempty`. */
-interface RoomViewWire {
-  id: string
-  name?: string
-  type?: string
-  userCount?: number
-  restricted?: boolean
-}
-
-function normalizeRoom(raw: RoomViewWire): AdminRoom {
-  return {
-    id: raw.id,
-    name: raw.name ?? '',
-    type: raw.type ?? '',
-    userCount: raw.userCount ?? 0,
-    restricted: raw.restricted ?? false,
-  }
-}
-
 function normalizeUser(raw: UserViewWire): AdminUser {
   return {
     id: raw.id,
@@ -513,12 +493,7 @@ export async function listRooms(
   params: ListRoomsParams = {},
 ): Promise<{ rooms: AdminRoom[]; total: number }> {
   const qs = buildQuery({ page: params.page, limit: params.limit })
-  const raw = await adminFetch<{ rooms: RoomViewWire[]; total: number }>(
-    authToken,
-    'GET',
-    `/rooms${qs}`,
-  )
-  return { rooms: (raw.rooms ?? []).map(normalizeRoom), total: raw.total }
+  return adminFetch<{ rooms: AdminRoom[]; total: number }>(authToken, 'GET', `/rooms${qs}`)
 }
 
 /** Lists every account subscribed to the room — the accounts the duty toggle will
@@ -543,13 +518,10 @@ export async function setRoomOnDuty(
   roomId: string,
   input: SetRoomOnDutyInput,
 ): Promise<void> {
-  const body: SetRoomOnDutyInput = input.onDuty
-    ? { onDuty: true, ownerAccount: input.ownerAccount }
-    : { onDuty: false }
   await adminFetch<{ status: string }>(
     authToken,
     'POST',
     `/rooms/${encodeURIComponent(roomId)}/onduty`,
-    body,
+    input,
   )
 }

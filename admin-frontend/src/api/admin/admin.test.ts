@@ -845,14 +845,6 @@ describe('listRooms', () => {
     expect(result).toEqual({ rooms: [ROOM], total: 1 })
   })
 
-  it('defaults restricted to false when the server omits it', async () => {
-    stubFetch(200, { rooms: [{ id: 'r-2', name: 'random', type: 'channel', userCount: 3 }], total: 1 })
-
-    const result = await listRooms('tok')
-
-    expect(result.rooms[0].restricted).toBe(false)
-  })
-
   it('throws AsyncJobError on a non-2xx response', async () => {
     stubFetch(403, { error: { code: 'forbidden', reason: 'not_admin', message: 'nope' } })
 

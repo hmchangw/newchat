@@ -220,10 +220,10 @@ func (mr *MockAdminStoreMockRecorder) ListPermissionGrants(ctx, subjectAccount, 
 }
 
 // ListRoomMembers mocks base method.
-func (m *MockAdminStore) ListRoomMembers(ctx context.Context, roomID string) ([]model.Subscription, error) {
+func (m *MockAdminStore) ListRoomMembers(ctx context.Context, roomID string) ([]model.SubscriptionUser, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListRoomMembers", ctx, roomID)
-	ret0, _ := ret[0].([]model.Subscription)
+	ret0, _ := ret[0].([]model.SubscriptionUser)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

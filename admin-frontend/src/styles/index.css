@@ -137,6 +137,10 @@ a:focus-visible,
   background: var(--status-error-bg);
   color: var(--status-error);
 }
+.status-badge.is-onduty {
+  background: var(--status-success-bg);
+  color: var(--status-success);
+}
 
 /* Admin list table — the console tables share this base and add only their own quirks. */
 .data-table {

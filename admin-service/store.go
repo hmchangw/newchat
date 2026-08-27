@@ -77,11 +77,11 @@ type AdminStore interface {
 	// the admin-console columns only. Also returns the unpaged match count.
 	ListRooms(ctx context.Context, siteID string, page, limit int) ([]model.Room, int64, error)
 
-	// ListRoomMembers returns every subscription for roomID, projected to the
-	// account fields. Reads the same collection room-service's membership check
-	// consults, so an account it returns is one the duty toggle will accept as
-	// owner. Unpaged — a room's roster is bounded and callers want it whole.
-	ListRoomMembers(ctx context.Context, roomID string) ([]model.Subscription, error)
+	// ListRoomMembers returns the subscribed account of every member of roomID.
+	// Reads the same collection room-service's membership check consults, so an
+	// account it returns is one the duty toggle will accept as owner. Unpaged —
+	// a room's roster is bounded and callers want it whole.
+	ListRoomMembers(ctx context.Context, roomID string) ([]model.SubscriptionUser, error)
 
 	AppendAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, siteID string, f AuditFilter, page, limit int) ([]AuditEntry, int64, error)

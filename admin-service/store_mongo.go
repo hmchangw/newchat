@@ -163,7 +163,8 @@ func (s *storeMongo) SearchUsers(ctx context.Context, q string, page, limit int)
 var roomProjection = bson.M{"_id": 1, "name": 1, "type": 1, "userCount": 1, "restricted": 1}
 
 // roomMemberProjection contains the subscription fields the owner picker needs.
-var roomMemberProjection = bson.M{"u.account": 1, "u.isBot": 1}
+// _id is excluded explicitly — Mongo returns it by default and nothing reads it.
+var roomMemberProjection = bson.M{"u.account": 1, "u.isBot": 1, "_id": 0}
 
 // ListRooms pages this site's rooms ordered by _id — the _id index serves the
 // sort for free, so paging stays stable without a blocking in-memory sort.
@@ -196,8 +197,9 @@ func (s *storeMongo) ListRooms(ctx context.Context, siteID string, page, limit i
 	return rooms, total, nil
 }
 
-// ListRoomMembers returns every subscription for the room, unpaged.
-func (s *storeMongo) ListRoomMembers(ctx context.Context, roomID string) ([]model.Subscription, error) {
+// ListRoomMembers returns every member of the room, unpaged. Decodes the two
+// projected fields rather than the whole ~45-field Subscription.
+func (s *storeMongo) ListRoomMembers(ctx context.Context, roomID string) ([]model.SubscriptionUser, error) {
 	cur, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID},
 		options.Find().
 			SetProjection(roomMemberProjection).
@@ -207,14 +209,18 @@ func (s *storeMongo) ListRoomMembers(ctx context.Context, roomID string) ([]mode
 		return nil, fmt.Errorf("find room members: %w", err)
 	}
 
-	var subs []model.Subscription
-	if err := cur.All(ctx, &subs); err != nil {
+	var rows []struct {
+		User model.SubscriptionUser `bson:"u"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
 		return nil, fmt.Errorf("decode room members: %w", err)
 	}
-	if subs == nil {
-		subs = []model.Subscription{}
+
+	members := make([]model.SubscriptionUser, len(rows))
+	for i := range rows {
+		members[i] = rows[i].User
 	}
-	return subs, nil
+	return members, nil
 }
 
 func (s *storeMongo) GetUserByAccount(ctx context.Context, siteID, account string) (*model.User, error) {

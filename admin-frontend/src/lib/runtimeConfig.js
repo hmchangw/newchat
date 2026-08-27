@@ -24,7 +24,7 @@ export const updatesEnabled = () =>
 // Minimum member count before a room may be put on duty. Mirrors room-service's
 // RESTRICTED_ROOM_MIN_MEMBERS, which is the real enforcement — this only decides
 // whether the console offers the action. A junk or unrendered value falls back to 5.
-export const ONDUTY_MIN_MEMBERS_DEFAULT = 5
+const ONDUTY_MIN_MEMBERS_DEFAULT = 5
 
 export const ondutyMinMembers = () => {
   const raw = runtimeConfig().ROOM_ONDUTY_MIN_MEMBERS ?? import.meta.env.VITE_ROOM_ONDUTY_MIN_MEMBERS

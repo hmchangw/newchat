@@ -58,15 +58,15 @@ func (h *Handler) listRooms(c *gin.Context) {
 func (h *Handler) listRoomMembers(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	subs, err := h.store.ListRoomMembers(ctx, c.Param("roomId"))
+	members, err := h.store.ListRoomMembers(ctx, c.Param("roomId"))
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("list room members: %w", err))
 		return
 	}
 
-	views := make([]roomMemberView, len(subs))
-	for i := range subs {
-		views[i] = roomMemberView{Account: subs[i].User.Account, IsBot: subs[i].User.IsBot}
+	views := make([]roomMemberView, len(members))
+	for i := range members {
+		views[i] = roomMemberView{Account: members[i].Account, IsBot: members[i].IsBot}
 	}
 	c.JSON(http.StatusOK, gin.H{"members": views})
 }
