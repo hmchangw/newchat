@@ -316,7 +316,9 @@ func TestSoakRPCClient_ExpiredDeadlineIsClassifiedAsATimeout(t *testing.T) {
 }
 
 // The guard at the top of each attempt returned bare too. A soak torn down
-// mid-retry takes this path, and it had already spent attempts worth counting.
+// mid-retry takes this path, and it had already spent an attempt on the wire —
+// so the identity has to survive without the cancellation overwriting why the
+// operation actually failed.
 func TestSoakRPCClient_CancellationBetweenAttemptsCarriesTheIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -336,7 +338,9 @@ func TestSoakRPCClient_CancellationBetweenAttemptsCarriesTheIdentity(t *testing.
 	var carrier *soakRequestError
 	require.ErrorAs(t, err, &carrier)
 	assert.Equal(t, "frank", carrier.Account)
-	assert.Equal(t, soakErrorCanceled, carrier.Class)
+	assert.Equal(t, soakErrorTimeout, carrier.Class,
+		"the attempt reached the wire and timed out; its effect is unknown, and "+
+			"reporting the teardown instead would erase that")
 	assert.Equal(t, 1, result.Attempts, "the spent attempt must still be reported")
 }
 

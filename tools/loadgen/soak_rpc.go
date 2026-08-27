@@ -424,7 +424,13 @@ func (c *soakRPCClient) Call(
 
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			result.ErrorClass = classifySoakRPCError(err)
+			// Only when no attempt reached the wire. Once one has failed, that
+			// failure is why the operation failed and the cancellation merely
+			// ended the retrying — overwriting it would erase a timeout whose
+			// effect on the server is unknown.
+			if result.ErrorClass == "" {
+				result.ErrorClass = classifySoakRPCError(err)
+			}
 			return result, carry(err)
 		}
 		result.Attempts++

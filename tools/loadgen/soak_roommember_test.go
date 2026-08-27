@@ -757,6 +757,14 @@ func TestSoakRoomMutationNeverSent_OnlyProvenLocalFailures(t *testing.T) {
 		{
 			name: "context canceled", err: context.Canceled, want: false,
 		},
+		// A cancellation now carries a class, and the guard that fires between
+		// attempts cannot tell "nothing was sent" from "an attempt is already on
+		// the wire". Claiming not_sent for either would erase a real effect, so
+		// the conservative answer has to survive the class becoming non-empty.
+		{
+			name: "canceled with a class", err: context.Canceled,
+			outcome: soakRoomMutationOutcome{ErrorClass: soakErrorCanceled}, want: false,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			assert.Equal(t, testCase.want,
