@@ -480,3 +480,124 @@ comments cite the tests that pin their behaviour by name (`handler.go:229` refer
    `HandlerDeps` (nil → inert), removing the seam from production code and unblocking `t.Parallel()`.
 7. **`nitpick`** — Call `pretouchJSON()` from `TestPretouch_TypesCompile`, and pin
    `shortRoomType(RoomTypeDiscussion) == "p"`.
+
+---
+
+# Chapter 5 — Maintainability
+
+**Score: 3 / 5**
+
+Unusually well-commented code with strong tests and coherent deploy artifacts — but `main.go`
+carries a Mongo store and two hand-rolled consume loops that the repo's own conventions and
+`pkg/` helpers already solve, and `HandleMessage` is a 221-line pipeline with no seams.
+
+## Findings
+
+### `high` — `main.go` holds a full Mongo store; no `store.go`/`store_mongo.go`
+
+`main.go:77-178` defines `mongoMemberLoader` + `fillHomeSites` (~100 lines of Find / projection /
+decode). CLAUDE.md's per-service file organization mandates `store.go` (interface + mockgen) and
+`store_mongo.go`. Both siblings comply (`broadcast-worker/store_mongo.go`,
+`message-worker/store_mongo.go`); notification-worker is the only one of the three with neither
+file. `integration_test.go:192,252` tests this store — production store code exercised out of
+`main.go`.
+
+### `high` — The consume loop reimplements `pkg/natsmetrics.Start`
+
+`main.go:411-453` hand-rolls semaphore + `wg.Add` + `Track`/`Finish`/`LoopFailed`, and the comment
+at `main.go:413-415` is a near-verbatim copy of the doc comment on `pkg/natsmetrics/loop.go:19-23`.
+`message-gatekeeper/main.go:195` and `broadcast-worker/main.go:351` both call the shared helper.
+Roughly 45 lines of drift-prone duplication.
+
+*Verified: notification-worker builds `consumerMetrics` at `main.go:274` exactly as its siblings do,
+then declines to use the shared loop.*
+
+### `high` — `parent_fetcher.go` is a byte-identical copy of broadcast-worker's
+
+`notification-worker/parent_fetcher.go:36-90` vs `broadcast-worker/parent_fetcher.go:21-76`. A
+whitespace-and-comment-insensitive diff shows the two bodies are identical; they differ only in
+where `ParentMessageInfo`/`ParentFetcher` are declared (broadcast-worker puts them in
+`handler.go:60-72`). This is a history-service RPC client — it belongs in `pkg/`.
+
+### `high` — `HandleMessage` is a 221-line function
+
+`handler.go:93-313` performs decode, event filter, a cache-invalidation side effect, the
+notifiability gate, member load, mention parse, thread/parent resolution, a four-stage 48-line
+filter loop (`:187-234`), settings+presence snapshot, survivor sort, badge fan-out, payload build,
+and batched emit with error aggregation. No complexity linter guards this: `.golangci.yml` enables
+none of `gocyclo`, `cyclop`, `funlen`, or `gocognit`.
+
+### `medium` — `main()` is 332 lines with three non-wiring subsystems
+
+`main.go:180-512`. Beyond wiring it contains four feature-toggle branches with degradation policy
+(`:289-330`) and an entire member-cache invalidation subsystem — bounded queue, drop policy, a second
+JetStream consumer, and an inline decode/dispatch loop (`main.go:348-399`) — plus four of the nine
+shutdown steps that exist only to drain it (`:489-505`). That loop is unmetered and un-`jobguard`ed,
+unlike the primary one.
+
+### `medium` — Decomposition is misfiled at the seam that matters most
+
+`shouldPush` (`presence.go:153-167`) is the combined settings+presence gate, but `notifSettings` and
+`isPriority` live in `usersettings.go:30-45`. Adding one user-setting touches `usersettings.go`
+(struct, projection `:58-65`, `resolveNotifSettings:149`), `presence.go:153`, and `pkg/model` — the
+decision logic sits in the file named after only one of its two inputs. A `gate.go` would make the
+pipeline stage legible.
+
+### `medium` — Three copies of every default, with no shared constant
+
+`LargeRoomThreshold` defaults to `500` at `main.go:51` and again at `handler.go:79`; presence
+batch/timeout `512`/`2s` at `main.go:59-60` and `presence.go:49-53`; user-settings `512`/`2s` at
+`main.go:64-65` and `usersettings.go:79-83`. `RecipientBatchSize` does it correctly
+(`handler.go:27` `defaultRecipientBatchSize`), so the inconsistency is internal to the service.
+
+### `medium` — Test-only mutable globals in production code
+
+`presence.go:132-135` declares `isDND`/`isPresenting` as package-level `var` closures that always
+return `false`, reassigned by `presence_test.go:34-36,45-49`. `shouldPush:160` is therefore
+permanently inert. This is shared mutable state across tests (CLAUDE.md Section 4) and a test helper
+living in production code (Section 4 again).
+
+### `low` — Magic numbers that should be config
+
+`main.go:350` `make(chan string, 256)`; `main.go:373` `PullMaxMessages(64)`; `badge_client.go:19`
+`badgeFetchTimeout = 5s` (a cross-site RPC, untunable); `members.go:18` `memberFetchTimeout = 10s`.
+Sibling knobs (`PRESENCE_RPC_TIMEOUT`, `USER_SETTINGS_TIMEOUT`) *are* env-driven, so no rule
+distinguishes them.
+
+### `low` — Speculative generality
+
+`Vetoer` (`hook.go:12`) has exactly one production implementation, `noopVetoer`, wired at
+`main.go:338`; only tests supply a real one. `notifyKind` (`nats_metrics.go:13-20`) is a two-value
+enum where `notifyKindUnknown` is only ever an unreachable map-miss fallback (`nats_metrics.go:73`).
+`Handler` stores the same pointer twice (`handler.go:66` `metrics` and `deps.Metrics`).
+
+### `nitpick` — Unresolvable comment references
+
+`members.go:17` "See the design spec.", `usersettings.go:90` "See the spec", `presence.go:150` "the
+issue's stated priority order", `emit.go:54` "contract doc § Dedup" — none name a path, while
+`main.go:81` correctly cites `docs/notification-worker-downstream-contracts.md §3`.
+
+### `nitpick` — Identical Dockerfiles
+
+`deploy/user/Dockerfile` and `deploy/bot/Dockerfile` are byte-identical; only compose and pipeline
+differ. Otherwise deploy is coherent and matches the dual-mode pattern of `broadcast-worker/deploy`
+and `push-notification-service/deploy`.
+
+## Recommendations
+
+1. **`high`** — Extract `store.go` (interface + `//go:generate mockgen`) and `store_mongo.go` from
+   `main.go:77-178`, folding in `threads.go` and `usersettings.go`'s Mongo readers. Restores the
+   mandated layout and drops `main.go` by ~100 lines.
+2. **`high`** — Replace `main.go:411-453` with `natsmetrics.Start(...)`, mirroring
+   `broadcast-worker/main.go:351` including its `broadcastProcessor`/`guardedProcessor` split.
+3. **`high`** — Promote `parent_fetcher.go` to `pkg/historyclient` and delete both copies.
+4. **`medium`** — Split `HandleMessage` (`handler.go:93-313`) along its own comment boundaries:
+   `resolveThreadContext`, `selectAudiences` (the `:187-234` loop), `emitBatches` (`:264-310`).
+5. **`medium`** — Move the invalidation subsystem (`main.go:348-399` plus shutdown steps `:489-505`)
+   into `invalidator.go` as a `newRoomInvalidator(...).Run/Stop` type, with the same
+   `jobguard`/metrics treatment as the primary loop.
+6. **`medium`** — Add `gocyclo`/`funlen` to `.golangci.yml` so this does not recur; hoist duplicated
+   defaults into per-file constants referenced by both the `main.go` env tags and the constructors.
+7. **`low`** — Delete `isDND`/`isPresenting` (`presence.go:132-135`) and the inert branch at `:160`
+   until presence ships them; move `chunkStrings` (`presence.go:109`, duplicated at
+   `user-service/service/threadunread.go:179`) into `pkg/`.
