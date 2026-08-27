@@ -8213,9 +8213,11 @@ response still reports the publication. Treat the audit log as a record of
 intent, not as a transaction log for the artifact store.
 
 **Not atomic across the pair:** `client-update-service` writes the two objects
-independently (§12). A `200` means both landed; a failure after the first write
-leaves the new descriptor beside the previous executable, and re-uploading the
-pair is what repairs it. There is no versioning or rollback — a deliberate
+independently and without locking (§12). A `200` means both of this request's
+writes landed; a failure after the first leaves the new descriptor beside the
+previous executable, and two concurrent uploads can interleave into a mixed
+pair with both callers seeing `200`. Re-uploading the pair repairs either case.
+Publish one pair at a time. There is no versioning or rollback — a deliberate
 non-goal of this endpoint.
 
 **Timeouts** are ordered so that whichever budget expires first, the admin still
@@ -8726,10 +8728,17 @@ a temporary file before the object is written to MinIO. Size the container's
 ephemeral storage for the largest artifact you intend to publish. The MinIO
 write itself streams from that temporary file.
 
-The two objects are written **independently, not atomically**: a failure after
-the first write returns an error with that object already replaced, so a
-downloader can see the new descriptor beside the previous executable until the
-pair is re-uploaded. Versioning and rollback are out of scope for this service.
+The two objects are written **independently, not atomically**, with no locking
+between requests. Two consequences:
+
+- A failure after the first write returns an error with that object already
+  replaced, so a downloader sees the new descriptor beside the previous
+  executable until the pair is re-uploaded.
+- Two uploads in flight at once can interleave their writes, leaving the
+  descriptor from one submission beside the executable from the other — and
+  **both callers receive `200`**. Publish one artifact pair at a time.
+
+Versioning and rollback are out of scope for this service.
 
 #### Request
 
