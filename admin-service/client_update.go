@@ -167,7 +167,13 @@ type relayResult struct {
 // extension and content rules, and duplicating them here would let the two
 // services disagree about what a valid upload is.
 func (h *Handler) uploadClientVersion(c *gin.Context) {
-	ctx := c.Request.Context()
+	// ONE budget for the whole request, inherited by the upstream call. resty
+	// drains the relay pipe before dialling, so the inbound and outbound phases
+	// run back to back rather than overlapping: without this, each would get its
+	// own ClientUpdateTimeout and the handler could run to 2d against a write
+	// deadline of d + uploadResponseMargin.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.ClientUpdateTimeout)
+	defer cancel()
 
 	if h.uploader == nil {
 		errhttp.Write(ctx, c, errcode.Unavailable("client update upload is not configured"))
@@ -275,17 +281,28 @@ func (h *Handler) awaitRelay(c *gin.Context, done <-chan relayResult, uploadErr 
 // uploadResponseMargin is how much longer this request's WRITE deadline runs
 // than its read deadline, which is what keeps the budgets strictly ordered:
 //
-//	client-update-service's own write timeout
-//	  < CLIENT_UPDATE_UPLOAD_TIMEOUT (this service's outbound resty timeout,
-//	    and this request's read deadline)
+//	CLIENT_UPDATE_UPLOAD_TIMEOUT — ONE budget for the whole handler, inbound
+//	  read plus outbound call (uploadClientVersion pins it on the context, and
+//	  it is also this request's read deadline)
 //	  < that timeout + uploadResponseMargin (this request's write deadline)
 //	  < the browser's upload timeout (admin-frontend adds its own margin)
 //
-// Without it the outbound timeout and the write deadline are equal, and the
-// write deadline starts FIRST — at handler entry, before the outbound request
-// exists. A stalled upstream would then produce its error only after the
-// connection had gone unwritable, and the admin would see a transport failure
-// instead of the 503 envelope this handler took the trouble to build.
+// The context deadline is what makes this hold. resty drains the relay pipe
+// before dialling, so the inbound and outbound phases are sequential; left
+// unbounded the outbound call would start a SECOND full timeout on top of the
+// inbound one and the handler could run to 2x the budget, long past the write
+// deadline. The margin then covers only what is left: writing the response.
+//
+// Without the margin the outbound timeout and the write deadline would be
+// equal, and the write deadline starts FIRST — at handler entry. A stalled
+// upstream would produce its error only after the connection had gone
+// unwritable, and the admin would see a transport failure instead of the 503
+// envelope this handler took the trouble to build.
+//
+// client-update-service's own HTTP_WRITE_TIMEOUT should be at least this
+// service's CLIENT_UPDATE_UPLOAD_TIMEOUT, so it does not abandon a request this
+// service is still waiting on. Its clock starts later (after the inbound
+// phase), so equal defaults are safe.
 const uploadResponseMargin = 30 * time.Second
 
 // uploadDeadlines returns one upload's read and write deadlines: d bounds how
@@ -359,8 +376,15 @@ func relayOnePart(part *multipart.Part, mw *multipart.Writer, names map[string]s
 	// — client-update-service remains the sole judge of the artifacts — but a
 	// caller sending millions of distinct field names must not be able to grow
 	// this map (and the AuditEntry built from it) without bound.
+	//
+	// FIRST wins, never overwritten: client-update-service reads its parts with
+	// c.FormFile, which selects the first file for a field name. Recording a
+	// later duplicate would make the audit entry name a file the upstream did
+	// not store.
 	if _, ok := auditedUploadFields[part.FormName()]; ok {
-		names[part.FormName()] = truncateFileName(part.FileName())
+		if _, seen := names[part.FormName()]; !seen {
+			names[part.FormName()] = truncateFileName(part.FileName())
+		}
 	}
 
 	hdr := textproto.MIMEHeader{}

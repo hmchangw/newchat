@@ -8206,7 +8206,9 @@ name and extension rules live there and are reported back verbatim on a `400`.
 ```
 
 **Audit:** a successful upload appends an `AuditEntry` with action
-`client_update.upload` and `details` naming both uploaded file names. The append
+`client_update.upload` and `details` naming both uploaded file names. If a field
+appears more than once, the entry names the **first** occurrence — the one
+`client-update-service` actually stores. The append
 is best-effort, as it is for every mutating admin endpoint: the artifacts are
 already published by then, so a failed append is logged at `ERROR` and the
 response still reports the publication. Treat the audit log as a record of
@@ -8220,13 +8222,20 @@ pair with both callers seeing `200`. Re-uploading the pair repairs either case.
 Publish one pair at a time. There is no versioning or rollback — a deliberate
 non-goal of this endpoint.
 
-**Timeouts** are ordered so that whichever budget expires first, the admin still
-gets an envelope rather than a dropped connection:
-`client-update-service`'s `HTTP_WRITE_TIMEOUT` ≤ this service's
-`CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`, also this request's read deadline)
-< that value + 30s (this request's write deadline) < the browser's own upload
-timeout. Raising one without the others reintroduces a window where a published
-upload is reported as a failure.
+**Timeouts.** `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`) is ONE budget for
+the whole request — reading the browser's body and calling
+`client-update-service` — pinned on the request context. The two phases are
+sequential rather than overlapping, because the outbound client buffers the body
+before dialling (see the memory note above), so without a single budget the
+upstream call would start a second full timeout on top of the inbound one.
+
+The rest is ordered around it, so that whichever budget expires first the admin
+still gets an envelope rather than a dropped connection: that value < that value
++ 30s (this request's write deadline) < the browser's own upload timeout.
+`client-update-service`'s `HTTP_WRITE_TIMEOUT` should be at least
+`CLIENT_UPDATE_UPLOAD_TIMEOUT` so it does not abandon a request this service is
+still waiting on. Raising one without the others reintroduces a window where a
+published upload is reported as a failure.
 
 ---
 

@@ -180,7 +180,13 @@ func TestRestyVersionUploader_PostsBodyAndCredential(t *testing.T) {
 // resty buffers an entire io.Reader body into memory when SetContentLength is
 // on (resty v2.17.2 middleware.go:519-527), which would defeat streaming for a
 // multi-hundred-MB artifact. This pins that it stays off.
-func TestRestyVersionUploader_StreamsWithoutContentLength(t *testing.T) {
+// NOTE: this does NOT prove streaming, and the name must not suggest it does.
+// resty v2.17.2 drains an io.Reader body with io.ReadAll before dialling, so a
+// chunked encoding here only shows the body went out with no Content-Length —
+// it says nothing about when the connection opened relative to EOF. What it
+// does guard is the SetContentLength=off property in newRestyVersionUploader:
+// turning it on would make resty measure the body and send a fixed length.
+func TestRestyVersionUploader_SendsChunkedWithoutContentLength(t *testing.T) {
 	const size = 4 << 20 // 4 MiB — larger than any internal buffer
 	var gotLen int
 	var gotTransferEncoding []string
@@ -202,7 +208,7 @@ func TestRestyVersionUploader_StreamsWithoutContentLength(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, size, gotLen, "the whole body must arrive intact")
 	assert.Contains(t, gotTransferEncoding, "chunked",
-		"a streamed body of unknown length must be chunked, not buffered and measured")
+		"a body of unknown length must go out chunked, not measured with a Content-Length")
 }
 
 // zeroReader is an endless source of zero bytes; pair it with io.LimitReader.
@@ -950,4 +956,82 @@ func TestRelayOnePart_AuditedFileNameStaysValidUTF8(t *testing.T) {
 	got := names["configFile"]
 	assert.True(t, utf8.ValidString(got), "audited filename must be valid UTF-8, got %q", got)
 	assert.LessOrEqual(t, len(got), maxAuditFileNameLen+len("...(truncated)"))
+}
+
+// deadlineCapturingUploader records the context it was handed.
+type deadlineCapturingUploader struct {
+	mu       sync.Mutex
+	deadline time.Time
+	hasDL    bool
+}
+
+func (d *deadlineCapturingUploader) Upload(ctx context.Context, _ string, body io.Reader) error {
+	_, _ = io.Copy(io.Discard, body)
+	dl, ok := ctx.Deadline()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.deadline, d.hasDL = dl, ok
+	return nil
+}
+
+// Because resty drains the relay pipe before dialling, the inbound and outbound
+// phases run back to back rather than overlapping. Without a deadline bounding
+// the whole handler, each phase gets its own ClientUpdateTimeout — up to 2d —
+// while the write deadline only runs to d + uploadResponseMargin, so the
+// connection can die before the handler can answer. The upstream call must
+// therefore inherit what is left of ONE budget, not start a second one.
+func TestUploadClientVersion_UpstreamCallInheritsTheRequestBudget(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateTimeout = 90 * time.Second
+	up := &deadlineCapturingUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+		"configFile":  {"app.yaml", "version: 1", ""},
+		"executeFile": {"app.exe", "MZ", ""},
+	})
+	start := time.Now()
+	status, _ := postUpload(t, srv, body, ct)
+	require.Equal(t, http.StatusOK, status)
+
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	require.True(t, up.hasDL, "the upstream call must carry a deadline, or a slow inbound phase plus a full outbound timeout can outlive the write deadline")
+	// One budget, not two: the deadline sits ~ClientUpdateTimeout from when the
+	// handler began (a few ms after start), never 2x it.
+	budget := up.deadline.Sub(start)
+	assert.Greater(t, budget, cfg.ClientUpdateTimeout/2,
+		"the deadline must be the request budget, not some smaller leftover")
+	assert.Less(t, budget, cfg.ClientUpdateTimeout+5*time.Second,
+		"the upstream call must inherit the request's budget, not start a fresh one on top of it")
+}
+
+// client-update-service reads its parts with c.FormFile, which selects the FIRST
+// file for a field name. The audit map recorded the LAST, so a request carrying
+// two configFile parts stored file A while the audit entry named file B.
+func TestRelayParts_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for _, f := range []struct{ field, name string }{
+		{"configFile", "first.yaml"},
+		{"configFile", "second.yaml"},
+		{"executeFile", "first.exe"},
+		{"executeFile", "second.exe"},
+	} {
+		fw, err := mw.CreateFormFile(f.field, f.name)
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+
+	out := &bytes.Buffer{}
+	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
+	require.NoError(t, err)
+
+	assert.Equal(t, "first.yaml", names["configFile"], "the audit must name the file the upstream actually stores")
+	assert.Equal(t, "first.exe", names["executeFile"])
+	// Every part is still relayed — admin-service validates nothing.
+	assert.Contains(t, out.String(), "second.yaml")
 }
