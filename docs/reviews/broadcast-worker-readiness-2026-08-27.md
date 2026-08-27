@@ -272,3 +272,65 @@ has the required `testutil.RunTests(m)` TestMain.
 5. `low` — Cover `cachedMetaStore` with a fake `Store` counting `GetRoomMeta` calls: miss→inner, hit→no inner call, pass-through of embedded methods.
 6. `low` — Set `fakeBulkWriter.err` in one case; add a `remotePeers` case `{"b","b"}`; strengthen `TestPublishToThreadAccounts_PartialFail_ReturnsNil` to assert two attempts and alice's payload.
 7. `info` — Extracting `main.go`'s wiring into a testable `run(ctx, cfg) error` would move the headline number from 67.3% toward the 82–89% the rest of the package already achieves.
+
+---
+
+# 5. Maintainability — 3 / 5
+
+The extraction itself was disciplined — no dead helpers, no orphaned mocks,
+`LAST_MSG_FLUSH_INTERVAL` genuinely gone, and an integration test that actively pins the split
+boundary. What costs it two points: `handler.go` has outgrown a single file, the deploy test
+harness still describes the pre-split service, and two of the sharpest invariants are enforced
+only by call-site discipline.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `deploy/test/README.md:7-10`, `deploy/test/verify/*.sh` | **Verified.** The harness's scenario table and three of four verify scripts assert `rooms.lastMsgAt`, `subscriptions.hasMention` and `rooms.lastMentionAllAt` — all `roomlist-worker`'s now. Sharper than first reported: both *dev* compose files were correctly updated (`deploy/user/docker-compose.yml` and `deploy/bot/docker-compose.yml` each reference `roomlist-worker` twice), but `deploy/user/docker-compose.test.yml` has **zero** references. The documented demo flow fails at step 4. The one artifact that teaches a newcomer what this service does now teaches the pre-split model. |
+| `high` | `handler.go:1073`, call sites `:365`, `:564`, `:612` | `publishChannelThreadEvent(…, viewPayload, followerPayload []byte, …)` — two adjacent same-typed parameters where the first must be sealed (it lands on a room-namespace subject) and the second must not. `:612` deliberately passes the same buffer twice. A newcomer copying that pattern for an event *with* a body publishes plaintext room-wide, and neither the signature nor a type resists it. |
+| `medium` | `handler.go:396-399` | **Verified.** The comment states "broadcast-worker makes no MongoDB writes". `preview_writer.go:63` contradicts it in the same service, under the heading "Why this is broadcast-worker's only MongoDB write". The precise claim — *no MongoDB write that any handler awaits* — is the true one and is what the PR body says; this comment dropped the qualifier that carries all the meaning. Textbook drift of duplicated rationale. |
+| `medium` | `handler.go` (1,407 lines, 30 functions) | `handleCreated:230` alone owns mention resolution, preview sealing, room-type routing, cross-site mention federation and the activity announce — five reasons to change. The file spans two transports (JetStream plus core-NATS `HandleServerBroadcast`) and seven event kinds. |
+| `medium` | `main.go:350-358`, `:456` | `go previews.Run(flushCtx, …)` starts on a `*previewWriter` that is nil whenever `sealer.enabled()` is false, and a shutdown hook unconditionally waits on `flushDone`. Correct only because of nil-receiver guards in `preview_writer.go:108,150,178`; nothing at the call site says so, and the `if previews != nil` log at `:356` reads as though the guard were there. |
+| `medium` | `main.go:255-266` ↔ `handler.go:138` | "The buffered writer exists only while the sealer does" is stated in `main` and enforced nowhere: `withPreviewSealer(sealer, previews)` takes them as two independent parameters. Decoupling them sends every ineligible message down `previewUpdate`'s `GuardedAdvanceKeyFields` branch with no body ever written — contained today only by that guard's `previewForMsgId == lastMsgId` conjunct, in a third package. |
+| `medium` | `main.go:45-116`, `:118-482` | 30 direct env knobs plus ~15 mounted, validated in eight separate places scattered through a 365-line `main()` — some `os.Exit`, some `slog.Warn`, some reachable only behind a feature flag. There is no `cfg.Validate()`. |
+| `low` | `main.go:80`, `:83` | `VALKEY_KEY_GRACE_PERIOD` and `METRICS_ADDR` are parsed and never read. `METRICS_ADDR` is dead fleet-wide (six services); `VALKEY_KEY_GRACE_PERIOD` is unique to this service and was born dead in `abedb10`. |
+| `low` | `roomactivity.go:88-111`, `:119-139` | The prune-resume rationale is told twice — ~25 comment lines guarding a 13-line function. Two copies of one argument is the drift shape already realised above. |
+| `low` | `preview.go:97` | Refers to `roomLastMessage.Preview/PreviewFailed`; the type is `roomPreview` (`preview_writer.go:19`). A pre-split name. |
+| `low` | `handler.go:1-2` | The package comment covers fan-out and the reaction notification only — silent on the preview write, the server-broadcast subscriber and OUTBOX federation. |
+
+## Post-split residue
+
+**Cleaned up properly:** no unused package-level functions; `mock_store_test.go` carries exactly
+the five surviving `Store` methods; `LAST_MSG_FLUSH_INTERVAL` is absent from config, both dev
+compose files and all code; no `SetSubscriptionMentions`/`UpdateRoomLastMessage` test helpers
+survive; `integration_test.go:652-666` actively asserts the room document's `roomlist-worker`
+half is untouched.
+
+**Left behind:** the entire `deploy/test/` harness; the "no MongoDB writes" comment; the
+`roomLastMessage` type reference; and a six-site duplication of the "roomlist-worker owns the
+room pointer now" rationale (`handler.go:252,296,344,396`, `main.go:112,329`,
+`roomactivity.go:26`, `preview_writer.go:63`, `store_mongo.go:156`) — one copy of which has
+already drifted into falsehood.
+
+## Adding a per-message side effect — the newcomer walkthrough
+
+1. **`handler.go:230`** `handleCreated` — insert the call. *Trap:* placement matters and nothing says so. Before `GetRoomMeta:266` it runs on every NAK'd redelivery; after the fan-out only on success.
+2. **`handler.go:79,104,138`** — new `Handler` field, new `handlerOptions` field, new `withX` option, wired in `NewHandler:142`. Four edits for one dependency.
+3. **`store.go:18`** + the `//go:generate` block, `store_mongo.go` implementation, then `make generate`. *Trap:* `store_mongo.go:77-83` — a new fenced read with its own not-found sentinel **must** be added to `mongoBreakerFailure` or it re-splits the single failure budget. Documented at the definition, invisible from the call site.
+4. If it writes and buffers: a second `flushloop` goroutine in `main.go` plus a shutdown hook placed **after** `wg.Wait()` and **before** `mongoutil.Disconnect` — stated only in a comment at `main.go:453-455`.
+5. *Trap:* `preview.go:115` — anything on the pre-fan-out path must re-implement the deadline-reserve check (`timeout + previewSealReserve`) or it spends the fan-out's budget. There is no shared helper; you must notice `previewForInserted` did it.
+6. *Trap:* never return an error once the broadcast has left — a NAK redelivers to every client. Asserted in six independent comments (`preview_writer.go:86`, `roomactivity.go:66`, `handler.go:426`, `:733`, `:1106`, `:1184`), nowhere central.
+7. *Trap:* call `withBroadcastMetricLabels` on any new publish path or it lands in the `unknown` room-kind series, and `natsmetrics.MarkTerminalFromContext` on any swallowed publish failure.
+
+**4–6 files, and three invariants a newcomer must discover unaided.**
+
+## Recommendations
+
+1. `high` — Fix or delete `deploy/test/`: point the verify scripts at what this service now produces (the sealed `previewCiphertext`/`previewForMsgId` fields and the NATS events), or add `roomlist-worker` to `docker-compose.test.yml`. A harness that fails on the happy path teaches the wrong model.
+2. `high` — Make the thread-lane payload distinction type-safe: `type sealedPayload []byte` / `type followerPayload []byte`, or collapse `publishChannelThreadEvent` to take the plaintext plus a `seal func()`. Then `:612`'s "both lanes share it" becomes an explicit constructor rather than two identical arguments.
+3. `medium` — Delete the "makes no MongoDB writes" clause at `handler.go:397` and collapse the six-site rationale to one canonical statement (`preview_writer.go:63-88` is the best-written copy), leaving one-line pointers elsewhere.
+4. `medium` — Split `handler.go`: `handler_thread.go` (the five `handleThread*` plus `channelThreadFanOut`/`threadFanOutAccounts`, ~450 lines) and `handler_mutation.go` (pin/unpin/react/`publishMutation`/`build*RoomEvent`, ~300). `handler_test.go` splits along the same seams.
+5. `medium` — Add `func (c *config) validate() error` collecting the eight scattered checks and call it once after `env.ParseAs`. Delete `VALKEY_KEY_GRACE_PERIOD`; leave `METRICS_ADDR` for a fleet-wide sweep.
+6. `medium` — Couple the sealer and writer structurally: have `withPreviewSealer` derive the writer, and move the `go …Run(…)`/`flushDone` wiring behind a `previews != nil` branch so the nil-receiver guards are a safety net rather than the mechanism.
+7. `low` — Fix `preview.go:97`'s stale type name, extend the package comment, cut the duplicated prune rationale to one site.
