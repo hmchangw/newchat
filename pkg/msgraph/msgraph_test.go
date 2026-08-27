@@ -1151,3 +1151,78 @@ func TestApplyProxy_AcceptsEverySupportedScheme(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyCredentials_MalformedEscapeNeverLeaksPassword closes the hole left by
+// the first sanitising attempt: unwrapping to *url.Error.Err is not enough,
+// because some underlying parse errors quote the offending input themselves
+// (`invalid URL escape "%zz"`). A password beginning with a bad escape would
+// still reach the log, so no parse failure may carry any part of the value.
+func TestProxyCredentials_MalformedEscapeNeverLeaksPassword(t *testing.T) {
+	tests := []struct {
+		name   string
+		proxy  string
+		secret string
+	}{
+		{name: "bad escape starts the password", proxy: "http://user:%zzsecret@proxy.corp", secret: "zz"},
+		{name: "bad escape inside the password", proxy: "http://user:pw%GGtail@proxy.corp", secret: "GG"},
+		{name: "bad escape in the username", proxy: "http://%QQuser:pw@proxy.corp", secret: "QQ"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), tc.secret, "no fragment of the proxy url may reach the error")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsColonInBasicUsername keeps a colon-bearing username from
+// failing only on the first request: Go builds the Basic credential as
+// "user:pass", so an HTTP(S) proxy splits at the first colon and reads a
+// different pair, answering 407. RFC 7617 forbids a colon in the user-id.
+func TestApplyProxy_RejectsColonInBasicUsername(t *testing.T) {
+	t.Run("explicit username", func(t *testing.T) {
+		for _, scheme := range []string{"http", "https"} {
+			t.Run(scheme, func(t *testing.T) {
+				_, err := NewMeetingsClient(Config{
+					TenantID: "t", ClientID: "c", ClientSecret: "s",
+					ProxyURL:      scheme + "://proxy.corp:8080",
+					ProxyUsername: "corp:svc",
+					ProxyPassword: "pw",
+				})
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), "pw", "the rejection must not carry the password")
+			})
+		}
+	})
+
+	// A percent-encoded colon survives url.Parse into Username(), so the
+	// embedded form reaches the same broken credential.
+	t.Run("embedded username", func(t *testing.T) {
+		_, err := NewMeetingsClient(Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL: "http://corp%3Asvc:pw@proxy.corp:8080",
+		})
+		require.Error(t, err)
+	})
+}
+
+// TestApplyProxy_AllowsColonInSocksUsername is the other half: SOCKS5 negotiates
+// credentials with length-prefixed fields (RFC 1929), so a colon is ordinary
+// data there and must not be rejected.
+func TestApplyProxy_AllowsColonInSocksUsername(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      scheme + "://proxy.corp:1080",
+				ProxyUsername: "corp:svc",
+				ProxyPassword: "pw",
+			})
+			require.NoError(t, err)
+			u := proxyTargetOf(t, c)
+			require.NotNil(t, u.User)
+			assert.Equal(t, "corp:svc", u.User.Username())
+		})
+	}
+}

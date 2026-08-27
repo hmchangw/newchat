@@ -139,13 +139,15 @@ type Config struct {
 	// the standard proxy env vars. Must include a scheme and host
 	// (e.g. "http://proxy.corp:8080").
 	ProxyURL string
-	// ProxyUsername and ProxyPassword authenticate to ProxyURL with HTTP Basic
-	// (Proxy-Authorization, emitted by net/http on both the plain-HTTP hop and
-	// the CONNECT tunnel). They override any userinfo embedded in ProxyURL, so a
-	// password carrying URL metacharacters needs no percent-encoding — the
-	// reason they are separate settings. Setting either without ProxyURL, or a
-	// password without a username, is a configuration error and is rejected at
-	// construction. ProxyPassword is a secret: never log it.
+	// ProxyUsername and ProxyPassword authenticate to ProxyURL. For an http/https
+	// proxy they travel as HTTP Basic (Proxy-Authorization, emitted by net/http
+	// on both the plain-HTTP hop and the CONNECT tunnel); for socks5/socks5h they
+	// travel in the RFC 1929 sub-negotiation instead. They override any userinfo
+	// embedded in ProxyURL, so a password carrying URL metacharacters needs no
+	// percent-encoding — the reason they are separate settings. Rejected at
+	// construction: either without ProxyURL, a password without a username, and
+	// a username containing ':' for a Basic (http/https) proxy.
+	// ProxyPassword is a secret: never log it.
 	ProxyUsername string
 	ProxyPassword string
 	// UserAgent overrides the User-Agent header sent on every Graph request. When
@@ -353,6 +355,12 @@ var supportedProxySchemes = map[string]bool{
 	"http": true, "https": true, "socks5": true, "socks5h": true,
 }
 
+// basicAuthProxySchemes are the schemes whose credentials travel as HTTP Basic
+// in a Proxy-Authorization header. The SOCKS5 schemes authenticate through the
+// RFC 1929 sub-negotiation instead, so the Basic-specific rules below don't
+// apply to them.
+var basicAuthProxySchemes = map[string]bool{"http": true, "https": true}
+
 // applyProxy points hc's transport at cfg.ProxyURL (overriding
 // HTTPS_PROXY/HTTP_PROXY) when it is non-empty, authenticating with
 // cfg.ProxyUsername/ProxyPassword when they are set. The URL must include a
@@ -374,14 +382,11 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	}
 	proxyURL, err := url.Parse(cfg.ProxyURL)
 	if err != nil {
-		// *url.Error carries the raw input, so returning it verbatim would leak a
-		// password embedded as userinfo. Redacted() can't help here — it needs a
-		// URL that parsed. Keep the underlying reason, drop the value.
-		var uerr *url.Error
-		if errors.As(err, &uerr) {
-			return fmt.Errorf("parse graph proxy url: %w", uerr.Err)
-		}
-		return errors.New("parse graph proxy url: malformed value")
+		// Nothing from a failed parse may reach the log: *url.Error quotes the
+		// whole input, and its underlying error quotes fragments of it too
+		// (`invalid URL escape "%zz"` would expose the start of a password).
+		// Redacted() can't help — it needs a URL that parsed.
+		return errors.New("parse graph proxy url: malformed value in GRAPH_PROXY_URL")
 	}
 	if proxyURL.Scheme == "" || proxyURL.Host == "" {
 		// Redacted() masks any embedded proxy credentials before it reaches logs.
@@ -393,6 +398,14 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	}
 	if cfg.ProxyUsername != "" {
 		proxyURL.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)
+	}
+	// Basic sends "user:password", so an HTTP(S) proxy splits a colon-bearing
+	// username at the wrong place and answers 407 on the first request — RFC 7617
+	// forbids the colon for that reason. SOCKS5 negotiates length-prefixed fields
+	// (RFC 1929), where a colon is ordinary data.
+	if basicAuthProxySchemes[proxyURL.Scheme] && proxyURL.User != nil &&
+		strings.Contains(proxyURL.User.Username(), ":") {
+		return fmt.Errorf("invalid graph proxy username for a %s proxy: must not contain ':'", proxyURL.Scheme)
 	}
 	tr := mutableTransport(hc)
 	if tr == nil {

@@ -66,10 +66,15 @@ value at startup.
 ### Authenticating proxies
 
 Set `GRAPH_PROXY_USERNAME`/`GRAPH_PROXY_PASSWORD` alongside `GRAPH_PROXY_URL`
-and the client sends `Proxy-Authorization: Basic` on every hop — the token
-request and the Graph request alike, through the CONNECT tunnel. Credentials
-embedded in the URL (`http://user:pass@proxy:8080`) still work and stay
-supported, but the separate vars are preferred:
+to authenticate to the proxy. How they travel depends on the scheme:
+
+- **`http` / `https`** — `Proxy-Authorization: Basic` on every hop, the token
+  request and the Graph request alike, through the CONNECT tunnel.
+- **`socks5` / `socks5h`** — the RFC 1929 username/password sub-negotiation
+  during the SOCKS handshake. No HTTP proxy-auth header is sent.
+
+Credentials embedded in the URL (`http://user:pass@proxy:8080`) still work and
+stay supported, but the separate vars are preferred:
 
 - A password containing `@ : / ? # %` needs no percent-encoding.
 - Only the password is a secret, so `GRAPH_PROXY_URL` can stay in a ConfigMap.
@@ -79,12 +84,22 @@ supported, but the separate vars are preferred:
 
 The explicit vars win over embedded userinfo. These fail fast at construction
 rather than silently egressing unauthenticated or breaking on the first request:
-credentials with no `GRAPH_PROXY_URL`, a password with no username, a malformed
-URL, and a scheme `net/http` cannot proxy through (only `http`, `https`,
-`socks5` and `socks5h` work). A malformed URL is reported without its value, so
-userinfo embedded in a broken `GRAPH_PROXY_URL` never reaches the log. Only
-**Basic** auth is supported — Go's transport has no NTLM/Kerberos/Digest proxy
-auth.
+
+- credentials with no `GRAPH_PROXY_URL`, or a password with no username;
+- a malformed URL;
+- a scheme `net/http` cannot proxy through — only `http`, `https`, `socks5` and
+  `socks5h` work;
+- a `:` in the username of an `http`/`https` proxy. Basic sends `user:password`,
+  so the proxy would split at the wrong colon and answer 407 on the first
+  request; RFC 7617 forbids it. SOCKS5 fields are length-prefixed, so a colon is
+  accepted there.
+
+A malformed URL is reported as `malformed value` with no part of the value
+attached — the underlying parse error quotes fragments of the input (`invalid
+URL escape "%zz"`), which would put the start of a password in the log.
+
+For `http`/`https` proxies, only **Basic** auth is supported — Go's transport
+has no NTLM/Kerberos/Digest proxy auth.
 
 Every error-returning constructor applies it: `NewMeetingsClient`,
 `NewMeetingsDirectoryClient`, `NewUserListerClient`, `NewChatsClient`,
