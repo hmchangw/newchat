@@ -263,3 +263,136 @@ store, and `main.go:66-85` re-declares `badgeCache` plus a `noopBadgeCache` pure
    at startup.
 7. **`low`** — Rename `store.go` → `service_iface.go`, export `service.BadgeCache` to delete the
    `main.go` duplicate, and move `startHTTPServer` into `httpserver.go`.
+
+---
+
+# Chapter 4 — Test Coverage
+
+**Score: 1.0 / 5**
+
+> **Score is mechanically floored** by CLAUDE.md §4: measured total coverage is 52.6%, below the
+> 60% threshold that mandates a `critical` finding and a score of 1. **On test *quality* alone the
+> `service` and root packages would rate 4/5.** Read the caveat below before acting on the number.
+
+## `make test SERVICE=user-service` — PASS
+
+```
+ok  .../user-service          1.105s     ok  .../user-service/mongorepo  1.055s
+ok  .../user-service/config   1.073s     ?   .../presenceclient  [no test files]
+ok  .../historyclient         1.169s     ?   .../publisher       [no test files]
+ok  .../models                1.027s     ?   .../roomclient      [no test files]
+ok  .../user-service/service  1.159s
+```
+
+`make generate SERVICE=user-service` produced **no diff** — mocks are current, not stale. The
+working tree was left clean.
+
+## Numeric coverage
+
+| Package | Covered / total stmts | % |
+|---|---|---|
+| `user-service` (root) | 60/229 | **26.2%** |
+| `user-service/config` | 67/70 | 95.7% |
+| `user-service/historyclient` | 11/25 | 44.0% |
+| `user-service/models` | — | no statements |
+| `user-service/mongorepo` | 68/417 | **16.3%** |
+| `user-service/presenceclient` | 0/13 | **0.0%** |
+| `user-service/publisher` | 0/8 | **0.0%** |
+| `user-service/roomclient` | 0/50 | **0.0%** |
+| `user-service/service` | 994/1165 | 85.3% |
+| `user-service/service/mocks` (generated) | 0/306 | 0.0% |
+| **TOTAL** | **1200/2283** | **52.6%** |
+| TOTAL excluding generated mocks | 1200/1977 | 60.7% |
+
+### Material caveat — read this before acting
+
+**Docker was unavailable in the audit environment, so `-tags integration` could not run.**
+`mongorepo` (88 integration tests), `roomclient`, `presenceclient`, `publisher` and the root
+`integration_test.go` are covered *only* under that tag. `go vet -tags=integration
+./user-service/...` compiles clean. **The integration-inclusive figure is very likely ≥80%.**
+
+The genuinely actionable finding is therefore less "this service is undertested" than **"nobody
+measures it"**: the repo has no coverage gate wired for `user-service` (`tools/coveragecheck` is
+used only by `tools/loadgen`), and the reported number counts 306 statements of generated mocks.
+Both distortions should be fixed before the 52.6% is treated as a quality verdict.
+
+## Findings
+
+**`critical`** — Coverage below repo minimum 80%, currently **52.6%**. Generated mocks
+(`service/mocks/mock_repository.go`, 306 stmts) are counted, no `-exclude` is applied, and no gate
+exists.
+
+**`high` — Six client-facing chatlist RPCs are entirely untested.** `service/chatlist.go:27`
+`GetChatlist`, `:45` `CreateChatlistSection`, `:74` `DeleteChatlistSection`, `:91`
+`RenameChatlistSection`, `:116` `ReorderChatlistSections`, `:131` `SetChatlistSectionSortMode`,
+plus `:153` `mutateChatlist` and the `:190`/`:200` publish paths — all 0.0%.
+`service/chatlist_test.go` tests only pure helpers (`validateSectionName`, `isPermutation`). All
+six are registered at `service/service.go:242-247` as `chat.user.*` handlers, so CLAUDE.md §4
+("every handler method must have tests for valid input, invalid input, store errors, and edge
+cases") is unmet. **This gap is real regardless of the Docker caveat** — these are unit-testable
+against existing mocks.
+
+**`high` — `service/service.go:232` `RegisterHandlers` at 0.0%.** ~40 subject registrations; a
+dropped or mistyped subject ships silently. Cheap to assert against a fake router.
+
+**`medium`** — `historyclient/client.go:33` `GetThreadList` is 0.0% while its sibling `RoomsGet`
+(`:59`) is at 83.3%, well tested with an embedded in-process NATS server
+(`historyclient/client_test.go:25` `startTestNATS`). The pattern exists and is simply unused for
+the other method.
+
+**`medium`** — `roomclient` / `presenceclient` / `publisher` have zero *unit* tests
+(`roomclient/client.go:27-100`, `presenceclient/client.go:28,31`, `publisher/core.go:20,24`,
+`publisher/publisher.go:21,26`). They rely wholly on Docker-gated integration tests, so a normal
+`make test` run validates none of their marshalling or error mapping. The `startTestNATS`
+embedded-server pattern would cover these without Docker.
+
+**`medium`** — `oidc.go:15` `oidcValidator` at 0.0%. The unconfigured branch (returns
+`nil, nil, nil`) and the `TLSSkipVerify` warning are security-relevant and testable with no
+network.
+
+**`low`** — `service/chatlist_test.go` is the only non-generated test file not using testify
+(49/54 do), and uses no `t.Run` subtests and no table-driven cases despite testing 5+ input
+variations per function.
+
+**`low`** — TDD Red phase is unverifiable: history is squashed PR merges. Every commit does ship
+tests alongside implementation (`2d7bf69` 2 impl/1 test, `834e837` 15/11, `e793090` 22/11) — good
+discipline, but not evidence of test-first.
+
+**`nitpick`** — Naming drifts from `Test<Type>_<Method>_<Scenario>` (e.g. `service/status_test.go:58`
+`TestGetProfileByName_StoreError` omits the type).
+
+**`nitpick`** — `newSvc(t)` returns 7 positional values (`service/status_test.go:59`); every call
+site carries `_, _, _, _` noise. A struct return would survive dependency additions.
+
+**`nitpick`** — No `t.Parallel()` anywhere in the service; suite runs are serial.
+
+## What is genuinely good
+
+Integration infrastructure is **fully compliant**: `TestMain` + `testutil.RunTests` in all five
+integration packages, zero inline `testcontainers.GenericContainer`, per-test
+`testutil.MongoDB(t, prefix)` isolation, compile-time interface assertions at
+`mongorepo/setup_test.go:18`. No `time.Sleep`, no shared mutable state, no order dependence;
+`config/config_test.go:15` `unsetEnv` correctly restores prior env. Error-path depth in `service`
+is strong (`status_test.go:58,79,86,93` store/publish failures; `threads_test.go:217,255,310`
+assert graceful degradation).
+
+## Recommendations
+
+1. **`critical`** — Wire a `coveragecheck` gate for `user-service` in CI mirroring
+   `coverage-loadgen-*`, at `-min 80` with `-exclude service/mocks`, measured **with
+   `-tags integration`** so the number reflects what actually ships. Until this exists the true
+   figure is unknown to everyone, not just this audit.
+2. **`high`** — Write table-driven tests for the six `service/chatlist.go` RPCs against
+   `service/mocks`: happy path, invalid name, duplicate name, unknown section ID, non-permutation
+   reorder, and repository error → `errcode.CodeInternal`.
+3. **`high`** — Test `RegisterHandlers` (`service/service.go:232`) by registering into a
+   `natsrouter` and asserting the exact set of subjects, so a lost registration fails the build.
+4. **`medium`** — Extract `startTestNATS` (currently `historyclient/client_test.go:25`) into a
+   shared test helper and use it to unit-test `roomclient`, `presenceclient`, `publisher` and
+   `historyclient.GetThreadList` without Docker.
+5. **`medium`** — Add two cheap unit tests for `oidc.go:15`: unconfigured issuer returns
+   `(nil, nil, nil)`, and a bad issuer URL returns a wrapped `init oidc validator` error.
+6. **`low`** — Rewrite `service/chatlist_test.go` onto testify + `t.Run` subtests with named
+   cases, matching the other 49 files.
+7. **`low`** — Convert `newSvc(t)` to return a struct of dependencies to stop the positional-blank
+   churn.
