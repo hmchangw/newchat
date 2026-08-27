@@ -121,8 +121,8 @@ func TestSetAppSubscription_Reactivate_ClearsMuted(t *testing.T) {
 	require.NotNil(t, got.Subscription.Room, "added event must carry the hydrated room")
 	assert.Equal(t, "Test Bot", got.Subscription.Room.Name)
 	require.NotNil(t, got.AppInfo)
-	assert.Equal(t, "app1", got.AppInfo.ID)
-	assert.Equal(t, "helper.bot", got.AppInfo.AssistantName)
+	// The reactivate "added" carries the full app record (same shape subscription.list nests).
+	assert.Equal(t, model.AppSubscriptionFromApp(appWith(true)), got.AppInfo)
 	assert.NotZero(t, got.Timestamp)
 }
 
