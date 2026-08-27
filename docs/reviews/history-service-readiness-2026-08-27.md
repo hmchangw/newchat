@@ -331,3 +331,54 @@ The fleet-wide value agrees (all three services default to 360), but `history-se
 5. **`low`** — Compute the event `Timestamp` at the publish site (`messages.go:549,628`, `reactions.go:100`, `pin.go:137`), matching `migration.go:80`.
 6. **`low`** — Pin `MESSAGE_BUCKET_HOURS=360` explicitly in `deploy/docker-compose.yml`.
 7. **`nitpick`** — Correct the `messages_by_id` primary-key comments (`migration.go:87,95`, `write.go:48`), and dedupe `req.MessageIDs` before `GetMessagesByIDs` (`messages.go:463`) so duplicates don't each cost a Cassandra read.
+
+---
+
+# 6. Performance — 4 / 5
+
+Genuinely strong for a read service. Every page size is clamped (`internal/cassrepo/utils.go:66-78`, `pkg/mongoutil/pagination.go:33-43`), the classic N+1s are already batched (`internal/service/threads.go:211`, `threads.go:352`, `internal/mongorepo/room.go:77`), independent Mongo reads run concurrently (`internal/service/utils.go:403-428`), projections are precise, and the Cassandra bucket walk is both bounded and fan-out-adaptive. The read cache is correct where it counts: singleflight, `WithoutCancel` plus `fetchTimeout`, positives-only, and `Invalidate` on mutation (`internal/service/messages.go:684-686`). Deductions are for CPU and lock overhead on the hot path plus two Mongo aggregation shapes that do not scale with room size.
+
+## Findings
+
+### `high` — Every page is JSON-encoded twice
+`pkg/pagefit/pagefit.go:144-157` reflectively `json.Encode`s every row into a length counter, and then `natsrouter` marshals the same rows again for the reply. `fitPage` (`internal/service/utils.go:210-211`) runs unconditionally whenever a budget is set — which is the default (`cmd/main.go:213-219`) — so even a five-row page pays the sizing pass. `warnIfStillOversize` (`utils.go:260-261`) can make it three passes.
+
+### `high` — `$facet` plus uncapped `$skip` on thread-parent lists
+`pkg/mongoutil/collection.go:93-106` appends `$facet{$skip/$limit, $count}`. `$facet` is a blocking stage: it materializes the entire matched-and-sorted set before paging, defeating index sort-limit pushdown, and it runs without `allowDiskUse` so it hard-fails at the 100 MB stage limit. `Offset` is never capped (`pkg/mongoutil/pagination.go:33-43`), making deep pagination O(offset). Caller: `internal/service/threads.go:319-332`. The code-quality expert independently flagged the same shape from the input-validation side.
+
+### `high` — Correlated `$lookup` per thread room, executed before pagination
+`internal/mongorepo/pipelines.go:136-161`: `unreadThreadsPipeline` matches *all* thread rooms in the room, joins `thread_subscriptions` for **each** one, and only then sorts and pages. Cost is O(threads in room) sub-queries per request regardless of `limit=20`. `userThreadSubscriptionsPipeline` in the same file (`pipelines.go:56-133`) is the well-designed counterexample: filter first, `$limit`, then join.
+
+### `medium` — Bucket-wave over-read multiplied by per-row decrypt
+`internal/cassrepo/walker.go:320` and `:332` request `w.pageSize` from *every* bucket in a wave rather than the remaining shortfall, and the surplus rows are discarded at `walker.go:261-262`. Worst case is fanout 8 × pageSize 100 = 800 rows fetched, scanned and **decrypted** to return 100. Each decrypt opens an OTel span, an AEAD, and a `json.Unmarshal` (`pkg/atrest/cipher.go:81-108`), so the waste is CPU-heavy rather than just I/O.
+
+### `medium` — Per-row reflection allocations in the scanner
+`internal/cassrepo/utils.go:153-159` rebuilds a 28-element `colNames []string` per row, and `buildScanValues` (`utils.go:134`) a 28-element `[]any` per row, inside `scanMessagesUpTo`'s loop (`utils.go:57-72`). The columns are invariant for the whole iterator, so this is roughly 1,600 needless slice allocations per over-read page.
+
+### `medium` — Read caches serialize on one exclusive mutex each
+`hashicorp/golang-lru/v2@v2.0.7`'s `expirable.Get` takes `mu.Lock()` rather than `RLock` in order to move the LRU element, so **every hit** in `internal/readcache/readcache.go:66` is an exclusive acquisition on a process-global lock — with `MAX_CONCURRENCY=256` (`pkg/natsrouter/guard.go:21`) and three or more lookups per read RPC. Each cache also spawns a cleanup ticker at `ttl/100`, which is **100ms** for the 10s room and preview TTLs.
+
+### `medium` — `GetAllPinnedMessages` is unbounded and over-projected, per pin request
+`internal/cassrepo/pin.go:218-237` reads the whole `pinned_messages_by_room` partition with all 24 columns — message body, attachments, `enc_payload` — while its only caller reads just `MessageID` and `PinnedAt` (`internal/service/pin.go:56-70`). No `LIMIT`, no page size.
+
+### `medium` — Fan-out amplification versus the Cassandra connection pool
+`internal/service/rooms.go:94` (16 goroutines) × `internal/cassrepo/repository.go:17` (fanout 8) is up to 128 concurrent CQL queries per `RoomsGet`, multiplied by 256 in-flight handlers, against `NumConns=8` per host (`pkg/cassutil/cass.go:18`). Nothing bounds Cassandra concurrency process-wide, so a burst of `RoomsGet` calls queues on the driver rather than being shed at admission.
+
+### `low` — Reply size unbounded on four RPCs
+`pagefit` is applied only to `LoadHistory` and `LoadSurroundingMessages`; `internal/service/messages.go:167`, `threads.go:141`, `pin.go:212` and `messages.go:482` return their pages whole. See the integration chapter — four of these are documented as intentional, `ListThreadSubscriptions` is not.
+
+### `low` — The hottest queries' indexes are never verified at startup
+`subscriptions{u.account, roomId}` (`internal/mongorepo/subscription.go:125,130`) and `apps{assistant.name}` (`app.go:28`) get no `mongoutil.WarnMissingIndexes` call, unlike `thread_subscriptions` (`threadsubscription.go:51`) and unlike peers such as `room-service/store_mongo.go:130`.
+
+### `nitpick` — Small hot-path waste
+`internal/service/rooms.go:250` copies a roughly 400-byte `Message` per scanned row just to test eligibility; `threads.go:247,254` perform two reflective `json.Marshal` calls per thread-list row; `internal/readcache/readcache.go:73-75` records a singleflight-recheck hit as a `Miss`, skewing the cache hit-rate metric.
+
+## Recommendations
+
+1. **`high`** — Encode rows once: have `pagefit` return the per-row encoded bytes (or a `[]json.RawMessage`) and assemble the reply from them, eliminating the second marshal. A cheap interim win is to skip `rowSizes` entirely when `len(items) * knownMaxRowBytes < budget`.
+2. **`high`** — Replace `AggregatePaged`'s `$facet` on thread lists with `AggregatePagedHasMore` (already available at `pkg/mongoutil/collection.go:142`), and cap `Offset` in `NewOffsetPageRequest` — or move to the keyset cursor that `userThreadSubscriptionsPipeline` already uses.
+3. **`high`** — Restructure `unreadThreadsPipeline` to drive from `thread_subscriptions` (userAccount + roomId), `$sort`/`$limit`, and only then join `thread_rooms`, mirroring `userThreadSubscriptionsPipeline` in the same file.
+4. **`medium`** — In `fetchWave`, size each bucket's limit to the remaining shortfall known at plan time, and hoist the `colNames`/`[]any` mapping out of `structScan` into a per-iterator prepared scanner.
+5. **`medium`** — Shard the readcache LRUs (for example 16 shards keyed by an FNV hash of the key) or move to a striped map, and raise the 10s TTLs so the cleanup ticker is not firing every 100ms.
+6. **`medium`** — Add a narrow `SELECT message_id, pinned_at FROM pinned_messages_by_room WHERE room_id = ? LIMIT maxPinnedPerRoom+N` for `enforcePinLimit`, instead of reading the full partition with all 24 columns.
+7. **`low`** — Apply the page budget to `LoadNextMessages`, `GetThreadMessages`, `ListPinnedMessages` and `GetMessagesByIDs`, and add `WarnMissingIndexes` for `subscriptions` and `apps` at startup.
