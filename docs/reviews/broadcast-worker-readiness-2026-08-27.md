@@ -384,3 +384,65 @@ fail-fast, no INBOX creation, no client-facing handlers. Two shared-field disagr
 5. `low` — Add `model.SubscriptionMentionEvent` and `model.NotificationEvent` to `pretouchTypes`.
 6. `low` — Move `h.activity.refresh` above the room-type switch so ordering announces match `roomlist-worker`'s unconditional pointer write.
 7. `low` — Refresh the `RoomActivityEvent` doc comment in `pkg/model/event.go`.
+
+---
+
+# 7. Performance — 4 / 5
+
+The hot path is genuinely well built: channel fan-out is **O(1) in room size**, every gating
+read is singleflight-coalesced and breaker-fenced, and the preview buffer *is* bounded. At the
+stated load this service is nowhere near a bottleneck. The deductions are one unbounded
+goroutine spawn, no handler deadline against `AckWait`, and an optional seal sitting ahead of
+delivery.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `handler.go:1266` | **Verified.** `publishToThreadAccounts` spawns **one goroutine per recipient, unbounded** — the only unbounded spawn in the service. With `MAX_WORKERS=100` and a thread carrying 500 followers plus mentions that is 50,000 goroutines, roughly 200 MB of stacks. It also buys nothing: `nats.Conn.publish` serializes on the connection mutex, so the "concurrent" publishes hand off one at a time while paying spawn and scheduling cost. **The correct shape is 800 lines away in the same file:** `federateMentions:454` uses `sem := make(chan struct{}, maxSiteFanout)` with the comment "Acquire before spawning so the live goroutine count, not just concurrency, stays within the budget." |
+| `high` | `main.go:520` | **Verified — there is no `context.WithTimeout` or `WithDeadline` anywhere in `main.go`.** The handler context carries no deadline (`o11y`'s `messagesContext.Next` adds none), so nothing bounds a message against `AckWait=30s`. Worst-case blocking sums well past it: roommetacache `fetchTimeout` 10s + userstore `fetchTimeout` 10s + seal 2s + parent fetch 2s + mention fan-out 5s + go-redis defaults (3s read × 3 retries, per call). Exceeding `AckWait` redelivers a message still in flight — **the whole room gets the message twice.** It also makes `preview.go:115`'s reserve check dead code in production. |
+| `medium` | `handler.go:261` | The preview seal runs **before** `GetRoomMeta` and before any publish, yet nothing downstream consumes `sealed` except `previews.buffer`. Every millisecond it costs — cold DEK means a Vault unwrap; cold bot sender means an `apps` read; bounded at 2s — is added directly to client-visible delivery latency, for an explicitly optional feature. |
+| `medium` | `handler.go:1392` | `GetThreadFollowers` is an **uncached** `thread_rooms` point-read on every channel thread reply — the only gating read on any fan-out path with no L1 or L2 tier (`GetRoomMeta` has two, `ListRoomMembers` has one). Breaker-fenced and index-supported, but a MongoDB blip stalls all thread delivery. `GetHistorySharedSince` by contrast is fine: precise projection, minimal decode shape, and `{roomId, u.account:$in}` is covered by room-service's unique `roomId_1_u.account_1`. |
+| `medium` | `preview_writer.go:48` | `maxPendingPreviews` caps **entries, not bytes**, and `Flush` resets the counter at swap, so the live peak is 2× the cap — the drained batch is held for the whole 30s `maxFlushDuration` while the replacement refills. Bounded in practice (`preview.Build` truncates to 500 runes / 10 attachments ⇒ ~1–7 KB per entry ⇒ 10–70 MB worst case), so this is **not** the sibling service's unbounded-map bug. But the bound is incidental rather than stated. |
+| `low` | `pkg/roomsubcache/lookup.go:123` | The known re-probe pattern is **half-fixed**: `sf.Do("refresh:"+roomID)` collapses concurrent refreshes, but `Slide` only re-arms the TTL without moving `CachedAt`, so a stale entry never becomes `Fresh` again during an outage — every subsequent DM message re-enters the refresh flight (breaker fast-fail plus one Valkey `EXPIRE` round-trip). Cheap, but it is one extra round-trip per DM message for the outage's duration. |
+| `low` | `pkg/userstore/cache.go:144` | `FindUsersByAccounts` is the **only** L1 path with no singleflight (both single-key methods have it), and misses are never negative-cached. An unresolvable mention, or a bot sender absent from `users`, costs an MGET plus a Mongo `$in` on *every* message, forever. |
+| `info` | `roomactivity.go:112` | The prune is correct: budget 256, and `reclaimed == 0` advances the watermark, so the degenerate re-scan-per-message case is already handled. No mutex is held across I/O anywhere in the service. |
+
+## Throughput model
+
+At 500 msg/s into 50-member channel rooms, measured per created message (Xeon 2.8 GHz):
+
+| Step | Time | Bytes | Allocs |
+|---|---|---|---|
+| sonic unmarshal, 335 B `MessageEvent` | 1.8 µs | 846 B | 3 |
+| `sonic.Marshal(RoomEvent)` | 1.7 µs | 954 B | 5 |
+| `DecodeAttachments` (2 attachments) | 8 µs | 1,760 B | 23 |
+
+`mention.Parse` is the outlier, and **this service is exposed to it**: a flat ~20 MB/s linear
+scan — 3.2 µs for a 70 B body, 54 µs at 1 KB, **1.2 ms at the 20 KB gatekeeper cap**, roughly
+10× the per-byte cost of decoding the entire event.
+
+Total ≈ **25–40 allocations, 4–6 KB, ~12 µs per message** for ordinary bodies ⇒ at 500/s that is
+0.6% of a core and ~3 MB/s of garbage.
+
+**Publish volume is 1 core-NATS publish per channel message** (2 during the 168 h locality-grace
+dual-publish) *regardless of room size* — a 10,000-member room costs exactly what a 5-member one
+costs, and nothing is O(n²). MongoDB: zero reads on the warm created path; the real load is the
+preview flush — 4 bulk writes/s, each up to ~125 pipeline `UpdateOne`s against `rooms`,
+contending with `roomlist-worker` on the same documents. Valkey: ~0 with warm L1s.
+
+**First bottleneck: MongoDB write throughput and document contention on `rooms`, not this
+process.** CPU headroom runs out around 10–20k msg/s — or ~10× sooner if bodies approach 20 KB,
+where 500 × 1.2 ms is 0.6 of a core on the regex alone. A secondary risk independent of rate:
+go-redis defaults `PoolSize = 10 × GOMAXPROCS` (≈20 on a 2-CPU pod) against `MAX_WORKERS=100`,
+and `pkg/valkeyutil` sets no pool or timeout overrides.
+
+## Recommendations
+
+1. `high` — Bound `publishToThreadAccounts` with a semaphore of 8, exactly as `federateMentions` already does — or just publish sequentially. Core NATS publish is a buffered memcpy behind one connection mutex, so the goroutines add cost and no parallelism.
+2. `high` — Wrap each message in `context.WithTimeout(handlerCtx, ~0.6 × AckWait)` in `broadcastProcessor` (`main.go:518`). It caps the blocking sum below redelivery and activates the reserve logic `preview.go:115` was written for.
+3. `medium` — Move `previewForInserted`/`previews.buffer` after the fan-out publishes in `handleCreated`; nothing between them depends on `sealed`.
+4. `medium` — Put `GetThreadFollowers` behind a small LRU plus singleflight (the `keycache.go` shape), TTL ~10–30 s. Thread membership changes are rare and delivery already tolerates that staleness.
+5. `medium` — Add the three missing metrics: **preview shed/backlog** (buffered rooms, bodies shed at `maxPendingPreviews`, flush duration and failures — today the cap silently degrades previews with zero signal); **consumer backlog** (`ConsumerInfo.NumPending`/`NumAckPending`, the only way to see fan-out falling behind); **worker-pool occupancy** (a gauge on the `natsmetrics` semaphore, to tell whether `MAX_WORKERS` or a dependency is the constraint).
+6. `low` — Have a `roomsubcache` refresh failure rewrite the entry with a bumped `CachedAt` rather than `Slide` alone, so a fail-open entry stops re-entering the flight on every message.
+7. `low` — Add singleflight to `userstore.Cache.FindUsersByAccounts` and briefly negative-cache misses, so unknown mentions and non-`users` bot senders stop reaching MongoDB per message.
