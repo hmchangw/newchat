@@ -129,3 +129,76 @@ Worth stating explicitly, because these are the conventions most often broken:
 - **[medium]** Adopt the sanctioned sub-package layout: split `handler.go` along its natural seams (`rooms/`, `subscriptions/`, `threads/`, `readreceipts/`, `teams/`, `apps/`), giving each a narrow store interface over the shared `MongoStore`. That decomposes the 47-method `RoomStore` and the 22-field `Handler` without changing any wire contract.
 - **[medium]** Replace the 13-arg `NewHandler` plus seven post-construction assignments with a `HandlerDeps` struct or functional options, returning an error when a required dependency is missing so an incompletely wired handler cannot reach `Register`.
 - **[low]** Convert the remaining bare `slog.*` calls to `…Context` variants, and move the hardcoded 5s/2s timeouts and `queryChunkSize` into the typed config with `envDefault`s.
+
+---
+
+# 3. Test coverage — 1 / 5
+
+Floored at 1 by CLAUDE.md Section 4: unit coverage is **57.7%**, below the 60% threshold that mandates a `critical` finding. This is the highest-risk dimension in the review — not because the tests that exist are bad (handler error-path testing is one of the service's strengths) but because the 2,046-line store implementation is effectively outside the gate that runs on every commit.
+
+## Measurements
+
+**Test run:** `make test SERVICE=room-service` → **PASS**, `ok github.com/hmchangw/chat/room-service 1.656s`. Zero failures, zero skips. `-race` is applied (`Makefile:108`). `go vet -tags=integration ./room-service/...` compiles clean; integration tests could not be *executed* (Docker unavailable in the audit sandbox).
+
+**Unit coverage:** **57.7%** of statements (`go test -coverprofile ./room-service/...`).
+
+| File | Coverage |
+|------|:--------:|
+| `bootstrap.go` | 100% |
+| `helper.go` | 96.0% |
+| `reader_history.go` | 92.0% |
+| `handler_teams.go` | 91.8% |
+| `handler.go` | 87.5% (1048/1198) |
+| `memberlist_client.go` | 76.6% |
+| `main.go` | 5.7% |
+| **`store_mongo.go`** | **2.6% (17/654)** |
+
+Excluding `store_mongo.go` the figure is 79.9%. Integration tests reach ~48 of 58 `MongoStore` methods, so a merged profile would likely land in the low 80s — but the number the floor check applies to is the plain unit figure, **57.7%**.
+
+**Lowest-covered functions:**
+
+| Function | Location | Coverage |
+|----------|----------|:--------:|
+| `main` | `main.go:136` | 0.0% (246 stmts) |
+| `Register` | `handler.go:115` | 0.0% (27 registrations) |
+| `EnsureIndexes` | `store_mongo.go:102` | 0.0% |
+| `GetTeamsMeeting` / `InsertTeamsMeeting` | `store_mongo.go:180`/`:196` | 0.0% |
+| `ListMentionableSubscriptions` | `store_mongo.go:1667` | 0.0% |
+| `ComputeSectionOrder` | `store_mongo.go:1121` | 0.0% |
+| `botOrPlatformAdminRegex` | `helper.go:122` | 0.0% |
+| `withMemberListMetrics` / `withHistoryMetrics` | `memberlist_client.go:48` / `reader_history.go:36` | 0.0% |
+| `moveChat` | `handler.go:2306` | 67.7% |
+| `boundedReply` | `helper.go:227` | 66.7% |
+| `publishThreadChannelEvent` | `handler.go:1881` | 60.0% |
+
+**Mock freshness: clean.** `make generate SERVICE=room-service` produced an empty `git status --porcelain room-service/` and empty `git diff --stat`. Nothing to revert; tree verified clean relative to HEAD.
+
+## Positives
+
+`main_test.go:1-11` is exactly the mandated `TestMain`/`testutil.RunTests` shape. All containers come from `pkg/testutil` (`MongoDB`, `NATS`) with **zero** inline `testcontainers.GenericContainer`/`mongodb.Run`. No test helpers leak into production files. Handler error-path coverage is genuinely strong — store errors, publish failures, cross-site aborts and boundary lengths are all named explicitly.
+
+## Findings
+
+- **[critical] Coverage below repo minimum 80%, currently 57.7%** — `room-service/store_mongo.go:1` — 654 of 2,274 statements live in an essentially unit-untested store. Below the 60% threshold, so this dimension is floored at 1.
+- **[high] The 2,046-line store implementation has 2.6% unit coverage** — `room-service/store_mongo.go:102-2046` — every method is verified only behind `//go:build integration`, so the pre-commit hook and `make test` see almost none of it. A projection or filter regression ships green locally.
+- **[high] No coverage threshold is enforced in CI for this service** — `room-service/deploy/azure-pipelines.yml:44` writes `coverage-room-service.out` and never inspects it. `tools/coveragecheck` exists but is wired only to loadgen (`Makefile:141-143`). The 80% rule is documented, not enforced.
+- **[medium] `main()` is a 246-line untestable block** — `room-service/main.go:136` — six fail-fast guards (`:158-168`) and the nine-step shutdown ordering (`:357-381`) have no test because nothing is extracted into a `run(ctx, cfg) error`.
+- **[medium] Unit tests boot a real in-process NATS server** — `room-service/memberlist_client_test.go:22-34`, `room-service/reader_history_test.go:24-35` — CLAUDE.md Section 4 says "Never connect to real databases, NATS, or external services in unit tests". These belong behind the integration tag, or need an injected request func.
+- **[medium] Cross-site errcode envelope translation is untested** — `room-service/memberlist_client.go:118-125` (legacy non-canonical-code fallback + warn) and `:128-133` (metadata propagation) are both 0%; only the happy envelope and the `RoomNotMember` remap are covered.
+- **[medium] Teams meeting persistence has zero integration coverage** — `room-service/store_mongo.go:180`, `:196` — the duplicate-key race branch is exercised only against a hand-built `mongo.WriteException` (`handler_teams_test.go:26`), never against the real E11000 the `(roomId,siteId)` unique index (`store_mongo.go:173`) emits.
+- **[medium] Handler wiring is unverified** — `room-service/handler.go:115-142` — `Register` is 0% in unit tests; a mistyped subject pattern or a dropped registration passes the unit gate. Integration tests call `h.Register` but exercise only ~5 of 27 subjects.
+- **[low] Non-rebalance cross-site `section_moved` federation is untested** — `room-service/handler.go:2408-2426` — only `TestHandler_MoveChat_Rebalance_...` (`handler_test.go:6570`) covers the sibling branch.
+- **[low] Table-driven guidance largely unused in the biggest file** — `room-service/handler_test.go:50-593` — 19 sequential `TestHandler_UpdateRole_*` funcs duplicate setup where one table would do; 244 top-level funcs vs 22 tables file-wide.
+- **[low] Global `slog.Default()` mutation in tests** — `room-service/debug_log_test.go:62-72` — correctly restored via `t.Cleanup`, but it is shared mutable state; combined with zero `t.Parallel()` across all 14 test files, the suite cannot be parallelized safely.
+- **[nitpick] Redundant, inconsistent `testing.Short()` skips** — `room-service/integration_test.go:1361,1431,1488,1512,1602,1780,1886,1932` — 8 of 73 integration tests, already gated by the build tag.
+- **[nitpick] Ten exported store methods have no direct integration test** — `ComputeSectionOrder`, `FindDMSubscription`, `FindUsersByAccounts`, `GetApp`, `GetUser`, `ListSubscriptionsByRoom`, `MoveSubscriptionSection`, `UpdateRoomVisibility`, plus the two Teams methods above.
+
+## Recommendations
+
+- **[critical]** Close the floor. Either add unit-level tests for `store_mongo.go`'s pure logic (`ComputeSectionOrder`, `sectionOrderExtreme`, the filter/projection builders) or merge unit and integration profiles (`go test -coverprofile -tags integration`) and gate on the merged number — but state explicitly which number CI enforces.
+- **[high]** Wire `tools/coveragecheck -profile coverage-room-service.out -min 80` into `.github/workflows/ci.yml` and `room-service/deploy/azure-pipelines.yml:44` so the documented 80% rule actually blocks a merge.
+- **[medium]** Extract `func run(ctx context.Context, cfg config) error` from `main.go:136` and test the six startup guards and the shutdown ordering; leave `main()` as a three-line shim.
+- **[medium]** Move `startInProcessNATS` (`memberlist_client_test.go:22`) and `startOtelNATS` (`reader_history_test.go:24`) into an `integration`-tagged file backed by `testutil.NATS(t)`, or inject the request function so the unit tests need no server.
+- **[medium]** Add a table-driven test over the cross-site envelope decoder covering the non-canonical-code fallback and metadata propagation (`memberlist_client.go:118-133`).
+- **[medium]** Add integration tests for `InsertTeamsMeeting`/`GetTeamsMeeting` that provoke the real E11000 against the `(roomId,siteId)` unique index, replacing reliance on `errStubDuplicateKey`.
+- **[low]** Add a `Register` wiring test asserting the exact set of subscribed subjects (a fake `natsrouter.Router` recording registrations), so a dropped or mistyped subject fails the unit gate.
