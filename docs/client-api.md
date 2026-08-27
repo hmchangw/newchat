@@ -8302,6 +8302,108 @@ published upload is reported as a failure.
 
 ---
 
+
+### 9.18 List rooms
+
+**Endpoint:** `GET /v1/admin/rooms`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Lists the rooms homed at admin-service's own site, newest paging first by `_id`. Site-scoped, unlike [§9.1 List users](#91-list-users), which spans every site: a room is managed only where it lives, and the duty toggle (§9.12) is same-site only. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
+
+#### Query parameters
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `page` | number | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
+| `limit` | number | no | Rows per page. Defaults to `20`, capped at `100`. |
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `rooms` | [AdminRoomView](#adminroomview)[] | This page of rooms. Empty array when the site has none. |
+| `total` | number | Rooms at this site, unpaged. |
+
+##### AdminRoomView
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | Room `_id`. |
+| `name` | string | Room name. |
+| `type` | string | `channel`, `dm`, `botDM`, or `discussion`. |
+| `userCount` | number | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
+| `restricted` | boolean | Whether the room is on duty. Always present, including when `false`. |
+
+```json
+{
+  "rooms": [
+    { "id": "aB3xY9kLmN2pQ7rS4", "name": "general", "type": "channel", "userCount": 7, "restricted": true }
+  ],
+  "total": 1
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role or its `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events
+
+`None — HTTP-only.`
+
+### 9.19 List room members
+
+**Endpoint:** `GET /v1/admin/rooms/:roomId/members`
+**Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
+
+Lists every account subscribed to the room. Unpaged — a room's roster is bounded, and the caller wants it whole.
+
+Read from the same subscriptions that room-service checks a designated owner against, so an account returned here is one [§9.12 Set room on-duty](#912-set-room-on-duty) will accept as `ownerAccount`. Unlike the client-facing [`member.list`](#list-members) RPC this does not require the caller to be a member — an admin managing a room is usually not in it — and it returns no display names, roles, or join times.
+
+An unknown `roomId` is not an error: it has no subscriptions, so the result is an empty list.
+
+#### Success response
+
+`HTTP 200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `members` | [AdminRoomMemberView](#adminroommemberview)[] | Every subscribed account, sorted by account. Empty array when the room has none. |
+
+##### AdminRoomMemberView
+
+| Field | Type | Notes |
+|---|---|---|
+| `account` | string | Member's account. |
+| `isBot` | boolean | Whether the member is a bot. Always present, including when `false`. |
+
+```json
+{
+  "members": [
+    { "account": "alice", "isBot": false },
+    { "account": "helperbot", "isBot": true }
+  ]
+}
+```
+
+#### Errors
+
+| HTTP | `code` | `reason` | When |
+|---|---|---|---|
+| 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
+| 403 | `forbidden` | `not_admin` | Session lacks the admin role or its `siteId` does not match. |
+| 500 | `internal` | — | Server-side fault; cause is logged server-side only. |
+
+#### Triggered events
+
+`None — HTTP-only.`
+
 ## 10. Botplatform Service
 
 HTTP REST endpoints served by `botplatform-service` — the authoritative password-login and session-token store for bot/admin accounts. Any user may authenticate against any cluster (there is no home-site gate). Sessions are permanent (no TTL); the per-user cap is `SESSIONS_MAX_PER_ACCOUNT` (default 100), FIFO-evicted by `issuedAt` on overflow.

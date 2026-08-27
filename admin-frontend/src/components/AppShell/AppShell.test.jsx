@@ -8,6 +8,7 @@ vi.mock('@/api', async (importOriginal) => {
     ...actual,
     listUsers: vi.fn(),
     listAudit: vi.fn(),
+    listRooms: vi.fn(),
     createPermissions: vi.fn(),
     listPermissions: vi.fn(),
   }
@@ -15,7 +16,7 @@ vi.mock('@/api', async (importOriginal) => {
 
 import AppShell from './AppShell'
 import { useAuth } from '@/context/AuthContext'
-import { listUsers, listAudit, listPermissions } from '@/api'
+import { listUsers, listAudit, listPermissions, listRooms } from '@/api'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -29,6 +30,7 @@ beforeEach(() => {
   listUsers.mockResolvedValue({ users: [], total: 0 })
   listAudit.mockResolvedValue({ entries: [], total: 0 })
   listPermissions.mockResolvedValue({ entries: [], total: 0 })
+  listRooms.mockResolvedValue({ rooms: [], total: 0 })
 })
 
 describe('AppShell', () => {
@@ -113,6 +115,21 @@ describe('AppShell permissions gating', () => {
     window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true' }
     render(<AppShell />)
     expect(screen.getByRole('button', { name: 'Permissions' })).toBeInTheDocument()
+  })
+
+  it('switches from Users to Rooms via nav and mounts RoomsPage', async () => {
+    render(<AppShell />)
+    await waitFor(() => expect(listUsers).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /^rooms$/i }))
+
+    await waitFor(() => expect(listRooms).toHaveBeenCalledWith('tok', { page: 1, limit: 20 }))
+  })
+
+  it('shows the Rooms tab regardless of the permissions runtime flag', () => {
+    window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'false' }
+    render(<AppShell />)
+    expect(screen.getByRole('button', { name: /^rooms$/i })).toBeInTheDocument()
   })
 })
 

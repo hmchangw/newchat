@@ -219,6 +219,37 @@ func (mr *MockAdminStoreMockRecorder) ListPermissionGrants(ctx, subjectAccount, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListPermissionGrants", reflect.TypeOf((*MockAdminStore)(nil).ListPermissionGrants), ctx, subjectAccount, permission, page, limit)
 }
 
+// ListRoomMembers mocks base method.
+func (m *MockAdminStore) ListRoomMembers(ctx context.Context, roomID string) ([]model.Subscription, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListRoomMembers", ctx, roomID)
+	ret0, _ := ret[0].([]model.Subscription)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListRoomMembers indicates an expected call of ListRoomMembers.
+func (mr *MockAdminStoreMockRecorder) ListRoomMembers(ctx, roomID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRoomMembers", reflect.TypeOf((*MockAdminStore)(nil).ListRoomMembers), ctx, roomID)
+}
+
+// ListRooms mocks base method.
+func (m *MockAdminStore) ListRooms(ctx context.Context, siteID string, page, limit int) ([]model.Room, int64, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListRooms", ctx, siteID, page, limit)
+	ret0, _ := ret[0].([]model.Room)
+	ret1, _ := ret[1].(int64)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// ListRooms indicates an expected call of ListRooms.
+func (mr *MockAdminStoreMockRecorder) ListRooms(ctx, siteID, page, limit any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRooms", reflect.TypeOf((*MockAdminStore)(nil).ListRooms), ctx, siteID, page, limit)
+}
+
 // Ping mocks base method.
 func (m *MockAdminStore) Ping(ctx context.Context) error {
 	m.ctrl.T.Helper()

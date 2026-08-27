@@ -1407,3 +1407,103 @@ func TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference(t *t
 	require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"_id": "txn-guard-probe"}).Decode(&got))
 	assert.Equal(t, "txn-probe", got["account"])
 }
+
+// ListRooms / ListRoomMembers
+// -------------------------------------------------------------------------
+
+func TestIntegration_ListRooms(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	ctx := context.Background()
+
+	rooms := []model.Room{
+		{ID: "room-a1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 7, Restricted: true},
+		{ID: "room-a2", Name: "random", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 3},
+		{ID: "room-a3", Name: "alice-bob", Type: model.RoomTypeDM, SiteID: "site-a", UserCount: 2},
+		{ID: "room-b1", Name: "other-site", Type: model.RoomTypeChannel, SiteID: "site-b", UserCount: 9},
+	}
+	for i := range rooms {
+		_, err := db.Collection("rooms").InsertOne(ctx, rooms[i])
+		require.NoError(t, err)
+	}
+
+	t.Run("returns only the requested site's rooms", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "site-a", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		require.Len(t, results, 3)
+		for _, r := range results {
+			assert.NotEqual(t, "room-b1", r.ID, "another site's room must not appear")
+		}
+	})
+
+	t.Run("projects the console fields", func(t *testing.T) {
+		results, _, err := st.ListRooms(ctx, "site-a", 1, 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "room-a1", results[0].ID)
+		assert.Equal(t, "general", results[0].Name)
+		assert.Equal(t, model.RoomTypeChannel, results[0].Type)
+		assert.Equal(t, 7, results[0].UserCount)
+		assert.True(t, results[0].Restricted)
+	})
+
+	t.Run("pages by _id in a stable order", func(t *testing.T) {
+		first, total, err := st.ListRooms(ctx, "site-a", 1, 2)
+		require.NoError(t, err)
+		assert.Equal(t, int64(3), total)
+		require.Len(t, first, 2)
+		assert.Equal(t, []string{"room-a1", "room-a2"}, []string{first[0].ID, first[1].ID})
+
+		second, _, err := st.ListRooms(ctx, "site-a", 2, 2)
+		require.NoError(t, err)
+		require.Len(t, second, 1)
+		assert.Equal(t, "room-a3", second[0].ID)
+	})
+
+	t.Run("a site with no rooms returns an empty slice", func(t *testing.T) {
+		results, total, err := st.ListRooms(ctx, "site-zzz", 1, 10)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+		assert.Empty(t, results)
+	})
+}
+
+func TestIntegration_ListRoomMembers(t *testing.T) {
+	db := testutil.MongoDBReplicaSet(t, "adminsvc")
+	st := newStoreMongo(db)
+	ctx := context.Background()
+
+	subs := []model.Subscription{
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "u2", Account: "bob"}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-1", User: model.SubscriptionUser{ID: "b1", Account: "helperbot", IsBot: true}},
+		{ID: idgen.GenerateUUIDv7(), RoomID: "room-2", User: model.SubscriptionUser{ID: "u3", Account: "carol"}},
+	}
+	for i := range subs {
+		_, err := db.Collection("subscriptions").InsertOne(ctx, subs[i])
+		require.NoError(t, err)
+	}
+
+	t.Run("returns only that room's members, account-sorted", func(t *testing.T) {
+		results, err := st.ListRoomMembers(ctx, "room-1")
+		require.NoError(t, err)
+		require.Len(t, results, 3)
+		accounts := []string{results[0].User.Account, results[1].User.Account, results[2].User.Account}
+		assert.Equal(t, []string{"alice", "bob", "helperbot"}, accounts)
+	})
+
+	t.Run("carries the bot flag", func(t *testing.T) {
+		results, err := st.ListRoomMembers(ctx, "room-1")
+		require.NoError(t, err)
+		require.Len(t, results, 3)
+		assert.False(t, results[0].User.IsBot)
+		assert.True(t, results[2].User.IsBot)
+	})
+
+	t.Run("a room with no subscriptions returns an empty slice", func(t *testing.T) {
+		results, err := st.ListRoomMembers(ctx, "room-nobody")
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+}

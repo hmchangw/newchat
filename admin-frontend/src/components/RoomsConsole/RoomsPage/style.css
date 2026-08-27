@@ -1,0 +1,26 @@
+.rooms-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-xl);
+  height: 100%;
+  overflow-y: auto;
+}
+
+.rooms-page-not-authorized {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.rooms-page-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.rooms-page-total {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}

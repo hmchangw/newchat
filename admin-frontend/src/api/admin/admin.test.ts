@@ -6,6 +6,8 @@ import {
   getUser,
   listAudit,
   listPermissions,
+  listRoomMembers,
+  listRooms,
   listSessions,
   listUsers,
   resyncPermissions,
@@ -13,6 +15,7 @@ import {
   revokeAllSessions,
   revokeSession,
   setPassword,
+  setRoomOnDuty,
   updateUser,
   uploadClientVersion,
   UPLOAD_TIMEOUT_MS,
@@ -42,6 +45,14 @@ const USER = {
   roles: ['admin'],
   active: true,
   requirePasswordChange: false,
+}
+
+const ROOM = {
+  id: 'r-1',
+  name: 'general',
+  type: 'channel',
+  userCount: 7,
+  restricted: true,
 }
 
 describe('listUsers', () => {
@@ -812,5 +823,101 @@ describe('uploadClientVersion cancellation and budget', () => {
     await promise
 
     expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+})
+
+describe('listRooms', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('GETs /v1/admin/rooms with page/limit query params', async () => {
+    const fetchMock = stubFetch(200, { rooms: [ROOM], total: 1 })
+
+    const result = await listRooms('tok', { page: 2, limit: 10 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/v1/admin/rooms')
+    expect(parsed.searchParams.get('page')).toBe('2')
+    expect(parsed.searchParams.get('limit')).toBe('10')
+    expect(init.method).toBe('GET')
+    expect(init.headers.Authorization).toBe('Bearer tok')
+    expect(result).toEqual({ rooms: [ROOM], total: 1 })
+  })
+
+  it('defaults restricted to false when the server omits it', async () => {
+    stubFetch(200, { rooms: [{ id: 'r-2', name: 'random', type: 'channel', userCount: 3 }], total: 1 })
+
+    const result = await listRooms('tok')
+
+    expect(result.rooms[0].restricted).toBe(false)
+  })
+
+  it('throws AsyncJobError on a non-2xx response', async () => {
+    stubFetch(403, { error: { code: 'forbidden', reason: 'not_admin', message: 'nope' } })
+
+    await expect(listRooms('tok')).rejects.toBeInstanceOf(AsyncJobError)
+  })
+})
+
+describe('listRoomMembers', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('GETs /v1/admin/rooms/<id>/members and returns the members array', async () => {
+    const fetchMock = stubFetch(200, {
+      members: [
+        { account: 'alice', isBot: false },
+        { account: 'helperbot', isBot: true },
+      ],
+    })
+
+    const result = await listRoomMembers('tok', 'room 1')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    // The room id is path-encoded, so an id with a space cannot break the URL.
+    expect(new URL(url).pathname).toBe('/v1/admin/rooms/room%201/members')
+    expect(init.method).toBe('GET')
+    expect(result).toEqual([
+      { account: 'alice', isBot: false },
+      { account: 'helperbot', isBot: true },
+    ])
+  })
+
+  it('returns an empty array when the server omits members', async () => {
+    stubFetch(200, {})
+
+    await expect(listRoomMembers('tok', 'r-1')).resolves.toEqual([])
+  })
+})
+
+describe('setRoomOnDuty', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POSTs onDuty:true with the owner account', async () => {
+    const fetchMock = stubFetch(200, { status: 'ok' })
+
+    await setRoomOnDuty('tok', 'r-1', { onDuty: true, ownerAccount: 'alice' })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(new URL(url).pathname).toBe('/v1/admin/rooms/r-1/onduty')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ onDuty: true, ownerAccount: 'alice' })
+  })
+
+  it('POSTs onDuty:false without an owner account', async () => {
+    const fetchMock = stubFetch(200, { status: 'ok' })
+
+    await setRoomOnDuty('tok', 'r-1', { onDuty: false })
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect(JSON.parse(init.body)).toEqual({ onDuty: false })
+  })
+
+  it('throws AsyncJobError when the room has too few members', async () => {
+    stubFetch(409, { error: { code: 'conflict', message: 'not enough members' } })
+
+    await expect(setRoomOnDuty('tok', 'r-1', { onDuty: true, ownerAccount: 'alice' })).rejects.toBeInstanceOf(
+      AsyncJobError,
+    )
   })
 })
