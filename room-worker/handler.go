@@ -402,9 +402,10 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return nil
 	}
 
-	// Individual-only: delete sub, reconcile userCount, publish leave/removed events.
-	if _, err := h.store.DeleteSubscription(ctx, req.RoomID, req.Account); err != nil {
-		return fmt.Errorf("delete subscription: %w", err)
+	// Individual-only: delete sub, adjust userCount, publish leave/removed events.
+	deleted, delErr := h.store.DeleteSubscription(ctx, req.RoomID, req.Account)
+	if delErr != nil {
+		return fmt.Errorf("delete subscription: %w", delErr)
 	}
 	// Bust AFTER the write: a removed member's cached positive decision must
 	// die immediately, not linger for the L2 TTL (the security case this
@@ -417,12 +418,21 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return err
 	}
 
-	if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
-		return fmt.Errorf("reconcile member counts: %w", err)
+	// deleted==0 means a redelivery found the subscription already gone: the
+	// counter was decremented on the first delivery, so decrementing again
+	// would drift it.
+	if deleted > 0 {
+		userDelta, appDelta := -1, 0
+		if subIsBot(req.Account) {
+			userDelta, appDelta = 0, -1
+		}
+		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, userDelta, appDelta); err != nil {
+			return err
+		}
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Rotate after delete + reconcile; survivors are the post-deletion accounts.
+	// Rotate after delete + count adjustment; survivors are the post-deletion accounts.
 	// Bots hold keys too, so a bot removal rotates like any other member.
 	survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if listErr != nil {
@@ -612,10 +622,13 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		accounts[i] = m.Account
 	}
 
+	var deletedSubs int64
 	if len(accounts) > 0 {
-		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts); err != nil {
-			return fmt.Errorf("delete subscriptions by accounts: %w", err)
+		n, delErr := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts)
+		if delErr != nil {
+			return fmt.Errorf("delete subscriptions by accounts: %w", delErr)
 		}
+		deletedSubs = n
 		// Bust AFTER the write, in one batched round trip: each removed
 		// account's cached positive decision must die immediately, not linger
 		// for the L2 TTL.
@@ -631,8 +644,31 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		return fmt.Errorf("delete room member (org): %w", err)
 	}
 
-	if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
-		return fmt.Errorf("reconcile member counts: %w", err)
+	// Counters follow what the delete actually removed, never a full recompute
+	// per removal — dropping a 5k-person department otherwise costs two whole-room
+	// CountDocuments on top of the delete itself.
+	switch {
+	case len(accounts) == 0:
+		// Every org member survives via another source: nothing left the room.
+	case int(deletedSubs) == len(accounts):
+		var removedUsers, removedApps int
+		for _, acc := range accounts {
+			if subIsBot(acc) {
+				removedApps++
+			} else {
+				removedUsers++
+			}
+		}
+		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, -removedUsers, -removedApps); err != nil {
+			return err
+		}
+	default:
+		// Fewer documents deleted than accounts targeted (a concurrent removal,
+		// or a partially-applied redelivery): the target set no longer describes
+		// what left, so fall back to the authoritative recompute.
+		if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
+			return fmt.Errorf("reconcile member counts: %w", err)
+		}
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
@@ -1494,13 +1530,41 @@ func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) 
 	return sr
 }
 
+// subIsBot is the single definition of the u.isBot flag stamped at subscription
+// creation. The remove paths derive their count deltas from it, so the counter
+// they decrement is the one the add path incremented.
+func subIsBot(account string) bool {
+	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
+}
+
+// applyMemberRemovalCounts $inc's the room's counters by an exact delta, running
+// the full recompute only when the TTL clock says a drift check is due.
+// ReconcileMemberCounts is two CountDocuments over the entire room, so it must
+// never be the per-removal default: on a 50k-member room that is two full index
+// scans to record the departure of one member.
+func (h *Handler) applyMemberRemovalCounts(ctx context.Context, roomID string, userDelta, appDelta int) error {
+	if userDelta == 0 && appDelta == 0 {
+		return nil
+	}
+	reconcileDue, err := h.store.ApplyMemberCountDelta(ctx, roomID, userDelta, appDelta, h.reconcileTTL)
+	if err != nil {
+		return fmt.Errorf("apply member count delta: %w", err)
+	}
+	if reconcileDue {
+		if err := h.store.ReconcileMemberCounts(ctx, roomID); err != nil {
+			return fmt.Errorf("reconcile member counts: %w", err)
+		}
+	}
+	return nil
+}
+
 // newSub constructs a Subscription carrying the room's own type. A DM pair
 // overrides RoomType per row — see buildDMPairSubs.
 func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 	name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
 	return &model.Subscription{
 		ID:           id,
-		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: model.IsBot(user.Account) || model.IsPlatformAdminAccount(user.Account)},
+		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: subIsBot(user.Account)},
 		RoomID:       room.ID,
 		SiteID:       room.SiteID,
 		Roles:        roles,
