@@ -1066,3 +1066,46 @@ func TestRestyVersionUploader_DoesNotFollowRedirects(t *testing.T) {
 	require.ErrorAs(t, err, &ec)
 	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
 }
+
+// A client that stalls mid-body trips the request's read deadline. relayParts
+// then fails on its own terms, so the handler's "relay failed and we did not
+// kill it" branch is taken — and it used to answer "could not read the uploaded
+// files", pointing an operator at malformed multipart data when the real cause
+// was the clock. The status stays 4xx (the client did not finish sending), but
+// the message must say so.
+func TestUploadClientVersion_StalledBodyReportsATimeoutNotAMalformedUpload(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateTimeout = 300 * time.Millisecond
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(&fakeUploader{}))
+	srv := uploadTestServer(t, h)
+
+	// A body the client never finishes: one complete part, then silence.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	mw := multipart.NewWriter(pw)
+	go func() {
+		fw, err := mw.CreateFormFile("configFile", "app.yaml")
+		if err != nil {
+			return
+		}
+		_, _ = fw.Write([]byte("version: 1"))
+		select {} // never Close(): the request body stays open past the deadline
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", pr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Skipf("the server closed the connection before answering: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(body), "could not read the uploaded files",
+		"a deadline expiry must not be reported as malformed multipart data")
+	assert.Contains(t, strings.ToLower(string(body)), "time",
+		"the message must name the real cause: the upload ran out of time")
+}

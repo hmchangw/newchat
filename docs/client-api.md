@@ -8189,7 +8189,7 @@ name and extension rules live there and are reported back verbatim on a `400`.
 | Status | Condition |
 |---|---|
 | `200 OK` | Both artifacts published. |
-| `400 Bad Request` | Body is not `multipart/form-data`, or `client-update-service` rejected the artifacts (its message is relayed). |
+| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the upload did not finish within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
 | `401 Unauthorized` | Missing or invalid admin session. |
 | `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
 | `500 Internal Server Error` | This service could not extend its own I/O deadlines for the upload (deployment fault). |

@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -238,6 +239,13 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 	// client body reports as an upstream outage and sends ops chasing a phantom
 	// one — or, once the teardown exists, an upstream 401 reports as a bad body.
 	if res.err != nil && !relayKilled {
+		// Still 4xx — the client did not finish sending — but a clock running out
+		// is not malformed data, and saying so sends an operator hunting the wrong
+		// bug.
+		if uploadDeadlineExpired(ctx, res.err) {
+			errhttp.Write(ctx, c, errcode.BadRequest("the upload did not finish within the allowed time"))
+			return
+		}
 		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
 		return
 	}
@@ -248,6 +256,14 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 
 	h.audit(ctx, c, clientUpdateAuditAction, "", "", res.names)
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
+}
+
+// uploadDeadlineExpired reports whether the relay failed because the request ran
+// out of time rather than because the body was malformed. Two clocks can fire:
+// the request's read deadline, which surfaces through the relay's read as
+// os.ErrDeadlineExceeded, and this handler's own budget on ctx.
+func uploadDeadlineExpired(ctx context.Context, relayErr error) bool {
+	return errors.Is(relayErr, os.ErrDeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 // awaitRelay collects the relay's outcome, tearing it down first if the upload
