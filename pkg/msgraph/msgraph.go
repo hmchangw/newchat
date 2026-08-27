@@ -388,9 +388,13 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 		// Redacted() can't help — it needs a URL that parsed.
 		return errors.New("parse graph proxy url: malformed value in GRAPH_PROXY_URL")
 	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		// Redacted() masks any embedded proxy credentials before it reaches logs.
-		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
+	// Hostname(), not Host: "http://:8080" has a non-empty Host but nothing to
+	// dial. The message interpolates nothing — Redacted() only masks userinfo
+	// that url.Parse actually populated, and a scheme-less "user:pw@host" parses
+	// with User nil and the whole value in Opaque, so Redacted() would hand the
+	// password straight to the log.
+	if proxyURL.Scheme == "" || proxyURL.Hostname() == "" {
+		return errors.New("invalid graph proxy url: GRAPH_PROXY_URL needs a scheme and host")
 	}
 	if !supportedProxySchemes[proxyURL.Scheme] {
 		// net/http would accept this here and fail on the first request instead.
@@ -399,13 +403,21 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	if cfg.ProxyUsername != "" {
 		proxyURL.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)
 	}
-	// Basic sends "user:password", so an HTTP(S) proxy splits a colon-bearing
-	// username at the wrong place and answers 407 on the first request — RFC 7617
-	// forbids the colon for that reason. SOCKS5 negotiates length-prefixed fields
-	// (RFC 1929), where a colon is ordinary data.
-	if basicAuthProxySchemes[proxyURL.Scheme] && proxyURL.User != nil &&
-		strings.Contains(proxyURL.User.Username(), ":") {
-		return fmt.Errorf("invalid graph proxy username for a %s proxy: must not contain ':'", proxyURL.Scheme)
+	// Validate the effective userinfo, whether it came from the explicit fields
+	// or from the URL — the checks above only saw the explicit ones.
+	if proxyURL.User != nil {
+		username := proxyURL.User.Username()
+		if password, ok := proxyURL.User.Password(); ok && password != "" && username == "" {
+			// Basic would send ":password"; the proxy answers 407 on the first request.
+			return errors.New("graph proxy password set without a username")
+		}
+		// Basic sends "user:password", so an HTTP(S) proxy splits a colon-bearing
+		// username at the wrong place and answers 407 — RFC 7617 forbids the colon
+		// for that reason. SOCKS5 negotiates length-prefixed fields (RFC 1929),
+		// where a colon is ordinary data.
+		if basicAuthProxySchemes[proxyURL.Scheme] && strings.Contains(username, ":") {
+			return fmt.Errorf("invalid graph proxy username for a %s proxy: must not contain ':'", proxyURL.Scheme)
+		}
 	}
 	tr := mutableTransport(hc)
 	if tr == nil {

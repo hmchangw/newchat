@@ -85,8 +85,11 @@ stay supported, but the separate vars are preferred:
 The explicit vars win over embedded userinfo. These fail fast at construction
 rather than silently egressing unauthenticated or breaking on the first request:
 
-- credentials with no `GRAPH_PROXY_URL`, or a password with no username;
-- a malformed URL;
+- credentials with no `GRAPH_PROXY_URL`;
+- a password with no username — from the settings *or* from URL userinfo
+  (`http://:secret@proxy:8080`), since Basic would send `:secret` and draw a 407;
+- a malformed URL, or one missing a scheme or hostname (`http://:8080` has a
+  port but no host to dial);
 - a scheme `net/http` cannot proxy through — only `http`, `https`, `socks5` and
   `socks5h` work;
 - a `:` in the username of an `http`/`https` proxy. Basic sends `user:password`,
@@ -94,9 +97,12 @@ rather than silently egressing unauthenticated or breaking on the first request:
   request; RFC 7617 forbids it. SOCKS5 fields are length-prefixed, so a colon is
   accepted there.
 
-A malformed URL is reported as `malformed value` with no part of the value
-attached — the underlying parse error quotes fragments of the input (`invalid
-URL escape "%zz"`), which would put the start of a password in the log.
+**No rejection quotes the value.** Every one of those errors is static (bar the
+scheme name), because there is no safe way to echo a bad proxy URL: a failed
+parse quotes the whole input, its underlying error quotes fragments (`invalid
+URL escape "%zz"`), and `Redacted()` masks userinfo only when `url.Parse`
+populated it — a scheme-less `user:pw@host` lands entirely in `Opaque` with
+`User` nil, so `Redacted()` would return the password verbatim.
 
 For `http`/`https` proxies, only **Basic** auth is supported — Go's transport
 has no NTLM/Kerberos/Digest proxy auth.

@@ -1226,3 +1226,48 @@ func TestApplyProxy_AllowsColonInSocksUsername(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyCredentials_SchemelessURLNeverLeaksPassword covers the third shape of
+// this leak. The first two were parse *failures*; this one parses fine. Without
+// a scheme, url.Parse reads "user" as the scheme and swallows the rest into
+// Opaque, leaving User nil — so Redacted(), which only masks a populated User,
+// returns the raw string password and all. No error may interpolate the value.
+func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
+	const password = "supersecret"
+	for _, proxy := range []string{
+		"user:" + password + "@proxy.corp:8080",
+		"proxy.corp:8080/" + password,
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "a parsed-but-invalid proxy url must not leak its value")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsEmbeddedEmptyUsername mirrors the explicit
+// password-without-username check onto userinfo carried in the URL: Basic would
+// send ":secret", which an authenticating proxy answers with 407 — after
+// construction has already succeeded.
+func TestApplyProxy_RejectsEmbeddedEmptyUsername(t *testing.T) {
+	const password = "secret"
+	_, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL: "http://:" + password + "@proxy.corp:8080",
+	})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), password, "the rejection must not carry the password")
+}
+
+// TestApplyProxy_RejectsPortWithoutHostname closes a hole in the host check:
+// "http://:8080" has a non-empty Host (":8080") but no hostname, so a Host==""
+// test passes it through and the dial fails later instead of at startup.
+func TestApplyProxy_RejectsPortWithoutHostname(t *testing.T) {
+	for _, proxy := range []string{"http://:8080", "https://:443", "socks5://:1080"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+		})
+	}
+}
