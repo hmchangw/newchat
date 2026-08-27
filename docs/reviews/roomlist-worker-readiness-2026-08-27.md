@@ -155,3 +155,87 @@ JetStream backoff server rules from CLAUDE.md are clean.
 5. `medium` — Add a shared table-driven test in `pkg/mention` that both `roomlist-worker/handler_test.go` and `broadcast-worker` bind to, pinning local-badge accounts against federated-mention accounts for identical content.
 6. `low` — Put every field write in `flush_test.go`'s `stubStore` under `s.mu`.
 7. `low` — Consider `jsretry.LowLatencyBackoff` at `flush.go:165`: unread badges and room ordering are user-visible, and `broadcast-worker` already settles that way on the same stream.
+
+---
+
+# 4. Test coverage — 2 / 5
+
+The test *design* is exemplary — rigorous table-driven error-path coverage, comments that
+explain the failure mode each case pins, real-MongoDB integration depth. But measured coverage
+is **63.4%**, below the repo's mandatory 80% floor, so CLAUDE.md §4's floor rule applies and
+caps this dimension at 2.
+
+## Measurements
+
+```
+go test -race ./roomlist-worker/...
+ok  github.com/hmchangw/chat/roomlist-worker  1.609s        PASS
+
+go tool cover -func=/tmp/cov.out
+total:  (statements)  63.4%
+```
+
+`make generate SERVICE=roomlist-worker` was a **no-op** with an empty `git status` — consistent
+with `store.go`'s documented no-mockgen decision. **No mocks are stale**, and nothing needed
+reverting. The tree was verified clean at exit.
+
+Five lowest-covered functions:
+
+| Function | File | Coverage |
+|---|---|---|
+| `main` | `main.go:66` | 0.0% |
+| `requestSelfShutdown` | `main.go:261` | 0.0% |
+| `pretouchJSON` | `pretouch.go:16` | 0.0% |
+| `NewMongoStore` | `store_mongo.go:23` | 0.0% |
+| `BulkAdvanceLastSeen` / `BulkSetMentions` | `store_mongo.go:101/112` | 80.0% |
+
+## The shape of the number matters more than the number
+
+`main()` alone is **83 of 257 statements (32%)**, entirely untested. Excluding it, the package
+sits at **93.7%** (163/174) — only **11 non-`main` statements** are uncovered anywhere.
+
+So this is not the usual failure mode of a high percentage concealing untested error branches.
+It is the inverse: the error branches are unusually well covered and one giant wiring function
+drags the total under the floor. For calibration, sibling workers measure 67.3%
+(broadcast-worker), 58.2% (notification-worker), 51.3% (message-worker), 37.3% (outbox-worker) —
+**the floor breach is fleet-wide, not a roomlist-worker regression.** That context does not
+waive the gate; it does change what fixing it means.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | package | Coverage below repo minimum 80%, currently **63.4%**. |
+| `medium` | `main.go:66` | `main()` is 83 uncovered statements containing load-bearing wiring no unit test can reach: that `validateFlushBudget` is fed `cfg.Consumer.EffectiveAckWait()` rather than the configured `AckWait`, that its error exits non-zero, that `cfg.Pool.Validate()` is called, and that `requestSelfShutdown` is installed as `onUnexpectedStop`. The helpers are 100% covered; their call sites are not. |
+| `medium` | `integration_test.go:19` | The integration suite exercises real MongoDB only. There is no `testutil.NATS(t)` test, so `bootstrapStreams`' verify/create paths, `buildConsumerConfig`'s acceptance by a live server, and `consumeLoop` against a real JetStream iterator are never validated end to end. This is exactly where the `MaxDeliver`/`BackOff` clamp interaction (Architecture, `medium`) would have been caught. |
+| `medium` | `flush.go:132` | The only uncovered non-`main` branch of real logic: a **transient** failure in the third stage (`subscription mentions`). Every transient test fails at stage 1 or 2, so the `return flushOutcome{err: err}` after the last stage never executes. |
+| `low` | `main_test.go:35` | **Verified; the line reference has been corrected from the expert's `:22`.** `TestBuildConsumerConfig_BotModePrefixesDurable` never calls `buildConsumerConfig`. It asserts only `stream.PipelineBot.ConsumerName(...)` and `stream.PipelineUser.ConsumerName(...)` — `pkg/stream` behaviour that would pass identically with every line of `roomlist-worker` deleted. |
+| `low` | `flush.go:67-76` | `flushOutcome.stageCodes` / `mongoErrs` — the fields whose own comments call them the load-bearing poison-vs-retry diagnostic — are executed but never asserted. No test file mentions `stageCodes`, `mongoErrs`, or `flushOutcome`, so the `"<stage>=<codes>"` pairing could break silently. |
+| `low` | `consumeloop_test.go:214` | `TestConsumeLoop_ReadyWhileConsuming` duplicates the first assertion of `TestConsumeLoop_ExitFailsReadiness` (`:198`) and only probes a zero-value `consumeState`. |
+| `info` | `store_mongo.go:103,114` | `BulkAdvanceLastSeen`/`BulkSetMentions` sit at 80% because unit tests pass only empty maps; the loop bodies are covered by integration tests, which the untagged profile cannot see. |
+
+## What is genuinely good here
+
+Unit tests touch no real MongoDB or NATS — hand-written `stubStore`/`fakeMsg`/`fakeIterator`/
+`fakeStreamManager` only. `integration_test.go` has the required
+`func TestMain(m *testing.M) { testutil.RunTests(m) }` and uses `testutil.MongoDB(t, prefix)`
+for per-test isolation. Every helper lives in a `_test.go` file. No shared mutable state, no
+order dependence. `TestClassifyFlushErr`, `TestValidateFlushBudget`, `TestDeriveIntents` and
+`TestBootstrapStreams` are properly table-driven with descriptive `t.Run` names, and cover the
+mixed-code allow-list case, the WriteConcern/RetryableWriteError overrides, non-positive
+duration validation, and panic recovery in both the consume loop and the flush loop.
+
+`TestValidateFlushBudget` deserves specific mention as the opposite of the hollow test above:
+13 cases, each carrying a comment naming the failure mode it pins, including the exact
+arithmetic an earlier version waved through — *"20.25 s looks safe against a 30 s AckWait, but
+a stalled flush plus the wait for the next tick plus this message's own flush is 40.25 s."*
+
+## Recommendations
+
+1. `high` — Extract `main()` into `run(ctx context.Context, cfg config) error` and test the wiring: that `validateFlushBudget` receives `EffectiveAckWait()` rather than `cfg.Consumer.AckWait`, and that a budget or `Pool.Validate` error returns non-zero without connecting to anything. **This single change moves the package over 80%.**
+2. `medium` — Add a NATS integration test (`testutil.NATS(t)`) that calls `bootstrapStreams` with `Enabled=true`, creates the consumer from `buildConsumerConfig`, and asserts the server accepts it and reports `MaxDeliver=-1` and `DeliverNew`.
+3. `medium` — Cover `flush.go:132`: a `stubStore` failing only `"mentions"` with a plain transient error, asserting all three stages ran and the message was Nak'd.
+4. `medium` — Assert `flushOutcome.stageCodes` and `mongoErrs` directly for a two-permanent-stage batch, pinning the `"subscription mentions=[11000]"` shape that makes a dropped poison batch diagnosable.
+5. `low` — Either rename `TestBuildConsumerConfig_BotModePrefixesDurable` to reflect that it tests `stream.Pipeline.ConsumerName`, or make it call `buildConsumerConfig` with a bot-prefixed durable and assert `cc.Durable`.
+6. `low` — Add a unit test pinning `cc.BackOff` from `buildConsumerConfig` (length, and first entry equal to `AckWait`), guarding the MaxDeliver-override/BackOff-clamp interaction CLAUDE.md flags as a hard consumer-create error.
+7. `low` — Cover `requestSelfShutdown` by injecting the signal function, and drop the redundant `TestConsumeLoop_ReadyWhileConsuming`.
