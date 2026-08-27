@@ -25,10 +25,12 @@ func NewSubscriptionRepo(db *mongo.Database) *SubscriptionRepo {
 
 // subscriptionReadProjection is the field set GetSubscription returns — the
 // union of every Subscription field its call sites read: canBypassLargeRoomPin
-// (roles, u.account) and the PinnedBy participant (u.id, u.account).
+// (roles, u.account) and the PinnedBy participant (u._id, u.account).
 // model.Subscription carries ~30 fields including the unbounded threadUnread
 // list, and this sits on the pin/unpin path uncached, so the rest is decode
-// cost for nothing. _id is excluded because no call site reads sub.ID. Keep in
+// cost for nothing. The top-level _id is excluded because no call site reads
+// sub.ID; the user id is a separate path (u._id, tagged bson:"_id" on
+// SubscriptionUser) and rides along with the whole u subdocument. Keep in
 // sync with the Subscription field reads in service/pin.go; the unit tests in
 // subscription_unit_test.go and the projection-field integration test guard drift.
 var subscriptionReadProjection = bson.M{"u": 1, "roles": 1, "_id": 0}

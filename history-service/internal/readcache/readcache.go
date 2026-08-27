@@ -145,8 +145,10 @@ func (c *SubscriptionCache) GetHistorySharedSince(ctx context.Context, account, 
 }
 
 // GetSubscription bypasses the access-window cache and delegates to the
-// underlying source. Pin/unpin paths need the full subscription doc (roles,
-// account) which we don't cache.
+// underlying source, which projects to the roles and user fields the pin/unpin
+// paths read (see mongorepo.subscriptionReadProjection). Reading any further
+// Subscription field on this path means widening that projection first — an
+// unprojected field decodes as a zero value, not an error.
 func (c *SubscriptionCache) GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error) {
 	return c.inner.GetSubscription(ctx, account, roomID)
 }
