@@ -708,6 +708,15 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 	}
 }
 
+// roomMemberSubProjection: the RoomMember rows this path builds read only _id,
+// u._id, u.account, roles and joinedAt, so the ~35-field Subscription doc is
+// never decoded for a member list. Note SubscriptionUser.ID maps to bson
+// "_id", so the nested path is u._id — "u.id" would project nothing.
+var roomMemberSubProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "u._id", Value: 1}, {Key: "u.account", Value: 1},
+	{Key: "roles", Value: 1}, {Key: "joinedAt", Value: 1},
+}
+
 func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error) {
 	opts := options.Find().SetSort(bson.D{
 		{Key: "joinedAt", Value: 1},
@@ -721,6 +730,7 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 	if limit != nil && *limit > 0 {
 		opts.SetLimit(int64(*limit))
 	}
+	opts.SetProjection(roomMemberSubProjection)
 	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID}, opts)
 	if err != nil {
 		return nil, fmt.Errorf("find subscriptions for %q: %w", roomID, err)
@@ -870,9 +880,23 @@ func (s *MongoStore) findAppsForDisplay(ctx context.Context, botAccounts []strin
 	return out, nil
 }
 
+// userReadProjection is the field set GetUser returns — the union of every
+// User field a room-service call site reads: _id and account (BuildDMRoomID /
+// RequesterAccount), engName and chineseName (the create-room name validation
+// and the Teams system-message display name) and roles (IsPlatformAdmin gates
+// roomRename and roomRestricted). Projecting keeps users.services — the bcrypt
+// credential block — off this path entirely; the projection-field integration
+// test guards drift.
+var userReadProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "account", Value: 1},
+	{Key: "engName", Value: 1}, {Key: "chineseName", Value: 1},
+	{Key: "roles", Value: 1},
+}
+
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
 	var u model.User
-	err := s.users.FindOne(ctx, bson.M{"account": account}).Decode(&u)
+	opts := options.FindOne().SetProjection(userReadProjection)
+	err := s.users.FindOne(ctx, bson.M{"account": account}, opts).Decode(&u)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, ErrUserNotFound
 	}
@@ -882,9 +906,17 @@ func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, 
 	return &u, nil
 }
 
+// appAssistantReadProjection: both GetApp call sites (botDM create, addMembers
+// bot validation) read only Assistant.Enabled, so the app's display metadata,
+// sponsors and per-locale view URLs never need to cross the wire.
+var appAssistantReadProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "assistant", Value: 1},
+}
+
 func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App, error) {
 	var a model.App
-	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount}).Decode(&a)
+	opts := options.FindOne().SetProjection(appAssistantReadProjection)
+	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount}, opts).Decode(&a)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, ErrAppNotFound
 	}
@@ -894,13 +926,20 @@ func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App,
 	return &a, nil
 }
 
+// dmDedupProjection: the open-or-create dedup check uses the hit solely to
+// return the existing RoomID, so the fat Subscription doc is never decoded.
+var dmDedupProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "roomId", Value: 1},
+}
+
 func (s *MongoStore) FindDMSubscription(ctx context.Context, account, targetName string) (*model.Subscription, error) {
 	var sub model.Subscription
+	opts := options.FindOne().SetProjection(dmDedupProjection)
 	err := s.subscriptions.FindOne(ctx, bson.M{
 		"u.account": account,
 		"name":      targetName,
 		"roomType":  bson.M{"$in": []model.RoomType{model.RoomTypeDM, model.RoomTypeBotDM}},
-	}).Decode(&sub)
+	}, opts).Decode(&sub)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, model.ErrSubscriptionNotFound
 	}
@@ -1489,13 +1528,20 @@ func (s *MongoStore) ListThreadReadReceipts(
 	return rows, nil
 }
 
+// threadSubParentProjection: the single call site (messageThreadRead) reads
+// only ThreadRoomID off the hit — everything else is the not-found sentinel.
+var threadSubParentProjection = bson.D{
+	{Key: "_id", Value: 1}, {Key: "threadRoomId", Value: 1},
+}
+
 func (s *MongoStore) GetThreadSubscriptionByParent(ctx context.Context, account, parentMessageID, roomID string) (*model.ThreadSubscription, error) {
 	var ts model.ThreadSubscription
+	opts := options.FindOne().SetProjection(threadSubParentProjection)
 	err := s.threadSubscriptions.FindOne(ctx, bson.M{
 		"parentMessageId": parentMessageID,
 		"userAccount":     account,
 		"roomId":          roomID,
-	}).Decode(&ts)
+	}, opts).Decode(&ts)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("find thread subscription for %q parent %q in room %q: %w",
