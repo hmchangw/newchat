@@ -49,12 +49,13 @@ func newSoakRoomPicker(seed int64, roomCount int, zipfS, zipfV float64) (*soakRo
 	if roomCount <= 0 {
 		return nil, fmt.Errorf("room count must be greater than zero")
 	}
-	// math/rand returns a nil generator rather than an error for out-of-range
-	// parameters, which would surface as a nil dereference on the first send.
-	if zipfS <= 1 {
+	// math/rand guards on `s <= 1`, which NaN and +Inf both slip past, and the
+	// generator it then returns is not nil — its Uint64 spins forever. Refusing
+	// non-finite values here is what keeps a typo from hanging the run silently.
+	if math.IsNaN(zipfS) || math.IsInf(zipfS, 0) || zipfS <= 1 {
 		return nil, fmt.Errorf("room Zipf exponent must be greater than 1, got %v", zipfS)
 	}
-	if zipfV < 1 {
+	if math.IsNaN(zipfV) || math.IsInf(zipfV, 0) || zipfV < 1 {
 		return nil, fmt.Errorf("room Zipf offset must be at least 1, got %v", zipfV)
 	}
 	rng := rand.New(rand.NewSource(seed))

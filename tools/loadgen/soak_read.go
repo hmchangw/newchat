@@ -41,15 +41,26 @@ type soakReadConfig struct {
 type soakReadSample struct {
 	Action  soakRPCAction
 	Latency time.Duration
-	// Messages is the row count the read came back with; ReplyBytes is what
-	// those rows weighed on the wire. Latency alone cannot tell a slow page
-	// from a large one.
+	// Messages is what the read came back with; ReplyBytes is what it weighed
+	// on the wire. Latency alone cannot tell a slow page from a large one.
+	//
+	// RowsCounted separates a real row count from the two things that share
+	// this field but are not one: a constant (get_message_by_id always returns
+	// one) and a server-side total (subscription.count reports the user's whole
+	// count, not rows in the reply). Set it through countRows, never by hand.
 	Messages    int
+	RowsCounted bool
 	ReplyBytes  int
 	ErrorClass  soakErrorClass
 	ErrorReason soakErrorReason
 	Retries     int
 	Skipped     bool
+}
+
+// countRows records how many rows the reply carried and marks the sample as
+// one loadgen_soak_rows may observe.
+func (s *soakReadSample) countRows(n int) {
+	s.Messages, s.RowsCounted = n, true
 }
 
 type soakReadSampleRecorder interface {
@@ -185,7 +196,7 @@ func (r *soakReader) LoadHistory(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCLoadHistory, Latency: latency,
-			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
 			Retries: result.Retries,
 		}
 		if len(response.Messages) == 0 {
@@ -260,7 +271,7 @@ func (r *soakReader) GetThreadMessages(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCGetThread, Latency: latency,
-			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
 			Retries: result.Retries,
 		}
 		if !response.HasNext {
@@ -374,7 +385,7 @@ func (r *soakReader) ListPinnedMessages(
 		}
 		sample := soakReadSample{
 			Action: soakRPCPinnedList, Latency: latency,
-			Messages: len(response.Messages), ReplyBytes: result.ReplyBytes,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
 			Retries: result.Retries,
 		}
 		if !response.HasNext {

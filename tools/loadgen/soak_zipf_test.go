@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,4 +78,45 @@ func TestValidateSoakConfig_RejectsAnUnusableZipfOffset(t *testing.T) {
 func TestSoakZipfDefaultsMatchTheReplacedConstants(t *testing.T) {
 	assert.Equal(t, 1.2, soakDefaultRoomZipfS)
 	assert.Equal(t, 1.0, soakDefaultRoomZipfV)
+}
+
+// math/rand's guard is `s <= 1`, which NaN and +Inf both slip past, and the
+// generator it then returns is NOT nil — its Uint64 spins forever. A soak
+// started with SOAK_ROOM_ZIPF_S=NaN would hang on the first send with no error
+// and no log, which is worse than the nil dereference the bounds exist to stop.
+// strconv.ParseFloat accepts both spellings, so env can deliver them.
+func TestNewSoakRoomPicker_RejectsNonFiniteParameters(t *testing.T) {
+	for name, tc := range map[string]struct{ s, v float64 }{
+		"exponent NaN":  {math.NaN(), 1.0},
+		"exponent +Inf": {math.Inf(1), 1.0},
+		"offset NaN":    {1.2, math.NaN()},
+		"offset +Inf":   {1.2, math.Inf(1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := newSoakRoomPicker(1, 100, tc.s, tc.v)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestValidateSoakConfig_RejectsNonFiniteZipfParameters(t *testing.T) {
+	for name, tc := range map[string]struct {
+		s, v float64
+		want string
+	}{
+		"exponent NaN":  {math.NaN(), 1.0, "SOAK_ROOM_ZIPF_S"},
+		"exponent +Inf": {math.Inf(1), 1.0, "SOAK_ROOM_ZIPF_S"},
+		"offset NaN":    {1.2, math.NaN(), "SOAK_ROOM_ZIPF_V"},
+		"offset +Inf":   {1.2, math.Inf(1), "SOAK_ROOM_ZIPF_V"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			cfg.RoomZipfS, cfg.RoomZipfV = tc.s, tc.v
+
+			err := validateSoakConfig(&cfg, "keyspace")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }

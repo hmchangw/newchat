@@ -422,7 +422,7 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections` | Connections the lane currently claims online |
 | `loadgen_soak_reply_bytes{action}` | Wire size of a successful paged read, bucketed to the 128 KiB `max_payload`. A distribution climbing into the top bucket is the warning that the next reply comes back as `response_too_large` instead of data |
-| `loadgen_soak_rows{action}` | Rows returned per paged read. Separates "the page is slow" from "the page is large". Emitted only for the read lanes — a mutation has no page, and its zero would read as "returns nothing" |
+| `loadgen_soak_rows{action}` | Rows returned per paged read. Separates "the page is slow" from "the page is large". Emitted only where the count is real — a mutation has no rows, and a read whose count is a constant or a server-side total is not reporting rows either |
 | `loadgen_failure_abandoned_journals` | Retained journals from earlier epochs |
 
 The existing `loadgen_failure_operations_total`,

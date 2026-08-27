@@ -286,7 +286,7 @@ func (r *soakUserReader) Chatlist(ctx context.Context) error {
 		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Sections)
+		sample.countRows(len(response.Sections))
 	})
 }
 
@@ -299,7 +299,7 @@ func (r *soakUserReader) PriorityContacts(ctx context.Context) error {
 		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Contacts)
+		sample.countRows(len(response.Contacts))
 	})
 }
 
@@ -313,7 +313,7 @@ func (r *soakUserReader) AppsList(ctx context.Context) error {
 		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Apps)
+		sample.countRows(len(response.Apps))
 	})
 }
 
@@ -326,7 +326,7 @@ func (r *soakUserReader) AppsCategories(ctx context.Context) error {
 		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Categories)
+		sample.countRows(len(response.Categories))
 	})
 }
 
@@ -359,7 +359,7 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 }
 
@@ -386,7 +386,7 @@ func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 }
 
@@ -420,7 +420,7 @@ func (r *soakUserReader) ThreadList(ctx context.Context) error {
 		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Items)
+		sample.countRows(len(response.Items))
 	})
 }
 
@@ -515,7 +515,7 @@ func (r *soakUserReader) call(
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		r.record(&sample)
-		return fmt.Errorf("issue %s request: %w", request.Action, err)
+		return fmt.Errorf("user read lane: %w", err)
 	}
 	if apply != nil {
 		apply(&sample)

@@ -205,7 +205,7 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 		l.countCheck(soakPresenceCheckUnknown, len(accounts))
 		return fmt.Errorf("query presence batch: %w", err)
 	}
-	sample.Messages = len(response.States)
+	sample.countRows(len(response.States))
 	l.record(&sample)
 
 	reported := make(map[string]model.PresenceStatus, len(response.States))

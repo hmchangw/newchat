@@ -128,7 +128,7 @@ func (r *soakSearchReader) SearchMessages(ctx context.Context) error {
 		Body:    model.SearchMessagesRequest{Query: term, Size: r.cfg.PageSize},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Messages)
+		sample.countRows(len(response.Messages))
 	})
 }
 
@@ -142,7 +142,7 @@ func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
 		Body:    model.SearchRoomsRequest{Query: term, Size: r.cfg.PageSize},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Rooms)
+		sample.countRows(len(response.Rooms))
 	})
 }
 
@@ -181,7 +181,7 @@ func (r *soakSearchReader) IndexedAt(
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Messages)
+		sample.countRows(len(response.Messages))
 	})
 	if err != nil {
 		// A search-service or Elasticsearch outage proves nothing about the
@@ -240,7 +240,7 @@ func (r *soakSearchReader) call(
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		r.record(&sample)
-		return fmt.Errorf("issue %s request: %w", request.Action, err)
+		return fmt.Errorf("search read lane: %w", err)
 	}
 	if apply != nil {
 		apply(&sample)

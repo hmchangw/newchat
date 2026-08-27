@@ -209,7 +209,7 @@ func (m *soakRoomMutator) call(
 	outcome.ErrorClass = result.ErrorClass
 	outcome.ErrorReason = result.ErrorReason
 	if err != nil {
-		return outcome, fmt.Errorf("issue %s request: %w", request.Action, err)
+		return outcome, fmt.Errorf("room mutation lane: %w", err)
 	}
 	apply(&outcome)
 	return outcome, nil

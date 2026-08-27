@@ -74,7 +74,7 @@ func TestSoakCollector_ObservesPageSizeAndRowCount(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		HasPage: true, ReplyBytes: 98_304, Rows: 40,
+		RowsCounted: true, ReplyBytes: 98_304, Rows: 40,
 	}))
 
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.SoakReplyBytes))
@@ -92,7 +92,7 @@ func TestSoakCollector_SkipsWarmupPages(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		HasPage: true, ReplyBytes: 98_304, Rows: 40,
+		RowsCounted: true, ReplyBytes: 98_304, Rows: 40,
 	}))
 
 	assert.Zero(t, testutil.CollectAndCount(metrics.SoakReplyBytes))
@@ -124,7 +124,7 @@ func TestSoakCollector_CountsAnEmptyPage(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		HasPage: true, ReplyBytes: 21, Rows: 0,
+		RowsCounted: true, ReplyBytes: 21, Rows: 0,
 	}))
 
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.SoakRows))
@@ -144,4 +144,54 @@ func TestSoakCollector_SkipsActionsThatHaveNoPage(t *testing.T) {
 
 	assert.Zero(t, testutil.CollectAndCount(metrics.SoakRows))
 	assert.Zero(t, testutil.CollectAndCount(metrics.SoakReplyBytes))
+}
+
+// A read whose Messages is a constant (get_message_by_id always returns one)
+// or a server-side total (subscription.count returns the user's whole count,
+// not rows in the reply) is not a row count. Marking every read sample as one
+// would put those in the same distribution as a real page.
+func TestSoakReadSample_CountRowsMarksOnlyRealCounts(t *testing.T) {
+	counted := soakReadSample{Action: soakRPCMemberList}
+	counted.countRows(7)
+	assert.Equal(t, 7, counted.Messages)
+	assert.True(t, counted.RowsCounted)
+
+	constant := soakReadSample{Action: soakRPCGetMessage, Messages: 1}
+	assert.False(t, constant.RowsCounted, "a hardcoded 1 is not a row count")
+}
+
+func TestSoakReadCollectorRecorder_ObservesOnlyCountedRows(t *testing.T) {
+	start := time.Unix(0, 0).UTC()
+	for name, tc := range map[string]struct {
+		sample soakReadSample
+		want   int
+	}{
+		"a counted page is observed": {
+			sample: soakReadSample{
+				Action: soakRPCSubscriptionList, Latency: time.Millisecond,
+				Messages: 40, RowsCounted: true, ReplyBytes: 98_304,
+			},
+			want: 1,
+		},
+		"an uncounted read is not": {
+			sample: soakReadSample{
+				Action: soakRPCGetMessage, Latency: time.Millisecond,
+				Messages: 1, ReplyBytes: 512,
+			},
+			want: 0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			metrics := NewMetrics()
+			recorder := &soakReadCollectorRecorder{
+				collector: NewSoakCollector(metrics, start, 0, time.Hour),
+				now:       func() time.Time { return start.Add(time.Second) },
+			}
+
+			sample := tc.sample
+			recorder.Record(&sample)
+
+			assert.Equal(t, tc.want, testutil.CollectAndCount(metrics.SoakRows))
+		})
+	}
 }

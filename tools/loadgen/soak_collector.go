@@ -66,15 +66,14 @@ type soakOperationSample struct {
 	ErrorClass    soakErrorClass
 	ErrorReason   soakErrorReason
 	TargetMissing bool
-	// HasPage marks the samples that describe a paged read. Only those carry
-	// ReplyBytes and Rows, and only those may be observed: a mutation has no
-	// page, so recording its zero would stand a bar at rows=0 beside the reads
-	// and read as "returns nothing" rather than "has no page". An empty page
-	// is a real answer, which is why the gate is this flag and not a non-zero
-	// row count.
-	HasPage    bool
-	ReplyBytes int
-	Rows       int
+	// RowsCounted marks the samples whose Rows is a real count of what the reply
+	// carried. Only those may be observed: a mutation has no rows at all, and a
+	// read whose count is a constant or a server-side total is not reporting
+	// rows either. An empty page is a real answer, which is why the gate is this
+	// flag and not a non-zero count.
+	RowsCounted bool
+	ReplyBytes  int
+	Rows        int
 }
 
 type soakFixedHistogram struct {
@@ -269,7 +268,7 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 					sample.Latency.Seconds(),
 				)
 			}
-			if sample.Outcome == soakOutcomeSucceeded && sample.HasPage {
+			if sample.Outcome == soakOutcomeSucceeded && sample.RowsCounted {
 				if sample.ReplyBytes > 0 {
 					c.metrics.SoakReplyBytes.WithLabelValues(action).Observe(
 						float64(sample.ReplyBytes),

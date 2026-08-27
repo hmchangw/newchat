@@ -180,7 +180,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Readers)
+		sample.countRows(len(response.Readers))
 	})
 }
 
@@ -198,7 +198,7 @@ func (r *soakRoomReader) ListMembers(
 		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Members)
+		sample.countRows(len(response.Members))
 	})
 	return response, err
 }
@@ -216,7 +216,7 @@ func (r *soakRoomReader) RoomsInfo(ctx context.Context) error {
 		Body:    soakRoomsInfoRequest{RoomIDs: roomIDs},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Rooms)
+		sample.countRows(len(response.Rooms))
 	})
 }
 
@@ -238,7 +238,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 }
 
@@ -259,7 +259,7 @@ func (r *soakRoomReader) RoomState(
 		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Members)
+		sample.countRows(len(response.Members))
 	})
 	return response, err
 }
@@ -277,7 +277,7 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 		Body:    soakRoomsInfoRequest{RoomIDs: []string{roomID}},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Rooms)
+		sample.countRows(len(response.Rooms))
 	})
 	if err != nil {
 		return soakRoomInfo{}, err
@@ -312,7 +312,7 @@ func (r *soakRoomReader) SubscriptionFor(
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 	if err != nil {
 		// Two verifiers share this call, so the transport error alone does not
@@ -389,7 +389,7 @@ func (r *soakRoomReader) call(
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		r.record(&sample)
-		return fmt.Errorf("issue %s request: %w", request.Action, err)
+		return fmt.Errorf("room read lane: %w", err)
 	}
 	apply(&sample)
 	r.record(&sample)

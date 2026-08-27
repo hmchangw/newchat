@@ -292,10 +292,12 @@ func validateSoakConfig(cfg *soakConfig, cassandraKeyspace string) error {
 	// MAX_SUBSCRIPTION_LIMIT, but that is the service's own configuration and
 	// loadgen cannot read it, whereas a negative page size is wrong under every
 	// configuration.
-	if cfg.RoomZipfS <= 1 {
+	// NaN and +Inf compare false against every bound, so they reach the room
+	// picker, whose generator then never terminates. See newSoakRoomPicker.
+	if math.IsNaN(cfg.RoomZipfS) || math.IsInf(cfg.RoomZipfS, 0) || cfg.RoomZipfS <= 1 {
 		return fmt.Errorf("SOAK_ROOM_ZIPF_S must be greater than 1, got %v", cfg.RoomZipfS)
 	}
-	if cfg.RoomZipfV < 1 {
+	if math.IsNaN(cfg.RoomZipfV) || math.IsInf(cfg.RoomZipfV, 0) || cfg.RoomZipfV < 1 {
 		return fmt.Errorf("SOAK_ROOM_ZIPF_V must be at least 1, got %v", cfg.RoomZipfV)
 	}
 	if cfg.SubscriptionListLimit < 0 {

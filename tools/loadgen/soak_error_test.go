@@ -129,14 +129,21 @@ func TestSoakRequestError_ErrorIsTheCauseVerbatim(t *testing.T) {
 	assert.Equal(t, cause.Error(), err.Error())
 }
 
-func TestSoakRequestError_ComposedLaneMessageNamesTheActionOnce(t *testing.T) {
-	carrier := &soakRequestError{
-		Action: soakRPCSubscriptionList,
-		err:    errors.New("nats request: context deadline exceeded"),
-	}
-	lane := fmt.Errorf("issue %s request: %w", soakRPCSubscriptionList, carrier)
+// Driven through the real lane rather than a hand-built wrapper: the
+// duplication this guards against lives in how the layers compose, so a test
+// that composes them itself would keep passing after a regression.
+func TestSoakRoomReader_LaneFailureNamesTheActionOnce(t *testing.T) {
+	transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{
+		{err: context.DeadlineExceeded},
+	}}
+	reader, _, _ := newSoakRoomReadFixture(t, transport, 1)
 
-	assert.Equal(t, 1, strings.Count(lane.Error(), string(soakRPCSubscriptionList)))
+	err := reader.SubscriptionList(context.Background())
+
+	require.Error(t, err)
+	assert.Equal(t, 1,
+		strings.Count(err.Error(), string(soakRPCSubscriptionList)),
+		"got %q", err.Error())
 }
 
 // A carrier with no cause would be a programming error, but it must not panic
