@@ -397,3 +397,41 @@ func perCallSetViaOneLocal(ctx context.Context, c metric.Int64Counter, v string)
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributeSet(set))
 }
+
+// Camel-qualified identity keys. The qualifier prefix added for
+// messaging.message.id required a . or _ separator, so the Go-idiomatic
+// spelling of exactly the same key walked past it. destinationRoomID is one
+// series per room whatever the separator is — or isn't.
+func camelQualifiedIdentityKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("destinationRoomID", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("sourceAccountID", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("parentMessageId", v)))
+	// A bare capitalised root with no qualifier at all.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("RoomID", v)))
+	// Both qualifier kinds at once: dotted namespace, then a camel hump.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("messaging.destinationRoomID", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Key("destinationOrgUID").String(v)))
+}
+
+// The camel negatives. A capitalised word that merely contains an identity
+// root, or a bounded key whose last segment happens to follow a lowercase run,
+// must stay silent — otherwise the camel branch forbids ordinary label names.
+func boundedCamelKeys(ctx context.Context, c metric.Int64Counter, v string, n int64) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("destinationKind", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("eventType", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("userAgent", v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("runInfo", v)))
+	// Plural of a root is a count, not an identity.
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("recipientCount", n)))
+}

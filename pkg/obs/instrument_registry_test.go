@@ -350,7 +350,31 @@ func boundedSubjectArg(arg string) bool {
 	if !strings.HasPrefix(arg, "subject.") {
 		return false
 	}
-	return !entityArg.MatchString(arg)
+	for _, a := range strings.Split(builderArgs(arg), ",") {
+		if entityArg.MatchString(strings.TrimSpace(a)) {
+			return false
+		}
+	}
+	return true
+}
+
+// builderArgs returns what a builder call was passed, or "" for a plain
+// selector such as subject.SomeConstant.
+//
+// Splitting the name off the arguments matters in both directions. Matching
+// over the whole call text made the builder's own name part of the evidence,
+// so subject.RoomEvents(siteID) was rejected for saying "Room" — and matching
+// a bare root anywhere in the text was the only thing catching
+// subject.RoomEvents(parentRoomID), for the same accidental reason. Neither is
+// a judgement about the argument, which is the only thing that decides how
+// many subjects the call can produce.
+func builderArgs(call string) string {
+	open := strings.Index(call, "(")
+	closing := strings.LastIndex(call, ")")
+	if open < 0 || closing < open {
+		return ""
+	}
+	return call[open+1 : closing]
 }
 
 // routerSubjectExpr is natsrouter's registered route pattern, bounded by
@@ -370,18 +394,25 @@ const routerSubjectExpr = "rt.natsSubject"
 // smaller vocabulary than the rule it backs is a guard with a published list
 // of ways around it.
 //
-// The tail is `_?u?id`, not `id`. Go identifiers spell the same thing four
-// ways — roomId, roomID, roomUID, room_id — and \b sees no boundary inside
-// any of them, so the earlier `(id)?` matched only the first two and let
-// roomUID and room_id through.
+// The shape is the semgrep rule's identity branch, transcribed: the argument
+// is anchored end to end, so a root has to be the whole identifier bar a
+// namespace qualifier and an id tail. That distinction is what separates
+// parentRoomID from userAgent — both contain a root, only one of them *is* an
+// identity — and getting it from \b instead was wrong twice over. \b sees no
+// boundary at a camel hump, so parentRoomID and destinationOrgID passed; and
+// it sees one anywhere else, so any text containing a root word matched
+// whether or not the argument named an entity.
 //
-// Matching runs over the whole argument text, builder name included, so
-// subject.Inbox(siteID) would be rejected on its name alone. That is the safe
-// direction for a guard — it over-rejects, and the fix is to rename or to
-// widen boundedSubjectArg deliberately — and no call site hits it today.
+// Both qualifier forms are here for the same reason they are in the semgrep
+// rule: destination_room_id and destinationRoomID are the same argument, and
+// a guard that knows only one spelling is a guard with a published workaround.
 var entityArg = regexp.MustCompile(
-	`(?i)\b(room|account|user|message|msg|thread|device|session|recipient|` +
-		`request|trace|doc|span|tenant|org|run|inbox|pod)(_?u?id)?\b`)
+	`^(?:[A-Za-z0-9]+[._])*(?:` +
+		`(?:room|account|user|message|msg|thread|device|session|recipient|` +
+		`request|trace|doc|span|tenant|org|run|inbox|pod)` +
+		`|[A-Za-z0-9]*(?:Room|Account|User|Message|Msg|Thread|Device|Session|Recipient|` +
+		`Request|Trace|Doc|Span|Tenant|Org|Run|Inbox|Pod)` +
+		`)(?:[._]?[uU]?[iI][dD])?$`)
 
 // TestBoundedSubjectArg pins the guard's own decisions.
 //
@@ -400,6 +431,9 @@ func TestBoundedSubjectArg(t *testing.T) {
 		{"builder with no arguments", "subject.MessagesCanonicalAll()", true},
 		{"builder taking a site id", "subject.InboxExternalAll(siteID)", true},
 		{"builder taking a wildcard", "subject.RoomEvents(subject.Wildcard)", true},
+
+		{"camel-prefixed entity argument", "subject.RoomEvents(parentRoomID)", false},
+		{"camel-prefixed org argument", "subject.SomeBuilder(destinationOrgID)", false},
 
 		{"bare identifier", "subj", false},
 		{"struct field", "h.subject", false},
@@ -435,36 +469,90 @@ func TestEntityArg_CoversTheForbiddenIdentityVocabulary(t *testing.T) {
 		"org", "run", "inbox", "pod",
 	}
 	tails := []string{"", "Id", "ID", "id", "UID", "Uid", "_id", "_uid"}
+	// Each qualifier spells the same argument. The camel one is the Go-idiomatic
+	// form and was the one that got through: \b sees no boundary at the hump.
+	qualifiers := []struct {
+		name string
+		of   func(root string) string
+	}{
+		{"bare", func(r string) string { return r }},
+		{"snake", func(r string) string { return "destination_" + r }},
+		{"dotted", func(r string) string { return "destination." + r }},
+		{"camel", func(r string) string { return "destination" + strings.ToUpper(r[:1]) + r[1:] }},
+	}
 
 	for _, root := range roots {
 		for _, tail := range tails {
-			arg := "subject.SomeBuilder(" + root + tail + ")"
-			t.Run(root+tail, func(t *testing.T) {
-				assert.True(t, entityArg.MatchString(arg), "%s names an entity", arg)
-				assert.False(t, boundedSubjectArg(arg), "%s must not pass the guard", arg)
-			})
+			for _, q := range qualifiers {
+				arg := q.of(root) + tail
+				call := "subject.SomeBuilder(" + arg + ")"
+				t.Run(q.name+"/"+root+tail, func(t *testing.T) {
+					assert.True(t, entityArg.MatchString(arg), "%s names an entity", arg)
+					assert.False(t, boundedSubjectArg(call), "%s must not pass the guard", call)
+				})
+			}
 		}
 	}
 }
 
-// TestEntityArg_AllowsBoundedArguments is the other half: widening the
-// vocabulary must not start rejecting arguments that open no series. These are
-// the near-misses — a bounded field whose name contains a root, and the site
-// and wildcard arguments real builders actually take.
+// TestEntityArg_AllowsBoundedArguments is the other half, and the one that
+// decides whether the anchoring was worth it. Every argument here contains an
+// identity root and none of them *is* an identity — the root is followed by
+// something other than an id tail. A guard that rejected these would be
+// rejecting on the presence of a word rather than on what the argument names,
+// and the first person to hit it would delete the guard rather than rename
+// their variable.
 func TestEntityArg_AllowsBoundedArguments(t *testing.T) {
 	bounded := []string{
-		"subject.SomeBuilder(siteID)",
-		"subject.SomeBuilder(cfg.SiteID)",
-		"subject.SomeBuilder(subject.Wildcard)",
-		"subject.SomeBuilder(eventType)",
-		"subject.SomeBuilder(userAgent)",
-		"subject.SomeBuilder(orgName)",
-		"subject.SomeBuilder(errorType)",
-		"subject.SomeBuilder(runInfo)",
+		"siteID",
+		"cfg.SiteID",
+		"subject.Wildcard",
+		"eventType",
+		"userAgent",
+		"orgName",
+		"errorType",
+		"runInfo",
+		"messageCount",
+		"recipientCount",
+		"spanKind",
 	}
 	for _, arg := range bounded {
 		t.Run(arg, func(t *testing.T) {
 			assert.False(t, entityArg.MatchString(arg), "%s names no entity", arg)
+			assert.True(t, boundedSubjectArg("subject.SomeBuilder("+arg+")"),
+				"subject.SomeBuilder(%s) must pass the guard", arg)
 		})
 	}
+}
+
+// TestBuilderArgs pins the name/argument split, because both gates now depend
+// on it and a mistake there fails open — an empty argument list names no
+// entity, so everything passes.
+func TestBuilderArgs(t *testing.T) {
+	tests := []struct {
+		call string
+		want string
+	}{
+		{"subject.SomeBuilder(roomID)", "roomID"},
+		{"subject.SomeBuilder(siteID, roomID)", "siteID, roomID"},
+		{"subject.SomeBuilder(subject.Wildcard)", "subject.Wildcard"},
+		{"subject.SomeBuilder()", ""},
+		{"subject.SomeConstant", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.call, func(t *testing.T) {
+			assert.Equal(t, tt.want, builderArgs(tt.call))
+		})
+	}
+}
+
+// A builder whose own name contains a root must be judged on its argument.
+// Matching over the whole call text rejected these, which is the kind of false
+// positive that gets a guard deleted rather than fixed.
+func TestBoundedSubjectArg_IgnoresTheBuilderName(t *testing.T) {
+	assert.True(t, boundedSubjectArg("subject.RoomEvents(siteID)"))
+	assert.True(t, boundedSubjectArg("subject.InboxExternalAll(siteID)"))
+	assert.False(t, boundedSubjectArg("subject.RoomEvents(roomID)"))
+	// Multiple arguments: any one of them naming an entity is enough.
+	assert.False(t, boundedSubjectArg("subject.RoomEvents(siteID, roomID)"))
 }
