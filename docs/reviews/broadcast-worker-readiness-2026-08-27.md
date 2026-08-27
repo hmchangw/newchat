@@ -67,3 +67,50 @@ the code rather than picking a side — see the Integration chapter's tie-break 
 `.semgrep/` rules both ran clean over this service. `govulncheck` and the semgrep registry
 rulesets could not run: this environment's egress proxy answers 403 for `vuln.go.dev` and
 `semgrep.dev`. `make sast` therefore exits 1 overall. CI is authoritative for those two.
+
+---
+
+# 2. Code quality — 4 / 5
+
+Unusually disciplined against CLAUDE.md §3: every error wrapped with what the function was
+doing, no bare `err`, no log-and-return, no string error comparison, no `time.Sleep` for
+synchronization, every goroutine with a termination path, config fully typed through
+`caarlos0/env`. **No leak of message content, DEKs or room keys was found at any log site** —
+`preview.go`, `preview_writer.go` and `roomactivity.go` log only ids, counts and durations,
+which matters in a service that handles both bodies and encryption keys.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `medium` | `store_mongo.go:88-97`, call sites `handler.go:269,312,391,538,589,714,750,775,820` | **Verified.** A missing room makes `GetRoom`/`GetRoomMeta` return a wrapped `mongo.ErrNoDocuments` — deliberately preserved by `pkg/roommetacache/valkey.go:135` "which callers branch on" — but *no handler branches on it*. The only `ErrNoDocuments` test in production code is `store_mongo.go:201`, inside `GetThreadFollowers`. So a permanently-unsatisfiable message NAKs through the full retry budget, which **this branch widened from 5 to ~17 deliveries across roughly an hour**. The precedent exists 100 lines away: `handler.go:176` already returns `errcode.Permanent` for a malformed payload with exactly this reasoning, and peers do the same (`message-worker/store_mongo.go:73`). Currently unreachable in production because nothing deletes rooms — the same latent class the PR body already records as "no room-existence gate on the send path". |
+| `medium` | `main.go:46,53` | **Verified.** `NATS_URL` and `MONGO_URI` carry `envDefault` localhost connection strings, against CLAUDE.md §3's "never default secrets or connection strings — mark them `required`". An unset `MONGO_URI` starts silently against localhost and surfaces as an outage rather than a config error. This is the identical defect just fixed in `roomlist-worker`; `room-service`, `message-worker`, `message-gatekeeper` and `bot-message-worker` all mark both required. |
+| `low` | `handler.go:1061-1068` | `publishRoomEvent` overwrites `pubErr` each iteration, so when both dual-publish targets fail only the last error survives. `roomActivityPublisher` (`roomactivity.go:193-199`) already does this correctly with `errors.Join`. |
+| `low` | `roomactivity.go:5,186` | `encoding/json` marshals `RoomActivityEvent` on the created-message path, inside a service CLAUDE.md explicitly names as a sonic hot-path worker, with no documented exception — contrast `message-gatekeeper/fetcher_history.go`, whose exception is spelled out. `model.RoomActivityEvent` is also absent from `pretouch.go:15`. |
+| `low` | `roomactivity.go:78-85` | `throttled` stamps `lastRefreshed[roomID]` *before* `publish` runs, so a failed announce suppresses retries for a whole interval. The doc comment's "the next message re-establishes it" is true only after the interval elapses. |
+| `low` | `main.go:404,508` | `logctx.ConsumeContext(..., msg.Data())` feeds the canonical payload to `CapturePayload` (`pkg/logctx/limiter.go:94-97`), which logs `"payload", string(data)` — a full message body. Double-gated behind an inbound `X-Debug` rung *and* `DEBUG_LOG_PAYLOADS`, and repo-shared rather than this service's invention, but this is the stream where CLAUDE.md's "never log full message bodies" actually bites, and the exemption list covers only `.sso.*`. |
+| `low` | `preview.go:120-129`, `handler.go:803/813/863` vs `:918/1074` | Log key casing mixes `room_id`/`roomID` and `messageID` within and across call sites, degrading structured-log queryability. |
+| `nitpick` | `handler.go:1264` | `account := account` is a dead loop-variable copy under Go 1.22+ semantics. |
+| `nitpick` | `keycache.go:110` | `metrics.Miss` fires even when the singleflight re-check served from the LRU, over-counting misses. |
+
+## SAST gate — partial
+
+| Tool | Result | Detail |
+|---|---|---|
+| `gosec` | **PASS** | Via `make sast`, `-severity medium -confidence medium -tests=true -exclude-generated`. Zero findings repo-wide, none in `broadcast-worker/`. |
+| `semgrep` — repo rules | **PASS** | `.semgrep/`, 9 Go rules over 14 files. Zero findings, including `room-subject-publish-must-route` and the `errcode.WithCause` guard. |
+| `semgrep` — registry | **COULD NOT RUN** | `p/golang` and `p/security-audit` need `semgrep.dev`; the proxy answers 403 on CONNECT. |
+| `govulncheck` | **COULD NOT RUN** | `vuln.go.dev:443` denied by gateway policy. Dependency-CVE reachability is **unverified, not clean**. |
+
+`make lint` reports 0 issues and `make test SERVICE=broadcast-worker` passes. **Do not read this
+chapter as a clean SAST result** — `make sast` exits 1 overall because two of three scanners did
+not execute.
+
+## Recommendations
+
+1. `medium` — Add `errors.Is(err, mongo.ErrNoDocuments)` branches at the `GetRoom`/`GetRoomMeta` call sites returning `errcode.Permanent(errcode.NotFound("room not found"))`, matching `handler.go:176`. This closes before any room-deletion feature lands, and the widened retry budget makes it more expensive than it was.
+2. `medium` — `main.go:46,53`: change to `env:"NATS_URL,required"` / `env:"MONGO_URI,required"`, keeping the localhost values in `deploy/*/docker-compose.yml`. Mirrors the fix already applied to `roomlist-worker`.
+3. `low` — `handler.go:1061`: accumulate with `errors.Join` in `publishRoomEvent`.
+4. `low` — `roomactivity.go`: either switch `roomActivityPublisher` to sonic and add `model.RoomActivityEvent` to `pretouch.go`, or add one line stating why stdlib is retained.
+5. `low` — `roomactivity.go:78`: record the throttle watermark only after a successful publish, or say plainly that a failed announce is not retried within the interval.
+6. `low` — Normalize log keys to `room_id`/`message_id` in one pass.
