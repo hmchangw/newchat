@@ -8200,7 +8200,17 @@ name and extension rules live there and are reported back verbatim on a `400`.
 ```
 
 **Audit:** a successful upload appends an `AuditEntry` with action
-`client_update.upload` and `details` naming both uploaded file names.
+`client_update.upload` and `details` naming both uploaded file names. The append
+is best-effort, as it is for every mutating admin endpoint: the artifacts are
+already published by then, so a failed append is logged at `ERROR` and the
+response still reports the publication. Treat the audit log as a record of
+intent, not as a transaction log for the artifact store.
+
+**Not atomic across the pair:** `client-update-service` writes the two objects
+independently (§12). A `200` means both landed; a failure after the first write
+leaves the new descriptor beside the previous executable, and re-uploading the
+pair is what repairs it. There is no versioning or rollback — a deliberate
+non-goal of this endpoint.
 
 **Timeouts** are ordered so that whichever budget expires first, the admin still
 gets an envelope rather than a dropped connection:
@@ -8703,6 +8713,11 @@ publish client updates can deploy without it. Downloads are unaffected.
 Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
 and streamed straight to MinIO (no size cap). An upload of an existing file name
 overwrites it and evicts any cached copy.
+
+The two objects are written **independently, not atomically**: a failure after
+the first write returns an error with that object already replaced, so a
+downloader can see the new descriptor beside the previous executable until the
+pair is re-uploaded. Versioning and rollback are out of scope for this service.
 
 #### Request
 
