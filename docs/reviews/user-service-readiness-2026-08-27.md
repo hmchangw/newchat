@@ -396,3 +396,120 @@ assert graceful degradation).
    cases, matching the other 49 files.
 7. **`low`** — Convert `newSvc(t)` to return a struct of dependencies to stop the positional-blank
    churn.
+
+---
+
+# Chapter 5 — Maintainability
+
+**Score: 3.0 / 5**
+
+Unusually well-commented code with **zero dead code and zero TODO/FIXME debt** — but the service
+layer has consolidated into a god object, and the same concurrency and lookup skeletons are now
+written three to five times each. The service is refactor-*ready*, not refactor-*urgent*.
+
+## Findings
+
+**`high` — `UserService` is a god object spanning 9 unrelated domains.**
+`service/service.go:127-169` — 28 struct fields; **66 methods** (31 exported) across 12 files;
+**29 RPCs** registered in one `RegisterHandlers` (`service.go:232-262`); **12 dependency
+interfaces** in one file. It began as subscriptions + status and now carries apps, threads,
+thread-unread, chatlist, priority contacts, settings, SSO and badge. Nothing forces cohesion —
+`SSOSet` and `ListSubscriptions` share a struct only by accident.
+
+**`high` — 15-parameter positional constructor, called twice with a silent divergence.**
+`service/service.go:180` takes 15 positional args, 13 of them interfaces. `main.go:226` and
+`main.go:234` both call it; the HTTP instance omits `service.WithPageBudget(pageBudget)` with no
+comment explaining why (`main.go:229-239` explains only the Mongo pool). Adding a 14th dependency
+means editing a signature and two 6-line call sites, and any future option must be re-decided at
+both — a divergence the compiler cannot catch.
+
+**`medium` — The bounded site fan-out skeleton is hand-rolled 5 times.**
+`subscriptions.go:495` (the generic `fanOutChunks`), `subscriptions.go:805`, `threads.go:223`,
+`threadunread.go:147` and `threadunread.go:58`. All are `wg + sem + failed[i] + ctx.Err()`
+recheck. Worse, `threadunread.go:58` (`GetThreadUnreadSummary`) has **no semaphore at all** — it
+ignores `s.fanout()` and spawns one goroutine per site unbounded, an inconsistency that survives
+only because nobody can diff five copies. *(Independently flagged by Code quality and
+Performance.)*
+
+**`medium` — Degrade-to-nil lookup helpers triplicated.** `GetAppsByAssistants` is wrapped
+identically at `subscriptions.go:162` (`lookupApps`), `threads.go:293` (`lookupThreadApps`) and
+`prioritycontacts.go:93` (`lookupPriorityContactApps`) — same guard, same warn, same nil return,
+only the log string differs. `GetHRInfoByAccounts` is doubled at `subscriptions.go:176` and
+`threads.go:279`. Likewise `distinctListNames` (`subscriptions.go:186`) vs `distinctDMAndBotNames`
+(`threads.go:308`).
+
+**`medium` — Cross-site INBOX fanout loop copy-pasted 3×.** `status.go:101-124`,
+`settings.go:138-158` and `chatlist.go:202-222` are ~20 identical lines each (skip-self, build
+`model.InboxEvent`, marshal, publish, warn). Only the event type and payload vary. A fourth event
+type means a fourth copy.
+
+**`medium` — `service/subscriptions.go` (867 lines) mixes six concerns.** Transport handlers, page
+normalization, room enrichment, chunk planning, a recursive payload-splitting retry
+(`roomsGetSplitting:364`), rune truncation, a generic fan-out primitive, and the badge unread
+computation (`unreadRooms:771`, 97 lines, 5 nesting levels) all live in one file. `unreadRooms` is
+also the only fan-out that *doesn't* use `fanOutChunks`, sitting 275 lines above it.
+
+**`medium` — No complexity guard in CI.** `.golangci.yml` enables no `gocyclo` / `cyclop` /
+`funlen` / `gocognit`. Nothing stops `main()` (242 lines, `main.go:86`) or `config.Load()`
+(98 lines, ~35 branches, `config/config.go:178`) from growing further.
+
+**`low` — Persistence type leaks into the service interface.** `mongoutil.OffsetPageRequest` /
+`OffsetPageHasMore` appear in `service.go:21,22,52` and `subscriptions.go:107` — a Mongo-named
+package in a consumer-defined domain interface. Harmless today, awkward if a repo is ever not
+Mongo.
+
+**`low` — `$lookup` without the mandated justification comment.** CLAUDE.md requires
+`// $lookup justification: …` when touching a `$lookup`. `mongorepo/apps.go:92` and
+`threadsubscriptions.go:48` comply; `mongorepo/subscriptions.go:98` (`roomsEnrichStages`), `:145`
+(`roomMatchStages`) and `:715` (`GetDMSubscription`) do not.
+
+**`low` — Near-identical 12-field room projections duplicated.** `mongorepo/subscriptions.go:100-112`
+and `:154-166` list the same fields; drift between them silently breaks one path.
+
+**`nitpick`** — `chunkStrings` (`threadunread.go:178`) reimplements `slices.Chunk`, already used
+at `subscriptions.go:334`.
+
+**`nitpick` — The hybrid layout is undocumented.** HTTP transport lives in flat root files
+(`handler.go`, `routes.go`, `store.go`, `middleware.go`); NATS handlers live in `service/`.
+CLAUDE.md's exception says sub-packages are used *instead of* flat files. A newcomer will look for
+the chatlist handler in `handler.go`.
+
+## Ease of adding a new user-scoped RPC
+
+Traced `chatlist.section.setSortMode` end-to-end: **8 files** — `pkg/subject/subject.go`,
+`pkg/errcode/codes_user.go`, `models/chatlist.go`, `service/chatlist.go`, `service/service.go`
+(register + possibly interface), `mongorepo/*.go`, `service/mocks/` (via `make generate`), plus
+`docs/client-api.md` and its two derived views. The path is **obvious and mechanical** — this is
+the codebase's biggest strength. Cost appears only when the RPC needs cross-site fan-out or a
+degrading lookup, where the newcomer must pick among five near-identical prior arts.
+
+## Store interfaces — done right
+
+**Not fat.** Instead of one `UserStore` there are 8 role-scoped, consumer-defined interfaces
+(`SubscriptionRepository` 8 methods, `UserRepository` 12, `AppRepository` 4,
+`ThreadSubscriptionRepository` 1, `RoomClient` 5, `HistoryClient` 2, `PresenceClient` 1,
+`SSOTokenRepository` 2), each with a doc comment, plus compile-time assertions at
+`main.go:46-59`. `UserRepository` at 12 methods is the only one drifting toward fat.
+
+## Recommendations
+
+1. **`high`** — Convert `service.New` to a `Deps` struct (or functional options); delete the
+   duplicated 6-line call site at `main.go:234` in favour of a `withHTTPPool(deps)` derivation so
+   options cannot silently diverge.
+2. **`high`** — Split `UserService` along its existing file seams into 3–4 structs sharing a small
+   embedded `base` (siteID, allSiteIDs, pub, clientPub, fanout): `subscriptionService`,
+   `threadService`, `profileService` (status/settings/chatlist/contacts), `ssoService`.
+   `RegisterHandlers` becomes a per-struct method.
+3. **`medium`** — Extract one `fanOutSites[T](ctx, sites, maxFanout, call)` primitive and delete
+   the four hand-rolled copies; this also fixes the unbounded goroutines at `threadunread.go:58`.
+4. **`medium`** — Extract `lookupOrDegrade[K,V](ctx, keys, fn, what)` and
+   `publishInboxFanout(ctx, evType, payload, now)`; removes ~120 duplicated lines across 6 files.
+5. **`medium`** — Split `service/subscriptions.go`: move `fanOutChunks`/`planChunks`/`chunkJob` to
+   `fanout.go`, `roomsGetSplitting`/`truncatePreviews` to `preview.go`, and `unreadRooms` to
+   `badge.go` (its only two callers are `CountSubscriptions` and `BadgeCountBatch`).
+6. **`medium`** — Enable `gocyclo` (threshold 15) and `funlen` (80 lines) in `.golangci.yml`, with
+   `main()` and `config.Load()` explicitly excluded, so the current five >80-line functions become
+   the ceiling rather than the trend.
+7. **`low`** — Add `// $lookup justification:` to the three sites in `mongorepo/subscriptions.go`,
+   and factor the duplicated room projection into one `roomProjectionFields()` used by both
+   pipeline builders.
