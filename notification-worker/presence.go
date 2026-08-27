@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/nats-io/nats.go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -35,23 +36,35 @@ type presenceRequester interface {
 	Request(ctx context.Context, subj string, data []byte, timeout time.Duration) (*nats.Msg, error)
 }
 
+// defaultPresenceConcurrency bounds how many presence chunks are in flight at
+// once. A 50k-recipient room is 100 chunks; without a bound, and with MAX_WORKERS
+// messages in flight, that is thousands of simultaneous goroutines and RPCs.
+const defaultPresenceConcurrency = 8
+
 type bulkPresenceSource struct {
-	req       presenceRequester
-	siteID    string
-	batchSize int
-	timeout   time.Duration
+	req         presenceRequester
+	siteID      string
+	batchSize   int
+	timeout     time.Duration
+	concurrency int
 	// metrics is injected; the zero value is safe and records nothing.
 	metrics natsmetrics.Publisher
 }
 
-func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, timeout time.Duration, metrics natsmetrics.Publisher) *bulkPresenceSource {
+func newBulkPresenceSource(req presenceRequester, siteID string, batchSize int, timeout time.Duration, concurrency int, metrics natsmetrics.Publisher) *bulkPresenceSource {
 	if batchSize <= 0 {
 		batchSize = 512
 	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &bulkPresenceSource{req: req, siteID: siteID, batchSize: batchSize, timeout: timeout, metrics: metrics}
+	if concurrency <= 0 {
+		concurrency = defaultPresenceConcurrency
+	}
+	return &bulkPresenceSource{
+		req: req, siteID: siteID, batchSize: batchSize,
+		timeout: timeout, concurrency: concurrency, metrics: metrics,
+	}
 }
 
 func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (map[string]model.Presence, error) {
@@ -64,45 +77,46 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 	var (
 		mu  sync.Mutex
 		out = make(map[string]model.Presence, len(accounts))
-		wg  sync.WaitGroup
+		g   errgroup.Group
 	)
+	// Bounded fan-out: chunks still overlap, but a very large recipient list can
+	// no longer spawn one goroutine (and one in-flight RPC) per chunk.
+	g.SetLimit(b.concurrency)
 	for _, ch := range chunks {
-		ch := ch
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		g.Go(func() error {
 			data, err := sonic.Marshal(model.PresenceSnapshotRequest{Accounts: ch})
 			if err != nil {
 				slog.Warn("presence marshal failed", "error", err)
-				return
+				return nil
 			}
 			started := time.Now()
 			msg, err := b.req.Request(ctx, subj, data, b.timeout)
 			b.metrics.Request(ctx, natsmetrics.OperationPresenceLookup, time.Since(started), err)
 			if err != nil {
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
-				return
+				return nil
 			}
 			if errResp, ok := errcode.Parse(msg.Data); ok {
 				slog.Warn("presence rpc returned error response",
 					"error", errResp.Message,
 					"code", errResp.Code,
 					"chunk", len(ch))
-				return
+				return nil
 			}
 			var reply model.PresenceSnapshotReply
 			if err := sonic.Unmarshal(msg.Data, &reply); err != nil {
 				slog.Warn("presence unmarshal failed", "error", err)
-				return
+				return nil
 			}
 			mu.Lock()
 			for k, v := range reply.Presences {
 				out[k] = v
 			}
 			mu.Unlock()
-		}()
+			return nil
+		})
 	}
-	wg.Wait()
+	_ = g.Wait() // every g.Go above returns nil — chunk failures are logged and absorbed
 	return out, nil
 }
 

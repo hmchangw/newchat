@@ -26,6 +26,16 @@ import (
 // defaultRecipientBatchSize mirrors PUSH_RECIPIENT_BATCH_SIZE's envDefault so unit tests don't re-declare it.
 const defaultRecipientBatchSize = 100
 
+// defaultBadgeBatchSize caps accounts per badge.count.batch RPC. The badge
+// audience is the whole membership minus sender/muted/restricted — the
+// large-room push throttle does not narrow it — so without a cap a 5k-member
+// room sends one 5k-account request per message, and user-service recomputes
+// unreadRooms per account on every cache miss behind it.
+const defaultBadgeBatchSize = 512
+
+// defaultBadgeConcurrency bounds in-flight badge RPCs across all chunks and sites.
+const defaultBadgeConcurrency = 8
+
 // maxMentionLookups caps how many distinct @accounts one message may resolve.
 // Not an env knob: it bounds a user-controlled fan-out rather than tuning a
 // workload, and no legible push body renders this many names.
@@ -54,6 +64,8 @@ type HandlerDeps struct {
 	RoomMeta           RoomMetaGetter      // nil → title falls back to sender.Account
 	MentionNames       MentionNameResolver // nil → only @all/@here are substituted in the body
 	BadgeClient        badgeClient         // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
+	BadgeBatchSize     int                 // accounts per badge RPC (≥ 1); 0 → defaultBadgeBatchSize
+	BadgeConcurrency   int                 // in-flight badge RPCs (≥ 1); 0 → defaultBadgeConcurrency
 	LargeRoomThreshold int
 	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
 	Metrics            *notificationMetrics // nil → built on the global meter
@@ -80,6 +92,12 @@ func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one
 	}
 	if deps.RecipientBatchSize <= 0 {
 		deps.RecipientBatchSize = defaultRecipientBatchSize
+	}
+	if deps.BadgeBatchSize <= 0 {
+		deps.BadgeBatchSize = defaultBadgeBatchSize
+	}
+	if deps.BadgeConcurrency <= 0 {
+		deps.BadgeConcurrency = defaultBadgeConcurrency
 	}
 	if deps.Settings == nil {
 		deps.Settings = noopUserSettings{}
@@ -192,7 +210,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		if m.Muted {
 			continue
 		}
-		if isRestricted(m, msg, isThreadOnlyReply, parentCreatedAt) {
+		if isRestricted(m, &msg, isThreadOnlyReply, parentCreatedAt) {
 			continue
 		}
 
@@ -236,13 +254,34 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		return nil
 	}
 
-	// Both lookups run over the narrowed candidate set — only accounts that survived
-	// the exclusion filters, never every member of a large room.
-	// TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins that narrowing.
-	// shouldPush combines the two, keyed on the sender's account for the priority pierce.
-	settings, _ := h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
-	snapshot, _ := h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
+	// Settings, presence and the badge fan-out are mutually independent, so they run
+	// concurrently: the critical path is the slowest of the three rather than their
+	// sum. Settings and presence run over the narrowed candidate set — only accounts
+	// that survived the exclusion filters, never every member of a large room
+	// (TestHandle_SettingsFetchedOnlyForSurvivingCandidates pins that narrowing) —
+	// while the badge phase runs over the FULL badge audience, since bumps must land
+	// even for members who won't be pushed.
+	var (
+		settings     map[string]notifSettings
+		snapshot     map[string]model.Presence
+		unreadCounts map[string]int
+		lookups      errgroup.Group
+	)
+	lookups.Go(func() error {
+		settings, _ = h.deps.Settings.Snapshot(ctx, accounts) // fail-open: error → empty map
+		return nil
+	})
+	lookups.Go(func() error {
+		snapshot, _ = h.deps.Presence.Snapshot(ctx, accounts) // fail-open: error → empty map
+		return nil
+	})
+	lookups.Go(func() error {
+		unreadCounts = h.fetchUnreadCounts(ctx, msg.RoomID, badgeAccounts, siteByAccount)
+		return nil
+	})
+	_ = lookups.Wait() // every lookup above fails open and returns nil
 
+	// shouldPush combines settings and presence, keyed on the sender's account for the priority pierce.
 	// Sort survivors so batch N has a deterministic account set across redeliveries — required for the {messageID}-b{N} Nats-Msg-Id to dedup correctly.
 	survivors := make([]string, 0, len(candidates))
 	for _, c := range candidates {
@@ -254,19 +293,31 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	}
 	sort.Strings(survivors)
 
-	// Badge phase runs over the FULL badge audience (bumps must land even for
-	// members who won't be pushed); only survivors ride the push payload.
-	unreadCounts := h.fetchUnreadCounts(ctx, msg.RoomID, badgeAccounts, siteByAccount)
+	// Only survivors ride the push payload; unreadCounts already covers the wider audience.
 	if len(survivors) == 0 {
 		return nil
 	}
+
+	// Title and body are independent cache/Mongo reads, so they overlap too. Both stay
+	// behind the survivor gate: a message nobody receives must never pay for them.
+	var title, body string
+	var render errgroup.Group
+	render.Go(func() error {
+		title = h.resolveTitle(ctx, msg.RoomID, roomType, sender)
+		return nil
+	})
+	render.Go(func() error {
+		body = h.resolveBody(ctx, msg.Content, mentionInfo)
+		return nil
+	})
+	_ = render.Wait() // both resolvers fail open internally and return nil
 
 	now := time.Now().UTC()
 	// Template carries fields shared across every batch — only ID and Accounts change per batch.
 	pushEvt := model.PushNotificationEvent{
 		RoomID: msg.RoomID,
-		Title:  h.resolveTitle(ctx, msg.RoomID, roomType, sender),
-		Body:   h.resolveBody(ctx, msg.Content, mentionInfo),
+		Title:  title,
+		Body:   body,
 		Data: model.PushNotificationData{
 			RoomID:            msg.RoomID,
 			MessageID:         msg.ID,
@@ -313,10 +364,11 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 }
 
 // fetchUnreadCounts groups the badge audience by home site (Member.HomeSiteID,
-// not the room's site) and issues one badge.count.batch RPC per site
-// concurrently, merged into one account → count map. Fail-open throughout: nil
+// not the room's site), splits each site's accounts into BadgeBatchSize chunks
+// and issues the badge.count.batch RPCs concurrently under a BadgeConcurrency
+// bound, merged into one account → count map. Fail-open throughout: nil
 // BadgeClient is a no-op, an unknown home site skips the account, and a
-// per-site RPC failure just leaves that site's accounts out of the result.
+// per-chunk RPC failure just leaves that chunk's accounts out of the result.
 func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, accounts []string, siteByAccount map[string]string) map[string]int {
 	if h.deps.BadgeClient == nil {
 		return nil
@@ -339,24 +391,27 @@ func (h *Handler) fetchUnreadCounts(ctx context.Context, roomID string, accounts
 		merged = make(map[string]int, len(accounts))
 		g      errgroup.Group
 	)
+	g.SetLimit(h.deps.BadgeConcurrency)
 	for siteID, siteAccounts := range bySite {
-		g.Go(func() error {
-			counts, err := h.deps.BadgeClient.Counts(ctx, siteID, roomID, siteAccounts)
-			if err != nil {
-				slog.Warn("badge count batch RPC failed, accounts publish without counts",
-					"error", err, "siteId", siteID, "roomId", roomID, "accounts", len(siteAccounts),
-					"request_id", natsutil.RequestIDFromContext(ctx))
-				return nil // never fail the push on a badge-count failure
-			}
-			mu.Lock()
-			for account, n := range counts {
-				merged[account] = n
-			}
-			mu.Unlock()
-			return nil
-		})
+		for _, chunk := range chunkStrings(siteAccounts, h.deps.BadgeBatchSize) {
+			g.Go(func() error {
+				counts, err := h.deps.BadgeClient.Counts(ctx, siteID, roomID, chunk)
+				if err != nil {
+					slog.WarnContext(ctx, "badge count batch RPC failed, accounts publish without counts",
+						"error", err, "siteId", siteID, "roomId", roomID, "accounts", len(chunk),
+						"request_id", natsutil.RequestIDFromContext(ctx))
+					return nil // never fail the push on a badge-count failure
+				}
+				mu.Lock()
+				for account, n := range counts {
+					merged[account] = n
+				}
+				mu.Unlock()
+				return nil
+			})
+		}
 	}
-	_ = g.Wait() // every g.Go above always returns nil — errors are logged and absorbed per-site
+	_ = g.Wait() // every g.Go above always returns nil — errors are logged and absorbed per-chunk
 	return merged
 }
 
@@ -387,7 +442,7 @@ func mentionedSet(parsed mention.ParseResult) map[string]bool {
 
 // isRestricted filters members who joined after the message timestamp (the parent's
 // createdAt for thread-only replies); a nil parentCreatedAt suppresses, not leaks.
-func isRestricted(m roomsubcache.Member, msg model.Message, isThreadOnlyReply bool, parentCreatedAt *time.Time) bool { //nolint:gocritic // hugeParam: hot loop, pointer indirection adds no benefit
+func isRestricted(m roomsubcache.Member, msg *model.Message, isThreadOnlyReply bool, parentCreatedAt *time.Time) bool { //nolint:gocritic // hugeParam: Member stays by value; msg is a pointer to avoid a per-member copy
 	if m.HistorySharedSince == nil {
 		return false
 	}

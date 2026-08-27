@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,7 +201,7 @@ func TestBulkPresence_Chunks(t *testing.T) {
 		return out, nil
 	}}
 
-	src := newBulkPresenceSource(stub, "site-a", 500, time.Second, natsmetrics.Publisher{})
+	src := newBulkPresenceSource(stub, "site-a", 500, time.Second, 0, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), accounts)
 	require.NoError(t, err)
 	assert.Equal(t, 3, stub.calls, "expect ceil(1500/500) chunks")
@@ -210,7 +212,7 @@ func TestBulkPresence_FailOpenOnError(t *testing.T) {
 	stub := &stubRequester{reply: func(model.PresenceSnapshotRequest) (model.PresenceSnapshotReply, error) {
 		return model.PresenceSnapshotReply{}, errors.New("nats: timeout")
 	}}
-	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, natsmetrics.Publisher{})
+	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, 0, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), []string{"a", "b"})
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -222,7 +224,7 @@ func TestBulkPresence_ErrorResponseLoggedAndFailOpen(t *testing.T) {
 			return errnats.MarshalQuiet(errcode.Internal("presence backend down")), nil
 		},
 	}
-	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, natsmetrics.Publisher{})
+	src := newBulkPresenceSource(stub, "site-a", 100, 50*time.Millisecond, 0, natsmetrics.Publisher{})
 	got, err := src.Snapshot(context.Background(), []string{"alice", "bob"})
 	require.NoError(t, err) // fail-open: error envelope is swallowed
 	assert.Empty(t, got)
@@ -234,4 +236,46 @@ func uniqueStrings(in []string) map[string]struct{} {
 		out[s] = struct{}{}
 	}
 	return out
+}
+
+// TestBulkPresence_BoundsChunkConcurrency: a very large recipient list must not
+// spawn one goroutine per chunk. With 40 chunks and a concurrency of 4, peak
+// in-flight RPCs must never exceed the limit.
+func TestBulkPresence_BoundsChunkConcurrency(t *testing.T) {
+	accounts := make([]string, 4000)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+	}
+
+	var inFlight, maxInFlight atomic.Int64
+	stub := &stubRequester{reply: func(req model.PresenceSnapshotRequest) (model.PresenceSnapshotReply, error) {
+		n := inFlight.Add(1)
+		for {
+			peak := maxInFlight.Load()
+			if n <= peak || maxInFlight.CompareAndSwap(peak, n) {
+				break
+			}
+		}
+		defer inFlight.Add(-1)
+		// Hold the fake RPC open so overlap is observable.
+		time.Sleep(10 * time.Millisecond)
+		out := model.PresenceSnapshotReply{Presences: map[string]model.Presence{}}
+		for _, a := range req.Accounts {
+			out.Presences[a] = model.Presence{AggregatedStatus: "online"}
+		}
+		return out, nil
+	}}
+
+	src := newBulkPresenceSource(stub, "site-a", 100, time.Second, 4, natsmetrics.Publisher{})
+	got, err := src.Snapshot(context.Background(), accounts)
+	require.NoError(t, err)
+
+	assert.Len(t, got, len(accounts))
+	assert.LessOrEqual(t, maxInFlight.Load(), int64(4), "presence fan-out must respect the concurrency limit")
+	assert.Greater(t, maxInFlight.Load(), int64(1), "chunks should still run concurrently")
+}
+
+func TestNewBulkPresenceSource_ConcurrencyDefault(t *testing.T) {
+	src := newBulkPresenceSource(nil, "site-a", 0, 0, 0, natsmetrics.Publisher{})
+	assert.Equal(t, defaultPresenceConcurrency, src.concurrency)
 }

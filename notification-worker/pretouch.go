@@ -14,6 +14,10 @@ var pretouchTypes = []reflect.Type{
 	reflect.TypeOf(model.CanonicalMemberEvent{}),
 	reflect.TypeOf(model.PresenceSnapshotRequest{}),
 	reflect.TypeOf(model.PresenceSnapshotReply{}),
+	reflect.TypeOf(model.BadgeCountBatchRequest{}),
+	reflect.TypeOf(model.BadgeCountBatchResponse{}),
+	reflect.TypeOf(getMessageByIDRequest{}),
+	reflect.TypeOf(parentMessageProjection{}),
 }
 
 func pretouchJSON() { jsonwarm.Pretouch(pretouchTypes...) }

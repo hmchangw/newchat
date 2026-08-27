@@ -15,4 +15,6 @@ func TestPretouch_TypesCompile(t *testing.T) {
 	for _, ty := range pretouchTypes {
 		require.NoErrorf(t, sonic.Pretouch(ty), "sonic cannot compile codec for %s", ty)
 	}
+	// Exercise the real entry point too, so the wiring itself is covered.
+	require.NotPanics(t, pretouchJSON)
 }

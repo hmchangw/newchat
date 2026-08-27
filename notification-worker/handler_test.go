@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1881,4 +1882,210 @@ func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
 	require.Len(t, emit.emitted, 1)
 	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
 	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
+}
+
+// ---------------------------------------------------------------------------
+// Performance: critical-path concurrency and badge chunking.
+// ---------------------------------------------------------------------------
+
+// arrivalBarrier releases every caller once n distinct callers are inside it.
+// Concurrent callers pass immediately; a sequential pipeline never reaches n and
+// the deadline fires, recording timedOut so the test fails with a clear message.
+// The deadline is a failure escape, not goroutine synchronisation — the barrier
+// itself is the synchronisation primitive.
+type arrivalBarrier struct {
+	n        int
+	mu       sync.Mutex
+	arrived  int
+	release  chan struct{}
+	timedOut atomic.Bool
+}
+
+func newArrivalBarrier(n int) *arrivalBarrier {
+	return &arrivalBarrier{n: n, release: make(chan struct{})}
+}
+
+func (b *arrivalBarrier) arrive() {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.n {
+		close(b.release)
+	}
+	b.mu.Unlock()
+	select {
+	case <-b.release:
+	case <-time.After(3 * time.Second):
+		b.timedOut.Store(true)
+	}
+}
+
+// barrierSettings/barrierPresence/barrierBadge each park in the same barrier, so
+// all three must be in flight simultaneously for HandleMessage to make progress.
+type barrierSettings struct {
+	b   *arrivalBarrier
+	out map[string]notifSettings
+}
+
+func (s *barrierSettings) Snapshot(_ context.Context, _ []string) (map[string]notifSettings, error) {
+	s.b.arrive()
+	return s.out, nil
+}
+
+type barrierPresence struct {
+	b   *arrivalBarrier
+	out map[string]model.Presence
+}
+
+func (p *barrierPresence) Snapshot(_ context.Context, _ []string) (map[string]model.Presence, error) {
+	p.b.arrive()
+	return p.out, nil
+}
+
+type barrierBadge struct {
+	b *arrivalBarrier
+}
+
+func (c *barrierBadge) Counts(_ context.Context, _, _ string, accounts []string) (map[string]int, error) {
+	c.b.arrive()
+	out := make(map[string]int, len(accounts))
+	for _, a := range accounts {
+		out[a] = 1
+	}
+	return out, nil
+}
+
+// TestHandle_SettingsPresenceBadgeRunConcurrently pins that the three independent
+// critical-path lookups overlap. Run sequentially, none of them can reach the
+// third arrival and the barrier times out.
+func TestHandle_SettingsPresenceBadgeRunConcurrently(t *testing.T) {
+	barrier := newArrivalBarrier(3)
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {
+			{ID: "alice", Account: "alice", HomeSiteID: "site-a"},
+			{ID: "bob", Account: "bob", HomeSiteID: "site-a"},
+		},
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:   members,
+		Followers: &stubFollowers{},
+		Presence:  &barrierPresence{b: barrier, out: map[string]model.Presence{}},
+		Settings:  &barrierSettings{b: barrier, out: map[string]notifSettings{}},
+		Hook:      noopVetoer{},
+		Emitter:   emit,
+		// BadgeClient is the third arrival; without it the barrier can't be met.
+		BadgeClient:        &barrierBadge{b: barrier},
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(context.Background(), msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+	})))
+
+	assert.False(t, barrier.timedOut.Load(),
+		"settings, presence and badge lookups must run concurrently, not back-to-back")
+	assert.Equal(t, []string{"bob"}, emit.accounts(), "parallelising must not change the outcome")
+}
+
+// TestFetchUnreadCounts_ChunksLargeSiteAudience: one site with more accounts than
+// BadgeBatchSize must be split across several bounded RPCs rather than sent as a
+// single unbounded request, and every account's count must survive the merge.
+func TestFetchUnreadCounts_ChunksLargeSiteAudience(t *testing.T) {
+	const total = 1200
+	const batch = 512
+
+	accounts := make([]string, total)
+	siteByAccount := make(map[string]string, total)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+		siteByAccount[accounts[i]] = "site-a"
+	}
+
+	badge := &countingBadgeClient{}
+	h := NewHandler(HandlerDeps{
+		Members: &stubMembers{}, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: &recordingEmitter{},
+		BadgeClient: badge, BadgeBatchSize: batch, LargeRoomThreshold: 500,
+	})
+
+	got := h.fetchUnreadCounts(context.Background(), "r1", accounts, siteByAccount)
+
+	calls := badge.snapshot()
+	assert.Len(t, calls, 3, "expect ceil(1200/512) badge RPCs")
+	var seen []string
+	for _, c := range calls {
+		assert.LessOrEqual(t, len(c), batch, "no badge RPC may exceed BadgeBatchSize")
+		seen = append(seen, c...)
+	}
+	assert.ElementsMatch(t, accounts, seen, "chunking must cover the whole audience exactly once")
+	assert.Len(t, got, total, "every chunk's counts must be merged")
+}
+
+// TestFetchUnreadCounts_BoundsChunkConcurrency: chunk fan-out must stay inside
+// BadgeConcurrency so a huge room can't spawn an unbounded RPC burst.
+func TestFetchUnreadCounts_BoundsChunkConcurrency(t *testing.T) {
+	const total = 2000
+	const batch = 100
+	const limit = 4
+
+	accounts := make([]string, total)
+	siteByAccount := make(map[string]string, total)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+		siteByAccount[accounts[i]] = "site-a"
+	}
+
+	badge := &countingBadgeClient{hold: 20 * time.Millisecond}
+	h := NewHandler(HandlerDeps{
+		Members: &stubMembers{}, Followers: &stubFollowers{}, Presence: noopPresenceSnapshotter{},
+		Hook: noopVetoer{}, Emitter: &recordingEmitter{},
+		BadgeClient: badge, BadgeBatchSize: batch, BadgeConcurrency: limit, LargeRoomThreshold: 500,
+	})
+
+	h.fetchUnreadCounts(context.Background(), "r1", accounts, siteByAccount)
+
+	assert.LessOrEqual(t, badge.maxInFlight.Load(), int64(limit),
+		"badge chunk fan-out must respect BadgeConcurrency")
+	assert.Greater(t, badge.maxInFlight.Load(), int64(1), "chunks should still overlap")
+}
+
+// countingBadgeClient records each call's account slice and tracks peak concurrency.
+type countingBadgeClient struct {
+	hold        time.Duration
+	mu          sync.Mutex
+	calls       [][]string
+	inFlight    atomic.Int64
+	maxInFlight atomic.Int64
+}
+
+func (c *countingBadgeClient) Counts(_ context.Context, _, _ string, accounts []string) (map[string]int, error) {
+	n := c.inFlight.Add(1)
+	for {
+		peak := c.maxInFlight.Load()
+		if n <= peak || c.maxInFlight.CompareAndSwap(peak, n) {
+			break
+		}
+	}
+	defer c.inFlight.Add(-1)
+	if c.hold > 0 {
+		// Widen the overlap window so peak concurrency is observable; this gates
+		// the fake RPC's duration, it does not synchronise the goroutines.
+		time.Sleep(c.hold)
+	}
+
+	c.mu.Lock()
+	c.calls = append(c.calls, append([]string(nil), accounts...))
+	c.mu.Unlock()
+
+	out := make(map[string]int, len(accounts))
+	for _, a := range accounts {
+		out[a] = 1
+	}
+	return out, nil
+}
+
+func (c *countingBadgeClient) snapshot() [][]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([][]string(nil), c.calls...)
 }

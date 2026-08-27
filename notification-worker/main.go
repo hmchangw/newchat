@@ -45,33 +45,37 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: read-only service (fan-out lookups); secondaryPreferred
 	// offloads the primary.
-	MongoReadPreference    string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	Pool                   mongoutil.PoolConfig
-	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
-	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
-	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
-	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
-	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
-	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
-	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
-	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
-	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
-	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
-	UserCacheSize          int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL           time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	MentionNamesEnabled    bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
-	MentionNamesTimeout    time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
-	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MongoReadPreference     string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	Pool                    mongoutil.PoolConfig
+	MaxWorkers              int                     `env:"MAX_WORKERS"               envDefault:"100"`
+	LargeRoomThreshold      int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
+	PushRecipientBatchSize  int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
+	RoomMetaCacheSize       int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL        time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomMetaL2TTL           time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	ValkeyAddrs             []string                `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword          string                  `env:"VALKEY_PASSWORD"           envDefault:""`
+	RoomSubCacheTTL         time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
+	PresenceBatchSize       int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
+	PresenceConcurrency     int                     `env:"PRESENCE_CONCURRENCY"      envDefault:"8"`
+	PresenceRPCTimeout      time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
+	PresenceEnabled         bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled       bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
+	BadgeBatchSize          int                     `env:"BADGE_BATCH_SIZE"          envDefault:"512"`
+	BadgeConcurrency        int                     `env:"BADGE_CONCURRENCY"         envDefault:"8"`
+	UserSettingsEnabled     bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"` // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize   int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsConcurrency int                     `env:"USER_SETTINGS_CONCURRENCY" envDefault:"4"`
+	UserSettingsTimeout     time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	UserCacheSize           int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL            time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesEnabled     bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
+	MentionNamesTimeout     time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
+	Mode                    stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	Consumer                stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap               bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr              string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 // mongoMemberLoader loads a room's member list and stamps each member's HOME
@@ -100,7 +104,9 @@ func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubc
 	}
 	defer cur.Close(ctx)
 
-	var out []roomsubcache.Member
+	// RemainingBatchLength sizes the first append run from the cursor's current
+	// batch, which avoids most of the regrowth on a large room.
+	out := make([]roomsubcache.Member, 0, cur.RemainingBatchLength())
 	for cur.Next(ctx) {
 		var doc struct {
 			User struct {
@@ -150,14 +156,33 @@ func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, me
 	for i := range members {
 		accounts = append(accounts, members[i].Account)
 	}
-	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}},
+
+	siteByAccount := make(map[string]string, len(accounts))
+	// Chunked: an unbounded $in over every member of a very large room is a single
+	// oversized query with an oversized result set. Sequential is fine — this runs
+	// on cache fill, not per message.
+	for _, chunk := range chunkStrings(accounts, homeSiteBatchSize) {
+		if err := m.appendHomeSites(ctx, roomID, chunk, siteByAccount); err != nil {
+			return err
+		}
+	}
+	for i := range members {
+		members[i].HomeSiteID = siteByAccount[members[i].Account]
+	}
+	return nil
+}
+
+// homeSiteBatchSize caps accounts per home-site $in.
+const homeSiteBatchSize = 512
+
+func (m *mongoMemberLoader) appendHomeSites(ctx context.Context, roomID string, chunk []string, out map[string]string) error {
+	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": chunk}},
 		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "siteId": 1}))
 	if err != nil {
 		return fmt.Errorf("find home sites for room %s members: %w", roomID, err)
 	}
 	defer cur.Close(ctx)
 
-	siteByAccount := make(map[string]string, len(accounts))
 	for cur.Next(ctx) {
 		var doc struct {
 			Account string `bson:"account"`
@@ -166,13 +191,10 @@ func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, me
 		if err := cur.Decode(&doc); err != nil {
 			return fmt.Errorf("decode user home site: %w", err)
 		}
-		siteByAccount[doc.Account] = doc.SiteID
+		out[doc.Account] = doc.SiteID
 	}
 	if err := cur.Err(); err != nil {
 		return fmt.Errorf("iterate user home sites: %w", err)
-	}
-	for i := range members {
-		members[i].HomeSiteID = siteByAccount[members[i].Account]
 	}
 	return nil
 }
@@ -246,7 +268,10 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
+	// Home site is near-immutable, so this fan-out-sized read takes the client-wide
+	// preference (secondaryPreferred) rather than the primary-pinned usersCol that
+	// the delivery-gating settings read needs.
+	loader := &mongoMemberLoader{col: subCol, users: db.Collection("users")}
 	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -293,6 +318,7 @@ func main() {
 			cfg.SiteID,
 			cfg.PresenceBatchSize,
 			cfg.PresenceRPCTimeout,
+			cfg.PresenceConcurrency,
 			publishMetrics,
 		)
 	}
@@ -304,7 +330,7 @@ func main() {
 
 	var settings UserSettingsSnapshotter = noopUserSettings{}
 	if cfg.UserSettingsEnabled {
-		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
+		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout, cfg.UserSettingsConcurrency)
 	}
 
 	// Display names for the push body read from the client-wide read preference
@@ -340,6 +366,8 @@ func main() {
 		RoomMeta:           roomMetaCache,
 		MentionNames:       mentionNames,
 		BadgeClient:        badge,
+		BadgeBatchSize:     cfg.BadgeBatchSize,
+		BadgeConcurrency:   cfg.BadgeConcurrency,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 		Metrics:            domainMetrics,

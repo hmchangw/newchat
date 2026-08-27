@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -64,61 +67,98 @@ var userSettingsProjection = bson.M{
 	"settings.priorityContacts":                 1,
 }
 
+// defaultUserSettingsConcurrency bounds how many settings chunks are read at
+// once, so a large recipient list overlaps its reads without opening an
+// unbounded number of simultaneous Mongo cursors.
+const defaultUserSettingsConcurrency = 4
+
+// settingsChunkFetcher reads one chunk of accounts. It is a field on
+// mongoUserSettings so tests can exercise the chunking, timeout and fail-open
+// policy without a live Mongo, mirroring how the JetStream publish function is
+// injected elsewhere in this repo.
+type settingsChunkFetcher func(ctx context.Context, chunk []string) (map[string]notifSettings, error)
+
 // mongoUserSettings reads notification settings straight from the users
 // collection — one indexed $in per chunk, no cache. Per-user keys make a Valkey
 // tier strictly worse than this (one round trip per candidate, and per-account
 // keys cross cluster slots), so there is no L2 here by design.
 type mongoUserSettings struct {
-	col       *mongo.Collection
-	batchSize int
-	timeout   time.Duration
+	col         *mongo.Collection
+	batchSize   int
+	timeout     time.Duration
+	concurrency int
+	fetch       settingsChunkFetcher
 }
 
-func newMongoUserSettings(col *mongo.Collection, batchSize int, timeout time.Duration) *mongoUserSettings {
+func newMongoUserSettings(col *mongo.Collection, batchSize int, timeout time.Duration, concurrency int) *mongoUserSettings {
 	if batchSize <= 0 {
 		batchSize = 512
 	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &mongoUserSettings{col: col, batchSize: batchSize, timeout: timeout}
+	if concurrency <= 0 {
+		concurrency = defaultUserSettingsConcurrency
+	}
+	m := &mongoUserSettings{col: col, batchSize: batchSize, timeout: timeout, concurrency: concurrency}
+	m.fetch = m.findChunk
+	return m
 }
 
 // Snapshot returns settings keyed by account. It never returns an error: a failed
 // or timed-out read yields whatever was collected so far, and absent accounts take
 // the zero notifSettings, i.e. today's behaviour. See the spec on why this gate
 // fails open like its two neighbours rather than silencing the site.
+//
+// Chunks run concurrently, each under its OWN timeout. Sharing one budget across a
+// sequential loop meant that on a large recipient list the chunks nearest the end
+// were the ones that never got read — so those users were pushed regardless of
+// muteAllNotifications. Failing open is now per chunk, not per snapshot.
 func (m *mongoUserSettings) Snapshot(ctx context.Context, accounts []string) (map[string]notifSettings, error) {
 	out := make(map[string]notifSettings, len(accounts))
 	if len(accounts) == 0 {
 		return out, nil
 	}
-	// Bound the new dependency rather than inheriting the consumer's deadline.
-	qctx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
 
-	// Chunks run sequentially under one shared timeout, unlike bulkPresenceSource's
-	// concurrent fan-out — deliberate, since this read is a single indexed $in and
-	// not worth a goroutine per chunk. Consequence: if the shared timeout expires
-	// mid-loop, chunks nearer the end of a very large recipient list are the ones
-	// that never get read and fail open.
+	var (
+		mu sync.Mutex
+		g  errgroup.Group
+	)
+	g.SetLimit(m.concurrency)
 	for _, chunk := range chunkStrings(accounts, m.batchSize) {
-		if err := m.appendChunk(qctx, chunk, out); err != nil {
-			slog.Warn("user settings lookup failed, defaulting to push",
-				"error", err, "chunk", len(chunk), "request_id", natsutil.RequestIDFromContext(ctx))
-			return out, nil
-		}
+		g.Go(func() error {
+			// Bound the new dependency rather than inheriting the consumer's deadline.
+			qctx, cancel := context.WithTimeout(ctx, m.timeout)
+			defer cancel()
+
+			got, err := m.fetch(qctx, chunk)
+			if err != nil {
+				slog.WarnContext(ctx, "user settings chunk lookup failed, those accounts default to push",
+					"error", err, "chunk", len(chunk), "request_id", natsutil.RequestIDFromContext(ctx))
+				return nil
+			}
+			mu.Lock()
+			for account, ns := range got {
+				out[account] = ns
+			}
+			mu.Unlock()
+			return nil
+		})
 	}
+	_ = g.Wait() // every g.Go above returns nil — chunk failures are logged and absorbed
 	return out, nil
 }
 
-func (m *mongoUserSettings) appendChunk(ctx context.Context, chunk []string, out map[string]notifSettings) error {
+// findChunk reads one chunk's settings. Returning a fresh map (rather than
+// mutating a shared one) is what lets chunks run concurrently.
+func (m *mongoUserSettings) findChunk(ctx context.Context, chunk []string) (map[string]notifSettings, error) {
+	out := make(map[string]notifSettings, len(chunk))
 	// active:{$ne:false} matches activeUserFilter in user-service so this read
 	// agrees with user-service about what an active user is.
 	filter := bson.M{"account": bson.M{"$in": chunk}, "active": bson.M{"$ne": false}}
 	cur, err := m.col.Find(ctx, filter, options.Find().SetProjection(userSettingsProjection))
 	if err != nil {
-		return fmt.Errorf("find user settings: %w", err)
+		return nil, fmt.Errorf("find user settings: %w", err)
 	}
 	// Close error intentionally discarded: the cursor is being abandoned either
 	// way, and Snapshot is fail-open by contract, so a close failure here
@@ -131,7 +171,7 @@ func (m *mongoUserSettings) appendChunk(ctx context.Context, chunk []string, out
 			Settings *model.UserSettings `bson:"settings"`
 		}
 		if err := cur.Decode(&doc); err != nil {
-			return fmt.Errorf("decode user settings: %w", err)
+			return nil, fmt.Errorf("decode user settings: %w", err)
 		}
 		if doc.Account == "" {
 			continue
@@ -139,9 +179,9 @@ func (m *mongoUserSettings) appendChunk(ctx context.Context, chunk []string, out
 		out[doc.Account] = resolveNotifSettings(doc.Settings)
 	}
 	if err := cur.Err(); err != nil {
-		return fmt.Errorf("iterate user settings: %w", err)
+		return nil, fmt.Errorf("iterate user settings: %w", err)
 	}
-	return nil
+	return out, nil
 }
 
 // resolveNotifSettings collapses the stored pointer fields into a total value and

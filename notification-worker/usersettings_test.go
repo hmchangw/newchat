@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,14 +99,129 @@ func TestResolveNotifSettings(t *testing.T) {
 
 func TestMongoUserSettings_EmptyAccountsSkipsQuery(t *testing.T) {
 	// A nil collection proves no query is attempted on the empty-accounts path.
-	s := newMongoUserSettings(nil, 512, time.Second)
+	s := newMongoUserSettings(nil, 512, time.Second, 0)
 	got, err := s.Snapshot(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 
 func TestNewMongoUserSettings_Defaults(t *testing.T) {
-	s := newMongoUserSettings(nil, 0, 0)
+	s := newMongoUserSettings(nil, 0, 0, 0)
 	assert.Equal(t, 512, s.batchSize)
 	assert.Equal(t, 2*time.Second, s.timeout)
+}
+
+// stubSettingsFetch is a settingsChunkFetcher double: it records each chunk and
+// can hold a chunk open long enough to prove chunks no longer share one budget.
+type stubSettingsFetch struct {
+	mu          sync.Mutex
+	chunks      [][]string
+	hold        time.Duration
+	holdFirst   bool
+	inFlight    atomic.Int64
+	maxInFlight atomic.Int64
+	err         error
+}
+
+func (s *stubSettingsFetch) fetch(ctx context.Context, chunk []string) (map[string]notifSettings, error) {
+	n := s.inFlight.Add(1)
+	for {
+		peak := s.maxInFlight.Load()
+		if n <= peak || s.maxInFlight.CompareAndSwap(peak, n) {
+			break
+		}
+	}
+	defer s.inFlight.Add(-1)
+
+	s.mu.Lock()
+	first := len(s.chunks) == 0
+	s.chunks = append(s.chunks, append([]string(nil), chunk...))
+	s.mu.Unlock()
+
+	if s.hold > 0 && (!s.holdFirst || first) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(s.hold):
+		}
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[string]notifSettings, len(chunk))
+	for _, a := range chunk {
+		out[a] = notifSettings{muteAll: true}
+	}
+	return out, nil
+}
+
+func (s *stubSettingsFetch) chunkCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.chunks)
+}
+
+// TestMongoUserSettings_ChunksRunConcurrently: chunks must overlap rather than
+// run back-to-back, so a large recipient list is not serialised.
+func TestMongoUserSettings_ChunksRunConcurrently(t *testing.T) {
+	accounts := make([]string, 1000)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+	}
+	stub := &stubSettingsFetch{hold: 15 * time.Millisecond}
+
+	s := newMongoUserSettings(nil, 100, time.Second, 4)
+	s.fetch = stub.fetch
+
+	got, err := s.Snapshot(context.Background(), accounts)
+	require.NoError(t, err)
+	assert.Len(t, got, len(accounts), "every chunk must be merged into the snapshot")
+	assert.Equal(t, 10, stub.chunkCount())
+	assert.LessOrEqual(t, stub.maxInFlight.Load(), int64(4), "chunk fan-out must respect the concurrency limit")
+	assert.Greater(t, stub.maxInFlight.Load(), int64(1), "chunks must actually overlap")
+}
+
+// TestMongoUserSettings_SlowChunkDoesNotStarveOthers is the regression pin for
+// the shared-budget bug: one chunk exceeding the timeout must fail open alone,
+// leaving every other chunk's settings intact. Under the old shared-deadline
+// loop the remaining chunks were silently dropped and those users were pushed
+// regardless of muteAllNotifications.
+func TestMongoUserSettings_SlowChunkDoesNotStarveOthers(t *testing.T) {
+	accounts := make([]string, 500)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+	}
+	// Only the first chunk stalls past the per-chunk timeout.
+	stub := &stubSettingsFetch{hold: 300 * time.Millisecond, holdFirst: true}
+
+	s := newMongoUserSettings(nil, 100, 50*time.Millisecond, 1)
+	s.fetch = stub.fetch
+
+	got, err := s.Snapshot(context.Background(), accounts)
+	require.NoError(t, err, "settings snapshot is fail-open by contract")
+	assert.Equal(t, 5, stub.chunkCount(), "every chunk must still be attempted")
+	assert.Len(t, got, 400, "only the stalled chunk's 100 accounts fail open")
+}
+
+// TestMongoUserSettings_ChunkErrorFailsOpenPerChunk: a chunk-level error must not
+// abandon the chunks behind it.
+func TestMongoUserSettings_ChunkErrorFailsOpenPerChunk(t *testing.T) {
+	accounts := make([]string, 300)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("u%04d", i)
+	}
+	stub := &stubSettingsFetch{err: errors.New("mongo: connection reset")}
+
+	s := newMongoUserSettings(nil, 100, time.Second, 2)
+	s.fetch = stub.fetch
+
+	got, err := s.Snapshot(context.Background(), accounts)
+	require.NoError(t, err)
+	assert.Equal(t, 3, stub.chunkCount(), "all chunks attempted despite the first failing")
+	assert.Empty(t, got)
+}
+
+func TestNewMongoUserSettings_ConcurrencyDefault(t *testing.T) {
+	s := newMongoUserSettings(nil, 0, 0, 0)
+	assert.Equal(t, defaultUserSettingsConcurrency, s.concurrency)
 }

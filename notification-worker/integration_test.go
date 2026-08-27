@@ -397,7 +397,7 @@ func TestMongoUserSettings_Snapshot_Integration(t *testing.T) {
 	usersCol := db.Collection("users")
 	seedUserSettings(t, ctx, usersCol)
 
-	s := newMongoUserSettings(usersCol, 512, 5*time.Second)
+	s := newMongoUserSettings(usersCol, 512, 5*time.Second, 0)
 	got, err := s.Snapshot(ctx, []string{
 		"muted-user", "partial-user", "nosettings-user", "noactive-user",
 		"inactive-user", "absent-user",
@@ -444,7 +444,7 @@ func TestMongoUserSettings_ChunkingBoundary_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Batch size below the seeded count forces ceil(7/3) = 3 chunked $in queries.
-	s := newMongoUserSettings(usersCol, 3, 5*time.Second)
+	s := newMongoUserSettings(usersCol, 3, 5*time.Second, 0)
 	got, err := s.Snapshot(ctx, accounts)
 	require.NoError(t, err)
 
@@ -460,7 +460,7 @@ func TestMongoUserSettings_FailsOpenOnReadError_Integration(t *testing.T) {
 	usersCol := db.Collection("users")
 	seedUserSettings(t, ctx, usersCol)
 
-	s := newMongoUserSettings(usersCol, 512, 5*time.Second)
+	s := newMongoUserSettings(usersCol, 512, 5*time.Second, 0)
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
