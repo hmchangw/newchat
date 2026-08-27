@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"time"
 )
 
 // Config holds Drive connection settings parsed from environment variables.
@@ -12,6 +13,10 @@ type Config struct {
 	URL               string `env:"URL"`
 	Token             string `env:"API_TOKEN"`
 	BaseURLConfigPath string `env:"BASE_URL_CONFIG_PATH" envDefault:"etc/config/baseurls.json"`
+	// Timeout is the whole-request ceiling on a Drive transfer. Sized for the
+	// internal leg only — 2 GiB moves in tens of seconds over the private
+	// network — so it does not track the public client leg's server timeouts.
+	Timeout time.Duration `env:"TIMEOUT" envDefault:"5m"`
 	// BaseURLMap maps a room-origin siteID to a Drive base URL. Populated by LoadBaseURLs.
 	BaseURLMap map[string]string
 }

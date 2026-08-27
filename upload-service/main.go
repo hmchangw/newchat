@@ -47,8 +47,8 @@ type config struct {
 
 	Pool mongoutil.PoolConfig
 	// No blanket request timeout here: upload-service streams potentially-large
-	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout
-	// (both 5m); a short per-request context deadline would cancel those streams.
+	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout;
+	// a short per-request context deadline would cancel those streams.
 
 	// MaxImages caps the number of images per image-upload request.
 	MaxImages int `env:"MAX_IMAGES" envDefault:"10"`
@@ -59,6 +59,14 @@ type config struct {
 
 	// FileUploadMaxFileSize is the single-file upload ceiling (default 100 MiB; -1 = unlimited).
 	FileUploadMaxFileSize int64 `env:"FILE_UPLOAD_MAX_FILE_SIZE" envDefault:"104857600"`
+	// HTTPTimeout is the server's ReadTimeout and WriteTimeout. Size it as
+	// FILE_UPLOAD_MAX_FILE_SIZE / slowest supported client bandwidth: the default
+	// 15m serves a 2 GiB upload from clients down to ~2.3 MiB/s. It is also the
+	// ceiling on how long a stalled connection holds its spooled temp file. One
+	// value covers both directions because WriteTimeout starts at end-of-header
+	// and so must cover the body read as well; the post-read Drive leg is
+	// internal, has its own DRIVE_TIMEOUT, and takes seconds.
+	HTTPTimeout time.Duration `env:"HTTP_TIMEOUT" envDefault:"15m"`
 	// FileUploadMediaTypeWhitelist/Blacklist gate the file endpoint's MIME types.
 	FileUploadMediaTypeWhitelist string `env:"FILE_UPLOAD_MEDIA_TYPE_WHITELIST" envDefault:""`
 	FileUploadMediaTypeBlacklist string `env:"FILE_UPLOAD_MEDIA_TYPE_BLACKLIST" envDefault:"image/svg+xml"`
@@ -180,10 +188,13 @@ func run() error {
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute, // downloads stream potentially-large bodies
+		Addr:    addr,
+		Handler: r,
+		// The header phase keeps a short bound of its own: HTTPTimeout is sized for
+		// bodies, and inheriting it would let a slowloris hold a connection that long.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       cfg.HTTPTimeout,
+		WriteTimeout:      cfg.HTTPTimeout,
 	}
 
 	srvErr := make(chan error, 1)

@@ -168,7 +168,9 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[imageFormField]
@@ -251,7 +253,9 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[fileFormField]
