@@ -177,3 +177,98 @@ Name+Subjects and verifies-only in production. No raw `fmt.Sprintf` on any subje
 5. `medium` — Emit a metric for `previewForMsgId != lastMsgId` observed at read time in `history-service`. It is the only observable signal that the split's one gap is open, and the outage-correlated case above is invisible without it.
 6. `low` — Move `roomLastMsgFilter` into `pkg/msgbucket` beside `NewerRow` and add a test driving both forms over the same tie cases.
 7. `low` — Move `h.previews.buffer` below the room-type switch; swap `Unsubscribe()` for `Drain()` on the server-broadcast subscription.
+
+---
+
+# 4. Test coverage — 3 / 5
+
+Measured unit coverage is **67.3%**, below the repo's 80% floor, so the floor rule applies. But
+the shortfall is concentrated almost entirely in wiring no unit test can reach, and the tested
+logic is genuinely well tested — which is why this scores 3 rather than the 2 the raw number
+alone would suggest.
+
+## Measurements
+
+```
+make test SERVICE=broadcast-worker
+go test -race ./broadcast-worker/...
+ok  github.com/hmchangw/chat/broadcast-worker        PASS
+
+go tool cover -func=/tmp/covbw.out
+total:  (statements)  67.3%     (705/1047)
+```
+
+`make generate SERVICE=broadcast-worker` produced **no diff** — mocks are current. Tree verified
+clean at exit.
+
+| Scope | Coverage |
+|---|---|
+| Whole package | **67.3%** (705/1047) |
+| Excluding `main()` | **82.3%** (705/857) |
+| Excluding all of `main.go` | 83.4% |
+| Excluding `main.go` + integration-only stores | **88.8%** |
+
+Per file: `main.go` 3.3% (203 uncovered) · `store_mongo.go` 26.2% (48) · `preview.go` 81.0% ·
+**`handler.go` 86.9%** (69) · `roomactivity.go` 96.0% · `keycache.go` 96.3% ·
+`preview_writer.go` 97.1% · `helper.go` / `bootstrap.go` 100%.
+
+Docker was unavailable, so the integration tag could not be measured. `EnsureIndexes`,
+`BulkUpdateRoomPreview`, `GetThreadFollowers`, `GetHistorySharedSince` and Mongo `GetRoomMeta`
+*are* exercised by `integration_test.go` / `metacache_integration_test.go`, so their 0–13% unit
+figures understate reality.
+
+For calibration: `roomlist-worker` 63.4%, `room-worker` 63.1%, `notification-worker` 58.1%,
+`message-worker` 51.3%, `inbox-worker` 44.3%, `outbox-worker` 37.3%. **The floor breach is
+fleet-wide**, and CI enforces no coverage gate.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | package | Coverage below repo minimum 80%, currently **67.3%**. |
+| `medium` | `preview_writer.go:127` | The `default:` over-cap shed branch — the one whose comment says getting it wrong reintroduces #224 — is the single uncovered statement in the file, and `maxPendingPreviews` appears in no test at all. |
+| `medium` | `handler.go:683-699` | `publishThreadMetadata`'s entire DM/BotDM arm — the per-account loop, the `isBot` skip, the publish-error path — plus the unknown-room-type default are untested. Only the channel arm runs. |
+| `medium` | `store_mongo.go:111` | `mongoStore.ListRoomMembers`, the query behind all DM fan-out, has zero coverage in unit *or* integration tests. |
+| `medium` | `store_mongo_breaker_test.go:78` | **Verified.** `TestMongoStore_FencedReadsDoNotSpendBudgetOnAbsence` never touches `mongoStore`. It constructs a breaker directly and feeds it `mongo.ErrNoDocuments`, so it tests the `mongoBreakerFailure` predicate — real, but not what its name claims — and would pass with all three fenced reads deleted. |
+| `medium` | `metacache.go:18,27` | `cachedMetaStore`, wired at `main.go:270`, is never constructed by any test. The L1 read-through has no coverage at either level. |
+| `low` | `handler_test.go:3233` | `TestPublishToThreadAccounts_PartialFail_ReturnsNil` asserts only `NoError`; an implementation that publishes nothing would pass. |
+| `low` | `roomactivity.go:165` | `remotePeers`' duplicate-peer `continue` is uncovered — the case named "tolerates blanks and self repeated" repeats only *self*, caught by an earlier branch. |
+| `low` | `preview_test.go:148` | `fakeBulkWriter.err` is dead — never set — so `Flush`'s bulk-write-failure return is never exercised. |
+| `low` | `consumeloop_test.go:42`, `parent_fetcher_test.go:24` | Untagged unit tests start real in-process `nats-server` instances. Hermetic (`Port:-1`, `t.TempDir`, `t.Cleanup`), but literally connecting to NATS in a unit test. |
+| `info` | `handler_test.go:89` | Package-level `*model.Room` fixtures shared across 88 tests. No mutation found today, but a pointer fixture is one assignment from cross-test bleed. |
+
+## A cross-cutting observation: tests written to the intent, not the call
+
+`store_mongo_breaker_test.go:78` is the **third** instance of one shape in this repository:
+
+| Test | Name claims | Body exercises |
+|---|---|---|
+| `pkg/roomsubcache/lookup_test.go:281` | `GuardLoader` serving L2 while the breaker is open | Seeds `CachedAt = now`, so the fresh branch returns and the loader is never reached |
+| `roomlist-worker/main_test.go:35` | `buildConsumerConfig` bot-mode durable | Only `stream.PipelineBot.ConsumerName` |
+| `broadcast-worker/store_mongo_breaker_test.go:78` | Fenced store reads not spending breaker budget | Only the `mongoBreakerFailure` predicate |
+
+All three pass with the production code they name deleted. The common failure is writing a test
+to the *intent* rather than to the *call* — precisely what a green suite is supposed to rule
+out. Worth treating as a review habit rather than three unrelated fixes: **when a test names a
+function, assert that the function ran.**
+
+## What is genuinely well tested
+
+Preview seal-failure vs ineligible (`preview_test.go:234`, table-driven, four ordering cases);
+`FindUsersByAccounts` failure fallback (`handler_test.go:520`); breaker-open on all three fenced
+reads (`store_mongo_breaker_test.go:40`); key-cache miss/hit/expiry/singleflight/ctx-cancel
+(`keycache_test.go`); the refresher's prune bounding **and** the degenerate nothing-to-reclaim
+case (`roomactivity_test.go:264,295`); the four sonic wire-compat tests CLAUDE.md mandates; and
+a poison-panic-does-not-wedge-the-consumer test against real JetStream. Integration tests use
+`testutil.MongoDB`/`NATS`/`SharedValkeyCluster` with `FlushValkey` cleanup, and `main_test.go`
+has the required `testutil.RunTests(m)` TestMain.
+
+## Recommendations
+
+1. `medium` — Test `previewWriter.buffer`'s over-cap path: fill `maxPendingPreviews` rooms with bodies, buffer a new eligible room, assert the new entry lands as `pvwFailed=true` rather than an ineligible key-advance. This is the branch guarding #224.
+2. `medium` — Add a `publishThreadMetadata` DM case: a `RoomTypeDM` room with `Accounts{alice, weather.bot}`, asserting one publish to alice, none to the bot, plus a publish-error case asserting the wrapped error.
+3. `medium` — Give `mongoStore.ListRoomMembers` an integration test (members present, room absent → empty, projection shape), matching the existing `GetThreadFollowers` test.
+4. `medium` — Rewrite `TestMongoStore_FencedReadsDoNotSpendBudgetOnAbsence` to go through `GetRoom`/`GetThreadFollowers` against a real MongoDB with a missing document, asserting the breaker stays `StateClosed`.
+5. `low` — Cover `cachedMetaStore` with a fake `Store` counting `GetRoomMeta` calls: miss→inner, hit→no inner call, pass-through of embedded methods.
+6. `low` — Set `fakeBulkWriter.err` in one case; add a `remotePeers` case `{"b","b"}`; strengthen `TestPublishToThreadAccounts_PartialFail_ReturnsNil` to assert two attempts and alice's payload.
+7. `info` — Extracting `main.go`'s wiring into a testable `run(ctx, cfg) error` would move the headline number from 67.3% toward the 82–89% the rest of the package already achieves.
