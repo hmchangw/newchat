@@ -27,8 +27,10 @@ set in §3.5:
 
 1. **The SLI/SLO targets are unvalidated guesses.** They were set achievable-first
    (sli-slo §0.2 calls for a 4–6 week calibration that has not started) and no run
-   has ever asserted against the production predicates, because the counters those
-   predicates read do not exist yet (§2, G4/G9).
+   has ever asserted against the production predicates. For five of the nine the
+   counters genuinely do not exist yet; for the rest, including **SLO-1a, which is
+   computable on `main` today**, nobody has looked. Hop-by-hop coverage:
+   [`slo-measurement-map.md`](slo-measurement-map.md).
 2. **No ceiling exists for anything.** Both completed programs are
    non-destructive by design. Nothing has been ramped to a breach.
 3. **No extreme shape has been exercised.** See
@@ -75,7 +77,7 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 | loadgen `soak` (Cassandra Run A + room/member/user/search/presence lanes, durable ledger) | **Exists** | Run A is implementation-ready; gated on environment only |
 | loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Track 2; `max-room-size --rooms-per-size=1` also serves 3.6 |
 | P1 — RPC server duration histogram | **Delivered by #337** as `rpc_server_call_duration_seconds{rpc_method, error_type}` (OTel RPC semconv), with `channel_history` / `thread_open` as separate methods | SLO-4/5 become computable on merge — as a **server-side proxy**: the timer stops after `Respond`, so a server→client partition moves the SLI toward green. SLO-5's bound moved 300 ms → 250 ms and its target 99% → 95% to sit on a real bucket boundary |
-| P2 — J1 counters | **Partly present.** `message_worker_persistence_total{message_kind,result}` already covers SLO-1a's numerator; the gatekeeper denominator, the channel enqueue counter and the age histogram are absent. #337 does not touch P2 | SLO-1a/1b/2 still have **no enforceable boundary**. Until they do, every J1 run gates on loadgen L1 E2E correlation — a *different, downstream* boundary. Record it as observational, never as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) |
+| P2 — J1 counters | **More present than the roadmap says.** `message_gatekeeper_messages_total{result="accepted"}` is the denominator and `message_worker_persistence_total{message_kind,result}` the SLO-1a numerator — **both on `main` today**. Missing: a `broadcast_path` slice on the denominator, a per-message channel enqueue counter, and the age histogram. #337 does not touch P2 | **SLO-1a is computable now** (with a `message_kind` filter). SLO-1b/2 remain unmeasurable, so a J1 run still gates on loadgen L1 E2E correlation for those two — a *different, downstream* boundary. Never report it as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md); full path coverage: [`slo-measurement-map.md`](slo-measurement-map.md) |
 | `search_service_requests_total{kind,status}` | **Exists** | SLO-7 scorable (partial-failure only) |
 | `search_service_request_duration_seconds` `status` label (P4) | **Still absent after #337** — the PR adds `status` to the *counter*, but `durationOptFor(kind)` keeps the histogram on `kind` alone | SLO-8 client-side only (loadgen `--workload=search` scores it); not enforceable from production recording rules |
 | JetStream Prometheus exporter with `is_consumer_leader` filtering (P3) | Local overlay only (`nats-exporter` sidecar) | Backlog is the primary enforcement signal for every async SLO — a staging run without it has no backstop |
@@ -109,7 +111,8 @@ decision.
 
 | # | Item | Why it is first | Output |
 |---|---|---|---|
-| **1.1** | **Ship the remaining P2 counters** (G9/P1 is done — #337) | Three of nine SLOs (1a, 1b, 2) — the flagship J1 journey — have **no production counter today**. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
+| **1.0** | **Write the SLO-1a recording rule against counters that already exist** | A rules change, not a code change: `message_worker_persistence_total` ÷ `message_gatekeeper_messages_total{result="accepted"}`. Puts a third of J1 into the calibration window immediately, weeks ahead of the rest | SLO-1a under observation |
+| **1.1** | **Ship the remaining P2 work** (G9/P1 is done — #337) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
 | **1.3** | **Set targets from 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate. Right now they are round numbers | Approved SLO targets + `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can hard-gate instead of eyeballing |
@@ -304,6 +307,7 @@ Added in rev 2, from the code review behind
 - [`README.md`](README.md) — program index
 - [`extreme-scenarios.md`](extreme-scenarios.md) — code-derived worst-case shapes (Track 3)
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what to build for Track 1.1, and what deliberately not to build
+- [`slo-measurement-map.md`](slo-measurement-map.md) — every journey's path hop by hop, which instrument sits where, and which segments are dark
 - [`common/sli-slo.md`](common/sli-slo.md) — acceptance criteria
 - [`common/workload-model.md`](common/workload-model.md) — shared inputs (I1–I13)
 - [`common/environments-and-data-ownership.md`](common/environments-and-data-ownership.md) — what may be pushed, blast radius, cleanup

@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | **Status** | Draft — for review |
-| **Net change** | **3 instruments to add, 1 already exists, 1 to drop.** Only one of the three has a measurable hot-path cost, and it is bounded and plumbing-shaped, not per-recipient |
+| **Net change** | **2 instruments to add, 1 label to widen, 2 already exist, 1 to drop.** Only one addition has a measurable hot-path cost, and it is bounded and plumbing-shaped, not per-recipient. **SLO-1a is computable today with no code change at all** — see §1A |
 | **Not in scope** | Anything that needs a JetStream advisory consumer — see §6 |
 
 ---
@@ -23,7 +23,7 @@ them are already done and one should be dropped.
 
 | Roadmap piece | Reality | Action |
 |---|---|---|
-| gatekeeper `messages_canonical_published_total{broadcast_path}` | Absent | **Add** — §1A |
+| gatekeeper `messages_canonical_published_total{broadcast_path}` | **The counter already exists** as `message_gatekeeper_messages_total{result="accepted"}` (`message-gatekeeper/nats_metrics.go:56`, recorded at `handler.go:218` after the canonical publish). Only the `broadcast_path` slice is missing | **Widen the label** (or add a small dedicated counter) — §1A |
 | message-worker persisted numerator | **Already exists** as `message_worker_persistence_total{message_kind,result}` (`message-worker/nats_metrics.go:46`, recorded at `handler.go:190,193,204,207`) | **Nothing** — §1B |
 | broadcast-worker `broadcast_channel_enqueue_total` | #337's `broadcast_worker_recipient_deliveries_total` is close but counts per publish target | **Add**, one counter — §1C |
 | broadcast-worker `broadcast_channel_enqueue_age_seconds` | Absent, and the handler cannot see the message | **Add** + plumbing — §1D |
@@ -34,23 +34,20 @@ them are already done and one should be dropped.
 
 ## 1. The instruments
 
-### A. `messages_canonical_published_total{broadcast_path}` — message-gatekeeper · **add**
+### A. The J1 denominator — message-gatekeeper · **already exists; it needs one more label**
 
-The shared denominator for all three SLOs.
+**The counter is already there.** `message_gatekeeper_messages_total{result, reason}`
+records `resultAccepted` at `message-gatekeeper/handler.go:218` — after the
+canonical `PublishMsg` succeeded and the client reply was sent. That is exactly
+"a canonical message was accepted", which is the J1 denominator.
 
-**Site.** `message-gatekeeper/handler.go`, immediately after the canonical
-`PublishMsg` returns without error (~`:404`). Success path only — a rejected
-send is not a published canonical message.
+**Consequence: SLO-1a is computable today, with no code change.** See §1B and §4.
 
-**Why the gatekeeper and not broadcast-worker.** This is the whole point of the
-instrument. The denominator has to sit **upstream** of the workers it measures,
-so that a dead message-worker or broadcast-worker makes the ratio *drop* rather
-than making the traffic *disappear*. A self-emitted denominator turns an outage
-into missing data — `sli-slo.md` §0.1 names this trap, and §5's search SLO is
-already living in it.
+**What is missing is only the fan-out slice.** SLO-1b and SLO-2 count the
+`room_subject` path only, and the counter has no `broadcast_path` label.
 
-**Label derivation is free — no new I/O.** Everything needed is already in hand
-at that line:
+**Label derivation is free — no new I/O.** Everything needed is in hand at that
+line:
 
 ```go
 switch {
@@ -63,31 +60,43 @@ default:
 }
 ```
 
-- `sub` comes from `GetSubscription` (`handler.go:376`), which the handler
-  already calls and which is cache-absorbed. `model.Subscription` carries
-  `RoomType` (`pkg/model/subscription.go:33`).
+- `sub` comes from `GetSubscription` (`handler.go:376`), already called and
+  cache-absorbed; `model.Subscription` carries `RoomType`
+  (`pkg/model/subscription.go:33`).
 - `req.ThreadParentMessageID` and `req.TShow` are on the request
   (`pkg/model/message.go:64,71`).
 
 **Do not reach for `GetRoomMeta` to build this label.** The handler deliberately
 *skips* that fetch on the thread-reply and owner/admin-bypass paths
 (`handler.go:394-396`, "Both bypasses skip the Room fetch entirely"). Adding a
-Mongo read to label a counter would put I/O on the send path to measure the send
-path. If a future label needs something `sub` does not carry, drop the label.
+Mongo read to label a counter would put I/O on the send path in order to measure
+the send path.
 
 **The classification must mirror broadcast-worker's dispatch, not the room type.**
 `shouldUseThreadFanOut` is `ThreadParentMessageID != "" && !TShow`
 (`broadcast-worker/handler.go:220`) and is checked **first**, before the room-type
-switch. A channel thread reply with `TShow=false` is a channel room that routes
-to per-account thread fan-out, so a `room_type="channel"` denominator would count
-a message that never reaches `publishChannelEvent` — depressing SLO-1b and SLO-2
+switch. A channel thread reply with `TShow=false` is a channel room that routes to
+per-account thread fan-out, so a `room_type="channel"` denominator would count a
+message that never reaches `publishChannelEvent` — depressing SLO-1b and SLO-2
 with messages they do not own.
 
-**Cost.** One `Add` with a precomputed option, on the success path only. Three
-label values, so three series. No allocation, no I/O, no branch that was not
-already evaluated (`isThreadReply` is computed at `:394` today).
+**Two ways to carry the label; pick one deliberately.**
 
----
+| | Widen the existing counter | Add `messages_canonical_published_total{broadcast_path}` |
+|---|---|---|
+| New instruments | 0 | 1 |
+| Series | `accepted` currently pairs only with `reason="none"`, so adding 3 paths turns 1 series into 3 — total goes 32 → 34 | 32 unchanged + 3 |
+| Semantics | One counter carries a business outcome *and* a routing dimension | Business outcomes stay one counter; the SLO denominator is a single-purpose series |
+| Registry entry | Amend the existing one | One new entry naming its reader |
+
+Recommendation: **widen the existing counter** unless a reviewer objects to mixing
+the two concerns. It adds no instrument, the cardinality delta is two series, and
+the SLO queries filter on `result="accepted"` anyway. Build the label only for the
+`accepted` key — the other results have no fan-out route and must not gain one.
+
+**Cost either way.** No extra work at all: the counter is already incremented on
+this line, and the label value comes from data already in registers. The only
+change is which precomputed option is looked up.
 
 ### B. SLO-1a numerator — message-worker · **already exists, do nothing**
 
@@ -111,7 +120,14 @@ every v1 async ratio; the primary enforcement signal remains consumer lag. Makin
 it exact needs the outcome ledger (P7), not a new counter here.
 
 **The only action is documentation:** `sli-slo.md` §8 should stop listing this as
-outstanding work.
+outstanding work — and §1 should move SLO-1a from 🔧 to ✅ (approximate), because
+paired with §1A's existing denominator the ratio is computable on `main` today.
+
+**One filter is mandatory.** message-worker also persists `system` and
+`teams_migration` messages, which reach MESSAGES-CANONICAL from history-service
+mutations and room-worker system events rather than through the gatekeeper. Without
+`message_kind=~"user|thread_reply"` the numerator counts messages the denominator
+never saw.
 
 ---
 
@@ -239,8 +255,9 @@ Per canonical message, with #337's recorder discipline applied (nil-collapse whe
 
 | Instrument | Fires | Added work per message | New series |
 |---|---|---|---|
-| A `messages_canonical_published_total` | once per accepted send | 1 counter add, label already computed | 3 |
+| A J1 denominator | already incremented per accepted send | **none** — one extra label value on an existing add | +2 |
 | B `message_worker_persistence_total` | — | **none, exists** | 0 |
+| — SLO-1a as a whole | — | **none — computable today** | 0 |
 | C `broadcast_channel_enqueue_total` | once per canonical **channel** message | 1 counter add | 2 |
 | D `broadcast_channel_enqueue_age_seconds` | once per canonical **channel** message | 1 histogram record **+ one `msg.Metadata()` parse per consumed message** | 1 histogram (11 buckets) |
 | E `_age_invalid_total` | only on a broken reading | ~0 | 2 |
@@ -282,17 +299,20 @@ reader is named: the SLO-1a/1b/2 recording rules, and the load-test hard gate.
 ## 4. The resulting queries
 
 ```promql
-# SLO-1a — persisted / published (all paths)
-sum by (site) (rate(message_worker_persistence_total{result="success"}[28d]))
-/ sum by (site) (rate(messages_canonical_published_total[28d]))
+# SLO-1a — persisted / published.  WORKS TODAY, no code change.
+sum by (site) (rate(message_worker_persistence_total{
+      message_kind=~"user|thread_reply", result="success"}[28d]))
+/ sum by (site) (rate(message_gatekeeper_messages_total{result="accepted"}[28d]))
 
 # SLO-1b — channel enqueue accepted / published on the room-subject path
 sum by (site) (rate(broadcast_channel_enqueue_total{result="ok"}[28d]))
-/ sum by (site) (rate(messages_canonical_published_total{broadcast_path="room_subject"}[28d]))
+/ sum by (site) (rate(message_gatekeeper_messages_total{
+      result="accepted", broadcast_path="room_subject"}[28d]))
 
 # SLO-2 — enqueued within 1 s / published on the room-subject path
 sum by (site) (rate(broadcast_channel_enqueue_age_seconds_bucket{le="1"}[28d]))
-/ sum by (site) (rate(messages_canonical_published_total{broadcast_path="room_subject"}[28d]))
+/ sum by (site) (rate(message_gatekeeper_messages_total{
+      result="accepted", broadcast_path="room_subject"}[28d]))
 ```
 
 `by (site)` is required for the same reason #337 spelled out for SLO-4/5: a bare
@@ -307,15 +327,19 @@ rounds away.
 
 ## 5. Order of work
 
-1. **A** — gatekeeper counter. Standalone, unblocks nothing else but is the
-   denominator for all three. Smallest diff.
+0. **Nothing** — write the SLO-1a recording rule against the two counters that
+   already exist (§4) and start its calibration window immediately. This is a
+   Grafana/rules change, not a code change, and it puts a third of J1 into
+   observation weeks before the rest.
+1. **A** — widen the gatekeeper label. Smallest diff; unblocks 1b and 2's
+   denominator.
 2. **C + E** — broadcast-worker counters. No plumbing needed.
 3. **D** — the metadata plumbing and the histogram. Benchmark before and after.
-4. Update `sli-slo.md` §8: P1 ✅ (#337), P2 rows for B removed, remaining P2
-   narrowed to A/C/D/E.
+4. Update `sli-slo.md`: §1 marks SLO-1a ✅ (approximate), §8's P1 row is ✅ (#337),
+   the P2 row loses B and narrows to A/C/D/E.
 
-After 1–3, SLO-1a/1b/2 are computable and the calibration window (Track 1.2) can
-start with all of J1 in it.
+Step 0 matters for scheduling: the calibration window (Track 1.2) does not have to
+wait for steps 1–3 to begin.
 
 ---
 
@@ -361,6 +385,7 @@ advisory completeness".
 
 ## 7. Sibling documents
 
+- [`slo-measurement-map.md`](slo-measurement-map.md) — every journey's path, hop by hop, and which instrument sits where
 - [`common/sli-slo.md`](common/sli-slo.md) §2, §8 — the SLO definitions and the roadmap line this spec implements
 - [`execution-priority-plan.md`](execution-priority-plan.md) — Track 1.1
 - [`extreme-scenarios.md`](extreme-scenarios.md) X9 — the delivery-budget scenario
