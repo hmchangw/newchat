@@ -7083,7 +7083,7 @@ func TestProcessRoomRename_BotRequester_Content(t *testing.T) {
 	store.EXPECT().GetUser(gomock.Any(), "helper.bot").
 		Return(&model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"}, nil)
 	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
 
 	var published []publishedMsg
@@ -7115,7 +7115,7 @@ func TestProcessRoomRename_PublishesRoomRenamedEvent(t *testing.T) {
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
 
 	var roomEvts [][]byte
@@ -7161,7 +7161,7 @@ func TestProcessRoomRename_PublishesInternalSearchFeed(t *testing.T) {
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
 
 	var feed [][]byte
@@ -7199,15 +7199,12 @@ func TestProcessRoomRename_HappyPathNoRemoteSites(t *testing.T) {
 	const roomID, newName = "r1", "renamed"
 	requestID := testRequestID
 
-	subs := []model.Subscription{
-		{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: roomID},
-		{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: roomID},
-	}
+	accounts := []string{"alice", "bob"}
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(subs, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(accounts, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
 		{Account: "alice", SiteID: "site-a"}, {Account: "bob", SiteID: "site-a"},
 	}, nil)
@@ -7245,15 +7242,12 @@ func TestProcessRoomRename_HappyPathWithRemoteSite(t *testing.T) {
 	requestID := testRequestID
 	ts := int64(1700000000000)
 
-	subs := []model.Subscription{
-		{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: roomID},
-		{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: roomID},
-	}
+	accounts := []string{"alice", "bob"}
 
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(subs, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(accounts, nil)
 	// Bob is on a remote site.
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
 		{Account: "alice", SiteID: "site-a"},
@@ -7319,8 +7313,8 @@ func TestProcessRoomRename_ErrorThenOkRetrySequence(t *testing.T) {
 	store.EXPECT().UpdateRoomName(gomock.Any(), "r1", "x").Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), "r1", "x", gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	// Empty subs → accounts is empty → findRemoteSitesForAccounts short-circuits (no FindUsersByAccounts call).
-	store.EXPECT().ListByRoom(gomock.Any(), "r1").Return([]model.Subscription{}, nil)
+	// Empty accounts → findRemoteSitesForAccounts short-circuits (no FindUsersByAccounts call).
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), "r1").Return([]string{}, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1"}, nil)
 
 	var asyncResults []model.AsyncJobResult
@@ -7360,7 +7354,7 @@ func newRoomRenameRoutingFixture(t *testing.T, crossSite bool) (*Handler, *MockS
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID, CrossSite: ptrBool(crossSite)}, nil)
 
 	var roomEvts [][]byte
@@ -7442,7 +7436,7 @@ func TestProcessRoomRename_GetRoomFails_FallsBackToGlobal(t *testing.T) {
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(nil, errors.New("mongo down"))
 
 	var roomEvts []string
@@ -8141,4 +8135,35 @@ func TestProcessCreateRoom_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
 	assert.Equal(t, model.RoomTypeBotDM, byAccount["alice"].RoomType)
 	assert.False(t, byAccount["alice"].IsSubscribed,
 		"only setAppSubscription initiated by Alice may set isSubscribed")
+}
+
+// Rename only needs member accounts for the cross-site fan-out, so it must use
+// the projected GetSubscriptionAccounts rather than reading every full
+// subscription document in the room (a 5k-member rename otherwise ships 5k
+// documents to extract two string fields).
+func TestProcessRoomRename_UsesProjectedAccountsQuery(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store := NewMockSubscriptionStore(ctrl)
+
+	const roomID, newName = "r1", "renamed"
+
+	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	// The projected read — and no ListByRoom expectation, so a full-document
+	// read fails the test as an unexpected call.
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{"alice", "bob"}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
+		{Account: "alice", SiteID: "site-a"}, {Account: "bob", SiteID: "site-a"},
+	}, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
+
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, _ string, _ []byte, _ string) error { return nil }}
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	body, _ := json.Marshal(model.RenameRoomRequest{
+		RoomID: roomID, NewName: newName, Account: "alice", Timestamp: time.Now().UTC().UnixMilli(),
+	})
+
+	require.NoError(t, h.processRoomRename(ctx, body))
 }
