@@ -329,3 +329,154 @@ swapped by tests (`presence_test.go:34-36`).
 6. **`low`** — Split `HandleMessage` into audience-building, gating, and batch-emitting helpers.
 7. **`low`** — Mark `NATS_URL`/`MONGO_URI`/`VALKEY_ADDRS` `required` and route the ROOMS binding
    through `stream.Resolve`.
+
+---
+
+# Chapter 4 — Test coverage
+
+**Score: 1 / 5**
+
+Scored mechanically per CLAUDE.md Section 4: total coverage 55.6% is below 60%, which
+mandates a `critical` finding and floors the dimension at 1.
+
+**This score materially understates the suite's substantive quality**, and the report would
+be misleading without saying so plainly. On qualitative merit — table-driven structure, test
+independence, error-path depth, integration-suite compliance — this is a 4/5 suite. The
+number is dragged down almost entirely by untested wiring in `func main()`, and the fix is
+the same store-extraction that Chapters 3 and 5 call for on independent grounds.
+
+## Measurements
+
+`make test SERVICE=notification-worker` → **PASS** (`go test -race ./notification-worker/...`,
+ok, 3.15s). No failures.
+
+**Total: 55.6% of statements** (668 statements, 296 uncovered). Independently re-run and
+confirmed.
+
+`make generate` → **no diff**. Mocks are not stale. This service has no `//go:generate`
+directives at all; it uses hand-written stubs rather than mockgen. Working tree verified
+identical to its pre-audit state afterward.
+
+### Worst-covered functions
+
+| Function | Coverage | Statements |
+|---|---|---|
+| `main.go:180 main` | 0.0% | 184 |
+| `main.go:88 (*mongoMemberLoader).Load` | 0.0% | ~26 |
+| `main.go:145 fillHomeSites` | 0.0% | ~14 |
+| `threads.go:33 (*mongoThreadFollowers).Lookup` | 0.0% | 14 |
+| `usersettings.go:115 appendChunk` | 0.0% | ~14 |
+| `threads.go:29 newMongoThreadFollowers` | 0.0% | 1 |
+| `presence.go:175 (*natsPresenceRequester).Request` | 0.0% | 4 |
+| `emit.go:82 (*jsPublisher).PublishMsg` | 0.0% | 3 |
+| `pretouch.go:19 pretouchJSON` | 0.0% | 1 |
+| `usersettings.go:91 (*mongoUserSettings).Snapshot` | 30.0% | — |
+| `members.go:78 Invalidate` | 50.0% | — |
+| `presence.go:47 newBulkPresenceSource` | 60.0% | — |
+| `handler.go:403 shortRoomType` | 75.0% | — |
+
+### Coverage decomposition
+
+Context, not an excuse:
+
+- `func main()` alone is 184 statements — **27.5% of the entire package** — and is untestable
+  as written. Excluding it, coverage is **76.9%**.
+- **Docker was unavailable in the audit environment**, so the `//go:build integration` suite
+  could not run. It demonstrably covers `Lookup`, `appendChunk`, `Load`, and `fillHomeSites`
+  (~77 further statements), which would put non-`main()` coverage near **93%**.
+- `handler.go` — the actual business logic — is at **97.4%** on unit tests alone.
+
+The 80% floor is still missed on the measured figure, and the remedy is structural rather
+than a matter of writing more tests against `main()`.
+
+## Findings
+
+### `critical` — Coverage below repo minimum 80%, currently 55.6%
+
+Driven by `notification-worker/main.go:180`, an untestable 184-statement `main()` that embeds
+real logic: the invalidation goroutine's decode / drop-on-full / ack path, the migration-header
+skip, the semaphore worker loop, and nine-step shutdown ordering.
+
+### `high` — `GetMembers` error path has no test
+
+`handler.go:126`: the `GetMembers` error → NAK branch is entirely uncovered.
+`stubMembers.GetMembers` (`handler_test.go:39`) unconditionally returns `nil`, so no fixture
+can drive the failure. This is the redeliver-vs-drop decision for the service's hottest
+dependency.
+
+### `medium` — Empty-member-list early return untested
+
+`handler.go:129`. CLAUDE.md Section 4 names empty collections explicitly as a required edge case.
+
+### `medium` — `isRestricted` nil-parent branch uncovered
+
+`handler.go:395`: the `parentCreatedAt == nil` branch ("suppress, not leak") is the fail-closed
+guard against leaking restricted history to a later-joining member, and nothing exercises it.
+
+### `medium` — Several fail-open paths uncovered
+
+`presence.go:94` (malformed presence reply / `sonic.Unmarshal` error) and `members.go:58/61/79`
+(loader error inside singleflight, cache-`Set` failure, `Invalidate` failure) are all uncovered.
+
+### `low` — Embedded NATS server inside the unit suite
+
+`parent_fetcher_test.go:25` `startTestNATS` boots an in-process `nats-server`, also used by
+`badge_client_test.go`. CLAUDE.md Section 4 says "Never connect to real … NATS … in unit tests."
+Defensible (embedded, no container) but it binds a port and slows the default target.
+
+### `low` — Test-only mutable globals
+
+`presence.go:127-135`: `isDND`/`isPresenting` are package-level vars existing purely as a test
+seam, mutated by `presence_test.go:33-49`. Restoration via `t.Cleanup` is correct and no test
+calls `t.Parallel()`, so it is safe today — but it becomes a data race the moment anyone
+parallelizes.
+
+### `low` — Minor uncovered branches
+
+`handler.go:407` (`RoomTypeDiscussion` → `"p"`) and `handler.go:109` (non-`created` event
+backstop).
+
+### `nitpick` — `pretouchJSON` left at 0%
+
+`pretouch_test.go:14` iterates `pretouchTypes` directly instead of calling `pretouchJSON()`.
+
+### `nitpick` — Wall-clock dependence in a test
+
+`members_test.go:118` uses a 50 ms `fakeLoader.delay` to widen the singleflight race window.
+The synchronization itself is correct (`sync.WaitGroup`), so this is not a Section 3 violation,
+but it is timing-dependent.
+
+## Strengths worth recording
+
+122 test functions; heavy table-driven use with descriptive subtest names (`TestIsNotifiable`,
+`TestHandle_SystemMessageProducesNoPush`, `TestBuildConsumerConfig`); every stub is
+per-test-constructed with mutex-guarded recorders — no shared fixtures, no order dependence;
+`-race` on both targets. The integration suite is textbook-compliant: `//go:build integration`,
+`package main`, `TestMain(m) → testutil.RunTests`, **all** containers from `pkg/testutil` with
+`FlushValkey` cleanup, and zero inline `testcontainers.GenericContainer`. Error-path and
+fail-open coverage is strong (`TestHandle_SettingsErrorFailsOpen`,
+`TestBulkPresence_ErrorResponseLoggedAndFailOpen`, `TestHandle_MentionPartialResolutionOnError`,
+`TestCachedMemberLookup_LeaderCancelDoesNotPoisonWaiters`). TDD signals are genuine — production
+comments cite the tests that pin their behaviour by name (`handler.go:229` references
+`TestHandle_SettingsFetchedOnlyForSurvivingCandidates`).
+
+## Recommendations
+
+1. **`high`** — Extract `main()`'s logic into testable units: `runInvalidationLoop(ctx, iter, ch)`,
+   `newInvalidationWorker`, and a `wireHandler(cfg, deps) *Handler`. Leaving `main()` as ~30 lines
+   of `os.Exit` glue moves total coverage from 55.6% to roughly 90% *and* puts the drop-on-full
+   invalidation queue and migration-skip under test.
+2. **`high`** — Add an `err` field to `stubMembers` (`handler_test.go:32`) and a
+   `TestHandle_MemberFetchError_NAKs` asserting `HandleMessage` returns a non-`Permanent` error,
+   mirroring the existing `TestHandle_ThreadFollowersError_NAKs`.
+3. **`medium`** — Add `TestHandle_EmptyMemberList_NoPush` and a direct table test for `isRestricted`
+   covering `parentCreatedAt == nil`, equal, and after boundaries.
+4. **`medium`** — Enforce the floor in CI with a per-package `go tool cover -func` gate, configured
+   to exclude `main()` (or to track `handler.go`/`pkg` at 90%) so the metric measures logic rather
+   than wiring.
+5. **`low`** — Add `TestBulkPresence_MalformedReplyFailsOpen` via the existing `rawReply` hook, and
+   a `newBulkPresenceSource` defaults test for `batchSize <= 0` / `timeout <= 0`.
+6. **`low`** — Replace the `isDND`/`isPresenting` globals with a `presenceFlags` field on
+   `HandlerDeps` (nil → inert), removing the seam from production code and unblocking `t.Parallel()`.
+7. **`nitpick`** — Call `pretouchJSON()` from `TestPretouch_TypesCompile`, and pin
+   `shortRoomType(RoomTypeDiscussion) == "p"`.
