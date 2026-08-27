@@ -382,3 +382,55 @@ Genuinely strong for a read service. Every page size is clamped (`internal/cassr
 5. **`medium`** — Shard the readcache LRUs (for example 16 shards keyed by an FNV hash of the key) or move to a striped map, and raise the 10s TTLs so the cleanup ticker is not firing every 100ms.
 6. **`medium`** — Add a narrow `SELECT message_id, pinned_at FROM pinned_messages_by_room WHERE room_id = ? LIMIT maxPinnedPerRoom+N` for `enforcePinLimit`, instead of reading the full partition with all 24 columns.
 7. **`low`** — Apply the page budget to `LoadNextMessages`, `GetThreadMessages`, `ListPinnedMessages` and `GetMessagesByIDs`, and add `WarnMissingIndexes` for `subscriptions` and `apps` at startup.
+
+---
+
+# 7. Prioritized action list
+
+Ordered by severity first, then by impact ÷ effort. Items found by more than one expert are marked; that convergence is part of why they rank where they do.
+
+### 1. `critical` — Enforce the 80% coverage floor in CI, then close the `cassrepo`/`mongorepo` gap
+**Dimension:** test coverage · **Evidence:** `history-service/deploy/azure-pipelines.yml:44`, `Makefile:141-152`, `internal/mongorepo/pipelines.go:10,18,25,136`, `internal/cassrepo/write.go:116`, `internal/cassrepo/decrypt.go:21,26`
+**Why:** Measured coverage is 53.9% against a mandatory 80% floor, and the profile CI already writes is never read — so nothing catches further drift. The uncovered code is not incidental: `blankQuotedBody` exists solely to stop plaintext reaching an unencrypted column, and `decryptIfNeeded`'s cipher-disabled branch is a security-visible error path. Both are pure or seam-injectable and testable with no container. Highest impact ÷ effort on the list: wiring `tools/coveragecheck -min 80` is a few lines, and `pipelines_test.go` unlocks 144 statements of pure `bson` builders with no Docker.
+
+### 2. `high` — Make canonical mutation events durable
+**Dimension:** architecture + integration (two experts) · **Evidence:** `internal/service/messages.go:729-740`, reached from `messages.go:556,636`, `pin.go:139,181`, `reactions.go:114`
+**Why:** The only availability-affecting correctness bug in the service. Edits, deletes, pins and reactions commit to Cassandra and then publish on the *request* context with failures swallowed by a `slog.Warn`. A NATS blip — or simply a request that already spent its 10s budget in Cassandra — leaves the mutation persisted but never fanned out to clients and never reindexed by `search-sync-worker`, permanently, while the client is told it succeeded. The repo already owns the fix pattern (`pkg/outbox` + `outbox-worker`), and even the interim step (`context.WithoutCancel` + bounded retry + a failure metric) converts silent permanent divergence into an observable, retried one.
+
+### 3. `high` — Add `bootstrap.go` + `Bootstrap` config + `BOOTSTRAP_STREAMS`
+**Dimension:** architecture + integration + maintainability (three experts) · **Evidence:** `internal/config/config.go` (no `Bootstrap` field), no `history-service/bootstrap.go`, `deploy/docker-compose.yml` (no `BOOTSTRAP_STREAMS`); precedent at `room-service/bootstrap.go:44-59`
+**Why:** Found independently by three of six experts. Small, well-precedented change (11 siblings have one) that buys a startup fail-fast on a misprovisioned MESSAGES-CANONICAL stream — which today manifests as item 2's silent warn on every mutation instead — and makes the service runnable against a fresh dev NATS.
+
+### 4. `high` — Fix the two Mongo aggregation shapes that don't scale with room size
+**Dimension:** performance + code quality (two experts) · **Evidence:** `internal/mongorepo/pipelines.go:136-161`, `internal/service/threads.go:319-332`, `pkg/mongoutil/collection.go:93-106`, `pkg/mongoutil/pagination.go:33-43`
+**Why:** `unreadThreadsPipeline` issues one correlated `$lookup` per thread room in the room *before* paging, so a busy room's cost is O(threads) per request regardless of `limit=20`. `AggregatePaged`'s `$facet` blocks index sort-limit pushdown and hard-fails at the 100 MB stage limit with no `allowDiskUse`, and `Offset` is uncapped so a client can buy an O(offset) skip. All three fixes have in-repo counterexamples to copy: `userThreadSubscriptionsPipeline` in the same file, and `AggregatePagedHasMore` at `collection.go:142`.
+
+### 5. `high` — Project `GetSubscription`
+**Dimension:** code quality + integration (two experts) · **Evidence:** `internal/mongorepo/subscription.go:28`, consumer at `internal/service/pin.go:38`
+**Why:** A one-line change with the best effort ratio on the list. The only projection-free read in the service, on the pin/unpin hot path, deliberately uncached, pulling `model.Subscription`'s unbounded `ThreadUnread []string` plus ~25 other fields to read three. Every sibling read in the same file already does it correctly.
+
+### 6. `high` — Collapse the seven hand-rolled canonical-event mappings into one
+**Dimension:** maintainability · **Evidence:** `internal/service/reactions.go:125` (the existing complete mapper), versus `messages.go:531,613`, `migration.go:59,117`, `pin.go:125,168`
+**Why:** The drift is not hypothetical — it has already happened. `messages.go:613` emits `EventDeleted` with `UserID`/`UserAccount`; `migration.go:117` emits the same event type without them, so consumers see two shapes for one event. `UserDisplayName` is set only on the reaction path. A complete mapper already exists and is used by exactly one of seven sites; routing the other six through it is mechanical and removes a silent-failure class.
+
+### 7. `high` — Guard the four hand-maintained Cassandra column lists with a reflection test
+**Dimension:** maintainability · **Evidence:** `internal/cassrepo/messages_by_room.go:13`, `pin.go:33`, `thread_messages.go:14`, `write.go:147`, scanner at `utils.go:125`
+**Why:** `buildScanValues` errors on an *extra* column but silently zero-values a *forgotten* one, so adding a message field is a seven-file change whose failure mode is silent data loss with no test coverage (the only reference from tests is a benchmark). A single table-driven test asserting each column constant against `cqlFieldIndex(reflect.TypeOf(models.Message{}))` closes it.
+
+### 8. `high` — Stop encoding every page twice
+**Dimension:** performance · **Evidence:** `pkg/pagefit/pagefit.go:144-157`, `internal/service/utils.go:210-211,260-261`, default enabled at `cmd/main.go:213-219`
+**Why:** Pure CPU waste on the single hottest path in a read service — reflective `json.Encode` for sizing, then a second marshal for the reply, three passes when `warnIfStillOversize` fires, and it runs even for a five-row page. The interim guard (skip sizing when `len(items) * knownMaxRowBytes < budget`) is cheap; returning the encoded bytes from `pagefit` is the real fix.
+
+### 9. `medium` — Restore log discipline: five context-less `slog` calls, one log-and-return, one missing `WithLogValues`
+**Dimension:** code quality · **Evidence:** `internal/service/messages.go:402,732,737`, `threads.go:370`, `internal/cassrepo/utils.go:162`; `reactions.go:58-59`; `reactions.go:25-27`
+**Why:** Grouped because they are one afternoon's work and they all degrade incident triage: bare `slog.Warn` bypasses the `logctx` handler wired at `cmd/main.go:85`, so those lines carry no trace or request ID — including `messages.go:732/737`, the near-verbatim twin of `migration.go:139/145` which *does* carry one. `reactions.go:58` double-logs every failure, and `ReactMessage` is the one handler of 16 whose boundary error lines land without account or room. A `forbidigo` rule banning non-`Context` `slog` in `internal/service` and `internal/cassrepo` prevents regression.
+
+### 10. `medium` — Flatten `cmd/` + `internal/` to the sanctioned layout
+**Dimension:** architecture + maintainability (two experts; the architecture expert tagged it `critical`) · **Evidence:** `history-service/cmd/main.go`, `history-service/internal/*`, `Makefile:169-180`, `deploy/Dockerfile:7`, hand-copied wire structs at `room-service/reader_history.go:48`, `message-gatekeeper/fetcher_history.go:37`, `broadcast-worker/parent_fetcher.go:36`, `tools/loadgen/history_generator.go:100`
+**Why:** Ranked here rather than at the top deliberately, and the demotion is stated rather than quiet: this is the only `cmd`/`internal` pair among 40+ services and it violates `CLAUDE.md` §1, but it carries **no runtime risk**. The real costs are a Makefile special case in two targets and four sibling services hand-copying wire structs they cannot import — genuine drift surfaces, but bounded ones. Best done as its own mechanical PR (no import cycles exist today), paired with promoting the client-facing structs from `internal/models` into `pkg/model`, ideally *before* items 6 and 7 so those land in their final home.
+
+---
+
+## Verdict
+
+`history-service` is close to production-ready and reads like code written by people who know the codebase's conventions. Item 2 is the one finding that can lose user-visible data delivery in normal operation, and item 1 is the one that would let the next such bug ship unnoticed; between them they account for both `critical`/`high` clusters. Items 3–8 are well-precedented changes with in-repo counterexamples to copy. Nothing here requires a redesign.
