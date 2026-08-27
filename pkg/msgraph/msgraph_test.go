@@ -1,11 +1,13 @@
 package msgraph
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1270,4 +1272,63 @@ func TestApplyProxy_RejectsPortWithoutHostname(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// TestApplyProxy_WarnsOnUnencryptedCredentialHop covers CWE-319: Basic and the
+// RFC 1929 sub-negotiation both travel before any TLS to the target, so an
+// http/socks5 proxy hands the credentials to anyone on the path. Only an https
+// proxy encrypts the hop carrying them. Warned rather than rejected — corporate
+// proxies are overwhelmingly plain http, and refusing them would break the
+// deployment this setting exists for — so the warning is the whole mitigation
+// and must actually fire, without quoting the credentials.
+func TestApplyProxy_WarnsOnUnencryptedCredentialHop(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	tests := []struct {
+		name     string
+		proxy    string
+		wantWarn bool
+	}{
+		{name: "http warns", proxy: "http://proxy.corp:8080", wantWarn: true},
+		{name: "socks5 warns", proxy: "socks5://proxy.corp:1080", wantWarn: true},
+		{name: "socks5h warns", proxy: "socks5h://proxy.corp:1080", wantWarn: true},
+		{name: "https is silent", proxy: "https://proxy.corp:8443", wantWarn: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      tc.proxy,
+				ProxyUsername: "proxyuser",
+				ProxyPassword: password,
+			})
+			require.NoError(t, err)
+
+			logged := buf.String()
+			assert.NotContains(t, logged, password, "the warning must never carry the password")
+			assert.NotContains(t, logged, "proxyuser", "the warning must never carry the username")
+			if tc.wantWarn {
+				assert.Contains(t, logged, "unencrypted", "an unencrypted credential hop must be warned about")
+			} else {
+				assert.Empty(t, logged, "an https proxy encrypts the credential hop, so nothing to warn about")
+			}
+		})
+	}
+}
+
+// TestApplyProxy_NoWarnWithoutCredentials keeps the warning tied to credentials:
+// an unauthenticated http proxy exposes nothing and must stay silent.
+func TestApplyProxy_NoWarnWithoutCredentials(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"})
+	require.NoError(t, err)
+	assert.Empty(t, buf.String(), "no credentials means no exposure to warn about")
 }

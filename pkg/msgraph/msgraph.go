@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -147,7 +148,9 @@ type Config struct {
 	// percent-encoding — the reason they are separate settings. Rejected at
 	// construction: either without ProxyURL, a password without a username, and
 	// a username containing ':' for a Basic (http/https) proxy.
-	// ProxyPassword is a secret: never log it.
+	// ProxyPassword is a secret: never log it. It also reaches the proxy
+	// unencrypted on every scheme but https (CWE-319) — applyProxy warns once at
+	// startup; see docs/msgraph-client.md.
 	ProxyUsername string
 	ProxyPassword string
 	// UserAgent overrides the User-Agent header sent on every Graph request. When
@@ -417,6 +420,15 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 		// where a colon is ordinary data.
 		if basicAuthProxySchemes[proxyURL.Scheme] && strings.Contains(username, ":") {
 			return fmt.Errorf("invalid graph proxy username for a %s proxy: must not contain ':'", proxyURL.Scheme)
+		}
+		// CWE-319: Basic and the RFC 1929 sub-negotiation both travel before any
+		// TLS to the target, so every scheme but https hands these credentials to
+		// anyone on the path to the proxy. Warned rather than rejected — corporate
+		// proxies are overwhelmingly plain http, and refusing them here would break
+		// the deployments this setting exists for. Never name the credentials.
+		if proxyURL.Scheme != "https" {
+			slog.Warn("graph proxy credentials are sent unencrypted to the proxy; only an https proxy encrypts that hop",
+				"scheme", proxyURL.Scheme, "proxyHost", proxyURL.Hostname())
 		}
 	}
 	tr := mutableTransport(hc)

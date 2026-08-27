@@ -73,6 +73,18 @@ to authenticate to the proxy. How they travel depends on the scheme:
 - **`socks5` / `socks5h`** — the RFC 1929 username/password sub-negotiation
   during the SOCKS handshake. No HTTP proxy-auth header is sent.
 
+> **The credential hop is unencrypted unless the proxy scheme is `https`**
+> (CWE-319). Basic is only base64, and RFC 1929 sends the password in the clear;
+> both travel to the proxy *before* the TLS tunnel to Graph exists, so anyone on
+> the path to the proxy can read them. The TLS that protects the Graph traffic
+> itself starts inside that tunnel and does not cover this.
+>
+> The client warns once at startup rather than refusing, because corporate
+> proxies are overwhelmingly plain `http` and refusing would block the very
+> deployments this setting is for. Treat it as a decision for whoever runs the
+> proxy: an `https://` proxy URL closes it; a trusted network segment is the
+> usual reason to accept it. The warning names the scheme and proxy host only.
+
 Credentials embedded in the URL (`http://user:pass@proxy:8080`) still work and
 stay supported, but the separate vars are preferred:
 
