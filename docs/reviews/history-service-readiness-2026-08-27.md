@@ -224,3 +224,56 @@ The raw percentage understates this suite, and the recommendations are aimed at 
 5. **`medium`** — Cover `RegisterHandlers` (`service.go:221`) with a fake `natsrouter.Router` capturing registered subjects, asserted against the expected `subject.*Pattern` set.
 6. **`medium`** — Cover `PreviewCache.Invalidate` / `ttlCache.remove` (`readcache.go:285`, `readcache.go:63`): populate, invalidate, assert the next `Get` re-loads.
 7. **`low`** — De-flake the two timing tests: inject a clock into `ttlCache` (or assert only "at least one reload"), and replace the `Sleep(10ms)` in `messages_by_id_test.go:97` with a channel barrier that releases once `limit` fetches are in flight.
+
+---
+
+# 4. Maintainability — 4 / 5
+
+Production code is only about 6.1k LOC — the 22.7k total is 15.6k of tests. There are no god-files and no god-functions, packages are cohesive, and comments are almost uniformly WHY-focused with issue references (`internal/service/messages.go:660-680` on #226, `rooms.go:122-129` on #291). The debts below are specific and fixable, not structural rot.
+
+**Positive signals worth preserving:** `docs/client-api.md` is in sync — all 13 client-facing subjects are documented (`:2854-2866`), including the `meta`/`RoomMeta` hint (`:2875-2889`) and `sizeLimited` semantics. `internal/service/service.go:21-140` is a genuine consumer-defined interface set with compile-time assertions at `:256-259`, and `mongorepo` justifies its `$lookup` inline (`pipelines.go:39`) as §6 requires. Dead code is near-zero, and `previewWalk`'s state machine (`rooms.go:177-204`) correctly makes "degraded" the zero value.
+
+## Findings
+
+### `high` — The `cmd/` + `internal/` layout has already leaked into shared tooling
+`CLAUDE.md` §1 permits `config/`, `models/`, `mongorepo/`, `service/`, `service/mocks/` *directly under the service directory*, as `user-service` does — never `cmd/` or `internal/`. `Makefile:169-179` now carries a hardcoded `ifeq ($(SERVICE),history-service)` branch in *both* the Windows and Unix `build` targets solely because this is the only service with a `cmd/`, and `deploy/Dockerfile:7` builds `./history-service/cmd/`. Every future repo-wide script pays this tax. Corroborates the architecture chapter's finding from the tooling side.
+
+### `high` — Canonical-event mapping duplicated seven times, with drift already observed
+A complete `cassandra.Message → pkgmodel.Message` mapper already exists at `internal/service/reactions.go:125` (`toWireMessage`) and is used by exactly **one** publish site. The other six hand-roll partial subsets: `messages.go:531`, `messages.go:613`, `migration.go:59`, `migration.go:117`, `pin.go:125`, `pin.go:168`. The drift is already visible — `messages.go:613` (user delete) carries `UserID`/`UserAccount`, while `migration.go:117` (migration delete) omits both, so downstream consumers see two different shapes for `EventDeleted`. `UserDisplayName` is populated only on the reaction path. Adding a field the canonical event must carry means auditing seven sites, and a miss is silent.
+
+### `high` — Cassandra column lists are hand-maintained in four places with no coverage guard
+`baseColumns` (`internal/cassrepo/messages_by_room.go:13`), `pinnedColumns` (`pin.go:33`), `threadMessageColumns` (`thread_messages.go:14`), plus an ad-hoc `SELECT` at `write.go:147`. `buildScanValues` (`utils.go:125`) errors only on an *extra* column — a **forgotten** column leaves the field zero-valued with no error at all. The only reference to `baseColumns` from tests is a benchmark (`utils_test.go:19`). Adding a message field is therefore a seven-file change (`pkg/model/cassandra`, three column constants, the init DDL, `docs/cassandra_message_model.md`) whose failure mode is silent data loss.
+
+### `medium` — `internal/readcache` re-implements `pkg/roommetacache`'s L1
+`internal/readcache/readcache.go:27` and `pkg/roommetacache/roommetacache.go:34` both declare `const fetchTimeout = 10 * time.Second` under the *same comment text*, both wrap `lru.NewLRU` + `singleflight` + `cachemetrics`, both re-check under singleflight, and both detach via `context.WithoutCancel`. The generic primitive belongs in `pkg/`; two copies means two places to fix a singleflight bug.
+
+### `medium` — Reusable Cassandra plumbing is locked inside `internal/`
+`Cursor`, `QueryBuilder`, `structScan` and `cqlFieldIndex` (`internal/cassrepo/utils.go:13-186`) are service-agnostic and solve exactly the problem `data-migration/es-index-migrator/messagesource_cassandra.go:81` still suffers — a six-plus-argument positional `iter.Scan`. `pkg/cassutil` exposes only `Connect`/`Close`.
+
+### `medium` — Split config validation, plus one dead field
+`config.validate()` (`internal/config/config.go:122`) returns errors; `cmd/main.go:38` `checkConfig` duplicates the job with `os.Exit`. A new integer knob must be added in both files or it silently goes unvalidated. Related: `MetricsAddr` (`config/config.go:48`) is dead — zero readers.
+
+### `medium` — No `bootstrap.go` or `Bootstrap` config, unlike 11 sibling services
+`history-service` publishes to MESSAGES-CANONICAL but has no `BOOTSTRAP_STREAMS` in config or in `deploy/docker-compose.yml`, so it cannot stand up against a fresh NATS in dev — the stated purpose of the convention in §6. Third independent sighting of this gap.
+
+### `low` — Copy-pasted limit clamp, five times
+`internal/service/messages.go:56-61`, `messages.go:132-137`, `messages.go:192-197`, `threads.go:76-81`, `threads.go:171-176`. Separately, `threads.go:94-102` re-derives the ceiling and floor inline instead of going through `walkBounds` (`room_times.go:42`).
+
+### `low` — Production/test file mapping is broken, and one 3k-line test god-file
+`internal/service/messages_test.go` holds **130** test functions in 2,999 lines, while `pagefit_test.go`, `preview_walk_test.go`, `preview_repair_test.go`, `appname_test.go` and `threadlist_test.go` test code that lives in `utils.go`/`rooms.go`/`messages.go`/`reactions.go`. "Where does a test for X go?" has no answer. Relatedly, `toWireMessage`/`toWireParticipant`/`botAwareDisplayName` — display-name concerns — live in `reactions.go`. And `cmd/` has zero test files, so `checkConfig` is untested despite §4's per-package 80% requirement.
+
+### `nitpick` — Doc comment attached to the wrong function
+`internal/readcache/readcache.go:56-62`: the `getOrLoad` doc block ends with `// remove drops key…` and is followed by `func remove` at `:63`, then `getOrLoad` at `:65`. godoc attributes the whole block to `remove`, leaving `getOrLoad` undocumented.
+
+### `nitpick` — Cross-file invariants held by comment only
+`maxContentBytes = 20 * 1024` is duplicated at `internal/service/messages.go:30` and `message-gatekeeper/handler.go:32` ("mirrors message-gatekeeper's content cap"). `rooms.go:21-22` says "mirrors `maxGetByIDsBatchSize`" and "mirrors `cassrepo.maxConcurrentIDReads`" — the latter is unexported and therefore unreferenceable. `rooms.go:127` `walkBoundsFromRow` is a pass-through returning two struct fields.
+
+## Recommendations
+
+1. **`high`** — Extract `canonicalMessage(msg *models.Message, updatedAt *time.Time) pkgmodel.Message` from `reactions.go:125` into a new `internal/service/canonical.go`, and route all seven publish sites through it. Reconcile the `migration.go:117` versus `messages.go:613` field divergence deliberately rather than inheriting it.
+2. **`high`** — Add a table-driven test asserting each of the three column constants is a subset of `cqlFieldIndex(reflect.TypeOf(models.Message{}))` *and* covers every non-`cql:"-"` field the table persists. This is the cheapest available guard against silent field loss.
+3. **`high`** — Flatten to the sanctioned layout (`main.go` at `history-service/`, packages as `config/ models/ mongorepo/ cassrepo/ service/ …`) and delete the `Makefile:169-179` special case.
+4. **`medium`** — Promote `Cursor`/`QueryBuilder`/`structScan` to `pkg/cassutil`, and the LRU+TTL+singleflight+metrics primitive to a shared `pkg` package consumed by both `readcache` and `roommetacache`.
+5. **`medium`** — Fold `cmd/main.go:38 checkConfig` into `config.validate()`, delete `MetricsAddr`, and add `config/` tests covering the merged positive-integer checks.
+6. **`medium`** — Add `bootstrap.go` plus `Bootstrap` config plus `BOOTSTRAP_STREAMS=true` in `deploy/docker-compose.yml`, matching the 11 sibling services.
+7. **`low`** — Add a `clampLimit(req, def int) int` helper to replace the five clamp copies; split `internal/service/messages_test.go` to mirror the production files; move `toWireMessage`/`toWireParticipant`/`botAwareDisplayName` out of `reactions.go` into a `wire.go`; and fix the comment placement at `readcache.go:56-65`.
