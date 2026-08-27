@@ -11,9 +11,30 @@
 
 | | |
 |---|---|
-| **Status** | Draft — for review |
+| **Status** | Draft — for review · **rev 2** (post-soak, post-failure-round-1) |
 | **Answers** | In what order do we run the load tests, and what has to be true first |
-| **Does NOT answer** | What "pass" means (§ sli-slo), how to ramp (§ capacity-test-plan), how to read a fault result (§ failure/) |
+| **Does NOT answer** | What "pass" means (§ sli-slo), how to ramp (§ capacity-test-plan), how to read a fault result (§ failure/), what the worst-case shapes are (§ extreme-scenarios) |
+
+## 0. Where we are
+
+| Done | Evidence it produced | What it did **not** produce |
+|---|---|---|
+| Cassandra Run A soak on staging (latest loadgen) | Schema/access patterns under sustained *realistic* load; ledger + observer evidence | No ceiling (non-destructive by decision D1/D8); no pathological shape; reads hit only run-generated, shallow, dense data (soak blind spot 11) |
+| Failure round 1 with the NATS / MongoDB / Cassandra teams (latest loadgen) | Per-dependency fault behaviour, recovery classification | No capacity number; no evidence for the silent-drop path X9 unless max-delivery advisories were collected |
+
+**So the remaining work is exactly the three gaps below**, plus the pre-production
+set in §3.5:
+
+1. **The SLI/SLO targets are unvalidated guesses.** They were set achievable-first
+   (sli-slo §0.2 calls for a 4–6 week calibration that has not started) and no run
+   has ever asserted against the production predicates, because the counters those
+   predicates read do not exist yet (§2, G4/G9).
+2. **No ceiling exists for anything.** Both completed programs are
+   non-destructive by design. Nothing has been ramped to a breach.
+3. **No extreme shape has been exercised.** See
+   [`extreme-scenarios.md`](extreme-scenarios.md) — ten code-derived worst cases,
+   two of which (X1 unbounded thread scan, X5 login storm) have no loadgen
+   coverage at all.
 
 ---
 
@@ -33,11 +54,11 @@ Three ordering rules fall out of that:
 1. **Cheap attribution first.** A `max-rps` ramp that names the
    first-saturating component costs ~30 minutes on a laptop stack and tells you
    which of the expensive staging runs is actually worth its window.
-2. **De-risk the expensive window before you book it.** The 3-day Cassandra
-   soak is the single most expensive item in the program; its harness
-   (evidence ledger, WAL, observers, at-rest DEK preflight) gets a short
-   local smoke run first, because a mechanism failure discovered on day 2 of
-   a staging soak costs the whole window.
+2. **A measurement gap outranks a measurement.** Rev 2's biggest change: with
+   the soak and the first failure round done, the binding constraint is no
+   longer "what should we run" but "what can we legitimately conclude". Shipping
+   the two missing counter sets (G4, G9) unblocks five of nine SLOs and is
+   cheaper than any staging run, so it moves ahead of every test.
 3. **A blocked item is scheduled as its gate, not as a test.** Elasticsearch
    capacity is not "later" — it is "after a run-scoped index with verified
    teardown exists". The gate is the schedulable unit.
@@ -50,9 +71,9 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 
 | Capability | State | Consequence for scheduling |
 |---|---|---|
-| loadgen `messages`/`thread`/`history`/`thread-read`/`room-read`/`read-receipt`/`login`/`search` ramps | **Exists** | Wave A can start today |
+| loadgen `messages`/`thread`/`history`/`thread-read`/`room-read`/`read-receipt`/`login`/`search` ramps | **Exists** | Track 2 needs no new tooling — only a breach run |
 | loadgen `soak` (Cassandra Run A + room/member/user/search/presence lanes, durable ledger) | **Exists** | Run A is implementation-ready; gated on environment only |
-| loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Wave A |
+| loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Track 2; `max-room-size --rooms-per-size=1` also serves 3.6 |
 | P1 — `rpc_server_duration_seconds` metrics middleware in `pkg/natsrouter` | **Absent** (no metrics middleware in `pkg/natsrouter/middleware.go`) | SLO-4/5 cannot be hard-gated from production counters; gate on loadgen L1 only. Also why `daily`'s `service_errors` verdict arm is permanently zero |
 | P2 — `messages_canonical_published_total`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` | **Absent** (no occurrence in the repo) | SLO-1a/1b/2 have **no enforceable server-side boundary**. Every J1 run this wave gates on loadgen L1 E2E correlation, which is a *different, downstream* boundary — record it as observational, never as "SLO-2 passed" |
 | `search_service_requests_total{kind,status}` | **Exists** | SLO-7 scorable (partial-failure only) |
@@ -65,90 +86,117 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 | Valkey run-scoped key namespace + expiry + verified cleanup | **Absent** | Blocks Valkey capacity execution (damage lands during the run, not at result time) |
 | Cross-site federation traffic in loadgen | **Absent** — single-site | SLO-9 unschedulable this round |
 | `PUSH_NOTIFICATION` recipient observer | **Absent** | SLO-6 unschedulable this round |
+| `pkg/threadcount` bound on the reply-count scan | **Absent** — full partition scan, `LIMIT`-less, 15 s timeout backstop (`count.go:33-45`) | Item 3.1. The soak plan documents a `Cap(99)`; a test sized from that doc is wrong by the whole thread length |
+| Enforced maximum thread length | **Absent** anywhere in the send path | I7's "max 500" is an assumption, so 3.1's partition is genuinely unbounded |
+| Deployed TWCS `compaction_window_size` == `MESSAGE_BUCKET_HOURS` (360) | **Unverified** — init DDL says 360, the TWCS migration says 72 | Item 3.5. Until checked, the completed soak's compaction and SSTables-per-read evidence is uninterpretable |
 
 ---
 
-## 3. The priority ladder
+## 3. The priority ladder (rev 2)
 
-`Env`: **L** = docker-local (`tools/loadgen/deploy`), **S** = staging.
-Ranks within a wave may run in parallel; waves are ordered by dependency.
+Four tracks. **T1 and T2 are sequential — you cannot validate an SLO you cannot
+measure, and you cannot report a ceiling against an SLO you have not validated.**
+T3 runs in parallel with both. T4 is the pre-production sweep.
 
-### Wave A — unblocked, runs today (docker-local)
+`Env`: **L** = docker-local, **S** = staging.
 
-Numbers are box-relative, not absolute (environments §1). The purpose is
-mechanism validation, bottleneck attribution, and a regression baseline.
+### Track 1 — Make the SLOs measurable, then calibrate them
 
-| # | Item | Question it answers | Driver | Cost | Pass / output |
-|---|---|---|---|---|---|
-| **A1** | **J1 send-path ceiling + bottleneck attribution** (T1-7, T1-4, T1-6) | Where does the whole send chain break, and which component saturates first? | `max-rps --workload=messages --preset=realistic --inject=frontdoor --steps=100,250,500,1k,2k,5k` | ~45 min | Largest all-signals-pass step + `BOTTLENECK:` line. **This output re-ranks everything below it** |
-| **A2** | **J1 fixed-load baseline at I1** | At the declared peak (100 msg/s), is latency in budget and is every durable's backlog flat? | `run --preset=realistic --rate=100`, then `daily --preset=daily-heavy` | ~30 min | `final_pending == 0`, `miss% ≈ 0`, error rate in budget. Becomes the regression reference |
-| **A3** | **Soak-harness smoke** | Does the evidence ledger, WAL, observer set and at-rest-DEK preflight actually work before we book the staging window? | `seed --workload=soak` → `soak` with `SOAK_RUN_DURATION=30m`, `SOAK_LEDGER_DIR` set → `teardown --workload=soak` | ~1 h | Dispatch ratio ≥95% per lane, zero `loadgen_failure_invalidations_total`, `unverified` under `max(3, 0.001×eligible)`, WAL flush p95 flat. **Prerequisite for B2/B3** |
-| **A4** | **Notification O(N) + broadcast fan-out** (T2-8, T2-9) | How large can a room get before notification-worker's per-message O(N) backs up? | `seed-botroom` → `max-room-size --preset=botroom-medium --rate=200` | ~1 h | `ANSWER: max room size = N` + first tripping signal. Run `--rooms-per-size=1` separately for the Cassandra hot-partition / Mongo room-doc contention probe |
-| **A5** | **Enter-channel / enter-thread read cost** (T2-10, SLO-4/5) | Does the bucket walk hold its latency bound, and how deep does it get? | `max-rps --workload=history` and `--workload=thread-read` on `history-medium`, then `history-large` | ~1 h | Per-endpoint p95/p99 + **bucket-walk depth** distribution. Compare blended (`history`) vs focused (`thread-read`) |
-| **A6** | **room-service aggregation reads** (T2-11) | Do the read-receipt / mark-as-read `$lookup` paths hold up? | `seed-roomread` → `max-rps --workload=room-read`; `seed --workload=read-receipt` → `max-rps --workload=read-receipt` | ~1 h | Max RPS per RPC; a knee well below the message path is a finding against the aggregation |
-| **A7** | **Concurrent-user ceiling** | How many daily-IM users does one site sustain, and what breaks first? | `seed PRESET=daily-heavy` → `daily --steps=1k,2k,5k,10k` | ~1.5 h | `ANSWER: N` + `Next limit:`. Note the two known fixture limitations (large-room gatekeeper rejects, dormant service-error arm) before reading it |
-| **A8** | **Presence capacity + reconnect storm** | Max concurrent online population; largest survivable reconnect storm | `presence-capacity --steps=10k,20k,50k`; `presence-storm --storm-mode=graceful` then `silent` | ~1.5 h | Max N held without false-offlines; largest fraction recovering within SLO |
-| **A9** | **Login (SLO-3) and search (SLO-7/8) client-side** | Do the two already-measurable SLOs hold under load? | `max-rps --workload=login`; then `--workload=search` **after** A1/A2 have produced indexable traffic | ~45 min | SLO-3 / SLO-7 / SLO-8 good-ratio columns. SLO-8 is client-side only until the `status` label lands |
-| **A10** | **Member-add pipeline** | Does the ROOMS → room-worker lane sustain rate, and does per-room cost grow with room size? | `seed-members PRESET=members-heavy` → `members-sustained RATE=1000`; `members-capacity --target-size=5000` on `members-capacity-xl` | ~1 h | `final_pending == 0` at rate; size-bucket latency table flat or explained |
-| **A11** | **o11y overhead A/B** | Does observability cost throughput or latency? | A1 repeated with `O11Y_ENABLED` on/off and a fixed `OTEL_TRACES_SAMPLER_ARG` | ~1 h | Delta in max RPS and p95. Required once per release |
+The targets are unvalidated because nothing has ever *measured* them, not because
+nobody looked. Calibration is a measurement problem before it is a judgement
+problem. Order matters here: 1.1 is a code change, 1.2 is observation, 1.3 is the
+decision.
 
-### Wave B — staging, gated on isolation and infra coordination
-
-| # | Item | Question | Driver | Gates | Cost |
-|---|---|---|---|---|---|
-| **B1** | **J1 SLO validation at expected load** (Run 1 Baseline) | Does the system meet its SLO predicates at 100 msg/s + 700 reads/s on production-like backends? | `run`/`daily` at I1, warm-up → send → settle | G1, G2, G4, G6 | half day |
-| **B2** | **Cassandra Run A — acute** (T1-1, phase 1) | Do the schema and access patterns hold under concurrent realistic load? | `soak` for a few hours | G1, G3, G5, A3 | ~1 day |
-| **B3** | **Mongo send-path write capacity** (T1-4, T1-5) | Where does the send-path write amplification (`UpdateRoomLastMessage`, `AdvanceSubscriptionLastSeen`, `SetSubscriptionMentions`) saturate Mongo? | `max-rps --workload=messages --preset=realistic` with `@all` mention share, asserting on Mongo L2/L3 | G1, G2 | ~1 day |
-| **B4** | **Cassandra Run A — endurance** (3 days) | Does compaction backlog, disk growth or latency drift over a multi-day window? | `soak` `SOAK_RUN_MODE=continuous` | B2 green, G5, multi-day window | 3 days + retention |
-
-### Wave C — failure campaigns (`failure/`), each under continuous soak traffic
-
-Run in a **separate** run from B4's evidence soak — a fault window inside the
-soak contaminates exactly the compaction/disk evidence the soak exists to
-produce. Ordered by dependency criticality (environments §6).
-
-| # | Item | Fault classes | Doc |
+| # | Item | Why it is first | Output |
 |---|---|---|---|
-| **C1** | NATS / JetStream | Leader loss, election, reconnect, slow consumer, recovery surge | [`failure/nats-jetstream.md`](failure/nats-jetstream.md) |
-| **C2** | MongoDB | Primary loss/election, majority loss, slow query, 2-min planned outage overlay | [`failure/mongodb.md`](failure/mongodb.md) §5 |
-| **C3** | Cassandra | Replica loss, LOCAL_QUORUM unavailable, slow coordinator, ambiguous write | [`failure/cassandra.md`](failure/cassandra.md) |
+| **1.1** | **Ship G4 (P2 J1 counters) and G9 (P1 natsrouter middleware)** | Five of nine SLOs (1a, 1b, 2, 4, 5) have **no production counter today**. Every "validation" run before this lands measures loadgen's own downstream boundary and calls it an SLO. This is a ~2-service code change, not a test | SLO-1a/1b/2/4/5 become computable |
+| **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
+| **1.3** | **Set targets from 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate. Right now they are round numbers | Approved SLO targets + `Revisit date` filled in |
+| **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can hard-gate instead of eyeballing |
+| **1.5** | **Re-run the completed soak + failure round under assertion mode** | The two finished programs produced evidence but no SLO verdict. Replaying them with 1.4 is cheap and converts them into a pass/fail record | First real "we meet our SLOs" statement |
 
-Each needs: an external fault injector and its timestamps, the ledger enabled
-(`SOAK_LEDGER_DIR`, `SOAK_RECIPIENT_OBSERVER_ENABLED=true`), and the
-recovery-classification window from
-[`loadgen/dashboard-contract.md`](loadgen/dashboard-contract.md).
+> **Interim rule until 1.1 lands:** every J1 verdict is loadgen-L1 observational.
+> Say "E2E publish→delivery p99 was X" — never "SLO-2 passed". They are different
+> boundaries (sli-slo §2).
 
-### Wave D — blocked or out of round (scheduled as their gate)
+### Track 2 — Find the ceilings
 
-| # | Item | Blocked by | Unblock = |
-|---|---|---|---|
-| **D1** | Elasticsearch capacity | No run-scoped index with verified teardown; no ES telemetry contract | G7 |
-| **D2** | Valkey capacity (incl. cache-fallthrough amplification onto Mongo/ES) | No run-scoped key namespace / expiry / verified cleanup | G8 |
-| **D3** | Cassandra pathological F1–F6 | Disk-reclaim branch undecided; isolated keyspace missing | G5 |
-| **D4** | Federation SLO-9 (outbox FIFO per-peer, T2-12) | loadgen is single-site | Cross-site traffic in loadgen + a two-site staging topology |
-| **D5** | Push SLO-6 | No `PUSH_NOTIFICATION` recipient observer | P4 + observer |
-| **D6** | Search index-convergence (E2E) | `search_index` observer refused at startup | Per-message searchable marker in soak payloads |
-| **D7** | Collector / OTLP outage | Unowned — no campaign asserts it | Assign an owner |
-| **D8** | Frontend last mile, spike scenarios | Out of scope this round | P6/P6b probers |
+Nothing here is new tooling; `max-rps` and `daily` already do it. What is missing
+is that no one has run them to a breach on a production-like backend, and that
+the results have to be reported as **headroom vs current prod load**, not as
+absolutes (capacity-test-plan §Method).
+
+| # | Item | Question | Driver | Env | Gates |
+|---|---|---|---|---|---|
+| **2.1** | **J1 send-path ceiling + bottleneck attribution** | msg/s at first SLO breach; which component saturates first | `max-rps --workload=messages --inject=frontdoor --steps=100,250,500,1k,2k,5k` | L then S | — / G1 |
+| **2.2** | **Concurrent-user ceiling** | How many daily-IM users per site | `daily --steps=1k,2k,5k,10k` | L then S | G1 |
+| **2.3** | **Mongo send-path write ceiling** (T1-4/T1-5) | Where the per-send write amplification saturates Mongo | 2.1 with a mention share, asserting on Mongo L2/L3 | S | G1, G2 |
+| **2.4** | **Read-path ceilings** | Enter-channel, enter-thread, mark-read, read-receipt | `max-rps --workload=history\|thread-read\|room-read\|read-receipt` | L then S | G1 |
+| **2.5** | **Presence ceiling + storm** | Max online population; largest survivable reconnect storm | `presence-capacity`, `presence-storm` | L then S | G1 |
+| **2.6** | **Login and search ceilings** | SLO-3 / SLO-7 / SLO-8 under load | `max-rps --workload=login\|search` | L then S | G1 |
+| **2.7** | **Recovery-surge ceiling** | After a fault clears, does the backlog drain exceed what storage absorbs | Failure-round replay with the drain measured | S | round-1 evidence |
+
+**Report every ceiling in the same four fields**, or it is not a result
+(end-to-end-plan §7): sustainable ceiling · first-saturating component · failure
+mode past the knee · whether it recovers when load returns to baseline.
+
+### Track 3 — Extreme scenarios
+
+Full derivation, arithmetic and per-item test design in
+[`extreme-scenarios.md`](extreme-scenarios.md). Ranked here by priority only.
+
+| # | Scenario | Dependency | Coverage today | Effort |
+|---|---|---|---|---|
+| **3.1** | **X1** — unbounded thread partition, full re-scan on every reply (O(N²) rows; 15 s timeout → `MaxDeliver` drop) | Cassandra | **None** — and the soak plan documents this path as bounded to 99 rows, which is wrong | New seed shape + ramp |
+| **3.2** | **X5** — morning login / reconnect storm (`subscription.list` last-message fan-out, unbounded in aggregate) | history-service + Cassandra | **None** — `daily` warms up, which is the opposite shape | New loadgen mode |
+| **3.3** | **X2** — large-room notification fan-out (⌈N/512⌉ presence RPCs/msg) **+ the Valkey-miss variant** | NATS, presence-service, Mongo | Partial — `max-room-size` gates backlog but never looks at presence-service or the Valkey fallthrough | Extra scrape targets + one variant |
+| **3.4** | **X3** — `@all` in a large room (N-doc `UpdateMany`, repeated on edit) | MongoDB | T1-5, unasserted | Mention-storm variant of 2.3 |
+| **3.5** | **X6a** — deployed TWCS `compaction_window_size` vs `MESSAGE_BUCKET_HOURS` | Cassandra | **Config assertion, not a test.** Do this first — it decides whether the completed soak's compaction evidence is interpretable | Minutes |
+| **3.6** | **X6b** — hot-room partition size (bucket is a fixed *time* window; no row cap) | Cassandra | `max-room-size --rooms-per-size=1` exists; never held long enough to fill a bucket | Long single-room hold |
+| **3.7** | **X4** — key-rotation storm on member removal (N × `key.get`) | room-service + Mongo | None | Small addition to 3.3 |
+| **3.8** | **X9** — gatekeeper immediate-Nak burning `MaxDeliver` in ms | NATS | Possibly covered by failure round 1 — **check whether max-delivery advisories were collected**; if not, re-run | Re-run with an advisory consumer |
+| **3.9** | **X10** — sparse/aged history walk | Cassandra | None — soak has no historical backfill | New seed span |
+| **3.10** | **X7** — reaction MAP width / collection tombstones (soak F4) | Cassandra | None | Isolated keyspace |
+| **3.11** | **X8** — cross-site membership burst through the `MaxAckPending=1` FIFO lane | NATS federation | **Blocked** — single-site driver | Needs D4 |
+
+### Track 4 — Pre-production sweep
+
+Answering *"what else before prod"*. These are not capacity questions; they are
+"we will find out the hard way otherwise" questions.
+
+| # | Item | Why it belongs before prod |
+|---|---|---|
+| **4.1** | **Deployment-shape validation**: per-service CPU/memory requests and limits, replica counts, HPA behaviour under 2.1's load | Every ceiling measured so far is against *staging* pod sizing. A ceiling is meaningless without the resource envelope it was measured in, and `terminationGracePeriodSeconds` (30 s) vs the 25 s shutdown budget has never been exercised under load |
+| **4.2** | **Rolling-restart / deploy under load** | Consumer-loop terminal errors leave a durable unread behind a green readiness probe (`failure/nats-jetstream.md` §1). A deploy at peak is the most common production event and no test covers it |
+| **4.3** | **Cold-start / crash-loop behaviour** | Services **exit** when the initial NATS connection, JetStream context, stream lookup or consumer creation fails. A restart during a dependency blip crash-loops. Read as its own scenario, never as steady-state degradation |
+| **4.4** | **Data-volume rehearsal**: run reads against a dataset aged to a realistic size, not a fresh one | Every read measured so far hit shallow, dense, run-generated data. Production reads hit a year of history. This is the single largest fidelity gap in all completed work |
+| **4.5** | **Backup / restore and Cassandra disk-growth projection** | Soak plan §5 requires the disk model be projected under the **no-TTL production assumption**, where storage grows unbounded. Confirm the projection and the reclaim path (G5) before prod, not after |
+| **4.6** | **Multi-site federation smoke** (even if not at scale) | SLO-9 is entirely unvalidated and X8 suggests the 30 s bound may be unreachable for bulk membership at realistic RTT. If prod is multi-site, this cannot ship unmeasured |
+| **4.7** | **o11y overhead A/B at the chosen sampler ratio** | Required once per release (sli-slo §10). Cheap, and it protects every other number |
+| **4.8** | **Alerting dry-run**: burn-rate alerts (sli-slo §7) fired against a real breach | An SLO with no working alert is a dashboard. Validate the 14.4×/6×/1× windows against a deliberately-induced breach from 2.1 |
+| **4.9** | **Capacity headroom statement** | Convert 2.1–2.6 into "we have N× headroom over projected launch load", with the projection written down. This is the artefact a go/no-go actually needs |
 
 ---
 
 ## 4. Gate backlog
 
 Gates are the schedulable unit for everything above that is blocked. Ordered by
-how much they unblock.
+how much they unblock. **⬆ marks the two promoted in rev 2**: G4 and G9 were
+"nice to have for hard-gating" while the programme was exploratory; now that the
+question is *"are our SLO numbers right"*, they are the critical path — Track 1.1
+cannot start without them.
 
 | Gate | Work | Unblocks | Owner |
 |---|---|---|---|
-| **G1** | Isolated staging tenant: dedicated `SITE_ID`, Mongo DB, Cassandra keyspace, NATS account | B1, B2, B3, B4, all of Wave C | Infra + us |
+| **G1** | Isolated staging tenant: dedicated `SITE_ID`, Mongo DB, Cassandra keyspace, NATS account | All of Track 2, every staging item in Track 3 | Infra + us |
 | **G2** | Confirm workload-model inputs: I8 meaning, I10 scope, I12; and S1–S4 (fan-out, concurrent members, notification eligibility, cross-site share) | B1, B3 — and every "is this rate realistic" argument | Product + infra |
-| **G3** | Managed pre-run coordination: peak load declared, blast radius recorded, abort thresholds agreed, L3 dashboards confirmed | B1–B4, Wave C | Us → infra |
-| **G4** | **P2 J1 counters** (`messages_canonical_published_total{broadcast_path}`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`) | Hard-gating SLO-1a/1b/2 in B1. Until then every J1 verdict is loadgen-L1 observational | App |
+| **G3** | Managed pre-run coordination: peak load declared, blast radius recorded, abort thresholds agreed, L3 dashboards confirmed | Every staging run. **Now higher-stakes than before** — Track 2 ramps to a breach, unlike the two completed programs | Us → infra |
+| **G4** ⬆ | **P2 J1 counters** (`messages_canonical_published_total{broadcast_path}`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`) | Hard-gating SLO-1a/1b/2 in B1. Until then every J1 verdict is loadgen-L1 observational | App |
 | **G5** | Cassandra storage control: pick and verify **one** of — run-scoped disposable keyspace with snapshot clearing, or bounded TTL + storage budget (both over an isolated keyspace) | B4 (repeat runs), D3 | Owner decision + infra |
-| **G6** | JetStream exporter on staging with `{is_consumer_leader="true"}` recording rules; custom oldest-pending-age monitor (P3) | The enforcement backstop for every async SLO in B1–B4 and Wave C | Infra |
+| **G6** | JetStream exporter on staging with `{is_consumer_leader="true"}` recording rules; custom oldest-pending-age monitor (P3) | The enforcement backstop for every async SLO in Tracks 1–3 | Infra |
 | **G7** | ES: run-scoped index, named owner, expiry, verified teardown **and** an ES telemetry contract (shards, thread-pool rejection, circuit breaker, merge, watermarks) | D1 | Us |
 | **G8** | Valkey: run-scoped key namespace / ownership marker, expiry, verified post-teardown cleanup | D2 | Us |
-| **G9** | **P1 natsrouter metrics middleware** (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | Server-side SLO-4/5; also revives `daily`'s dormant service-error verdict arm | App |
+| **G9** ⬆ | **P1 natsrouter metrics middleware** (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | Server-side SLO-4/5; also revives `daily`'s dormant service-error verdict arm | App |
 | **G10** | Storage locality + node affinity answers for Mongo/Cassandra/ES/Valkey | Makes IO-bound ceilings non-provisional (environments §7) | Infra |
 
 ---
@@ -222,11 +270,30 @@ owning document.
    with no ES telemetry contract (G7) a breach cannot be attributed to
    Elasticsearch. Worth narrowing to "the search *query-path* workload".
 
+Added in rev 2, from the code review behind
+[`extreme-scenarios.md`](extreme-scenarios.md):
+
+4. **`soak/cassandra-soak-plan.md` §1 describes the reply-count scan as bounded
+   to `Cap`(99).** `pkg/threadcount` has no cap: it scans the whole
+   `thread_messages_by_thread` partition with no `LIMIT`, paging at 5000, under a
+   15 s timeout its own comment calls a *"backstop for an unbounded partition"*.
+   **Fixed in this branch**, because a soak designed from that sentence
+   under-tests the path by the full thread length.
+5. **`soak/cassandra-soak-plan.md` §D pins `MESSAGE_BUCKET_HOURS` at envDefault
+   `72` with line references that no longer resolve.** Every service defaults to
+   **360** (`message-worker/main.go:46`,
+   `history-service/internal/config/config.go:53`, `bot-message-worker/main.go:37`).
+6. **`docker-local/cassandra/migrations/2026-05-twcs-message-tables.cql:40` sets
+   `compaction_window_size` to 72 while the init DDL sets 360.** A cluster built
+   from the migration and never re-`ALTER`ed runs a 5× mismatch against the bucket
+   window. Both files carry a comment saying the two MUST match.
+
 ---
 
 ## 8. Sibling documents
 
 - [`README.md`](README.md) — program index
+- [`extreme-scenarios.md`](extreme-scenarios.md) — code-derived worst-case shapes (Track 3)
 - [`common/sli-slo.md`](common/sli-slo.md) — acceptance criteria
 - [`common/workload-model.md`](common/workload-model.md) — shared inputs (I1–I13)
 - [`common/environments-and-data-ownership.md`](common/environments-and-data-ownership.md) — what may be pushed, blast radius, cleanup

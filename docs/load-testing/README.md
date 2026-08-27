@@ -26,6 +26,7 @@ docs/load-testing/
 | Does the system stay correct and recoverable when a dependency breaks | [`failure/overview.md`](failure/overview.md) |
 | How the load generator records evidence | [`loadgen/observation.md`](loadgen/observation.md) |
 | In what order to run all of it, and what blocks each item | [`execution-priority-plan.md`](execution-priority-plan.md) |
+| What the worst-case load shapes are, read out of the code | [`extreme-scenarios.md`](extreme-scenarios.md) |
 
 ## The Three Programs
 
