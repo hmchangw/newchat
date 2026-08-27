@@ -344,3 +344,63 @@ disagreements and one missing fleet convention keep it off 5.
 4. `low` — Add a `reflect.TypeOf(model.Message{}).NumField()` assertion to `projection_test.go`, so a new canonical field forces a conscious decision about the narrow projection.
 5. `low` — Have `broadcast-worker.handleCreated` NAK rather than warn when `FindUsersByAccounts` errors on a message with parsed mentions, so cross-site badges cannot be lost while local ones land.
 6. `info` — Record the `lastSeenAt` / `updatedAt` ownership rules in `deploy/README.md` alongside the existing preview/pointer section; it is currently the best cross-service contract doc in the repo and is the right home for both.
+
+---
+
+# 7. Performance — 4 / 5
+
+A genuinely well-engineered hot path — ~4 µs and ~8–17 allocations per message, correctly
+batched index-supported bulk writes, and back-pressure that actually engages. Held back by one
+unbounded amplification path and zero service-level metrics. Figures below were measured with a
+scratch benchmark module outside the repo; no repo file was touched.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `batch.go:43,110-115` | **`mentions` amplifies ~2,600× per message, defeating the only bound the design has.** `MaxAckPending=1000` caps *messages*, but a 20 KB message yields **2,644 unique accounts** (measured), so a slow-flush window can hold 1000 × 2644 ≈ **2.6 M `subKey` entries (~250 MB** of map plus strings), then build a 2.6 M-operation `BulkWrite` that cannot finish inside `FLUSH_TIMEOUT` → Nak → rebuild → **livelock under `MaxDeliver=-1`**. The code documents `mentions` as the one map without a `MaxAckPending` bound; this quantifies what that costs. |
+| `medium` | `pkg/mention/mention.go:15,38` | The regex is compiled once at package level (correct), but `FindAllStringSubmatch` runs at ~20 MB/s and allocates 4 objects per match: measured **1.04 ms / 20 KB** benign, **3.44 ms / 20 KB adversarial (1.34 MB, 8,239 allocs)**. This one call is ~60% of per-message cost at typical size and collapses the single consume goroutine's ceiling from ~240 k msg/s to **~290 msg/s** on maximum-size content. |
+| `medium` | `store_mongo.go:101-120`, `main.go:114` | Both subscription bulks rely on the `subscriptions (roomId, u.account)` index, created only by `room-service/store_mongo.go:126`. This service neither creates it nor calls `mongoutil.WarnMissingIndexes`, so against a database where room-service has not run, **every bulk operation COLLSCANs, silently.** (Same defect as Integration `medium`.) |
+| `low` | `flush.go:52` | `newBatch` runs **inside** `f.mu`: measured **23 µs / 56 KB** at 125 entries and **793 µs / 1.8 MB** at the 4096 clamp, versus 130 ns for `add`. Allocate before `Lock`, swap under it. |
+| `low` | `main.go:193` | The `go func(){ wg.Wait(); close(done) }()` drain helper leaks if the drain times out. Benign — the process is exiting — but it is the one goroutine in the file with no termination path. |
+| `low` | `store_mongo.go:87` | An `@all` room emits two `UpdateOne`s, so the rooms bulk is up to `2×len(rooms)`. |
+| `info` | `handler.go:44`, `flush.go:35` | The two `//nolint:gocritic // hugeParam` suppressions guard a non-issue: `writeIntents` is 168 B, and by-value measures **130.1 ns/op** against by-pointer **141.1 ns/op** — by-value is *faster*. Keep the signature; the suppressions are noise, not debt. |
+| `info` | `main.go:304` | `2×timeout + interval < ackWait` is sound and slightly conservative. A 10 s flush always leaves a tick buffered in the 1-slot ticker channel, so the true worst case is `max(2×timeout, timeout+interval)`; charging both is correct padding. `EffectiveAckWait` is the right input. Not covered: `flushloop.DefaultFinalTimeout` (5 s), which sits outside this budget but inside the 25 s shutdown allowance. |
+
+## Throughput model
+
+At ~500 msg/s with typical (~150 B) content, **per message**:
+
+| Step | Time | Bytes | Allocs |
+|---|---|---|---|
+| sonic unmarshal | 978 ns | 415 B | 3 |
+| `mention.Parse` (one mention) | ~2.3 µs | 386 B | 4 |
+| `logctx.ConsumeContext` + `obs.ContextWithIdentity` | 404 ns | 128 B | 4 |
+| `batch.add` | 130 ns | ~51 B amortized | 0 |
+| **Total** | **≈3.9 µs** | **~980 B** | **~11** |
+
+That is **0.2% of one core** and ~0.5 MB/s of garbage.
+
+**Per 250 ms flush**: 125 held messages → ≤125 room operations (≤250 with `@all`), ≤125
+lastSeen, ~25 mention ≈ **275 indexed single-document updates across 3 unordered bulks,
+~1,100 writes/s** to MongoDB. Every filter is an exact index seek — `_id` for rooms, the unique
+`roomId_1_u.account_1` prefix for both subscription stages, with `lastSeenAt` as a residual on
+one fetched document. No N+1, no scan.
+
+**The first bottleneck is MongoDB write throughput, not this process** — CPU headroom is ~500×.
+
+Back-pressure traces correctly: a MongoDB outage fails a flush in ~2 s
+(`MONGO_SERVER_SELECTION_TIMEOUT`), the batch Naks with 1 s–10 m jittered backoff, and the
+un-acked count pins at `MaxAckPending`, blocking `iter.Next()` — bounded at ~1000 messages
+(≤20 MB of retained payloads). **Nothing buffers unboundedly except `mentions`.** The second
+bottleneck, only under attack, is the regex at ~290 msg/s.
+
+## Recommendations
+
+1. `high` — Cap `mentions` per batch (for example, force an early flush above `4 × MaxAckPending`) or cap `MentionAccounts` per message in `deriveIntents`; log the truncation either way. Without this, the one documented unbounded map is also the one that wedges the consumer.
+2. `high` — Add three metrics: (a) flush-duration histogram plus outcome counter labelled `stage` / `success|transient|permanent`; (b) batch-size histogram over `held`/`rooms`/`lastSeen`/`mentions` — the only pre-OOM warning for finding #1 and the input for sizing `MaxAckPending`; (c) end-to-end age at settle (`now − msg.CreatedAt`) plus `num_ack_pending`, which is what tells an operator back-pressure has engaged and how stale room lists are.
+3. `medium` — Replace `mentionRe.FindAllStringSubmatch` with a hand-rolled byte scanner; the grammar is trivial. Measured ceiling today is 20 MB/s with 4 allocs/match; a scanner is allocation-free and ~10–20× faster, which also largely neutralises the CPU half of finding #1.
+4. `medium` — Call `mongoutil.WarnMissingIndexes(ctx, subCol, "roomId_1_u.account_1")` at startup, matching `room-service/store_mongo.go:129`.
+5. `low` — Build the replacement batch outside `f.mu` (23–793 µs measured inside the critical section).
+6. `low` — Tie `maxReuseCap` to `MaxAckPending` rather than the literal 4096; for `rooms`/`lastSeen`/`held` the constant is unreachable dead code, and only `mentions` ever meets it.
+7. `info` — `sync.Mutex` is the right primitive and contention is effectively zero: one producer at ~500 uncontended acquisitions/s (~20 ns each) against one flusher at 4/s. Do not reach for sharding or atomics here.
