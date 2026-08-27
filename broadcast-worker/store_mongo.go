@@ -168,13 +168,25 @@ func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 		}
 	}
 	if systemOnly {
-		// Sticky freeze: pin lastUserMsgAt ONCE to the room's pre-system
-		// position. Every $set expression reads the pre-update document, so
-		// "$lastMsgAt" here is the position BEFORE this write advances it; a
-		// brand-new room (no lastMsgAt yet) pins to its createdAt, which is
-		// what makes the room unread for members who have never opened it
-		// while never re-flagging members who have.
-		fields["lastUserMsgAt"] = bson.M{"$ifNull": bson.A{"$lastUserMsgAt", "$lastMsgAt", "$createdAt", "$$REMOVE"}}
+		// Sticky freeze: keep whatever lastUserMsgAt already says, and pin a
+		// floor ONCE for a room that has never carried a message — its
+		// createdAt, which is what makes the room unread for members who have
+		// never opened it while never re-flagging members who have. A room that
+		// already has a lastMsgAt is left untouched: that timestamp is
+		// unclassified (it may itself be a system message), so promoting it
+		// would persist a system position as user activity and the freeze would
+		// then keep it forever. Absent is the safe state — readers coalesce to
+		// lastMsgAt, which is the pre-field behavior. Every expression reads the
+		// pre-update document, so "$lastMsgAt" here is the position BEFORE this
+		// write advances it.
+		fields["lastUserMsgAt"] = bson.M{"$ifNull": bson.A{
+			"$lastUserMsgAt",
+			bson.M{"$cond": bson.A{
+				bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$lastMsgAt", nil}}, nil}},
+				bson.M{"$ifNull": bson.A{"$createdAt", "$$REMOVE"}},
+				"$$REMOVE",
+			}},
+		}}
 	}
 	if !m.previews {
 		return mongo.Pipeline{{{Key: "$set", Value: fields}}}

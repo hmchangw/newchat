@@ -82,9 +82,14 @@ they are touched.
     (unguarded, same accepted regression semantics as `lastMsgAt`);
   - window is system-only → **sticky freeze**, a pipeline `$set` evaluated against the
     pre-update document:
-    `lastUserMsgAt = $ifNull($lastUserMsgAt, $lastMsgAt, $createdAt, $$REMOVE)` (variadic — MongoDB ≥5.0; the repo runs 7)
-    — set once to the room's pre-system position; a brand-new channel (no `lastMsgAt`
-    yet) pins to its `createdAt`.
+    `lastUserMsgAt = $ifNull($lastUserMsgAt, $cond($lastMsgAt is null-or-missing, $ifNull($createdAt, $$REMOVE), $$REMOVE))`
+    — an existing value is kept, and a floor is pinned once for a room that has
+    never carried a message (its `createdAt`). A room that already has a
+    `lastMsgAt` is left untouched: that timestamp is *unclassified* (pre-deploy it
+    was bumped by system messages too), so promoting it would persist a system
+    position as user activity and the stickiness would then keep it forever.
+    Absent is the safe state — readers coalesce to `lastMsgAt`, which is the
+    pre-field behavior.
   - This makes the previews-off mode a pipeline update too (was a plain `$set`; the
     test asserting that shape is updated).
 - Everything else in `handleCreated` is untouched: the actor's
@@ -92,26 +97,25 @@ they are touched.
 
 **Why requirement 2 needs no per-recipient machinery:** a newly added member's
 subscription has no `lastSeenAt`, and `unread(nil, ms≠nil)` is already true. The
-freeze guarantees the reference is non-nil the moment the membership system message
-lands (existing room → pre-system position; new room → `createdAt`). Members who have
-opened the room have `lastSeenAt` at/past the frozen floor, so later system events
-never re-flag them.
+reference is non-nil the moment the membership system message lands — for a room
+with history it is the room's own `lastMsgAt`, reached through the reader's
+coalesce; for a brand-new room it is the `createdAt` the freeze pins. Members who
+have opened the room have `lastSeenAt` at/past that reference, so later system
+events never re-flag them.
 
-**The freeze inherits pre-deploy pollution — "self-healing" is too strong.** The
-fallback rung is `lastMsgAt`, which before this change was bumped by system
-messages too, so it is an *unclassified* activity time, not a user-message time.
-For a legacy room whose newest pre-deploy event was a system message at T2 while
-its last real user message was T1, the first post-deploy system-only write freezes
-T2 in as `lastUserMsgAt`. A member who had read through T1 is then flagged unread,
-and the room sorts at T2, until the room's next user message overwrites the field.
-This is **not a regression** — that member already read as unread today, because
-today's unread compares against the same `lastMsgAt` = T2 — but the room is not
-repaired either, and a room that goes quiet after that keeps the wrong reference
-indefinitely. Correcting it needs an accurate per-room user-message backfill from
-history, which is the migration this design set out to avoid; the alternative is
-to accept the limitation, scoped to legacy rooms whose last pre-deploy event was a
-system message. Rooms created after the cutover are unaffected: their own
-`room_created` message freezes `createdAt`, which is a correct floor.
+**Legacy rooms are not repaired, but nothing wrong is persisted.** A pre-deploy
+`lastMsgAt` is an *unclassified* activity time — before this change system messages
+bumped it too — so it cannot be promoted into a field whose whole contract is "the
+last user message". Hence the freeze declines to write for any room that already
+has one. For a legacy room whose newest pre-deploy event was a system message at T2
+while its last real user message was T1, a member who had read through T1 still
+reads as unread and the room still sorts at T2 — but that is **exactly today's
+behavior**, not a regression, and it is not frozen in: it is just the `?? lastMsgAt`
+coalesce, and the room's next user message writes the first accurate value the
+field ever holds. Repairing T1 itself would need a per-room user-message backfill
+from history, which is the migration this design set out to avoid. Rooms created
+after the cutover are unaffected: their own `room_created` message freezes
+`createdAt`, which is a correct floor.
 
 ### Wire addition: `RoomEvent.systemMsg`
 

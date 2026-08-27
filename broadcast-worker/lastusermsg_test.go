@@ -56,11 +56,21 @@ func TestLastMessageUpdate_UserMessageSetsLastUserMsgAt(t *testing.T) {
 	assert.Equal(t, at, fields["lastMsgAt"])
 }
 
-// System-only window: lastUserMsgAt freezes once to the room's pre-system
-// position — existing lastUserMsgAt, else the pre-update lastMsgAt, else the
-// room's createdAt (brand-new room), else stays absent. Requires the pipeline
-// form so the expression reads the PRE-update document, previews on or off.
+// System-only window: an existing lastUserMsgAt is kept, and otherwise only a
+// room that has never carried a message gets its createdAt pinned as the floor.
+// A room that already has a lastMsgAt is left alone — that timestamp is
+// unclassified (it may itself be a system message), so promoting it would
+// persist a system position as user activity. Requires the pipeline form so the
+// expression reads the PRE-update document, previews on or off.
 func TestLastMessageUpdate_SystemOnlyWindowFreezes(t *testing.T) {
+	want := bson.M{"$ifNull": bson.A{
+		"$lastUserMsgAt",
+		bson.M{"$cond": bson.A{
+			bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$lastMsgAt", nil}}, nil}},
+			bson.M{"$ifNull": bson.A{"$createdAt", "$$REMOVE"}},
+			"$$REMOVE",
+		}},
+	}}
 	for _, previews := range []bool{false, true} {
 		m := &mongoStore{previews: previews}
 		at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
@@ -68,8 +78,7 @@ func TestLastMessageUpdate_SystemOnlyWindowFreezes(t *testing.T) {
 		pipe, ok := got.(mongo.Pipeline)
 		require.True(t, ok, "system-only window must use a pipeline $set (previews=%v)", previews)
 		fields := pipe[0][0].Value.(bson.M)
-		assert.Equal(t, bson.M{"$ifNull": bson.A{"$lastUserMsgAt", "$lastMsgAt", "$createdAt", "$$REMOVE"}},
-			fields["lastUserMsgAt"], "previews=%v", previews)
+		assert.Equal(t, want, fields["lastUserMsgAt"], "previews=%v", previews)
 		assert.Equal(t, at, fields["lastMsgAt"], "system message still advances the history ceiling (previews=%v)", previews)
 	}
 }

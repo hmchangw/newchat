@@ -972,3 +972,55 @@ func TestBroadcastWorker_SystemMessageOnNewRoomFreezesToCreatedAt_Integration(t 
 	require.NotNil(t, got.LastUserMsgAt)
 	assert.WithinDuration(t, createdAt, *got.LastUserMsgAt, time.Millisecond, "no prior user message → freeze pins to the room's createdAt")
 }
+
+// A room that predates the field (lastMsgAt set, lastUserMsgAt never written)
+// receiving only a system message must NOT gain a lastUserMsgAt. That lastMsgAt
+// is unclassified — it may itself be a system message — so promoting it would
+// persist a system position as user activity, and the sticky freeze would then
+// keep it forever. The field stays unset and readers go on coalescing to
+// lastMsgAt, which is exactly the pre-field behavior.
+func TestBroadcastWorker_SystemMessageOnLegacyRoomLeavesLastUserMsgAtUnset_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+
+	createdAt := time.Date(2026, 5, 18, 8, 0, 0, 0, time.UTC)
+	legacyAt := createdAt.Add(time.Hour)
+	_, err := db.Collection("rooms").InsertOne(ctx, model.Room{
+		ID: "r-legacy", Name: "general", Type: model.RoomTypeChannel, UserCount: 2, SiteID: "site-a",
+		CreatedAt: createdAt, LastMsgAt: &legacyAt, LastMsgID: "msg-legacy",
+	})
+	require.NoError(t, err)
+	seedUsers(t, db)
+
+	inner := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), nil, 0, false)
+	cached, err := newCachedMetaStore(inner, 10, time.Minute)
+	require.NoError(t, err)
+	coalescer := newCoalescingStore(cached, inner)
+
+	pub := &recordingPublisher{}
+	h := NewHandler(coalescer, userstore.NewMongoStore(db.Collection("users")), pub, &fakeRoomKeyProvider{}, defaultParentFetcher, false, subject.RouteGlobal)
+
+	sysTime := legacyAt.Add(time.Hour)
+	sysEvt := model.MessageEvent{
+		Event:     model.EventCreated,
+		Timestamp: sysTime.UnixMilli(),
+		Message: model.Message{
+			ID: "msg-sys-legacy", RoomID: "r-legacy", UserID: "u-alice", UserAccount: "alice",
+			Content: "alice renamed the room", CreatedAt: sysTime, Type: model.MessageTypeRoomRenamed,
+		},
+	}
+	data, err := json.Marshal(sysEvt)
+	require.NoError(t, err)
+	require.NoError(t, h.HandleMessage(ctx, data))
+	require.NoError(t, coalescer.Flush(ctx))
+
+	var got struct {
+		LastMsgAt     time.Time  `bson:"lastMsgAt"`
+		LastMsgID     string     `bson:"lastMsgId"`
+		LastUserMsgAt *time.Time `bson:"lastUserMsgAt"`
+	}
+	require.NoError(t, db.Collection("rooms").FindOne(ctx, bson.M{"_id": "r-legacy"}).Decode(&got))
+	assert.Equal(t, "msg-sys-legacy", got.LastMsgID)
+	assert.WithinDuration(t, sysTime, got.LastMsgAt, time.Millisecond, "the history ceiling still advances")
+	assert.Nil(t, got.LastUserMsgAt, "an unclassified lastMsgAt is never promoted into lastUserMsgAt")
+}
