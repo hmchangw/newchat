@@ -139,12 +139,16 @@ type SubscriptionRoom struct {
 	// RFC3339 timestamps (*time.Time). The room-service RPC delivers them as epoch
 	// millis; enrichment converts at the seam (the local $lookup baseline already
 	// carries *time.Time).
-	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"-"`
-	LastMsgID string     `json:"lastMsgId,omitempty" bson:"-"`
-	// LastUserMsgAt is the last NON-system message time — what hasUnread and
-	// sidebar ordering are computed from; nil for rooms with no user messages
-	// since the field shipped (clients fall back to LastMsgAt).
-	LastUserMsgAt    *time.Time `json:"lastUserMsgAt,omitempty" bson:"-"`
+	//
+	// LastMsgAt is the room's USER-activity position — the last non-system
+	// message — which is what unread and sidebar ordering key off. The server
+	// coalesces rooms.lastUserMsgAt over rooms.lastMsgAt when building this
+	// object, so the client sees one timestamp and needs no fallback rule of its
+	// own. rooms.lastMsgAt (all messages, the history read ceiling) is internal
+	// and deliberately never reaches the client; see
+	// docs/superpowers/specs/2026-08-26-system-message-unread-ordering-design.md.
+	LastMsgAt        *time.Time `json:"lastMsgAt,omitempty" bson:"-"`
+	LastMsgID        string     `json:"lastMsgId,omitempty" bson:"-"`
 	LastMentionAllAt *time.Time `json:"lastMentionAllAt,omitempty" bson:"-"`
 	// MinUserLastSeenAt is the oldest read position across the room's members (the
 	// room-wide "everyone has read up to here" floor), mirrored from the room doc.

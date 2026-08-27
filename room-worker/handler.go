@@ -1459,23 +1459,23 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) *model.SubscriptionRoom {
 	// PreviewMessage stays nil: a member added without shared history must not see the prior last message.
 	//
-	// LastUserMsgAt is resolved here rather than passed through raw: this event
-	// races broadcast-worker's freeze (the membership system message is still in
-	// flight when it publishes), and the added member's client flags the room
-	// unread from this value — a nil reference on a brand-new room would leave
-	// their room dark until a reload. lastUserMsgAt ?? lastMsgAt ?? createdAt is
-	// what a reader resolves for this room either way: the freeze pins createdAt
-	// only for a room that has never carried a message, and otherwise leaves the
-	// field absent for the reader to coalesce to lastMsgAt.
+	// The wire LastMsgAt is the room's USER-activity position, resolved here
+	// rather than passed through raw: this event races broadcast-worker's freeze
+	// (the membership system message is still in flight when it publishes), and
+	// the added member's client flags the room unread from this value — a nil
+	// reference on a brand-new room would leave their room dark until a reload.
+	// lastUserMsgAt ?? lastMsgAt ?? createdAt is what a reader resolves for this
+	// room either way: the freeze pins createdAt only for a room that has never
+	// carried a message, and otherwise leaves the field absent for the reader to
+	// coalesce to lastMsgAt.
 	sr := &model.SubscriptionRoom{
 		SiteID:            room.SiteID,
 		Name:              room.Name,
 		CrossSite:         room.CrossSite,
 		UserCount:         room.UserCount,
 		AppCount:          room.AppCount,
-		LastMsgAt:         room.LastMsgAt,
+		LastMsgAt:         timeutil.Coalesce(room.LastUserMsgAt, timeutil.Coalesce(room.LastMsgAt, &room.CreatedAt)),
 		LastMsgID:         room.LastMsgID,
-		LastUserMsgAt:     timeutil.Coalesce(room.LastUserMsgAt, timeutil.Coalesce(room.LastMsgAt, &room.CreatedAt)),
 		LastMentionAllAt:  room.LastMentionAllAt,
 		MinUserLastSeenAt: room.MinUserLastSeenAt,
 	}

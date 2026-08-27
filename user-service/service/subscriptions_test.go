@@ -1500,6 +1500,7 @@ func TestListSubscriptions_LocalUnread_PrefersLastUserMsgAt(t *testing.T) {
 	base := resp.Subscriptions[0].Base()
 	assert.False(t, base.HasUnread, "system bump past the read position must not count as unread")
 	require.NotNil(t, base.Room)
-	require.NotNil(t, base.Room.LastUserMsgAt)
-	assert.Equal(t, userAt, *base.Room.LastUserMsgAt)
+	require.NotNil(t, base.Room.LastMsgAt)
+	assert.Equal(t, userAt, *base.Room.LastMsgAt,
+		"the wire carries ONE activity timestamp: lastMsgAt is the coalesced user-activity value, not the raw ceiling")
 }

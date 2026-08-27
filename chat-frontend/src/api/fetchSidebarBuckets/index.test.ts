@@ -227,15 +227,16 @@ describe('fetchSidebarBuckets: failure reporting', () => {
 })
 
 describe('subToRoom', () => {
-  it('prefers lastUserMsgAt over lastMsgAt for the summary position', () => {
-    const s = sub('r1', {
-      room: { lastMsgAt: '2026-08-26T10:00:00Z', lastUserMsgAt: '2026-08-01T00:00:00Z' },
-    })
+  // The server sends ONE activity timestamp, already resolved to user activity.
+  // The client applies no fallback rule of its own — if this ever needs a `??`
+  // chain again, the server-side coalesce has regressed.
+  it('takes the server lastMsgAt verbatim as the summary position', () => {
+    const s = sub('r1', { room: { lastMsgAt: '2026-08-01T00:00:00Z' } })
     expect(subToRoom(s, 'site-a').lastMsgAt).toBe('2026-08-01T00:00:00Z')
   })
 
-  it('falls back to lastMsgAt when lastUserMsgAt is absent (pre-cutover rooms)', () => {
-    const s = sub('r1', { room: { lastMsgAt: '2026-08-26T10:00:00Z' } })
-    expect(subToRoom(s, 'site-a').lastMsgAt).toBe('2026-08-26T10:00:00Z')
+  it('leaves the position undefined when the room has no activity yet', () => {
+    const s = sub('r1', { room: {} })
+    expect(subToRoom(s, 'site-a').lastMsgAt).toBeUndefined()
   })
 })

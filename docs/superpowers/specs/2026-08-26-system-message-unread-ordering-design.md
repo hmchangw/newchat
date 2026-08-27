@@ -72,6 +72,29 @@ Single writer: broadcast-worker `handleCreated`, alongside `lastMsgAt`.
 The `?? lastMsgAt` fallback keeps pre-deploy rooms behaving exactly as today until
 they are touched.
 
+**The coalesce is server-side and the client never sees two timestamps.**
+`lastUserMsgAt` is internal: it lives in Mongo, in `model.Room`, in
+`model.EnrichedSubscription`, and on the server-to-server `model.RoomInfo`
+(`rooms.info`) — but NOT on `model.SubscriptionRoom`, the client-facing room
+object. Every site that builds a `SubscriptionRoom` writes the resolved value
+into `LastMsgAt`, so the field the client has always read now simply means what
+clients already assumed it meant: the last thing a person said. There are three
+such sites, and they are the whole contract —
+`user-service/service/subscriptions.go` `buildLocalRoom` (local) and
+`applyRoomInfo` (cross-site), and `room-worker`'s `subscriptionRoomFor` (the
+`subscription.update` *added* event). `TestSubscriptionRoom_NeverExposesLastUserMsgAt`
+pins the struct against re-exposing the internal field.
+
+Consequences worth stating: a client needs no fallback rule, no new field, and no
+migration — an OLD client gets the fix for free, because the value it already
+reads under that name is now the correct one. The cost is a name that means one
+thing in Mongo (`rooms.lastMsgAt`, all messages, the history ceiling) and another
+on the wire (user activity); anyone comparing a Mongo dump to a payload must know
+that. The one contract this breaks is the `meta.lastMsgAt` history hint — no
+client-visible field carries the full-activity time any more, so `docs/client-api.md`
+now tells clients to omit it (history-service's hint handling is unchanged, and a
+client caching a full-activity value from `RoomEvent.lastMsgAt` may still send one).
+
 ### Write path (broadcast-worker)
 
 - `roomLastMessage` gains `SystemMsg bool` (from `model.IsSystemMessageType(msg.Type)`).
@@ -133,7 +156,8 @@ membership/rename facts are already plaintext in `subscription.update` / room ev
 - `buildListRows`: `sortAt` and the `withinDays` cutoff use the sort rule above.
 - `enrichLocal` / `applyRoomInfo` / both branches of `unreadRooms`: `HasUnread` and
   badge membership use the unread rule; the wire `room` object exposes
-  `lastUserMsgAt` (`model.SubscriptionRoom`, `model.EnrichedSubscription`).
+  `lastUserMsgAt` (`model.EnrichedSubscription`); the client-facing
+  `model.SubscriptionRoom` carries only the coalesced `LastMsgAt`.
 - Badge cache, `subscription.count`, push `UnreadCounts`: no code change (derived).
 
 ### room-service
@@ -145,17 +169,19 @@ membership/rename facts are already plaintext in `subscription.update` / room ev
 
 ### chat-frontend
 
-Summary `lastMsgAt` keeps its name, takes user-activity semantics — `sortByLastMsgDesc`
-and `selectUnread` need no change:
+Summary `lastMsgAt` keeps its name and takes user-activity semantics — which is
+now also what the server sends under that name, so `sortByLastMsgDesc`,
+`selectUnread` and the seed mappers need no fallback rule:
 
 - Seeds (`fetchSidebarBuckets`, the `subscription.update`/room-added seam embedding a
-  room object) map `room.lastUserMsgAt ?? room.lastMsgAt` into the summary.
+  room object) take `room.lastMsgAt` verbatim.
 - Reducer `MESSAGE_RECEIVED` (both branches):
   `isSystem = evt.systemMsg === true || isSystemMessageType(msg.type) || msg.sysMsgData != null`
   → skip the `lastMsgAt` bump, skip the `unreadCount` increment, leave `summaries`
   untouched (no resort); still append the message and bump `msgRecvSeq`. Preview
   suppression already exists.
-- `types.ts`: `lastUserMsgAt?` on the room object, `systemMsg?` on the room event.
+- `types.ts`: `systemMsg?` on the room event. No new room-object field — the
+  client contract gains one boolean and nothing else.
 
 ### Docs
 

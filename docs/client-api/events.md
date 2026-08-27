@@ -132,7 +132,6 @@ Two shapes exist — discriminated by `action`:
       "userCount": 12,
       "appCount": 1,
       "lastMsgAt": "2026-05-06T07:59:01Z",
-      "lastUserMsgAt": "2026-05-06T07:59:01Z",
       "lastMsgId": "01970a4f8c2d7c9aM123",
       "lastMentionAllAt": "2026-05-05T11:00:00Z",
       "minUserLastSeenAt": "2026-05-04T09:30:00Z",

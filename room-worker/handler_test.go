@@ -7506,9 +7506,9 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.False(t, *got.CrossSite)
 		assert.Equal(t, 3, got.UserCount)
 		assert.Equal(t, 1, got.AppCount)
-		assert.Equal(t, &lastMsg, got.LastMsgAt)
+		assert.Equal(t, &lastUserMsg, got.LastMsgAt,
+			"the wire carries ONE activity timestamp: the coalesced user-activity value, not the raw ceiling")
 		assert.Equal(t, "m123", got.LastMsgID)
-		assert.Equal(t, &lastUserMsg, got.LastUserMsgAt)
 		assert.Equal(t, &mention, got.LastMentionAllAt)
 		assert.Equal(t, &floor, got.MinUserLastSeenAt)
 		require.NotNil(t, got.PrivateKey)
@@ -7525,7 +7525,7 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, "eng", got.Name)
 	})
 
-	t.Run("fresh room pins lastUserMsgAt to createdAt", func(t *testing.T) {
+	t.Run("fresh room pins lastMsgAt to createdAt", func(t *testing.T) {
 		// The added event outruns broadcast-worker's freeze: for a brand-new room
 		// neither lastMsgAt nor lastUserMsgAt exists yet, so the event must carry
 		// the same reference the freeze will persist (createdAt) — without it the
@@ -7534,23 +7534,22 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2, CreatedAt: created}
 		got := subscriptionRoomFor(bare, nil)
 		assert.Nil(t, got.CrossSite)
-		assert.Nil(t, got.LastMsgAt, "wire lastMsgAt mirrors the doc — only the unread reference is pre-seeded")
-		require.NotNil(t, got.LastUserMsgAt)
-		assert.True(t, got.LastUserMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
 		assert.Nil(t, got.LastMentionAllAt)
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
 	})
 
-	t.Run("pre-freeze room falls back to lastMsgAt for the reference", func(t *testing.T) {
+	t.Run("pre-freeze room falls back to the room's lastMsgAt", func(t *testing.T) {
 		created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 		pre := &model.Room{
 			ID: "r3", Name: "legacy", SiteID: "site-a", UserCount: 2,
 			LastMsgAt: &lastMsg, LastMsgID: "m9", CreatedAt: created,
 		}
 		got := subscriptionRoomFor(pre, nil)
-		require.NotNil(t, got.LastUserMsgAt)
-		assert.True(t, got.LastUserMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
 	})
 }
 

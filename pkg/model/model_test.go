@@ -2174,7 +2174,6 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 		pk := "dGVzdC1wcml2YXRlLWtleS1iYXNlNjQ="
 		kv := 7
 		lastMsg := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
-		lastUserMsg := time.Date(2025, 1, 1, 18, 0, 0, 0, time.UTC)
 		lastMention := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
 		minSeen := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 		r := model.SubscriptionRoom{
@@ -2183,7 +2182,6 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 			UserCount:         42,
 			AppCount:          3,
 			LastMsgAt:         &lastMsg,
-			LastUserMsgAt:     &lastUserMsg,
 			LastMsgID:         "m-100",
 			LastMentionAllAt:  &lastMention,
 			MinUserLastSeenAt: &minSeen,
@@ -2195,17 +2193,15 @@ func TestSubscriptionRoomJSON(t *testing.T) {
 
 	t.Run("timestamps serialize as RFC3339 strings", func(t *testing.T) {
 		lastMsg := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-		lastUserMsg := time.Date(2025, 1, 1, 2, 3, 4, 0, time.UTC)
 		lastMention := time.Date(2025, 1, 3, 6, 7, 8, 0, time.UTC)
 		minSeen := time.Date(2025, 1, 4, 9, 10, 11, 0, time.UTC)
-		r := model.SubscriptionRoom{LastMsgAt: &lastMsg, LastUserMsgAt: &lastUserMsg, LastMentionAllAt: &lastMention, MinUserLastSeenAt: &minSeen}
+		r := model.SubscriptionRoom{LastMsgAt: &lastMsg, LastMentionAllAt: &lastMention, MinUserLastSeenAt: &minSeen}
 		// #nosec G117 -- test roundtrip on a model whose PrivateKey field is part of the wire schema
 		data, err := json.Marshal(&r)
 		require.NoError(t, err)
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
 		assert.Equal(t, "2025-01-02T03:04:05Z", raw["lastMsgAt"], "lastMsgAt must be RFC3339, not epoch millis")
-		assert.Equal(t, "2025-01-01T02:03:04Z", raw["lastUserMsgAt"], "lastUserMsgAt must be RFC3339, not epoch millis")
 		assert.Equal(t, "2025-01-03T06:07:08Z", raw["lastMentionAllAt"], "lastMentionAllAt must be RFC3339, not epoch millis")
 		assert.Equal(t, "2025-01-04T09:10:11Z", raw["minUserLastSeenAt"], "minUserLastSeenAt must be RFC3339, not epoch millis")
 	})
@@ -5523,4 +5519,19 @@ func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
 		Timestamp:   1755820800123,
 	}
 	roundTrip(t, src, &model.SubscriptionMentionEvent{})
+}
+
+// The client sees ONE activity timestamp. lastUserMsgAt is an internal field:
+// the server coalesces it into SubscriptionRoom.LastMsgAt at the wire boundary,
+// so a client never learns the distinction and never writes a fallback rule.
+// Reflection rather than a marshal check, because omitempty would hide a
+// re-introduced field whenever a test happens to leave it nil.
+func TestSubscriptionRoom_NeverExposesLastUserMsgAt(t *testing.T) {
+	rt := reflect.TypeOf(model.SubscriptionRoom{})
+	for i := range rt.NumField() {
+		tag := rt.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		assert.NotEqual(t, "lastUserMsgAt", name,
+			"field %s re-exposes the internal user-activity field; coalesce it into lastMsgAt instead", rt.Field(i).Name)
+	}
 }
