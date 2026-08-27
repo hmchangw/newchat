@@ -823,9 +823,31 @@ func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int)
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	pipeline = append(pipeline, roomsEnrichStages()...)
+	pipeline = append(pipeline, activeRoomsEnrichStages()...)
 	pipeline = append(pipeline, bson.M{"$project": activeSubscriptionProjection()})
 	return pipeline
+}
+
+// activeRoomsEnrichStages is the badge path's rooms join. It deliberately does NOT
+// reuse roomsEnrichStages: the badge count reads exactly one room field, so joining
+// the list path's eleven (the encKey blob among them) would materialize ten per
+// joined room for the terminal $project to discard — once per account in a
+// notification batch. A cross-site subscription has no local room document and,
+// as in the list path, simply yields no lastMsgAt.
+func activeRoomsEnrichStages() bson.A {
+	return bson.A{
+		bson.M{"$lookup": bson.M{
+			"from": roomsCollection,
+			"let":  bson.M{"rid": "$roomId"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
+				bson.M{"$project": bson.M{"_id": 0, "lastMsgAt": 1}},
+			},
+			"as": "room",
+		}},
+		bson.M{"$unwind": bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}},
+		bson.M{"$addFields": bson.M{"lastMsgAt": "$room.lastMsgAt"}},
+	}
 }
 
 // GetActiveSubscriptions returns the active set for the unread count, capped before the join.
