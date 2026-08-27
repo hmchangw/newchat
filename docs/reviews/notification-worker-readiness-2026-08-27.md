@@ -856,3 +856,121 @@ every cache fill. Home site is near-immutable and does not need primary reads.
 6. **`medium`** — Give `fillHomeSites` a `secondaryPreferred` collection handle and chunk its `$in`.
 7. **`low`** — Switch `main.go:449` to `jsretry.LowLatencyBackoff`, take `msg` by pointer in
    `isRestricted`, and preallocate the loader slice.
+
+---
+
+# Chapter 8 — Prioritized action list
+
+Ordered by severity first, then by impact ÷ effort. Items reported by more than one expert are
+marked with the count — cross-dimension agreement is a confidence signal, not extra severity.
+
+### 1. `high` — Fix the shutdown send-on-closed-channel race
+
+- **Dimension:** Architecture / Performance / Integration / Code quality (**found by 4 of 6**)
+- **Where:** `notification-worker/main.go:378-399`, `main.go:490-494`
+- **Why:** The only finding that crashes a running pod. `invalIter.Stop()` is asynchronous, so a
+  reader goroutine parked between `Next()` returning and the channel send will send on a closed
+  channel and panic during every rollout that hits the window. Untracked goroutine also violates
+  CLAUDE.md Section 3.
+- **Fix:** Add the goroutine to a `WaitGroup`, join it before `close(invalCh)`. Roughly ten lines.
+
+### 2. `high` — Stop narrowing `MESSAGES-CANONICAL` at bootstrap
+
+- **Dimension:** Architecture / Integration (**found by 2 of 6**)
+- **Where:** `notification-worker/main.go:268`, `bootstrap.go:25-32`, `bootstrap_test.go:85`
+- **Why:** Passing the `.created` filter leaf as the stream's *subject set* means a dev boot with
+  `BOOTSTRAP_STREAMS=true` strips `.edited/.deleted/.reacted/.pinned` from a stream
+  `message-gatekeeper` owns — last-writer-wins, breaking every other canonical publisher. The unit
+  test passes the wildcard instead of the production value, which is why CI cannot see it.
+- **Fix:** Pass `wiring.CanonicalStream.Subjects`, and assert the exact subjects in the test. Better:
+  only *verify* the canonical stream, since another service owns it. One line plus a test.
+
+### 3. `high` — Parallelize the serialized critical-path lookups
+
+- **Dimension:** Performance
+- **Where:** `notification-worker/handler.go:243-244`, `:259`, `:268-269`
+- **Why:** Settings → presence → badge → room-meta/mention-names run back-to-back despite being
+  mutually independent. Worst case ~13 s serial against a 30 s `AckWait`; an `errgroup` makes it
+  ~5 s. Highest throughput return of any item here, at moderate effort.
+- **Fix:** One `errgroup` around the four independent calls.
+
+### 4. `high` — Chunk the badge RPC
+
+- **Dimension:** Performance
+- **Where:** `notification-worker/handler.go:259`, `badge_client.go:42-47`, `routing.go:20`
+- **Why:** The only fan-out call that never chunks. A 5 000-member room sends one 5 000-account
+  request per message under a fixed 5 s budget, and `user-service/service/badge.go:24-57` loops
+  per account with a Mongo recompute on each cache miss. This is a cliff, not a gradient.
+- **Fix:** Reuse `chunkStrings` at ~512 with a bounded `errgroup.SetLimit`, matching presence.
+
+### 5. `high` — Extract `store.go` / `store_mongo.go` out of `main.go`
+
+- **Dimension:** Architecture / Maintainability / Code quality (**found by 3 of 6**)
+- **Where:** `notification-worker/main.go:77-178`, `threads.go:22-73`, `usersettings.go:67-145`
+- **Why:** Highest impact-per-unit-effort item in the report: it simultaneously fixes the mandated
+  layout violation, makes the Mongo adapters unit-testable, and is the single largest lever on the
+  coverage number (`main()` is 27.5% of all statements). Also unblocks action 6.
+- **Fix:** `store.go` with a `NotificationStore` interface + `//go:generate mockgen`, `store_mongo.go`
+  with the implementations.
+
+### 6. `high` — Close the coverage gap to the 80% floor
+
+- **Dimension:** Test coverage
+- **Where:** `notification-worker/main.go:180` (184 untested statements); `handler.go:126`
+- **Why:** 55.6% against a repo minimum of 80% — a blocking merge criterion per CLAUDE.md Section 4.
+  Note the figure is distorted: excluding `main()` it is 76.9%, `handler.go` is at 97.4%, and Docker
+  was unavailable so the integration suite (which covers the Mongo adapters) could not contribute.
+  The remedy is structural, not "write more tests".
+- **Fix:** Do action 5 first, then add `TestHandle_MemberFetchError_NAKs` (add an `err` field to
+  `stubMembers`), the empty-member-list case, and the `isRestricted` nil-parent branch.
+
+### 7. `high` — Delete the two duplications of shared code
+
+- **Dimension:** Maintainability
+- **Where:** `notification-worker/main.go:411-453` vs `pkg/natsmetrics/loop.go:19-23`;
+  `parent_fetcher.go:36-90` vs `broadcast-worker/parent_fetcher.go:21-76`
+- **Why:** ~45 lines reimplementing `natsmetrics.Start` (which the service already builds
+  `consumerMetrics` for at `main.go:274`), plus a byte-identical copy of a history-service RPC client.
+  Both are pure deletions that reduce drift risk. Low effort, immediate payoff.
+- **Fix:** Call `natsmetrics.Start` as `broadcast-worker/main.go:351` does; promote the fetcher to
+  `pkg/historyclient`.
+
+### 8. `medium` — Re-run the two SAST gates that could not execute here
+
+- **Dimension:** Code quality
+- **Where:** CI / build environment
+- **Why:** SAST is a blocking CI gate. `gosec` is clean, but `govulncheck` was blocked by the proxy
+  (`vuln.go.dev` Forbidden) and `semgrep` could not be installed (`pipx`/`uv` version conflict). Two
+  of three gates are **unverified, not passed** — this audit cannot certify them.
+- **Fix:** Run `make sast` in CI or any environment with network access and working tooling.
+
+### 9. `medium` — Fix the `@here` documentation drift
+
+- **Dimension:** Integration
+- **Where:** `docs/client-api.md:6566` vs `handler.go:135-136`, `pkg/mention/mention.go:47-51`
+- **Why:** The docs promise clients that `@here` triggers a push in large rooms; the code explicitly
+  and deliberately does not. This is the client contract, and it is wrong in the direction that makes
+  integrators build against behaviour that will never fire. A one-line doc fix.
+
+### 10. `medium` — Give the invalidation consumer real consumer settings, and propagate request IDs
+
+- **Dimension:** Integration / Architecture (**found by 3 of 6** for the consumer settings)
+- **Where:** `main.go:363-368` (consumer config); `emit.go:48-54`, `badge_client.go:47`,
+  `parent_fetcher.go:75` (request IDs)
+- **Why:** The second consumer inherits unlimited `MaxDeliver` and no backoff, invisible to
+  `CONSUMER_*` tuning. Separately, this is the only service in the repo hand-building a publish
+  `nats.Msg`, so the `X-Request-ID` correlation chain dies at every outbound hop — contradicting
+  CLAUDE.md Section 3.
+- **Fix:** Build the config from `stream.DurableConsumerDefaults`; replace hand-built messages with
+  `natsutil.NewMsg`.
+
+---
+
+## Closing note
+
+Items 1 and 2 are the two that would actually bite in production, and both are small, local, and
+well-understood. Item 5 is the highest-leverage structural change: it resolves a layout violation, a
+maintainability complaint, and most of the coverage deficit in one move. Nothing in this audit
+suggests the service delivers *wrong* notifications — the business logic is well-tested and the
+fail-open behaviour is deliberate and documented. The gap is operational robustness at the edges
+(shutdown, bootstrap) and headroom under large-room load.
