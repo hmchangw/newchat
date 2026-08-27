@@ -37,10 +37,8 @@ func TestSubscriptionRepo_GetSubscription(t *testing.T) {
 	assert.Equal(t, []model.Role{model.RoleMember}, sub.Roles)
 }
 
-// TestSubscriptionRepo_GetSubscription_ProjectionFields pins subscriptionReadProjection
-// against a real Mongo decode: the fields service/pin.go reads come back populated,
-// and the ones it does not are absent from the wire rather than merely unused.
-// A widened projection is a silent regression the unit tests cannot see.
+// Pins subscriptionReadProjection against a real Mongo decode — a widened projection
+// is a silent regression the unit guards, which only read the var, cannot see.
 func TestSubscriptionRepo_GetSubscription_ProjectionFields(t *testing.T) {
 	db := setupMongo(t)
 	repo := NewSubscriptionRepo(db)
@@ -71,8 +69,7 @@ func TestSubscriptionRepo_GetSubscription_ProjectionFields(t *testing.T) {
 	assert.True(t, sub.User.IsBot)
 	assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, sub.Roles)
 
-	// Not read by any call site — must not be fetched. threadUnread is the
-	// expensive one: an unbounded parent-ID list on an uncached hot path.
+	// Not read by any call site — must not be fetched; threadUnread is the costly one.
 	assert.Empty(t, sub.ThreadUnread, "threadUnread must stay out of the projection")
 	assert.Empty(t, sub.ID, "_id must stay out of the projection")
 	assert.Empty(t, sub.RoomID)
