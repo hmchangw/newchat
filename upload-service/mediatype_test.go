@@ -163,6 +163,10 @@ func TestResolveMediaType(t *testing.T) {
 			declared: "APPLICATION/OCTET-STREAM", filename: "photo.png", data: png64x48, want: "image/png",
 		},
 		{
+			name:     "the generic default is still generic when it carries parameters",
+			declared: "application/octet-stream; charset=binary", filename: "photo.png", data: png64x48, want: "image/png",
+		},
+		{
 			name:     "an absent declared type is resolved from the bytes",
 			declared: "", filename: "photo.jpg", data: jpeg32x32, want: "image/jpeg",
 		},
