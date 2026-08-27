@@ -744,3 +744,115 @@ timeout that is not env-tunable, unlike `PRESENCE_RPC_TIMEOUT`/`USER_SETTINGS_TI
 7. **`medium`** — Fix `docs/client-api.md:6566` to remove `@here` from the large-room push triggers,
    and add a sonic↔stdlib wire-compat test for `PushNotificationEvent` (map field, plus HTML
    metacharacters in `Title`/`Body`) mirroring `broadcast-worker/sonic_wire_test.go`.
+
+---
+
+# Chapter 7 — Performance
+
+**Score: 3 / 5**
+
+Strong fundamentals: precise projections everywhere, batch `$in` reads, singleflight on the member
+cache, cache metrics, acquire-before-spawn semaphore, sonic with `Pretouch` warming, and a payload
+cap. Loses points on serialized critical-path I/O, an unchunked badge RPC that becomes a cliff in
+large rooms, a per-message stdlib JSON decode of the whole member list, and the shutdown race.
+
+## Findings
+
+### `high` — Untracked goroutine and send on closed channel at shutdown
+
+`main.go:378-399` spawns the invalidation reader with no `WaitGroup`. Shutdown step 3
+(`main.go:490-492`) calls `invalIter.Stop()`, step 4 (`main.go:494`) runs `close(invalCh)` — but
+`shutdown.Wait` runs steps sequentially with no synchronization against that goroutine
+(`pkg/shutdown/shutdown.go:26-31`). If it is past `Next()` and at `invalCh <- evt.RoomID`
+(`main.go:392`) when the close lands, the process panics.
+
+### `high` — Badge RPC is unchunked and unbounded by room size
+
+`handler.go:259` → `fetchUnreadCounts` → `badge_client.go:42-47` sends *every* badge account for a
+site in one request under a fixed 5 s budget. `badgeAccounts` is the whole membership minus
+sender/muted/restricted — the large-room throttle (`routing.go:20`) narrows push candidates, not
+badge accounts. A 5 000-member room means one 5 000-account RPC per message; server-side,
+`BadgeCountBatch` loops per account with a Mongo `unreadRooms` recompute on every cache miss
+(`user-service/service/badge.go:24-57`). Presence chunks at 512 and settings chunks at 512; this
+does not chunk at all.
+
+### `high` — Independent lookups serialized on the critical path
+
+`handler.go:243-244` runs settings (2 s) then presence (2 s) sequentially; `handler.go:259` then runs
+badge (5 s); `handler.go:268-269` then room-meta and mention-names (2 s). All are mutually
+independent — `badgeAccounts` is computed before the survivor filter, so even the badge call does not
+depend on the settings/presence result. Worst case is roughly 13 s of serial wall time per message
+against `AckWait=30s`, where an `errgroup` would give about 5 s. At `MAX_WORKERS=100` that is roughly
+an 8 msg/s ceiling under degradation.
+
+*Verified directly at `handler.go:236-275`.*
+
+### `high` — Settings snapshot fails open systematically for large rooms
+
+`usersettings.go:97-111` runs all chunks sequentially under one shared 2 s timeout — the code itself
+documents the consequence at `:100-104`. 5 000 candidates is 10 sequential primary-read `$in` queries
+inside 2 s; on expiry the tail chunks return zero settings, and every one of those users is pushed
+regardless of `muteAllNotifications`.
+
+### `medium` — Full member list JSON-decoded per message, with the stdlib codec
+
+`pkg/roomsubcache/roomsubcache.go:141` does `json.Unmarshal([]byte(raw), &members)` — a full
+string→`[]byte` copy plus an `encoding/json` reflection decode, on every message, with
+`members := []Member{}` (`:140`) growing unpreallocated. A 5 000-member room is roughly 350 KB copied
+plus 5 000 structs allocated *per message*. Every other hot path in this worker uses sonic
+(`handler.go:102`, `emit.go:41`). There is no L1 tier (`members.go:24-26`, a deliberate choice), so
+this cost is paid on every single message.
+
+### `medium` — Batch emits are serial
+
+`handler.go:286-307` publishes batches one at a time with synchronous JetStream publishes. An `@all`
+in a 50 000-member room is 500 sequential round-trips inside the ack budget.
+
+### `medium` — Presence fan-out spawns unbounded goroutines
+
+`presence.go:69-104` starts one goroutine per 512-account chunk with no semaphore. 50 000 candidates
+across 100 in-flight messages is roughly 9 800 goroutines. Compare `broadcast-worker/handler.go:458-477`,
+which bounds fan-out with `maxSiteFanout` plus a shared deadline.
+
+### `medium` — Fan-out-sized reads pinned to the Mongo primary
+
+`main.go:227` pins `usersCol` to `readpref.Primary()` for the settings gate, then `main.go:249` reuses
+that same handle for `fillHomeSites` (`main.go:153`) — an unchunked `$in` over every member account on
+every cache fill. Home site is near-immutable and does not need primary reads.
+
+### `low` — `model.Message` copied by value per member
+
+`handler.go:195` passes `msg` (a 24-field struct, ~300 B) by value inside the member loop; the
+`//nolint` at `handler.go:390` justifies it backwards. Add a per-member `Member` copy at
+`handler.go:188` and an interface dispatch at `handler.go:218` for a no-op vetoer.
+
+### `low` — Wrong backoff class for a user-visible path
+
+`main.go:449` uses `jsretry.DefaultBackoff` (1s/5s/30s…); sibling `broadcast-worker/main.go:446` uses
+`LowLatencyBackoff` (200 ms first retry), which `pkg/jsretry` documents as the fan-out/delivery choice.
+
+### `low` — Member loader slice unpreallocated
+
+`main.go:103` `var out []roomsubcache.Member` appended per cursor row — roughly 13 reallocations for
+5 000 members. `cursor.All` or a `userCount`-sized prealloc avoids it.
+
+### `nitpick` — Pretouch list incomplete
+
+`pretouch.go:11-17` omits `BadgeCountBatchRequest`/`Response`, `getMessageByIDRequest`, and
+`parentMessageProjection`, all sonic-coded on the hot path.
+
+## Recommendations
+
+1. **`high`** — Track the invalidation goroutine in a `WaitGroup` and join it before `close(invalCh)`,
+   or replace the close with `invalCancel()` plus a `select` on ctx.
+2. **`high`** — Chunk `badgeAccounts` per site (reuse `chunkStrings`, ~512) and issue chunks under a
+   bounded `errgroup.SetLimit`.
+3. **`high`** — Wrap settings, presence, and badge (plus room-meta and mention-name resolution) in one
+   `errgroup` so the critical path is `max(...)` rather than `sum(...)`; give each chunk its own
+   timeout instead of one shared budget in `usersettings.go`.
+4. **`medium`** — Switch `roomsubcache` to sonic and decode from the raw string without the `[]byte`
+   copy; consider a small TTL-bounded L1 for hot rooms keyed off `userCount`.
+5. **`medium`** — Emit batches through a bounded `errgroup` (limit ~8) instead of the serial loop.
+6. **`medium`** — Give `fillHomeSites` a `secondaryPreferred` collection handle and chunk its `$in`.
+7. **`low`** — Switch `main.go:449` to `jsretry.LowLatencyBackoff`, take `msg` by pointer in
+   `isRestricted`, and preallocate the loader slice.
