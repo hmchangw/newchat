@@ -38,6 +38,7 @@ var soakAllErrorClasses = [...]soakErrorClass{
 	soakErrorAmbiguous,
 	soakErrorMutationTargetMissing,
 	soakErrorResponseTooLarge,
+	soakErrorCanceled,
 }
 
 type soakOperationOutcome string
@@ -66,6 +67,14 @@ type soakOperationSample struct {
 	ErrorClass    soakErrorClass
 	ErrorReason   soakErrorReason
 	TargetMissing bool
+	// RowsCounted marks the samples whose Rows is a real count of what the reply
+	// carried. Only those may be observed: a mutation has no rows at all, and a
+	// read whose count is a constant or a server-side total is not reporting
+	// rows either. An empty page is a real answer, which is why the gate is this
+	// flag and not a non-zero count.
+	RowsCounted bool
+	ReplyBytes  int
+	Rows        int
 }
 
 type soakFixedHistogram struct {
@@ -259,6 +268,14 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 				c.metrics.SoakRPCLatency.WithLabelValues(action).Observe(
 					sample.Latency.Seconds(),
 				)
+			}
+			if sample.Outcome == soakOutcomeSucceeded && sample.RowsCounted {
+				if sample.ReplyBytes > 0 {
+					c.metrics.SoakReplyBytes.WithLabelValues(action).Observe(
+						float64(sample.ReplyBytes),
+					)
+				}
+				c.metrics.SoakRows.WithLabelValues(action).Observe(float64(sample.Rows))
 			}
 			if sample.TargetMissing {
 				c.metrics.SoakMutationTargetMissing.Inc()

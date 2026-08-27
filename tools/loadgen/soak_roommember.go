@@ -601,9 +601,10 @@ func (l *soakRoomLanes) observeAdmission(
 			return fmt.Errorf("record unreadable soak room admission: %w", observeErr)
 		}
 		return nil
-	case transientSoakError(outcome.ErrorClass):
-		// Ambiguous: the request may or may not have been accepted. It is never
-		// resent and never called not_sent; reconciliation decides.
+	case outcome.ErrorClass == soakErrorCanceled || transientSoakError(outcome.ErrorClass):
+		// Ambiguous: the request may or may not have been accepted, and a
+		// teardown says nothing about whether it reached the server. Never
+		// resent, never called not_sent; reconciliation decides.
 		if _, observeErr := l.ledger.Observe(
 			operationID, failureObserverAdmission, failureObservationUnverified, l.now().UTC(),
 		); observeErr != nil {
