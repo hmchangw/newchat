@@ -299,3 +299,48 @@ both discoverable only by reading `write`'s 20-line doc comment.
 5. `low` — Fix the deploy README's health-check sentence and add `FLUSH_TIMEOUT` (with the budget rule) to the Tuning table.
 6. `low` — Collapse the duplicated Dockerfile to one shared file referenced by both compose files; de-duplicate the three readiness comments down to one.
 7. `low` — Leave `MetricsAddr` alone unless doing a fleet-wide sweep; removing it here alone makes this service inconsistent with five siblings for no gain.
+
+---
+
+# 6. Integration — 4 / 5
+
+Subject, stream and consumer wiring, the typed-projection contract and the tie-break comparator
+are all correctly shared with peers and pinned by tests. Two genuine cross-service field
+disagreements and one missing fleet convention keep it off 5.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `store_mongo.go:101-110` | `BulkAdvanceLastSeen` filters `(roomId, u.account)` in the **room's** site only, but a cross-site member's authoritative subscription lives at their **home** site (created by `inbox-worker/main.go:586`, and the reason `room-service/handler.go:1436` federates `subscription_read` at all). Nothing federates the send-implied advance — `broadcast-worker/handler.go:426 federateMentions` relays the *badge* across sites but not the sender's `lastSeenAt`. Same-site senders write one document so the gap is invisible; **for a cross-site sender, their own message leaves the room `HasUnread=true` at home** (`user-service/service/subscriptions.go:256`) and their own `@all` self-badges `HasGroupMention` (`:257`) — because `lastMentionAllAt` arrives by RPC from the room's site while `lastSeenAt` is read from the un-advanced home copy. |
+| `medium` | `store_mongo.go:71-75` | Writes `updatedAt: u.at` — the *message*'s `createdAt` — into a field every other writer treats as a document-modification clock set to `time.Now()` (`room-worker/store_mongo.go:766`, `room-service/store_mongo.go:1833`), and which `inbox-worker/main.go:148` uses as a strict monotonic replication guard (`updatedAt: {$lt: room.UpdatedAt}`). Guarded only against `lastMsgAt`, so a message flushing just after a rename regresses `updatedAt` below the rename's timestamp. Latent rather than live only because the migration `room_sync` path is currently its sole reader. |
+| `medium` | `store_mongo.go:23-28` | `NewMongoStore` does not call `mongoutil.WarnMissingIndexes(ctx, subCol, "roomId_1_u.account_1")`, which every other service issuing this exact filter does (`inbox-worker/main.go:560-562`, `user-service/mongorepo/subscriptions.go:74`, `bot-room-service/store_mongo.go:36`) — and this service runs the shape at the highest volume in the fleet, twice per flush. |
+| `low` | `projection.go:25-44` | A *renamed* or retyped `model.Message` field breaks `projection_test.go:52` at compile/assert time, but an **added** field with pointer semantics (a future soft-delete or suppression flag) is silently ignored and the room pointer keeps advancing. No `reflect.NumField` drift guard exists, unlike the risk the comment claims to manage. |
+| `low` | `broadcast-worker/handler.go:241-251` | Badge sources diverge under failure: roomlist-worker badges from raw `mention.Parse(content).Accounts`, broadcast-worker federates from `resolved.Participants`, and a `FindUsersByAccounts` error is logged-not-returned — so local mentionees get badged while remote ones silently do not. |
+| `info` | `main.go:371-377` | The `MaxDeliver`/`BackOff` ordering (see Architecture). Harmless for delivery semantics — the server normalizes `-1` first — but the schedule length is clamped to a cap that no longer applies. |
+
+## Contract matrix
+
+| Contract | Other participants | Agrees? |
+|---|---|---|
+| `MESSAGES-CANONICAL-{siteID}` / `BOT-…` via `stream.Resolve` | message-gatekeeper, history-service (`.updated`), broadcast / notification / search-sync | **Yes** — no raw `fmt.Sprintf` subjects anywhere |
+| Durable `roomlist-worker` / `bot-roomlist-worker` | distinct streams per mode | **Yes** |
+| Stream bootstrap (`bootstrap.go:31-40`) | message-gatekeeper / bot-message-handler own it | **Yes** — `Name+Subjects` only, verifies when disabled |
+| `model.MessageEvent` → `eventProjection` | both user and bot producers use the same struct | **Yes** — parity-tested |
+| sonic decode | CLAUDE.md `Reactions` struct-keyed-map caveat | **Yes** — projection has no such type; `pretouch.go` warms exactly what is decoded |
+| `msgbucket.NewerRow` tie-break | `broadcast-worker/preview_writer.go:114,120` | **Yes** — same comparator; `store_mongo.go:42-49` is the same rule in BSON at ms granularity |
+| `rooms.lastMsgAt/lastMsgId/lastMentionAllAt` | broadcast-worker (preview fields only), user-service / history-service (read) | **Yes** — disjoint halves, separate watermarks |
+| `subscriptions.hasMention` | `inbox-worker/main.go:571-578`, room-service (clear) | **Yes** — identical `$not/$gte` guard (#467) |
+| `subscriptions.lastSeenAt` | room-service `$set` on read; roomlist `$max` | **No** — see `high` finding |
+| `rooms.updatedAt` | room-worker, room-service, inbox-worker guard | **No** — see `medium` finding |
+| Client API | none registered — no `chat.user.` subject, no Gin routes | **N/A** — `docs/client-api.md` correctly unaffected; the `Timestamp` publish rule also does not bind, as the service publishes nothing |
+| Deploy | matches broadcast / notification dual-mode layout; `golang:1.25.13-alpine` → `alpine:3.21`, repo-root context, `BOOTSTRAP_STREAMS=true` in compose | **Yes** |
+
+## Recommendations
+
+1. `high` — Federate the sender's `lastSeenAt` advance to their home site, or have roomlist-worker emit an OUTBOX `subscription_read`-shaped event for senders whose resolved `SiteID != siteID`. Reuse `inbox-worker`'s existing `UpdateSubscriptionRead` `$lt` guard; add the type to exactly one `pkg/outbox` filter set per CLAUDE.md.
+2. `medium` — Stop writing `updatedAt` from `msg.CreatedAt` (`store_mongo.go:73`). Either drop it from `roomLastMsgModels` or write `$currentDate`, so the field keeps one meaning across roomlist-worker, room-worker and inbox-worker's guard.
+3. `medium` — Add `mongoutil.WarnMissingIndexes(ctx, subCol, "roomId_1_u.account_1")` to `NewMongoStore`, matching inbox-worker's usage; take `ctx` in the constructor as those services do.
+4. `low` — Add a `reflect.TypeOf(model.Message{}).NumField()` assertion to `projection_test.go`, so a new canonical field forces a conscious decision about the narrow projection.
+5. `low` — Have `broadcast-worker.handleCreated` NAK rather than warn when `FindUsersByAccounts` errors on a message with parsed mentions, so cross-site badges cannot be lost while local ones land.
+6. `info` — Record the `lastSeenAt` / `updatedAt` ownership rules in `deploy/README.md` alongside the existing preview/pointer section; it is currently the best cross-service contract doc in the repo and is the right home for both.
