@@ -1,6 +1,10 @@
 package main
 
-import "strings"
+import (
+	"mime"
+	"path/filepath"
+	"strings"
+)
 
 // mediaTypeFilter decides whether an uploaded MIME type is allowed: blacklist
 // first (deny wins), then whitelist (when non-empty, the type must match). Each
@@ -85,4 +89,59 @@ func normalizeMediaType(v string) string {
 		v = base
 	}
 	return strings.ToLower(strings.TrimSpace(v))
+}
+
+// extensionMediaTypes maps a lowercase extension to its MIME type for the types
+// Go's own table lacks. The runtime image is bare alpine with no /etc/mime.types,
+// so mime.TypeByExtension knows only ~16 builtin entries — without this table
+// every Office document, archive and media file resolves to nothing.
+var extensionMediaTypes = map[string]string{
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	".doc":  "application/msword",
+	".xls":  "application/vnd.ms-excel",
+	".ppt":  "application/vnd.ms-powerpoint",
+	".odt":  "application/vnd.oasis.opendocument.text",
+	".ods":  "application/vnd.oasis.opendocument.spreadsheet",
+	".odp":  "application/vnd.oasis.opendocument.presentation",
+	".zip":  "application/zip",
+	".7z":   "application/x-7z-compressed",
+	".rar":  "application/vnd.rar",
+	".gz":   "application/gzip",
+	".tar":  "application/x-tar",
+	".txt":  "text/plain",
+	".log":  "text/plain",
+	".csv":  "text/csv",
+	".md":   "text/markdown",
+	".rtf":  "application/rtf",
+	".svg":  "image/svg+xml",
+	".heic": "image/heic",
+	".heif": "image/heif",
+	".bmp":  "image/bmp",
+	".tif":  "image/tiff",
+	".tiff": "image/tiff",
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+	".wav":  "audio/wav",
+	".ogg":  "audio/ogg",
+	".aac":  "audio/aac",
+	".mp4":  "video/mp4",
+	".mov":  "video/quicktime",
+	".webm": "video/webm",
+	".mkv":  "video/x-matroska",
+	".avi":  "video/x-msvideo",
+}
+
+// mediaTypeByExtension resolves a file name's extension to a MIME type: our own
+// table first, then Go's builtin one. Returns "" when neither knows it.
+func mediaTypeByExtension(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		return ""
+	}
+	if mt, ok := extensionMediaTypes[ext]; ok {
+		return mt
+	}
+	return normalizeMediaType(mime.TypeByExtension(ext))
 }
