@@ -25,6 +25,7 @@ docs/load-testing/
 | Does the Cassandra schema hold up under sustained realistic load | [`soak/cassandra-soak-plan.md`](soak/cassandra-soak-plan.md) |
 | Does the system stay correct and recoverable when a dependency breaks | [`failure/overview.md`](failure/overview.md) |
 | How the load generator records evidence | [`loadgen/observation.md`](loadgen/observation.md) |
+| In what order to run all of it, and what blocks each item | [`execution-priority-plan.md`](execution-priority-plan.md) |
 
 ## The Three Programs
 
