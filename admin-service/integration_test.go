@@ -94,49 +94,54 @@ func TestIntegration_SearchUsers(t *testing.T) {
 		require.NoError(t, st.CreateUser(ctx, &users[i]))
 	}
 
-	t.Run("filter by siteId – excludes other sites", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 1, 10)
+	t.Run("lists every site's users – no site filter", func(t *testing.T) {
+		results, total, err := st.SearchUsers(ctx, "", 1, 10)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
-		assert.Len(t, results, 2)
+		assert.Equal(t, int64(3), total)
+		assert.Len(t, results, 3)
+		sites := make(map[string]bool)
+		for _, u := range results {
+			sites[u.SiteID] = true
+		}
+		assert.True(t, sites["site-a"] && sites["site-b"], "both sites' users must appear")
 	})
 
 	t.Run("filter by q matches account", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "alice", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "alice", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 		assert.Equal(t, "alice", results[0].Account)
 	})
 
 	t.Run("filter by q matches engName", func(t *testing.T) {
-		_, total, err := st.SearchUsers(ctx, "site-a", "Smith", 1, 10)
+		_, total, err := st.SearchUsers(ctx, "Smith", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 	})
 
 	t.Run("filter by q matches chineseName", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "阿鮑", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "阿鮑", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), total)
 		assert.Equal(t, "bob", results[0].Account)
 	})
 
 	t.Run("pagination – page 1 limit 1", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 1, 1)
+		results, total, err := st.SearchUsers(ctx, "", 1, 1)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
+		assert.Equal(t, int64(3), total)
 		assert.Len(t, results, 1)
 	})
 
-	t.Run("pagination – page 2 limit 1", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "", 2, 1)
+	t.Run("pagination – page 3 limit 1", func(t *testing.T) {
+		results, total, err := st.SearchUsers(ctx, "", 3, 1)
 		require.NoError(t, err)
-		assert.Equal(t, int64(2), total)
+		assert.Equal(t, int64(3), total)
 		assert.Len(t, results, 1)
 	})
 
 	t.Run("no match returns empty slice", func(t *testing.T) {
-		results, total, err := st.SearchUsers(ctx, "site-a", "zzznomatch", 1, 10)
+		results, total, err := st.SearchUsers(ctx, "zzznomatch", 1, 10)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Empty(t, results)
@@ -193,13 +198,25 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		Account: "eve",
 		SiteID:  "site-a",
 		Roles:   []model.UserRole{model.UserRoleUser},
+		// Sentinel credential material so the returned-doc projection guard
+		// below is real: a widened fanoutProjection would surface this.
+		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: "seeded-hash-must-not-be-projected"}},
 	}
 	require.NoError(t, st.CreateUser(ctx, u))
 
 	t.Run("update roles", func(t *testing.T) {
 		newRoles := []model.UserRole{model.UserRoleAdmin}
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Roles: &newRoles})
+		updated, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Roles: &newRoles})
 		require.NoError(t, err)
+
+		// The returned doc is the POST-write state (ReturnDocument=After) — the
+		// fanout publishes it, so a Before doc would ship stale roles.
+		require.NotNil(t, updated)
+		assert.Equal(t, []model.UserRole{model.UserRoleAdmin}, updated.Roles)
+		assert.Equal(t, u.ID, updated.ID)
+		assert.Equal(t, u.Account, updated.Account)
+		assert.Equal(t, "site-a", updated.SiteID)
+		assert.Empty(t, updated.Services.Password.Bcrypt, "fanoutProjection must never return credential material")
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
 		require.NoError(t, err)
@@ -211,7 +228,7 @@ func TestIntegration_UpdateUser(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "eve-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 
 		inactive := false
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Active: &inactive})
+		_, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{Active: &inactive})
 		require.NoError(t, err)
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
@@ -226,7 +243,7 @@ func TestIntegration_UpdateUser(t *testing.T) {
 	t.Run("update names", func(t *testing.T) {
 		eng := "Eve Updated"
 		cn := "更新伊芙"
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{EngName: &eng, ChineseName: &cn})
+		_, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{EngName: &eng, ChineseName: &cn})
 		require.NoError(t, err)
 
 		got, err := st.GetUserByAccount(ctx, "site-a", u.Account)
@@ -236,13 +253,15 @@ func TestIntegration_UpdateUser(t *testing.T) {
 	})
 
 	t.Run("no-op when all fields nil", func(t *testing.T) {
-		err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{})
+		updated, err := st.UpdateUser(ctx, "site-a", u.Account, UserUpdate{})
 		require.NoError(t, err)
+		// (nil, nil) on an empty patch — the fanout branches on this to skip publishing.
+		assert.Nil(t, updated)
 	})
 
 	t.Run("nonexistent id returns ErrUserNotFound", func(t *testing.T) {
 		eng := "Ghost"
-		err := st.UpdateUser(ctx, "site-a", "nonexistent-account", UserUpdate{EngName: &eng})
+		_, err := st.UpdateUser(ctx, "site-a", "nonexistent-account", UserUpdate{EngName: &eng})
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -356,8 +375,14 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 		seedSession(t, db, session.Session{ID: "gwen-sess-1", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 1})
 		seedSession(t, db, session.Session{ID: "gwen-sess-2", UserID: u.ID, Account: u.Account, SiteID: "site-a", IssuedAt: 2})
 
-		err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
+		updated, err := st.DeactivateAndRevoke(ctx, "site-a", u.Account)
 		require.NoError(t, err)
+
+		// Post-write doc (ReturnDocument=After): active must already be false,
+		// otherwise the fanout would publish the user as still active.
+		require.NotNil(t, updated)
+		assert.Equal(t, u.ID, updated.ID)
+		assert.False(t, updated.IsActive())
 
 		var raw struct {
 			Active *bool `bson:"active"`
@@ -375,7 +400,7 @@ func TestIntegration_DeactivateAndRevoke(t *testing.T) {
 	})
 
 	t.Run("nonexistent account returns ErrUserNotFound", func(t *testing.T) {
-		err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
+		_, err := st.DeactivateAndRevoke(ctx, "site-a", "ghost-account")
 		assert.ErrorIs(t, err, ErrUserNotFound)
 	})
 }
@@ -595,8 +620,9 @@ func TestIntegration_EnsureIndexes_Keys(t *testing.T) {
 	require.NoError(t, st.EnsureIndexes(context.Background()))
 
 	userKeys := testutil.IndexSpecs(t, db.Collection("users"))
-	// users.account unique is owned by user-service now, not created here.
-	require.Contains(t, userKeys, "siteId:1,account:1")
+	// No owned users index: account_1 is user-service's, and the old
+	// {siteId, account} compound died with SearchUsers' site filter (R7).
+	require.NotContains(t, userKeys, "siteId:1,account:1")
 
 	auditKeys := testutil.IndexSpecs(t, db.Collection("admin_audit"))
 	require.Contains(t, auditKeys, "siteId:1,timestamp:-1")

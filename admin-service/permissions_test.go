@@ -773,8 +773,8 @@ func (l *publishLog) record(subj string, data []byte) {
 	l.data = append(l.data, data)
 }
 
-// publish returns a publishInbox func that records every call and succeeds.
-func (l *publishLog) publish(_ context.Context, subj string, data []byte) error {
+// publish matches the Handler publish func: records every call and succeeds.
+func (l *publishLog) publish(_ context.Context, subj string, data []byte, _ string) error {
 	l.record(subj, data)
 	return nil
 }
@@ -854,7 +854,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 				record("audit")
 				return nil
 			})
-		publish := func(context.Context, string, []byte) error {
+		publish := func(context.Context, string, []byte, string) error {
 			record("publish")
 			return nil
 		}
@@ -885,7 +885,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		var callErr error
 		var callDeadline time.Time
 		var callHasDeadline bool
-		publish := func(ctx context.Context, _ string, _ []byte) error {
+		publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			callErr = ctx.Err()
@@ -926,7 +926,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 
 		var mu sync.Mutex
 		var callDeadline time.Time
-		publish := func(ctx context.Context, _ string, _ []byte) error {
+		publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
 			mu.Lock()
 			defer mu.Unlock()
 			callDeadline, _ = ctx.Deadline()
@@ -1004,11 +1004,11 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		mockPermissionStoreOK(m, accounts)
 
 		var log publishLog
-		publish := func(ctx context.Context, subj string, data []byte) error {
+		publish := func(ctx context.Context, subj string, data []byte, encoding string) error {
 			if strings.Contains(subj, ".site-b.") {
 				return fmt.Errorf("simulated publish failure")
 			}
-			return log.publish(ctx, subj, data)
+			return log.publish(ctx, subj, data, encoding)
 		}
 
 		h := newHandler(m, emptySessionStore(), fanoutTestCfg(), nil, publish)
@@ -1029,7 +1029,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 		mockPermissionStoreOK(m, accounts)
 
 		published := 0
-		publish := func(_ context.Context, _ string, _ []byte) error {
+		publish := func(_ context.Context, _ string, _ []byte, _ string) error {
 			published++
 			return nil
 		}
@@ -1054,7 +1054,7 @@ func TestHandler_createPermissions_Fanout(t *testing.T) {
 			Return(fmt.Errorf("boom"))
 
 		published := 0
-		publish := func(_ context.Context, _ string, _ []byte) error {
+		publish := func(_ context.Context, _ string, _ []byte, _ string) error {
 			published++
 			return nil
 		}
@@ -1321,7 +1321,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 		perms := map[string]*model.UserPermissions{"alice": {ExternalImageView: &storedState}}
 		m.EXPECT().GetUserPermissionsForAccounts(gomock.Any(), gomock.Any()).Return(perms, nil)
 
-		publish := func(_ context.Context, subj string, _ []byte) error {
+		publish := func(_ context.Context, subj string, _ []byte, _ string) error {
 			if strings.Contains(subj, ".site-b.") {
 				return fmt.Errorf("simulated publish failure")
 			}
@@ -1354,7 +1354,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 		var mu sync.Mutex
 		var deadlines []time.Time
 		allHaveDeadline := true
-		publish := func(ctx context.Context, _ string, _ []byte) error {
+		publish := func(ctx context.Context, _ string, _ []byte, _ string) error {
 			d, ok := ctx.Deadline()
 			// Recorded, not asserted, here: destinations publish from their own
 			// goroutines, and require's FailNow is only legal on the test goroutine.
@@ -1395,7 +1395,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 
 		var log publishLog
 		var siteBPublishes atomic.Int32
-		publish := func(ctx context.Context, subj string, data []byte) error {
+		publish := func(ctx context.Context, subj string, data []byte, encoding string) error {
 			if strings.Contains(subj, ".site-b.") {
 				siteBPublishes.Add(1)
 				<-ctx.Done() // site-b stalls until the fanout budget expires
@@ -1404,7 +1404,7 @@ func TestHandler_resyncPermissions(t *testing.T) {
 			if err := ctx.Err(); err != nil { // a real publish fails on an expired budget
 				return err
 			}
-			return log.publish(ctx, subj, data)
+			return log.publish(ctx, subj, data, encoding)
 		}
 
 		cfg := fanoutTestCfg()

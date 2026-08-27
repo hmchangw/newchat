@@ -12,6 +12,7 @@ import {
   AsyncJobError,
   ASYNC_JOB_ERROR_KINDS,
 } from '@/api/_transport/asyncJob'
+import { userInboxPrefix } from '@/api/_transport/inbox'
 
 export const NatsContext = createContext(null)
 
@@ -61,6 +62,49 @@ function tracedFetch(method, url, init = {}) {
       return fetch(url, { ...init, method, headers })
     },
   )
+}
+
+// Watches one connection for a permission violation on its reply inbox, and
+// tears the link down when it sees one.
+//
+// nats.ws recreates the mux after a denied inbox SUB, so the error repeats
+// forever: a live connection here would keep generating denied subscriptions
+// and permission events while every RPC failed anyway — across a partial
+// rollout, a thundering herd of control traffic for no benefit. The causes are
+// a prefix/template mismatch, a lagging production template, or a JWT whose
+// account tag disagrees with this connection's prefix.
+//
+// The prefix is the whole user namespace, so this also catches any other
+// permission error under it. That namespace is granted for both pub and sub,
+// so nothing else should ever land here.
+//
+// Declared at module scope, and given only the values it needs, so the loop
+// does not retain `connectToNats`'s locals — the minted JWT, the NKey seed and
+// the auth Response would otherwise stay reachable for the life of the socket.
+//
+// Returns the iterator so the caller can stop it: nc.close() closes only the
+// protocol (nats.js:92-96), while status() pushes into nc.listeners
+// (nats.js:415-422), which nothing stops. Left running, each
+// connect/disconnect cycle strands a pending loop holding a dead connection.
+function watchInboxPermission({ nc, inboxPrefix, gen, genRef, setError, setConnected }) {
+  const statusIter = typeof nc.status === 'function' ? nc.status() : null
+  if (!statusIter) return null
+
+  void (async () => {
+    for await (const s of statusIter) {
+      if (genRef.current !== gen) break
+      const subject = s?.permissionContext?.subject
+      if (subject && subject.startsWith(`${inboxPrefix}.`)) {
+        setError('Reply inbox permission denied — reload the page to reconnect.')
+        setConnected(false)
+        statusIter.stop?.()
+        nc.drain().catch(() => {})
+        return
+      }
+    }
+  })()
+
+  return statusIter
 }
 
 export function NatsProvider({ children }) {
@@ -193,9 +237,11 @@ export function NatsProvider({ children }) {
       })
 
       // 3) Dial the resolved site's NATS.
+      const inboxPrefix = userInboxPrefix(userInfo.account)
       const nc = await natsConnect({
         servers: portal.natsUrl,
         authenticator,
+        inboxPrefix,
       })
 
       authUrlRef.current = nextAuthUrl
@@ -211,7 +257,12 @@ export function NatsProvider({ children }) {
         try { window.sessionStorage.setItem(BOT_SESSION_KEY, JSON.stringify(bundle)) } catch { /* storage unavailable */ }
       }
 
+      const statusIter = watchInboxPermission({
+        nc, inboxPrefix, gen: myGen, genRef: connectGenRef, setError, setConnected,
+      })
+
       nc.closed().then((err) => {
+        statusIter?.stop?.()
         // A newer connect or a disconnect bumped the generation; this old
         // link's close must not clobber the live session's state.
         if (myGen !== connectGenRef.current) return

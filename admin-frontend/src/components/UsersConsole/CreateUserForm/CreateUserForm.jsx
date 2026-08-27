@@ -14,6 +14,10 @@ export default function CreateUserForm({ authToken, onClose, onCreated }) {
   const [requirePasswordChange, setRequirePasswordChange] = useState(false)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  // Set whenever the direct sync missed a site (spec R9). The INBOX snapshot is
+  // the only complete lane — the durable HR feed carries identity fields only —
+  // so hrSyncFailed just picks the severity: full failure vs identity-only partial.
+  const [syncResult, setSyncResult] = useState(null)
   const handleAdminError = useHandleAdminError()
 
   const toggleRole = (role) => {
@@ -29,7 +33,7 @@ export default function CreateUserForm({ authToken, onClose, onCreated }) {
     setError(null)
     setSubmitting(true)
     try {
-      await createUser(authToken, {
+      const res = await createUser(authToken, {
         account: account.trim(),
         engName: engName.trim() || undefined,
         chineseName: chineseName.trim() || undefined,
@@ -37,13 +41,45 @@ export default function CreateUserForm({ authToken, onClose, onCreated }) {
         password,
         requirePasswordChange,
       })
-      onCreated()
+      if (res.syncFailures.length > 0) {
+        setSyncResult(res)
+      } else {
+        onCreated()
+      }
     } catch (err) {
       const message = handleAdminError(err)
       if (message !== null) setError(message)
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // The user exists locally, so every exit from the notice (Done, Esc, backdrop) is onCreated —
+  // the parent has to refresh its list, not just drop the dialog.
+  if (syncResult) {
+    return (
+      <Modal onClose={onCreated} labelledBy="create-user-title">
+        <h2 id="create-user-title">User created on this site</h2>
+        <p className="dialog-error" role="alert">
+          {syncResult.hrSyncFailed ? (
+            <>
+              This account did not sync to: {syncResult.syncFailures.join(', ')}. Use Resync on
+              this user once those sites are reachable.
+            </>
+          ) : (
+            <>
+              Only this account&apos;s identity reached: {syncResult.syncFailures.join(', ')} —
+              roles and status did not sync. Use Resync on this user to deliver them.
+            </>
+          )}
+        </p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCreated}>
+            Done
+          </button>
+        </div>
+      </Modal>
+    )
   }
 
   return (

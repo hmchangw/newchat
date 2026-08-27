@@ -114,6 +114,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
@@ -140,6 +141,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                     TEXT,
 			sys_msg_data             BLOB,
 			quoted_parent_message    FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload              BLOB,
 			enc_meta                 FROZEN<"EncMeta">,
 			PRIMARY KEY (message_id)
@@ -163,6 +165,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			deleted               BOOLEAN,

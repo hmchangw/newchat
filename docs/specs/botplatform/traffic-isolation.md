@@ -739,6 +739,12 @@ gateway {
 }
 ```
 
+> Note: `_INBOX.>` here now carries **backend** reply traffic only. Clients set
+> their request/reply inbox prefix to `chat.user.{account}`, so client replies
+> ride the `chat.user.>` entry above and no longer touch `_INBOX` — but backend
+> services still use the library default, so the grant must stay. See
+> `docs/nats-subject-naming.md`.
+
 **Verification before each rollout phase:** publish a message on `chat.bot.canonical.siteA.test` from siteA, assert it arrives on siteB and is consumed by `broadcast-worker-bot` at siteB (not by the human pool).
 
 `inbox-worker` continues to consume from `INBOX-{siteID}` regardless of class — it's the stream-wide ingress and shouldn't be split.

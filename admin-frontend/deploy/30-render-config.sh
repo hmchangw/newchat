@@ -5,10 +5,12 @@
 set -eu
 
 : "${ADMIN_SERVICE_URL:?ADMIN_SERVICE_URL is required (admin-service base URL)}"
-export ADMIN_SERVICE_URL
+# Deploy-gated sections default off; only the literal string "true" enables.
+: "${PERMISSIONS_ENABLED:=false}"
+export ADMIN_SERVICE_URL PERMISSIONS_ENABLED
 
-envsubst '${ADMIN_SERVICE_URL}' \
+envsubst '${ADMIN_SERVICE_URL} ${PERMISSIONS_ENABLED}' \
   < /etc/config.js.template \
   > /usr/share/nginx/html/config.js
 
-echo "rendered /config.js  ADMIN_SERVICE_URL=$ADMIN_SERVICE_URL"
+echo "rendered /config.js  ADMIN_SERVICE_URL=$ADMIN_SERVICE_URL PERMISSIONS_ENABLED=$PERMISSIONS_ENABLED"

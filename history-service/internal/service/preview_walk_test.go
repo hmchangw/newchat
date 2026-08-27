@@ -228,11 +228,12 @@ func TestPreviewWalk_Eligibility(t *testing.T) {
 			want: "m-1",
 		},
 		{
-			// The room list has one preview per room but visible_to is per-user, so a
-			// restricted message can never be the right thing to show every subscriber.
-			name: "a visibility-restricted message is skipped",
+			// Store-and-surface: visible_to is an opaque client-set marker the backend
+			// never filters on, so a message carrying it is a valid preview (the client
+			// interprets the scope).
+			name: "a visibility-marked message is eligible",
 			page: []models.Message{restricted(msgAt("m-3", 1), "u-9"), msgAt("m-1", 3)},
-			want: "m-1",
+			want: "m-3",
 		},
 		{
 			name: "an empty room reports gone",
@@ -257,6 +258,16 @@ func TestPreviewWalk_Eligibility(t *testing.T) {
 			assert.Equal(t, tc.want, got.MessageID)
 		})
 	}
+}
+
+// The surfaced preview carries the message's visible_to marker verbatim, so the client
+// can interpret the scope the backend never filters on.
+func TestPreviewWalk_SurfacesVisibleTo(t *testing.T) {
+	got, gone := walkedPreview(t, makePage([]models.Message{restricted(msgAt("m-3", 1), "u-9")}, false))
+	assert.False(t, gone)
+	require.NotNil(t, got)
+	assert.Equal(t, "m-3", got.MessageID)
+	assert.Equal(t, "u-9", got.VisibleTo)
 }
 
 // Enumerated, not sampled: a newly added system type fails here instead of shipping.

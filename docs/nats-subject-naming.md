@@ -23,6 +23,8 @@ All subjects are dot-delimited and organized into four namespaces:
 
 On connect, every client subscribes to `chat.user.{account}.>`. This single wildcard captures all personal events:
 
+> **Note:** this wildcard is optional, and it overlaps request/reply replies. `inboxPrefix` is `chat.user.{account}`, so a reply matches both the library's request mux and this subscription — and NATS delivers a **copy to every matching non-queue subscription**, not just the one that issued the request. A client subscribing this broadly therefore receives its own RPC replies here as well and must ignore subjects it did not expect. The frontend instead subscribes to the specific event subjects below; only the async `msg.send` reply (`chat.user.{account}.response.{requestID}`) actually requires a subscription, and a narrow one suffices.
+
 | Subject | Direction | Publisher | Purpose |
 |---------|-----------|-----------|---------|
 | `chat.user.{account}.stream.msg` | Server → Client | broadcast-worker | DM message delivery |
@@ -243,10 +245,8 @@ The auth-service issues per-user JWTs with these permissions:
 | Type | Pattern | Rationale |
 |------|---------|-----------|
 | Pub.Allow | `chat.user.{account}.>` | User can publish messages, requests, typing under own namespace |
-| Pub.Allow | `_INBOX.>` | Required for NATS core request/reply pattern |
-| Sub.Allow | `chat.user.{account}.>` | User receives own events, responses, notifications |
+| Sub.Allow | `chat.user.{account}.>` | User receives own events, responses, notifications, and NATS core request/reply replies (the client's `inboxPrefix` is `chat.user.{account}`) |
 | Sub.Allow | `chat.room.>` | User can subscribe to any room's message stream and events |
-| Sub.Allow | `_INBOX.>` | Required for NATS core request/reply pattern |
 
 All client publishes — message sends, member invites, room CRUD requests, typing indicators, and request/reply — fall under `chat.user.{account}.>`. No additional publish permissions are needed. Room-scoped subjects (`chat.room.*`) are server-published only; clients can subscribe but never publish to them.
 

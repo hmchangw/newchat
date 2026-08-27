@@ -438,3 +438,17 @@ func (mr *MockInboxStoreMockRecorder) UpsertThreadSubscription(ctx, sub any) *go
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertThreadSubscription", reflect.TypeOf((*MockInboxStore)(nil).UpsertThreadSubscription), ctx, sub)
 }
+
+// UpsertUserAccount mocks base method.
+func (m *MockInboxStore) UpsertUserAccount(ctx context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpsertUserAccount", ctx, e, updatedAt)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpsertUserAccount indicates an expected call of UpsertUserAccount.
+func (mr *MockInboxStoreMockRecorder) UpsertUserAccount(ctx, e, updatedAt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpsertUserAccount", reflect.TypeOf((*MockInboxStore)(nil).UpsertUserAccount), ctx, e, updatedAt)
+}

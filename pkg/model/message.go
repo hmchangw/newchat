@@ -35,6 +35,10 @@ type Message struct {
 	QuotedParentMessage          *cassandra.QuotedParentMessage `json:"quotedParentMessage,omitempty"          bson:"quotedParentMessage,omitempty"`
 	PinnedAt                     *time.Time                     `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
 	PinnedBy                     *Participant                   `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
+	// VisibleTo is an opaque, client-set visibility marker: set on send, persisted,
+	// and surfaced on history reads and the room-list preview. The backend never
+	// filters delivery, reads, or previews on it — the client interprets visibility.
+	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomRenamedSysData is the JSON payload stored in Message.SysMsgData
@@ -73,6 +77,10 @@ type SendMessageRequest struct {
 	// MessageTypeImportant; message-gatekeeper rejects any system type or unknown
 	// value so a client can't inject a system event. Empty = a normal message.
 	Type string `json:"type,omitempty"`
+	// VisibleTo is an opaque, client-set visibility marker copied verbatim onto the
+	// canonical Message. message-gatekeeper caps its size but never interprets it;
+	// the backend stores and surfaces it without filtering on it.
+	VisibleTo string `json:"visibleTo,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's
@@ -139,9 +147,10 @@ type PreviewMessage struct {
 	CreatedAt   time.Time              `json:"createdAt"`
 	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
 	Mentions    []Participant          `json:"mentions,omitempty"`
-	// No VisibleTo: one preview is stored per room but visibility is per-user, so a
-	// restricted message is preview-INELIGIBLE (preview.Eligible) rather than previewed
-	// with a scope the room list has no way to honour (#364).
+	// VisibleTo is the message's opaque visibility marker, surfaced verbatim so the
+	// client can interpret it. A message with a non-empty VisibleTo is still previewed —
+	// the backend does not filter previews on it (the client honours the scope).
+	VisibleTo string `json:"visibleTo,omitempty"`
 	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
 }
 
@@ -154,6 +163,9 @@ type PreviewMeta struct {
 	Sender    Participant   `json:"sender"              bson:"sender"`
 	CreatedAt time.Time     `json:"createdAt"           bson:"createdAt"`
 	Mentions  []Participant `json:"mentions,omitempty"  bson:"mentions,omitempty"`
+	// VisibleTo is visibility metadata, so it rides the plaintext meta half alongside
+	// messageId/sender — never the sealed body — and is surfaced on the preview verbatim.
+	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomsGetResponse maps each requested roomId that has a resolvable last message to
