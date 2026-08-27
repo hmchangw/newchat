@@ -48,7 +48,10 @@ func NewMongoLoader(subscriptions, users *mongo.Collection) Loader {
 		}
 		defer cur.Close(ctx)
 
-		var out []Member
+		// Capacity hint: this is the cold-fill path for rooms documented as having
+		// thousands of members, so an unhinted append reallocates and copies the
+		// whole slice ~log2(N) times per fill.
+		out := make([]Member, 0, 128)
 		for cur.Next(ctx) {
 			var doc struct {
 				User struct {

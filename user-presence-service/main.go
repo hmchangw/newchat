@@ -112,14 +112,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := presencestore.NewValkeyStore(
-		presencestore.ClusterConfig{Addrs: cfg.Valkey.Addrs, Password: cfg.Valkey.Password},
-		cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL,
-	)
+	// Dialed through valkeyutil rather than presencestore's own ClusterConfig so
+	// this service's Valkey commands carry the same instrumentation and dial
+	// policy as every other service's. Presence IS the datastore here, so an
+	// uninstrumented client is the one worth least having.
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
+	store := presencestore.NewValkeyStoreFromClient(valkeyClient, cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL)
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
 	if err != nil {

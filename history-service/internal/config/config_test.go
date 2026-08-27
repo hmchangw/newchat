@@ -1,12 +1,13 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/testutil"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -154,25 +155,11 @@ func TestLoad_DefaultsReadPreferenceToSecondaryPreferred(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 	t.Setenv("CASSANDRA_HOSTS", "localhost")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
-	unsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
+	testutil.UnsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
 
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
-}
-
-// unsetEnv removes key for the duration of the test and restores its prior
-// presence/value on cleanup, so a default-value test can't be perturbed by an
-// externally set variable.
-func unsetEnv(t *testing.T, key string) {
-	t.Helper()
-	prev, had := os.LookupEnv(key)
-	require.NoError(t, os.Unsetenv(key))
-	t.Cleanup(func() {
-		if had {
-			_ = os.Setenv(key, prev)
-		}
-	})
 }
 
 // Every knob this branch added is rejected when negative. Table-driven: the
@@ -218,7 +205,7 @@ func TestLoad_PageTrimming(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setRequiredEnv(t)
 			if tc.env == "" {
-				unsetEnv(t, "PAGE_TRIMMING_ENABLED")
+				testutil.UnsetEnv(t, "PAGE_TRIMMING_ENABLED")
 			} else {
 				t.Setenv("PAGE_TRIMMING_ENABLED", tc.env)
 			}
@@ -356,7 +343,7 @@ func TestValidate_AcceptsBucketBudgetThatCoversTheWalkSkew(t *testing.T) {
 func TestLoad_ProductionDefaultsCoverTheWalk(t *testing.T) {
 	setRequiredEnv(t)
 	for _, k := range []string{"MESSAGE_BUCKET_HOURS", "MESSAGE_READ_MAX_BUCKETS", "MESSAGE_HISTORY_FLOOR_DAYS"} {
-		unsetEnv(t, k)
+		testutil.UnsetEnv(t, k)
 	}
 
 	cfg, err := Load()

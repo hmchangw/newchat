@@ -1,27 +1,14 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-)
 
-// unsetEnv removes key for the duration of the test and restores its prior
-// presence/value on cleanup, so a default-value test can't be perturbed by an
-// externally set variable.
-func unsetEnv(t *testing.T, key string) {
-	t.Helper()
-	prev, had := os.LookupEnv(key)
-	require.NoError(t, os.Unsetenv(key))
-	t.Cleanup(func() {
-		if had {
-			_ = os.Setenv(key, prev)
-		}
-	})
-}
+	"github.com/hmchangw/chat/pkg/testutil"
+)
 
 func TestLoad(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
@@ -50,7 +37,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
-	unsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
+	testutil.UnsetEnv(t, "MONGO_READ_PREFERENCE") // the default only applies when unset
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 1000, cfg.MaxSubscriptionLimit)
@@ -293,8 +280,8 @@ func TestLoad_BadgeDefaults(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
-	unsetEnv(t, "BADGE_CACHE_TTL")
-	unsetEnv(t, "BADGE_COUNT_CAP")
+	testutil.UnsetEnv(t, "BADGE_CACHE_TTL")
+	testutil.UnsetEnv(t, "BADGE_COUNT_CAP")
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 24*time.Hour, cfg.BadgeCacheTTL)
@@ -332,7 +319,7 @@ func TestLoad_BadgeCountCacheFirst(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
-	unsetEnv(t, "BADGE_COUNT_CACHE_FIRST")
+	testutil.UnsetEnv(t, "BADGE_COUNT_CACHE_FIRST")
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.False(t, cfg.BadgeCountCacheFirst, "cache-first count must be opt-in (rollout gate)")
@@ -382,8 +369,8 @@ func TestLoad_BadgeMarkerTTLDefault(t *testing.T) {
 	t.Setenv("SITE_ID", "site-a")
 	// An inherited BADGE_MARKER_TTL would change the asserted default, and an
 	// inherited short BADGE_CACHE_TTL would make that default invalid.
-	unsetEnv(t, "BADGE_CACHE_TTL")
-	unsetEnv(t, "BADGE_MARKER_TTL")
+	testutil.UnsetEnv(t, "BADGE_CACHE_TTL")
+	testutil.UnsetEnv(t, "BADGE_MARKER_TTL")
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Equal(t, 10*time.Minute, cfg.BadgeMarkerTTL)
@@ -517,7 +504,7 @@ func TestLoad_HTTPMongoMaxIdleTimeDefault(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x")
 	t.Setenv("SITE_ID", "site-a")
-	unsetEnv(t, "HTTP_MONGO_MAX_IDLE_TIME")
+	testutil.UnsetEnv(t, "HTTP_MONGO_MAX_IDLE_TIME")
 
 	cfg, err := Load()
 
@@ -573,7 +560,7 @@ func TestLoad_RejectsNonPositiveHandlerTimeout(t *testing.T) {
 // preview memory rather than the gatekeeper's 20 KB body ceiling.
 func TestLoad_PreviewContentCharsDefault(t *testing.T) {
 	requiredEnv(t)
-	unsetEnv(t, "PREVIEW_CONTENT_CHARS")
+	testutil.UnsetEnv(t, "PREVIEW_CONTENT_CHARS")
 
 	cfg, err := Load()
 
@@ -673,7 +660,7 @@ func TestLoad_PageTrimming(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			requiredEnv(t)
 			if tc.env == "" {
-				unsetEnv(t, "PAGE_TRIMMING_ENABLED")
+				testutil.UnsetEnv(t, "PAGE_TRIMMING_ENABLED")
 			} else {
 				t.Setenv("PAGE_TRIMMING_ENABLED", tc.env)
 			}

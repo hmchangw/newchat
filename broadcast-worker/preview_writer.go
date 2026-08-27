@@ -158,10 +158,6 @@ func (w *previewWriter) Flush(ctx context.Context) error {
 	w.pending = make(map[string]roomPreviewUpdate, len(batch))
 	w.pendingPreviews = 0
 	w.mu.Unlock()
-	// Bounded: the drained batch stays live for the whole write, and handlers fill the
-	// replacement map behind it, so an unbounded write is an unbounded pair of maps.
-	ctx, cancel := context.WithTimeout(ctx, maxFlushDuration)
-	defer cancel()
 	return w.bulk.BulkUpdateRoomPreview(ctx, batch)
 }
 
@@ -169,9 +165,11 @@ func (w *previewWriter) Flush(ctx context.Context) error {
 // final flush so a buffered batch still lands even though the supplied ctx is
 // already done.
 //
-// No per-flush bound is passed: Flush bounds its own bulk write (maxFlushDuration),
-// since the drained batch stays live for the whole write while handlers fill the
-// replacement map behind it. The final drain takes flushloop.DefaultFinalTimeout.
+// PerFlush carries the bound rather than Flush imposing its own: the drained batch
+// stays live for the whole write while handlers fill the replacement map behind it,
+// so an unbounded write is an unbounded pair of maps. Keeping it on the shared knob
+// means there is one place to look when a flush hangs, as in unread-worker. The
+// final drain takes flushloop.DefaultFinalTimeout.
 //
 // A flush failure is logged and never returned to the handler. The message is
 // already in Cassandra and already broadcast, and a room with no stored preview
@@ -183,5 +181,6 @@ func (w *previewWriter) Run(ctx context.Context, interval time.Duration) {
 	flushloop.Run(ctx, flushloop.Config{
 		Name:     "room preview flush",
 		Interval: interval,
+		PerFlush: maxFlushDuration,
 	}, w.Flush)
 }
