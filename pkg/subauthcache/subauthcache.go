@@ -144,7 +144,6 @@ type Tier struct {
 	// window must exceed the process-local L1 TTL in front of this tier (two
 	// minutes in both services), or every L1 miss would pay a refresh.
 	inner  valkeyutil.Tier[subID, SubAuth]
-	client valkeyutil.Client
 	loader Loader
 }
 
@@ -175,7 +174,7 @@ func NewTierWithLoader(client valkeyutil.Client, ttl time.Duration, rec Recorder
 // newTierWithClock is NewTierWithLoader with an injected clock, for this
 // package's own refresh-window tests.
 func newTierWithClock(client valkeyutil.Client, ttl time.Duration, rec Recorder, loader Loader, now func() time.Time) *Tier {
-	t := &Tier{client: client, loader: loader}
+	t := &Tier{loader: loader}
 	t.inner = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[subID, SubAuth]{
 		Client: client,
 		TTL:    ttl,

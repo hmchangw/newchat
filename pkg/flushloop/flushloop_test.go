@@ -87,7 +87,7 @@ func runUntilCancel(t *testing.T, cfg Config, r *recorder) {
 }
 
 func testConfig() Config {
-	return Config{Name: "test", Interval: time.Millisecond, PerFlush: time.Second, FinalTimeout: time.Second}
+	return Config{Name: "test", Interval: time.Millisecond, PerFlush: time.Second}
 }
 
 func TestRun_FlushesOnTickAndOnceMoreAfterCancellation(t *testing.T) {
@@ -188,19 +188,6 @@ func TestRun_UsesTheConfiguredLogger(t *testing.T) {
 	runUntilCancel(t, cfg, r)
 
 	assert.Contains(t, buf.String(), "write failed", "the failure must reach the supplied logger")
-}
-
-// A zero FinalTimeout must take the package default, not build an
-// already-expired context for the one drain this package exists to land.
-func TestRun_ZeroFinalTimeoutTakesTheDefault(t *testing.T) {
-	cfg := testConfig()
-	cfg.FinalTimeout = 0
-	r := newRecorder()
-
-	runUntilCancel(t, cfg, r)
-
-	assert.NoError(t, r.last().err, "the final flush must not start already expired")
-	assert.True(t, r.last().hasDeadline, "it must still be bounded")
 }
 
 // A non-positive interval would panic time.NewTicker and kill the process from

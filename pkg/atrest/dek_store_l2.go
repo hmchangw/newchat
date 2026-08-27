@@ -55,12 +55,8 @@ func usableDEK(k *RoomDataKey) bool { return len(k.WrappedDEK) > 0 }
 //     a room that keeps being read survives an outage of any length instead of
 //     expiring one TTL after its last populate.
 type l2DEKStore struct {
-	inner  DEKStore
-	client valkeyutil.Client
-	// ttl is kept only for l2Enabled and invalidate; the tier owns the rest. It
-	// must stay above ATREST_DEK_CACHE_TTL, or every miss in that cache triggers
-	// a Mongo read here. The 90m/1h defaults leave room.
-	ttl     time.Duration
+	inner   DEKStore
+	client  valkeyutil.Client
 	breaker *circuitbreaker.Breaker
 	tier    valkeyutil.Tier[string, RoomDataKey]
 }
@@ -77,7 +73,7 @@ func NewL2DEKStore(inner DEKStore, client valkeyutil.Client, ttl time.Duration, 
 // newL2DEKStoreWithClock is NewL2DEKStore with an injected clock, for this
 // package's own refresh-window tests.
 func newL2DEKStoreWithClock(inner DEKStore, client valkeyutil.Client, ttl time.Duration, breaker *circuitbreaker.Breaker, rec L2Recorder, now func() time.Time) *l2DEKStore {
-	s := &l2DEKStore{inner: inner, client: client, ttl: ttl, breaker: breaker}
+	s := &l2DEKStore{inner: inner, client: client, breaker: breaker}
 	s.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, RoomDataKey]{
 		Client: client,
 		TTL:    ttl,
@@ -107,8 +103,6 @@ func (s *l2DEKStore) loadEntry(ctx context.Context, roomID string) (RoomDataKey,
 	}
 	return *row, true, nil
 }
-
-func (s *l2DEKStore) l2Enabled() bool { return s.client != nil && s.ttl > 0 }
 
 // Get resolves a room's wrapped DEK. A nil row means "no DEK yet" and is never
 // cached — the cipher uses it to create one. Caching policy is
@@ -159,10 +153,10 @@ func (s *l2DEKStore) Replace(ctx context.Context, key RoomDataKey) error { //nol
 }
 
 // invalidate best-effort deletes the L2 entry after an authoritative write.
+// Gated on the client alone, not on the TTL, matching valkeyutil's own bust:
+// keys written while a TTL was configured must still be clearable after it is
+// set to zero, and BustKeys already no-ops on a nil client.
 func (s *l2DEKStore) invalidate(ctx context.Context, roomID string) {
-	if !s.l2Enabled() {
-		return
-	}
 	valkeyutil.BustKeys(ctx, s.client, "dek", DEKKey(roomID))
 }
 

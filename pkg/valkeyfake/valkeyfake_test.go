@@ -379,15 +379,4 @@ func TestClient_Close(t *testing.T) {
 	c := New()
 
 	require.NoError(t, c.Close())
-
-	assert.Equal(t, 1, c.Closes())
-}
-
-func TestClient_FailClose(t *testing.T) {
-	boom := errors.New("close failed")
-	c := New()
-	c.FailClose(boom)
-
-	assert.ErrorIs(t, c.Close(), boom)
-	assert.Equal(t, 1, c.Closes(), "a failed Close is still an attempt")
 }

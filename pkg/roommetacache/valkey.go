@@ -70,8 +70,7 @@ type tierOpts struct {
 // returned — three allocations on a path that runs once per message through
 // broadcast-worker's fan-out. Holding the tier moves that to startup.
 type L2Tier struct {
-	tier   valkeyutil.Tier[string, Meta]
-	client valkeyutil.Client
+	tier valkeyutil.Tier[string, Meta]
 }
 
 // NewL2Tier wires the tier over a rooms collection.
@@ -98,7 +97,7 @@ func newL2TierWithClock(client valkeyutil.Client, rooms *mongo.Collection, ttl t
 	for _, opt := range opts {
 		opt(&o)
 	}
-	t := &L2Tier{client: client}
+	t := &L2Tier{}
 	t.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, Meta]{
 		Client: client,
 		TTL:    ttl,

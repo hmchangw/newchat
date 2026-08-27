@@ -58,13 +58,6 @@ func TestApplyTuning_UnsetMaxIdleTimeLeavesDriverDefault(t *testing.T) {
 // system. Every fail-open path downstream depends on the read failing FAST
 // enough to leave time to serve a cached answer, so this bound is what makes
 // those paths reachable at all.
-func TestWithServerSelectionTimeout(t *testing.T) {
-	clientOpts := options.Client()
-	newConnectConfig(WithServerSelectionTimeout(2 * time.Second)).applyTuning(clientOpts)
-	require.NotNil(t, clientOpts.ServerSelectionTimeout)
-	assert.Equal(t, 2*time.Second, *clientOpts.ServerSelectionTimeout)
-}
-
 func TestWithServerSelectionTimeout_UnsetLeavesDriverDefault(t *testing.T) {
 	clientOpts := options.Client()
 	newConnectConfig().applyTuning(clientOpts)

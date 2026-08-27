@@ -57,8 +57,7 @@ type Client struct {
 	expired     []string
 	setKeys     []string
 
-	getErr, mgetErr, setErr, delErr, expireErr, closeErr error
-	closes                                               int
+	getErr, mgetErr, setErr, delErr, expireErr error
 
 	onDel    func(context.Context)
 	afterGet func(key string)
@@ -228,12 +227,10 @@ func (c *Client) Expire(_ context.Context, key string, ttl time.Duration) (bool,
 	return true, nil
 }
 
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closes++
-	return c.closeErr
-}
+// Close satisfies valkeyutil.Client. Nothing to release in memory, and no test
+// has needed to assert on it — a counter and an error injector lived here
+// unused, so they are gone rather than shipped untested.
+func (c *Client) Close() error { return nil }
 
 // --- seeding and inspection ---
 
@@ -375,17 +372,6 @@ func (c *Client) FailSet(err error) { c.set(func() { c.setErr = err }) }
 // FailDel makes every later Del return err without deleting. The call is still
 // recorded, so a test can assert the attempt was made.
 func (c *Client) FailDel(err error) { c.set(func() { c.delErr = err }) }
-
-// Closes is the number of times Close was called, for a caller asserting that a
-// failed setup path still released the client.
-func (c *Client) Closes() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closes
-}
-
-// FailClose makes every later Close return err.
-func (c *Client) FailClose(err error) { c.set(func() { c.closeErr = err }) }
 
 // FailExpire makes every later Expire return err.
 func (c *Client) FailExpire(err error) { c.set(func() { c.expireErr = err }) }

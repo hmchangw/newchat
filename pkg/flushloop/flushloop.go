@@ -23,9 +23,12 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 )
 
-// DefaultFinalTimeout bounds the post-cancellation drain when Config leaves it
-// unset. Comfortably inside the 25s shutdown budget every service allows, and
-// far longer than a drain that is going to succeed needs.
+// DefaultFinalTimeout bounds the post-cancellation drain. It is deliberately a
+// constant rather than a Config field: that drain is the last thing between a
+// buffered batch and losing it, and it also has to sit inside the process's
+// shutdown budget, so there is one sensible answer and no reason for a caller
+// to pick a different one. Comfortably inside the 25s budget every service
+// allows, and far longer than a drain that is going to succeed needs.
 const DefaultFinalTimeout = 5 * time.Second
 
 // Config describes one buffered writer's drain cadence.
@@ -45,22 +48,8 @@ type Config struct {
 	// consumer's AckWait, for the same reason the Mongo server-selection
 	// timeout stays under it.
 	PerFlush time.Duration
-	// FinalTimeout bounds the drain that runs after cancellation. Zero takes
-	// DefaultFinalTimeout, which is what every caller wants: that drain is the
-	// last thing between a buffered batch and losing it, and it also sits inside
-	// the process's shutdown budget, so there is one sensible answer rather than
-	// a knob. Left unhandled, a zero here would build an already-expired context
-	// for precisely the drain this package exists to land.
-	FinalTimeout time.Duration
 	// Logger receives drain failures. Nil uses the default logger.
 	Logger *slog.Logger
-}
-
-func (c Config) finalTimeout() time.Duration {
-	if c.FinalTimeout > 0 {
-		return c.FinalTimeout
-	}
-	return DefaultFinalTimeout
 }
 
 func (c Config) logger() *slog.Logger {
@@ -98,7 +87,7 @@ func Run(ctx context.Context, cfg Config, flush func(context.Context) error) {
 			// WithoutCancel, then a deadline: the values (trace, request id)
 			// survive so the final drain is still attributable, while the
 			// deadline keeps it inside the shutdown budget.
-			finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.finalTimeout())
+			finalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultFinalTimeout)
 			run(finalCtx, cfg, flush, "final")
 			cancel()
 			return

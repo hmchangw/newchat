@@ -37,6 +37,11 @@ type PoolConfig struct {
 	// never runs. Two seconds makes an outage reportable while the request still
 	// has budget to serve a cached fallback.
 	//
+	// The trade-off is deliberate: a bound this short also trips during a replica
+	// set election rather than waiting it out. For a service fronted by a cache
+	// and a circuit breaker that is the better failure — it serves cached data
+	// and recovers on the breaker's next probe, instead of stalling every caller.
+	//
 	// It rides here rather than in each service's own config so adopting the
 	// shared pool field carries the bound with it. 0 leaves the URI/driver value
 	// alone; a negative value is refused, because the driver reads <= 0 as no

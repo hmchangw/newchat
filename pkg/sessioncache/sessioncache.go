@@ -63,8 +63,6 @@ func usableSession(v *session.Session) bool { return v.ID != "" }
 type Cache struct {
 	load Loader
 	tier valkeyutil.Tier[string, session.Session]
-	// client is kept only for Bust; the tier owns every other use.
-	client valkeyutil.Client
 }
 
 // New returns a Cache over load. A nil client (or a non-positive ttl) makes
@@ -75,7 +73,7 @@ func New(load Loader, client valkeyutil.Client, ttl time.Duration) *Cache {
 }
 
 func newWithClock(load Loader, client valkeyutil.Client, ttl time.Duration, now func() time.Time) *Cache {
-	c := &Cache{load: load, client: client}
+	c := &Cache{load: load}
 	c.tier = valkeyutil.NewTierWithClock(valkeyutil.TierConfig[string, session.Session]{
 		Client: client,
 		TTL:    ttl,
