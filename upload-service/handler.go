@@ -269,25 +269,28 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	// Normalize the (client-controlled) declared type: lowercase + strip params so
-	// the filter and the image branch see a clean value.
-	mime := normalizeMediaType(fh.Header.Get("Content-Type"))
-	if mime == "" {
-		mime = defaultUploadContentType
-	}
-	if !h.mimeFilter.allowed(mime) {
-		errhttp.Write(ctx, c, errcode.BadRequest("file type is not allowed"))
-		return
-	}
-
-	// The upload is handed to both the header read and Drive as a reader, so the
-	// file is never held in memory whatever its type or size.
+	// The upload is handed to the resolver, the header read and Drive as a reader,
+	// so the file is never held in memory whatever its type or size.
 	driveFile, err := fh.Open()
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("open uploaded file: %w", err))
 		return
 	}
 	defer driveFile.Close()
+
+	// The declared Content-Type is a client-controlled hint — browsers send
+	// application/octet-stream for any file the OS cannot type — so the real type
+	// comes from the bytes and the name. Filtering THAT rather than the declared
+	// value is what stops a blacklisted upload arriving under a generic label.
+	mime, err := resolveMediaType(fh.Header.Get("Content-Type"), fh.Filename, driveFile)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("resolve uploaded file media type: %w", err))
+		return
+	}
+	if !h.mimeFilter.allowed(mime) {
+		errhttp.Write(ctx, c, errcode.BadRequest("file type is not allowed"))
+		return
+	}
 
 	// Read the dimensions BEFORE the Drive upload so a read failure can't leave an
 	// orphaned Drive file. imageDimensions rewinds driveFile for us and no-ops on
