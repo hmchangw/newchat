@@ -119,9 +119,14 @@ type ThreadSubscriptionRepository interface {
 	ListUserThreadSubscriptions(ctx context.Context, account string, cursorLastMsgAt *time.Time, cursorThreadRoomID string, limit int) ([]mongorepo.ThreadSubRow, bool, error)
 }
 
-// UserStore resolves the calling user's full profile for ReactorInfo and the Participant on the canonical event.
+// UserStore resolves user profiles: one account for ReactorInfo and the Participant
+// on the canonical event, and a batch for resolving a whole page of legacy
+// system-message accounts in a single query.
 type UserStore interface {
 	FindUserByAccount(ctx context.Context, account string) (*pkgmodel.User, error)
+	// FindUsersByAccounts resolves many accounts in one read. Accounts with no
+	// matching user are simply absent from the result — not an error.
+	FindUsersByAccounts(ctx context.Context, accounts []string) ([]pkgmodel.User, error)
 }
 
 // AppStore resolves a bot account's app display name for reaction Actor rendering.

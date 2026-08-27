@@ -953,6 +953,21 @@ func (mr *MockUserStoreMockRecorder) FindUserByAccount(ctx, account any) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUserByAccount", reflect.TypeOf((*MockUserStore)(nil).FindUserByAccount), ctx, account)
 }
 
+// FindUsersByAccounts mocks base method.
+func (m *MockUserStore) FindUsersByAccounts(ctx context.Context, accounts []string) ([]model.User, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindUsersByAccounts", ctx, accounts)
+	ret0, _ := ret[0].([]model.User)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindUsersByAccounts indicates an expected call of FindUsersByAccounts.
+func (mr *MockUserStoreMockRecorder) FindUsersByAccounts(ctx, accounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindUsersByAccounts", reflect.TypeOf((*MockUserStore)(nil).FindUsersByAccounts), ctx, accounts)
+}
+
 // MockAppStore is a mock of AppStore interface.
 type MockAppStore struct {
 	ctrl     *gomock.Controller
