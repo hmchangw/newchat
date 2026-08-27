@@ -176,3 +176,33 @@ func TestDeriveIntents(t *testing.T) {
 		})
 	}
 }
+
+// #382 excludes system messages from unread counts and sidebar ordering. That
+// classification is derived here, from the message type alone, so the write path
+// can advance the room pointer without advancing the user position.
+func TestDeriveIntents_FlagsSystemMessages(t *testing.T) {
+	at := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		typ  string
+		want bool
+	}{
+		{"a plain user message has no type", "", false},
+		{"member_left is a system message", model.MessageTypeMemberLeft, true},
+		{"room_renamed is a system message", model.MessageTypeRoomRenamed, true},
+		// The one client-settable type: it previews and notifies like any user
+		// message, so it must not be swept up by the "Type != \"\"" shorthand.
+		{"important is client-set, not system", model.MessageTypeImportant, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := deriveIntents(&eventProjection{
+				Event: model.EventCreated,
+				Message: messageProjection{
+					ID: "m1", RoomID: "r1", UserAccount: "alice", CreatedAt: at, Type: tc.typ,
+				},
+			})
+			assert.Equal(t, tc.want, in.SystemMsg)
+		})
+	}
+}

@@ -17,6 +17,13 @@ import (
 type writeIntents struct {
 	RoomID string
 
+	// SystemMsg marks a system message. It advances the room pointer (the
+	// history ceiling) but never the user position that orders the sidebar and
+	// drives unread counts — a system-only flush window freezes lastUserMsgAt
+	// instead of setting it. Carried from #382, whose coalescer this service
+	// replaced.
+	SystemMsg bool
+
 	// LastMsgID != "" selects the rooms-collection last-message update.
 	LastMsgID        string
 	LastMsgAt        time.Time
@@ -56,6 +63,7 @@ func deriveIntents(evt *eventProjection) writeIntents {
 			LastMsgAt:     msg.CreatedAt,
 			SenderAccount: msg.UserAccount,
 			SenderSeenAt:  msg.CreatedAt,
+			SystemMsg:     model.IsSystemMessageType(msg.Type),
 		}
 		if parsed.MentionAll {
 			in.LastMentionAllAt = msg.CreatedAt

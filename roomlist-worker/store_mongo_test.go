@@ -82,10 +82,11 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 	mentionAll := at.Add(-time.Minute)
 
 	models := roomLastMsgModels(map[string]roomLastMsgUpdate{
-		"r1": {at: at, msgID: "m1", lastMentionAllAt: mentionAll},
+		"r1": {at: at, msgID: "m1", lastMentionAllAt: mentionAll, userAt: at, userMsgID: "m1"},
 	})
 
-	require.Len(t, models, 2, "the pointer and the badge need different filters, so they are separate writes")
+	require.Len(t, models, 3,
+		"the pointer, the user position and the badge each need their own filter, so all three are separate writes")
 
 	pointerFilter, pointerUpdate := modelParts(t, models[0])
 	assert.Equal(t, roomLastMsgFilter("r1", "m1", at), pointerFilter)
@@ -93,7 +94,7 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 		"lastMsgAt": at, "lastMsgId": "m1", "updatedAt": at,
 	}}, pointerUpdate, "the badge must not be inside the guarded $set")
 
-	badgeFilter, badgeUpdate := modelParts(t, models[1])
+	badgeFilter, badgeUpdate := modelParts(t, models[2])
 	assert.Equal(t, bson.M{"_id": "r1"}, badgeFilter,
 		"the badge write matches on identity alone — a lost pointer race must not skip it")
 	// $max, not $set: the write is unguarded now, so monotonicity has to come
@@ -102,20 +103,25 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 }
 
 // A plain message carries no badge, and must not emit a write that could
-// create or disturb the field.
-func TestRoomLastMsgModels_NoGroupMentionEmitsPointerWriteOnly(t *testing.T) {
+// create or disturb the field. It does carry a user position, so the pointer
+// write is accompanied by that $max and nothing else.
+func TestRoomLastMsgModels_NoGroupMentionEmitsNoBadgeWrite(t *testing.T) {
 	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 
 	models := roomLastMsgModels(map[string]roomLastMsgUpdate{
-		"r1": {at: at, msgID: "m1"},
+		"r1": {at: at, msgID: "m1", userAt: at, userMsgID: "m1"},
 	})
 
-	require.Len(t, models, 1)
+	require.Len(t, models, 2, "the pointer and the user position; no badge write")
 	filter, update := modelParts(t, models[0])
 	assert.Equal(t, roomLastMsgFilter("r1", "m1", at), filter)
 	assert.Equal(t, bson.M{"$set": bson.M{
 		"lastMsgAt": at, "lastMsgId": "m1", "updatedAt": at,
 	}}, update)
+
+	_, userUpdate := modelParts(t, models[1])
+	assert.Equal(t, bson.M{"$max": bson.M{"lastUserMsgAt": at}}, userUpdate,
+		"the only other write is the user position — nothing touches lastMentionAllAt")
 }
 
 // Every bulk write must return before it reaches its collection when there is
@@ -160,4 +166,47 @@ func TestMongoStore_BulkWrites_EmptyMapNoOp(t *testing.T) {
 			assert.NoError(t, tc.emptyMap(ctx, store), "empty non-nil map must be a no-op")
 		})
 	}
+}
+
+// The user position is its own monotonic dimension, exactly like
+// lastMentionAllAt: a batch that loses the pointer's regression guard to a newer
+// message must not also lose a newer user position it alone carries. So it takes
+// a separate $max write matched on identity, not a field in the guarded $set.
+func TestRoomLastMsgModels_UserPositionIsItsOwnGuardedWrite(t *testing.T) {
+	at := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+
+	models := roomLastMsgModels(map[string]roomLastMsgUpdate{
+		"r1": {msgID: "m1", at: at, userAt: at, userMsgID: "m1"},
+	})
+
+	require.Len(t, models, 2, "the room pointer and the user position are separate writes")
+	upd, ok := models[1].(*mongo.UpdateOneModel)
+	require.True(t, ok)
+	assert.Equal(t, bson.M{"_id": "r1"}, upd.Filter, "matched on identity alone, like lastMentionAllAt")
+	assert.Equal(t, bson.M{"$max": bson.M{"lastUserMsgAt": at}}, upd.Update,
+		"$max supplies the monotonicity the pointer's guard would otherwise have implied")
+}
+
+// A system-only window must not name a user position. The write instead keeps
+// whatever is stored, and pins a floor ONCE for a room that has never carried a
+// message — which needs a read-before-write expression, hence a pipeline.
+func TestRoomLastMsgModels_SystemOnlyWindowFreezesTheUserPosition(t *testing.T) {
+	at := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+
+	models := roomLastMsgModels(map[string]roomLastMsgUpdate{
+		"r1": {msgID: "m-sys", at: at},
+	})
+
+	require.Len(t, models, 1, "a system-only window writes the pointer and nothing else")
+	upd, ok := models[0].(*mongo.UpdateOneModel)
+	require.True(t, ok)
+	pipeline, ok := upd.Update.(mongo.Pipeline)
+	require.True(t, ok, "pinning the floor reads the pre-update document, which a plain $set cannot do")
+
+	// The freeze must ride the SAME model as the pointer. The bulk is unordered,
+	// so a separate model could read lastMsgAt after this write had already set
+	// it and conclude the room had carried a message all along.
+	set := pipeline[0][0].Value.(bson.M)
+	require.Contains(t, set, "lastUserMsgAt")
+	require.Contains(t, set, "lastMsgAt", "the pointer and the freeze are one document read")
 }

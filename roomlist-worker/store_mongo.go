@@ -68,11 +68,18 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(roomLastMsgFilter(roomID, u.msgID, u.at)).
-			SetUpdate(bson.M{"$set": bson.M{
-				"lastMsgAt": u.at,
-				"lastMsgId": u.msgID,
-				"updatedAt": u.at,
-			}}))
+			SetUpdate(roomPointerUpdate(&u)))
+		if !u.userAt.IsZero() {
+			// A SEPARATE write, matched on identity alone, for the same reason
+			// lastMentionAllAt takes one: the user position is its own monotonic
+			// dimension. Gating it on the pointer's regression filter would
+			// discard a newer user position whenever a redelivered batch lost
+			// the pointer race to a later system message — and the sidebar would
+			// then order the room by a staler user message than it has.
+			models = append(models, mongo.NewUpdateOneModel().
+				SetFilter(bson.M{"_id": roomID}).
+				SetUpdate(bson.M{"$max": bson.M{"lastUserMsgAt": u.userAt}}))
+		}
 		if u.lastMentionAllAt.IsZero() {
 			continue
 		}
@@ -89,6 +96,44 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 			SetUpdate(bson.M{"$max": bson.M{"lastMentionAllAt": u.lastMentionAllAt}}))
 	}
 	return models
+}
+
+// roomPointerUpdate renders the room-pointer write. A window that carried a user
+// message takes the plain $set it always did — its user position rides a separate
+// $max above. A system-only window takes a pipeline instead, because freezing
+// lastUserMsgAt needs to read the document before this write changes it.
+//
+// The freeze must share this model with the pointer: the bulk is unordered, so a
+// separate model could read lastMsgAt after the pointer write had already set it
+// and conclude the room had carried a message all along.
+func roomPointerUpdate(u *roomLastMsgUpdate) any {
+	fields := bson.M{
+		"lastMsgAt": u.at,
+		"lastMsgId": u.msgID,
+		"updatedAt": u.at,
+	}
+	if !u.userAt.IsZero() {
+		return bson.M{"$set": fields}
+	}
+	// A bare "$"-prefixed string reads as a field path inside a pipeline stage.
+	fields["lastMsgId"] = bson.M{"$literal": u.msgID}
+	// Sticky freeze, carried verbatim from #382's coalescer: keep whatever
+	// lastUserMsgAt already says, and pin a floor ONCE for a room that has never
+	// carried a message — its createdAt, which makes the room unread for members
+	// who never opened it without re-flagging members who have. A room that
+	// already has a lastMsgAt is left alone: that timestamp is unclassified (it
+	// may itself be a system message), so promoting it would persist a system
+	// position as user activity and the freeze would then keep it forever. Absent
+	// is the safe state — readers coalesce to lastMsgAt, the pre-field behaviour.
+	fields["lastUserMsgAt"] = bson.M{"$ifNull": bson.A{
+		"$lastUserMsgAt",
+		bson.M{"$cond": bson.A{
+			bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$lastMsgAt", nil}}, nil}},
+			bson.M{"$ifNull": bson.A{"$createdAt", "$$REMOVE"}},
+			"$$REMOVE",
+		}},
+	}}
+	return mongo.Pipeline{{{Key: "$set", Value: fields}}}
 }
 
 func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {

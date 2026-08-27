@@ -23,6 +23,12 @@ type roomLastMsgUpdate struct {
 	msgID            string
 	at               time.Time
 	lastMentionAllAt time.Time
+	// userAt/userMsgID name the newest NON-system message in the window, under
+	// the same NewerRow comparator as msgID/at. A zero userAt means the window
+	// carried only system messages, which the write path reads to freeze the
+	// stored user position rather than set one.
+	userAt    time.Time
+	userMsgID string
 }
 
 // heldMsg is a consumed message awaiting settlement until its batch flushes.
@@ -93,6 +99,12 @@ func (b *batch) add(in writeIntents, msg heldMsg) {
 		if msgbucket.NewerRow(in.LastMsgAt, in.LastMsgID, cur.at, cur.msgID) {
 			cur.msgID = in.LastMsgID
 			cur.at = in.LastMsgAt
+		}
+		// Same comparator as the pointer, for the same reason: two writers must
+		// not resolve a same-millisecond tie differently.
+		if !in.SystemMsg && msgbucket.NewerRow(in.LastMsgAt, in.LastMsgID, cur.userAt, cur.userMsgID) {
+			cur.userAt = in.LastMsgAt
+			cur.userMsgID = in.LastMsgID
 		}
 		if in.LastMentionAllAt.After(cur.lastMentionAllAt) {
 			cur.lastMentionAllAt = in.LastMentionAllAt

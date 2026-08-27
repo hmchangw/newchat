@@ -35,6 +35,11 @@ type messageProjection struct {
 	UserAccount string    `json:"userAccount"`
 	Content     string    `json:"content"`
 	CreatedAt   time.Time `json:"createdAt"`
+	// Type classifies the message. Empty for an ordinary user message; a
+	// model.MessageType* value for a system one. Read only through
+	// model.IsSystemMessageType, so "important" — the one client-settable type —
+	// stays a user message rather than being swept up by a Type != "" shorthand.
+	Type string `json:"type,omitempty"`
 	// EditedAt selects the edit path; nil on a create.
 	EditedAt *time.Time `json:"editedAt,omitempty"`
 	// ThreadParentMessageID and TShow together decide whether the message is

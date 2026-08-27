@@ -170,3 +170,32 @@ func TestNewBatch_DoesNotInheritAnOutsizedCapacity(t *testing.T) {
 
 	assert.Equal(t, maxReuseCap, cap(got.held))
 }
+
+// The room pointer follows the newest message of ANY kind; the user position
+// follows only the newest non-system one. A system message arriving after a user
+// message must move the first and not the second.
+func TestBatch_UserPositionIgnoresSystemMessages(t *testing.T) {
+	b := newBatch(nil)
+	t1 := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Second)
+
+	b.add(writeIntents{RoomID: "r1", LastMsgID: "m-user", LastMsgAt: t1}, held(&fakeMsg{}))
+	b.add(writeIntents{RoomID: "r1", LastMsgID: "m-sys", LastMsgAt: t2, SystemMsg: true}, held(&fakeMsg{}))
+
+	got := b.rooms["r1"]
+	assert.Equal(t, "m-sys", got.msgID, "the pointer follows the newest message of any kind")
+	assert.Equal(t, t1, got.userAt, "the user position must stay on the newest NON-system message")
+	assert.Equal(t, "m-user", got.userMsgID)
+}
+
+// A window carrying only system messages names no user position at all. The zero
+// value is what the write path reads to choose the freeze instead of a set.
+func TestBatch_SystemOnlyWindowNamesNoUserPosition(t *testing.T) {
+	b := newBatch(nil)
+	at := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+
+	b.add(writeIntents{RoomID: "r1", LastMsgID: "m-sys", LastMsgAt: at, SystemMsg: true}, held(&fakeMsg{}))
+
+	assert.True(t, b.rooms["r1"].userAt.IsZero(),
+		"a system-only window must not name a user position; the write freezes what is stored instead")
+}
