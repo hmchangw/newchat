@@ -1200,3 +1200,25 @@ func TestSoakRoomLanes_RoomCreateRegistersTheRequesterAsReader(t *testing.T) {
 	require.True(t, ok, "a created room joins the read mix")
 	assert.Equal(t, requester, account)
 }
+
+// A teardown is not a refusal. Closing the operation as `bad` with
+// `admission_rejected` asserts the service turned the mutation down, and the
+// candidate goes back to the pool as untouched — so if the request did reach
+// the server, a real effect is left with nothing to reconcile it. That is the
+// failure the unknown-status branch above already refuses to cause.
+func TestSoakRoomLanes_CanceledMutationIsUnverifiedNotRejected(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, fixture.lanes.MemberMutation(ctx))
+
+	snapshot := fixture.ledger.Snapshot()
+	assert.Zero(t, snapshot.Results[failureResultBad],
+		"a cancellation is not an explicit rejection")
+	assert.Zero(t, snapshot.Results[failureResultNotSent],
+		"nor is it proof the request stayed local")
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, failureObservationUnverified,
+		operation.Observations[failureObserverAdmission])
+}
