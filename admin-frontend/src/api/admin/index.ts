@@ -370,16 +370,26 @@ export async function listPermissions(
  *
  * @throws {AsyncJobError} on a non-2xx response or a transport failure.
  */
-/** Client-side ceiling for one artifact upload, matching admin-service's
- * CLIENT_UPDATE_UPLOAD_TIMEOUT default (10m) so the browser does not give up
- * while the server is still relaying. */
-export const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000
+/** Client-side ceiling for one artifact upload.
+ *
+ * Budgets must be ordered client-update-service < admin relay < browser. The XHR
+ * timer starts before the request reaches admin-service, so an equal budget lets
+ * the browser abort a publication the backend has already committed and report
+ * "upload timed out" for an upload that succeeded. This is admin-service's
+ * CLIENT_UPDATE_UPLOAD_TIMEOUT default plus a margin for the upstream response,
+ * the audit write and response transit.
+ *
+ * A deployment that raises CLIENT_UPDATE_UPLOAD_TIMEOUT above the backend
+ * default must raise this too — the frontend cannot read that setting today. */
+export const UPLOAD_TIMEOUT_MARGIN_MS = 2 * 60 * 1000
+export const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000 + UPLOAD_TIMEOUT_MARGIN_MS
 
 export function uploadClientVersion(
   authToken: string,
   configFile: File,
   executeFile: File,
   onProgress?: (percent: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const form = new FormData()
   form.append('configFile', configFile)
@@ -413,6 +423,21 @@ export function uploadClientVersion(
     xhr.onerror = () => reject(new AsyncJobError('upload failed: could not reach the server'))
     xhr.onabort = () => reject(new AsyncJobError('upload was aborted'))
     xhr.ontimeout = () => reject(new AsyncJobError('upload timed out'))
+
+    // Without this an admin who leaves the console mid-upload keeps the request,
+    // both backend connections and the selected files alive for minutes, and
+    // returning can start a second invisible upload alongside the first.
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort()
+        return
+      }
+      const onAbort = () => xhr.abort()
+      signal.addEventListener('abort', onAbort, { once: true })
+      // Detach on every terminal path so a long-lived controller does not retain
+      // this listener (and the xhr it closes over) after the request settles.
+      xhr.onloadend = () => signal.removeEventListener('abort', onAbort)
+    }
 
     xhr.send(form)
   })

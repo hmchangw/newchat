@@ -776,3 +776,111 @@ func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.False(t, up.wasCalled(), "a non-admin request must never reach the upstream")
 }
+
+// rejectingUploader answers immediately without reading a byte of the body —
+// the shape of a misconfigured service token drawing an instant 401 upstream.
+type rejectingUploader struct{ err error }
+
+func (r *rejectingUploader) Upload(_ context.Context, _ string, _ io.Reader) error { return r.err }
+
+// An upstream that answers before the browser finishes sending must not pin the
+// handler. The relay is parked reading the request body, which closing the pipe
+// does not unblock, so without the teardown in awaitRelay this waits out the
+// extended read deadline. It must also still report the UPSTREAM error: the
+// relay's read failure is our doing, not a bad client body.
+func TestUploadClientVersion_EarlyUpstreamFailureDoesNotStrandTheRelay(t *testing.T) {
+	up := &rejectingUploader{err: errcode.Unavailable("client update upload is misconfigured")}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	// A body the client never finishes: the relay blocks reading it.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	mw := multipart.NewWriter(pw)
+	go func() {
+		fw, err := mw.CreateFormFile("configFile", "app.yaml")
+		if err != nil {
+			return
+		}
+		_, _ = fw.Write([]byte("version: 1"))
+		// Deliberately never Close() the writer — the request stays open.
+		select {}
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", pr)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+
+	type result struct {
+		status int
+		err    error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, doErr := srv.Client().Do(req)
+		if doErr != nil {
+			resCh <- result{err: doErr}
+			return
+		}
+		defer resp.Body.Close()
+		resCh <- result{status: resp.StatusCode}
+	}()
+
+	select {
+	case got := <-resCh:
+		// A transport error is acceptable here — the server closing the request
+		// body mid-send is exactly the teardown under test. What must NOT happen
+		// is hanging until the deadline.
+		if got.err == nil {
+			assert.Equal(t, http.StatusServiceUnavailable, got.status,
+				"the upstream verdict must survive; a 400 would mean the forced-close read error was mistaken for a bad client body")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("handler did not return promptly — the relay was stranded on the request body")
+	}
+}
+
+func TestRelayParts_RejectsTooManyParts(t *testing.T) {
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for i := 0; i < maxUploadParts+1; i++ {
+		fw, err := mw.CreateFormFile(fmt.Sprintf("extra%d", i), fmt.Sprintf("f%d.bin", i))
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+
+	out := &bytes.Buffer{}
+	_, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "more than")
+}
+
+// Every part is relayed, but only the contract fields are retained for the audit
+// entry — otherwise a caller choosing arbitrary field names controls how much
+// this map (and the AuditEntry built from it) grows.
+func TestRelayParts_AuditsOnlyTheContractFields(t *testing.T) {
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for field, name := range map[string]string{
+		"configFile":  "app.yaml",
+		"executeFile": "app.exe",
+		"stowaway":    "junk.bin",
+	} {
+		fw, err := mw.CreateFormFile(field, name)
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+
+	out := &bytes.Buffer{}
+	outWriter := multipart.NewWriter(out)
+	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), outWriter)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{"configFile": "app.yaml", "executeFile": "app.exe"}, names)
+	// The unknown part is still relayed — admin-service validates nothing.
+	assert.Contains(t, out.String(), "junk.bin")
+}

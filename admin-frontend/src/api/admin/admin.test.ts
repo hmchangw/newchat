@@ -16,6 +16,7 @@ import {
   updateUser,
   uploadClientVersion,
   UPLOAD_TIMEOUT_MS,
+  UPLOAD_TIMEOUT_MARGIN_MS,
 } from './index'
 
 function mockResponse(status: number, body: unknown): Response {
@@ -570,7 +571,9 @@ describe('uploadClientVersion', () => {
     onerror: (() => void) | null = null
     onabort: (() => void) | null = null
     ontimeout: (() => void) | null = null
+    onloadend: (() => void) | null = null
     timeout = 0
+    aborted = false
     status = 0
     responseText = ''
     method = ''
@@ -591,12 +594,18 @@ describe('uploadClientVersion', () => {
     send(body: FormData) {
       this.body = body
     }
+    abort() {
+      this.aborted = true
+      this.onabort?.()
+      this.onloadend?.()
+    }
     // Test helper: settle the request. Success and failure differ only in the
     // status and body the server would have sent, so one method covers both.
     respond(status = 200, text = '{"result":"success"}') {
       this.status = status
       this.responseText = text
       this.onload?.()
+      this.onloadend?.()
     }
   }
 
@@ -712,5 +721,86 @@ describe('uploadClientVersion', () => {
 
     xhr.respond()
     await promise
+  })
+})
+
+describe('uploadClientVersion cancellation and budget', () => {
+  class AbortableXHR {
+    static instances: AbortableXHR[] = []
+    upload = { onprogress: null as ((e: ProgressEvent) => void) | null }
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    onabort: (() => void) | null = null
+    ontimeout: (() => void) | null = null
+    onloadend: (() => void) | null = null
+    status = 0
+    responseText = ''
+    timeout = 0
+    aborted = false
+    constructor() {
+      AbortableXHR.instances.push(this)
+    }
+    open() {}
+    setRequestHeader() {}
+    send() {}
+    abort() {
+      this.aborted = true
+      this.onabort?.()
+      this.onloadend?.()
+    }
+    respond(status = 200, text = '{"result":"success"}') {
+      this.status = status
+      this.responseText = text
+      this.onload?.()
+      this.onloadend?.()
+    }
+  }
+
+  beforeEach(() => {
+    AbortableXHR.instances = []
+    vi.stubGlobal('XMLHttpRequest', AbortableXHR)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  const cfg = () => new File(['version: 1'], 'app.yaml', { type: 'text/yaml' })
+  const exe = () => new File(['MZ'], 'app.exe', { type: 'application/octet-stream' })
+
+  // The XHR timer starts before the request reaches admin-service, so an equal
+  // budget lets the browser abort an upload the backend already committed.
+  it('allows a longer budget than the backend relay timeout', () => {
+    expect(UPLOAD_TIMEOUT_MARGIN_MS).toBeGreaterThan(0)
+    expect(UPLOAD_TIMEOUT_MS).toBeGreaterThan(10 * 60 * 1000)
+  })
+
+  it('aborts the request when the signal fires', async () => {
+    const controller = new AbortController()
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    controller.abort()
+
+    expect(AbortableXHR.instances[0].aborted).toBe(true)
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  it('does not send when the signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    expect(AbortableXHR.instances[0].aborted).toBe(true)
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // A long-lived controller must not retain the listener (and the xhr it closes
+  // over) after the request settles.
+  it('detaches the abort listener once the request settles', async () => {
+    const controller = new AbortController()
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener')
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    AbortableXHR.instances[0].respond()
+    await promise
+
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function))
   })
 })

@@ -140,7 +140,11 @@ describe('UpdatesPage', () => {
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/uploaded/i))
     expect(uploadClientVersion).toHaveBeenCalledWith(
-      'tok', expect.any(File), expect.any(File), expect.any(Function),
+      'tok',
+      expect.any(File),
+      expect.any(File),
+      expect.any(Function),
+      expect.any(AbortSignal),
     )
   })
 

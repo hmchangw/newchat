@@ -112,7 +112,9 @@ func validateClientUpdate(rawURL, token string, timeout time.Duration) error {
 	// Only http/https: the uploader resolves the version path against this base and
 	// sends it through *http.Transport, which rejects any other scheme at request
 	// time. Failing here turns a per-upload 503 into a startup error.
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	// Hostname(), not Host: "http://:8080" has a non-empty Host (":8080") but no
+	// host to dial, and would fail per-request rather than at startup.
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute http or https URL with a host", rawURL)
 	}
 	if token == "" {

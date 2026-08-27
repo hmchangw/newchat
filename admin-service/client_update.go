@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -112,6 +113,19 @@ func upstreamMessage(body, fallback string) string {
 // clientUpdateAuditAction is the audit action for a published artifact pair.
 const clientUpdateAuditAction = "client_update.upload"
 
+// auditedUploadFields bounds what the audit entry records. These are the two
+// fields client-update-service's contract defines; anything else is relayed but
+// not retained, so the entry's cardinality cannot grow with the part count.
+var auditedUploadFields = map[string]struct{}{
+	"configFile":  {},
+	"executeFile": {},
+}
+
+// maxUploadParts caps the file parts one request may carry. The contract needs
+// two; the ceiling is generous but finite, so a caller cannot hold a relay open
+// indefinitely by streaming an unbounded number of parts.
+const maxUploadParts = 16
+
 // quoteEscaper mirrors mime/multipart's own escaping for Content-Disposition
 // values, so a filename containing a quote or backslash cannot break out of the
 // header it is written into. CR and LF become %0D/%0A for the same reason,
@@ -176,16 +190,17 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 	uploadErr = h.uploader.Upload(ctx, mw.FormDataContentType(), pr)
 	// Unblocks the goroutine if the upload gave up mid-body; a no-op otherwise.
 	_ = pr.CloseWithError(uploadErr)
-	res := <-done
+
+	res, relayKilled := h.awaitRelay(c, done, uploadErr)
 
 	// res.err first, but only when the relay failed on its own terms — the
-	// client's body — rather than because we closed the pipe after the upstream
-	// rejected the request. pr.CloseWithError injects uploadErr into the pipe, so
-	// on a genuine upstream failure res.err wraps it and errors.Is is true; on a
-	// truncated or malformed client body res.err is an independent request-side
-	// read error. Without this split, a bad client body reports as an upstream
-	// outage and sends ops chasing a phantom one.
-	if res.err != nil && !errors.Is(res.err, uploadErr) {
+	// client's body — rather than because we tore it down after the upstream
+	// rejected the request. Whether the relay had already finished is the
+	// discriminator: awaitRelay reports relayKilled only when it was still
+	// parked when we closed the request body under it. Without this split, a bad
+	// client body reports as an upstream outage and sends ops chasing a phantom
+	// one — or, once the teardown exists, an upstream 401 reports as a bad body.
+	if res.err != nil && !relayKilled {
 		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
 		return
 	}
@@ -196,6 +211,40 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 
 	h.audit(ctx, c, clientUpdateAuditAction, "", "", res.names)
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
+}
+
+// awaitRelay collects the relay's outcome, tearing it down first if the upload
+// already failed while the relay is still running.
+//
+// Closing the pipe only unblocks a relay parked on pw.Write. When the upstream
+// answers before the browser finishes sending — an immediate 401 from a bad
+// service token is the clearest case — the relay is parked on the REQUEST body
+// instead, and a bare <-done would pin this handler, its goroutine and both
+// connections until the client sends more or the extended read deadline expires.
+//
+// killed reports whether the relay was still running when we cut the body out
+// from under it, which is what tells the caller the relay's error is ours rather
+// than the client's. A relay that had already finished keeps its own verdict.
+//
+// The teardown is an immediate read deadline, NOT c.Request.Body.Close():
+// net/http's server body guards Read and Close with the same mutex, so closing
+// during an in-flight read blocks behind that read instead of interrupting it.
+// Expiring the deadline fails the read itself.
+func (h *Handler) awaitRelay(c *gin.Context, done <-chan relayResult, uploadErr error) (res relayResult, killed bool) {
+	if uploadErr == nil {
+		return <-done, false
+	}
+	select {
+	case res = <-done:
+		return res, false // finished on its own; its error is genuine
+	default:
+	}
+	if err := http.NewResponseController(c.Writer).SetReadDeadline(time.Now()); err != nil {
+		// Nothing better to do than wait: the relay still exits when the client
+		// stops sending or the extended deadline expires.
+		slog.WarnContext(c.Request.Context(), "could not expire the upload read deadline", "error", err)
+	}
+	return <-done, true
 }
 
 // extendUploadDeadlines pushes this request's read and write deadlines out to d.
@@ -224,6 +273,7 @@ func extendUploadDeadlines(c *gin.Context, d time.Duration) error {
 // every part, which would change what client-update-service stores the .yaml as.
 func relayParts(mr *multipart.Reader, mw *multipart.Writer) (map[string]string, error) {
 	names := make(map[string]string)
+	parts := 0
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
@@ -231,6 +281,11 @@ func relayParts(mr *multipart.Reader, mw *multipart.Writer) (map[string]string, 
 		}
 		if err != nil {
 			return names, fmt.Errorf("read upload part: %w", err)
+		}
+		parts++
+		if parts > maxUploadParts {
+			_ = part.Close()
+			return names, fmt.Errorf("upload has more than %d parts", maxUploadParts)
 		}
 		if err := relayOnePart(part, mw, names); err != nil {
 			_ = part.Close()
@@ -251,7 +306,13 @@ func relayOnePart(part *multipart.Part, mw *multipart.Writer, names map[string]s
 	if part.FileName() == "" {
 		return nil // not a file part
 	}
-	names[part.FormName()] = part.FileName()
+	// Audit only the two contract fields. Every part is still relayed unvalidated
+	// — client-update-service remains the sole judge of the artifacts — but a
+	// caller sending millions of distinct field names must not be able to grow
+	// this map (and the AuditEntry built from it) without bound.
+	if _, ok := auditedUploadFields[part.FormName()]; ok {
+		names[part.FormName()] = truncateForLog(part.FileName())
+	}
 
 	hdr := textproto.MIMEHeader{}
 	// %q rather than "%s" would re-escape what quoteEscaper already escaped.

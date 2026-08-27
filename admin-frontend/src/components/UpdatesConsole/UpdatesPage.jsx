@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { uploadClientVersion } from '@/api'
 import { useAuth } from '@/context/AuthContext'
 import { useHandleAdminError } from '@/hooks/useHandleAdminError'
@@ -16,6 +16,12 @@ export default function UpdatesPage() {
   const [percent, setPercent] = useState(0)
   const [error, setError] = useState('')
   const [done, setDone] = useState('')
+  const abortRef = useRef(null)
+
+  // An upload runs for minutes. Leaving the console must not leave it consuming
+  // the browser's, admin-service's and client-update-service's connections, nor
+  // let a second upload start alongside the first on the way back.
+  useEffect(() => () => abortRef.current?.abort(), [])
 
   const ready = Boolean(configFile && executeFile) && !busy
 
@@ -24,8 +30,16 @@ export default function UpdatesPage() {
     setError('')
     setDone('')
     setPercent(0)
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
-      await uploadClientVersion(session.authToken, configFile, executeFile, setPercent)
+      await uploadClientVersion(
+        session.authToken,
+        configFile,
+        executeFile,
+        setPercent,
+        controller.signal,
+      )
       setDone(`Uploaded ${configFile.name} and ${executeFile.name}.`)
     } catch (err) {
       // An upload runs for minutes, so a session can expire mid-flight: the shared
@@ -33,6 +47,7 @@ export default function UpdatesPage() {
       const message = handleAdminError(err)
       if (message !== null) setError(message)
     } finally {
+      abortRef.current = null
       setBusy(false)
     }
   }
