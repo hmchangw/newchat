@@ -1853,7 +1853,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 |---|---|---|---|
 | `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
-| `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` is within N days. Non-negative. |
+| `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` (the room's user-activity position) is within N days. Non-negative. |
 | `includeLastMessage` | boolean | no | Embed each room's [`previewMessage`](../client-api.md#subscriptionroom). Omitted ⇒ include (default); `false` ⇒ skip the per-room preview resolve. |
 | `offset` | integer | no | Zero-based index of first record. Negative ⇒ `0`. Default `0`. |
 | `limit` | integer | no | Page size. Omitted/≤0 ⇒ `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`). |
@@ -1862,7 +1862,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Notes |
 |---|---|---|
-| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
+| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc (the room's user-activity position). Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;

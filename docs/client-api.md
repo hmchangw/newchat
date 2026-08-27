@@ -148,7 +148,8 @@ Each rung includes the ones below it. The header propagates across every service
 ### Reply patterns
 
 - **Standard NATS request/reply** — the NATS client library auto-generates a reply subject under `chat.user.{account}.>` (from the connection's `inboxPrefix`, see §2.1) and routes the reply back to the caller. Used by every method in §3.
-- **Async reply on `chat.user.{account}.response.{requestID}`** — used only by `msg.send` (§4). The client publishes and expects **no synchronous request/reply response**; the server reads `requestId` from the payload and publishes the reply to `chat.user.{account}.response.{requestID}`. The client must hold a subscription matching that subject to receive it — the `chat.user.{account}.>` wildcard is one way, but a narrower subscription works and is what the frontend uses.
+- **Async reply on `chat.user.{account}.response.{requestID}`** — carries every deferred result: the `msg.send` reply (§4) and the [AsyncJobResult](#asyncjobresult) terminal of the two-phase room operations (Create Room, Add Members, Remove Member, Remove Org, Update Member Role, Rename Room). The request ID comes from a different place per flow: `msg.send` reads `requestId` from its own JSON payload, while a room operation uses the request's `X-Request-ID` header. **Always send that header on a room operation.** room-service runs the lenient request-id middleware, so a missing or malformed value is not rejected — the server mints a UUID instead, and the `AsyncJobResult` is then published to `chat.user.{account}.response.{server-minted-id}`. A client subscribed to its own `chat.user.{account}.response.{requestID}` never sees that reply, so a job that later fails looks indefinitely pending; a `chat.user.{account}.>` wildcard subscriber still receives it but has to correlate on the payload's `operation`/`roomId` rather than the subject. The client must hold a subscription matching that subject to receive **any** of them — the `chat.user.{account}.>` wildcard is one way, but a narrower subscription works and is what the frontend uses. A client that skips this subscription never learns a room operation's outcome.
+  What differs is only the first phase: `msg.send` is a plain publish with **no synchronous request/reply response**, while the room operations answer their request synchronously (the accept/reject) and then deliver the outcome here.
 
 ### Timestamps
 
@@ -973,7 +974,7 @@ it is absent on every other action.
 | `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
 | `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. For a mentionee homed on another site, `broadcast-worker` also relays a cross-site `subscription_mention` event so the badge lands on the site that serves their `subscription.list`. |
-| `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). |
+| `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). System messages (member added/removed, rename, …) never set it; a member who has never opened the room sees it true whenever the room has any activity to compare against. **Deployment note:** while the `broadcast-worker` fleet is mixed, a room can briefly read as caught-up when it is not (and, before any writer is upgraded, a system message still marks it unread — the pre-change behavior). Drain the old writers before deploying the readers. |
 | `hasGroupMention` | boolean | Whether the room has an unread @all/@channel mention — computed at read time by comparing the room's `lastMentionAllAt` to the subscription's `lastSeenAt` (not persisted). |
 | `alert` | boolean | Whether the room has an unread alert for the user. Authoritative subscription state maintained by the write path (set on new message, cleared on read receipt); **not** modified by read enrichment. |
 | `muted` | boolean | Whether the user muted the room. |
@@ -1013,7 +1014,7 @@ document (`previewMessage` always omitted there). All fields are optional
 | `name` | string | The room's canonical name (may differ from the subscription `name`). |
 | `userCount` | number | Member count — human members, including QA `p_` test accounts (ordinary users). |
 | `appCount` | number | App count — `.bot` bots plus the `p_admin` platform-admin pseudo-account. |
-| `lastMsgAt` | RFC3339 timestamp | The room's last-message time. |
+| `lastMsgAt` | RFC3339 timestamp | The room's **user-activity position** — the last non-system message time, and the value `hasUnread` and sidebar ordering derive from. System events never advance it. On a `subscription.update` `added` payload for a room with no messages yet it is the room's `createdAt`, so a newly added member's client has a reference to flag the room unread against. Absent only when the room has no activity at all. |
 | `lastMsgId` | string | Last message ID. |
 | `lastMentionAllAt` | RFC3339 timestamp | The last room-wide mention time. |
 | `minUserLastSeenAt` | RFC3339 timestamp | The room-wide read floor — the oldest `lastSeenAt` across the room's members ("everyone has read up to here"). Omitted when the floor is unset (a member is still fully unread). |
@@ -2878,12 +2879,12 @@ The paginated read RPCs (Load History, Load Next, Load Surrounding, Get Thread M
 
 | Field | Type | Notes |
 |---|---|---|
-| `lastMsgAt` | number | Optional. Room's most-recent-message time, UTC ms. Supplying a valid value is what lets the server skip its MongoDB lookup. |
+| `lastMsgAt` | number | Optional, and **clients should omit it** — see the note below. It must be the room's most-recent message of ANY kind, and no client-visible field carries that value: the room object's `lastMsgAt` is user-activity only, so seeding this from it caps the read below the newest system messages and hides them. Supplying a valid full-activity value is what lets the server skip its MongoDB lookup. |
 | `createdAt` | number | Optional. Room's creation time, UTC ms. A refinement only — narrows the scan's lower bound; its absence never forces a lookup. |
 
 **What to pass for `meta`:** the server uses the room's `lastMsgAt` to pick the Cassandra time-bucket window to scan (and, when given, `createdAt` as the scan's lower bound). `meta` lets the client supply the values it already holds so the server can skip a MongoDB lookup:
 
-- `meta.lastMsgAt` — the room's most-recent-message time, as the client knows it from the room summary (the same `lastMsgAt` carried on `RoomEvent`s / the sidebar). **A valid `lastMsgAt` alone is sufficient to skip the lookup.** Use the room's last-activity timestamp; for an empty room use its `createdAt`.
+- `meta.lastMsgAt` — **omit this.** The hint bounds the timeline read, which includes system messages, so it must be the room's *most recent message of any kind*. The room summary's `lastMsgAt` is the room's **user-activity** position and excludes system messages, so seeding the hint from it would cap the read below the newest system messages and hide them. No client-visible field carries the full-activity time; omit `meta` and let the server resolve the bounds. (A client that already caches a full-activity value from `RoomEvent.lastMsgAt` — which is the individual message's own time, system messages included — may still send it. `meta.createdAt` alone buys nothing: without a usable `lastMsgAt` the server reads the room anyway.)
 - `meta.createdAt` — the room's creation time from the room summary. Optional refinement: when present it floors the scan at the room's creation time instead of the server's default history window; when omitted the server still skips the lookup and simply uses that default floor.
 
 Both are **hints, not authority**: the server sanitizes each (values that are negative or in the future are ignored) and falls back to a MongoDB fetch when `lastMsgAt` is missing or fails sanitization — or when both are supplied but mutually inconsistent (a `createdAt` later than `lastMsgAt`), which triggers a re-fetch to resolve the inconsistency. A client that does not have `lastMsgAt` should omit `meta` entirely — correctness is unaffected, only an extra lookup is incurred.
@@ -5145,7 +5146,18 @@ reorder fans a few-KB event no matter how many chats a section holds.
 favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
 
 **sortMode**: `"custom"` (sort the section's chats by `subscription.sectionOrder`) or
-`"mostRecent"` (sort by last message — the default and fallback).
+`"mostRecent"` (sort by last **user** activity — the default and fallback; same key as
+[`subscription.list`](#subscriptionlist): `room.lastMsgAt` descending, used as-is. The
+server resolves that field to user activity before sending it — a system message (a rename,
+a member change) never advances it — so the client needs no rule of its own to keep a
+dormant room from resurfacing above one with newer real conversation. A room carrying **no**
+`lastMsgAt` cannot be placed client-side at all — the room object exposes no `createdAt` —
+so preserve the server's relative position for it rather than folding it to the end of the
+list: `subscription.list` already ordered it by `createdAt`, and a naive `?? 0` comparator
+would sink a freshly created room to the bottom of a section the server had put it at the
+top of. In practice most rooms do carry a value: an `added` payload stamps `lastMsgAt`, and
+a room's own `room_created` system message freezes the field to `createdAt`. The gap is a
+room that predates the field and has seen no message since.)
 
 ##### Client read model
 
@@ -5156,7 +5168,10 @@ favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
    · each custom section (`sectionId == <that id>`) · `chats` (no `sectionId`, not
    favorite/bot). A `sectionId` pointing at a section not in the definitions renders in
    **chats** (orphan tolerance — a deleted section leaves its members orphaned, no cascade).
-4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last message.
+4. Within a section: `sortMode == "custom"` → order by `sectionOrder`; else by last user
+   activity (`lastMsgAt`, descending — see **sortMode** above). Sort
+   **stably**, and treat two rooms that both lack an activity timestamp as equal, so the
+   server's `createdAt` ordering survives the client-side grouping.
 5. Live updates: `subscription.update` (a chat's membership/order changed) and
    `chatlist.update` (a section def changed) each replace their own scope, guarded by
    their timestamp (last-write-wins, no deltas).
@@ -5216,7 +5231,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 |---------------------|---------|----------|-------|
 | `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (botDM rooms). |
 | `favorite`          | boolean | no       | When `true`, filters to favorited subscriptions only **and** moves the self-DM to the front of the list. |
-| `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last message (`room.lastMsgAt`) is within the last N days** — room activity, not the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
+| `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last user message (`room.lastMsgAt`) is within the last N days** — user activity, not system bumps or the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
 | `includeLastMessage` | boolean | no      | Whether to embed each room's [`previewMessage`](#subscriptionroom). Omitted ⇒ include (backward-compatible default); `false` ⇒ skip the per-room last-message resolve (a client that renders no room-list snippet can send `false` to save the server-side work). |
 | `offset`            | integer | no       | Zero-based index of the first record to return. Negative ⇒ `0`. Default `0`. |
 | `limit`             | integer | no       | Page size. Omitted or ≤ 0 ⇒ the server default `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); values above `MAX_SUBSCRIPTION_LIMIT` (default `1000`) are capped to it. |
@@ -5232,7 +5247,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 | `subscriptions` | array<[Subscription](#subscription)> | One page of room-info-enriched subscription records. |
 | `hasMore`       | boolean           | `true` when at least one more record follows this page (the server over-fetches `limit + 1` to decide). Request the next page by advancing `offset` by the `limit` you sent. |
 
-`subscriptions` is one page of [Subscription](#subscription) records (full schema in §3.0), room-info-enriched per the behavior below. Ordered by the room's `lastMsgAt` descending (rooms with no messages fall back to the room's `createdAt`). In the `favorite` view the caller's self-DM is pinned first; otherwise favorites are **not** pinned by this ordering. Ordering freshness is bounded by a short server-side cache (default 15s): a room's position may lag its newest message by up to that window, while the returned records' `room` fields — and `updatedWithinDays`, `favorite` and open/closed membership — are always fresh: a row that stops matching the request's filters before its page is built is dropped from that page rather than returned in its stale state. The cache is per server instance, so consecutive pages of one `hasMore` drain may be served from orderings that differ within that window: treat multi-page drains as best-effort membership and dedupe rows by `roomId` (a row can appear on two pages or fall between them; a missed room reappears on its next event or refetch).
+`subscriptions` is one page of [Subscription](#subscription) records (full schema in §3.0), room-info-enriched per the behavior below. Ordered by the room's `lastMsgAt` descending (rooms with no activity fall back to the room's `createdAt`) — a system-only bump (e.g. a rename) cannot resurface a dormant room or push it above one with real recent conversation. In the `favorite` view the caller's self-DM is pinned first; otherwise favorites are **not** pinned by this ordering. Ordering freshness is bounded by a short server-side cache (default 15s): a room's position may lag its newest message by up to that window, while the returned records' `room` fields — and `updatedWithinDays`, `favorite` and open/closed membership — are always fresh: a row that stops matching the request's filters before its page is built is dropped from that page rather than returned in its stale state. The cache is per server instance, so consecutive pages of one `hasMore` drain may be served from orderings that differ within that window: treat multi-page drains as best-effort membership and dedupe rows by `roomId` (a row can appear on two pages or fall between them; a missed room reappears on its next event or refetch).
 
 Results are **paginated** by `offset`/`limit` (offset-based): the server returns the requested window and `hasMore` signals whether another page follows. `limit` defaults to `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`) when omitted and is capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`); omitting `offset`/`limit` yields the first page.
 
@@ -5576,7 +5591,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
 
-**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. The count reads subscription state only — it consults no room document, and no room name is filtered.
+**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
 
 ##### Request body
 
@@ -5602,7 +5617,7 @@ Returns the count of active subscriptions, optionally filtered to unread rooms o
 
 **Threads:** a room also counts as unread if it has at least one unread followed thread, even when its own messages are all read — at most **+1 per room** (existence, not a per-thread count). Muted rooms are excluded (as with room-level unread), and only rooms within the fetched active-subscription page are considered. Thread-unread state (`Subscription.ThreadUnread`, a list of unread thread parent-message IDs) is already carried on the subscription document fetched for the room-level pass — federated onto the account's home-replica sub for both local and cross-site rooms — so this phase needs no additional RPC and cannot degrade independently of the room-level pass.
 
-**Caching:** when the server-side badge cache is enabled, the unread count may be served from the account's maintained unread-room set instead of being recomputed. The set is bumped on every message, and a read removes exactly the room read (a room with unread followed threads stays counted); mute, unmute, thread-read and membership changes invalidate it. The set is re-derived from MongoDB whenever it has gone unverified for longer than the server's badge marker TTL, which is therefore the upper bound on how stale this count can be. Same response schema and staleness bounds as the badge counts carried on push notifications (this count is not capped for display, unlike push counts).
+**Caching:** when the server-side badge cache is enabled, the unread count may be served from the account's maintained unread-room set instead of being recomputed. The set is bumped on every **notifiable** message — the same gate that decides whether a message pushes, so system messages (rename, member changes, …) never enter it — and a read removes exactly the room read (a room with unread followed threads stays counted); mute, unmute, thread-read and membership changes invalidate it. The set is re-derived from MongoDB whenever it has gone unverified for longer than the server's badge marker TTL, which is therefore the upper bound on how stale this count can be. Same response schema and staleness bounds as the badge counts carried on push notifications (this count is not capped for display, unlike push counts).
 
 ##### Error response
 
@@ -6442,11 +6457,12 @@ A `RoomEvent`. Recipients: every client subscribed to the room (which includes t
 | `roomType` | string | `channel`, `dm`, etc. |
 | `siteId` | string | |
 | `userCount` | number | |
-| `lastMsgAt` | string | RFC 3339. |
+| `lastMsgAt` | string | RFC 3339. **This message's own time** — not the room object's `lastMsgAt`, which is the room's user-activity position. A system message carries its own timestamp here, so folding this into a room summary unconditionally would let a rename or a member change reorder the sidebar. Gate on `systemMsg` first. |
 | `lastMsgId` | string | The new message's ID. |
 | `mentions` | [Participant](#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if the message mentioned `@all` or `@here`. |
 | `hasMention` | boolean | Optional. Per-recipient flag (DM event only). Always absent on channel events. |
+| `systemMsg` | boolean | Optional. `true` when the message is a server-generated system message (`room_created`, `members_added`, …). Clients must not advance unread state or sidebar ordering from a flagged event — present in plaintext even when the body is sealed in `encryptedMessage`. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
 | `encryptedMessage` | [EncryptedMessage](#encryptedmessage) | Optional. Set for encrypted (channel) rooms. Clients decrypt with the room key for `version`. |
 

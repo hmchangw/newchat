@@ -386,11 +386,12 @@ messages through a separate backend path.
 | `roomType` | string | `"channel"`, `"dm"`, etc. |
 | `siteId` | string | |
 | `userCount` | number | |
-| `lastMsgAt` | string | RFC 3339. |
+| `lastMsgAt` | string | RFC 3339. **This message's own time** — not the room object's `lastMsgAt`, which is the room's user-activity position. A system message carries its own timestamp here, so folding this into a room summary unconditionally would let a rename or a member change reorder the sidebar. Gate on `systemMsg` first. |
 | `lastMsgId` | string | The new message's ID. |
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
 | `hasMention` | boolean | Optional. Per-recipient flag — present only on DM events. |
+| `systemMsg` | boolean | Optional. `true` when the message is a server-generated system message (`room_created`, `members_added`, …). Clients must not advance unread state or sidebar ordering from a flagged event — present in plaintext even when the body is sealed in `encryptedMessage`. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
 | `encryptedMessage` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. Set for encrypted channel rooms. Decrypt with room key for `version`. |
 

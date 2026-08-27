@@ -2652,6 +2652,29 @@ func TestRoomsInfoBatch_CarriesCrossSite(t *testing.T) {
 	assert.Nil(t, resp.Rooms[2].CrossSite, "unclassified room must carry a nil (absent) CrossSite in RoomInfo, never coerced to false")
 }
 
+func TestHandler_handleRoomsInfoBatch_ForwardsLastUserMsgAt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	keyStore := NewMockRoomKeyStore(ctrl)
+
+	userAt := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	sysAt := userAt.Add(time.Hour)
+	store.EXPECT().ListRoomsByIDs(gomock.Any(), []string{"r1"}).Return([]model.Room{
+		{ID: "r1", SiteID: "site-a", LastMsgAt: &sysAt, LastUserMsgAt: &userAt},
+	}, nil)
+	keyStore.EXPECT().GetMany(gomock.Any(), []string{"r1"}).Return(map[string]*roomkeystore.VersionedKeyPair{}, nil)
+
+	h := &Handler{store: store, keyStore: keyStore, siteID: "site-a", maxBatchSize: 100}
+
+	resp, err := h.roomsInfoBatch(ctxParams(map[string]string{}), model.RoomsInfoBatchRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Rooms, 1)
+	require.NotNil(t, resp.Rooms[0].LastUserMsgAt)
+	assert.Equal(t, userAt.UnixMilli(), *resp.Rooms[0].LastUserMsgAt)
+	require.NotNil(t, resp.Rooms[0].LastMsgAt)
+	assert.Equal(t, sysAt.UnixMilli(), *resp.Rooms[0].LastMsgAt)
+}
+
 func TestHandler_handleRoomsInfoBatch_chunking(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)

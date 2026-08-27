@@ -20,6 +20,12 @@ type Room struct {
 	AppCount  int        `json:"appCount" bson:"appCount"`
 	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
 	LastMsgID string     `json:"lastMsgId" bson:"lastMsgId"`
+	// LastUserMsgAt is the newest NON-system message time — the only input to
+	// unread and sidebar ordering. LastMsgAt (all messages, system included)
+	// stays the history read ceiling. Absent on rooms untouched since the field
+	// shipped; readers fall back to LastMsgAt. See
+	// docs/superpowers/specs/2026-08-26-system-message-unread-ordering-design.md.
+	LastUserMsgAt *time.Time `json:"lastUserMsgAt,omitempty" bson:"lastUserMsgAt,omitempty"`
 	// PreviewMeta is the plaintext half of the memoized room-list preview —
 	// exactly what Cassandra also leaves unencrypted.
 	//
@@ -90,14 +96,16 @@ type RoomsInfoBatchRequest struct {
 
 // RoomInfo is a single aggregated room record: Mongo metadata + room key.
 type RoomInfo struct {
-	RoomID            string  `json:"roomId"`
-	Found             bool    `json:"found"`
-	SiteID            string  `json:"siteId,omitempty"`
-	Name              string  `json:"name,omitempty"`
-	UserCount         int     `json:"userCount,omitempty"`
-	AppCount          int     `json:"appCount,omitempty"`
-	LastMsgAt         *int64  `json:"lastMsgAt,omitempty"`
-	LastMsgID         string  `json:"lastMsgId,omitempty"`
+	RoomID    string `json:"roomId"`
+	Found     bool   `json:"found"`
+	SiteID    string `json:"siteId,omitempty"`
+	Name      string `json:"name,omitempty"`
+	UserCount int    `json:"userCount,omitempty"`
+	AppCount  int    `json:"appCount,omitempty"`
+	LastMsgAt *int64 `json:"lastMsgAt,omitempty"`
+	LastMsgID string `json:"lastMsgId,omitempty"`
+	// LastUserMsgAt mirrors Room.LastUserMsgAt (epoch ms); nil when absent.
+	LastUserMsgAt     *int64  `json:"lastUserMsgAt,omitempty"`
 	LastMentionAllAt  *int64  `json:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *int64  `json:"minUserLastSeenAt,omitempty"`
 	PrivateKey        *string `json:"privateKey,omitempty"`

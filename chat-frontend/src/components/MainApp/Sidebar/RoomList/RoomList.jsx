@@ -17,7 +17,10 @@ function mentionBadge(summary) {
 }
 
 function RoomItem({ room, isSelected, onSelectRoom, onDragStartRoom, onDropOnRoom }) {
-  const unread = room.unreadCount > 0
+  // Bold on the shared read-position rule (hasUnread, same as the header
+  // badge) OR the live message counter; the count chip renders only when
+  // messages actually accrued.
+  const unread = room.unreadCount > 0 || !!room.hasUnread
   const classes = ['room-item']
   if (isSelected) classes.push('room-item-selected')
   if (unread) classes.push('room-item-unread')
@@ -41,7 +44,7 @@ function RoomItem({ room, isSelected, onSelectRoom, onDragStartRoom, onDropOnRoo
           </span>
           {mentionBadge(room)}
           <span className="room-meta">{room.userCount}</span>
-          {unread && <span className="room-badge-unread">{room.unreadCount}</span>}
+          {room.unreadCount > 0 && <span className="room-badge-unread">{room.unreadCount}</span>}
         </div>
         {/* Always rendered, even with no preview — the row's height must not
             depend on whether this line has content, or the sidebar reflows

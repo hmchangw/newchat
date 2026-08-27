@@ -22,6 +22,10 @@ type roomLastMessage struct {
 	// PreviewFailed means MsgID was eligible but sealing failed, so the stored body is
 	// stale and the write clears it. Never true alongside a non-nil Preview (#224).
 	PreviewFailed bool
+	// SystemMsg marks a system message (model.IsSystemMessageType): it advances
+	// lastMsgAt (the history ceiling) but never lastUserMsgAt — a system-only
+	// flush window freezes lastUserMsgAt instead (see lastMessageUpdate).
+	SystemMsg bool
 }
 
 // roomLastMsgUpdate is the per-room state buffered between flushes. Fields take the
@@ -36,6 +40,11 @@ type roomLastMsgUpdate struct {
 	// pvwMsgID is the message that last moved the preview clock, so the preview and the
 	// room tuple break ties the same way rather than on separate rules.
 	pvwMsgID string
+	// userAt/userMsgID track the newest NON-system message in the window, under
+	// the same newerRow comparator as msgID/at. Zero userAt = system-only
+	// window: the write freezes lastUserMsgAt instead of setting it.
+	userAt    time.Time
+	userMsgID string
 }
 
 // maxPendingPreviews bounds how many buffered rooms may hold a sealed preview body. The
@@ -144,6 +153,10 @@ func (c *coalescingStore) UpdateRoomLastMessage(_ context.Context, upd roomLastM
 		cur.msgID = upd.MsgID
 		cur.at = upd.At
 	}
+	if !upd.SystemMsg && newerRow(upd.At, upd.MsgID, cur.userAt, cur.userMsgID) {
+		cur.userAt = upd.At
+		cur.userMsgID = upd.MsgID
+	}
 	if upd.MentionAll && upd.At.After(cur.lastMentionAllAt) {
 		cur.lastMentionAllAt = upd.At
 	}
@@ -216,6 +229,7 @@ func (c *coalescingStore) refreshRemoteActivity(ctx context.Context, batch map[s
 		return
 	}
 	now := c.clock()
+	//nolint:gocritic // rangeValCopy: batch is a map, so indexing buys nothing over the copy
 	for roomID, u := range batch {
 		if !c.crossSite(ctx, roomID) {
 			continue

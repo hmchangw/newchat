@@ -396,6 +396,10 @@ type RoomEvent struct {
 	MentionAll bool          `json:"mentionAll,omitempty"`
 
 	HasMention bool `json:"hasMention,omitempty"`
+	// SystemMsg marks a system-message new_message (IsSystemMessageType) in
+	// plaintext, so clients can exclude it from unread/ordering even when the
+	// message itself is sealed inside EncryptedMessage.
+	SystemMsg bool `json:"systemMsg,omitempty"`
 
 	Message          *ClientMessage  `json:"message,omitempty"`
 	EncryptedMessage json.RawMessage `json:"encryptedMessage,omitempty"`
