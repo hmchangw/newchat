@@ -421,6 +421,24 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
 	// slot — and BustSubs no-ops on an empty set.
 	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
+	// Deferred for the same reason as the bust above, and it has to be: a
+	// mid-batch error on a LATER user returns before the explicit rotation
+	// below, with earlier deletes already committed. The retry cannot repair
+	// that — those deletes report wasThere=false next time, so `removed` can
+	// come back empty and the rotation is then skipped for good, leaving an
+	// already-removed member holding a key that opens every future message.
+	// Best effort and logged rather than returned: this only runs on a path
+	// that is already failing, and the caller's error must not be replaced.
+	rotated := false
+	defer func() {
+		if rotated || len(removed) == 0 {
+			return
+		}
+		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			slog.ErrorContext(c, "room key rotation after a failed bot removal did not complete; removed members may still hold a working key",
+				"error", err, "roomID", roomID, "removed", len(removed))
+		}
+	}()
 	for _, userID := range req.UserIDs {
 		// The account comes from the delete itself, so the bust below cannot be
 		// skipped by the enrichment lookup failing. It is the same value
@@ -472,6 +490,10 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	// stranded-federation gap this handler already documents: the remote site
 	// still shows them subscribed, but they cannot read anything new.
 	if len(removed) > 0 {
+		// Set before the call, not after: a failure here is already being
+		// returned to the caller, so the deferred safety net must not run it a
+		// second time.
+		rotated = true
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
 			return nil, err
 		}
