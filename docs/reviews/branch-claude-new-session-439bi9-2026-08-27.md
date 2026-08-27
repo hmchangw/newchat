@@ -106,3 +106,48 @@ Correctness independently confirmed by call-site audit — every projected field
 ## What's right
 
 Var placement (package-level, immediately above the consuming method), naming, `bson.D` choice, `require`/`assert` split, and `Test<Type>_<Method>_<Scenario>` naming all match the surrounding code. Non-table-driven tests are the correct call here — each case has a distinct fixture and a distinct assertion set, not input/output variations of one function.
+
+---
+
+# Test automation
+
+## Test run
+
+```
+$ make test SERVICE=room-service          # after go clean -testcache
+go test -race ./room-service/...
+ok  	github.com/hmchangw/chat/room-service	1.625s
+
+$ go test -run 'ProjectionFields' -v ./room-service/... | grep -c "^=== RUN"
+0
+
+$ make test-integration SERVICE=room-service
+--- FAIL: TestMongoStore_ListMentionableSubscriptions_Integration/... (0.00s)
+    integration_test.go:40: testutil.MongoDB: start mongo: run mongodb: generic container:
+      get provider: rootless Docker not found, failed to create Docker provider
+[…every integration test fails identically…]
+FAIL	github.com/hmchangw/chat/room-service	0.576s
+make: *** [Makefile:122: test-integration] Error 1
+
+$ docker info   ->  docker UNAVAILABLE
+$ go vet -tags=integration ./room-service/...   # exit 0 — new tests compile
+
+$ make generate SERVICE=room-service; git status --porcelain room-service/   ->  empty
+```
+
+**Mock freshness: clean.** `room-service/store.go` is untouched, mocks are in sync, tree clean — nothing to revert.
+
+**Integration tests have never been executed.** Docker is unavailable in this environment, so the five new tests were confirmed to compile but never run.
+
+## Findings
+
+- **[medium] The projection change has zero coverage in the pre-commit gate** — `room-service/integration_test.go:1` — all five new tests sit under `//go:build integration`; `make test` ran 0 of them (grep count above). Part of this *is* unit-testable without Mongo: the failure mode the author calls out at `room-service/store_mongo.go:713-714` ("`u.id` would project nothing") is pure bson-tag arithmetic. A plain `store_test.go` with no build tag, reflecting each dotted key in the five projection vars against the target struct's `bson` tags and failing on any key that resolves to no field, would run on every commit and catch exactly that typo class — which Mongo-only tests catch ten minutes later, or never.
+- **[medium] One of the five tests cannot fail if the projection is deleted** — `room-service/integration_test.go:341-364` — `TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration` asserts only included fields (`ID`, `RoomID`, `Ts`, `Member.ID/Account/IsOwner`). Remove `opts.SetProjection(roomMemberSubProjection)` at `room-service/store_mongo.go:733` and it still passes. The other four each pin exclusions (`GetUser` `:225-230`, `GetApp` `:262-267`, `FindDMSubscription` `:297-300`, `GetThreadSubscriptionByParent` `:330-333`) and genuinely fail on projection removal. This one is a drift guard, not a projection guard — say so in the comment, or assert through a raw `Find` with the same projection.
+- **[low] Comment contradicts the call** — `room-service/integration_test.go:336` — says "the fallback (enrich=false) build" but line 353 passes `true`. `enrich=true` is required for the `IsOwner` assertion (`store_mongo.go:753`), so the code is right and the comment is wrong.
+- **[low] Exclusion assertions could pass for the wrong reason** — `room-service/integration_test.go:225` — `assert.Empty(t, got.Services.Password.Bcrypt)` proves nothing if the fixture never persisted it; `Services` carries `bson:"services,omitempty"` (`pkg/model/user.go:70`). For the one security-relevant assertion, add a raw `db.Collection("users").FindOne(...)` read-back confirming `services.password.bcrypt` really is in the stored document. Same caveat, lower stakes, for the other `assert.Empty` blocks.
+- **[nitpick] Inline insert instead of the helper** — `room-service/integration_test.go:247` — `GetApp` test inserts via `db.Collection("apps").InsertOne` while siblings use `mustInsertX`; five call sites now do this. Extract `mustInsertApp`.
+- **[nitpick] No error paths, none table-driven** — none of the five cover the not-found path. Consistent with the pre-existing `GetRoom`/`GetSubscription` projection tests, so no deviation, but CLAUDE.md Section 4's "tests must cover … error paths" is satisfied only by other tests in the file.
+
+## What's right
+
+TDD's 1:1 mapping holds — five changed reads, five tests, each naming the call site it protects. `TestMain` present (`room-service/main_test.go:11`), `testutil.MongoDB` throughout with zero inline `testcontainers.GenericContainer`, per-test DB hashed on `t.Name()` so there is no shared state or order reliance, `-race` on the unit gate. The four exclusion-pinning tests are genuinely load-bearing.
