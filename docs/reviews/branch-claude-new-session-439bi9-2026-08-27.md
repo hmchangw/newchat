@@ -215,3 +215,26 @@ No `critical`, no `high`. Every claim below was traced to source.
 ## Regressions
 
 **None found.** All five are pure projection additions. The `{joinedAt, _id}` index-backed sort is unaffected — projection applies post-sort, and the 32 MB sort limit is still avoided. No query was previously covered, so none was un-covered. The `u._id` nested path is correct (`SubscriptionUser.ID` → `bson:"_id"`, `pkg/model/subscription.go:21`); a `u.id` typo would have silently zeroed `Member.ID`, and the new test pins it.
+
+---
+
+# Observability
+
+## Findings
+
+- **[high] The only guard against projection drift is a test CI never runs** — `room-service/integration_test.go:1` vs `room-service/deploy/azure-pipelines.yml:44` — the new pins are `//go:build integration`, but the pipeline runs `go test ./$(SERVICE_NAME)/...` with no `-tags integration`, and there is no integration step anywhere in that file. The entire safety net for a silent-zeroing change exists only behind a manual `make test-integration` (`Makefile:120-124`). Either add an integration lane, or state in the PR that the guard is local-only.
+- **[medium] Nothing at runtime would surface a projection bug; one cheap signal is worth adding, four are not** — `room-service/store_mongo.go` contains zero `slog.` calls and no spans, so store methods have no span convention to diverge from. The only per-operation telemetry is the driver command span/metric from `o11ymongo.Instrument` (`pkg/mongoutil/mongo.go:50`), which reports latency and errors but never field content. A dropped projection key therefore surfaces only as a *business* symptom: a missing `engName`/`chineseName` becomes `errInvalidUserData` (`room-service/handler.go:163`); a missing `roles` makes `IsPlatformAdmin` false and yields `errOnlyAdmins` (`handler.go:2044`) — a real admin gets a 403 and no log distinguishes that from a genuine non-admin.
+
+  Cost-weighted recommendation:
+  - **Add one branch** in `GetUser` (`store_mongo.go:896`): after a successful decode, if `u.ID == "" || u.Account == ""`, emit `slog.WarnContext(ctx, "room-service GetUser projection returned empty identity", "request_id", natsutil.RequestIDFromContext(ctx), "account", account)`. Both fields are non-optional on every user document, so empty-after-success is unambiguously a projection or schema bug. Request/reply path, negligible cost, and it names the failure the two admin gates otherwise hide.
+  - **Do not** add per-field debug logs or a metric to the other four. `FindDMSubscription` and `GetThreadSubscriptionByParent` results are consumed through a single field each (`handler.go:244`, `handler.go:1690`), and `getRoomSubscriptions` (`store_mongo.go:733`) is a list path where per-row logging is a hot-path cost. A new instrument plus dashboards is not justified for a bug class the integration test catches deterministically — fixing the finding above is the better spend.
+  - Precedent note: only `tcard-service/store_mongo.go:60` logs from a store layer, so this is a mild new precedent, but compliant with CLAUDE.md Section 3.
+- **[medium] `active` is not projected, and `IsActive()` silently returns true when absent** — `room-service/store_mongo.go:890-894` — `Active *bool` nil means active (`pkg/model/user.go:~68-70`). No live regression: `IsActive` and `.Active` appear nowhere in room-service. But a future `requester.IsActive()` would silently pass a deactivated account. Record it in the projection comment as an explicit "if you ever need `IsActive`, add `active` here".
+- **[nitpick] `User.String()` is not relied upon, and the projection dulls it** — `pkg/model/user.go:83` omits the hash by design; grep found no site logging a `model.User`, `model.App` or `model.Subscription` value wholesale (no `%v`/`%+v` or slog struct-value use in `room-service/*.go`). The change makes `String()` moot for safety but slightly misleading: `SiteID` is now always `""` on a `GetUser` result, so a future `%v` in a siteID-routing debug session would print a false empty.
+- **[nitpick] Comment/assert mismatch** — `room-service/integration_test.go:337` describes "the fallback (enrich=false) build" but calls `ListRoomMembers(ctx, "rmembers", nil, nil, true)` and asserts `IsOwner`, which only `enrich=true` populates (`store_mongo.go:753`).
+
+## Verified clean
+
+**Secret-leak claim holds.** The inclusion projection at `store_mongo.go:890-894` lists only `_id, account, engName, chineseName, roles`; Mongo inclusion semantics exclude everything else, so `Services` (`pkg/model/user.go:69`, the bcrypt block) never leaves Mongo on this path. Pinned at `integration_test.go:231`. Strict improvement.
+
+**ctx / request-ID propagation: no finding.** All five methods pass `ctx` through unchanged; callers derive IDs via `natsutil.RequestIDFromContext(ctx)` (`handler.go:155`, `:286`) and Mongo spans nest under the handler span via ctx. The diff introduces no log statements and no `fmt.Println`/`log.Println`.
