@@ -5147,17 +5147,17 @@ favorite, not a bot). All built-ins default to `sortMode: "mostRecent"`.
 
 **sortMode**: `"custom"` (sort the section's chats by `subscription.sectionOrder`) or
 `"mostRecent"` (sort by last **user** activity — the default and fallback; same key as
-[`subscription.list`](#subscriptionlist): `room.lastMsgAt` descending, falling back to
-`room.lastMsgAt` for rooms that predate it. Sorting on `lastMsgAt` alone would let a system
-message — a rename, a member change — resurface a dormant room above one with newer real
-conversation. A room carrying **neither** timestamp cannot be placed client-side at all —
-the room object exposes no `createdAt` — so preserve the server's relative position for it
-rather than folding it to the end of the list: `subscription.list` already ordered it by
-`createdAt`, and a naive `?? 0` comparator would sink a freshly created room to the bottom
-of a section the server had put it at the top of. In practice most rooms do carry a value:
-an `added` payload stamps `lastMsgAt`, and a room's own `room_created` system message
-freezes the field to `createdAt`. The gap is a room that predates the field and has seen no
-message since.)
+[`subscription.list`](#subscriptionlist): `room.lastMsgAt` descending, used as-is. The
+server resolves that field to user activity before sending it — a system message (a rename,
+a member change) never advances it — so the client needs no rule of its own to keep a
+dormant room from resurfacing above one with newer real conversation. A room carrying **no**
+`lastMsgAt` cannot be placed client-side at all — the room object exposes no `createdAt` —
+so preserve the server's relative position for it rather than folding it to the end of the
+list: `subscription.list` already ordered it by `createdAt`, and a naive `?? 0` comparator
+would sink a freshly created room to the bottom of a section the server had put it at the
+top of. In practice most rooms do carry a value: an `added` payload stamps `lastMsgAt`, and
+a room's own `room_created` system message freezes the field to `createdAt`. The gap is a
+room that predates the field and has seen no message since.)
 
 ##### Client read model
 
