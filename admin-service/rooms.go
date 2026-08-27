@@ -10,15 +10,18 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// roomView is the admin-console projection of a room: identity plus the three
-// fields the duty toggle branches on. Restricted carries no omitempty — the
-// console renders on its value, so it must survive as false rather than vanish.
+// roomView is the admin-console projection of a room: identity plus the fields
+// the duty toggle branches on. A room is on duty only with both flags set —
+// the toggle writes them together, but they are stored independently. Neither
+// carries omitempty: the console renders on their values, so they must survive
+// as false rather than vanish.
 type roomView struct {
-	ID         string         `json:"id"`
-	Name       string         `json:"name"`
-	Type       model.RoomType `json:"type"`
-	UserCount  int            `json:"userCount"`
-	Restricted bool           `json:"restricted"`
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Type           model.RoomType `json:"type"`
+	UserCount      int            `json:"userCount"`
+	Restricted     bool           `json:"restricted"`
+	ExternalAccess bool           `json:"externalAccess"`
 }
 
 // roomMemberView is one member of a room, projected to what the owner picker
@@ -43,11 +46,12 @@ func (h *Handler) listRooms(c *gin.Context) {
 	views := make([]roomView, len(rooms))
 	for i := range rooms {
 		views[i] = roomView{
-			ID:         rooms[i].ID,
-			Name:       rooms[i].Name,
-			Type:       rooms[i].Type,
-			UserCount:  rooms[i].UserCount,
-			Restricted: rooms[i].Restricted,
+			ID:             rooms[i].ID,
+			Name:           rooms[i].Name,
+			Type:           rooms[i].Type,
+			UserCount:      rooms[i].UserCount,
+			Restricted:     rooms[i].Restricted,
+			ExternalAccess: rooms[i].ExternalAccess,
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"rooms": views, "total": total})

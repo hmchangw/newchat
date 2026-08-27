@@ -284,7 +284,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `DELETE /v1/admin/sessions?account=<account>` | synchronous HTTP | Revoke all of an account's sessions (§9.7). |
 | `DELETE /v1/admin/sessions/:sessionId?account=<account>` | synchronous HTTP | Revoke a single session (§9.8). |
 | `GET /v1/admin/audit` | synchronous HTTP | List the audit log (§9.9). |
-| `GET /v1/admin/rooms` | synchronous HTTP | List the rooms homed at this site, paged; each row projected to `id`/`name`/`type`/`userCount`/`restricted` (§9.17). |
+| `GET /v1/admin/rooms` | synchronous HTTP | List the rooms homed at this site, paged; each row projected to `id`/`name`/`type`/`userCount`/`restricted`/`externalAccess` — a room is on duty only when both flags are set (§9.17). |
 | `GET /v1/admin/rooms/:roomId/members` | synchronous HTTP | List every account subscribed to the room, unpaged. Same subscriptions the duty toggle validates `ownerAccount` against, and unlike the client-facing `member.list` RPC it needs no membership (§9.18). |
 | `POST /v1/admin/rooms/:roomId/onduty` | synchronous HTTP | Toggle a channel's on-duty state: maps the boolean onto `restricted` + `externalAccess` via room-service's restrict RPC, with `ownerAccount` required when turning on. Emits a `room_restricted` room event; no system message, so nothing is displayed (§9.12). |
 | `POST /v1/password/change` | synchronous HTTP | Logged-in admin's self-service password change (§9.11). |

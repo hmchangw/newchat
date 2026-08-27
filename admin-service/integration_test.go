@@ -1417,7 +1417,7 @@ func TestIntegration_ListRooms(t *testing.T) {
 	ctx := context.Background()
 
 	rooms := []model.Room{
-		{ID: "room-a1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 7, Restricted: true},
+		{ID: "room-a1", Name: "general", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 7, Restricted: true, ExternalAccess: true},
 		{ID: "room-a2", Name: "random", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 3},
 		{ID: "room-a3", Name: "alice-bob", Type: model.RoomTypeDM, SiteID: "site-a", UserCount: 2},
 		{ID: "room-b1", Name: "other-site", Type: model.RoomTypeChannel, SiteID: "site-b", UserCount: 9},
@@ -1446,6 +1446,9 @@ func TestIntegration_ListRooms(t *testing.T) {
 		assert.Equal(t, model.RoomTypeChannel, results[0].Type)
 		assert.Equal(t, 7, results[0].UserCount)
 		assert.True(t, results[0].Restricted)
+		assert.True(t, results[0].ExternalAccess)
+		assert.False(t, results[1].Restricted, "an unrestricted room must not inherit the flag")
+		assert.False(t, results[1].ExternalAccess)
 	})
 
 	t.Run("pages by _id in a stable order", func(t *testing.T) {

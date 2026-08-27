@@ -160,7 +160,9 @@ func (s *storeMongo) SearchUsers(ctx context.Context, q string, page, limit int)
 }
 
 // roomProjection contains the fields the admin rooms console renders.
-var roomProjection = bson.M{"_id": 1, "name": 1, "type": 1, "userCount": 1, "restricted": 1}
+var roomProjection = bson.M{
+	"_id": 1, "name": 1, "type": 1, "userCount": 1, "restricted": 1, "externalAccess": 1,
+}
 
 // roomMemberProjection contains the subscription fields the owner picker needs.
 // _id is excluded explicitly — Mongo returns it by default and nothing reads it.

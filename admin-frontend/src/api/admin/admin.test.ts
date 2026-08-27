@@ -53,6 +53,7 @@ const ROOM = {
   type: 'channel',
   userCount: 7,
   restricted: true,
+  externalAccess: true,
 }
 
 describe('listUsers', () => {

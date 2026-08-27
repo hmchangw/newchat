@@ -40,12 +40,15 @@ export interface AuditEntry {
 }
 
 /** Admin-facing room projection (mirrors admin-service's `roomView`). */
+/** A room is on duty only when BOTH flags are set — the duty toggle writes them
+ * together, but they are stored independently. */
 export interface AdminRoom {
   id: string
   name: string
   type: string
   userCount: number
   restricted: boolean
+  externalAccess: boolean
 }
 
 /** One member of a room, sourced from the subscriptions the duty toggle validates against. */

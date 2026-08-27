@@ -36,8 +36,14 @@ import RoomsPage from './RoomsPage'
 import { useAuth } from '@/context/AuthContext'
 import { listRooms, AsyncJobError } from '@/api'
 
-const OPEN = { id: 'r-off', name: 'general', type: 'channel', userCount: 7, restricted: false }
-const ONDUTY = { id: 'r-on', name: 'ops', type: 'channel', userCount: 9, restricted: true }
+const OPEN = {
+  id: 'r-off', name: 'general', type: 'channel', userCount: 7,
+  restricted: false, externalAccess: false,
+}
+const ONDUTY = {
+  id: 'r-on', name: 'ops', type: 'channel', userCount: 9,
+  restricted: true, externalAccess: true,
+}
 
 let logout
 

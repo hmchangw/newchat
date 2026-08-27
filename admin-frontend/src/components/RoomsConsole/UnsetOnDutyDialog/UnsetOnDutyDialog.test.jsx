@@ -11,7 +11,10 @@ import UnsetOnDutyDialog from './UnsetOnDutyDialog'
 import { useAuth } from '@/context/AuthContext'
 import { setRoomOnDuty, AsyncJobError } from '@/api'
 
-const ROOM = { id: 'r-1', name: 'general', type: 'channel', userCount: 7, restricted: true }
+const ROOM = {
+  id: 'r-1', name: 'general', type: 'channel', userCount: 7,
+  restricted: true, externalAccess: true,
+}
 
 beforeEach(() => {
   vi.clearAllMocks()

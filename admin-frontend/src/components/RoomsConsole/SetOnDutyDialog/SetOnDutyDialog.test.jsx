@@ -11,7 +11,10 @@ import SetOnDutyDialog from './SetOnDutyDialog'
 import { useAuth } from '@/context/AuthContext'
 import { listRoomMembers, setRoomOnDuty, AsyncJobError } from '@/api'
 
-const ROOM = { id: 'r-1', name: 'general', type: 'channel', userCount: 7, restricted: false }
+const ROOM = {
+  id: 'r-1', name: 'general', type: 'channel', userCount: 7,
+  restricted: false, externalAccess: false,
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -99,6 +102,28 @@ describe('SetOnDutyDialog', () => {
     listRoomMembers.mockRejectedValue(new AsyncJobError('db offline', { code: 'internal' }))
     render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={vi.fn()} />)
     expect(await screen.findByText(/db offline/i)).toBeInTheDocument()
+  })
+
+  it('accepts exactly one owner — picking one removes the field that could add a second', async () => {
+    render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={vi.fn()} />)
+    await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await typeOwner('ali')
+      fireEvent.click(await screen.findByRole('option', { name: /alice/i }))
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(screen.queryByLabelText(/owner/i)).not.toBeInTheDocument()
+    expect(screen.getByText('alice')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
+    await waitFor(() => expect(setRoomOnDuty).toHaveBeenCalledTimes(1))
+    // ownerAccount is a single string on the wire — there is no shape that carries two.
+    expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
+      onDuty: true,
+      ownerAccount: 'alice',
+    })
   })
 
   it('closes without calling the API when cancelled', async () => {

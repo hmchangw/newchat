@@ -15,8 +15,12 @@ const room = (over) => ({
   type: 'channel',
   userCount: 7,
   restricted: false,
+  externalAccess: false,
   ...over,
 })
+
+/** A room the duty toggle turned on — it writes both flags together. */
+const ondutyRoom = (over) => room({ restricted: true, externalAccess: true, ...over })
 
 /** Returns the Action cell of the row whose _id cell holds `id`. */
 function actionCell(id) {
@@ -48,10 +52,15 @@ describe('RoomTable', () => {
     expect(cells[3]).toHaveTextContent('7')
   })
 
-  it('shows "onduty" as the status of a restricted room and nothing for an unrestricted one', () => {
+  it('shows "onduty" only when both duty flags are set', () => {
     render(
       <RoomTable
-        rooms={[room({ id: 'r-on', restricted: true }), room({ id: 'r-off', restricted: false })]}
+        rooms={[
+          ondutyRoom({ id: 'r-on' }),
+          room({ id: 'r-off' }),
+          room({ id: 'r-restricted-only', restricted: true }),
+          room({ id: 'r-external-only', externalAccess: true }),
+        ]}
         loading={false}
         onSetOnDuty={vi.fn()}
         onUnsetOnDuty={vi.fn()}
@@ -59,6 +68,9 @@ describe('RoomTable', () => {
     )
     expect(statusCell('r-on')).toHaveTextContent('onduty')
     expect(statusCell('r-off')).toHaveTextContent('')
+    // Half-set flags are not on duty — the toggle only ever writes both together.
+    expect(statusCell('r-restricted-only')).toHaveTextContent('')
+    expect(statusCell('r-external-only')).toHaveTextContent('')
   })
 
   it('offers "set onduty" for an unrestricted channel at or above the member floor', () => {
@@ -73,10 +85,10 @@ describe('RoomTable', () => {
     expect(within(actionCell('r-1')).getByRole('button', { name: /set onduty/i })).toBeInTheDocument()
   })
 
-  it('offers "unset onduty" for a restricted channel regardless of the member floor', () => {
+  it('offers "unset onduty" for an on-duty channel regardless of the member floor', () => {
     render(
       <RoomTable
-        rooms={[room({ restricted: true, userCount: 2 })]}
+        rooms={[ondutyRoom({ userCount: 2 })]}
         loading={false}
         onSetOnDuty={vi.fn()}
         onUnsetOnDuty={vi.fn()}
@@ -85,6 +97,30 @@ describe('RoomTable', () => {
     const cell = actionCell('r-1')
     expect(within(cell).getByRole('button', { name: /unset onduty/i })).toBeInTheDocument()
     expect(within(cell).queryByRole('button', { name: /^set onduty/i })).not.toBeInTheDocument()
+  })
+
+  it('offers no action for a restricted channel that is not on duty', () => {
+    render(
+      <RoomTable
+        rooms={[room({ restricted: true })]}
+        loading={false}
+        onSetOnDuty={vi.fn()}
+        onUnsetOnDuty={vi.fn()}
+      />,
+    )
+    expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('offers no action for an on-duty DM', () => {
+    render(
+      <RoomTable
+        rooms={[ondutyRoom({ type: 'dm', userCount: 9 })]}
+        loading={false}
+        onSetOnDuty={vi.fn()}
+        onUnsetOnDuty={vi.fn()}
+      />,
+    )
+    expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('offers no action for an unrestricted channel below the member floor', () => {
@@ -127,7 +163,7 @@ describe('RoomTable', () => {
   it('passes the room up when an action is clicked', () => {
     const onSetOnDuty = vi.fn()
     const onUnsetOnDuty = vi.fn()
-    const rooms = [room({ id: 'r-off' }), room({ id: 'r-on', restricted: true })]
+    const rooms = [room({ id: 'r-off' }), ondutyRoom({ id: 'r-on' })]
     render(
       <RoomTable rooms={rooms} loading={false} onSetOnDuty={onSetOnDuty} onUnsetOnDuty={onUnsetOnDuty} />,
     )

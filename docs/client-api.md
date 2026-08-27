@@ -8334,12 +8334,22 @@ Lists the rooms homed at admin-service's own site, newest paging first by `_id`.
 | `name` | string | Room name. |
 | `type` | string | `channel`, `dm`, `botDM`, or `discussion`. |
 | `userCount` | number | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
-| `restricted` | boolean | Whether the room is on duty. Always present, including when `false`. |
+| `restricted` | boolean | Only owners may change the roster. Always present, including when `false`. |
+| `externalAccess` | boolean | Members may connect from outside the company network. Always present, including when `false`. |
+
+A room is **on duty** only when `restricted` AND `externalAccess` are both true. [§9.12](#912-set-room-on-duty) writes the pair together, but they are stored as independent fields, so a room can be found half-set (for example by an older write); such a room is not on duty.
 
 ```json
 {
   "rooms": [
-    { "id": "aB3xY9kLmN2pQ7rS4", "name": "general", "type": "channel", "userCount": 7, "restricted": true }
+    {
+      "id": "aB3xY9kLmN2pQ7rS4",
+      "name": "general",
+      "type": "channel",
+      "userCount": 7,
+      "restricted": true,
+      "externalAccess": true
+    }
   ],
   "total": 1
 }

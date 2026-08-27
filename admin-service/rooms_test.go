@@ -47,7 +47,7 @@ func TestHandler_listRooms(t *testing.T) {
 				m.EXPECT().ListRooms(gomock.Any(), "site-A", 2, 10).
 					Return([]model.Room{{
 						ID: "r1", Name: "general", Type: model.RoomTypeChannel,
-						UserCount: 7, Restricted: true,
+						UserCount: 7, Restricted: true, ExternalAccess: true,
 					}}, int64(1), nil)
 			},
 			wantStatus: http.StatusOK,
@@ -90,7 +90,7 @@ func TestHandler_listRooms(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:  "an unrestricted room reports restricted=false rather than omitting it",
+			name:  "an unrestricted room reports both duty flags as false rather than omitting them",
 			query: "",
 			setupMock: func(m *MockAdminStore) {
 				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
@@ -108,6 +108,27 @@ func TestHandler_listRooms(t *testing.T) {
 				// The UI branches on this field, so it must always be present.
 				assert.Contains(t, room, "restricted")
 				assert.Equal(t, false, room["restricted"])
+			},
+		},
+		{
+			name:  "reports a restricted room without external access as exactly that",
+			query: "",
+			setupMock: func(m *MockAdminStore) {
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+					Return([]model.Room{{
+						ID: "r3", Name: "half", Type: model.RoomTypeChannel,
+						UserCount: 9, Restricted: true,
+					}}, int64(1), nil)
+			},
+			wantStatus: http.StatusOK,
+			checkBody: func(t *testing.T, body map[string]any) {
+				rooms, ok := body["rooms"].([]any)
+				require.True(t, ok)
+				require.Len(t, rooms, 1)
+				room, ok := rooms[0].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, true, room["restricted"])
+				assert.Equal(t, false, room["externalAccess"])
 			},
 		},
 		{
