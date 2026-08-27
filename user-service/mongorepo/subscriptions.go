@@ -836,6 +836,14 @@ func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int)
 // as in the list path, simply yields no lastMsgAt.
 func activeRoomsEnrichStages() bson.A {
 	return bson.A{
+		// $lookup justification: the unread test compares the room's lastMsgAt
+		// against the subscription's own lastSeenAt, so both sides must meet
+		// somewhere. Composing app-side would add a second round trip per account
+		// — an $in over the whole active set — on a path that already runs once
+		// per account in a notification batch. The $limit above caps the join at
+		// maxSubs rows, and the correlated $expr matches on the rooms _id index.
+		// The cross-site half of this same computation necessarily uses the
+		// separate-query shape (GetRoomsMeta), there being no local room document.
 		bson.M{"$lookup": bson.M{
 			"from": roomsCollection,
 			"let":  bson.M{"rid": "$roomId"},
