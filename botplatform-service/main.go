@@ -47,6 +47,9 @@ func run() error {
 	if err := cfg.Pool.Validate(); err != nil {
 		return fmt.Errorf("validate mongo pool: %w", err)
 	}
+	if err := cfg.Breaker.Validate(""); err != nil {
+		return fmt.Errorf("validate mongo breaker: %w", err)
+	}
 	if err := cfg.HTTP.Validate(); err != nil {
 		return fmt.Errorf("validate http timeout: %w", err)
 	}

@@ -130,6 +130,10 @@ func main() {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
+	if err := cfg.Breaker.Validate("BROADCAST_"); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)

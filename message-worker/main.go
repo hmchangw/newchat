@@ -90,6 +90,10 @@ func main() {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
+	if err := cfg.Breaker.Validate(""); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
 
 	if cfg.MessageBucketHours < 1 {
 		slog.Error("invalid config", "MESSAGE_BUCKET_HOURS", cfg.MessageBucketHours)
