@@ -9,6 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// validUploadTokens is a well-formed UPLOAD_TOKENS value for tests that need the
+// variable defined but are not testing it.
+const validUploadTokens = "admin-service:0123456789abcdef"
+
 func TestConfig_Defaults(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MINIO_ENDPOINT", "minio:9000")
@@ -34,12 +38,12 @@ func TestConfig_RequiresEachRequiredVar(t *testing.T) {
 	for _, missing := range required {
 		t.Run("missing_"+missing, func(t *testing.T) {
 			for _, k := range required {
-				seed := "seed"
-				if k == "UPLOAD_TOKENS" {
-					seed = "seed:0123456789abcdef" // well-formed key:value for map parsing
-				}
-				t.Setenv(k, seed) // t.Setenv restores the original value on cleanup
+				t.Setenv(k, "seed") // t.Setenv restores the original value on cleanup
 			}
+			// Pinned even though it is optional: a malformed value inherited from
+			// the host environment would fail the parse on its own and make every
+			// subtest here pass for the wrong reason.
+			t.Setenv("UPLOAD_TOKENS", validUploadTokens)
 			require.NoError(t, os.Unsetenv(missing))
 			_, err := loadConfig()
 			assert.Error(t, err, "parse must fail when %s is unset", missing)
@@ -149,6 +153,9 @@ func TestLoadConfig_AcceptsFloatFormattedByteSizes(t *testing.T) {
 			t.Setenv("MINIO_ACCESS_KEY", "k")
 			t.Setenv("MINIO_SECRET_KEY", "s")
 			t.Setenv("MINIO_BUCKET", "chat-updates")
+			// Optional, but pinned: a malformed inherited value would fail the
+			// parse before these cases reach their own assertions.
+			t.Setenv("UPLOAD_TOKENS", validUploadTokens)
 			t.Setenv("CACHE_MAX_OBJECT_BYTES", tt.value)
 
 			cfg, err := loadConfig()

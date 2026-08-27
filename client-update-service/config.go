@@ -76,7 +76,7 @@ func parseByteSize(v string) (int64, error) {
 	}
 	f, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%q is not a byte count", s)
+		return 0, fmt.Errorf("parse byte count %q: %w", s, err)
 	}
 	if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
 		return 0, fmt.Errorf("%q is not a whole number of bytes", s)
