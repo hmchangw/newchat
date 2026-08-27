@@ -4012,6 +4012,7 @@ Returns the replies in a thread. The thread parent's `messageId` is supplied in 
 | `hasNext` | boolean | `true` if more replies exist beyond this page. |
 | `parentMessage` | [Message](#message-schema) | Optional. The thread-parent message. Present whenever the thread parent passes the access-window check. Absent only on error paths. The parent's `quotedParentMessage` is access-window-redacted by the same rules as replies. |
 | `minUserLastSeenAt` | number | Optional. UTC milliseconds since Unix epoch. The thread room's **strict read floor** — `MIN(lastSeenAt)` across all thread subscribers, present **only when every subscriber has read**. Absent when any subscriber has not yet read (including bots, which never call Mark Thread as Read), or when the value cannot be retrieved (best-effort; thread messages still load). |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — messages at or after this timestamp may not have been persisted yet, so this thread can be missing replies that were delivered live. Clients should surface a "still catching up" state rather than rendering the gap as complete history, and may retry later. |
 
 ```json
 {
@@ -4036,6 +4037,25 @@ Returns the replies in a thread. The thread parent's `messageId` is supplied in 
   ],
   "hasNext": false,
   "minUserLastSeenAt": 1746518100000
+}
+```
+
+Degraded-case example (history catching up after a persistence outage — `tcount` is 3
+but the replies have not been persisted yet):
+
+```json
+{
+  "messages": [],
+  "parentMessage": {
+    "roomId": "01970a4f8c2d7c9aQ",
+    "createdAt": "2026-05-06T07:55:00Z",
+    "messageId": "01970a4f8c2d7c9aQRST",
+    "sender": { "id": "01970a4f8c2d7c9a01970a4f8c2d7c9a", "account": "alice" },
+    "msg": "anyone have thoughts on the new design?",
+    "tcount": 3
+  },
+  "hasNext": false,
+  "incompleteSince": 1700000000000
 }
 ```
 
@@ -4084,6 +4104,7 @@ Lists the parent messages of threads the user has subscribed to (or all threads,
 |---|---|---|
 | `parentMessages` | array<Message> | Thread parent messages, ordered by most-recent reply activity. See [Message schema](#message-schema). |
 | `total` | number | Raw count before access filtering. Use for pagination math only — `parentMessages.length` may be smaller. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Present only while this site's history is catching up after a persistence outage — messages at or after this timestamp may not have been persisted yet, so a thread whose parent message has not been persisted yet is omitted from `parentMessages` while still counted in `total`. Clients should surface a "still catching up" state rather than rendering the gap as complete history, and may retry later. |
 
 ```json
 {
@@ -4098,6 +4119,17 @@ Lists the parent messages of threads the user has subscribed to (or all threads,
     }
   ],
   "total": 42
+}
+```
+
+Degraded-case example (history catching up after a persistence outage — `total` counts
+a thread whose parent message has not been persisted yet, so it is absent below):
+
+```json
+{
+  "parentMessages": [],
+  "total": 1,
+  "incompleteSince": 1700000000000
 }
 ```
 

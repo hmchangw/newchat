@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,8 +21,18 @@ import (
 
 // emptyThreadResponse is the shared "no replies" shape for all short-circuit branches.
 // parent is the fetched thread-parent message and is always included in the response.
-func emptyThreadResponse(parent *models.Message) *models.GetThreadMessagesResponse {
-	return &models.GetThreadMessagesResponse{Messages: []models.Message{}, HasNext: false, ParentMessage: parent}
+//
+// A method rather than a free function so every short-circuit stamps incompleteSince
+// without having to remember to: "no replies" during a persistence outage is exactly
+// the answer a client must not read as settled, and it is the branch a new caller is
+// most likely to add without thinking about degradation.
+func (s *HistoryService) emptyThreadResponse(ctx context.Context, parent *models.Message) *models.GetThreadMessagesResponse {
+	return &models.GetThreadMessagesResponse{
+		Messages:        []models.Message{},
+		HasNext:         false,
+		ParentMessage:   parent,
+		IncompleteSince: s.incompleteSince(ctx),
+	}
 }
 
 // NATS: chat.user.{account}.request.room.{roomID}.{siteID}.msg.thread
@@ -69,7 +80,7 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 			"messageCreatedAt", msg.CreatedAt,
 			"account", account,
 		)
-		return emptyThreadResponse(msg), nil
+		return s.emptyThreadResponse(c, msg), nil
 	}
 
 	limit := req.Limit
@@ -87,7 +98,7 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 	// tcount==0 means all replies were deleted — skip Cassandra. nil means never written
 	// (new parent, or mid-write before the tcount LWT) and must fall through or replies could be hidden.
 	if msg.TCount != nil && *msg.TCount == 0 {
-		return emptyThreadResponse(msg), nil
+		return s.emptyThreadResponse(c, msg), nil
 	}
 
 	// Server-clock bounds only: thread replies never bump rooms.lastMsgAt (fan-out skips it),
@@ -144,6 +155,7 @@ func (s *HistoryService) GetThreadMessages(c *natsrouter.Context, req models.Get
 		HasNext:           page.HasNext,
 		ParentMessage:     msg,
 		MinUserLastSeenAt: minMs,
+		IncompleteSince:   s.incompleteSince(c),
 	}, nil
 }
 
@@ -335,7 +347,11 @@ func (s *HistoryService) GetThreadParentMessages(c *natsrouter.Context, req mode
 	}
 
 	if len(threadPage.Data) == 0 {
-		return &models.GetThreadParentMessagesResponse{ParentMessages: []models.Message{}, Total: threadPage.Total}, nil
+		return &models.GetThreadParentMessagesResponse{
+			ParentMessages:  []models.Message{},
+			Total:           threadPage.Total,
+			IncompleteSince: s.incompleteSince(c),
+		}, nil
 	}
 
 	seenIDs := make(map[string]struct{}, len(threadPage.Data))
@@ -378,5 +394,11 @@ func (s *HistoryService) GetThreadParentMessages(c *natsrouter.Context, req mode
 
 	redactUnavailableQuotes(parentMessages, accessSince)
 	setDecodedAttachments(c, parentMessages)
-	return &models.GetThreadParentMessagesResponse{ParentMessages: parentMessages, Total: threadPage.Total}, nil
+	// A parent whose Cassandra row has not landed is skipped above while Total still
+	// counts its Mongo thread room, so a degraded page is short with no other signal.
+	return &models.GetThreadParentMessagesResponse{
+		ParentMessages:  parentMessages,
+		Total:           threadPage.Total,
+		IncompleteSince: s.incompleteSince(c),
+	}, nil
 }

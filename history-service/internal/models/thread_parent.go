@@ -18,4 +18,8 @@ type GetThreadParentMessagesRequest struct {
 type GetThreadParentMessagesResponse struct {
 	ParentMessages []Message `json:"parentMessages"` // ordered by most recent reply activity
 	Total          int64     `json:"total"`          // raw MongoDB count before post-hydration access filtering; use for pagination math only, not slice length
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }

@@ -176,4 +176,8 @@ type GetThreadMessagesResponse struct {
 	HasNext           bool      `json:"hasNext"`
 	ParentMessage     *Message  `json:"parentMessage,omitempty"`
 	MinUserLastSeenAt *int64    `json:"minUserLastSeenAt,omitempty"`
+	// IncompleteSince is set (UTC millis) while the site's message history is
+	// still catching up after a persistence outage: rows at or after this
+	// timestamp may not have been written yet. Absent when history is healthy.
+	IncompleteSince *int64 `json:"incompleteSince,omitempty"`
 }

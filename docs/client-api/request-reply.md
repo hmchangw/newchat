@@ -1311,6 +1311,7 @@ state. Can always **remove** from a soft-deleted message; cannot **add** to one.
 | `hasNext` | boolean | |
 | `parentMessage` | Message | Optional. Thread-parent message. Present when accessible. |
 | `minUserLastSeenAt` | number | Optional. UTC ms. Thread room read floor — present only when every subscriber has read. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Set while the site's history is catching up after a persistence outage — this thread can be missing replies delivered live. |
 
 **Emits:** None — reply only.
 
@@ -1338,6 +1339,7 @@ on filter). Drives a "Threads" tab in the client.
 |---|---|---|
 | `parentMessages` | Message[] | Ordered by most-recent reply activity. |
 | `total` | number | Raw count before access filtering. |
+| `incompleteSince` | number | Optional. Epoch ms (UTC). Set while the site's history is catching up after a persistence outage — a thread whose parent has not been persisted is omitted from `parentMessages` while still counted in `total`. |
 
 **Emits:** None — reply only.
 
