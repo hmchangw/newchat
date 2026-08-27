@@ -513,3 +513,100 @@ degrading lookup, where the newcomer must pick among five near-identical prior a
 7. **`low`** — Add `// $lookup justification:` to the three sites in `mongorepo/subscriptions.go`,
    and factor the duplicated room projection into one `roomProjectionFields()` used by both
    pipeline builders.
+
+---
+
+# Chapter 6 — Integration
+
+**Score: 4.0 / 5**
+
+Integration hygiene is genuinely strong: every subject goes through `pkg/subject` builders (zero
+raw `fmt.Sprintf` on subjects anywhere in the service), all 28 client-facing subjects are
+documented with matching schemas *and* matching `reason` wire values, every publish site stamps
+`Timestamp`, IDs come from `pkg/idgen`, and remote error envelopes are relayed with
+`errcode.Parse` instead of being masked. Deductions are for cross-service correlation and
+federation durability.
+
+## Verified clean
+
+- No Cassandra / `msgbucket` usage — bucket alignment rules are N/A.
+- No JetStream consumers — consumer-pattern rules are N/A.
+- `idgen.GenerateID()` 17-char base62 for `sso_tokens._id` (`mongorepo/ssotokens.go:83`).
+- `idgen.GenerateUUIDv7()` for chatlist sections (`service/chatlist.go:63`).
+- DM room creation correctly delegated to `room-worker` rather than minting IDs locally.
+- `badge.count.batch` correctly on the `chat.server.` lane and thus rightly absent from client docs.
+- Resty via `restyutil.New(..., WithTimeout(5s))`; `pkg/oidc` uses `net/http` with a 10s timeout
+  under a documented go-oidc constraint.
+
+## Findings
+
+**`medium` — Outbound RPCs drop `X-Request-ID`, breaking the correlation chain at every hop.**
+`roomclient/client.go:45,70,90,109`, `historyclient/client.go:38,64` and
+`presenceclient/client.go:36` all call `nc.Request(ctx, subj, body, timeout)`. That path
+(`o11y@v0.11.0/nats/conn.go:304` → `RequestWithContext`) injects trace context but **no
+`X-Request-ID` header**. Downstream `room-service` / `history-service` / `user-presence-service`
+therefore mint a *fresh* ID via `natsutil.StampRequestID`, so a `user-service` request ID never
+appears in their logs. The repo's own reference does it correctly —
+`room-service/memberlist_client.go:80` uses `natsutil.NewMsg` with the comment "forwards the
+X-Request-ID from ctx for trace correlation". `user-service`'s *publishers* also do it right
+(`publisher/publisher.go:27`, `publisher/core.go:26`); only the request path regressed.
+
+**`medium` — `ALL_SITE_IDS` is unvalidated; federation silently no-ops when unset.**
+`config/config.go:66` (`envDefault:""`, no check in `Load`, unlike `SITE_ID`'s `notEmpty` at
+`:65`). An empty value makes the loops at `service/status.go:101`, `service/settings.go:138` and
+`service/chatlist.go:202` iterate nothing — status/settings/chatlist never replicate — and
+collapses the thread-inbox fanout at `service/threads.go:174` to local-only. **Both failures are
+silent successes.** CLAUDE.md: "Fail fast on missing required config."
+
+**`medium` — Cross-site federation is synchronous, serial, and dropped on error.**
+`service/status.go:101-121` and the identical shape in `settings.go:138-160` and
+`chatlist.go:202-224` loop peers inside the client's request, awaiting a gateway-crossing PubAck
+per peer (`publisher/publisher.go:27` blocks on `PublishMsg`), logging a Warn and continuing on
+failure. So (a) reply latency scales with peer count against `HANDLER_TIMEOUT` (15s,
+`config/config.go:72`), and a mid-loop deadline leaves later peers un-federated; (b) a gateway
+blip leaves remote replicas stale until the user's next mutation. This is precisely what the
+OUTBOX lane exists to prevent per CLAUDE.md ("a failed cross-gateway publish is durably retried
+rather than lost") — and none of `user_status_updated` / `user_settings_updated` /
+`user_chatlist_updated` (`pkg/model/event.go:187-191`) appear in `pkg/outbox/outbox.go:21-58`.
+CLAUDE.md *does* list `user-service` as a sanctioned direct publisher, so this is a design gap,
+not a rule violation. *(Independently flagged by Architecture and Performance.)*
+
+**`medium` — `docs/client-api.md` §3.4 preamble contradicts its own body.** Line 4615 claims
+"19 NATS request/reply endpoints"; the table at 4619-4648 lists **28**, matching
+`service/service.go:230-259`. Line 4617 claims "No other endpoint emits a client-facing event" —
+false twice over: the six `chatlist.*` endpoints emit `chatlist.update` (`service/chatlist.go:192`)
+and `subscription.setAppSubscription` emits `subscription.update` (`service/apps.go:116`). Both
+*are* correctly documented deeper in (4615→5176, 5651) and in `docs/client-api/events.md:272`, so
+this is a stale summary rather than missing docs — but it is the first thing an integrator reads.
+
+**`low` — Two event structs miss `bson` tags.** `pkg/model/usersettings.go:48-51`
+(`SettingsUpdateEvent`) and `pkg/model/chatlist.go:68-71` (`ChatlistUpdateEvent`) carry `json`
+only. CLAUDE.md mandates `Timestamp int64 \`json:"timestamp" bson:"timestamp"\`` on every NATS
+event struct plus both tags on all model structs. Harmless today (wire-only), but it breaks the
+convention scan.
+
+**`low` — RPC timeouts hardcoded.** `roomclient/client.go:18`, `historyclient/client.go:18` and
+`presenceclient/client.go:19` each pin 5s as a `const`, untunable against the configurable
+`HANDLER_TIMEOUT` during an incident.
+
+**`nitpick` — No `bootstrap.go` / `BOOTSTRAP_STREAMS`.** `user-service` JetStream-publishes but
+ships neither. Correct for production (INBOX is `inbox-worker`'s), yet CLAUDE.md states
+JetStream-interacting services carry the toggle.
+
+## Recommendations
+
+1. **`medium`** — Switch the three RPC clients to
+   `nc.RequestMsg(ctx, natsutil.NewMsg(ctx, subj, body), timeout)`, matching
+   `room-service/memberlist_client.go:80`. Seven call sites, mechanical.
+2. **`medium`** — Validate `ALL_SITE_IDS` in `config.Load`: reject empty, and reject a list not
+   containing `SITE_ID`.
+3. **`medium`** — Fix `docs/client-api.md:4615` (19 → 28) and rewrite `:4617` to name
+   `chatlist.update` and the `setAppSubscription` `subscription.update`; re-check
+   `docs/client-api/request-reply.md:1519` for the same count.
+4. **`medium`** — Either route the three `user_*_updated` types through OUTBOX (adding them to
+   `ConcurrentEventTypes` — they are HWM-guarded and order-insensitive), or at minimum federate
+   off the request path with `context.WithoutCancel` plus a bounded retry, and add a
+   `federation_publish_failed` counter so silent staleness becomes observable.
+5. **`low`** — Move the 5s RPC timeouts into `config` (`ROOM_RPC_TIMEOUT`, `HISTORY_RPC_TIMEOUT`,
+   `PRESENCE_RPC_TIMEOUT`), validated against `HANDLER_TIMEOUT`.
+6. **`low`** — Add `bson:"..."` tags to `SettingsUpdateEvent` and `ChatlistUpdateEvent`.
