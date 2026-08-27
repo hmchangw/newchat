@@ -555,8 +555,9 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 		filter := bson.M{"roomId": sub.RoomID, "u.account": sub.User.Account}
 		models = append(models, mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": sub}))
 	}
-	opts := options.BulkWrite().SetOrdered(false)
-	if _, err := s.subscriptions.BulkWrite(ctx, models, opts); err != nil {
+	// Chunked: an org add can present tens of thousands of candidates, and one
+	// BulkWrite carrying all of them is a single outsized command.
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.subscriptions, models, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk create %d subscriptions: %w", len(subs), err)
 	}
 	return nil
@@ -577,7 +578,7 @@ func (s *MongoStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joi
 			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
 			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
 	}
-	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.subscriptions, models, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk refresh joinedAt for %d subs: %w", len(models), err)
 	}
 	return nil
@@ -600,7 +601,7 @@ func (s *MongoStore) BulkCreateRoomMembers(ctx context.Context, members []*model
 		filter := bson.M{"rid": m.RoomID, "member.type": m.Member.Type, "member.id": m.Member.ID}
 		writes[i] = mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": set})
 	}
-	if _, err := s.roomMembers.BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false)); err != nil {
+	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.roomMembers, writes, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk upsert %d room members: %w", len(members), err)
 	}
 	return nil

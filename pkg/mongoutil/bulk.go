@@ -1,10 +1,12 @@
 package mongoutil
 
 import (
+	"context"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // BulkResult mirrors mongo.BulkWriteResult; bulk methods return (nil, nil) on empty input.
@@ -58,4 +60,75 @@ func bsonSetWithoutID(item any) (set bson.M, id any, err error) {
 	id = m["_id"]
 	delete(m, "_id")
 	return m, id, nil
+}
+
+// MaxBulkChunk is the default number of write models sent in one BulkWrite.
+// It bounds the command each round trip has to build and hold in memory, so a
+// caller that assembled tens of thousands of models does not turn them into a
+// single outsized request.
+const MaxBulkChunk = 1000
+
+// chunkWriteModels splits models into batches of at most size, preserving order.
+// A non-positive size falls back to MaxBulkChunk.
+func chunkWriteModels(models []mongo.WriteModel, size int) [][]mongo.WriteModel {
+	if size <= 0 {
+		size = MaxBulkChunk
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	chunks := make([][]mongo.WriteModel, 0, (len(models)+size-1)/size)
+	for start := 0; start < len(models); start += size {
+		end := min(start+size, len(models))
+		chunks = append(chunks, models[start:end])
+	}
+	return chunks
+}
+
+// merge folds one chunk's driver result into the accumulator. base is the
+// chunk's offset within the whole input, used to rebase UpsertedIDs ordinals so
+// each chunk's index 0 does not overwrite the previous chunk's.
+func (r *BulkResult) merge(res *mongo.BulkWriteResult, base int) {
+	if res == nil {
+		return
+	}
+	r.Matched += res.MatchedCount
+	r.Modified += res.ModifiedCount
+	r.Upserted += res.UpsertedCount
+	r.Inserted += res.InsertedCount
+	r.Deleted += res.DeletedCount
+	if !res.Acknowledged {
+		r.Acknowledged = false
+	}
+	for ordinal, id := range res.UpsertedIDs {
+		if r.UpsertedIDs == nil {
+			r.UpsertedIDs = make(map[int64]any, len(res.UpsertedIDs))
+		}
+		r.UpsertedIDs[int64(base)+ordinal] = id
+	}
+}
+
+// ChunkedBulkWrite issues models as a sequence of unordered BulkWrites of at
+// most size each (MaxBulkChunk when size is non-positive), returning the merged
+// result. Empty input is a no-op returning (nil, nil).
+//
+// Chunks are not atomic with respect to one another: an error reports how far
+// the write got, so callers must be idempotent — which the upsert-shaped models
+// this package builds already are.
+func ChunkedBulkWrite(ctx context.Context, coll *mongo.Collection, models []mongo.WriteModel, size int) (*BulkResult, error) {
+	if len(models) == 0 {
+		return nil, nil
+	}
+	opts := options.BulkWrite().SetOrdered(false)
+	out := &BulkResult{Acknowledged: true}
+	base := 0
+	for _, chunk := range chunkWriteModels(models, size) {
+		res, err := coll.BulkWrite(ctx, chunk, opts)
+		if err != nil {
+			return out, fmt.Errorf("bulk write models %d-%d of %d: %w", base, base+len(chunk), len(models), err)
+		}
+		out.merge(res, base)
+		base += len(chunk)
+	}
+	return out, nil
 }

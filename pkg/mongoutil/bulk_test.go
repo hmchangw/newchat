@@ -101,3 +101,88 @@ func TestBsonSetWithoutID_MarshalError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bson marshal")
 }
+
+func TestChunkWriteModels(t *testing.T) {
+	model := func(i int) mongo.WriteModel {
+		return UpsertModel(bson.M{"_id": i}, bson.M{"$set": bson.M{"n": i}})
+	}
+	models := func(n int) []mongo.WriteModel {
+		out := make([]mongo.WriteModel, 0, n)
+		for i := range n {
+			out = append(out, model(i))
+		}
+		return out
+	}
+
+	tests := []struct {
+		name       string
+		models     []mongo.WriteModel
+		size       int
+		wantChunks []int // length of each chunk
+	}{
+		{"empty input yields no chunks", nil, 10, nil},
+		{"fewer than one chunk", models(3), 10, []int{3}},
+		{"exact multiple", models(20), 10, []int{10, 10}},
+		{"trailing partial chunk", models(25), 10, []int{10, 10, 5}},
+		{"single element chunks", models(3), 1, []int{1, 1, 1}},
+		{"zero size falls back to the default", models(2), 0, []int{2}},
+		{"negative size falls back to the default", models(2), -5, []int{2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := chunkWriteModels(tt.models, tt.size)
+			require.Len(t, got, len(tt.wantChunks))
+
+			var seen int
+			for i, chunk := range got {
+				assert.Len(t, chunk, tt.wantChunks[i])
+				seen += len(chunk)
+			}
+			assert.Equal(t, len(tt.models), seen, "chunking must not drop or duplicate models")
+		})
+	}
+}
+
+// A chunk never exceeds the cap, whatever the input size.
+func TestChunkWriteModels_RespectsCap(t *testing.T) {
+	models := make([]mongo.WriteModel, 0, MaxBulkChunk*2+7)
+	for i := range MaxBulkChunk*2 + 7 {
+		models = append(models, UpsertModel(bson.M{"_id": i}, bson.M{"$set": bson.M{"n": i}}))
+	}
+	chunks := chunkWriteModels(models, MaxBulkChunk)
+
+	require.Len(t, chunks, 3)
+	for _, c := range chunks {
+		assert.LessOrEqual(t, len(c), MaxBulkChunk)
+	}
+	assert.Len(t, chunks[2], 7)
+}
+
+func TestBulkResult_Merge(t *testing.T) {
+	acc := &BulkResult{Acknowledged: true}
+	acc.merge(&mongo.BulkWriteResult{
+		MatchedCount: 1, ModifiedCount: 2, UpsertedCount: 3, InsertedCount: 4, DeletedCount: 5,
+		UpsertedIDs: map[int64]any{0: "a"}, Acknowledged: true,
+	}, 0)
+	acc.merge(&mongo.BulkWriteResult{
+		MatchedCount: 10, ModifiedCount: 20, UpsertedCount: 30, InsertedCount: 40, DeletedCount: 50,
+		UpsertedIDs: map[int64]any{0: "b"}, Acknowledged: true,
+	}, 1000)
+
+	assert.Equal(t, int64(11), acc.Matched)
+	assert.Equal(t, int64(22), acc.Modified)
+	assert.Equal(t, int64(33), acc.Upserted)
+	assert.Equal(t, int64(44), acc.Inserted)
+	assert.Equal(t, int64(55), acc.Deleted)
+	// Ordinals are rebased onto the whole input so the second chunk's index 0
+	// does not overwrite the first chunk's.
+	assert.Equal(t, map[int64]any{0: "a", 1000: "b"}, acc.UpsertedIDs)
+}
+
+// One unacknowledged chunk makes the whole result unacknowledged.
+func TestBulkResult_MergeUnacknowledged(t *testing.T) {
+	acc := &BulkResult{Acknowledged: true}
+	acc.merge(&mongo.BulkWriteResult{Acknowledged: true}, 0)
+	acc.merge(&mongo.BulkWriteResult{Acknowledged: false}, 10)
+	assert.False(t, acc.Acknowledged)
+}
