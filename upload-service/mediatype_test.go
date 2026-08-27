@@ -79,6 +79,14 @@ var (
 	wavBytes  = append(append([]byte("RIFF"), 0x24, 0x00, 0x00, 0x00), []byte("WAVE")...)
 	aviBytes  = append(append([]byte("RIFF"), 0x24, 0x00, 0x00, 0x00), []byte("AVI ")...)
 	oggBytes  = []byte("OggS\x00extra bytes here")
+
+	// bareSVGBytes has no xml declaration, so it sniffs as text/plain rather than
+	// text/xml — the other inconclusive-sniff branch the SVG check must also cover.
+	bareSVGBytes = []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)
+
+	// svgLookalikeTextBytes mentions "svg" in its content but carries no "<svg"
+	// tag, guarding the SVG detector against a false-positive substring match.
+	svgLookalikeTextBytes = []byte("svg is a vector format")
 )
 
 func TestSniffMediaType(t *testing.T) {
@@ -100,7 +108,7 @@ func TestSniffMediaType(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := bytes.NewReader(tc.data)
-			got, err := sniffMediaType(r)
+			got, _, err := sniffMediaType(r)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 
@@ -116,7 +124,7 @@ func TestSniffMediaType_RewindsPastSniffWindow(t *testing.T) {
 	data := append(append([]byte{}, pdfBytes...), bytes.Repeat([]byte("a"), 4096)...)
 	r := bytes.NewReader(data)
 
-	got, err := sniffMediaType(r)
+	got, _, err := sniffMediaType(r)
 	require.NoError(t, err)
 	assert.Equal(t, "application/pdf", got)
 
@@ -131,7 +139,7 @@ func TestSniffMediaType_RewindError(t *testing.T) {
 	seekErr := errors.New("seek boom")
 	r := &seekFailReader{Reader: bytes.NewReader(png64x48), seekErr: seekErr}
 
-	_, err := sniffMediaType(r)
+	_, _, err := sniffMediaType(r)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, seekErr)
 }
@@ -140,7 +148,7 @@ func TestSniffMediaType_ReadError(t *testing.T) {
 	readErr := errors.New("read boom")
 	r := &seekFailReader{Reader: iotest.ErrReader(readErr)}
 
-	_, err := sniffMediaType(r)
+	_, _, err := sniffMediaType(r)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, readErr)
 }
@@ -228,6 +236,26 @@ func TestResolveMediaType(t *testing.T) {
 		{
 			name:     "ogg sniff defers to the extension, so it still gets an audio/ prefix",
 			declared: "application/octet-stream", filename: "track.ogg", data: oggBytes, want: "audio/ogg",
+		},
+		{
+			name:     "an SVG with an xml declaration renamed .png is caught before the lying extension answers",
+			declared: "application/octet-stream", filename: "logo.png", data: svgBytes, want: "image/svg+xml",
+		},
+		{
+			name:     "a bare SVG with no xml declaration renamed .png is also caught",
+			declared: "application/octet-stream", filename: "logo.png", data: bareSVGBytes, want: "image/svg+xml",
+		},
+		{
+			name:     "an SVG named .svg still resolves to svg via the new check, not just the extension",
+			declared: "application/octet-stream", filename: "logo.svg", data: bareSVGBytes, want: "image/svg+xml",
+		},
+		{
+			name:     "a conclusive png sniff wins over a lying .svg extension, and the SVG check never fires",
+			declared: "application/octet-stream", filename: "x.svg", data: png64x48, want: "image/png",
+		},
+		{
+			name:     "text that merely mentions svg without a tag is not misdetected as SVG",
+			declared: "application/octet-stream", filename: "notes.txt", data: svgLookalikeTextBytes, want: "text/plain",
 		},
 	}
 	for _, tc := range tests {

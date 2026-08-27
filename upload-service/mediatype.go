@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -157,16 +158,19 @@ const sniffLen = 512
 // the caller can still upload it. Only the header is read, so a large upload is
 // never held in memory; a reader we cannot rewind is unusable for the upload
 // that follows, which makes it the one real error here (as in imageDimensions).
-func sniffMediaType(r io.ReadSeeker) (string, error) {
+// The sniff window is also returned so a caller resolving an inconclusive sniff
+// can inspect the same bytes further without reading the stream a second time.
+func sniffMediaType(r io.ReadSeeker) (string, []byte, error) {
 	head := make([]byte, sniffLen)
 	n, err := io.ReadFull(r, head)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return "", fmt.Errorf("read file header for type detection: %w", err)
+		return "", nil, fmt.Errorf("read file header for type detection: %w", err)
 	}
+	head = head[:n]
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return "", fmt.Errorf("rewind file after type detection: %w", err)
+		return "", nil, fmt.Errorf("rewind file after type detection: %w", err)
 	}
-	return normalizeMediaType(http.DetectContentType(head[:n])), nil
+	return normalizeMediaType(http.DetectContentType(head)), head, nil
 }
 
 // inconclusiveSniffTypes are the results http.DetectContentType returns for
@@ -186,6 +190,24 @@ var inconclusiveSniffTypes = map[string]struct{}{
 	"application/ogg":              {},
 }
 
+// svgSniffTypes are the two inconclusive sniff results real SVG content can
+// produce: text/xml when the file opens with an <?xml ...?> declaration, and
+// text/plain for a bare <svg> root (http.DetectContentType has no image/svg+xml
+// signature of its own). Any other inconclusive family (zip, octet-stream,
+// html, ...) is left alone — a binary payload that happens to contain the bytes
+// "<svg" must not be promoted to an image type on that basis.
+var svgSniffTypes = map[string]struct{}{
+	"text/xml":   {},
+	"text/plain": {},
+}
+
+// looksLikeSVG scans an already-read sniff window for a "<svg" tag rather than
+// re-reading the file or parsing XML — this is a cheap upfront check to catch
+// SVG content before a lying extension (e.g. "logo.png") answers instead.
+func looksLikeSVG(head []byte) bool {
+	return bytes.Contains(bytes.ToLower(head), []byte("<svg"))
+}
+
 // resolveMediaType picks the MIME type to record for an upload. A specific
 // declared type wins — the client knows its own file. Otherwise the bytes and
 // then the name decide, so a client that says nothing (or the generic
@@ -195,12 +217,17 @@ func resolveMediaType(declared, filename string, r io.ReadSeeker) (string, error
 	if d := normalizeMediaType(declared); d != "" && d != defaultUploadContentType {
 		return d, nil
 	}
-	sniffed, err := sniffMediaType(r)
+	sniffed, head, err := sniffMediaType(r)
 	if err != nil {
 		return "", fmt.Errorf("detect media type from file contents: %w", err)
 	}
 	if _, weak := inconclusiveSniffTypes[sniffed]; !weak {
 		return sniffed, nil
+	}
+	// Checked before the extension so a renamed SVG (e.g. "logo.png") can't ride
+	// past the extension table and reach a blacklist keyed on image/svg+xml.
+	if _, mayBeSVG := svgSniffTypes[sniffed]; mayBeSVG && looksLikeSVG(head) {
+		return "image/svg+xml", nil
 	}
 	if byExt := mediaTypeByExtension(filename); byExt != "" {
 		return byExt, nil
