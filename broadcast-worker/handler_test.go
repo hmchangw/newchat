@@ -4198,3 +4198,77 @@ func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
 	hadDeadline, _ := pub.calls()
 	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
 }
+
+// The message_edited event's mentions field carries ALL @-mentions in the CURRENT
+// edited content — not a diff of what the edit added, and not a cumulative history.
+// Each edit is parsed fresh, so the count tracks the current content exactly, including
+// dropping mentions the edit removed. (Jacob's cases: 1 mention -> 2 -> 3, then a remove.)
+func TestHandleUpdated_MentionsFieldIsFullCurrentSet(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		accounts []string // accounts present in content (order-independent)
+	}{
+		{"no mention", "just a status update", nil},
+		{"one mention", "hi @bob", []string{"bob"}},
+		{"two mentions", "hi @bob @carol", []string{"bob", "carol"}},
+		{"three mentions (one more)", "hi @bob @carol @dave", []string{"bob", "carol", "dave"}},
+		{"removed back to one", "hi @dave only", []string{"dave"}},
+	}
+
+	users := map[string]model.User{
+		"bob":   {ID: "u-bob", Account: "bob", EngName: "Bob"},
+		"carol": {ID: "u-carol", Account: "carol", EngName: "Carol"},
+		"dave":  {ID: "u-dave", Account: "dave", EngName: "Dave"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			roomID := "r1"
+			store.EXPECT().GetRoom(gomock.Any(), roomID).Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil)
+			if len(tc.accounts) > 0 {
+				store.EXPECT().SetSubscriptionMentions(gomock.Any(), roomID, gomock.InAnyOrder(tc.accounts), gomock.Any()).Return(nil)
+				us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.InAnyOrder(tc.accounts)).
+					DoAndReturn(func(_ context.Context, accts []string) ([]model.User, error) {
+						out := make([]model.User, 0, len(accts))
+						for _, a := range accts {
+							out = append(out, users[a])
+						}
+						return out, nil
+					})
+			}
+
+			edited := time.Date(2026, 5, 14, 12, 5, 0, 0, time.UTC)
+			evt := model.MessageEvent{
+				Event: model.EventUpdated, SiteID: "site-a", Timestamp: edited.UnixMilli(),
+				Message: model.Message{
+					ID: "msg-1", RoomID: roomID, UserID: "u-alice", UserAccount: "alice",
+					Content: tc.content, CreatedAt: edited.Add(-time.Hour),
+					EditedAt: &edited, UpdatedAt: &edited,
+				},
+			}
+			data, err := json.Marshal(&evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, false, subject.RouteGlobal)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
+
+			require.Len(t, pub.records, 1)
+			var roomEvt model.EditRoomEvent
+			require.NoError(t, json.Unmarshal(pub.records[0].data, &roomEvt))
+
+			got := make([]string, len(roomEvt.Mentions))
+			for i, m := range roomEvt.Mentions {
+				got[i] = m.Account
+			}
+			assert.ElementsMatch(t, tc.accounts, got,
+				"mentions field must equal the CURRENT content's mentions (full set, not a diff): content=%q", tc.content)
+		})
+	}
+}
