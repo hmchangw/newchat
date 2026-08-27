@@ -334,3 +334,53 @@ already drifted into falsehood.
 5. `medium` — Add `func (c *config) validate() error` collecting the eight scattered checks and call it once after `env.ParseAs`. Delete `VALKEY_KEY_GRACE_PERIOD`; leave `METRICS_ADDR` for a fleet-wide sweep.
 6. `medium` — Couple the sealer and writer structurally: have `withPreviewSealer` derive the writer, and move the `go …Run(…)`/`flushDone` wiring behind a `previews != nil` branch so the nil-receiver guards are a safety net rather than the mechanism.
 7. `low` — Fix `preview.go:97`'s stale type name, extend the package comment, cut the duplicated prune rationale to one site.
+
+---
+
+# 6. Integration — 4 / 5
+
+Cross-service contracts are unusually disciplined: every subject via `pkg/subject`, streams and
+durables from `pkg/stream`, correct OUTBOX lane placement, correct `ROOM_KEY_RETIRED_TTL`
+fail-fast, no INBOX creation, no client-facing handlers. Two shared-field disagreements with
+`roomlist-worker` are real and silent.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `handler.go:243-251` | `FindUsersByAccounts` failure is logged at Warn and not returned, so `resolved.Participants` is empty, `federateMentions` relays nothing, and the message Acks. The **local** badge is durable (`roomlist-worker`, `MaxDeliver=-1`, raw `mention.Parse`); the **remote** badge derives from the same failed lookup and is lost permanently. The justifying comment at `:509-513` — "the unread badge is set separately by roomlist-worker" — is true only for same-site mentionees; for a cross-site mentionee this publish *is* the durable signal. Same defect the architecture expert found independently. |
+| `medium` | `store_mongo.go:175-181` vs `roomlist-worker/store_mongo.go:41-50` | **Verified by hand after the two experts appeared to disagree — they were examining different layers, and the sharper claim wins.** `roomlist-worker` transliterated `msgbucket.NewerRow` into BSON faithfully, including the tiebreak: `{"lastMsgAt": at, "lastMsgId": {"$lt": msgID}}`. The preview guard bottoms out in `pkg/preview/preview.go:99` `watermarkGuard`, which is `$gte` on the millisecond timestamp **alone**, with no `msgID` term. So `NewerRow` is honoured in the in-memory coalescer (`preview_writer.go:114,120`) but **not at the Mongo guard across flush batches**. Concretely: at a same-millisecond tie split across batches, `lastMsgId` resolves deterministically to the *higher* id, while `previewForMsgId` goes to *whichever batch flushed last* — because with non-strict `$gte` both writes pass. They then disagree, the reader treats the preview as a miss, and the room takes a Cassandra walk. Self-healing, but it is exactly the tie `pkg/msgbucket` exists to make deterministic, and one of the two writers opts out. |
+| `medium` | `handler.go:472-473` | `natsutil.InboxDedupID` yields `{requestID}:{destSiteID}` — **not namespaced by event type**, unlike `message-worker`, which namespaces explicitly (`thread-sub-inbox:…`, `thread-unread:…`) because "stream-level dedup would swallow" a sibling. Any future OUTBOX producer on the same canonical request using this scheme is silently deduped away. The comment "`at` separates an edit from the send" describes only the *fallback* seed; `at` plays no role when a request ID exists. |
+| `low` | `pretouch.go:11-19` | `SubscriptionMentionEvent` and `NotificationEvent` are `sonic.Marshal`ed (`handler.go:458,858`) but not warmed. |
+| `low` | `handler.go:284-289` | Unknown-`meta.Type` rooms return before `activity.refresh`, so the cross-site position is skipped while `roomlist-worker` — which reads no room type — still advances `lastMsgAt`. |
+| `low` | `pkg/model/event.go:148` | Stale contract doc: `RoomActivityEvent` is described as "coalesced … by the origin's last-message flush". That flush moved to `roomlist-worker`; the announce now rides the fan-out. |
+
+## Contract matrix
+
+| Contract | Other party | Agrees |
+|---|---|---|
+| `MESSAGES-CANONICAL-{site}` / durable `broadcast-worker` / filter `chat.msg.canonical.{site}.>` | roomlist-worker (same wiring), message-worker, notification-worker | **Yes** |
+| `rooms.previewForMsgId` / `previewMeta`, `Ciphertext`, `Nonce`, `KeyEpoch` / `previewAsOf` | history-service (`openStoredPreview` identity check, walk + warm-back) | **Yes** |
+| `rooms.lastMsgId` read inside `GuardedAdvanceKeyFields` | roomlist-worker (owner) | **Yes** — cross-writer read is guarded, race documented |
+| Tie ordering (`msgbucket.NewerRow`) | roomlist-worker | In-memory **yes**; Mongo guard **no** |
+| `preview.Eligible` predicate | history-service walk | **Yes** |
+| `PREVIEW_KEY_EPOCH` / `ATREST_ENABLED` | history-service | **Yes** (compose-documented) |
+| OUTBOX `subscription_mention` → `ConcurrentEventTypes` | outbox-worker, inbox-worker | **Yes** |
+| `SubscriptionMentionEvent.MentionedAt` vs the `lastSeenAt $not/$gte` guard | inbox-worker `SetSubscriptionMentions`, roomlist-worker `mentionFilter` | **Yes** — identical guard |
+| Mention set (resolved participants vs raw parse) | roomlist-worker | Complementary by design, **but no contract test; diverges on lookup failure** |
+| `chat.roomactivity.{dest}` `RoomActivityEvent` | inbox-worker `HandleRoomActivity` (`$max`) | **Yes** |
+| `chat.server.broadcast.{site}.>` `thread_reply_added` | message-worker | **Yes** |
+| `ROOM_KEY_RETIRED_TTL` ≥ 2 × `ROOM_KEY_CACHE_TTL` | room-service, room-worker, bot-room-service (all `20m`) | **Yes** — `keycache.go:131` arithmetic correct; defaults sit exactly at the boundary |
+| `MESSAGE_BUCKET_HOURS` | — | N/A — this service does no bucket math |
+| INBOX / OUTBOX stream creation | inbox-worker / outbox-worker own them | **Yes** — `bootstrap.go` touches only the canonical stream |
+| Client API | none registered — no `chat.user.` subject, no Gin routes | **N/A** — `docs/client-api.md` correctly unaffected |
+
+## Recommendations
+
+1. `high` — On `FindUsersByAccounts` error in `handleCreated`, return the wrapped error (NAK) when `parsed.Accounts` is non-empty, or fall back to federating raw accounts via a site lookup. Silently Acking a lost cross-site badge is not equivalent to dropping display-name enrichment.
+2. `medium` — Add a `msgID` tiebreak to the preview watermark: `asOf > stored || (asOf == stored && forMsgID > $previewForMsgId)`, mirroring `roomLastMsgFilter`.
+3. `medium` — Namespace the dedup seed: prefix `natsutil.InboxDedupID` with `subscription-mention:`, and fix the misleading `at` comment at `handler.go:471`.
+4. `medium` — Add a cross-service contract test (in `pkg/mention` or a shared testdata corpus) asserting that `broadcast-worker`'s federated account set ∪ `roomlist-worker`'s local set equals `mention.Parse(content).Accounts` over a fixture table. This is the missing pin behind finding 1 and the mention-divergence row above.
+5. `low` — Add `model.SubscriptionMentionEvent` and `model.NotificationEvent` to `pretouchTypes`.
+6. `low` — Move `h.activity.refresh` above the room-type switch so ordering announces match `roomlist-worker`'s unconditional pointer write.
+7. `low` — Refresh the `RoomActivityEvent` doc comment in `pkg/model/event.go`.
