@@ -86,9 +86,8 @@ type SubscriptionUpdateEvent struct {
 	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
 	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
 	HRInfo *CounterpartHRInfo `json:"hrInfo,omitempty"`
-	// AppInfo carries the full app record for a botDM "added", the same shape
-	// subscription.list nests as its botDM `app` object, so a client has the app's
-	// details from the real-time event without a follow-up apps.list.
+	// AppInfo is the full app record on a botDM "added" — same shape subscription.list
+	// nests as its `app` object, so the client needs no follow-up apps.list.
 	AppInfo   *AppSubscription `json:"appInfo,omitempty"`
 	Timestamp int64            `json:"timestamp" bson:"timestamp"`
 }
