@@ -843,7 +843,7 @@ Before reporting the work complete, confirm each of these with actual command ou
 
 - [ ] `make test SERVICE=upload-service` passes, including every pre-existing test, unedited.
 - [ ] `make lint` clean.
-- [ ] `make sast` clean at medium and above.
+- [ ] `make sast` — UNMET in this sandbox, deferred to CI. gosec passes clean; govulncheck and semgrep are blocked by a network-policy 403 reaching `vuln.go.dev` and `semgrep.dev`.
 - [ ] `make test` (whole repo) passes.
 - [ ] Coverage for `resolveMediaType`, `sniffMediaType`, `mediaTypeByExtension`, `HandleUploadFile` is ≥ 80%.
 - [ ] `git status` clean — no stray `coverage.out`, no `.env`.
@@ -851,5 +851,11 @@ Before reporting the work complete, confirm each of these with actual command ou
 
 ## Known Behavior Changes to Call Out in the Handoff
 
-1. An upload declaring `application/octet-stream` whose resolved type is on the blacklist is now **rejected** where it previously succeeded. With the default configuration this is exactly one type: SVG. Say so explicitly when reporting the work.
+1. Blast radius depends entirely on the deployed whitelist/blacklist:
+   - **Default config** (empty whitelist, blacklist `image/svg+xml`): exactly one new rejection class — an SVG uploaded under a generic declared type. Say so explicitly when reporting the work.
+   - **Restrictive whitelist**: this change is a net LOOSENING, not a tightening. Those generically-declared uploads were already rejected — `application/octet-stream` was the value being filtered, and a restrictive whitelist doesn't contain it — so they now start succeeding.
+   - New rejections under a whitelist require the whitelist to ADMIT `application/octet-stream`, explicitly or via `application/*`. In that deployment the radius is wide: every generically-declared upload whose true type falls outside the list now fails, and several non-browser clients (curl, some mobile SDKs) declare `application/octet-stream` for everything. No feature flag exists; rollback means redeploying the previous image.
+   - Audit every site's `FILE_UPLOAD_MEDIA_TYPE_WHITELIST` / `BLACKLIST` before deploying.
+   - This does NOT close the SVG bypass in general — a client that declares a specific type (e.g. `Content-Type: image/png` on an SVG) still walks past the deny list, before and after this change. It closes only the accidental/browser case. The download path already sets `Content-Disposition: attachment` and `Content-Security-Policy: default-src 'none'`, so this is defense-in-depth, not a hole.
 2. Files that previously came back as plain `type: "file"` attachments may now carry `imageUrl`/`imageDimensions`, `audioUrl` or `videoUrl`, because `buildAttachment` branches on the resolved type. Clients already handle those fields — they are what a correctly-declared upload has always produced.
+3. A file that now resolves to an `image/*` type the browser can't decode (`image/heic`, `image/tiff`, or a text file misnamed `.png`) will render as a broken `<img>` in the frontend, with no dimensions and no `imagePreview` fallback, where a clean download tile used to appear.
