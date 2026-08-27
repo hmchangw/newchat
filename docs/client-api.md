@@ -8222,6 +8222,11 @@ pair with both callers seeing `200`. Re-uploading the pair repairs either case.
 Publish one pair at a time. There is no versioning or rollback — a deliberate
 non-goal of this endpoint.
 
+**Redirects are refused.** A `3xx` from `client-update-service` is treated as an
+error, not followed. `net/http` strips `Authorization` only when the redirect
+changes host, so a same-host `https`→`http` hop would otherwise carry the
+service-account token onward in the clear.
+
 **Timeouts.** `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`) is ONE budget for
 the whole request — reading the browser's body and calling
 `client-update-service` — pinned on the request context. The two phases are

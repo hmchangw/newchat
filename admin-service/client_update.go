@@ -40,11 +40,17 @@ type restyVersionUploader struct {
 // newRestyVersionUploader wraps a client built by restyutil.New with the
 // service-account bearer token and the upload timeout already applied.
 //
-// Two properties of that client are load-bearing and must not change:
-//   - SetContentLength stays OFF. resty buffers an entire io.Reader body into
-//     memory when it is on (v2.17.2 middleware.go:519-527), defeating streaming.
+// Three properties of that client are load-bearing and must not change:
+//   - SetContentLength stays OFF. resty measures an io.Reader body when it is
+//     on (v2.17.2 middleware.go:519-527), sending a fixed Content-Length.
 //   - No retries. The body is a pipe; once drained, a retry would send nothing.
+//   - Redirects are refused, set here rather than left to the caller. The
+//     upload endpoint has no reason to redirect, and net/http strips
+//     Authorization only when the HOST changes (shouldCopyHeaderOnRedirect
+//     compares hosts, not schemes), so a same-host https->http hop would carry
+//     the service-account token onward in the clear. A 3xx becomes an error.
 func newRestyVersionUploader(client *resty.Client) *restyVersionUploader {
+	client.SetRedirectPolicy(resty.NoRedirectPolicy())
 	return &restyVersionUploader{client: client}
 }
 

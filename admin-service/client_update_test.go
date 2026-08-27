@@ -1035,3 +1035,34 @@ func TestRelayParts_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
 	// Every part is still relayed — admin-service validates nothing.
 	assert.Contains(t, out.String(), "second.yaml")
 }
+
+// The upload endpoint has no legitimate reason to redirect, and following one
+// risks the service-account token: net/http strips Authorization only when the
+// HOST changes (shouldCopyHeaderOnRedirect compares hosts, not schemes), so a
+// same-host https->http downgrade — or a hop to a subdomain — would carry the
+// credential onward, in the clear. A 3xx here is an error, not a hop.
+func TestRestyVersionUploader_DoesNotFollowRedirects(t *testing.T) {
+	var reachedTarget bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reachedTarget = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/v1/version", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	u := newRestyVersionUploader(restyutil.New(srv.URL,
+		restyutil.WithBearerToken("0123456789abcdef"),
+		restyutil.WithTimeout(5*time.Second)))
+
+	err := u.Upload(context.Background(), "application/octet-stream", strings.NewReader("x"))
+
+	require.Error(t, err, "a redirect must not be followed silently")
+	assert.False(t, reachedTarget, "the credential must not reach the redirect target")
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+}
