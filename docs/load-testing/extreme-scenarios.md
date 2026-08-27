@@ -324,28 +324,36 @@ inter-site RTT.
 
 ---
 
-### X9 — Gatekeeper immediate-Nak burning the delivery budget · **NATS** · 🟡
+### X9 — Delivery-budget exhaustion under a long outage · **NATS** · 🟢 largely mitigated
 
-**What the code does.** A transient gatekeeper error `Nak()`s immediately against
-`MaxDeliver=5` (`failure/nats-jetstream.md` §3). A bare `Nak` bypasses the
-consumer `BackOff` entirely (CLAUDE.md §JetStream Redelivery Backoff), so five
-redeliveries can be spent in **milliseconds**.
+**Corrected after reading the code.** `failure/nats-jetstream.md` §3 says
+message-gatekeeper does an "immediate `Nak()` against `MaxDeliver=5`", so "a short
+fault can burn the whole delivery budget in seconds". **The code does not do
+that.** `message-gatekeeper/handler.go:212` calls
+`jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, …)` — `1s / 5s / 30s / 2m / 10m`
+(`pkg/jsretry/jsretry.go:51`) — and `MaxDeliver` defaults to **6**, not 5
+(`pkg/stream/consumer.go:18`). The client-side budget is therefore about
+**12.6 minutes**; the server-side `BackOff` for a message that goes un-acked is
+`{30s, 1m, 2m, 4m, 8m}`. A two-second dependency blip cannot exhaust either.
 
-**Amplification.** A 2-second dependency blip can terminally drop every message
-in flight, and the drop is invisible without an advisory consumer — pending
-returns to zero and the stream reads healthy.
+`pkg/jsretry`'s package comment exists precisely because a bare `Nak()` would do
+what the failure doc describes, and CLAUDE.md forbids it repo-wide.
 
-**Verdict: the highest-severity *silent* loss path in the send chain.** The first
-failure round exercised dependency outages; whether it *measured this specific
-drop* depends on whether max-delivery advisories were collected. If they were not,
-this is a re-run, not a new test.
+**What is left.** An outage *longer than the budget* still ends in terminal
+drops, and those are still invisible from consumer pending alone.
 
-**Test.** Inject a 1 s / 2 s / 5 s latency spike on gatekeeper's Mongo at
-sustained peak send with an **advisory consumer attached**; count terminal drops
-and compare against the loadgen ledger's `missing_after_deadline`. The two numbers
-agreeing is the validation that the ledger sees what JetStream sees.
+**Verdict: verify the budget, do not hunt the drop.** The residual question is
+arithmetic — does the configured budget exceed the longest outage you intend to
+survive — not instrumentation.
 
----
+**Test.** Inject a dependency outage longer than 12.6 minutes at sustained send,
+and confirm the loadgen ledger reports `missing_after_deadline` for the messages
+whose budget expired. That ledger result *is* the loss claim; a JetStream
+advisory consumer would add attribution (which consumer dropped it), not
+detection. Advisory capture needs a stream provisioned on the NATS cluster and is
+the platform team's territory — see
+[`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) §6 for the two
+in-territory alternatives.
 
 ### X10 — Sparse/aged room history walk · **Cassandra** · 🟡
 
@@ -380,7 +388,9 @@ already reports. Compare short-page rate and p99 against the dense preset.
    and should have blocked the soak that already ran; the soak's compaction and
    SSTables-per-read evidence is only interpretable once the deployed window is
    known.
-4. **X8 stays blocked** on the two-site topology.
+4. **X8 stays blocked** on the two-site topology; **X9 is largely mitigated** —
+   the delivery budget is minutes, not milliseconds, and the failure doc's
+   numbers are stale.
 5. **Three documentation defects surfaced** and are listed in the priority plan's
    corrections section: the `threadcount` Cap(99) claim, the soak plan's 72 h
    `MESSAGE_BUCKET_HOURS` references, and the stale TWCS migration file.

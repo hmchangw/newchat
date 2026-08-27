@@ -27,6 +27,7 @@ docs/load-testing/
 | How the load generator records evidence | [`loadgen/observation.md`](loadgen/observation.md) |
 | In what order to run all of it, and what blocks each item | [`execution-priority-plan.md`](execution-priority-plan.md) |
 | What the worst-case load shapes are, read out of the code | [`extreme-scenarios.md`](extreme-scenarios.md) |
+| What to build so J1's SLOs become measurable | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) |
 
 ## The Three Programs
 

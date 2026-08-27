@@ -15,8 +15,8 @@
 | Core publish | No server PubAck; a publish during a disconnect rides the client reconnect buffer | A full buffer fails synchronously. Publish success means the write entered the client path, not that a subscriber processed it |
 | Request/reply | One timeout, no application retry | Failover shows up as a timeout or as no-responders. A side-effecting RPC whose reply was lost may still have run |
 | Readiness | `RECONNECTING` counts as ready; only `DISCONNECTED`/`CLOSED` do not | A pod stays ready for as long as it keeps reconnecting, while none of its NATS-backed functionality works |
-| Consumer defaults | AckWait 30s, `MaxDeliver=5`, `MaxAckPending=1000` | Retries are finite. An outage longer than the delivery budget ends in a terminal drop, not in a pending backlog |
-| Retry backoff | `jsretry.DefaultBackoff` 1s/5s/30s/2m; low-latency 200ms/1s/5s/30s | Against `MaxDeliver=5` the whole budget is spent in minutes. Max-delivery advisories are the only enumeration of what was dropped |
+| Consumer defaults | AckWait 30s, `MaxDeliver=6` (`pkg/stream/consumer.go:18`), `MaxAckPending=1000` | Retries are finite. An outage longer than the delivery budget ends in a terminal drop, not in a pending backlog |
+| Retry backoff | `jsretry.DefaultBackoff` 1s/5s/30s/2m/10m; low-latency 200ms/1s/5s/30s | Against `MaxDeliver=6` the client-side budget is ~12.6 minutes. Max-delivery advisories are the only enumeration of what was dropped |
 | Consumer iterator | Ordinary reconnects and leader changes are survived. On a terminal error (e.g. the durable was deleted) most workers return from the goroutine | The process stays alive and ready while nobody consumes the durable |
 | Panic guard | A per-message handler panic Acks and drops the message; a search batch panic leaves messages unacknowledged | A drop is an event-integrity outcome, not a uptime outcome. Service health will not show it |
 | Startup | Services exit when the initial connection, JetStream context, stream lookup or consumer creation fails | A restart during an outage crash-loops. Read it as its own scenario, never as steady-state degradation |
@@ -48,7 +48,7 @@ learns the work was dropped.
 
 | Path | Behavior | What it looks like |
 |---|---|---|
-| message-gatekeeper transient failure | Immediate `Nak()` against `MaxDeliver=5` | A short fault can burn the whole delivery budget in seconds. The message is terminally dropped while the stream looks healthy |
+| message-gatekeeper transient failure | `jsretry.Nak` with `DefaultBackoff` against `MaxDeliver=6` (`handler.go:212`) — **not** a bare `Nak`, contrary to earlier revisions of this table | The budget spans ~12.6 minutes, so a brief blip cannot exhaust it. An outage *longer* than that still ends in a terminal drop while the stream looks healthy |
 | broadcast-worker DM and partial thread fanout | Individual Core publish failures are logged, processing continues, the canonical event is Acked | Some recipients never receive the message and nothing retries. The send still reconciles `good` |
 | room-worker post-write side effects | Some subscription/client/INBOX publish failures are logged and swallowed | Mongo is updated and the corresponding event never exists. Divergence with no error anywhere |
 | Consumer-loop terminal error | The goroutine returns and is not recreated | Pending climbs on a durable nobody is reading, behind a green process and a passing readiness probe |

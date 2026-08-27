@@ -74,10 +74,10 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 | loadgen `messages`/`thread`/`history`/`thread-read`/`room-read`/`read-receipt`/`login`/`search` ramps | **Exists** | Track 2 needs no new tooling — only a breach run |
 | loadgen `soak` (Cassandra Run A + room/member/user/search/presence lanes, durable ledger) | **Exists** | Run A is implementation-ready; gated on environment only |
 | loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Track 2; `max-room-size --rooms-per-size=1` also serves 3.6 |
-| P1 — `rpc_server_duration_seconds` metrics middleware in `pkg/natsrouter` | **Absent** (no metrics middleware in `pkg/natsrouter/middleware.go`) | SLO-4/5 cannot be hard-gated from production counters; gate on loadgen L1 only. Also why `daily`'s `service_errors` verdict arm is permanently zero |
-| P2 — `messages_canonical_published_total`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` | **Absent** (no occurrence in the repo) | SLO-1a/1b/2 have **no enforceable server-side boundary**. Every J1 run this wave gates on loadgen L1 E2E correlation, which is a *different, downstream* boundary — record it as observational, never as "SLO-2 passed" |
+| P1 — RPC server duration histogram | **Delivered by #337** as `rpc_server_call_duration_seconds{rpc_method, error_type}` (OTel RPC semconv), with `channel_history` / `thread_open` as separate methods | SLO-4/5 become computable on merge — as a **server-side proxy**: the timer stops after `Respond`, so a server→client partition moves the SLI toward green. SLO-5's bound moved 300 ms → 250 ms and its target 99% → 95% to sit on a real bucket boundary |
+| P2 — J1 counters | **Partly present.** `message_worker_persistence_total{message_kind,result}` already covers SLO-1a's numerator; the gatekeeper denominator, the channel enqueue counter and the age histogram are absent. #337 does not touch P2 | SLO-1a/1b/2 still have **no enforceable boundary**. Until they do, every J1 run gates on loadgen L1 E2E correlation — a *different, downstream* boundary. Record it as observational, never as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) |
 | `search_service_requests_total{kind,status}` | **Exists** | SLO-7 scorable (partial-failure only) |
-| `search_service_request_duration_seconds` `status` label (P4) | **Absent** — histogram carries `kind` only | SLO-8 client-side only (loadgen `--workload=search` scores it); not enforceable from production recording rules |
+| `search_service_request_duration_seconds` `status` label (P4) | **Still absent after #337** — the PR adds `status` to the *counter*, but `durationOptFor(kind)` keeps the histogram on `kind` alone | SLO-8 client-side only (loadgen `--workload=search` scores it); not enforceable from production recording rules |
 | JetStream Prometheus exporter with `is_consumer_leader` filtering (P3) | Local overlay only (`nats-exporter` sidecar) | Backlog is the primary enforcement signal for every async SLO — a staging run without it has no backstop |
 | loadgen `search_index` observer | **Refused at startup** by design (soak bodies analyze to one token) | Search index-convergence loss is unobservable; do not claim search E2E coverage |
 | Isolated staging `SITE_ID` / Mongo DB / Cassandra keyspace | **Unconfirmed** (environments §7) | Blocks every staging SLO-asserting run — counters are shared and monotonic, so isolation is the only denominator control |
@@ -109,7 +109,7 @@ decision.
 
 | # | Item | Why it is first | Output |
 |---|---|---|---|
-| **1.1** | **Ship G4 (P2 J1 counters) and G9 (P1 natsrouter middleware)** | Five of nine SLOs (1a, 1b, 2, 4, 5) have **no production counter today**. Every "validation" run before this lands measures loadgen's own downstream boundary and calls it an SLO. This is a ~2-service code change, not a test | SLO-1a/1b/2/4/5 become computable |
+| **1.1** | **Ship the remaining P2 counters** (G9/P1 is done — #337) | Three of nine SLOs (1a, 1b, 2) — the flagship J1 journey — have **no production counter today**. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
 | **1.3** | **Set targets from 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate. Right now they are round numbers | Approved SLO targets + `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can hard-gate instead of eyeballing |
@@ -191,12 +191,12 @@ cannot start without them.
 | **G1** | Isolated staging tenant: dedicated `SITE_ID`, Mongo DB, Cassandra keyspace, NATS account | All of Track 2, every staging item in Track 3 | Infra + us |
 | **G2** | Confirm workload-model inputs: I8 meaning, I10 scope, I12; and S1–S4 (fan-out, concurrent members, notification eligibility, cross-site share) | B1, B3 — and every "is this rate realistic" argument | Product + infra |
 | **G3** | Managed pre-run coordination: peak load declared, blast radius recorded, abort thresholds agreed, L3 dashboards confirmed | Every staging run. **Now higher-stakes than before** — Track 2 ramps to a breach, unlike the two completed programs | Us → infra |
-| **G4** ⬆ | **P2 J1 counters** (`messages_canonical_published_total{broadcast_path}`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`) | Hard-gating SLO-1a/1b/2 in B1. Until then every J1 verdict is loadgen-L1 observational | App |
+| **G4** ⬆ | **P2 J1 counters — narrowed** (`messages_canonical_published_total{broadcast_path}`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`) | Hard-gating SLO-1a/1b/2 in B1. Until then every J1 verdict is loadgen-L1 observational | App |
 | **G5** | Cassandra storage control: pick and verify **one** of — run-scoped disposable keyspace with snapshot clearing, or bounded TTL + storage budget (both over an isolated keyspace) | B4 (repeat runs), D3 | Owner decision + infra |
 | **G6** | JetStream exporter on staging with `{is_consumer_leader="true"}` recording rules; custom oldest-pending-age monitor (P3) | The enforcement backstop for every async SLO in Tracks 1–3 | Infra |
 | **G7** | ES: run-scoped index, named owner, expiry, verified teardown **and** an ES telemetry contract (shards, thread-pool rejection, circuit breaker, merge, watermarks) | D1 | Us |
 | **G8** | Valkey: run-scoped key namespace / ownership marker, expiry, verified post-teardown cleanup | D2 | Us |
-| **G9** ⬆ | **P1 natsrouter metrics middleware** (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | Server-side SLO-4/5; also revives `daily`'s dormant service-error verdict arm | App |
+| ~~**G9**~~ | ~~P1 natsrouter metrics middleware~~ — **delivered by #337** as `rpc_server_call_duration_seconds{rpc_method, error_type}` | Server-side SLO-4/5 (proxy); also gives `daily`'s dormant service-error arm a real counter to point at | ✅ App |
 | **G10** | Storage locality + node affinity answers for Mongo/Cassandra/ES/Valkey | Makes IO-bound ceilings non-provisional (environments §7) | Infra |
 
 ---
@@ -287,6 +287,15 @@ Added in rev 2, from the code review behind
    `compaction_window_size` to 72 while the init DDL sets 360.** A cluster built
    from the migration and never re-`ALTER`ed runs a 5× mismatch against the bucket
    window. Both files carry a comment saying the two MUST match.
+7. **`failure/nats-jetstream.md` overstated the gatekeeper's retry behaviour.**
+   It described an "immediate `Nak()` against `MaxDeliver=5`" burning the budget
+   "in seconds". The handler uses `jsretry.Nak` with `DefaultBackoff`
+   (1s/5s/30s/2m/10m) and `MaxDeliver` defaults to 6, so the budget is ~12.6
+   minutes. **Fixed in this branch**; X9's severity drops accordingly.
+8. **`sli-slo.md` §8 lists SLO-1a's numerator as outstanding P2 work.**
+   `message_worker_persistence_total{message_kind,result}` already exists and
+   records at every persist site. Tracked in
+   [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) §1B.
 
 ---
 
@@ -294,6 +303,7 @@ Added in rev 2, from the code review behind
 
 - [`README.md`](README.md) — program index
 - [`extreme-scenarios.md`](extreme-scenarios.md) — code-derived worst-case shapes (Track 3)
+- [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what to build for Track 1.1, and what deliberately not to build
 - [`common/sli-slo.md`](common/sli-slo.md) — acceptance criteria
 - [`common/workload-model.md`](common/workload-model.md) — shared inputs (I1–I13)
 - [`common/environments-and-data-ownership.md`](common/environments-and-data-ownership.md) — what may be pushed, blast radius, cleanup
