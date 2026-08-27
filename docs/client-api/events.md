@@ -386,7 +386,7 @@ messages through a separate backend path.
 | `roomType` | string | `"channel"`, `"dm"`, etc. |
 | `siteId` | string | |
 | `userCount` | number | |
-| `lastMsgAt` | string | RFC 3339. |
+| `lastMsgAt` | string | RFC 3339. **This message's own time** — not the room object's `lastMsgAt`, which is the room's user-activity position. A system message carries its own timestamp here, so folding this into a room summary unconditionally would let a rename or a member change reorder the sidebar. Gate on `systemMsg` first. |
 | `lastMsgId` | string | The new message's ID. |
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
