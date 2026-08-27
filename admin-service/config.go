@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -106,6 +107,20 @@ func checkHandlerTimeout(name string, d time.Duration) error {
 		return fmt.Errorf("invalid %s %s: must be below the %s HTTP write timeout", name, d, httpWriteTimeout)
 	}
 	return nil
+}
+
+// clientUpdateSendsTokenInClear reports whether the upload credential will
+// cross the network unencrypted. http:// stays legal — service-to-service
+// traffic here is plaintext inside the cluster, and rejecting it would break
+// both the local compose stack and production — so main.go warns instead, and
+// the operator decides whether that link needs TLS or a mesh.
+func clientUpdateSendsTokenInClear(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		// Already rejected by validateClientUpdate; nothing useful to warn about.
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "http")
 }
 
 // validateClientUpdate checks the relay's configuration at startup. Error text

@@ -66,6 +66,13 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
+	// The upload relay authenticates with a bearer token; over http:// it crosses
+	// the network in the clear. Warned, not rejected — see clientUpdateSendsTokenInClear.
+	if clientUpdateSendsTokenInClear(cfg.ClientUpdateURL) {
+		slog.Warn("CLIENT_UPDATE_URL is http:// — the client-update service-account token is sent unencrypted; use https or an encrypted service mesh outside a trusted network",
+			"site", cfg.SiteID)
+	}
+
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)

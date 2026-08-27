@@ -149,3 +149,28 @@ func TestValidateClientUpdate_ErrorNeverLeaksTheToken(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "supersecrettoken0123")
 }
+
+// The service-account token rides every upload. http:// is still allowed —
+// in-cluster service-to-service traffic is plaintext in this deployment, and
+// rejecting it would break both the local compose stack and production — but
+// the choice must be visible to whoever deploys it rather than silent.
+func TestClientUpdateSendsTokenInClear(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "http", url: "http://client-update-service:8080", want: true},
+		{name: "https", url: "https://client-update-service", want: false},
+		{name: "uppercase scheme", url: "HTTP://client-update-service:8080", want: true},
+		// Unparseable or non-http URLs never reach this: validateClientUpdate
+		// rejects them at startup first. Report false rather than warning about
+		// a URL that already failed.
+		{name: "unparseable", url: "://nope", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, clientUpdateSendsTokenInClear(tt.url))
+		})
+	}
+}
