@@ -161,6 +161,15 @@ func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 		}
 		slog.ErrorContext(ctx, msg, attrs...)
 	}
+	// out.err is either a single transient error or an errors.Join of ONLY
+	// permanent ones — never a mixture. That matters here and is not local:
+	// SettleQuiet asks errcode.IsPermanent, which is an errors.As any-match over
+	// the join, so one permanent error in a mixed join would Ack-drop the
+	// transient failures riding with it. What keeps a mixed join unreachable is
+	// write's early return on the first transient stage, three frames away.
+	// A stage that RECORDS a transient error instead of returning it would break
+	// this silently — an Ack is indistinguishable from success on the wire.
+	// TestFlusher_PermanentThenTransientNaksAndSkipsThirdStage is the guard.
 	for _, h := range b.held {
 		jsretry.SettleQuiet(h.ctx, h.msg, jsretry.DefaultBackoff, out.err)
 	}
