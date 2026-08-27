@@ -251,7 +251,7 @@ func TestRoomActivityRefresher_PruneScanIsBounded(t *testing.T) {
 		r.lastRefreshed[fmt.Sprintf("room-%d", i)] = stale
 	}
 
-	complete := r.pruneLocked(now)
+	complete, _ := r.pruneLocked(now)
 
 	assert.False(t, complete, "a map larger than the budget cannot be swept in one pass")
 	assert.Equal(t, pruneScanBudget*3-pruneScanBudget, len(r.lastRefreshed),
@@ -279,4 +279,30 @@ func TestRoomActivityRefresher_PartialPruneResumesOnTheNextMessage(t *testing.T)
 	for k := range r.lastRefreshed {
 		assert.NotContains(t, k, "stale-", "every stale watermark is eventually swept")
 	}
+}
+
+// The partial-resume rule above has a degenerate case: when more rooms are
+// active than the scan budget and none of them are stale, the sweep can never
+// complete. It scans the budget, deletes nothing, and reports incomplete —
+// forever. Leaving lastPruned unmoved there re-runs that scan on EVERY message,
+// under the mutex the whole fan-out shares, which is precisely the amortization
+// the throttle exists to provide. More than 256 rooms with a message inside one
+// 5s interval is ordinary traffic, not a stress case.
+//
+// A pass that reclaimed nothing has nothing to resume, so it counts as done for
+// this interval. A pass that reclaimed something still resumes on the next
+// message, which is what the test above pins.
+func TestRoomActivityRefresher_PruneStopsWhenThereIsNothingToReclaim(t *testing.T) {
+	r := newRoomActivityRefresher(func(context.Context, roomActivityRefresh) error { return nil }, time.Minute)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return now }
+	// Every watermark is inside the interval, so the sweep has nothing to delete.
+	for i := range pruneScanBudget * 2 {
+		r.lastRefreshed[fmt.Sprintf("live-%d", i)] = now
+	}
+
+	r.throttled("first-message", now)
+
+	assert.Equal(t, now, r.lastPruned,
+		"a sweep that reclaimed nothing must not leave every later message to sweep again")
 }

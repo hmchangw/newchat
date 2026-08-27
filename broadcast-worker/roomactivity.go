@@ -100,7 +100,10 @@ func (r *roomActivityRefresher) throttled(roomID string, now time.Time) bool {
 	}
 	r.lastRefreshed[roomID] = now
 	if now.Sub(r.lastPruned) >= r.interval {
-		if r.pruneLocked(now) {
+		// Advance on a complete pass, and equally on one that reclaimed nothing:
+		// such a pass has no remainder to resume, so leaving the watermark back
+		// would re-scan the budget on every later message. See pruneLocked.
+		if complete, reclaimed := r.pruneLocked(now); complete || reclaimed == 0 {
 			r.lastPruned = now
 		}
 	}
@@ -118,24 +121,35 @@ const pruneScanBudget = 256
 // memory. Callers must hold r.mu.
 //
 // It examines at most pruneScanBudget entries per pass and reports whether it
-// reached the end of the map. A partial pass deliberately does NOT advance
-// lastPruned, so the next message resumes the sweep rather than waiting another
-// interval — Go randomizes map iteration order, so successive partial passes
-// cover the map without needing a cursor. The bound trades a slower sweep for a
-// lock nobody waits on; the map's size is what the sweep is protecting anyway,
-// and it stays bounded by rooms active within one interval.
-func (r *roomActivityRefresher) pruneLocked(now time.Time) (complete bool) {
+// reached the end of the map, plus how many watermarks it reclaimed. A partial
+// pass that reclaimed something deliberately does NOT advance lastPruned, so the
+// next message resumes the sweep rather than waiting another interval — Go
+// randomizes map iteration order, so successive partial passes cover the map
+// without needing a cursor. The bound trades a slower sweep for a lock nobody
+// waits on; the map's size is what the sweep is protecting anyway, and it stays
+// bounded by rooms active within one interval.
+//
+// The reclaimed count is what stops that resume rule degenerating. With more
+// rooms active than the budget and none of them stale, a pass can never complete
+// — it scans the budget, deletes nothing, reports incomplete, and the caller
+// would re-run it on every single message, under the mutex the whole fan-out
+// shares. That is the opposite of amortizing, and it bites at ordinary traffic:
+// 256 rooms with a message inside one interval is not a stress case. A pass with
+// nothing to reclaim has no remainder to come back for, so the caller treats it
+// as done for the interval.
+func (r *roomActivityRefresher) pruneLocked(now time.Time) (complete bool, reclaimed int) {
 	scanned := 0
 	for roomID, last := range r.lastRefreshed {
 		if scanned == pruneScanBudget {
-			return false
+			return false, reclaimed
 		}
 		scanned++
 		if now.Sub(last) >= r.interval {
 			delete(r.lastRefreshed, roomID)
+			reclaimed++
 		}
 	}
-	return true
+	return true, reclaimed
 }
 
 // remotePeers returns the sites to refresh: everything in allSiteIDs except this
