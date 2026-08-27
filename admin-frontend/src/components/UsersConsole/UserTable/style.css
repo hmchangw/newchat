@@ -1,3 +1,9 @@
+/* Horizontal scroll for narrow viewports — the table keeps its natural width
+   instead of squeezing cells out of alignment. */
+.users-table-wrap {
+  overflow-x: auto;
+}
+
 .users-table {
   width: 100%;
   border-collapse: collapse;
@@ -17,9 +23,14 @@
   font-weight: var(--font-medium);
 }
 
+/* Must stay a real table-cell: display:flex on a <td> detaches it from the
+   row's vertical rhythm (the whole column drifts upward). */
 .users-table-actions {
-  display: flex;
-  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.users-table-actions .btn + .btn {
+  margin-left: var(--space-xs);
 }
 
 .users-status-badge {

@@ -5535,3 +5535,23 @@ func TestSubscriptionRoom_NeverExposesLastUserMsgAt(t *testing.T) {
 			"field %s re-exposes the internal user-activity field; coalesce it into lastMsgAt instead", rt.Field(i).Name)
 	}
 }
+
+func TestUserAccountUpdated_RoundTrip(t *testing.T) {
+	src := model.UserAccountUpdated{
+		ID: "u1", Account: "alice", SiteID: "site-a",
+		EngName: "Alice", ChineseName: "Alice CN",
+		Roles: []model.UserRole{model.UserRoleBot}, Active: true, Timestamp: 1755640000000,
+	}
+	var dst model.UserAccountUpdated
+	roundTrip(t, &src, &dst)
+}
+
+func TestUserAccountUpdated_RoundTrip_EmptyRoles(t *testing.T) {
+	src := model.UserAccountUpdated{ID: "u2", Account: "bob", SiteID: "site-a",
+		Roles: []model.UserRole{}, Active: false, Timestamp: 1}
+	var dst model.UserAccountUpdated
+	roundTrip(t, &src, &dst)
+	if dst.Roles == nil {
+		t.Fatal("empty roles must round-trip as [], not null")
+	}
+}

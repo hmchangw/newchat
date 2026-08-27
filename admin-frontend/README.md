@@ -16,12 +16,14 @@ chat client.
 | Variable | Purpose | Default |
 |---|---|---|
 | `VITE_ADMIN_SERVICE_URL` | admin-service base URL (REST API) | `http://localhost:8082` |
+| `VITE_PERMISSIONS_ENABLED` | shows the Permissions tab when the literal string `true` | unset (hidden) |
 
 **Container (nginx runtime, `/config.js` rendered by `deploy/30-render-config.sh`)**:
 
 | Variable | Purpose | Required |
 |---|---|---|
 | `ADMIN_SERVICE_URL` | admin-service base URL | yes — container fails to start if unset |
+| `PERMISSIONS_ENABLED` | shows the Permissions tab when the literal string `true` | no — defaults to `false` (tab hidden) |
 
 `src/lib/runtimeConfig.js` reads `window.__APP_CONFIG__` first (prod), falling
 back to the `VITE_*` env vars (dev), falling back to the literal defaults

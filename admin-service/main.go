@@ -91,13 +91,13 @@ func run() error {
 	}
 	// PublishMsg (not Publish) so X-Request-ID from ctx rides onto the outgoing
 	// message — same shape as user-service/publisher.
-	publishInbox := func(ctx context.Context, subj string, data []byte) error {
-		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+	publish := func(ctx context.Context, subj string, data []byte, encoding string) error {
+		if _, err := js.PublishMsg(ctx, natsutil.NewMsgEncoded(ctx, subj, data, encoding)); err != nil {
 			return fmt.Errorf("publish inbox event: %w", err)
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publishInbox)
+	h := newHandler(st, sessStore, cfg, nc, publish)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
