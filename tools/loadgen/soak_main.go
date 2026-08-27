@@ -156,7 +156,7 @@ func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
 		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
-		ReplyBytes: sample.ReplyBytes, Rows: sample.Messages,
+		HasPage: true, ReplyBytes: sample.ReplyBytes, Rows: sample.Messages,
 	}))
 }
 

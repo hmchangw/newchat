@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,14 +119,24 @@ func TestSoakRequestError_UnwrapsToItsCause(t *testing.T) {
 	assert.Equal(t, cause, errors.Unwrap(err))
 }
 
-func TestSoakRequestError_ErrorKeepsTheCauseMessage(t *testing.T) {
-	err := &soakRequestError{
+// The carrier decorates a failure, it does not describe a new one. Naming the
+// action here duplicates both the lane's own wrap and the action attr, giving
+// "issue subscription_list request: subscription_list: ..." on every line.
+func TestSoakRequestError_ErrorIsTheCauseVerbatim(t *testing.T) {
+	cause := errors.New("nats request: context deadline exceeded")
+	err := &soakRequestError{Action: soakRPCSubscriptionList, err: cause}
+
+	assert.Equal(t, cause.Error(), err.Error())
+}
+
+func TestSoakRequestError_ComposedLaneMessageNamesTheActionOnce(t *testing.T) {
+	carrier := &soakRequestError{
 		Action: soakRPCSubscriptionList,
 		err:    errors.New("nats request: context deadline exceeded"),
 	}
+	lane := fmt.Errorf("issue %s request: %w", soakRPCSubscriptionList, carrier)
 
-	assert.Contains(t, err.Error(), "subscription_list")
-	assert.Contains(t, err.Error(), "nats request: context deadline exceeded")
+	assert.Equal(t, 1, strings.Count(lane.Error(), string(soakRPCSubscriptionList)))
 }
 
 // A carrier with no cause would be a programming error, but it must not panic

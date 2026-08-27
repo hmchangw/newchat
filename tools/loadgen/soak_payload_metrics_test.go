@@ -74,7 +74,7 @@ func TestSoakCollector_ObservesPageSizeAndRowCount(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		ReplyBytes: 98_304, Rows: 40,
+		HasPage: true, ReplyBytes: 98_304, Rows: 40,
 	}))
 
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.SoakReplyBytes))
@@ -92,7 +92,7 @@ func TestSoakCollector_SkipsWarmupPages(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		ReplyBytes: 98_304, Rows: 40,
+		HasPage: true, ReplyBytes: 98_304, Rows: 40,
 	}))
 
 	assert.Zero(t, testutil.CollectAndCount(metrics.SoakReplyBytes))
@@ -124,8 +124,24 @@ func TestSoakCollector_CountsAnEmptyPage(t *testing.T) {
 	require.NoError(t, collector.Record(&soakOperationSample{
 		Action: soakRPCSubscriptionList, Outcome: soakOutcomeSucceeded,
 		At: start.Add(time.Second), Latency: time.Millisecond,
-		ReplyBytes: 21, Rows: 0,
+		HasPage: true, ReplyBytes: 21, Rows: 0,
 	}))
 
 	assert.Equal(t, 1, testutil.CollectAndCount(metrics.SoakRows))
+}
+
+// Only paged reads populate Rows. A mutation has no concept of one, so
+// observing its zero would stand a solid bar at rows=0 next to the reads and
+// read as "this action returns nothing" rather than "this action has no page".
+func TestSoakCollector_SkipsActionsThatHaveNoPage(t *testing.T) {
+	start := time.Unix(0, 0).UTC()
+	collector, metrics := newMetricsTestCollector(t, start)
+
+	require.NoError(t, collector.Record(&soakOperationSample{
+		Action: soakRPCReact, Outcome: soakOutcomeSucceeded,
+		At: start.Add(time.Second), Latency: time.Millisecond,
+	}))
+
+	assert.Zero(t, testutil.CollectAndCount(metrics.SoakRows))
+	assert.Zero(t, testutil.CollectAndCount(metrics.SoakReplyBytes))
 }

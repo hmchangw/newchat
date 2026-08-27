@@ -305,7 +305,7 @@ func NewMetrics() *Metrics {
 	m.SoakReplyBytes = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "loadgen_soak_reply_bytes",
-			Help: "Cassandra soak reply size in bytes by bounded action, successful replies only.",
+			Help: "Cassandra soak reply size in bytes for successful paged reads, by bounded action.",
 			Buckets: []float64{
 				512, 1024, 2048, 4096, 8192,
 				16384, 32768, 65536, 98304, 131072,

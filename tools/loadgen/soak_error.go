@@ -1,9 +1,6 @@
 package main
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // soakRequestError carries the identity of a failed RPC alongside its cause.
 // A metric spike names the action and nothing else, so without these fields on
@@ -20,11 +17,14 @@ type soakRequestError struct {
 	err      error
 }
 
+// Error passes the cause through unchanged. The action reaches the reader
+// twice over already — once from the lane's own wrap, once from the action
+// attr — and a third copy here only lengthens the line.
 func (e *soakRequestError) Error() string {
 	if e.err == nil {
 		return string(e.Action) + " request failed"
 	}
-	return fmt.Sprintf("%s: %v", e.Action, e.err)
+	return e.err.Error()
 }
 
 // Unwrap keeps errors.Is working through the carrier: retry classification and

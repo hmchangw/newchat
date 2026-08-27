@@ -66,10 +66,13 @@ type soakOperationSample struct {
 	ErrorClass    soakErrorClass
 	ErrorReason   soakErrorReason
 	TargetMissing bool
-	// ReplyBytes and Rows describe the payload a successful read came back
-	// with. Both stay zero for failures, which is why observation is gated on
-	// the outcome rather than on the values being non-zero: an empty page is a
-	// real answer and has to be counted.
+	// HasPage marks the samples that describe a paged read. Only those carry
+	// ReplyBytes and Rows, and only those may be observed: a mutation has no
+	// page, so recording its zero would stand a bar at rows=0 beside the reads
+	// and read as "returns nothing" rather than "has no page". An empty page
+	// is a real answer, which is why the gate is this flag and not a non-zero
+	// row count.
+	HasPage    bool
 	ReplyBytes int
 	Rows       int
 }
@@ -266,7 +269,7 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 					sample.Latency.Seconds(),
 				)
 			}
-			if sample.Outcome == soakOutcomeSucceeded {
+			if sample.Outcome == soakOutcomeSucceeded && sample.HasPage {
 				if sample.ReplyBytes > 0 {
 					c.metrics.SoakReplyBytes.WithLabelValues(action).Observe(
 						float64(sample.ReplyBytes),
