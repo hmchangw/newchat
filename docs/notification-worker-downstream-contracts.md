@@ -399,7 +399,7 @@ Required before a production rollout:
 4. **New env vars** (see `notification-worker/deploy/docker-compose.yml` for
    dev values):
    - `VALKEY_ADDRS` (**required**, comma-separated cluster seeds), `VALKEY_PASSWORD`
-   - `ROOMSUBCACHE_TTL` (default `5m`) — TTL for the Valkey room-member cache; no in-process L1 (per-pod memory bounded against very large rooms)
+   - `ROOMSUBCACHE_TTL` (default `90m`) — TTL for the Valkey room-member cache; no in-process L1 (per-pod memory bounded against very large rooms). Declared once on `roomsubcache.TTLConfig`; every reader of the shared key must be configured alike
    - `LARGE_ROOM_THRESHOLD` (default `500` — same knob as message-gatekeeper)
    - `PUSH_RECIPIENT_BATCH_SIZE` (default `100` — recipients per push event; tune toward provider multicast caps)
    - `ROOM_META_CACHE_SIZE` (default `10000`), `ROOM_META_CACHE_TTL` (default `2m`) — fronts `rooms` collection lookups for title resolution

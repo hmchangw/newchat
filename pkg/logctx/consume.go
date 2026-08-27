@@ -15,12 +15,17 @@ import (
 //
 // It is the consumer-side counterpart to natsrouter's RequestID middleware,
 // which does the same three things for request/reply. Consumers had no
-// equivalent and hand-rolled it, so the three had drifted apart: thirteen sites
-// stamped the request id, but only six admitted the rung and only six captured
-// the payload. In the other seven — outbox-worker, notification-worker,
+// equivalent and hand-rolled it, so the three had drifted apart: of the thirteen
+// sites that stamped the request id, only six admitted the rung and only six
+// captured the payload. In the other seven — outbox-worker, notification-worker,
 // inbox-worker, hr-sync-worker and the oplog services — a request that entered
 // the system with X-Debug set had its verbose-logging intent silently dropped at
 // the stream boundary, which is precisely where a cross-service trace needs it.
+//
+// That count is of the consumers this helper reaches, not a census of the fleet:
+// bot-message-worker, push-notification-service and search-sync-worker stamp
+// nothing at all and were left alone here. Adopting them is a separate change —
+// do not read this doc as evidence that every consumer is covered.
 //
 // Takes the three primitives rather than a message so it serves both shapes: a
 // jetstream.Msg passes msg.Headers()/msg.Subject()/msg.Data(), a core *nats.Msg
