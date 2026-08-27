@@ -113,3 +113,45 @@ them.
 4. `low` — `store_mongo.go:98,109,120`: wrap each return, e.g. `return fmt.Errorf("bulk update room last message: %w", err)`. `errors.As(mongo.BulkWriteException)` in `classifyFlushErr` is unaffected by the extra layer.
 5. `low` — `main.go:291`: give `validateFlushBudget` a fourth argument (the 25 s shutdown budget) and reject `FLUSH_TIMEOUT + flushloop.DefaultFinalTimeout >= budget − consumeDrainAllowance`, so raising `FLUSH_TIMEOUT` fails at startup rather than at SIGKILL.
 6. `low` — `store.go:8`: correct the justification comment to the real reason (a three-method interface where a stub is cheaper than a generated mock), since the current one is checkably false.
+
+---
+
+# 3. Architecture — 4 / 5
+
+Unusually rigorous for its size: flush-budget validation against `EffectiveAckWait`, replay-safe
+monotonic writes, majority write concern, self-SIGTERM on a dead loop. It loses a point for
+being the only MESSAGES-CANONICAL consumer with no consumer instrumentation while running
+`MaxDeliver=-1` — precisely the combination in which a stalled consumer is invisible.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `main.go:134-181` | No `natsmetrics.Consumer` wiring (`Track`/`LoopStarted`/`LoopFailed`), unlike every sibling canonical consumer (`broadcast-worker/main.go:420`, `message-worker/main.go:228`). With `MaxDeliver=-1`, a batch that Naks forever exhausts `MaxAckPending=1000` and the worker silently stops writing room-list state — while `/readyz`, which detects a *dead* loop but not a *stalled* one, keeps answering 200. |
+| `medium` | `main.go:371-377` | **Verified against source.** `cc.MaxDeliver = -1` is applied *after* `stream.DurableConsumerDefaults(s)` has already used the configured `CONSUMER_MAX_DELIVER` to clamp the derived `BackOff` length (`pkg/stream/consumer.go:82-87`). The clamp is explicitly meant to be skipped for an unlimited cap ("An unlimited MaxDeliver skips the clamp below"), but it has already fired. Net effect: `CONSUMER_MAX_DELIVER` has **no effect on the delivery cap** yet silently shortens server-side redelivery spacing. Nothing at the override says so. |
+| `medium` | `main.go:378-381` | `DeliverNewPolicy` overrides the repo default, and the stated reason ("replaying would re-apply historical writes for no benefit") is weaker than it reads: `store.go:13-15` asserts every write is replay-safe and each filter is monotonic-guarded, so `DeliverAll` would be a bursty no-op. Meanwhile `DeliverNew` makes a deleted-and-recreated durable (ops action, snapshot restore, site rebuild) a permanent silent gap in badges and room pointers — the exact loss `MaxDeliver=-1` and `writeconcern.Majority` exist to prevent. |
+| `medium` | `store_mongo.go:42-50` | The same-millisecond tie-break rule now exists in **three** hand-maintained encodings — `msgbucket.NewerRow`, `batch.go:93`, and this BSON `$or` — bound only by a comment. A change to `NewerRow`'s tie-break desyncs the BSON copy, and the affected rooms permanently stop serving previews because `previewForMsgId == lastMsgId` never holds again. |
+| `medium` | `handler.go:60-66` | Mention derivation is duplicated across services on the same stream: this service parses content for *local* badges, `broadcast-worker/handler.go:426` derives *remote* badges from resolved `participants`, and no shared contract test pins the two sets equal. A divergence badges a mentionee on one site and not the other. |
+| `low` | `store.go:8-11` | The no-mockgen justification is factually wrong (see Code quality). Hand stubs are a defensible outcome resting on a bad reason. |
+| `low` | `flush_test.go:44-46` | `stubStore` writes `order`/`rooms`/`lastSeen`/`mentions` outside the mutex it takes for `sawDeadline` — a latent `-race` failure the moment a test drives `Run`'s ticker alongside a direct `Flush`. |
+| `low` | `flush.go:129-133` | The "lastSeenAt precedes mentions so a self-mention doesn't badge the sender" invariant holds only when the lastSeen stage *succeeds*. On a permanent failure, `write` deliberately continues to mentions with the sender's `lastSeenAt` un-advanced — badging the sender against their own message. |
+
+## Explicitly not a finding
+
+**The single-goroutine `cons.Messages()` shape** (`main.go:323-326`) is a third pattern beside
+CLAUDE.md's two, and the justification holds. All I/O is batched into the flusher, so the
+per-message path is a sonic unmarshal plus a regex parse; workers would only contend on `f.mu`.
+It is the sequential shape in everything but the `cons.Consume()` call, and the
+`messageIterator` seam buys real testability (`consumeloop_test.go`). Bootstrap, deploy layout,
+`pkg/subject` usage (zero raw `fmt.Sprintf` on subjects), shutdown ordering, and all three
+JetStream backoff server rules from CLAUDE.md are clean.
+
+## Recommendations
+
+1. `high` — Wire `natsmetrics.Consumer`/`Track` in `main.go` as `message-worker/main.go:228-290` does, and add an ack-pending-saturation signal to `consumeState.Check()` so a *stalled* consumer fails readiness, not only a dead one.
+2. `medium` — Set `s.MaxDeliver = -1` **before** calling `DurableConsumerDefaults(s)` at `main.go:370`, so the backoff schedule is derived against the real unlimited cap. Extend `main_test.go` to assert the schedule length is independent of `CONSUMER_MAX_DELIVER`.
+3. `medium` — At `main.go:381`, either revert to `DeliverAll` (writes are already replay-safe by contract) or add an explicit `OptStartTime`/one-shot cutover knob so durable recreation cannot silently skip a backlog. Document the recreation runbook in the comment either way.
+4. `medium` — Move `roomLastMsgFilter` (`store_mongo.go:42`) into `pkg/msgbucket` as `NewerRowFilter(roomID, msgID, at) bson.M`, next to `NewerRow`, so the Go and BSON encodings of the tie-break cannot drift.
+5. `medium` — Add a shared table-driven test in `pkg/mention` that both `roomlist-worker/handler_test.go` and `broadcast-worker` bind to, pinning local-badge accounts against federated-mention accounts for identical content.
+6. `low` — Put every field write in `flush_test.go`'s `stubStore` under `s.mu`.
+7. `low` — Consider `jsretry.LowLatencyBackoff` at `flush.go:165`: unread badges and room ordering are user-visible, and `broadcast-worker` already settles that way on the same stream.
