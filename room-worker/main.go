@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -323,10 +324,17 @@ func main() {
 			go func(msgCtx context.Context, msg jetstream.Msg) {
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.RoomEventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msgCtx = tracked.Context(msgCtx)
+				// Keep the ack deadline alive for the duration of the handler.
+				// Room mutations on a large room (org removal, key rotation and
+				// fan-out over every survivor) can outrun AckWait, and a
+				// redelivery mid-flight would run the whole job a second time
+				// concurrently with the first.
+				stopHeartbeat := jsretry.Heartbeat(msgCtx, tracked, jsretry.HeartbeatInterval(consumerCfg.AckWait))
 				// runJobWithRecovery contains handler panics (it Acks — drops — the
 				// poison message) so this async goroutine, which runs outside
 				// natsrouter's recovery middleware, can't crash the worker.
 				defer func() {
+					stopHeartbeat()
 					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
