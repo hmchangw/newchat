@@ -784,6 +784,34 @@ func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
 	assert.False(t, up.wasCalled(), "a non-admin request must never reach the upstream")
 }
 
+// stalledUploadBody returns a request body carrying one complete multipart part
+// and then nothing: the client never finishes sending, so the request stays open
+// until a deadline fires. The writer goroutine has a real termination path —
+// CLAUDE.md forbids launching one without — so cleanup signals it and waits
+// rather than leaving it parked for the rest of the run.
+func stalledUploadBody(t *testing.T) (io.Reader, string) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		_ = pw.Close()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		fw, err := mw.CreateFormFile("configFile", "app.yaml")
+		if err != nil {
+			return
+		}
+		_, _ = fw.Write([]byte("version: 1"))
+		<-stop // the writer is never Closed: the body has no terminating boundary
+	}()
+	return pr, mw.FormDataContentType()
+}
+
 // rejectingUploader answers immediately without reading a byte of the body —
 // the shape of a misconfigured service token drawing an instant 401 upstream.
 type rejectingUploader struct{ err error }
@@ -800,23 +828,10 @@ func TestUploadClientVersion_EarlyUpstreamFailureDoesNotStrandTheRelay(t *testin
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	// A body the client never finishes: the relay blocks reading it.
-	pr, pw := io.Pipe()
-	t.Cleanup(func() { _ = pw.Close() })
-	mw := multipart.NewWriter(pw)
-	go func() {
-		fw, err := mw.CreateFormFile("configFile", "app.yaml")
-		if err != nil {
-			return
-		}
-		_, _ = fw.Write([]byte("version: 1"))
-		// Deliberately never Close() the writer — the request stays open.
-		select {}
-	}()
-
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", pr)
+	body, ct := stalledUploadBody(t)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", body)
 	require.NoError(t, err)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Content-Type", ct)
 
 	type result struct {
 		status int
@@ -1079,27 +1094,16 @@ func TestUploadClientVersion_StalledBodyReportsATimeoutNotAMalformedUpload(t *te
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(&fakeUploader{}))
 	srv := uploadTestServer(t, h)
 
-	// A body the client never finishes: one complete part, then silence.
-	pr, pw := io.Pipe()
-	t.Cleanup(func() { _ = pw.Close() })
-	mw := multipart.NewWriter(pw)
-	go func() {
-		fw, err := mw.CreateFormFile("configFile", "app.yaml")
-		if err != nil {
-			return
-		}
-		_, _ = fw.Write([]byte("version: 1"))
-		select {} // never Close(): the request body stays open past the deadline
-	}()
-
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", pr)
+	reqBody, ct := stalledUploadBody(t)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", reqBody)
 	require.NoError(t, err)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Content-Type", ct)
 
+	// Required, not skipped: the write deadline outlives the read deadline by
+	// uploadResponseMargin precisely so this answer arrives. A closed connection
+	// here is the regression this test exists to catch.
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Skipf("the server closed the connection before answering: %v", err)
-	}
+	require.NoError(t, err, "the handler must answer the timeout, not drop the connection")
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
