@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -258,4 +260,80 @@ func TestConsumeLoop_ShutdownExitDoesNotRequestRestart(t *testing.T) {
 	}
 	require.Error(t, state.Check().Probe(context.Background()),
 		"readiness must still report not-ready while shutting down, so the pod drains")
+}
+
+// capturingHandler records the level of every record it sees, so a test can
+// assert how a stop was reported rather than merely that it was reported.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *capturingHandler) levelFor(substr string) (slog.Level, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if strings.Contains(r.Message, substr) {
+			return r.Level, true
+		}
+	}
+	return 0, false
+}
+
+// captureLogs installs a recording default logger for one test and restores the
+// previous one afterwards, so the level assertion cannot leak between tests.
+func captureLogs(t *testing.T) *capturingHandler {
+	t.Helper()
+	h := &capturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// A graceful stop is the normal end of every pod's life: iter.Stop() during
+// shutdown makes Next return, and reporting that at ERROR trips error-rate
+// alerting on every single deploy. The intent is already recorded — stopped()
+// reads the same flag two lines earlier to decide not to re-signal the process.
+func TestConsumeLoop_GracefulStopIsNotLoggedAsAnError(t *testing.T) {
+	logs := captureLogs(t)
+	state := consumeState{}
+	state.beginShutdown()
+	iter := &fakeIterator{} // exhausted immediately: Next returns errFakeIterDone
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	consumeLoop(iter, newFlusher(&stubStore{}), &wg, &state)
+	wg.Wait()
+
+	lvl, found := logs.levelFor("consume loop stopped")
+	require.True(t, found, "the stop must still be reported")
+	assert.Equal(t, slog.LevelInfo, lvl, "an intended shutdown must not report at ERROR")
+}
+
+// The unexpected stop keeps ERROR: nothing else observes the loop dying, and
+// this is the line that says room-list state has silently stopped being written.
+func TestConsumeLoop_UnexpectedStopStaysAnError(t *testing.T) {
+	logs := captureLogs(t)
+	state := consumeState{onUnexpectedStop: func() {}}
+	iter := &fakeIterator{} // exhausted immediately: Next returns errFakeIterDone
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	consumeLoop(iter, newFlusher(&stubStore{}), &wg, &state)
+	wg.Wait()
+
+	lvl, found := logs.levelFor("consume loop stopped")
+	require.True(t, found)
+	assert.Equal(t, slog.LevelError, lvl, "an unexpected stop must stay at ERROR")
 }

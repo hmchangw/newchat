@@ -83,3 +83,25 @@ func TestValidateFlushBudget(t *testing.T) {
 		})
 	}
 }
+
+// buildConsumerConfig overrides MaxDeliver to -1 (unlimited), so the derived
+// BackOff must not be clamped to the configured CONSUMER_MAX_DELIVER — that cap
+// no longer applies, and pkg/stream skips the clamp precisely for an unlimited
+// cap. Before the fix the override ran AFTER DurableConsumerDefaults had already
+// clamped, so lowering CONSUMER_MAX_DELIVER silently shortened server-side
+// redelivery spacing while having no effect at all on the delivery cap it names.
+func TestBuildConsumerConfig_BackOffIsNotClampedByTheOverriddenMaxDeliver(t *testing.T) {
+	cc := buildConsumerConfig(stream.ConsumerSettings{
+		AckWait:       30 * time.Second,
+		MaxDeliver:    2, // deliberately below BackOffSteps
+		BackOffSteps:  5,
+		BackOffFactor: 2,
+		BackOffMax:    8 * time.Minute,
+		MaxWaiting:    512,
+		MaxAckPending: 1000,
+	}, "roomlist-worker", "chat.msg.canonical.site-a.>")
+
+	assert.Equal(t, -1, cc.MaxDeliver)
+	assert.Len(t, cc.BackOff, 5, "an unlimited MaxDeliver must not clamp the backoff schedule")
+	assert.Equal(t, 30*time.Second, cc.BackOff[0], "BackOff[0] overwrites AckWait server-side, so it must equal AckWait")
+}

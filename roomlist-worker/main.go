@@ -29,10 +29,10 @@ import (
 )
 
 type config struct {
-	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
 	SiteID        string `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoURI      string `env:"MONGO_URI,required"`
 	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
@@ -337,6 +337,15 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 			// way, and during shutdown failing readiness is what drains it from
 			// the load balancer.
 			state.stopped(err)
+			// Reported either way, but not at the same level. A graceful stop is
+			// the normal end of every pod's life — iter.Stop() during shutdown is
+			// what makes Next return — and logging that at ERROR trips error-rate
+			// alerting on every deploy. stopped() reads the same flag one line
+			// above to decide not to re-signal a process already on its way down.
+			if state.stopping.Load() {
+				slog.Info("roomlist-worker consume loop stopped (shutdown)", "error", err)
+				return
+			}
 			slog.Error("roomlist-worker consume loop stopped; no further room-list state will be written",
 				"error", err)
 			return
@@ -368,13 +377,20 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 // buildConsumerConfig returns the durable consumer config, centralized so it's
 // unit-testable without NATS.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
-	cc.Durable = durable
-	cc.FilterSubject = filterSubject
 	// Unlimited redelivery: a MongoDB outage must not exhaust MaxDeliver and
 	// silently drop badges. Poison messages are handled by classifyFlushErr
 	// Ack-dropping server-rejected writes, not by a delivery cap.
-	cc.MaxDeliver = -1
+	//
+	// Set on the settings BEFORE deriving the defaults, not on the result after:
+	// DurableConsumerDefaults clamps the BackOff schedule against MaxDeliver, and
+	// skips that clamp precisely when the cap is unlimited. Overriding afterwards
+	// left the clamp fired against a cap that no longer applied, so
+	// CONSUMER_MAX_DELIVER silently shortened redelivery spacing while having no
+	// effect whatsoever on the delivery cap it names.
+	s.MaxDeliver = -1
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = durable
+	cc.FilterSubject = filterSubject
 	// New (not All): these writes are derived from live traffic. Replaying the
 	// whole canonical stream on first deploy would re-apply historical writes as
 	// one large burst for no benefit. DeliverPolicy is honored only at creation.
