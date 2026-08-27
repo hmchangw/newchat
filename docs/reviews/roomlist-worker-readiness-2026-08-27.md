@@ -404,3 +404,101 @@ bottleneck, only under attack, is the regex at ~290 msg/s.
 5. `low` — Build the replacement batch outside `f.mu` (23–793 µs measured inside the critical section).
 6. `low` — Tie `maxReuseCap` to `MaxAckPending` rather than the literal 4096; for `rooms`/`lastSeen`/`held` the constant is unreachable dead code, and only `mentions` ever meets it.
 7. `info` — `sync.Mutex` is the right primitive and contention is effectively zero: one producer at ~500 uncontended acquisitions/s (~20 ns each) against one flusher at 4/s. Do not reach for sharding or atomics here.
+
+---
+
+# 8. Prioritized action list
+
+Ordered by severity, then impact ÷ effort. Duplicates raised by more than one expert are merged
+and recorded once.
+
+### 1. `high` — Bound the `mentions` map, or it can livelock the consumer
+**Dimension:** Performance · **Where:** `batch.go:43,110-115`
+A 20 KB message yields 2,644 unique accounts (measured), and `MaxAckPending` bounds *messages*,
+not map entries — so ~2.6 M entries can accumulate in one slow-flush window and produce a bulk
+write that cannot complete inside `FLUSH_TIMEOUT`. Under `MaxDeliver=-1` that is an unbounded
+Nak/rebuild loop with no exit. This is the only finding that can take the service down by
+itself, and the code already documents the missing bound without quantifying it. **Highest
+impact ÷ effort in the list** — an early-flush budget is a small, local change.
+
+### 2. `high` — Add instrumentation; the service is designed to degrade invisibly
+**Dimension:** Architecture + Performance · **Where:** `main.go:134-181`
+No `natsmetrics.Consumer` wiring, unlike every sibling canonical consumer, and no batch metrics
+at all. Combined with `MaxDeliver=-1`, a wedged consumer stops writing room-list state while
+`/readyz` — which detects a dead loop but not a stalled one — keeps returning 200. Minimum
+viable set: flush duration + outcome by stage, batch-size histogram, and settle-age plus
+`num_ack_pending`. The batch-size histogram is also the only pre-OOM warning for action #1.
+
+### 3. `high` — Federate the cross-site sender's `lastSeenAt`
+**Dimension:** Integration · **Where:** `store_mongo.go:101-110`
+The advance is written only in the room's site, but a cross-site member's authoritative
+subscription lives at their home site, and nothing federates it. **User-visible today:** a
+cross-site sender's own message leaves their room `HasUnread=true` at home, and their own `@all`
+self-badges `HasGroupMention` — because `lastMentionAllAt` arrives by RPC while `lastSeenAt`
+is read from the un-advanced home copy. Reuse `inbox-worker`'s `UpdateSubscriptionRead` `$lt`
+guard.
+
+### 4. `high` — Record the Ack/Nak invariant where it is consumed
+**Dimension:** Maintainability · **Where:** `flush.go:139` → `pkg/jsretry/jsretry.go:113`
+`IsPermanent` is an `errors.As` any-match over an `errors.Join`, so a mixed join would silently
+Ack-drop a transient failure. Correct today only because `write` early-returns on the first
+transient stage — a control-flow guarantee three frames away that nothing at the call site
+mentions. The failure mode is silent (an Ack looks like success) and no test would catch its
+regression. Two comment lines plus one mixed-join test.
+
+### 5. `high` — Extract `run()` from `main()` to clear the coverage floor
+**Dimension:** Test coverage · **Where:** `main.go:66`
+63.4% measured against a mandatory 80% floor. `main()` is 83 of 257 statements and untested;
+excluding it the package is at 93.7%, with only 11 uncovered non-`main` statements. Extracting
+`run(ctx, cfg) error` and testing the wiring — that `validateFlushBudget` receives
+`EffectiveAckWait()`, that a validation error exits non-zero — is a single change that moves the
+package over the floor. Pairs naturally with splitting `main.go` (action #9).
+
+### 6. `medium` — Derive `BackOff` against the real `MaxDeliver`
+**Dimension:** Architecture · **Where:** `main.go:371-377` *(verified against source)*
+`cc.MaxDeliver = -1` is applied after `DurableConsumerDefaults` already clamped the schedule to
+the configured `CONSUMER_MAX_DELIVER`. That env var therefore has no effect on the delivery cap
+while silently shortening redelivery spacing. Move the assignment into the `ConsumerSettings`
+passed in; add a unit test pinning schedule length as independent of the env var.
+
+### 7. `medium` — Stop writing `updatedAt` from the message `createdAt`
+**Dimension:** Integration · **Where:** `store_mongo.go:71-75`
+Every other writer treats `rooms.updatedAt` as a modification clock set to `time.Now()`, and
+`inbox-worker/main.go:148` uses it as a strict monotonic replication guard. A message flushing
+just after a rename regresses it below the rename's timestamp. Latent only because the migration
+`room_sync` path is its sole reader today — fix before that changes.
+
+### 8. `medium` — Warn on the missing subscriptions index
+**Dimension:** Integration + Performance · **Where:** `store_mongo.go:23-28`
+This service runs the `(roomId, u.account)` filter at the highest volume in the fleet, twice per
+flush, but relies on an index only `room-service` creates and does not call
+`mongoutil.WarnMissingIndexes` as its four peers do. Against a database where room-service has
+not run, every bulk operation COLLSCANs silently. One line at startup.
+
+### 9. `medium` — Stop the ERROR log on every clean shutdown, and split `main.go`
+**Dimension:** Code quality + Maintainability · **Where:** `main.go:340`, `main.go` (whole)
+`consumeLoop` logs `slog.Error` unconditionally, so normal pod termination fires error-rate
+alerts; `state.stopping` is right there and already used two lines earlier. Separately,
+`main.go` holds four separable units and `config_test.go`/`consumeloop_test.go` already exist
+with no matching production file — the codebase pointing at its own seams.
+
+### 10. `medium` — Make required config required
+**Dimension:** Code quality · **Where:** `main.go:32,35`
+`NATS_URL` and `MONGO_URI` default to localhost rather than being `,required`, against
+CLAUDE.md §3 and against the convention in five sibling services. A misconfigured pod silently
+dials localhost instead of failing fast.
+
+---
+
+## Deferred deliberately
+
+- **`MetricsAddr` dead knob** (`main.go:57`) — real, but identical in five sibling services. Fleet-wide sweep or nothing.
+- **`store.go` no-mockgen deviation** — the *outcome* is defensible; only the stated reason is false. Correct the comment, not the design.
+- **The two `hugeParam` suppressions** — measured to guard a non-issue; by-value is faster. Harmless noise.
+
+## Verification caveat
+
+`govulncheck` and the semgrep registry rulesets could not run in this environment
+(`vuln.go.dev` and `semgrep.dev` are both denied by the agent proxy). `gosec` and the repo's
+own `.semgrep/` rules ran clean over this service. **CI remains authoritative for the two
+scanners that did not execute.**
