@@ -39,3 +39,49 @@ Counts are deduplicated across lenses — four separate reviewers flagged the sa
 ## SAST status
 
 `gosec` **PASS** (0 findings, repo-wide). Repo-local semgrep rules **PASS** (9 rules, 0 findings). `govulncheck` and the semgrep registry rulesets (`p/golang`, `p/security-audit`) **did not run** — the sandbox proxy returns 403 for `vuln.go.dev` and `semgrep.dev`. `make sast` exits 2 on those two network failures, not on any code finding. **Neither can be reported as passing**; re-run on a runner with egress before treating the gate as green.
+
+---
+
+# Service: room-service
+
+## Projection correctness — all five verified superset, no `critical`
+
+The core check. Each projected field set was compared against every field its callers actually read, traced transitively.
+
+1. **`getRoomSubscriptions`** (`room-service/store_mongo.go:715`, applied `:733`) — the loop reads exactly `sub.User.ID` (`:749`), `sub.User.Account` (`:751`), `sub.Roles` (`:754`), `sub.ID` (`:757`), `sub.JoinedAt` (`:759`). `RoomID` comes from the argument (`:758`), not the document. `SubscriptionUser.ID` is `bson:"_id"` (`pkg/model/subscription.go:21`), so `u._id` is correct — `u.id` would have zeroed `Member.ID`. `u.isBot` is unread: `attachUserDisplayNames` partitions on `botAccountPattern` (`store_mongo.go:774`). Callers `handler.go:449`, `handler.go:1123`, `handler_teams.go:62`, `handler_teams.go:128` read only `Member.{Type,ID,Account}` / `IsOwner`. **Superset ✓**
+2. **`GetUser`** (`:890`, applied `:898`) — all call sites read only `EngName`/`ChineseName` (`handler.go:164`, `:268`), `ID` (`:253`, `:275`, `:368`), `Account` (`:242`, `:254`, `:316`, `:369`), `Roles` via `model.IsPlatformAdmin` (`handler.go:1987`, `:2045` → `pkg/model/user.go:101`), and `EngName`/`ChineseName`/`Account` (`handler_teams.go:246`). `IsActive()`, `SiteID` and `Settings` are read nowhere in room-service — `GetUserSiteID` is a separate, untouched method (`store_mongo.go:1337`). **Superset ✓**
+3. **`GetApp`** (`:912`) — both sites read only `app.Assistant == nil || !app.Assistant.Enabled` (`handler.go:301-303`, `:919-926`). `AppSubscriptionFromApp`, the one function needing the whole document, is called only from `user-service/service/subscriptions.go:143` — a different store. **Superset ✓**
+4. **`FindDMSubscription`** (`:931`) — both sites use only `existing.RoomID` (`handler.go:244`, `:296`). **Superset ✓**
+5. **`GetThreadSubscriptionByParent`** (`:1533`) — sole site reads only `tsub.ThreadRoomID` (`handler.go:1690`, `:1713`, `:1722`, `:1729`) plus the `ErrThreadSubscriptionNotFound` sentinel (`store_mongo.go:1547`). **Superset ✓**
+
+**Write-back / re-marshal hazard: none.** No projected struct reaches `UpdateOne`/`ReplaceOne`/`InsertOne` or `json.Marshal`. `publishCreateRoom` (`handler.go:368-369`) copies two scalars into `CreateRoomRequest` before marshaling — the `*model.User` never reaches the wire. `listMembers` returns freshly-constructed `RoomMember` values, not decoded documents.
+
+## (a) Diff correctness
+
+Clean. Every bson key matches its tag (`assistant`, `roomId`, `threadRoomId`, `engName`, `chineseName`, `roles`, `joinedAt`). `make build SERVICE=room-service` and `go vet -tags integration ./room-service/` pass; `golangci-lint --build-tags integration` reports 0 issues. `opts.SetProjection` after the conditional `SetLimit` (`:733`) is order-independent.
+
+## (b) Scope drift / refactor-readiness
+
+None. Two files, one behavioral commit, no unrelated refactor. `docs/reviews/` was removed in `fae6117` per CLAUDE.md Section 5. The store interface is unchanged, so no `make generate` is required.
+
+## (c) Abstraction changes
+
+The five new vars mirror `roomReadProjection` / `subscriptionReadProjection` (`store_mongo.go:208`, `:228`) exactly: package-level `bson.D`, doc comment naming the call sites, paired `*_ProjectionFields_Integration` guard. Justified — no premature abstraction.
+
+- **[nitpick]** Explicit `_id: 1` is redundant (Mongo includes `_id` by default), though it matches `membershipExistsProjection` (`:269`).
+
+## (d) Design coherence
+
+- **[medium] Interface docs still describe whole entities** — `room-service/store.go:197-220` documents `GetUser`, `GetApp`, `FindDMSubscription` and `GetThreadSubscriptionByParent` as returning the entity, with no note that the struct is now partial. `GetRoomAppRead` (`store.go:63`) and `ListDefaultChannelTabApps` (`store.go:202-204`) set the precedent of stating the projection in the interface doc. A future caller reading `requester.SiteID` gets `""` silently. Add one projection line to each of the four.
+
+Otherwise the diff fits the service's job precisely and bolts on no unrelated concern.
+
+## (e) Project-pattern adherence
+
+N/A or clean across the board: no subjects, streams, IDs, consumers, outbox usage or `pkg/model` event structs are touched. Mongo driver v2 with `options.FindOne().SetProjection` per existing style. The change directly satisfies CLAUDE.md Section 6's "always project precisely" rule.
+
+## (f) Client-API doc rule — does not fire, correctly
+
+The diff is store-layer only: no `natsrouter.Register` / `QueueSubscribe` registration, no handler body, and no `pkg/model` struct changed. The one client-facing surface reached (`listMembers`, `handler.go:423`) returns `RoomMember` values assembled field-by-field from the projected set, so the wire payload is byte-identical. **No `docs/client-api.md` update is required.**
+
+- **[nitpick]** `integration_test.go:352` comment says "the fallback (enrich=false) build" but the call at `:377` passes `enrich=true`, needed for the `IsOwner` assertion at `:385`.
