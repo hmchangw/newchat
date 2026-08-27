@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMediaTypeFilter_Allowed(t *testing.T) {
@@ -61,4 +66,76 @@ func TestMediaTypeByExtension(t *testing.T) {
 			assert.Equal(t, tc.want, mediaTypeByExtension(tc.filename))
 		})
 	}
+}
+
+// pdfBytes and zipBytes are the magic-number prefixes http.DetectContentType
+// keys on; the rest of a real file is irrelevant to the sniff.
+var (
+	pdfBytes = []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\n")
+	zipBytes = []byte("PK\x03\x04\x14\x00\x06\x00\x08\x00\x00\x00!\x00")
+	svgBytes = []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)
+)
+
+func TestSniffMediaType(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"png fixture", png64x48, "image/png"},
+		{"jpeg fixture", jpeg32x32, "image/jpeg"},
+		{"pdf", pdfBytes, "application/pdf"},
+		{"zip prefix, as every OOXML file sniffs", zipBytes, "application/zip"},
+		{"svg sniffs as xml, not as an image", svgBytes, "text/xml"},
+		{"plain text", []byte("hello, world"), "text/plain"},
+		{"charset parameter is stripped", []byte("hello"), "text/plain"},
+		{"empty file", []byte{}, "text/plain"},
+		{"opaque binary", []byte{0x00, 0x01, 0x02, 0xff, 0xfe}, "application/octet-stream"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bytes.NewReader(tc.data)
+			got, err := sniffMediaType(r)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+
+			rest, err := io.ReadAll(r)
+			require.NoError(t, err)
+			assert.Equal(t, tc.data, rest, "reader must be left at the start for the upload")
+		})
+	}
+}
+
+// A file larger than the sniff window must still be fully readable afterwards.
+func TestSniffMediaType_RewindsPastSniffWindow(t *testing.T) {
+	data := append(append([]byte{}, pdfBytes...), bytes.Repeat([]byte("a"), 4096)...)
+	r := bytes.NewReader(data)
+
+	got, err := sniffMediaType(r)
+	require.NoError(t, err)
+	assert.Equal(t, "application/pdf", got)
+
+	rest, err := io.ReadAll(r)
+	require.NoError(t, err)
+	assert.Equal(t, data, rest)
+}
+
+// A reader that cannot be rewound is unusable for the upload that follows, so
+// the sniff must surface an error rather than hand back a half-consumed file.
+func TestSniffMediaType_RewindError(t *testing.T) {
+	seekErr := errors.New("seek boom")
+	r := &seekFailReader{Reader: bytes.NewReader(png64x48), seekErr: seekErr}
+
+	_, err := sniffMediaType(r)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, seekErr)
+}
+
+func TestSniffMediaType_ReadError(t *testing.T) {
+	readErr := errors.New("read boom")
+	r := &seekFailReader{Reader: iotest.ErrReader(readErr)}
+
+	_, err := sniffMediaType(r)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, readErr)
 }

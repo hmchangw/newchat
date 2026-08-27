@@ -1,7 +1,11 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"mime"
+	"net/http"
 	"path/filepath"
 	"strings"
 )
@@ -144,4 +148,23 @@ func mediaTypeByExtension(filename string) string {
 		return mt
 	}
 	return normalizeMediaType(mime.TypeByExtension(ext))
+}
+
+// sniffLen is the number of leading bytes http.DetectContentType inspects.
+const sniffLen = 512
+
+// sniffMediaType detects a MIME type from a file's first bytes and rewinds r so
+// the caller can still upload it. Only the header is read, so a large upload is
+// never held in memory; a reader we cannot rewind is unusable for the upload
+// that follows, which makes it the one real error here (as in imageDimensions).
+func sniffMediaType(r io.ReadSeeker) (string, error) {
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(r, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", fmt.Errorf("read file header for type detection: %w", err)
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind file after type detection: %w", err)
+	}
+	return normalizeMediaType(http.DetectContentType(head[:n])), nil
 }
