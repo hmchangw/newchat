@@ -439,6 +439,12 @@ func (c *soakRPCClient) Call(
 				soakInterruptedError(request.Action, err, lastRequestErr),
 			)
 		}
+		if attempt > 1 {
+			// Counted here rather than after the backoff: a run torn down
+			// between the two would otherwise report a retry that never
+			// reached the transport. Retries stays Attempts-1.
+			result.Retries++
+		}
 		result.Attempts++
 		reply, requestErr := c.transport.Request(
 			ctx,
@@ -503,7 +509,6 @@ func (c *soakRPCClient) Call(
 				soakInterruptedError(request.Action, err, lastRequestErr),
 			)
 		}
-		result.Retries++
 	}
 
 	return result, carry(fmt.Errorf(

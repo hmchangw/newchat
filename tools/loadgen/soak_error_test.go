@@ -430,3 +430,52 @@ func TestSoakRPCClient_CancellationBeforeAnyAttemptNamesTheAction(t *testing.T) 
 	assert.Equal(t, 1, strings.Count(err.Error(), string(soakRPCSubscriptionList)),
 		"Call names the action once; got %q", err.Error())
 }
+
+// soakCancelingSleeper completes its backoff but kills the context while doing
+// so, which is the shutdown race that reaches the guard on the next attempt.
+type soakCancelingSleeper struct{ cancel context.CancelFunc }
+
+func (s *soakCancelingSleeper) Sleep(context.Context, time.Duration) error {
+	s.cancel()
+	return nil
+}
+
+// Retries is incremented after the backoff, before the next attempt's guard, so
+// a run torn down in that window reported a retry that never reached the
+// transport — and `loadgen_soak_retries_total` counted it.
+func TestSoakRPCClient_CancellationAfterBackoffCountsNoRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{{err: nats.ErrTimeout}}}
+	client := newSoakRPCClient(transport, soakRetryConfig{
+		MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+	}, &soakCancelingSleeper{cancel: cancel}, func() float64 { return 0 })
+
+	result, err := client.Call(ctx, soakRPCRequest{
+		Action: soakRPCSubscriptionList, Subject: "chat.test",
+		Account: "heidi", Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, 1, transport.callCount(), "only the first attempt reached the wire")
+	assert.Equal(t, 1, result.Attempts)
+	assert.Zero(t, result.Retries, "a retry that never ran must not be counted")
+}
+
+// The counter still has to move when a retry does run, or the fix trades an
+// over-count for an under-count.
+func TestSoakRPCClient_AnExecutedRetryIsStillCounted(t *testing.T) {
+	transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{
+		{err: nats.ErrTimeout}, {err: nats.ErrTimeout},
+	}}
+	client := newCarrierTestClient(transport, 2)
+
+	result, err := client.Call(context.Background(), soakRPCRequest{
+		Action: soakRPCSubscriptionList, Subject: "chat.test",
+		Account: "heidi", Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, 2, result.Attempts)
+	assert.Equal(t, 1, result.Retries, "Retries must stay Attempts-1")
+}
