@@ -381,3 +381,37 @@ func TestSoakUserReader_ChannelPairsSkipRoomsWithASingleDistinctMember(t *testin
 	assert.Empty(t, transport.subjects,
 		"the room names one account twice, so there is no co-member to query for")
 }
+
+// A room-scoped read that fails must name the room. Both of these send the room
+// in the body, which is gone by the time the failure is logged, and the account
+// alone cannot tell two concurrent reads of different rooms apart.
+func TestSoakSearchReader_IndexProbeFailureNamesTheRoom(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	transport := &soakRoomOpsTransport{err: context.DeadlineExceeded}
+	reader, _ := newSoakSearchFixture(t, transport, 1, func() time.Time { return now })
+
+	_, _, err := reader.IndexedAt(
+		context.Background(), "user-a", "room-7", "m1", "term",
+		now.Add(-2*time.Minute),
+	)
+
+	require.Error(t, err)
+	var carrier *soakRequestError
+	require.ErrorAs(t, err, &carrier)
+	assert.Equal(t, "room-7", carrier.RoomID)
+}
+
+func TestSoakUserReader_SubscriptionByRoomFailureNamesTheRoom(t *testing.T) {
+	transport := &soakRoomOpsTransport{err: context.DeadlineExceeded}
+	reader, _ := newSoakUserReadFixture(t, transport, 1)
+
+	err := reader.SubscriptionByRoom(context.Background())
+
+	require.Error(t, err)
+	var carrier *soakRequestError
+	require.ErrorAs(t, err, &carrier)
+	require.Len(t, transport.bodies, 1)
+	body := decodeSoakRequestBody(t, transport.bodies[0])
+	assert.Equal(t, body["roomId"], carrier.RoomID)
+	assert.NotEmpty(t, carrier.RoomID)
+}

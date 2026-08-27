@@ -422,7 +422,7 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections` | Connections the lane currently claims online |
 | `loadgen_soak_reply_bytes{action}` | Wire size of a successful paged read, bucketed to the 128 KiB `max_payload`. A distribution climbing into the top bucket is the warning that the next reply comes back as `response_too_large` instead of data |
-| `loadgen_soak_rows{action}` | Rows returned per paged read. Separates "the page is slow" from "the page is large". Emitted only where the count is real — a mutation has no rows, and a read whose count is a constant or a server-side total is not reporting rows either |
+| `loadgen_soak_rows{action}` | Rows returned per paged read. Separates "the page is slow" from "the page is large". Emitted only where the count is real — a mutation has no rows, and a read whose count is a constant, a server-side total, or a 0-or-1 point lookup is not reporting rows either |
 | `loadgen_failure_abandoned_journals` | Retained journals from earlier epochs |
 
 The existing `loadgen_failure_operations_total`,
@@ -434,4 +434,7 @@ and log content only.
 A metric names the action that failed and nothing else, so every lane failure
 is logged with the account, room, subject, error class and reason that identify
 the request — `account` is what joins a loadgen error to the `subject` on the
-server's own log line for the same call.
+server's own log line for the same call. A run torn down mid-flight reports
+`error_class=canceled` rather than an empty class: the run going away is not the
+site failing, and an empty class would have been counted as a completed
+operation.

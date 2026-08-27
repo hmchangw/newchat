@@ -173,7 +173,7 @@ func (r *soakSearchReader) IndexedAt(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSearchIndexProbe,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
-		Account: account,
+		Account: account, RoomID: roomID,
 		Body: model.SearchMessagesRequest{
 			Query:   term,
 			RoomIDs: []string{roomID},
@@ -218,9 +218,7 @@ func (r *soakSearchReader) pickQuery() (string, string) {
 	return r.accounts[r.rng.Intn(len(r.accounts))], r.terms[r.rng.Intn(len(r.terms))]
 }
 
-// failure identity; one copy per RPC is nothing beside the marshal and round trip.
-//
-//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakSearchReader) call(
 	ctx context.Context,
 	request soakRPCRequest,

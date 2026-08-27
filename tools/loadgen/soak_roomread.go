@@ -277,7 +277,9 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 		Body:    soakRoomsInfoRequest{RoomIDs: []string{roomID}},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Rooms))
+		// One room in, one room back. Counting it would stand a constant beside
+		// RoomState's member list, which shares this action label.
+		sample.Messages = len(response.Rooms)
 	})
 	if err != nil {
 		return soakRoomInfo{}, err
@@ -312,7 +314,7 @@ func (r *soakRoomReader) SubscriptionFor(
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Subscriptions))
+		sample.Messages = len(response.Subscriptions)
 	})
 	if err != nil {
 		// Two verifiers share this call, so the transport error alone does not
@@ -367,9 +369,7 @@ func (r *soakRoomReader) pickRoomBatch() []string {
 	return batch
 }
 
-// failure identity; one copy per RPC is nothing beside the marshal and round trip.
-//
-//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakRoomReader) call(
 	ctx context.Context,
 	request soakRPCRequest,

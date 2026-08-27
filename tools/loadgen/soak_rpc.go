@@ -121,6 +121,11 @@ const (
 	soakErrorAmbiguous             soakErrorClass = "ambiguous"
 	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
 	soakErrorResponseTooLarge      soakErrorClass = "response_too_large"
+	// soakErrorCanceled is the run itself going away, not the site failing.
+	// Folding it into internal would spike a server-fault class at every
+	// shutdown; leaving it empty made the recorder count the operation as a
+	// success, because the outcome is derived from the class alone.
+	soakErrorCanceled soakErrorClass = "canceled"
 )
 
 func validSoakErrorClass(class soakErrorClass) bool {
@@ -130,7 +135,8 @@ func validSoakErrorClass(class soakErrorClass) bool {
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
 		soakErrorRequestEncode, soakErrorResponseDecode,
 		soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
+		soakErrorMutationTargetMissing, soakErrorResponseTooLarge,
+		soakErrorCanceled:
 		return true
 	default:
 		return false
@@ -232,6 +238,9 @@ func classifySoakRPCError(err error) soakErrorClass {
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 		return soakErrorTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return soakErrorCanceled
 	}
 	if errors.Is(err, nats.ErrNoResponders) {
 		return soakErrorNoResponder
@@ -376,20 +385,17 @@ func newSoakRPCClient(
 	}
 }
 
-// failure identity; one copy per RPC is nothing beside the marshal and round trip.
-//
-//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) Call(
 	ctx context.Context,
 	request soakRPCRequest,
 	response any,
 ) (soakRPCResult, error) {
 	var result soakRPCResult
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
 	// carry stamps the request identity onto every failure leaving this
 	// function, so the lane logger above does not have to thread it through.
+	// Declared before the first guard: a context that died before the wire is
+	// still a failure the operator has to be able to place.
 	carry := func(err error) error {
 		if err == nil {
 			return nil
@@ -401,6 +407,10 @@ func (c *soakRPCClient) Call(
 			Attempts: result.Attempts, Retries: result.Retries,
 			err: err,
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		result.ErrorClass = classifySoakRPCError(err)
+		return result, carry(err)
 	}
 	if !validSoakRPCAction(request.Action) {
 		result.ErrorClass = soakErrorInternal
@@ -414,7 +424,8 @@ func (c *soakRPCClient) Call(
 
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			result.ErrorClass = classifySoakRPCError(err)
+			return result, carry(err)
 		}
 		result.Attempts++
 		reply, requestErr := c.transport.Request(
@@ -486,9 +497,7 @@ func (c *soakRPCClient) Call(
 	))
 }
 
-// failure identity; one copy per RPC is nothing beside the marshal and round trip.
-//
-//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) shouldRetryAmbiguous(
 	ctx context.Context,
 	request soakRPCRequest,

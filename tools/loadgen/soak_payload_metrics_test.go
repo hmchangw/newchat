@@ -195,3 +195,67 @@ func TestSoakReadCollectorRecorder_ObservesOnlyCountedRows(t *testing.T) {
 		})
 	}
 }
+
+// room_state_read is written by two lanes: RoomState returns a member list
+// whose length is the number the histogram exists to show, and RoomInfoFor asks
+// for exactly one room. Counting the second stands a constant 1 in the same
+// distribution — the defect get_message_by_id is already excluded for.
+func TestSoakRoomReader_PointLookupsAreNotCountedAsPages(t *testing.T) {
+	for name, tc := range map[string]struct {
+		reply string
+		call  func(*soakRoomReader, context.Context) error
+	}{
+		"room info answers for one room": {
+			reply: `{"rooms":[{"roomId":"room-1","found":true}]}`,
+			call: func(r *soakRoomReader, ctx context.Context) error {
+				_, err := r.RoomInfoFor(ctx, "room-1")
+				return err
+			},
+		},
+		"subscription-for answers zero or one": {
+			reply: `{"subscriptions":[{"roomId":"room-1"}],"total":1}`,
+			call: func(r *soakRoomReader, ctx context.Context) error {
+				_, err := r.SubscriptionFor(ctx, "user-a0", "room-1")
+				return err
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := &soakRoomOpsTransport{reply: []byte(tc.reply)}
+			reader, _, recorder := newSoakRoomReadFixture(t, transport, 1)
+
+			require.NoError(t, tc.call(reader, context.Background()))
+
+			require.Len(t, recorder.samples, 1)
+			assert.False(t, recorder.samples[0].RowsCounted)
+		})
+	}
+}
+
+// The member list shares that action label and is a genuine page, so excluding
+// the point lookups must not empty the distribution they were polluting.
+func TestSoakRoomReader_RoomStateRemainsCounted(t *testing.T) {
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"members":[{"id":"m1"},{"id":"m2"}]}`),
+	}
+	reader, _, recorder := newSoakRoomReadFixture(t, transport, 1)
+
+	_, err := reader.RoomState(context.Background(), "room-1", "user-a0")
+
+	require.NoError(t, err)
+	require.Len(t, recorder.samples, 1)
+	assert.True(t, recorder.samples[0].RowsCounted)
+	assert.Equal(t, 2, recorder.samples[0].Messages)
+}
+
+func TestSoakUserReader_SubscriptionByRoomIsNotCountedAsAPage(t *testing.T) {
+	transport := &soakRoomOpsTransport{
+		reply: []byte(`{"subscriptions":[{"roomId":"room-1"}],"total":1}`),
+	}
+	reader, recorder := newSoakUserReadFixture(t, transport, 1)
+
+	require.NoError(t, reader.SubscriptionByRoom(context.Background()))
+
+	require.Len(t, recorder.samples, 1)
+	assert.False(t, recorder.samples[0].RowsCounted)
+}

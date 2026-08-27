@@ -261,3 +261,112 @@ func TestSoakRPCClient_EncodeFailureStillCarriesTheAction(t *testing.T) {
 	assert.Equal(t, "dave", carrier.Account)
 	assert.Equal(t, soakErrorRequestEncode, carrier.Class)
 }
+
+// --- a dead context still identifies the request ---
+
+// soakIgnoringSleeper keeps backing off after the context dies, so a test can
+// reach the guard at the top of the next attempt. The real sleeper returns the
+// context error and short-circuits there.
+type soakIgnoringSleeper struct{}
+
+func (*soakIgnoringSleeper) Sleep(context.Context, time.Duration) error { return nil }
+
+// The read recorder derives the outcome from the error class alone, so a
+// failure that leaves the class empty is counted as a success. A context that
+// died before Call reached the wire did exactly that: a bare error with a
+// zero-valued result, logged without identity and tallied as a completed read.
+func TestSoakRPCClient_CanceledContextCarriesTheRequestIdentity(t *testing.T) {
+	transport := &soakRPCFakeTransport{}
+	client := newCarrierTestClient(transport, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := client.Call(ctx, soakRPCRequest{
+		Action:  soakRPCSubscriptionList,
+		Subject: "chat.user.erin.request.user.tw01.subscription.list",
+		Account: "erin", RoomID: "room-9",
+		Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	assert.Zero(t, transport.callCount(), "a dead context must not reach the wire")
+	var carrier *soakRequestError
+	require.ErrorAs(t, err, &carrier)
+	assert.Equal(t, "erin", carrier.Account)
+	assert.Equal(t, "room-9", carrier.RoomID)
+	assert.Equal(t, soakErrorCanceled, carrier.Class)
+	assert.Equal(t, soakErrorCanceled, result.ErrorClass,
+		"an empty class is what the recorder reads as a success")
+}
+
+// A deadline that elapsed before the call is a timeout, not a cancellation:
+// the two say different things about the site under load.
+func TestSoakRPCClient_ExpiredDeadlineIsClassifiedAsATimeout(t *testing.T) {
+	client := newCarrierTestClient(&soakRPCFakeTransport{}, 1)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancel()
+
+	result, err := client.Call(ctx, soakRPCRequest{
+		Action: soakRPCSubscriptionList, Subject: "chat.test",
+		Account: "erin", Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	assert.Equal(t, soakErrorTimeout, result.ErrorClass)
+}
+
+// The guard at the top of each attempt returned bare too. A soak torn down
+// mid-retry takes this path, and it had already spent attempts worth counting.
+func TestSoakRPCClient_CancellationBetweenAttemptsCarriesTheIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	transport := &soakCancelingTransport{cancel: cancel, inner: &soakRPCFakeTransport{
+		replies: []soakRPCFakeReply{{err: context.DeadlineExceeded}},
+	}}
+	client := newSoakRPCClient(transport, soakRetryConfig{
+		MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+	}, &soakIgnoringSleeper{}, func() float64 { return 0 })
+
+	result, err := client.Call(ctx, soakRPCRequest{
+		Action: soakRPCSubscriptionList, Subject: "chat.test",
+		Account: "frank", Timeout: time.Second, RetryMode: soakRetrySafe,
+	}, nil)
+
+	require.Error(t, err)
+	var carrier *soakRequestError
+	require.ErrorAs(t, err, &carrier)
+	assert.Equal(t, "frank", carrier.Account)
+	assert.Equal(t, soakErrorCanceled, carrier.Class)
+	assert.Equal(t, 1, result.Attempts, "the spent attempt must still be reported")
+}
+
+// soakCancelingTransport kills the context once the request is on the wire, so
+// the next attempt starts against a dead one.
+type soakCancelingTransport struct {
+	inner  soakRPCTransport
+	cancel context.CancelFunc
+}
+
+func (t *soakCancelingTransport) Request(
+	ctx context.Context,
+	requestSubject string,
+	data []byte,
+	timeout time.Duration,
+) ([]byte, error) {
+	defer t.cancel()
+	return t.inner.Request(ctx, requestSubject, data, timeout)
+}
+
+// The whole chain, driven through a real lane: an interrupted read must reach
+// the collector as a failure rather than padding the success count.
+func TestSoakRoomReader_ACanceledReadIsRecordedAsAFailure(t *testing.T) {
+	reader, _, recorder := newSoakRoomReadFixture(t, &soakRPCFakeTransport{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.Error(t, reader.SubscriptionList(ctx))
+
+	require.Len(t, recorder.samples, 1)
+	assert.Equal(t, soakErrorCanceled, recorder.samples[0].ErrorClass,
+		"an empty class makes soakReadCollectorRecorder count this as succeeded")
+}

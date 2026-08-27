@@ -355,11 +355,12 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionByRoom,
 		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
-		Account: account,
+		Account: account, RoomID: roomID,
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Subscriptions))
+		// A 0-or-1 answer for the room asked about, not a page.
+		sample.Messages = len(response.Subscriptions)
 	})
 }
 
@@ -493,9 +494,7 @@ func (r *soakUserReader) pickRoom() (string, bool) {
 	return r.rooms[r.rng.Intn(len(r.rooms))], true
 }
 
-// failure identity; one copy per RPC is nothing beside the marshal and round trip.
-//
-//nolint:gocritic // hugeParam: soakRPCRequest crossed 80 bytes when it gained the
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakUserReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
