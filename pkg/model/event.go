@@ -187,6 +187,7 @@ const (
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
 	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
+	InboxUserAccountUpdated          InboxEventType = "user_account_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
 	InboxSubscriptionMention         InboxEventType = "subscription_mention"
@@ -209,6 +210,22 @@ type UserPermissionsUpdated struct {
 	Accounts   []string        `json:"accounts"   bson:"accounts"` // ≤ fanoutChunkSize per event
 	State      PermissionState `json:"state"      bson:"state"`
 	Timestamp  int64           `json:"timestamp"  bson:"timestamp"`
+}
+
+// UserAccountUpdated is the InboxEvent.Payload for user_account_updated: the
+// admin-owned account state as a whole snapshot (identity included, so the
+// event alone materializes a complete remote doc). Published by admin-service
+// after createUser / updateUser / DeactivateAndRevoke; inbox-worker upserts it
+// under the accountUpdatedAt watermark.
+type UserAccountUpdated struct {
+	ID          string     `json:"id"          bson:"id"`
+	Account     string     `json:"account"     bson:"account"`
+	SiteID      string     `json:"siteId"      bson:"siteId"` // home site; immutable, $setOnInsert only
+	EngName     string     `json:"engName"     bson:"engName"`
+	ChineseName string     `json:"chineseName" bson:"chineseName"`
+	Roles       []UserRole `json:"roles"       bson:"roles"`     // always an array, never nil
+	Active      bool       `json:"active"      bson:"active"`    // resolved via IsActive()
+	Timestamp   int64      `json:"timestamp"   bson:"timestamp"` // unix ms; doubles as the watermark
 }
 
 // SubscriptionReadEvent is InboxEvent.Payload for "subscription_read": sent room-home→user-home

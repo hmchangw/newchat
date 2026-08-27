@@ -208,20 +208,68 @@ export async function getUser(authToken: string, account: string): Promise<Admin
   return normalizeUser(raw)
 }
 
-/** @throws {AsyncJobError} on a non-2xx response (e.g. `account_exists`). */
-export async function createUser(authToken: string, input: CreateUserInput): Promise<AdminUser> {
-  const raw = await adminFetch<UserViewWire>(authToken, 'POST', '/users', input)
-  return normalizeUser(raw)
+export interface CreateUserResult {
+  user: AdminUser
+  syncFailures: string[]
+  hrSyncFailed: boolean
 }
 
-/** Applies a partial update; resolves to `void` (server replies `{status:"ok"}`, not the user) —
- * follow up with `getUser` if you need the fresh record. */
+/** @throws {AsyncJobError} on a non-2xx response (e.g. `account_exists`). A 2xx
+ * with `syncFailures`/`hrSyncFailed` means the account committed locally but
+ * some cross-site replication did not land — the caller must show it. */
+export async function createUser(
+  authToken: string,
+  input: CreateUserInput,
+): Promise<CreateUserResult> {
+  const raw = await adminFetch<UserViewWire & { syncFailures?: string[]; hrSyncFailed?: boolean }>(
+    authToken,
+    'POST',
+    '/users',
+    input,
+  )
+  return {
+    user: normalizeUser(raw),
+    syncFailures: raw.syncFailures ?? [],
+    hrSyncFailed: raw.hrSyncFailed ?? false,
+  }
+}
+
+export interface UpdateUserResult {
+  syncFailures: string[]
+}
+
+/** Applies a partial update. A 2xx with `syncFailures` committed locally but
+ * did not reach those sites — the caller must show it. The server replies
+ * `{status:"ok"}`, not the user — follow up with `getUser` for the fresh record. */
 export async function updateUser(
   authToken: string,
   account: string,
   patch: UpdateUserPatch,
-): Promise<void> {
-  await adminFetch<{ status: string }>(authToken, 'PATCH', `/users/${encodeURIComponent(account)}`, patch)
+): Promise<UpdateUserResult> {
+  const raw = await adminFetch<{ status: string; syncFailures?: string[] }>(
+    authToken,
+    'PATCH',
+    `/users/${encodeURIComponent(account)}`,
+    patch,
+  )
+  return { syncFailures: raw.syncFailures ?? [] }
+}
+
+export interface ResyncUserResult {
+  syncFailures: string[]
+  hrSyncFailed: boolean
+}
+
+/** Re-delivers the current account state on both sync lanes (durable HR
+ * bootstrap + direct snapshot to every remote site). Re-delivery only — the
+ * server writes nothing. Home-site accounts only; foreign replicas 404. */
+export async function resyncUser(authToken: string, account: string): Promise<ResyncUserResult> {
+  const raw = await adminFetch<{
+    status: string
+    syncFailures?: string[]
+    hrSyncFailed?: boolean
+  }>(authToken, 'POST', `/users/${encodeURIComponent(account)}/resync`)
+  return { syncFailures: raw.syncFailures ?? [], hrSyncFailed: raw.hrSyncFailed ?? false }
 }
 
 /** Sets a new password; sent over the wire as `password` (admin-service's json tag). */

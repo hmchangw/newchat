@@ -13,6 +13,7 @@ const CreateUserForm = lazy(() => import('../CreateUserForm'))
 const EditUserDialog = lazy(() => import('../EditUserDialog'))
 const SetPasswordDialog = lazy(() => import('../SetPasswordDialog'))
 const SessionsDialog = lazy(() => import('../SessionsDialog'))
+const ResyncUserDialog = lazy(() => import('../ResyncUserDialog'))
 
 // Matches admin-service's parsePaging default limit (handler.go).
 const PAGE_SIZE = 20
@@ -35,6 +36,7 @@ export default function UsersPage() {
   const [editingUser, setEditingUser] = useState(null)
   const [passwordUser, setPasswordUser] = useState(null)
   const [sessionsUser, setSessionsUser] = useState(null)
+  const [resyncTarget, setResyncTarget] = useState(null)
 
   const { begin, isCurrent } = useLatestRequest()
 
@@ -114,9 +116,11 @@ export default function UsersPage() {
       <UserTable
         users={users}
         loading={loading}
+        ownSiteId={session?.siteId}
         onEdit={setEditingUser}
         onSetPassword={setPasswordUser}
         onSessions={setSessionsUser}
+        onResync={setResyncTarget}
       />
 
       <Pager
@@ -164,6 +168,16 @@ export default function UsersPage() {
               setPasswordUser(null)
               refresh()
             }}
+          />
+        </Suspense>
+      )}
+
+      {resyncTarget && (
+        <Suspense fallback={<LazyFallback variant="dialog" />}>
+          <ResyncUserDialog
+            authToken={authToken}
+            user={resyncTarget}
+            onClose={() => setResyncTarget(null)}
           />
         </Suspense>
       )}
