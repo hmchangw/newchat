@@ -2124,7 +2124,7 @@ func validateSyncCreateDMShape(req *model.SyncCreateDMRequest) error {
 
 // resolveSubUpdateCounterpart computes a subscription.update's roomName plus the
 // counterpart: appInfo for a bot, hrInfo for a human, neither elsewhere. Best-effort.
-func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) (string, *model.CounterpartHRInfo, *model.CounterpartAppInfo) {
+func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) (string, *model.CounterpartHRInfo, *model.AppSubscription) {
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
@@ -2142,9 +2142,8 @@ func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Su
 				}
 				return cp, nil, nil
 			}
-			// AssistantName is cp by construction — GetApp filters on assistant.name == cp,
-			// and the doc can't supply it anyway (projection leaves Assistant nil).
-			appInfo := &model.CounterpartAppInfo{ID: app.ID, Name: app.Name, AssistantName: cp}
+			// Full app record, same shape subscription.list nests as the botDM `app`.
+			appInfo := model.AppSubscriptionFromApp(app)
 			if app.Name == "" {
 				// Apps are always named, so this is a bad document; ship appInfo for its
 				// id but log which one, since roomName and appInfo.name now disagree.

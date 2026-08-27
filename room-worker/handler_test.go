@@ -3392,7 +3392,7 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 	// finishCreateRoom calls resolveSubUpdateCounterpart per sub; the human sub has
 	// Name="helper.bot" (RoomTypeBotDM), so GetApp is invoked once.
 	// Assistant left nil to match the real store's {"name":1} projection.
-	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil)
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}, nil)
 
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-1").Return(nil)
 
@@ -3429,8 +3429,9 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
-	// ...and the app it is now talking to, so the client renders the row without a refetch.
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-helper", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	// ...and the full app it is now talking to (same shape subscription.list nests),
+	// so the client renders the row without a refetch.
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo)
 
 	// bot (helper.bot) subscription.update must carry the human's display name,
@@ -7223,7 +7224,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 		setupMock func(s *MockSubscriptionStore)
 		want      string
 		wantHR    *model.CounterpartHRInfo
-		wantApp   *model.CounterpartAppInfo
+		wantApp   *model.AppSubscription
 	}{
 		{
 			name: "channel uses sub.Name and carries no counterpart",
@@ -7262,14 +7263,13 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 			wantHR:  &model.CounterpartHRInfo{Account: "dave"},
 		},
 		{
-			// Assistant nil as in production; assistantName comes from the queried account.
 			name: "botDM resolves app name and appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}),
 		},
 		{
 			// The bot IS in userByAccount in production (FindUsersByAccounts returns it),
@@ -7293,7 +7293,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-9", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-9", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-9", Name: "Helper Bot"}),
 		},
 		{
 			name: "botDM GetApp infra error falls back to bot account and omits appInfo",
@@ -7310,7 +7310,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{ID: "app-3", Name: ""}, nil)
 			},
 			want:    "nameless.bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-3", Name: "", AssistantName: "nameless.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-3", Name: ""}),
 		},
 		{
 			name:    "botDM bot-side sub resolves human from map",
@@ -7453,7 +7453,7 @@ func TestServerCreateDM_DM_SetsCounterpartHRInfo(t *testing.T) {
 	assert.Nil(t, bobEvt.AppInfo)
 }
 
-func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
+func TestServerCreateDM_BotDM_SetsAppInfo(t *testing.T) {
 	h, store, capture := newSyncDMTestHandler(t)
 
 	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
@@ -7465,7 +7465,6 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"}, RoomType: model.RoomTypeBotDM, Name: "alice"},
 		nil)
-	// Assistant left nil to match the real store's {"name":1} projection.
 	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
@@ -7474,7 +7473,7 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 	// Human side sees the app; bot side sees the human.
 	humanEvt := decodeSubUpdate(t, capture.captured, "alice")
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo, "bot counterpart carries no hrInfo")
 
 	botEvt := decodeSubUpdate(t, capture.captured, "helper.bot")

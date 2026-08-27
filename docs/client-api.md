@@ -1380,7 +1380,7 @@ Shared by Add Members, Remove Member, and Update Member Role.
 | `action` | string | `"added"`, `"removed"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label, set only where the server already has the name. On `added`: `channel` → room name; `dm` → counterpart's display name (`engName` + `chineseName`, falling back to account); `botDM` → the bot's app name. On `role_updated`: the channel name. Omitted (`omitempty`) on `mute_toggled` / `favorite_toggled` / `opened` / `read`, and absent on `removed`. |
 | `hrInfo` | [CounterpartHRInfo](#counterparthrinfo) | The DM counterpart's HR record, so the client can render the new sidebar row without a `subscription.list` refetch. Sent on `added` `dm` / `botDM` events when the counterpart account does **not** end in `.bot` — i.e. to both sides of a `dm`, and to the bot's own copy of a `botDM`. On a self-DM (note-to-self) the counterpart is the recipient, so the event carries their own record. Omitted on `channel` / `discussion` rooms and when the user lookup missed. |
-| `appInfo` | [CounterpartAppInfo](#counterpartappinfo) | The counterpart's app record, sent on `added` `botDM` events when the counterpart account ends in `.bot` — i.e. to the human member. Mutually exclusive with `hrInfo`; omitted when the app lookup missed. |
+| `appInfo` | [AppSubscription](#appsubscription) | The counterpart's **full app record** — the same shape `subscription.list` nests as a botDM row's `app` object, so the human member renders the row (and the app's details) from the real-time event without a `subscription.list` refetch. Sent on `added` `botDM` events when the counterpart account ends in `.bot`. Mutually exclusive with `hrInfo`; omitted when the app lookup missed. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the embedded `Subscription` serializes its ID as `id` (not `_id`) and the user under `u` (not `user`). Non-`omitempty` fields (`id`, `u`, `roomId`, `siteId`, `roles`, `name`, `roomType`, `joinedAt`, `hasMention`, `alert`, `muted`, `favorite`, `open`) are always present — and the envelope's `roomName` is `omitempty`: set on `added` / `role_updated`, omitted on `mute_toggled` / `favorite_toggled` / `opened` / `read`. On `added` the nested `room` object matches a `subscription.list` row (minus `previewMessage`), so clients can render the sidebar entry — and store the room key — from this single event. `removed` events use a dedicated lean payload (`SubscriptionRemovedEvent`) whose `subscription` carries **only** `roomId`, `roomType`, and `u` — no zero-valued `Subscription` fields are sent.
@@ -1445,7 +1445,7 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 {
   "action": "added",
   "roomName": "Helper Bot",
-  "appInfo": { "id": "01970a4f8c2d7c9aA1", "name": "Helper Bot", "assistantName": "helper.bot" },
+  "appInfo": { "appId": "01970a4f8c2d7c9aA1", "name": "Helper Bot", "description": "Your helpful assistant", "assistant": { "enabled": true, "name": "helper.bot" }, "appViewUrl": { "default": "https://apps.example.com/helper" }, "version": "1.4.0" },
   "timestamp": 1778054483000
 }
 ```
@@ -1488,13 +1488,7 @@ The cross-site INBOX copy of this event additionally carries `accounts` and `las
 >
 > **This divergence is deliberate.** PR #165 scoped the `chineseName` rekey to "search response only; other payloads untouched", deliberately leaving `subscription.list` on the legacy key. New and reshaped surfaces take `chineseName`; existing ones are not rekeyed. A client must therefore **not** reuse one `hrInfo` parser across the event and the list — it would silently drop the name on one of them.
 
-###### CounterpartAppInfo
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | App ID. |
-| `name` | string | App display name. Empty string when the app document has no name — `roomName` then falls back to the bot account. |
-| `assistantName` | string | The bot account the app answers on. |
+> The `appInfo` on a botDM `added` is the full [AppSubscription](#appsubscription) — the same nested `app` shape a botDM row carries in `subscription.list`, so the client renders the sidebar row and the app's details from this event alone. When the app has no name, `roomName` falls back to the bot account.
 
 ##### Triggered events — error path
 
@@ -5652,7 +5646,7 @@ PUT-like idempotent endpoint to subscribe or unsubscribe the calling user from a
 **`chat.user.{account}.event.subscription.update`** — emitted once for the requester (best-effort, core NATS) so the user's other devices reconcile the botDM without a refetch. Bot accounts receive it on their **encoded** per-user subject (dots→underscores), matching their NATS JWT scope.
 
 - **Unsubscribe** (`subscribed: false` on an existing subscription) → `action: "removed"`. Payload is the dedicated `SubscriptionRemovedEvent` (`subscription` carries only `roomId`, `roomType: "botDM"`, and `u`). No event fires when there was no subscription to remove.
-- **Reactivate** (`subscribed: true` on an existing, previously-unsubscribed subscription) → `action: "added"`, the same event the first-time subscribe path emits, so the FE re-adds the botDM it dropped on the prior `removed`. See the [subscription.update schema](#subscriptionupdate-event); the embedded `Subscription` reflects `isSubscribed: true` / `muted: false`, and `appInfo` carries the bot app's identity.
+- **Reactivate** (`subscribed: true` on an existing, previously-unsubscribed subscription) → `action: "added"`, the same event the first-time subscribe path emits, so the FE re-adds the botDM it dropped on the prior `removed`. See the [subscription.update schema](#subscriptionupdate-event); the embedded `Subscription` reflects `isSubscribed: true` / `muted: false`, and `appInfo` carries the bot app's full record (see [AppSubscription](#appsubscription)).
 - **First-time subscribe** (`subscribed: true`, no existing DM room) → the `action: "added"` event is emitted by room-service as part of botDM room creation, not by this handler.
 
 ##### Error response

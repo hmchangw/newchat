@@ -1358,10 +1358,10 @@ func TestSubscriptionUpdateEventCounterpartJSON(t *testing.T) {
 				Subscription: base,
 				Action:       "added",
 				RoomName:     "Helper",
-				AppInfo:      &model.CounterpartAppInfo{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"},
+				AppInfo:      &model.AppSubscription{AppID: "app-1", Name: "Helper", Assistant: &model.AppAssistant{Name: "helper.bot", Enabled: true}},
 				Timestamp:    1735689600000,
 			},
-			wantKeys: []string{`"appInfo"`, `"id":"app-1"`, `"name":"Helper"`, `"assistantName":"helper.bot"`},
+			wantKeys: []string{`"appInfo"`, `"appId":"app-1"`, `"name":"Helper"`, `"helper.bot"`},
 			absent:   []string{`"hrInfo"`},
 		},
 		{
@@ -1415,16 +1415,6 @@ func TestCounterpartHRInfoJSON(t *testing.T) {
 	data, err := json.Marshal(model.CounterpartHRInfo{Account: "dave"})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"account":"dave"}`, string(data))
-}
-
-func TestCounterpartAppInfoJSON(t *testing.T) {
-	src := model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}
-	roundTrip(t, &src, &model.CounterpartAppInfo{})
-
-	// No field is omitempty, so a nameless app still ships all three keys.
-	data, err := json.Marshal(model.CounterpartAppInfo{ID: "app-2", AssistantName: "solo.bot"})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"id":"app-2","name":"","assistantName":"solo.bot"}`, string(data))
 }
 
 func TestInboxEventJSON(t *testing.T) {
