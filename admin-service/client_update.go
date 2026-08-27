@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-resty/resty/v2"
@@ -97,6 +98,25 @@ func truncateForLog(s string) string {
 		return s
 	}
 	return s[:maxUpstreamBodyLogLen] + "...(truncated)"
+}
+
+// maxAuditFileNameLen caps an audited filename. Separate from
+// maxUpstreamBodyLogLen: that one bounds a log line, this one bounds a value
+// persisted to Mongo, and the two are free to move independently.
+const maxAuditFileNameLen = 256
+
+// truncateFileName caps a filename on a rune boundary. A byte-offset cut (what
+// truncateForLog does, correctly, for a log value) could split a multi-byte
+// rune and store invalid UTF-8 in the audit entry.
+func truncateFileName(s string) string {
+	if len(s) <= maxAuditFileNameLen {
+		return s
+	}
+	cut := maxAuditFileNameLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...(truncated)"
 }
 
 // upstreamMessage lifts the human-readable text out of an errcode envelope. The
@@ -340,7 +360,7 @@ func relayOnePart(part *multipart.Part, mw *multipart.Writer, names map[string]s
 	// caller sending millions of distinct field names must not be able to grow
 	// this map (and the AuditEntry built from it) without bound.
 	if _, ok := auditedUploadFields[part.FormName()]; ok {
-		names[part.FormName()] = truncateForLog(part.FileName())
+		names[part.FormName()] = truncateFileName(part.FileName())
 	}
 
 	hdr := textproto.MIMEHeader{}

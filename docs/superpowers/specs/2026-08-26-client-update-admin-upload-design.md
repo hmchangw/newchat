@@ -202,9 +202,21 @@ c.Request.MultipartReader()  →  io.Pipe  →  multipart.Writer  →  resty Set
 
 Parts are read one at a time and re-encoded into a fresh multipart body written
 into the pipe by a goroutine; resty reads the pipe's read end as the request body.
-Nothing is buffered, so memory stays flat regardless of artifact size. The
-goroutine's termination path is the pipe: it always closes the writer (with
+The goroutine's termination path is the pipe: it always closes the writer (with
 `CloseWithError` on failure), which unblocks the reader — no leak.
+
+**Correction — memory does NOT stay flat.** This section originally claimed it
+did. resty v2.17.2 calls `getBodyCopy` after building the request, and for an
+`io.Reader` body (`GetBody == nil`, always so here) that path runs `io.ReadAll`
+before the connection is dialled. Measured: a 64 MiB body allocated 375 MiB and
+was fully drained before the dial. The pipe still bounds what the *relay*
+goroutine holds, but the process holds the whole artifact regardless, so
+`admin-service` must be sized for it. Fixing it needs a decision this design does
+not make — drive the one call with `net/http` (against the project's "never
+`net/http` client directly" rule), move to resty v3, or accept the buffering —
+and two coupled changes if it is fixed: the `errors.Is(res.err, uploadErr)` blame
+attribution currently works *because* resty drains the pipe first, and
+`client-update-service`'s read timeout is presently masked by the same buffering.
 
 Each part is copied through under its own `part.FormName()` and `part.FileName()`,
 so field names reach `client-update-service` unchanged and the filenames are
@@ -301,8 +313,12 @@ type versionUploader interface {
 
 ### 3.1 API client
 
-`src/api/admin/index.ts` gains `uploadClientVersion(configFile, executeFile, onProgress?)`,
+`src/api/admin/index.ts` gains
+`uploadClientVersion(authToken, configFile, executeFile, onProgress?, signal?)`,
 building a `FormData` with the `configFile` and `executeFile` fields.
+`authToken` is the admin session token and is sent as `Authorization: Bearer
+<authToken>`; `signal` is an optional `AbortSignal` that cancels an upload in
+flight.
 `Content-Type` is never set by hand — the browser must write its own multipart
 boundary.
 

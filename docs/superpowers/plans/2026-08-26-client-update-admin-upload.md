@@ -4,7 +4,7 @@
 
 **Goal:** Gate `client-update-service`'s upload endpoint behind a service-account token, and give admins a supported way to publish client update artifacts through an authenticated, audited streaming relay in `admin-service` driven by a new console in `admin-frontend`.
 
-**Architecture:** Two independent credentials in one chain — the browser holds an admin session, `admin-service` holds a service-account bearer token, and only `admin-service` may call `POST /api/v1/version`. `admin-service` never buffers the artifact: it re-encodes the multipart stream through an `io.Pipe` into a resty request, and extends only its own request deadlines rather than raising the server-wide timeouts that double as a config validation ceiling.
+**Architecture:** Two independent credentials in one chain — the browser holds an admin session, `admin-service` holds a service-account bearer token, and only `admin-service` may call `POST /api/v1/version`. `admin-service` re-encodes the multipart stream through an `io.Pipe` into a resty request, and extends only its own request deadlines rather than raising the server-wide timeouts that double as a config validation ceiling. (This line originally claimed `admin-service` never buffers the artifact. It does: resty v2.17.2 reads an `io.Reader` body into memory before dialling — see the design record §2.3 correction.)
 
 **Tech Stack:** Go 1.25, Gin, resty v2, `caarlos0/env` v11, `go.uber.org/mock`, testify, React 19 + Vite + vitest.
 
@@ -2353,7 +2353,9 @@ After §9.15, following the field-table style §9 already uses:
 
 Publishes a client update artifact pair. `admin-service` streams both parts
 straight through to `client-update-service` under its own service-account
-credential — nothing is buffered, and the browser never holds that credential.
+credential. (The "nothing is buffered" claim this plan originally carried is
+wrong — see the design record §2.3 correction; the browser still never holds
+that credential.)
 
 The artifacts themselves are validated by `client-update-service`, not here: file
 name and extension rules live there and are reported back verbatim on a `400`.
@@ -2408,7 +2410,7 @@ behavior are in
 and the upload row's Purpose cell to:
 
 ```markdown
-| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). Service-account bearer token required. |
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, no size cap; disk-backed — parts over 32 MiB spill to a temp file before the MinIO write). Service-account bearer token required. |
 ```
 
 Under `## HTTP — Admin Service`, add a row to its endpoint table:

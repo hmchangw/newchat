@@ -8162,9 +8162,15 @@ None.
 
 **Auth:** admin session (`Authorization: Bearer <session token>`), same as every `/v1/admin/…` route.
 
-Publishes a client update artifact pair. `admin-service` streams both parts
-straight through to `client-update-service` under its own service-account
-credential — nothing is buffered, and the browser never holds that credential.
+Publishes a client update artifact pair. `admin-service` relays both parts to
+`client-update-service` under its own service-account credential; the browser
+never holds that credential.
+
+**Memory note.** The handler re-encodes the multipart body through an `io.Pipe`,
+but the outbound HTTP client (`resty` v2.17.2) reads an `io.Reader` body into
+memory before dialling, so one in-flight upload currently costs `admin-service`
+roughly the artifact size in RAM. Treat the relay as buffered when sizing the
+pod, not as constant-memory.
 
 The artifacts themselves are validated by `client-update-service`, not here: file
 name and extension rules live there and are reported back verbatim on a `400`.
@@ -8711,8 +8717,14 @@ starts normally and answers **every** upload with `401`, so a site that does not
 publish client updates can deploy without it. Downloads are unaffected.
 
 Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
-and streamed straight to MinIO (no size cap). An upload of an existing file name
-overwrites it and evicts any cached copy.
+and there is no size cap. An upload of an existing file name overwrites it and
+evicts any cached copy.
+
+**Disk-backed, not end-to-end streamed.** The handler reads its parts via
+`c.FormFile`, which buffers up to 32 MiB in memory and spills the remainder to
+a temporary file before the object is written to MinIO. Size the container's
+ephemeral storage for the largest artifact you intend to publish. The MinIO
+write itself streams from that temporary file.
 
 The two objects are written **independently, not atomically**: a failure after
 the first write returns an error with that object already replaced, so a

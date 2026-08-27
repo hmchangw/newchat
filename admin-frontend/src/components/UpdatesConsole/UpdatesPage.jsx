@@ -61,7 +61,7 @@ export default function UpdatesPage() {
       </p>
 
       <div className="updates-page-field">
-        <label htmlFor="configFile">Config file (.yaml)</label>
+        <label htmlFor="configFile">Config file (.yaml or .yml)</label>
         <input
           id="configFile"
           type="file"

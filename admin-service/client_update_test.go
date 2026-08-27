@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -924,4 +925,29 @@ func TestUploadClientVersion_AnswersAfterTheOutboundBudgetExpires(t *testing.T) 
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// truncateForLog cuts at a byte offset, which is fine for a log line but not for
+// a value stored in Mongo: a filename over the cap whose boundary falls inside a
+// multi-byte rune would be persisted as invalid UTF-8.
+func TestRelayOnePart_AuditedFileNameStaysValidUTF8(t *testing.T) {
+	// Each 'あ' is 3 bytes, so no multiple of 3 lands on maxAuditFileNameLen —
+	// a byte-offset cut is guaranteed to split a rune.
+	long := strings.Repeat("あ", maxAuditFileNameLen)
+
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	fw, err := mw.CreateFormFile("configFile", long+".yaml")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("version: 1"))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	out := &bytes.Buffer{}
+	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
+	require.NoError(t, err)
+
+	got := names["configFile"]
+	assert.True(t, utf8.ValidString(got), "audited filename must be valid UTF-8, got %q", got)
+	assert.LessOrEqual(t, len(got), maxAuditFileNameLen+len("...(truncated)"))
 }
