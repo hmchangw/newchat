@@ -150,3 +150,77 @@ The `service` package now holds message reads, message *mutations*, `RoomsGet` r
 6. **`medium`** — Split the preview write-back out of `RoomRepository` into a separate `PreviewWriter` interface, drop it from `readcache.RoomSource` by embedding rather than re-declaring, and then decide explicitly whether `history-service` or `broadcast-worker` owns `rooms` preview writes — today both do.
 7. **`low`** — Make the room access gate structural rather than per-handler: `getAccessSince`/`checkAccessAndRoomTimes` are called by hand at eight-plus sites (`internal/service/messages.go:41,120,207,277,422,451`, `pin.go:192`), so a new user-facing handler that forgets one is an unauthorized read with no compile-time or lint signal.
 8. **`nitpick`** — Fold `cmd/main.go:37-56` `checkConfig` into `config.validate()`, delete the dead `MetricsAddr` field, and replace the dynamic log key at `cmd/main.go:51` with fixed `"setting"`/`"value"` keys.
+
+---
+
+# 3. Test coverage — 1 / 5
+
+**Score floored by the mandatory rule in `CLAUDE.md` §4:** measured total 53.9% is below 60%, which forces a `critical` finding and a score of 1. The floor is doing most of the work in this number, and the report says so plainly: the `internal/service` suite is genuinely excellent and the integration scaffolding is fully compliant. The problem is concentrated, measurable and fixable.
+
+## Measured coverage
+
+`go test -coverprofile=/tmp/cov.out ./history-service/...` followed by `go tool cover -func`. Run without the `integration` build tag, since Docker was unavailable in the audit sandbox.
+
+| Package | Coverage | Covered / total statements |
+|---|---|---|
+| `internal/service` | **93.0%** | 982 / 1056 |
+| `internal/config` | 92.6% | 25 / 27 |
+| `internal/readcache` | 89.2% | 74 / 83 |
+| `internal/publisher` | 83.3% | 20 / 24 |
+| `internal/cassrepo` | **32.1%** | 175 / 546 |
+| `internal/mongorepo` | **3.5%** | 5 / 144 |
+| `cmd` | 0.0% | 0 / 120 |
+| `internal/service/mocks` (generated) | 0.0% | 0 / 378 |
+| **Total (verbatim tool output)** | **53.9%** | 1281 / 2378 |
+
+`internal/models` reports `[no statements]` — pure type declarations. Three alternative framings, for honesty: **64.0%** excluding the generated mock package, **68.1%** excluding mocks *and* `cmd/main.go`. All three are below the 80% floor.
+
+Other checks run:
+
+- `make test SERVICE=history-service` → **all 8 packages pass**, no failures.
+- `make generate SERVICE=history-service` → **no diff; mocks are current.** No stale-mock finding. Working tree verified clean afterwards (`git status --porcelain` empty).
+
+## Findings
+
+### `critical` — Total coverage 53.9%, below the repo minimum 80%
+Coverage below repo minimum 80%, currently 53.9%. Driven almost entirely by two packages: `internal/cassrepo` at 32.1% and `internal/mongorepo` at 3.5%.
+
+### `high` — The 80% floor is not enforced anywhere in CI
+`history-service/deploy/azure-pipelines.yml:44` writes `-coverprofile=coverage-$(SERVICE_NAME).out` and then never reads it. The repo *has* a gate tool — `tools/coveragecheck`, wired at `Makefile:141-152` — but it is applied only to `tools/loadgen`. Nothing would have caught this drift, and nothing will catch the next one.
+
+### `high` — `internal/mongorepo` has exactly one untagged test file, 49 LOC
+`internal/mongorepo/threadsubscription_unit_test.go` is the only non-`integration` test in a 144-statement package. Every repository method sits at 0%: `room.go:38 GetMinUserLastSeenAt` through `room.go:251 GetRoomUserCount` (78 uncovered statements), `threadroom.go:32-85`, `threadsubscription.go:49-65`. Worse, `pipelines.go:10/18/25/136` are **pure `bson.M`/`bson.A` builders that need no database at all** and are 0% covered — including `unreadThreadsPipeline` (`pipelines.go:136`), whose `$lookup` shape (itself a `high` performance finding) is asserted only behind Docker.
+
+### `high` — At-rest-encryption correctness paths have zero unit coverage
+`internal/cassrepo/write.go:116 blankQuotedBody` is a pure function whose entire job is clearing *only* the quoted-parent body sub-fields before the plaintext column is written; a bug leaks plaintext into an unencrypted column. It is at 0%. The same applies to `internal/cassrepo/decrypt.go:21 decryptIfNeeded`, whose `ErrEncryptedRowCipherDisabled` branch (`decrypt.go:26`) is a security-visible error path at 0% — and trivially testable, since the `r.cipher` seam already exists for a fake.
+
+### `medium` — `RegisterHandlers` is 0% covered
+`internal/service/service.go:221` wires 18 NATS subjects. A swapped handler or a wrong `subject.*Pattern` would ship silently in a service that is reachable *only* over NATS request/reply. Cheap to cover with a fake router that records `(subject → handler)` pairs.
+
+### `medium` — `PreviewCache.Invalidate` is 0% covered
+`internal/readcache/readcache.go:285`, and its `ttlCache.remove` at `readcache.go:63`, is the eviction mechanism the file's own comment identifies as the protection against serving a just-deleted message as a room preview. Untested.
+
+### `low` — Two timing-dependent tests will flake under load
+`internal/readcache/readcache_test.go:111` sleeps 40ms against a 20ms TTL, and `internal/cassrepo/messages_by_id_test.go:97` sleeps 10ms to widen a concurrency window then asserts `assert.Greater(maxSeen, 1)`. Both are vulnerable on a loaded or single-CPU CI runner under `-race`.
+
+### `nitpick` — Table-driven usage is thin relative to the guideline
+544 test functions against 26 `[]struct{}` tables and 79 named cases. Many one-scenario-per-function tests where a table would read better — `walker_test.go` alone has 14 discrete `TestWalkBuckets_*` functions. A style deviation from §4's "prefer table-driven", not a correctness gap.
+
+## What is genuinely good
+
+The raw percentage understates this suite, and the recommendations are aimed at the gap rather than at the whole:
+
+- **`internal/service` at 93.0% with real error-path depth.** All 30 partially-covered functions sit at 84–98%, and the only sub-80% items are three best-effort publish fallbacks (`messages.go:729`, `migration.go:136`, `rooms.go:207`) — themselves the subject of the `high` durability finding. Assertions check typed errors properly (`errcode.CodeNotFound/BadRequest/Forbidden/Internal`, `errcode.HasReason`, `errcode.MessageOutsideAccessWindow`), never error strings.
+- **Integration scaffolding is fully compliant.** 125 integration test functions across 18 tagged files; all three packages have `TestMain(m) { testutil.RunTests(m) }` (`cassrepo/main_test.go`, `mongorepo/main_test.go`, `service/main_test.go`); containers come exclusively from `testutil.MongoDB` / `testutil.CassandraKeyspace`; **zero** inline `testcontainers.GenericContainer`. The depth is real rather than smoke — `write_integration_test.go` is 1773 LOC across 31 tests.
+- **The mock-versus-real split is correct.** Business logic is mocked via `service/mocks` (10 interfaces, mockgen, up to date); store implementations are tested against real Cassandra and Mongo. No unit test touches a real dependency.
+- **No test helpers in production code**; no `testing` import outside `_test.go`. No package-level *mutable* shared state — the six package variables are immutable `time.Time`/`preview.Key` constants — and no `t.Parallel`, so no ordering hazard.
+
+## Recommendations
+
+1. **`critical`** — Wire `tools/coveragecheck` into `history-service/deploy/azure-pipelines.yml` after line 44 with `-min 80`, plus a `-min 90` scoped run for `internal/service`. Without a gate the floor is advisory and will drift again.
+2. **`high`** — Add an untagged `internal/mongorepo/pipelines_test.go` asserting the built `bson` documents for all four builders. Pure functions, no Docker, and it makes the `$lookup` shapes reviewable in CI.
+3. **`high`** — Add untagged unit tests for the pure and seam-injectable `cassrepo` helpers: `blankQuotedBody` (`write.go:116`), `decryptIfNeeded` (`decrypt.go:21`) including the cipher-disabled branch, `startBucketFromCursor` (`messages_by_room.go:24`), and `toPage` (`walker.go:81`). Table-driven, fake cipher, no container.
+4. **`high`** — Run the integration suite with `-coverprofile` in CI and merge the two profiles (`go tool covdata`, or `-coverpkg=./history-service/...`) so `cassrepo`/`mongorepo` coverage is *measured* rather than assumed. As it stands nobody can tell whether the Docker suite actually covers those 371 uncovered `cassrepo` statements.
+5. **`medium`** — Cover `RegisterHandlers` (`service.go:221`) with a fake `natsrouter.Router` capturing registered subjects, asserted against the expected `subject.*Pattern` set.
+6. **`medium`** — Cover `PreviewCache.Invalidate` / `ttlCache.remove` (`readcache.go:285`, `readcache.go:63`): populate, invalidate, assert the next `Get` re-loads.
+7. **`low`** — De-flake the two timing tests: inject a clock into `ttlCache` (or assert only "at least one reload"), and replace the `Sleep(10ms)` in `messages_by_id_test.go:97` with a channel barrier that releases once `limit` fetches are in flight.
