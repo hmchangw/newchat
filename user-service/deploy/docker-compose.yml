@@ -53,6 +53,7 @@ services:
       # Truncates each preview body; a page holds 400 and a body may reach 20 KB.
       - PREVIEW_CONTENT_CHARS=${PREVIEW_CONTENT_CHARS:-50}
       - MAX_SITE_FANOUT=${MAX_SITE_FANOUT:-8}
+      - MAX_BADGE_SEED_FANOUT=${MAX_BADGE_SEED_FANOUT:-8}
       - HEALTH_ADDR=${HEALTH_ADDR:-:8081}
       # Unset leaves HTTP auth on ssoToken only.
       - BOTPLATFORM_URL=${BOTPLATFORM_URL:-}
