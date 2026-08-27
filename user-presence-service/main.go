@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
@@ -110,12 +111,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := presencestore.NewValkeyStore(
+	store, err := presencestore.NewValkeyStore(ctx,
 		presencestore.ClusterConfig{Addrs: cfg.Valkey.Addrs, Password: cfg.Valkey.Password},
 		cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL,
+		valkeyutil.WithObservability(sdk),
 	)
 	if err != nil {
-		slog.Error("valkey connect failed", "error", err)
+		slog.Error("build valkey client failed", "error", err)
 		os.Exit(1)
 	}
 

@@ -17,8 +17,11 @@ type Observability interface {
 }
 
 type connectConfig struct {
-	obs       Observability
-	redisOpts []o11yredis.Option
+	obs         Observability
+	redisOpts   []o11yredis.Option
+	profile     Profile
+	breaker     bool
+	breakerName string
 }
 
 // Option configures ConnectCluster. The zero config attaches no instrumentation
@@ -55,12 +58,31 @@ func WithIgnoredCommands(names ...string) Option {
 	return WithRedisOptions(o11yredis.WithIgnoredCommands(names...))
 }
 
+// WithProfile selects the timeout budget for the client. Defaults to
+// CacheProfile; user-presence-service passes StoreProfile because Valkey is
+// its store of record rather than a cache.
+func WithProfile(p Profile) Option {
+	return func(c *connectConfig) { c.profile = p }
+}
+
 func newConnectConfig(opts ...Option) connectConfig {
-	var cfg connectConfig
+	cfg := connectConfig{profile: CacheProfile, breaker: true, breakerName: "valkey"}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
 	}
 	return cfg
+}
+
+// WithBreakerName labels the circuit breaker in logs and metrics. Defaults to
+// "valkey"; pass the service name when several clients coexist in one process.
+func WithBreakerName(name string) Option {
+	return func(c *connectConfig) { c.breakerName = name }
+}
+
+// WithoutCircuitBreaker disables the breaker. Intended for tests and one-shot
+// CLI tools, where short-circuiting adds nothing.
+func WithoutCircuitBreaker() Option {
+	return func(c *connectConfig) { c.breaker = false }
 }

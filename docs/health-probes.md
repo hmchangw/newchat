@@ -51,6 +51,46 @@ addition, since that is the failure neither current probe catches.)
 `HEALTH_ADDR` is a standard `caarlos0/env` var; override per deployment if
 `:8081` clashes with another container port.
 
+## Valkey is never a startup gate
+
+Long-running services build their Valkey client through
+`valkeyutil.ConnectClusterLazy` (or `valkeyutil.NewClusterClient`, for the
+raw-client consumers in `user-presence-service`). Both log an unreachable
+cluster and return a usable client rather than failing.
+
+This mirrors the readiness reasoning above: a shared datastore is the same for
+every replica, so making it fatal at startup means a Valkey outage overlapping a
+rollout, scale-up, or node drain crashloops every pod at once — including the
+message path. go-redis dials lazily and self-heals per call, so a pod that
+starts during an outage recovers on its own when Valkey returns.
+
+`valkeyutil.ConnectCluster` keeps the fail-fast contract and is used only by the
+one-shot CLI `tools/seed-sample-data`, where aborting the run is correct.
+
+### What degrades, and how
+
+| Consumer | Behavior while Valkey is down |
+|---|---|
+| Room metadata, room subscriptions, search restricted-rooms | Fall back to MongoDB / Elasticsearch. Correct results, higher latency and load. |
+| `botplatform-service` rate limit + idempotency | **Fail open** — bot requests are admitted unthrottled and without duplicate suppression. Bots are critical, so a lost ceiling beats a dead bot. |
+| `user-presence-service` | No fallback exists — Valkey is the store of record, so presence RPCs return `errcode` errors until it returns. `user-service` degrades `/me` to `presence: "offline"` rather than failing. |
+
+Room-metadata invalidation (`BustMeta`) is best-effort, so a rename or
+member-count change during an outage can serve stale metadata until
+`ROOM_META_L2_TTL` expires (default 15m). The write itself still lands in Mongo.
+
+### What to watch
+
+- `valkey_breaker_state` (0 closed, 1 half-open, 2 open) and
+  `valkey_breaker_transitions_total`, both labelled by service. The breaker
+  short-circuits calls while the cluster is down so the degraded path does not
+  pay a timeout per request. It decorates the `Client` facade, so
+  `user-presence-service`'s raw client is not behind one and pays its
+  `StoreProfile` budget per call instead.
+- `bot_control_bypassed_total{control}` — non-zero means bot rate limiting or
+  duplicate suppression is currently off. This is the only durable signal that
+  those controls were skipped; alert on it.
+
 ## Optional pprof profiling surface
 
 The nine message-pipeline NATS services (`broadcast-worker`, `history-service`,

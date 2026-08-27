@@ -81,9 +81,12 @@ func run() error {
 	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)
 
 	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency (dev only; prod must supply).
+	// Lazy connect: bots are critical, so an unreachable Valkey must not block startup —
+	// otherwise a pod restart during an outage crashloops and both middlewares' fail-open
+	// posture never gets a chance to run.
 	var valkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
-		valkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
+		valkey, err = valkeyutil.ConnectClusterLazy(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 			valkeyutil.WithObservability(sdk),
 			valkeyutil.WithRequireParentSpan(true),
 		)

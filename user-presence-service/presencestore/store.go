@@ -12,6 +12,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 const keyPrefix = "presence:"
@@ -188,16 +189,21 @@ type ClusterConfig struct {
 	Password string
 }
 
-// NewValkeyStore dials the cluster, pings it, and returns a Store.
-func NewValkeyStore(cfg ClusterConfig, staleThreshold, connsTTL time.Duration) (*Store, error) {
-	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: cfg.Addrs, Password: cfg.Password})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := c.Ping(ctx).Err(); err != nil {
-		if closeErr := c.Close(); closeErr != nil {
-			slog.Warn("valkey cluster close after failed connect", "error", closeErr)
-		}
-		return nil, fmt.Errorf("valkey cluster connect: %w", err)
+// NewValkeyStore dials the cluster and returns a Store. Construction, the
+// StoreProfile budget and the non-fatal startup probe all come from
+// valkeyutil.NewClusterClient, so this path picks up the same o11y hooks as
+// every other Valkey client in the fleet.
+//
+// Presence is the store of record with no fallback, hence StoreProfile's wider
+// budget rather than the cache-tight CacheProfile: a ceiling that manufactures
+// Lua EVAL timeouts here has nothing to degrade to. Unreachability is not an
+// error — failing startup would turn any rollout or node drain during an outage
+// into a CrashLoopBackOff on the one service that cannot degrade.
+func NewValkeyStore(ctx context.Context, cfg ClusterConfig, staleThreshold, connsTTL time.Duration, opts ...valkeyutil.Option) (*Store, error) {
+	c, err := valkeyutil.NewClusterClient(ctx, cfg.Addrs, cfg.Password,
+		append([]valkeyutil.Option{valkeyutil.WithProfile(valkeyutil.StoreProfile)}, opts...)...)
+	if err != nil {
+		return nil, fmt.Errorf("build presence valkey client: %w", err)
 	}
 	return NewValkeyStoreFromClient(c, staleThreshold, connsTTL), nil
 }
