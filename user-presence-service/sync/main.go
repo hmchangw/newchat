@@ -38,8 +38,9 @@ type Config struct {
 
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in, default
 	// false) for dev/on-prem environments behind a TLS-intercepting proxy. The
-	// proxy itself is taken from the standard HTTPS_PROXY/HTTP_PROXY env vars
-	// (msgraph clones the default transport, which honors ProxyFromEnvironment).
+	// proxy itself comes from GraphProxyURL below, or — only when that is empty —
+	// from the standard HTTPS_PROXY/HTTP_PROXY env vars (msgraph clones the
+	// default transport, which honors ProxyFromEnvironment).
 	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
 
 	// GraphProxyURL, when set, routes the presence Graph client through this

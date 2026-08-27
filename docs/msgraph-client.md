@@ -73,12 +73,18 @@ supported, but the separate vars are preferred:
 
 - A password containing `@ : / ? # %` needs no percent-encoding.
 - Only the password is a secret, so `GRAPH_PROXY_URL` can stay in a ConfigMap.
+  A `GRAPH_PROXY_URL` that *does* embed userinfo is itself a secret and belongs
+  in a Secret — that is the second reason to prefer the separate vars.
 - Rotating the password touches one value, not a connection string.
 
-The explicit vars win over embedded userinfo. Two misconfigurations fail fast at
-construction rather than silently egressing unauthenticated: credentials with no
-`GRAPH_PROXY_URL`, and a password with no username. Only **Basic** is supported
-— Go's transport has no NTLM/Kerberos/Digest proxy auth.
+The explicit vars win over embedded userinfo. These fail fast at construction
+rather than silently egressing unauthenticated or breaking on the first request:
+credentials with no `GRAPH_PROXY_URL`, a password with no username, a malformed
+URL, and a scheme `net/http` cannot proxy through (only `http`, `https`,
+`socks5` and `socks5h` work). A malformed URL is reported without its value, so
+userinfo embedded in a broken `GRAPH_PROXY_URL` never reaches the log. Only
+**Basic** auth is supported — Go's transport has no NTLM/Kerberos/Digest proxy
+auth.
 
 Every error-returning constructor applies it: `NewMeetingsClient`,
 `NewMeetingsDirectoryClient`, `NewUserListerClient`, `NewChatsClient`,
@@ -88,9 +94,12 @@ Every error-returning constructor applies it: `NewMeetingsClient`,
 precisely so a bad proxy value stops the pod at startup instead of failing the
 first Graph call.
 
-So no Graph traffic depends on the ambient `HTTPS_PROXY` any more: set
-`GRAPH_PROXY_URL` (plus credentials where the proxy authenticates) and every
-service's Graph egress uses it.
+The two settings are alternatives, not layers. When `GRAPH_PROXY_URL` is set it
+**overrides** `HTTPS_PROXY`/`HTTP_PROXY` for Graph traffic; when it is empty the
+client keeps the default transport, so those ambient vars stay the fallback
+(they also remain the fallback for a service's non-Graph egress either way).
+Set `GRAPH_PROXY_URL` on every Graph service and no Graph egress depends on the
+ambient vars.
 
 ## Resolving object IDs (app-only directory reader)
 

@@ -60,7 +60,7 @@ func NewPresenceClient(cfg Config, creds ROPCCredentials, opts ...Option) (Prese
 	g := New(cfg, opts...).(*graphClient)
 	hc := g.httpClient
 	if err := applyProxy(hc, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure presence client proxy: %w", err)
 	}
 	ua := cfg.UserAgent
 	if ua == "" {

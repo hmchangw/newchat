@@ -32,15 +32,14 @@ func newTestClient(tokenURL, baseURL string) Client {
 }
 
 // newTestDirectory wires a DirectoryReader at the given token + graph servers.
-func newTestDirectory(tokenURL, baseURL string) DirectoryReader {
+func newTestDirectory(t *testing.T, tokenURL, baseURL string) DirectoryReader {
+	t.Helper()
 	c, err := NewDirectoryClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return c
 }
 
@@ -282,7 +281,7 @@ func TestResolveAccountIDs_BatchesAndKeysByAccount(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	got, err := c.ResolveAccountIDs(context.Background(), []string{"alice", "bob"})
 	require.NoError(t, err)
 	// Keyed by account (lowercased UPN local-part), so mixed-case UPN still maps.
@@ -303,7 +302,7 @@ func TestResolveAccountIDs_SkipsUnrequestedAndDupes(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	got, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"alice": "ida1"}, got)
@@ -326,7 +325,7 @@ func TestResolveAccountIDs_ChunksLargeInput(t *testing.T) {
 	for i := range accounts {
 		accounts[i] = fmt.Sprintf("u%d", i)
 	}
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	_, err := c.ResolveAccountIDs(context.Background(), accounts)
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls, "accounts beyond one chunk trigger a second query")
@@ -631,7 +630,7 @@ func TestResolveAccountIDs_SendsUserAgent(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	_, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 }
@@ -1101,6 +1100,54 @@ func TestNewDirectoryClient_InvalidProxyURL(t *testing.T) {
 			c, err := NewDirectoryClient(Config{TenantID: "t", ProxyURL: proxy})
 			require.Error(t, err)
 			assert.Nil(t, c)
+		})
+	}
+}
+
+// TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword covers the path
+// the separate-credentials test misses: url.Parse's *url.Error carries the raw
+// input, so a malformed URL with embedded userinfo would put the proxy password
+// in the returned error — and from there into the server log via
+// errcode.Classify. Redacted() cannot help, since it needs a parsed URL.
+func TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	for _, proxy := range []string{
+		"://user:" + password + "@proxy.corp:8080",
+		"http://user:" + password + "@proxy.corp:80 80",
+		"ht tp://user:" + password + "@proxy.corp",
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "a malformed proxy url must not leak its embedded password")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsUnsupportedScheme keeps the fail-fast promise whole:
+// net/http only proxies through http, https, socks5 and socks5h, so any other
+// scheme is a startup-time configuration error rather than a surprise on the
+// first Graph call.
+func TestApplyProxy_RejectsUnsupportedScheme(t *testing.T) {
+	for _, proxy := range []string{"ftp://proxy.corp:21", "socks4://proxy.corp:1080", "ws://proxy.corp:80"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestApplyProxy_AcceptsEverySupportedScheme(t *testing.T) {
+	for _, proxy := range []string{
+		"http://proxy.corp:8080",
+		"https://proxy.corp:8443",
+		"socks5://proxy.corp:1080",
+		"socks5h://proxy.corp:1080",
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.NoError(t, err)
+			assert.Equal(t, proxy, proxyTargetOf(t, c).String())
 		})
 	}
 }

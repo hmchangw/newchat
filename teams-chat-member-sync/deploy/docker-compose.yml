@@ -19,7 +19,8 @@ services:
       - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
       - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
       - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}
-      # Fallback for any non-Graph egress.
+      # Fallback: for Graph too when GRAPH_PROXY_URL is empty, and for any
+      # non-Graph egress either way.
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}

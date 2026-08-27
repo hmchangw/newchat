@@ -199,8 +199,11 @@ func TestConfig_GraphProxyCredentials(t *testing.T) {
 func TestConfig_GraphProxyCredentialsDefaultEmpty(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
-	require.NoError(t, os.Unsetenv("GRAPH_PROXY_USERNAME"))
-	require.NoError(t, os.Unsetenv("GRAPH_PROXY_PASSWORD"))
+	// t.Setenv("") restores the prior value on cleanup; env falls back to the
+	// empty envDefault, so this is "unset" without leaking into sibling tests.
+	t.Setenv("GRAPH_PROXY_URL", "")
+	t.Setenv("GRAPH_PROXY_USERNAME", "")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "")
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)

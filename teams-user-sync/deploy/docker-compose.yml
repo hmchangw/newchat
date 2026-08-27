@@ -14,9 +14,9 @@ services:
       - GRAPH_CLIENT_ID=${GRAPH_CLIENT_ID}
       - GRAPH_CLIENT_SECRET=${GRAPH_CLIENT_SECRET}
       - GRAPH_PAGE_SIZE=500
-      # Graph egress proxy (optional). GRAPH_PROXY_URL takes precedence over the
-      # standard HTTPS_PROXY/HTTP_PROXY vars; the credentials are for a proxy
-      # that authenticates with Basic.
+      # Graph egress proxy (optional). GRAPH_PROXY_URL overrides the standard
+      # HTTPS_PROXY/HTTP_PROXY vars for Graph; leave it empty and those stay the
+      # Graph fallback. The credentials are for a proxy authenticating with Basic.
       - GRAPH_PROXY_URL=${GRAPH_PROXY_URL:-}
       - GRAPH_PROXY_USERNAME=${GRAPH_PROXY_USERNAME:-}
       - GRAPH_PROXY_PASSWORD=${GRAPH_PROXY_PASSWORD:-}

@@ -54,7 +54,7 @@ type DirectoryReader interface {
 func NewDirectoryClient(cfg Config, opts ...Option) (DirectoryReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure directory client proxy: %w", err)
 	}
 	return g, nil
 }
@@ -77,7 +77,7 @@ type UserLister interface {
 func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure user lister client proxy: %w", err)
 	}
 	return g, nil
 }
@@ -303,7 +303,7 @@ func New(cfg Config, opts ...Option) Client {
 func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure meetings client proxy: %w", err)
 	}
 	return g, nil
 }
@@ -320,7 +320,7 @@ func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 func NewMeetingsDirectoryClient(cfg Config, opts ...Option) (Client, DirectoryReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("configure meetings directory client proxy: %w", err)
 	}
 	return g, g, nil
 }
@@ -346,6 +346,13 @@ func mutableTransport(hc *http.Client) *http.Transport {
 	return tr
 }
 
+// supportedProxySchemes are the schemes net/http.Transport can proxy through
+// (transport.go: "http", "https", "socks5", "socks5h"). Anything else is a
+// configuration error we catch at construction.
+var supportedProxySchemes = map[string]bool{
+	"http": true, "https": true, "socks5": true, "socks5h": true,
+}
+
 // applyProxy points hc's transport at cfg.ProxyURL (overriding
 // HTTPS_PROXY/HTTP_PROXY) when it is non-empty, authenticating with
 // cfg.ProxyUsername/ProxyPassword when they are set. The URL must include a
@@ -367,11 +374,22 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	}
 	proxyURL, err := url.Parse(cfg.ProxyURL)
 	if err != nil {
-		return fmt.Errorf("parse graph proxy url: %w", err)
+		// *url.Error carries the raw input, so returning it verbatim would leak a
+		// password embedded as userinfo. Redacted() can't help here — it needs a
+		// URL that parsed. Keep the underlying reason, drop the value.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			return fmt.Errorf("parse graph proxy url: %w", uerr.Err)
+		}
+		return errors.New("parse graph proxy url: malformed value")
 	}
 	if proxyURL.Scheme == "" || proxyURL.Host == "" {
 		// Redacted() masks any embedded proxy credentials before it reaches logs.
 		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
+	}
+	if !supportedProxySchemes[proxyURL.Scheme] {
+		// net/http would accept this here and fail on the first request instead.
+		return fmt.Errorf("unsupported graph proxy scheme %q: want http, https, socks5 or socks5h", proxyURL.Scheme)
 	}
 	if cfg.ProxyUsername != "" {
 		proxyURL.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)

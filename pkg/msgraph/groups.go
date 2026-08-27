@@ -29,7 +29,7 @@ type GroupReader interface {
 func NewGroupReaderClient(cfg Config, opts ...Option) (GroupReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure group reader client proxy: %w", err)
 	}
 	return g, nil
 }

@@ -16,6 +16,11 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("GRAPH_TENANT_ID", "tenant")
 	t.Setenv("GRAPH_CLIENT_ID", "client")
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
+	// Cleared so the default-value assertions don't depend on the host env; the
+	// proxy tests set them explicitly.
+	t.Setenv("GRAPH_PROXY_URL", "")
+	t.Setenv("GRAPH_PROXY_USERNAME", "")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "")
 }
 
 func TestConfig_Defaults(t *testing.T) {

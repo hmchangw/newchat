@@ -31,7 +31,7 @@ type ChatsReader interface {
 func NewChatsClient(cfg Config, opts ...Option) (ChatsReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	if err := applyProxy(g.httpClient, &cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configure chats client proxy: %w", err)
 	}
 	return g, nil
 }

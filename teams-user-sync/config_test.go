@@ -16,6 +16,11 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("GRAPH_CLIENT_SECRET", "secret")
 	t.Setenv("MONGO_READ_URI", "mongodb://read:27017")
 	t.Setenv("MONGO_WRITE_URI", "mongodb://write:27017")
+	// Cleared so the default-value assertions don't depend on the host env; the
+	// proxy tests set them explicitly.
+	t.Setenv("GRAPH_PROXY_URL", "")
+	t.Setenv("GRAPH_PROXY_USERNAME", "")
+	t.Setenv("GRAPH_PROXY_PASSWORD", "")
 }
 
 func TestConfig_Defaults(t *testing.T) {

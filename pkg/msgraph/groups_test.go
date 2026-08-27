@@ -13,15 +13,14 @@ import (
 )
 
 // newTestGroupReader wires a GroupReader at the given token + graph servers.
-func newTestGroupReader(tokenURL, baseURL string) GroupReader {
+func newTestGroupReader(t *testing.T, tokenURL, baseURL string) GroupReader {
+	t.Helper()
 	c, err := NewGroupReaderClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
-	if err != nil {
-		panic(err)
-	}
+	require.NoError(t, err)
 	return c
 }
 
@@ -44,7 +43,7 @@ func TestGetGroup_Success(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	got, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "g1")
+	got, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "g1")
 	require.NoError(t, err)
 	assert.Equal(t, &GroupProfile{ID: "g1", DisplayName: "Engineering", Description: "eng dept"}, got)
 }
@@ -56,7 +55,7 @@ func TestGetGroup_Non200IsError(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "missing")
+	_, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "missing")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 404")
 }
@@ -93,7 +92,7 @@ func TestListGroupMembers_MultiPageFiltersNonUsers(t *testing.T) {
 
 	var got []GraphUser
 	var pages int
-	skipped, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).ListGroupMembers(
+	skipped, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).ListGroupMembers(
 		context.Background(), "g1", 2, func(users []GraphUser) error {
 			pages++
 			got = append(got, users...)
@@ -120,7 +119,7 @@ func TestListGroupMembers_CallbackErrorAbortsWalk(t *testing.T) {
 	defer graphSrv.Close()
 
 	boom := errors.New("boom")
-	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).ListGroupMembers(
+	_, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).ListGroupMembers(
 		context.Background(), "g1", 10, func([]GraphUser) error { return boom })
 	require.ErrorIs(t, err, boom)
 }
@@ -132,7 +131,7 @@ func TestListGroupMembers_Non200IsError(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).ListGroupMembers(
+	_, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).ListGroupMembers(
 		context.Background(), "g1", 10, func([]GraphUser) error { return nil })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 403")
@@ -148,7 +147,7 @@ func TestListGroupMembers_RejectsCrossOriginNextLink(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).ListGroupMembers(
+	_, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).ListGroupMembers(
 		context.Background(), "g1", 10, func([]GraphUser) error { return nil })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deviates from configured graph origin")
@@ -168,7 +167,7 @@ func TestGetGroup_RetriesOn429(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	got, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "g1")
+	got, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).GetGroup(context.Background(), "g1")
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls, "a 429 must be retried, not surfaced")
 	assert.Equal(t, "g1", got.ID)
@@ -189,7 +188,7 @@ func TestListGroupMembers_RetriesOn503(t *testing.T) {
 	defer graphSrv.Close()
 
 	var got []GraphUser
-	_, err := newTestGroupReader(tokenSrv.URL, graphSrv.URL).
+	_, err := newTestGroupReader(t, tokenSrv.URL, graphSrv.URL).
 		ListGroupMembers(context.Background(), "g1", 500, func(users []GraphUser) error { got = append(got, users...); return nil })
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls, "a 503 must be retried, not surfaced")
