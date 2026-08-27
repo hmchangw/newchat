@@ -128,11 +128,31 @@ suppression (§3.6).
 **Granularity: site-wide.** `message-worker` sets a "history degraded since T" marker
 when its Cassandra writes begin failing, and clears it once the backlog drains.
 
-**Only an infra-class failure sets it**, and this is load-bearing precisely *because* the
-marker is site-wide. A request-class verdict (§3.3) is the classifier saying "this one row
-is unwritable" — per-message by construction — and a clean `messages_by_id` miss on a
-thread parent is an ordering race between concurrent workers, not evidence about
-Cassandra. Either one, allowed to mark, turns a single message into a site-wide "history
+**Only an infra-class failure of a *write* sets it**, and this is load-bearing precisely
+*because* the marker is site-wide. A request-class verdict (§3.3) is the classifier saying
+"this one row is unwritable" — per-message by construction — and a clean `messages_by_id`
+miss on a thread parent is an ordering race between concurrent workers, not evidence about
+Cassandra.
+
+The write/read half of that rule was learned the expensive way. An earlier revision tagged
+the thread-parent `createdAt` lookup's failure as a history *write* failure, on the
+reasoning that a failed read is the same signal — history is behind — and that it usefully
+marks the site at the onset of an outage before any plain message has failed its own write.
+It is not the same signal. The marker asserts one thing, that history is behind, and only a
+failed write can make that true; a failed read means the lookup needs retrying, and during a
+read-timeout wave with writes landing normally history is in fact complete. The onset
+argument buys almost nothing besides — every message goes through a write, so on a real
+outage the write path raises the marker within milliseconds anyway, whereas the lookup only
+runs for the subset of thread replies whose parent the gatekeeper failed to resolve.
+
+What it cost was not small. Because `settle` calls `OnWriteSuccess` before the Ack, the
+message observing recovery is always in `NumAckPending`, so the drain-tail clock always
+starts and even a fully drained, healthy site waits out the entire grace (§3.5). One
+transient timeout on one lookup therefore bought every client on the site a full
+`drainTailGrace` — 20 minutes at the current schedule — of `incompleteSince` and suppressed
+thread badges, with no gap behind it. Read failures now retry identically and are counted on
+their own series (§3.7), which keeps the onset signal as an observation for an operator
+rather than as state every client is shown. Either one, allowed to mark, turns a single message into a site-wide "history
 is incomplete" for the whole drain grace: `incompleteSince` on every room, every thread
 badge suppressed. The cost of this rule is that a site-wide fault presenting as request
 class (a migration returning `Invalid` for every write) sets no marker; that is the
@@ -401,6 +421,10 @@ Add, with alerts:
 - History write failures by error class (`message_worker_history_write_failures_total{class}`)
   — a rising `class="request"` rate is a migration-induced wave, visible before the
   retry window elapses and anything is destroyed.
+- History **read** failures by error class (`message_worker_history_read_failures_total{class}`)
+  — the earliest visible sign of a Cassandra problem, often ahead of the first failed write.
+  Deliberately does not raise the degraded marker (§3.2), so this series is the whole of its
+  signal: alert on the rate, not on a single sample, since one timeout is noise.
 - Degraded-marker state and duration.
 - Stream retention verdict (`message_worker_stream_retention_insufficient`) — 1 when
   MESSAGES-CANONICAL cannot hold a backlog for `MIN_STREAM_MAX_AGE`, **-1 when the

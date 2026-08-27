@@ -580,3 +580,60 @@ func TestHandler_Settle_OrphanedParent(t *testing.T) {
 		}
 	})
 }
+
+// readErr wraps a Cassandra failure the way handler.go's two history *read* sites do.
+func readErr(cause error) error {
+	return fmt.Errorf("resolve thread parent createdAt: %w", historyReadError{fmt.Errorf("gocql: %w", cause)})
+}
+
+// TestHandler_Settle_HistoryReadFailure covers the failure that used to cost the
+// whole site twenty minutes of "history is incomplete".
+//
+// The marker means one thing: history is behind. Only a failed *write* can make that
+// true. A failed read means the lookup needs retrying — nothing is missing, and on a
+// read-timeout wave with writes landing normally, history is in fact complete.
+//
+// Tagging the read as a write failure inverted that. One transient timeout on the
+// thread-parent lookup raised site-wide state that OnWriteSuccess then holds for the
+// full drainTailGrace, because settle runs it before the Ack so the observing message
+// is itself in ackPending and the tail clock always starts. Every client on the site
+// saw incompleteSince, and every thread-reply badge was suppressed, over a blip.
+func TestHandler_Settle_HistoryReadFailure(t *testing.T) {
+	t.Run("never marks the site degraded", func(t *testing.T) {
+		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
+		msg := &fakeJetStreamMsg{numDelivered: 1}
+		h.settle(context.Background(), msg, readErr(gocql.ErrNoConnections))
+
+		assert.True(t, msg.naked, "a read failure still retries — it is infra, it just is not evidence of a gap")
+		assert.False(t, msg.acked)
+		assert.False(t, h.degrade.Degraded(),
+			"one failed lookup must not tell every client on the site that their history is incomplete")
+	})
+
+	t.Run("a write failure beside it still marks", func(t *testing.T) {
+		// The signal that genuinely means history is behind is unchanged: this is a
+		// narrowing of what may raise the marker, not a removal of the marker.
+		h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
+		h.settle(context.Background(), &fakeJetStreamMsg{numDelivered: 1}, infraClassErr())
+		assert.True(t, h.degrade.Degraded())
+	})
+
+	t.Run("never drops, whatever the CQL code and however long it retries", func(t *testing.T) {
+		// A read cannot destroy anything by being retried, and a request-class read
+		// error against our static prepared statements would fail EVERY read — the
+		// site-wide shape the classifier already refuses to drop on.
+		for _, cause := range []error{
+			gocql.ErrNoConnections,
+			fakeCQLError{code: gocql.ErrCodeInvalid, msg: "Invalid"},
+			fakeCQLError{code: gocql.ErrCodeSyntax, msg: "Syntax"},
+		} {
+			for _, delivered := range []uint64{1, 11, 100, 100_000} {
+				h := newDegradeStateHandler(t, nil, noopPublish, false, testDropPolicy())
+				msg := &fakeJetStreamMsg{numDelivered: delivered}
+				h.settle(context.Background(), msg, readErr(cause))
+				assert.False(t, msg.acked, "delivery %d of %v must retry, never drop", delivered, cause)
+				assert.False(t, h.degrade.Degraded())
+			}
+		}
+	})
+}

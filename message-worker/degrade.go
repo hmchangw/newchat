@@ -64,6 +64,31 @@ func isHistoryWriteError(err error) bool {
 	return errors.As(err, &h)
 }
 
+// historyReadError marks a failure of a Cassandra history *read* — the thread-parent
+// createdAt lookup and the quoted-parent snapshot — as opposed to the writes above.
+//
+// The distinction exists because of what the marker means: history is behind. Only a
+// failed write can make that true. A failed read means the lookup needs retrying;
+// nothing is missing, and during a read-timeout wave with writes landing normally
+// history is in fact complete. Reads therefore retry exactly like an infra-class
+// write and are counted like one, but they never raise the site-wide marker.
+//
+// This was the expensive kind of wrong. settle calls OnWriteSuccess before the Ack,
+// so the observing message is always in ackPending and the drain-tail clock always
+// starts — meaning a single spurious raise on a healthy, fully drained site holds
+// incompleteSince and badge suppression for the whole drainTailGrace. One transient
+// timeout on one lookup cost every client on the site twenty minutes of "your history
+// is incomplete" with no gap behind it.
+type historyReadError struct{ err error }
+
+func (e historyReadError) Error() string { return e.err.Error() }
+func (e historyReadError) Unwrap() error { return e.err }
+
+func isHistoryReadError(err error) bool {
+	var h historyReadError
+	return errors.As(err, &h)
+}
+
 // backlogFunc reports the consumer's two backlogs: pending is what has not been
 // delivered yet, ackPending is what has been delivered and not yet acked — the set
 // still cycling through redelivery. Both must be settled before history has caught

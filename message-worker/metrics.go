@@ -21,6 +21,7 @@ type consumerInfoFunc func(ctx context.Context) (*jetstream.ConsumerInfo, error)
 // are read by observable callbacks, so the poller never blocks a metric export.
 type metrics struct {
 	historyWriteFailures metric.Int64Counter
+	historyReadFailures  metric.Int64Counter
 	dropped              metric.Int64Counter
 	dropSuppressed       metric.Int64Counter
 
@@ -47,6 +48,13 @@ func newMetrics() (*metrics, error) {
 		return nil, fmt.Errorf("history write failures counter: %w", err)
 	}
 	m.historyWriteFailures = failures
+
+	reads, err := meter.Int64Counter("message_worker_history_read_failures_total",
+		metric.WithDescription("Cassandra history read failures by error class — the outage-onset signal, which deliberately does NOT raise the degraded marker"))
+	if err != nil {
+		return nil, fmt.Errorf("history read failures counter: %w", err)
+	}
+	m.historyReadFailures = reads
 
 	dropped, err := meter.Int64Counter("message_worker_history_dropped_total",
 		metric.WithDescription("messages destroyed after a request-class Cassandra failure outlasted the retry window, by CQL code"))
@@ -122,6 +130,20 @@ func (m *metrics) onHistoryWriteFailure(class string) {
 		return
 	}
 	m.historyWriteFailures.Add(context.Background(), 1, metric.WithAttributes(attribute.String("class", class)))
+}
+
+// onHistoryReadFailure counts a failed Cassandra history read.
+//
+// Separate from the write counter because it means something different: a failed read
+// is not evidence that history is behind, so it never raises the site-wide marker.
+// The series still exists — it is the earliest visible sign of a Cassandra problem,
+// often ahead of the first failed write — but it is an observation for an operator to
+// act on, not site-wide state every client is shown.
+func (m *metrics) onHistoryReadFailure(class string) {
+	if m == nil {
+		return
+	}
+	m.historyReadFailures.Add(context.Background(), 1, metric.WithAttributes(attribute.String("class", class)))
 }
 
 // onDropped counts a message destroyed by the give-up path, labelled with the CQL

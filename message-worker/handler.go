@@ -188,10 +188,13 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		// hasn't landed → NAK for redelivery rather than persist a null, corrupting
 		// partition coords.
 		//
-		// Only the read *error* is tagged as a history failure. A failed Cassandra
-		// read is the same signal as a failed write — history is behind — and tagging
-		// it is what lets a thread reply mark the site degraded at the onset of an
-		// outage, before any plain message has failed its own write.
+		// The read *error* is tagged as a read failure, not a write failure. A failed
+		// lookup is the earliest visible sign of a Cassandra problem and is counted as
+		// such, but it is not evidence that history is behind — nothing is missing, the
+		// lookup just needs retrying, and during a read-timeout wave with writes landing
+		// normally history is complete. It must not raise site-wide state: settle starts
+		// the drain-tail clock on the very message that observes recovery, so one
+		// spurious raise costs every client the whole drainTailGrace.
 		//
 		// A clean miss is not that signal. The canonical feed is consumed by
 		// MAX_WORKERS goroutines concurrently, so a reply overtaking its own parent is
@@ -206,7 +209,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 		if evt.Message.ThreadParentMessageCreatedAt == nil {
 			createdAt, found, err := h.store.GetMessageCreatedAt(ctx, evt.Message.ThreadParentMessageID)
 			if err != nil {
-				return fmt.Errorf("resolve thread parent createdAt: %w", historyWriteError{err})
+				return fmt.Errorf("resolve thread parent createdAt: %w", historyReadError{err})
 			}
 			if !found {
 				// Typed, not spelled: settle bounds this one (see settleOrphanedParent).
@@ -302,7 +305,7 @@ func (h *Handler) reprojectUnverifiedQuote(ctx context.Context, evt *model.Messa
 	q := evt.Message.QuotedParentMessage
 	snap, found, err := h.store.GetQuotedParentSnapshot(ctx, q.MessageID)
 	if err != nil {
-		return fmt.Errorf("get authoritative quoted parent %s: %w", q.MessageID, err)
+		return fmt.Errorf("get authoritative quoted parent %s: %w", q.MessageID, historyReadError{err})
 	}
 	// The quote is resolved authoritatively from here on, so the marker is
 	// cleared regardless of whether the parent was found.

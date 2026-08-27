@@ -23,6 +23,8 @@ import (
 //   - orphaned parent      → NAK while the site is degraded (the parent is still
 //     replaying), otherwise NAK until the retry window elapses and then drop; see
 //     settleOrphanedParent
+//   - history *read* failure → NAK indefinitely, counted, marker untouched: a failed
+//     lookup means nothing is missing, so it is not evidence history is behind
 //   - non-history failure  → NAK indefinitely; a Mongo/user-lookup/mention failure
 //     leaves the marker untouched, so dropping one would open a hole while
 //     history-service keeps telling clients their history is complete
@@ -52,6 +54,16 @@ func (h *Handler) settle(ctx context.Context, msg jetstream.Msg, err error) {
 	}
 	if parentID, orphaned := orphanedParent(err); orphaned {
 		h.settleOrphanedParent(ctx, msg, err, parentID)
+		return
+	}
+
+	// A read failure retries like an infra-class write and is counted like one, but it
+	// never raises the marker: the marker means history is behind, and only a failed
+	// write can make that true. Checked before the write branch because the tag is what
+	// separates them — see historyReadError for what tagging a read as a write cost.
+	if isHistoryReadError(err) {
+		h.histMetrics.onHistoryReadFailure(cassutil.ClassifyCQL(err).String())
+		jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, err)
 		return
 	}
 	if !isHistoryWriteError(err) {

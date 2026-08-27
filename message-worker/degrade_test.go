@@ -518,3 +518,67 @@ type getErrDegradeStore struct{ fakeDegradeStore }
 func (s *getErrDegradeStore) Get(context.Context, string) (*histdegrade.Marker, error) {
 	return nil, errors.New("mongo unavailable")
 }
+
+func TestIsHistoryReadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain error", errors.New("boom"), false},
+		{"wrapped history read error", fmt.Errorf("resolve parent: %w", historyReadError{errors.New("gocql timeout")}), true},
+		{"double wrapped", fmt.Errorf("outer: %w", fmt.Errorf("resolve parent: %w", historyReadError{errors.New("x")})), true},
+		{"a write error is not a read error", historyWriteError{errors.New("x")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isHistoryReadError(tt.err))
+		})
+	}
+}
+
+// TestDegradeTracker_OneFailureCostsTheFullDrainTailGrace states the price of a
+// single raise, which is the half nobody was asserting.
+//
+// The suite already guards the *bound* — that a tail which never settles cannot pin
+// the marker forever. Read the other way, the same number is the floor every raise
+// pays: because settle calls OnWriteSuccess before the Ack, the observing message is
+// always in ackPending, so the tail clock always starts and a fully drained, healthy
+// site still waits out the whole grace. That is what made a spurious raise expensive.
+//
+// drainTailGrace is derived from jsretry.DefaultBackoff, so retuning that schedule
+// moves this cost without touching a line of this service. This test is where that
+// shows up: it prints the current price, so a rebase that quadruples it (5m -> 20m,
+// as #344 already did once) surfaces as a review question instead of a silent
+// four-fold increase in how long a blip blanks every client on the site.
+func TestDegradeTracker_OneFailureCostsTheFullDrainTailGrace(t *testing.T) {
+	now := testClockStart
+	store := &fakeDegradeStore{}
+	// A healthy, fully drained site: nothing undelivered, and the single in-flight
+	// message is the one being settled. This is the only shape settle can produce.
+	tr := newTestTracker(t, store, func(context.Context) (uint64, uint64, error) {
+		return 0, 1, nil
+	}, func() time.Time { return now })
+
+	tr.OnWriteFailure(context.Background())
+	require.True(t, tr.Degraded())
+
+	// Probes stay more than backlogCheckInterval apart, or the throttle skips the
+	// backlog read and the sample proves nothing.
+	for _, elapsed := range []time.Duration{0, drainTailGrace / 4, drainTailGrace / 2, drainTailGrace - time.Minute} {
+		now = testClockStart.Add(elapsed)
+		tr.OnWriteSuccess(context.Background())
+		require.True(t, tr.Degraded(),
+			"every client on the site still sees incompleteSince %s after the last failure", elapsed)
+	}
+
+	now = testClockStart.Add(drainTailGrace)
+	tr.OnWriteSuccess(context.Background())
+	assert.False(t, tr.Degraded())
+
+	t.Logf("one raise costs %s of site-wide incompleteSince and badge suppression", drainTailGrace)
+	assert.LessOrEqual(t, drainTailGrace, 30*time.Minute,
+		"the cost of a single raise has grown past half an hour — re-check what may raise the marker "+
+			"(settle.go) before accepting this, since the grace is derived from jsretry.DefaultBackoff")
+}

@@ -2734,8 +2734,12 @@ func TestHandler_ProcessMessage_ThreadReplyPublish(t *testing.T) {
 		err := h.processMessage(context.Background(), threadData, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "resolve thread parent createdAt")
-		assert.True(t, isHistoryWriteError(err),
-			"a Cassandra read failure on the persist path is a history failure: it must set the degraded marker and NAK")
+		assert.True(t, isHistoryReadError(err),
+			"a failed lookup still NAKs and replays, and is counted — but as a read failure")
+		assert.False(t, isHistoryWriteError(err),
+			"and NOT as a write failure: the marker means history is behind, which only a failed write "+
+				"can make true. Raising it here cost every client on the site a full drainTailGrace of "+
+				"incompleteSince over a transient timeout with no gap behind it")
 	})
 
 	t.Run("NAKs (returns error) when parent not yet in messages_by_id — no partial writes", func(t *testing.T) {
