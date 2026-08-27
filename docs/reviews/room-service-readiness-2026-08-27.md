@@ -340,3 +340,59 @@ No goroutine leaks, no `time.Sleep` synchronization, no lock held across I/O, an
 - **[medium]** Move the enriched member-list aggregation, its existence probe, `attachOrgDisplay`, and the display-only `GetRoom` calls in `listMemberStatuses`/`listMentionableSubscriptions` onto the `*Secondary` handles; keep authz and read-after-write reads on primary as they are today.
 - **[medium]** Fan out `expandChannelRefs` with a bounded `errgroup` (`SetLimit(4-8)`) instead of the sequential loop, and drop the double marshal by having `boundedReply` return the already-marshaled bytes for the router to respond with.
 - **[low]** Precompute the platform-admin/bot `bson.Regex` values once at `SetPlatformAdminAccountPrefix` time, and decode `ListSubscriptionsByRoom` into a narrow `{u:{account}}` row struct rather than `model.Subscription`.
+
+---
+
+# 7. Prioritized action list
+
+Ordered by severity first, then impact ÷ effort. Items 1–4 are the ones that should land before anyone calls this service production-ready; 5–7 are the highest-leverage scale fixes; 8–10 are the structural work that makes everything after this review cheaper.
+
+### 1. `critical` — Close and enforce the coverage floor
+**Dimension:** Test coverage · **Evidence:** `room-service/store_mongo.go:1` (2.6% unit coverage), `room-service/deploy/azure-pipelines.yml:44`
+
+Unit coverage is 57.7%, below both the 80% repo minimum and the 60% threshold. The 2,046-line store is verified only behind `//go:build integration`, which `make test` and the pre-commit hook do not run — so a projection or filter regression ships green locally and CI never objects. Decide which number CI enforces (unit-only with new tests for the store's pure logic, or a merged unit+integration profile), then wire `tools/coveragecheck -min 80` into the pipeline. Everything else in this report is harder to fix safely until this is done.
+
+### 2. `high` — Fix the `section_moved` dedup-ID collision
+**Dimension:** Integration · **Evidence:** `room-service/handler.go:2402`, `pkg/natsutil/request_id.go:144-151`
+
+`federateOne`'s dedup ID ignores `dedupSeed` whenever a request ID is present, and the natsrouter middleware always stamps one. Every row in the `moveChat` rebalance loop therefore publishes with an identical `Nats-Msg-Id`, and JetStream drops all but the first — cross-site users keep stale `sectionOrder` on every renumbered sibling. This is silent data divergence, not a degraded path. Compose the ID from request ID *and* seed, and assert distinct `msgID`s in `handler_test.go:6570`.
+
+### 3. `high` — Make a missing room return 404 everywhere, and stop leaking the driver
+**Dimensions:** Code quality, Architecture, Maintainability · **Evidence:** `room-service/store_mongo.go:238,247`; `handler.go:663,757,885,1385` vs `:1976,2048`
+
+One fix resolves three findings flagged independently by three auditors. `GetRoom` wraps every failure — including Mongo timeouts — in a "not found" message, four RPCs then surface a genuinely missing room as a 500 while two others return 404, and handlers branch on `mongo.ErrNoDocuments` directly (forcing a driver import into `handler.go:18`). Branch on `mongo.ErrNoDocuments` inside the store, return the existing `ErrRoomNotFound` sentinel, map it at all six call sites, and delete the driver import.
+
+### 4. `high` — Stop treating unique-index creation as best-effort
+**Dimension:** Architecture · **Evidence:** `room-service/main.go:222-224`, `store_mongo.go:99,120-127`
+
+Startup logs a warning and continues when `EnsureIndexes` fails — including for the unique keys `room_members(rid,member.type,member.id)` and `subscriptions(roomId,u.account)` whose documented purpose is retry-safe writes *by room-worker*. A partial failure silently degrades another service's idempotency. Make unique-index failure fatal; keep warn-and-continue for non-unique performance indexes only. Better, move those two keys to their writer or to IaC and use `mongoutil.WarnMissingIndexes` here, as the service already does for user-service-owned indexes.
+
+### 5. `high` — Kill the `addMembers` N+1 and cap the request
+**Dimension:** Performance · **Evidence:** `room-service/handler.go:915-929`, `:1183,1243`
+
+One sequential `GetApp` per bot account, with no cap on `len(req.Users)` — `maxBatchSize` is enforced on the batch RPCs but not here. A 1,000-bot body is 1,000 serial round trips inside a 10s guard. Replace with a single `$in` batch and cap `len(req.Users)+len(req.Orgs)+len(req.Channels)` in both `addMembers` and `createRoom`, which bounds every downstream loop at once. Small, local, and removes the service's worst latency cliff.
+
+### 6. `high` — Filter before joining in the two autocomplete pipelines
+**Dimension:** Performance · **Evidence:** `room-service/store_mongo.go:1670-1755`, `:1611-1643`
+
+`ListMentionableSubscriptions` and `ListMemberStatuses` both place `$limit` after the `$lookup`s, so returning 3 rows from a 1,000-member room costs ~2,000 index lookups plus 1,000 unindexed regex evaluations — on a per-keystroke path. Pre-match on the indexed `u.account` field, or use the two-step page-then-`$in` route already established by `attachUserDisplayNames` (`store_mongo.go:768`).
+
+### 7. `high` — Add the missing projections
+**Dimensions:** Code quality, Performance · **Evidence:** `room-service/store_mongo.go:875,887,899,724,1494`
+
+Five hot reads fetch whole documents against CLAUDE.md's "always project precisely" rule. `GetUser` is the notable one: it pulls all ~24 `model.User` fields — including the `services` credential material — off the wire when callers read five. The `roomReadProjection`/`subscriptionReadProjection` pattern at `store_mongo.go:208-233` is already there to copy, and the existing projection-drift integration test extends to cover them.
+
+### 8. `high` — Fix `docs/client-api.md` drift and guard it
+**Dimension:** Integration · **Evidence:** `room-service/helper.go:41` vs `docs/client-api.md:1363,2293,2350,2388,6776`
+
+The published `errNotRoomMember` text does not match the sentinel, `section_moved` is missing from the canonical action enum while the derived view lists it (canonical and derived disagreeing is explicitly forbidden), `chat.move` and `key.get` are missing from the §3.1 index, and the `sectionOrder` nullability note contradicts `pkg/model/event.go:644-647`. Fix all four, then add a CI step that greps the docs for sentinel strings defined in `helper.go` so this class of drift cannot recur.
+
+### 9. `medium` — Route mute events where something consumes them
+**Dimension:** Integration · **Evidence:** `room-service/handler.go:2208`, `room-worker/main.go:287`, `room-worker/handler.go:274`
+
+`chat.room.canonical.{site}.event.member.muted` falls inside room-worker's unfiltered `chat.room.canonical.{site}.>` consumer binding, so every mute and unmute lands on `default: slog.Warn("unknown member operation")`. Add `FilterSubjects` to room-worker's consumer config, or move the event off that subject tree. Cheap, and it stops a steady stream of misleading warnings from masking real ones.
+
+### 10. `high` — Begin the sub-package decomposition
+**Dimensions:** Maintainability, Architecture · **Evidence:** `room-service/handler.go:1` (2,643 lines, 8 domains), `store.go:61-282` (47 methods)
+
+At 6,314 LOC the service matches `user-service` and `history-service` in size, but keeps everything in nine flat files where both peers use the sanctioned `config/ models/ mongorepo/ service/` split with no file over 993 lines. Adding one RPC touches six-plus places and regenerates a 958-line mock that all 273 handler tests depend on. Split `handler.go` along the seams `handler_teams.go` already demonstrates, break `RoomStore` into 4–5 aggregate interfaces, and enable `funlen`/`gocyclo`/`dupl` in `.golangci.yml` with a nolint baseline so the debt stops growing. Do this *after* item 1 — the coverage gate is what makes a refactor of this size safe.
