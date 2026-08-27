@@ -898,7 +898,7 @@ any other attachment, and the media fields are absent.
 | `description` | string | Optional. |
 | `titleLink` | string | Relative download URL (the GET image endpoint). |
 | `titleLinkDownload` | boolean | Always `true`. |
-| `fileType` | string | Optional. Canonical lowercased MIME type, present on every attachment family. Server-derived on upload — a declared `application/octet-stream` is replaced by the type detected from the file's bytes and extension. |
+| `fileType` | string | Optional. Canonical lowercased MIME type, present on every attachment family. Server-derived on upload — a declared type that is absent or `application/octet-stream` may be replaced by a more specific type detected from the file's bytes or extension; otherwise it stays `application/octet-stream`. |
 | `imageUrl` | string | Image only. Same as `titleLink`. |
 | `imageType` | string | Image only. MIME type. |
 | `imageSize` | number | Image only. Bytes. |
