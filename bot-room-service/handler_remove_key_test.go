@@ -387,3 +387,53 @@ func TestHandleRemove_RotatesWhenFederationFails(t *testing.T) {
 	require.Error(t, err, "the caller must still learn federation failed")
 	assert.True(t, rotated, "a federation failure must not leave the removed member holding the room key")
 }
+
+// Sibling of TestHandleRemove_RotatesWhenFederationFails: the same
+// committed-delete reasoning, applied to a failure in the MIDDLE of the batch
+// rather than after it. An error on a later user returns before the rotation,
+// and the retry cannot repair it — every delete this attempt already committed
+// reports wasThere=false next time, so `removed` can come back empty and the
+// rotation is skipped permanently, leaving the removed member holding a key
+// that opens every future message in the room.
+func TestHandleRemove_RotatesWhenTheBatchFailsPartWayThrough(t *testing.T) {
+	rotated := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+			return "alice", true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			if id == "bob-id" {
+				// Transient, NOT ErrNotFound: the handler returns rather than
+				// treating the user as absent and carrying on.
+				return nil, errors.New("mongo unreachable")
+			}
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+		ListRoomMemberAccountsFn: func(_ context.Context, _ string) ([]string, error) {
+			return []string{"carol"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{
+				Version: 3,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
+			}, nil
+		},
+		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
+			rotated = true
+			return 4, nil
+		},
+	}
+	ok := func(context.Context, string, []byte, string) error { return nil }
+	h := newHandler(store, "site-a", []string{"site-b"}, ok, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"alice-id", "bob-id"}})
+
+	require.Error(t, err, "the caller must still learn the batch failed")
+	assert.True(t, rotated, "a mid-batch failure must not leave the already-removed member holding the room key")
+}
