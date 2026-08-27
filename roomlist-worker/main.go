@@ -138,7 +138,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	f := newFlusher(store)
+	// Four times the ack-pending ceiling: high enough that ordinary traffic —
+	// where a message carries a handful of mentions — never trips it, low enough
+	// that the pathological case drains long before BulkSetMentions grows past
+	// what one flush can write. Derived rather than a separate knob so it cannot
+	// drift from the bound it exists to complement.
+	f := newFlusher(store, withEarlyFlush(4*cfg.Consumer.MaxAckPending, cfg.FlushTimeout))
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
 	go func() { f.Run(flushCtx, cfg.FlushInterval, cfg.FlushTimeout); close(flushDone) }()
@@ -369,7 +374,12 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 				return
 			}
 			handlerCtx = obs.ContextWithIdentity(handlerCtx, evt.Message.UserAccount, evt.Message.RoomID, evt.SiteID)
-			f.add(deriveIntents(&evt), heldMsg{ctx: handlerCtx, msg: msg})
+			// Drain inline when the batch reaches its mention budget rather than
+			// waiting out the interval: the cost lands on this goroutine, which
+			// is the back-pressure that keeps the unbounded map bounded.
+			if f.add(deriveIntents(&evt), heldMsg{ctx: handlerCtx, msg: msg}) {
+				f.flushNow(handlerCtx)
+			}
 		})
 	}
 }

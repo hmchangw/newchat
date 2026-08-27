@@ -262,18 +262,29 @@ func TestConsumeLoop_ShutdownExitDoesNotRequestRestart(t *testing.T) {
 		"readiness must still report not-ready while shutting down, so the pod drains")
 }
 
-// capturingHandler records the level of every record it sees, so a test can
-// assert how a stop was reported rather than merely that it was reported.
+// capturingHandler records the level and message of everything logged, so a
+// test can assert HOW a stop was reported rather than merely that it was.
+// Only those two fields are kept: a slog.Record is 288 bytes, and retaining
+// whole ones costs a copy per record for nothing the assertions read.
 type capturingHandler struct {
-	mu      sync.Mutex
-	records []slog.Record
+	mu    sync.Mutex
+	lines []loggedLine
+}
+
+type loggedLine struct {
+	level slog.Level
+	msg   string
 }
 
 func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+// The by-value slog.Record is fixed by the slog.Handler interface.
+//
+//nolint:gocritic // hugeParam: signature is dictated by slog.Handler
 func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.records = append(h.records, r.Clone())
+	h.lines = append(h.lines, loggedLine{level: r.Level, msg: r.Message})
 	return nil
 }
 func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
@@ -282,9 +293,9 @@ func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 func (h *capturingHandler) levelFor(substr string) (slog.Level, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, r := range h.records {
-		if strings.Contains(r.Message, substr) {
-			return r.Level, true
+	for _, l := range h.lines {
+		if strings.Contains(l.msg, substr) {
+			return l.level, true
 		}
 	}
 	return 0, false
@@ -336,4 +347,50 @@ func TestConsumeLoop_UnexpectedStopStaysAnError(t *testing.T) {
 	lvl, found := logs.levelFor("consume loop stopped")
 	require.True(t, found)
 	assert.Equal(t, slog.LevelError, lvl, "an unexpected stop must stay at ERROR")
+}
+
+// mentionEventBytes builds a canonical event whose content mentions each of the
+// supplied accounts, so deriveIntents produces one mention intent per account.
+func mentionEventBytes(t *testing.T, id string, mentions ...string) []byte {
+	t.Helper()
+	content := "hi"
+	for _, m := range mentions {
+		content += " @" + m
+	}
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: id, RoomID: "r1", UserAccount: "alice", Content: content,
+			CreatedAt: time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	b, err := json.Marshal(evt)
+	require.NoError(t, err)
+	return b
+}
+
+// The end-to-end guarantee behind the budget: no ticker runs in this test, so a
+// write reaching the store proves the consume loop drained on the budget alone.
+// Without that, mentions accumulate for a whole flush interval no matter how
+// large they grow.
+func TestConsumeLoop_DrainsEarlyWhenMentionsCrossTheBudget(t *testing.T) {
+	store := &stubStore{}
+	f := newFlusher(store, withEarlyFlush(2, time.Second))
+	iter := &fakeIterator{msgs: []jetstream.Msg{
+		&fakeJetstreamMsg{
+			subject: "chat.msg.canonical.site-a.created",
+			data:    mentionEventBytes(t, "m1", "bob", "carol"),
+			headers: nats.Header{},
+		},
+	}}
+	state := consumeState{onUnexpectedStop: func() {}}
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	consumeLoop(iter, f, &wg, &state)
+	wg.Wait()
+
+	assert.NotEmpty(t, store.mentions,
+		"the batch must drain on the budget rather than wait for a ticker that has not run")
 }

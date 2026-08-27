@@ -21,22 +21,75 @@ import (
 type flusher struct {
 	store Store
 
+	// mentionBudget drains the batch early once it holds this many DISTINCT
+	// mention intents. Zero leaves the ticker as the only trigger.
+	mentionBudget int
+	// flushTimeout bounds one early drain, mirroring the periodic one.
+	flushTimeout time.Duration
+
 	mu      sync.Mutex
 	pending *batch
 }
 
-func newFlusher(store Store) *flusher {
-	return &flusher{
-		store:   store,
-		pending: newBatch(nil),
+type flusherOption func(*flusher)
+
+// withEarlyFlush bounds the one write map MaxAckPending does not.
+//
+// held, rooms and lastSeen are all bounded by the un-acked message count.
+// mentions is not: it grows with mentioned accounts per message, and
+// mention.Parse caps neither the token count nor its input beyond the 20KB
+// content limit. One maximum-size message yields thousands of accounts, so a
+// window in which flushes are slow can hold MaxAckPending times that — enough
+// that BulkSetMentions cannot complete inside flushTimeout, and under
+// MaxDeliver=-1 that is a Nak-rebuild-Nak livelock that never exits, with a
+// readiness probe still reporting green.
+//
+// A budget rather than a per-message cap: capping mentions at derive time would
+// silently drop real badges, and a lost badge is invisible to everyone,
+// including whoever is meant to notice. Draining early instead keeps every
+// badge and turns the growth into back-pressure — the consume loop pays for the
+// write inline, which is precisely the desired effect.
+func withEarlyFlush(mentionBudget int, flushTimeout time.Duration) flusherOption {
+	return func(f *flusher) {
+		f.mentionBudget = mentionBudget
+		f.flushTimeout = flushTimeout
 	}
 }
 
+func newFlusher(store Store, opts ...flusherOption) *flusher {
+	f := &flusher{
+		store:   store,
+		pending: newBatch(nil),
+	}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
+}
+
+// add merges one message's intents and reports whether the pending batch has
+// reached its mention budget, i.e. whether the caller should drain now rather
+// than wait for the ticker. Always false when no budget is configured.
+//
 //nolint:gocritic // hugeParam: matches batch.add's writeIntents-by-value signature
-func (f *flusher) add(in writeIntents, msg heldMsg) {
+func (f *flusher) add(in writeIntents, msg heldMsg) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pending.add(in, msg)
+	return f.mentionBudget > 0 && len(f.pending.mentions) >= f.mentionBudget
+}
+
+// flushNow drains outside the ticker. The caller's context supplies the trace
+// and request id but not its cancellation: it belongs to one message, and the
+// batch being drained holds many others whose writes must not die with it.
+func (f *flusher) flushNow(ctx context.Context) {
+	timeout := f.flushTimeout
+	if timeout <= 0 {
+		timeout = flushloop.DefaultFinalTimeout
+	}
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	f.Flush(drainCtx)
 }
 
 // Flush swaps the pending batch out and writes it, then settles every message

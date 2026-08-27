@@ -444,3 +444,46 @@ func (s *blockingStore) BulkUpdateRoomLastMessage(ctx context.Context, _ map[str
 }
 func (s *blockingStore) BulkAdvanceLastSeen(context.Context, map[subKey]time.Time) error { return nil }
 func (s *blockingStore) BulkSetMentions(context.Context, map[subKey]time.Time) error     { return nil }
+
+// The mentions map is the one write map MaxAckPending does not bound: it grows
+// with mentioned accounts per message, not with messages. mention.Parse caps
+// neither the token count nor its input beyond the 20KB content limit, so a
+// single maximum-size message yields thousands of accounts and a slow-flush
+// window can hold MaxAckPending times that — enough that BulkSetMentions cannot
+// finish inside FLUSH_TIMEOUT, which under MaxDeliver=-1 is a Nak/rebuild
+// livelock with a green readiness probe. Draining on a budget bounds it without
+// dropping badges, which a per-message cap would do silently.
+func TestFlusher_AddSignalsAnEarlyFlushWhenMentionsCrossTheBudget(t *testing.T) {
+	f := newFlusher(&stubStore{}, withEarlyFlush(3, time.Second))
+	at := time.Now().UTC()
+
+	crossed := f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"a", "b"}, MentionAt: at}, held(&fakeMsg{}))
+	assert.False(t, crossed, "two intents are under a budget of three")
+
+	crossed = f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"c"}, MentionAt: at}, held(&fakeMsg{}))
+	assert.True(t, crossed, "crossing the budget must not wait for the ticker")
+}
+
+// Coalescing is what makes the budget a memory bound rather than a message
+// count: the same account mentioned repeatedly in one room is one map entry.
+func TestFlusher_AddCountsDistinctMentionsNotMessages(t *testing.T) {
+	f := newFlusher(&stubStore{}, withEarlyFlush(2, time.Second))
+	at := time.Now().UTC()
+
+	for range 5 {
+		if f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"a"}, MentionAt: at}, held(&fakeMsg{})) {
+			t.Fatal("one distinct account must not cross a budget of two however often it is mentioned")
+		}
+	}
+}
+
+// Without a configured budget the ticker stays the only trigger, so every
+// existing construction of a flusher keeps its current behaviour.
+func TestFlusher_AddNeverSignalsWithoutABudget(t *testing.T) {
+	f := newFlusher(&stubStore{})
+	at := time.Now().UTC()
+
+	crossed := f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"a", "b", "c"}, MentionAt: at}, held(&fakeMsg{}))
+
+	assert.False(t, crossed, "an unset budget must not change when a flusher drains")
+}
