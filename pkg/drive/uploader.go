@@ -16,6 +16,12 @@ import (
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
+// driveTimeout is the whole-request ceiling on a Drive transfer. Sized for the
+// internal leg only — 2 GiB moves in tens of seconds over the private network —
+// so it does not track the public client leg's server timeouts. Overrides
+// restyutil's 30s default, which large streamed bodies blow through.
+const driveTimeout = 5 * time.Minute
+
 // MultipartFile is an opened multipart file plus its name, ready to upload.
 type MultipartFile struct {
 	File     multipart.File
@@ -32,8 +38,7 @@ type Client struct {
 }
 
 // NewClient builds a Drive client. Both underlying clients skip TLS verification
-// (the Drive is reached over a private network); the download client uses a
-// 5-minute timeout to allow large streamed bodies.
+// (the Drive is reached over a private network) and share driveTimeout.
 //
 // The upload side keeps only the *http.Client — a deliberate exception to the
 // Resty-for-outbound-HTTP guideline: the bulk upload streams its body, and
@@ -47,8 +52,8 @@ func NewClient(cfg *Config) *Client {
 	// #nosec G402 -- internal Drive over a private network; TLS verification is intentionally skipped per deployment.
 	insecure := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}}
 	return &Client{
-		uploadHTTP:     restyutil.New(cfg.URL, restyutil.WithTransport(insecure)).GetClient(),
-		downloadClient: restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(5*time.Minute)),
+		uploadHTTP:     restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(driveTimeout)).GetClient(),
+		downloadClient: restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(driveTimeout)),
 		baseURLMap:     cfg.BaseURLMap,
 		baseURL:        cfg.URL,
 		apiToken:       cfg.Token,
