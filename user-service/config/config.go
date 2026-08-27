@@ -84,6 +84,12 @@ type Config struct {
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
 	MaxSiteFanout int `env:"MAX_SITE_FANOUT" envDefault:"8"`
+	// MaxBadgeSeedFanout bounds concurrent per-account badge seeds within one
+	// badge.count.batch. Each seed runs the unread aggregate (one Mongo
+	// connection) and opens its own MaxSiteFanout-bounded cross-site fan-out, so
+	// the worst-case concurrent RPC count is the product of the two — keep this
+	// at or below the Mongo pool size.
+	MaxBadgeSeedFanout int `env:"MAX_BADGE_SEED_FANOUT" envDefault:"8"`
 	// Room sort-key cache for subscription.list (see
 	// mongorepo.NewSubscriptionRepo). An entry is at most TTL old and staleness
 	// only affects ordering; zero or less for either knob turns the cache off.
@@ -235,6 +241,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxSiteFanout < 1 {
 		return Config{}, fmt.Errorf("MAX_SITE_FANOUT must be >= 1, got %d", cfg.MaxSiteFanout)
+	}
+	if cfg.MaxBadgeSeedFanout < 1 {
+		return Config{}, fmt.Errorf("MAX_BADGE_SEED_FANOUT must be >= 1, got %d", cfg.MaxBadgeSeedFanout)
 	}
 	if cfg.RoomBatchChunk < 1 || cfg.RoomBatchChunk > 100 {
 		return Config{}, fmt.Errorf("ROOM_BATCH_CHUNK must be in [1,100], got %d", cfg.RoomBatchChunk)
