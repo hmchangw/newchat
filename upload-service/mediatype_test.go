@@ -71,9 +71,14 @@ func TestMediaTypeByExtension(t *testing.T) {
 // pdfBytes and zipBytes are the magic-number prefixes http.DetectContentType
 // keys on; the rest of a real file is irrelevant to the sniff.
 var (
-	pdfBytes = []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\n")
-	zipBytes = []byte("PK\x03\x04\x14\x00\x06\x00\x08\x00\x00\x00!\x00")
-	svgBytes = []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)
+	pdfBytes  = []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\n")
+	zipBytes  = []byte("PK\x03\x04\x14\x00\x06\x00\x08\x00\x00\x00!\x00")
+	svgBytes  = []byte(`<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>`)
+	gzipBytes = []byte("\x1f\x8b\x08\x00\x00\x00\x00\x00")
+	rarBytes  = []byte("Rar!\x1a\x07\x00extra bytes here")
+	wavBytes  = append(append([]byte("RIFF"), 0x24, 0x00, 0x00, 0x00), []byte("WAVE")...)
+	aviBytes  = append(append([]byte("RIFF"), 0x24, 0x00, 0x00, 0x00), []byte("AVI ")...)
+	oggBytes  = []byte("OggS\x00extra bytes here")
 )
 
 func TestSniffMediaType(t *testing.T) {
@@ -203,6 +208,26 @@ func TestResolveMediaType(t *testing.T) {
 			name:     "an empty file falls back to its extension",
 			declared: "", filename: "empty.docx", data: []byte{},
 			want: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		},
+		{
+			name:     "gzip sniff defers to the extension, not the legacy x-gzip name",
+			declared: "application/octet-stream", filename: "archive.gz", data: gzipBytes, want: "application/gzip",
+		},
+		{
+			name:     "rar sniff defers to the extension, not the legacy x-rar-compressed name",
+			declared: "application/octet-stream", filename: "archive.rar", data: rarBytes, want: "application/vnd.rar",
+		},
+		{
+			name:     "wav sniff defers to the extension, not the legacy audio/wave name",
+			declared: "application/octet-stream", filename: "sound.wav", data: wavBytes, want: "audio/wav",
+		},
+		{
+			name:     "avi sniff defers to the extension, not the legacy video/avi name",
+			declared: "application/octet-stream", filename: "clip.avi", data: aviBytes, want: "video/x-msvideo",
+		},
+		{
+			name:     "ogg sniff defers to the extension, so it still gets an audio/ prefix",
+			declared: "application/octet-stream", filename: "track.ogg", data: oggBytes, want: "audio/ogg",
 		},
 	}
 	for _, tc := range tests {

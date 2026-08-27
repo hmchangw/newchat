@@ -174,11 +174,16 @@ func sniffMediaType(r io.ReadSeeker) (string, error) {
 // every text-based format as text/plain or text/xml. Specific enough to stop a
 // naive sniff-first resolution, so the extension gets to answer these instead.
 var inconclusiveSniffTypes = map[string]struct{}{
-	"application/zip":          {},
-	"application/octet-stream": {},
-	"text/plain":               {},
-	"text/xml":                 {},
-	"text/html":                {},
+	"application/zip":              {},
+	"application/octet-stream":     {},
+	"text/plain":                   {},
+	"text/xml":                     {},
+	"text/html":                    {},
+	"application/x-gzip":           {},
+	"application/x-rar-compressed": {},
+	"audio/wave":                   {},
+	"video/avi":                    {},
+	"application/ogg":              {},
 }
 
 // resolveMediaType picks the MIME type to record for an upload. A specific
@@ -194,14 +199,11 @@ func resolveMediaType(declared, filename string, r io.ReadSeeker) (string, error
 	if err != nil {
 		return "", fmt.Errorf("detect media type from file contents: %w", err)
 	}
-	if _, weak := inconclusiveSniffTypes[sniffed]; sniffed != "" && !weak {
+	if _, weak := inconclusiveSniffTypes[sniffed]; !weak {
 		return sniffed, nil
 	}
 	if byExt := mediaTypeByExtension(filename); byExt != "" {
 		return byExt, nil
 	}
-	if sniffed != "" {
-		return sniffed, nil
-	}
-	return defaultUploadContentType, nil
+	return sniffed, nil
 }

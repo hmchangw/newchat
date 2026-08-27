@@ -31,8 +31,9 @@ const imageFormField = "images"
 // fileFormField is the multipart form field carrying the single-endpoint upload.
 const fileFormField = "file"
 
-// defaultUploadContentType is the fallback MIME for the single-file endpoint when
-// the multipart part carries no Content-Type.
+// defaultUploadContentType marks a declared Content-Type as generic (so
+// resolveMediaType knows to look past it) and is the final fallback when
+// nothing else — sniff or extension — can name the file.
 const defaultUploadContentType = "application/octet-stream"
 
 // driveClient is the subset of the Drive client the handlers use.
@@ -288,7 +289,8 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 	if !h.mimeFilter.allowed(mime) {
-		errhttp.Write(ctx, c, errcode.BadRequest("file type is not allowed"))
+		errhttp.Write(errcode.WithLogValues(ctx, "media_type", mime), c,
+			errcode.BadRequest("file type is not allowed"))
 		return
 	}
 
