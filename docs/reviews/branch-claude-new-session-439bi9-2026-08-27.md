@@ -85,3 +85,24 @@ N/A or clean across the board: no subjects, streams, IDs, consumers, outbox usag
 The diff is store-layer only: no `natsrouter.Register` / `QueueSubscribe` registration, no handler body, and no `pkg/model` struct changed. The one client-facing surface reached (`listMembers`, `handler.go:423`) returns `RoomMember` values assembled field-by-field from the projected set, so the wire payload is byte-identical. **No `docs/client-api.md` update is required.**
 
 - **[nitpick]** `integration_test.go:352` comment says "the fallback (enrich=false) build" but the call at `:377` passes `enrich=true`, needed for the `IsOwner` assertion at `:385`.
+
+---
+
+# Go expert
+
+**Verdict: sound change, correct projections, two comment defects and a latent fail-open trap. No blocking Go-idiom violations.**
+
+Correctness independently confirmed by call-site audit — every projected field set is a superset of what callers read. `go vet -tags integration ./room-service/` and `gofmt -l` are both clean. No error-wrapping, `errcode`, log-and-return, struct-tag or concurrency changes appear in the diff, so CLAUDE.md Section 3 is untouched and uncontravened.
+
+## Findings
+
+- **[medium] Dropping `active` makes a future `IsActive()` check fail *open*, and nothing warns** — `room-service/store_mongo.go:883-894` — `model.User.Active` is `*bool` with "nil (field absent) means active" (`pkg/model/user.go:88-94`). `userReadProjection` omits `active`, so a decoded `User` always has `Active == nil`. No room-service call site calls `IsActive()` today (verified by grep), so this is not a live bug — but the failure mode of adding one later is silent: a deactivated user reads as active, with no test or compile error. The doc comment singles out `services` as deliberately excluded; it should do the same for `active`, with a note that any call site adding an active-check must add the field back. This is the same class of trap as `u._id`, which the author *did* call out at `store_mongo.go:713-714`.
+- **[medium] A comment states something false about the code** — `room-service/integration_test.go:334` — says "the fallback (**enrich=false**) build of RoomMember", but line 352 passes `enrich=true`, and line 359 asserts `Member.IsOwner`, which `store_mongo.go:751-753` only sets when `enrich` is true. Drop the parenthetical or correct it.
+- **[low] The test doesn't pin the path it claims to guard** — `room-service/integration_test.go:337-360` — it reaches `getRoomSubscriptions` only because no `room_members` document exists for `"rmembers"` (probe at `store_mongo.go:511-517`). If that probe or the fixture changes, the test silently runs the aggregation path — which also yields `IsOwner` and `Ts` — and keeps passing while guarding nothing. Either assert the fallback was taken, or call `store.getRoomSubscriptions` directly (same package, so it is reachable).
+- **[low] `{Key: "_id", Value: 1}` is a no-op** — `room-service/store_mongo.go:912`, `:931`, `:1534` — Mongo returns `_id` unless explicitly excluded. For `appAssistantReadProjection`, `dmDedupProjection` and `threadSubParentProjection` no caller reads the id, so the file's own narrow-read idiom applies: `{Key: "_id", Value: 0}` (see `store_mongo.go:477`, `:835`, `:859`, `:1337`, `:1961`, `:2001`). Keeping `_id:1` is neither the minimum payload nor the file's convention. `userReadProjection` and `roomMemberSubProjection` legitimately need `_id`.
+- **[nitpick] `SetProjection` placement reads as conditional** — `room-service/store_mongo.go:733` — `opts.SetProjection(...)` is unconditional, so it belongs chained onto the `options.Find().SetSort(...)` constructor at line 719 alongside the other unconditional option; trailing it after the conditional `SetSkip`/`SetLimit` block reads as if it were conditional too.
+- **[nitpick] Comment form** — four of the five new vars use the `name: prose` form rather than the `name is …` godoc form used by `roomReadProjection` and `subscriptionReadProjection`. Precedent for both exists in-file (`roomAppReadProjection:` at `:217`), so this is cosmetic.
+
+## What's right
+
+Var placement (package-level, immediately above the consuming method), naming, `bson.D` choice, `require`/`assert` split, and `Test<Type>_<Method>_<Scenario>` naming all match the surrounding code. Non-table-driven tests are the correct call here — each case has a distinct fixture and a distinct assertion set, not input/output variations of one function.
