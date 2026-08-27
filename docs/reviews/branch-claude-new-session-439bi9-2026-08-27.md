@@ -151,3 +151,38 @@ $ make generate SERVICE=room-service; git status --porcelain room-service/   -> 
 ## What's right
 
 TDD's 1:1 mapping holds — five changed reads, five tests, each naming the call site it protects. `TestMain` present (`room-service/main_test.go:11`), `testutil.MongoDB` throughout with zero inline `testcontainers.GenericContainer`, per-test DB hashed on `t.Name()` so there is no shared state or order reliance, `-race` on the unit gate. The four exclusion-pinning tests are genuinely load-bearing.
+
+---
+
+# Bug & security
+
+## SAST result
+
+| Scanner | Ran? | Result |
+|---|---|---|
+| `gosec` (`./...`, severity/confidence medium) | **yes** | **PASS** — 0 findings |
+| `semgrep --config=.semgrep/ room-service/` (repo-local rules) | **yes** | **PASS** — 9 rules, 9 files, 0 findings |
+| `govulncheck` | **no** | Proxy returned `403 Forbidden` for `https://vuln.go.dev/index/modules.json.gz` |
+| `semgrep` registry rulesets (`p/golang`, `p/security-audit`) | **no** | `ProxyError … semgrep.dev:443 … 403 Forbidden` while downloading rulesets |
+
+`make sast` summary: `gosec=PASS govulncheck=FAIL semgrep=FAIL`, exit 2 — both failures are proxy/network, **not** code findings. No medium+ finding is attributable to this branch from the scanners that actually ran. **`govulncheck` and the registry rules cannot be reported as passing.**
+
+## Findings
+
+No `critical`, no `high`. Every claim below was traced to source.
+
+**Projection completeness — verified clean on all five.** `userReadProjection` (`room-service/store_mongo.go:890`) = `_id, account, engName, chineseName, roles`, and all `GetUser` call sites read exactly and only those: `handler.go:164`, `:268` (`EngName`/`ChineseName`), `:275`, `:368-369` (`ID`/`Account`), `:1987`, `:2043` (`model.IsPlatformAdmin` → `Roles`), `handler_teams.go:245-246`. `SiteID`, `Active`, `Settings`, `Permissions` and `Chatlist` are read at **zero** room-service call sites.
+
+**Authorization: fail-closed, confirmed.** `roles` is genuinely projected and the bson tag matches (`pkg/model/user.go:63`, `bson:"roles,omitempty"`). `model.IsPlatformAdmin` (`pkg/model/user.go:96-105`) returns `false` on nil/empty — dropping `roles` would deny, never grant. Both gates then fall through to a stricter check (`roomRename` → owner-role check `handler.go:1988-1998`; `roomRestricted` → `errOnlyAdmins` `handler.go:2044`). No inverted logic anywhere, and no other authz decision in room-service reads a now-unprojected field.
+
+**Write-back hazard: none.** All five results are read-field-only; no projected struct reaches `InsertOne`/`ReplaceOne`/`UpdateOne` or a NATS payload.
+
+**BSON paths: all correct.** `u._id`/`u.account` match `SubscriptionUser` (`pkg/model/subscription.go:21-22`) — the nested-`_id` trap is handled and called out at `store_mongo.go:713-714`. `roomId`, `joinedAt`, `roles` (`subscription.go:29`, `:31`, `:36`), `threadRoomId` (`threadsubscription.go:14`), `assistant` (`app.go:13`), `engName`/`chineseName` (`user.go:59-60`) all match. No projection path collisions.
+
+**Credential exclusion: confirmed.** `users.services` (`pkg/model/user.go:37`, `:71`; bcrypt at `:25`) is absent from `userReadProjection:890-894` — `GetUser` no longer pulls hash material. No other changed read touches credentials; `GetApp` returns only `assistant`, which has no secret fields (`app.go:19-24`). Strict improvement, pinned at `integration_test.go:231`.
+
+- **[low] `roomMemberSubProjection` omits `u.isBot`** — `room-service/store_mongo.go:715-718` — safe today: `RoomMemberEntry` (`pkg/model/member.go:60-75`) has no `IsBot` field, and bot-ness downstream is derived from the account suffix (`attachUserDisplayNames` `store_mongo.go:786`; `membersToCallEmails` `handler_teams.go:281`). Flagged only because it is the one sub-document field a future member-list change would plausibly reach for and silently get `false`, and the new test does not pin it as excluded.
+- **[nitpick] Redundant `{Key: "_id", Value: 1}`** — `room-service/store_mongo.go:890`, `:912`, `:931`, `:1533` — Mongo includes `_id` by default. Harmless and consistent with the file's existing style.
+- **[nitpick] Package-level `bson.D` shared across concurrent requests** — the driver only marshals them, so there is no race, but a stray mutation would be process-wide.
+
+**Other lens items:** no swallowed errors introduced — all new `opts` paths keep the existing `errors.Is(mongo.ErrNoDocuments)` sentinels. No injection surface: projections are static literals with no user input. No logging change, no new config.
