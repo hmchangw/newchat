@@ -23,7 +23,7 @@ func (s *HistoryService) checkAccessAndRoomTimes(
 	account, roomID string,
 	meta *models.RoomMeta,
 	now time.Time,
-) (accessSince *time.Time, times walkTimes, err error) {
+) (accessSince *time.Time, createdAt time.Time, err error) {
 	var accessErr, rtErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -33,16 +33,16 @@ func (s *HistoryService) checkAccessAndRoomTimes(
 	}()
 	go func() {
 		defer wg.Done()
-		times, rtErr = s.resolveRoomTimesOrError(ctx, roomID, meta, now)
+		createdAt, rtErr = s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	}()
 	wg.Wait()
 	if accessErr != nil {
-		return nil, walkTimes{}, accessErr
+		return nil, time.Time{}, accessErr
 	}
 	if rtErr != nil {
-		return nil, walkTimes{}, rtErr
+		return nil, time.Time{}, rtErr
 	}
-	return accessSince, times, nil
+	return accessSince, createdAt, nil
 }
 
 // getAccessSince checks subscription and returns the historySharedSince lower bound (nil = full access).

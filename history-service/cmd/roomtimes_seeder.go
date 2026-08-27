@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	"github.com/hmchangw/chat/history-service/internal/service"
 )
 
@@ -21,6 +20,11 @@ import (
 // It also makes the tier's other rule structural rather than commented: only a
 // repository read can reach this decorator, so a client-supplied hint cannot
 // become another reader's walk floor.
+//
+// Only GetRoomTimes is overridden. GetRoomTimesByIDs is left to the embedded
+// repository on purpose: the batch path feeds the room list, which never walks
+// Cassandra per room, so seeding from it would write one key per listed room on
+// every request for no reader.
 type roomTimesSeeder struct {
 	service.RoomRepository
 	times service.RoomTimesCache
@@ -34,11 +38,4 @@ func (s roomTimesSeeder) GetRoomTimes(ctx context.Context, roomID string) (lastM
 		s.times.Store(ctx, roomID, createdAt)
 	}
 	return lastMsgAt, createdAt, err
-}
-
-// GetRoomTimesByIDs is left to the embedded repository. The batch path feeds
-// the room list, which never walks Cassandra per room, so seeding from it would
-// write one key per listed room on every request for no reader.
-func (s roomTimesSeeder) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
-	return s.RoomRepository.GetRoomTimesByIDs(ctx, ids)
 }

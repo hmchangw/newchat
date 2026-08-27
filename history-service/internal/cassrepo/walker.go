@@ -140,33 +140,6 @@ func gocqlBucketFetcher[T any](
 	}
 }
 
-// fillPage walks buckets in the given direction starting at startBucket until
-// pageSize rows are collected or maxBuckets is exhausted. It builds a live
-// gocql fetcher and delegates the traversal to walkBuckets.
-//
-// floorBucket bounds the walk: DESC stops when bucket < floorBucket; ASC stops
-// when bucket > floorBucket. To disable floor-based termination, callers pass
-// math.MinInt64 (DESC) or math.MaxInt64 (ASC). fanout caps how many buckets are
-// fetched concurrently once the walk fans out.
-func fillPage[T any](
-	ctx context.Context,
-	sizer msgbucket.Sizer,
-	direction walkDirection,
-	startBucket int64,
-	floorBucket int64,
-	maxBuckets int,
-	pageSize int,
-	initialPageState []byte,
-	fanout int,
-	queryFn bucketQueryFn,
-	scan func(iter *gocql.Iter, remaining int) ([]T, error),
-) (pageResult[T], error) {
-	return walkBuckets(
-		ctx, sizer, direction, startBucket, floorBucket, maxBuckets, pageSize,
-		initialPageState, fanout, gocqlBucketFetcher(queryFn, scan),
-	)
-}
-
 // bucketWalk holds the immutable parameters of one paginated walk over a
 // bucketed table. Its run method fills a single page by fetching buckets
 // concurrently in fan-out waves:
@@ -211,6 +184,11 @@ type bucketWalk[T any] struct {
 // walkBuckets fills a page starting at startBucket. See bucketWalk for the
 // traversal strategy. A fetch error aborts the walk and is returned to the
 // caller (accumulated rows are discarded).
+//
+// floorBucket bounds the walk: DESC stops when bucket < floorBucket; ASC stops
+// when bucket > floorBucket. To disable floor-based termination, callers pass
+// math.MinInt64 (DESC) or math.MaxInt64 (ASC). fanout caps how many buckets are
+// fetched concurrently once the walk fans out.
 func walkBuckets[T any](
 	ctx context.Context,
 	sizer msgbucket.Sizer,

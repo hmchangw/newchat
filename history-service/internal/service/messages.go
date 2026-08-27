@@ -38,7 +38,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	// Two independent Mongo reads, run concurrently for one RTT. Access errors take
 	// precedence so a "not subscribed" 403 isn't masked by a transient room-times error.
-	accessSince, times, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 		var pErr error
 		if accessSince == nil {
 			// Floor only: `before` is the caller's own ceiling, already clamped above.
-			_, walkFloor := s.walkBounds(times.createdAt, now)
+			_, walkFloor := s.walkBounds(createdAt, now)
 			page, pErr = s.msgReader.GetMessagesBefore(gctx, roomID, before, walkFloor, pageReq)
 		} else {
 			page, pErr = s.msgReader.GetMessagesBetweenDesc(gctx, roomID, *accessSince, before, pageReq)
@@ -112,12 +112,12 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 	c.WithLogValues("account", account, "room_id", roomID)
 	now := time.Now().UTC()
 
-	accessSince, times, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
 
-	ceiling, floor := s.walkBounds(times.createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	after := millisToTime(req.After)
 
@@ -213,12 +213,12 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 	}
 
 	now := time.Now().UTC()
-	times, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
+	createdAt, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
 
-	ceiling, floor := s.walkBounds(times.createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	remaining := limit - 1 // before gets the larger half on odd splits
 	if remaining <= 0 {
@@ -273,7 +273,7 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 	// already comes from walkBounds, so a future pivot simply yields nothing.
 	beforeUpper = clampToCeiling(beforeUpper, now)
 	// No findMessage dependency, so the access check and room-times resolve run concurrently.
-	accessSince, times, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +281,7 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 		return nil, errcode.Forbidden("timestamp is outside access window", errcode.WithReason(errcode.MessageOutsideAccessWindow))
 	}
 
-	ceiling, floor := s.walkBounds(times.createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	beforeCount := (limit + 1) / 2
 	afterCount := limit / 2

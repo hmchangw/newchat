@@ -202,7 +202,7 @@ func TestResolveRoomTimesOrError_CancelledContextDoesNotFailOpen(t *testing.T) {
 
 			require.Error(t, err, "a cancelled caller must not be served a degraded success")
 			assert.ErrorIs(t, err, tt.ctxErr)
-			assert.True(t, got.createdAt.IsZero(), "no walk bounds for a request nobody is waiting on")
+			assert.True(t, got.IsZero(), "no walk bounds for a request nobody is waiting on")
 		})
 	}
 }
@@ -223,7 +223,7 @@ func TestResolveRoomTimesOrError_MongoFailureStillFailsOpen(t *testing.T) {
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err, "an outage must not block the read")
-	assert.True(t, got.createdAt.IsZero())
+	assert.True(t, got.IsZero())
 }
 
 // --- L2 room-times fallback ------------------------------------------------
@@ -271,7 +271,7 @@ func TestResolveRoomTimesOrError_HealthyReadDoesNotWriteTheTier(t *testing.T) {
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err)
-	assert.Equal(t, created, got.createdAt)
+	assert.Equal(t, created, got)
 	assert.Empty(t, tier.stored, "the service must not write the tier")
 }
 
@@ -321,7 +321,7 @@ func TestResolveRoomTimesOrError_DegradedUsesTheCachedCreatedAtAsFloor(t *testin
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err, "an outage must not block the read")
-	assert.Equal(t, cachedCreated, got.createdAt, "createdAt is immutable, so it is safe as the floor")
+	assert.Equal(t, cachedCreated, got, "createdAt is immutable, so it is safe as the floor")
 }
 
 func TestResolveRoomTimesOrError_DegradedWithNoCachedEntryIsUnchanged(t *testing.T) {
@@ -339,7 +339,7 @@ func TestResolveRoomTimesOrError_DegradedWithNoCachedEntryIsUnchanged(t *testing
 	got, err := s.resolveRoomTimesOrError(context.Background(), "room-1", nil, now)
 
 	require.NoError(t, err)
-	assert.True(t, got.createdAt.IsZero())
+	assert.True(t, got.IsZero())
 }
 
 // A cancelled caller is not served a degraded walk, and must not spend a Valkey

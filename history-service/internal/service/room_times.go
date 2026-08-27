@@ -14,19 +14,6 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 )
 
-// walkTimes is what a bucket walk needs in order to bound itself, plus how the
-// value was obtained.
-//
-// There is deliberately no lastMsgAt here. It bounds neither end of a Cassandra
-// walk: as a ceiling it hides rows the lagging pointer has not caught up to
-// (see walkBounds), and as a floor it says nothing about older messages. The
-// walk's ceiling comes from the clock and its floor from createdAt.
-type walkTimes struct {
-	// createdAt bounds the walk's floor. A room's creation time is immutable,
-	// so a cached value is as good as a fresh one at any age.
-	createdAt time.Time
-}
-
 // resolveRoomTimesOrError calls resolveRoomTimes and translates the result for
 // handler return: mongo.ErrNoDocuments → errcode.NotFound; any other error
 // (e.g. a Mongo outage) fails open rather than blocking the read.
@@ -45,13 +32,13 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	roomID string,
 	meta *models.RoomMeta,
 	now time.Time,
-) (walkTimes, error) {
+) (time.Time, error) {
 	createdAt, err := s.resolveRoomTimes(ctx, roomID, meta, now)
 	if err == nil {
-		return walkTimes{createdAt: createdAt}, nil
+		return createdAt, nil
 	}
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return walkTimes{}, errcode.NotFound("room not found")
+		return time.Time{}, errcode.NotFound("room not found")
 	}
 	// A cancelled or timed-out CALLER is not what fail-open is for. Failing open
 	// here would send the request on to walk a year of Cassandra buckets to
@@ -60,7 +47,7 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	// round trip on a floor nobody will use. Checked on ctx rather than err so a
 	// store that swallows the cause is still caught.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return walkTimes{}, fmt.Errorf("resolve room times for %s: %w", roomID, ctxErr)
+		return time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, ctxErr)
 	}
 	// Fail-open: a transient room-times failure (Mongo outage) must not block a
 	// read. Without a cached entry, zero times make the walk use now as the
@@ -68,7 +55,7 @@ func (s *HistoryService) resolveRoomTimesOrError(
 	cachedCreated, found := s.roomTimes.Fallback(ctx, roomID)
 	slog.WarnContext(ctx, "room-times unavailable, falling back (fail-open)",
 		"room_id", roomID, "error", err, "l2_floor", found)
-	return walkTimes{createdAt: cachedCreated}, nil
+	return cachedCreated, nil
 }
 
 // clockSkewTolerance bounds how far in the future a client LastMsgAt hint may sit before the
@@ -127,7 +114,7 @@ func clampToCeiling(t, now time.Time) time.Time {
 // consulted) simply collapses the floor to that clamp.
 //
 // lastMsgAt is read but never returned — it bounds a Cassandra walk at neither end (see
-// walkTimes). It survives here as the gate on the Mongo read and as the one signal that a
+// walkBounds). It survives here as the gate on the Mongo read and as the one signal that a
 // hinted createdAt is incoherent: a room cannot be created after its own last message.
 // A usable lastMsgAt hint is therefore sufficient to skip Mongo entirely; a missing or
 // invalid one forces the read, and an inconsistent pair (createdAt later than lastMsgAt)
@@ -137,49 +124,47 @@ func (s *HistoryService) resolveRoomTimes(
 	roomID string,
 	meta *models.RoomMeta,
 	now time.Time,
-) (createdAt time.Time, err error) {
-	var last, created *time.Time
-	if meta != nil {
-		last = sanitizeLastMsgAt(meta.LastMsgAt, now)
-		created = sanitizeCreatedAt(meta.CreatedAt, now)
+) (time.Time, error) {
+	if meta == nil {
+		return s.fetchCreatedAt(ctx, roomID, "")
 	}
-
-	// fromMongo records that this call already holds an authoritative pair, so the
-	// consistency check below cannot re-read the document it just read.
-	fromMongo := false
+	// A usable lastMsgAt hint is what lets this skip Mongo: it is the only signal
+	// that a hinted createdAt is coherent. Missing or invalid forces the read.
+	last := sanitizeLastMsgAt(meta.LastMsgAt, now)
 	if last == nil {
-		l, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
-		if gerr != nil {
-			return time.Time{}, fmt.Errorf("resolve room times for %s: %w", roomID, gerr)
-		}
-		// Seeding is the repository decorator's job, beneath the process-local room
-		// cache (history-service/cmd/roomtimesSeeder). Storing from here would write
-		// Valkey on every request that reaches this branch, including the hits that
-		// cache exists to serve.
-		//
-		// Mongo's createdAt wins over the hint's rather than only filling a gap: the
-		// value is immutable, so a hint that disagrees is stale, and taking c also
-		// settles the inconsistency below without a second read.
-		last, created = &l, &c
-		fromMongo = true
+		return s.fetchCreatedAt(ctx, roomID, "")
 	}
-	if created == nil {
-		created = &time.Time{}
+	created := sanitizeCreatedAt(meta.CreatedAt, now)
+	switch {
+	case created == nil:
+		// No usable hint and no reason to read: a zero floor simply collapses to
+		// walkBounds' now-historyFloor clamp.
+		return time.Time{}, nil
+	case created.After(*last):
+		// Impossible for a real room, so the hinted pair is stale. Settle it
+		// authoritatively rather than walking from a floor that cannot be right.
+		return s.fetchCreatedAt(ctx, roomID, " (consistency refetch)")
 	}
-
-	// A hinted pair can be internally inconsistent (created > last, impossible for a
-	// real room): settle it against Mongo. Skipped when the pair already came from
-	// Mongo — a never-messaged room has createdAt > a zero lastMsgAt legitimately,
-	// and re-reading the same document would only return the same two values.
-	if !fromMongo && created.After(*last) {
-		_, c, gerr := s.rooms.GetRoomTimes(ctx, roomID)
-		if gerr != nil {
-			return time.Time{}, fmt.Errorf("resolve room times for %s (consistency refetch): %w", roomID, gerr)
-		}
-		created = &c
-	}
-
 	return *created, nil
+}
+
+// fetchCreatedAt reads the authoritative createdAt. Mongo's value wins over any
+// hint rather than only filling a gap: createdAt is immutable, so a hint that
+// disagrees is stale.
+//
+// Seeding the L2 tier is the repository decorator's job, beneath the
+// process-local room cache (history-service/cmd/roomtimesSeeder). Storing from
+// here would write Valkey on every request reaching this path, including the
+// hits that cache exists to serve.
+//
+// why distinguishes the two call sites in the error, since one is a refetch that
+// only fires on an incoherent hint and is worth telling apart in a log.
+func (s *HistoryService) fetchCreatedAt(ctx context.Context, roomID, why string) (time.Time, error) {
+	_, created, err := s.rooms.GetRoomTimes(ctx, roomID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("resolve room times for %s%s: %w", roomID, why, err)
+	}
+	return created, nil
 }
 
 // sanitizeLastMsgAt allows up to now+clockSkewTolerance — a fast client clock may know a newer lastMsgAt.

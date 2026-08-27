@@ -126,9 +126,9 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt m
 	// what Mongo says, not an unknown to go re-read — routing it through RoomMeta made
 	// resolveRoomTimes fetch the same document again, once per never-messaged room per
 	// request (#291). rt.LastMsgAt is deliberately dropped: it bounds a Cassandra walk at
-	// neither end (see walkTimes), and the row supplying it first-hand does not make it
+	// neither end (see walkBounds), and the row supplying it first-hand does not make it
 	// any less lagging.
-	times := walkTimes{createdAt: rt.CreatedAt}
+	times := rt.CreatedAt
 	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
 		w := s.walkForPreview(ctx, roomID, times, now)
 		if w.State == previewFound {
@@ -217,7 +217,7 @@ func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID stri
 
 // walkForPreview is roomLastPreviewMessage with the room's times already in hand, so a
 // caller that just read the room document does not read it again.
-func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, times walkTimes, now time.Time) previewWalk {
+func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, createdAt time.Time, now time.Time) previewWalk {
 	// Deliberately NOT narrowed when the room times came from the fail-open path.
 	// A truncated walk that finds nothing returns previewEmpty, and previewEmpty
 	// is destructive on this path — previewAfterMutation clears the stored preview
@@ -225,7 +225,7 @@ func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, time
 	// "this room has no messages" and wipe a good preview. The batch reader cannot
 	// reach a degraded walk at all (RoomsGet errors on a failed batched read
 	// rather than walking blind), so there is no amplification left to bound here.
-	ceiling, floor := s.walkBounds(times.createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 	before := ceiling.Add(time.Millisecond)
 
 	// The first row of the first page, eligible or not: the id to invalidate against.
