@@ -204,7 +204,7 @@ func TestPreviewWriter_NewerEligiblePreviewWins(t *testing.T) {
 	assert.Equal(t, "m-2", got.pvw.Meta.MessageID, "arrival order must not decide which preview survives")
 }
 
-// Same millisecond, so created_at cannot order them: the id has to. unread-worker
+// Same millisecond, so created_at cannot order them: the id has to. roomlist-worker
 // coalesces the same pair with the same comparator, and the reader only serves a
 // stored preview while the two agree on the room's newest message — so a tie broken
 // by arrival order here is a preview that reads as stale until the next message.
@@ -327,10 +327,10 @@ func TestPreviewWriter_NilIsInert(t *testing.T) {
 	}
 }
 
-// The room pointer moved to unread-worker, which holds its messages un-acked until
+// The room pointer moved to roomlist-worker, which holds its messages un-acked until
 // MongoDB takes them. This write must not touch those fields: a best-effort write that
 // drops on failure racing a durable, retried one would let a stalled preview flush
-// resurrect an older lastMsgId over the pointer unread-worker had already advanced.
+// resurrect an older lastMsgId over the pointer roomlist-worker had already advanced.
 func TestPreviewUpdate_TouchesOnlyThePreviewFields(t *testing.T) {
 	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 	sealed := &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-1"}}
@@ -343,7 +343,7 @@ func TestPreviewUpdate_TouchesOnlyThePreviewFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fields := previewUpdate(&u)[0][0].Value.(bson.M)
 			for _, owned := range []string{"lastMsgAt", "lastMsgId", "lastMentionAllAt", "updatedAt"} {
-				assert.NotContains(t, fields, owned, "%s belongs to unread-worker", owned)
+				assert.NotContains(t, fields, owned, "%s belongs to roomlist-worker", owned)
 			}
 			for k := range fields {
 				assert.True(t, strings.HasPrefix(k, "preview"),

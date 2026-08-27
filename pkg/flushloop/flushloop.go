@@ -2,7 +2,7 @@
 // process is shutting down, the one final drain that lands what is still
 // buffered.
 //
-// Three services had written this loop independently — unread-worker's
+// Three services had written this loop independently — roomlist-worker's
 // write-intent batch, broadcast-worker's room-list preview, and the oplog
 // connector's checkpointer — and each got the final drain subtly different. The
 // hard part is not the ticker: it is that the final drain runs precisely when
@@ -34,7 +34,7 @@ const DefaultFinalTimeout = 5 * time.Second
 // Config describes one buffered writer's drain cadence.
 type Config struct {
 	// Name labels the loop in panic and failure logs. It reads as the thing
-	// being drained, e.g. "unread-state flush".
+	// being drained, e.g. "room-list state flush".
 	Name string
 	// Interval is the drain cadence. Must be positive; Run refuses to start
 	// otherwise. Validate it at startup where you can name the env var.

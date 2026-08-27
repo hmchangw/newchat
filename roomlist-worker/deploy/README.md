@@ -1,4 +1,4 @@
-# unread-worker deployment
+# roomlist-worker deployment
 
 Applies the room-level MongoDB state derived from MESSAGES-CANONICAL:
 `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, the sender's subscription
@@ -21,7 +21,7 @@ newest at a same-millisecond tie — only about when each has flushed.
 
 ## Deploy order
 
-**Deploy unread-worker BEFORE rolling broadcast-worker to the release that
+**Deploy roomlist-worker BEFORE rolling broadcast-worker to the release that
 removes the room-pointer, lastSeenAt and mention writes.** In that order the old
 broadcast-worker keeps writing until the new worker is live, and the overlap is
 harmless — the writes are idempotent and additive. The reverse order leaves a window in which nobody writes to MongoDB

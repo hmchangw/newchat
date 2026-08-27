@@ -25,7 +25,7 @@ type roomActivityRefresh struct {
 // room per interval.
 //
 // It hangs off the fan-out path rather than a Mongo write batch: broadcast-worker
-// no longer writes rooms.lastMsgAt (unread-worker owns that now), so there is no
+// no longer writes rooms.lastMsgAt (roomlist-worker owns that now), so there is no
 // batch left to ride. Nothing is lost by the move — the announce still happens
 // exactly once per created message, the handler has already resolved the room's
 // meta so the cross-site test costs no read, and the throttle rather than the

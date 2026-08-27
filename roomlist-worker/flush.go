@@ -147,7 +147,7 @@ func (f *flusher) write(ctx context.Context, b *batch) flushOutcome {
 // "this batch will retry" from the log line alone.
 func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 	if out.err != nil {
-		msg := "unread-state flush failed, retrying"
+		msg := "room-list state flush failed, retrying"
 		attrs := []any{
 			"error", out.err,
 			"rooms", len(b.rooms),
@@ -156,7 +156,7 @@ func (f *flusher) settle(ctx context.Context, b *batch, out flushOutcome) {
 			"held", len(b.held),
 		}
 		if _, ok := errcode.IsPermanent(out.err); ok {
-			msg = "unread-state flush dropped poison batch"
+			msg = "room-list state flush dropped poison batch"
 			attrs = append(attrs, "mongo_stage_codes", out.stageCodes, "mongo_errors", out.mongoErrs)
 		}
 		slog.ErrorContext(ctx, msg, attrs...)
@@ -214,7 +214,7 @@ func classifyFlushErr(err error) error {
 			return err
 		}
 	}
-	return errcode.Permanent(errcode.Internal("mongo rejected unread-state bulk write", errcode.WithCause(err)))
+	return errcode.Permanent(errcode.Internal("mongo rejected room-list state bulk write", errcode.WithCause(err)))
 }
 
 // Run drives the flush ticker until ctx is cancelled, then performs one final
@@ -236,7 +236,7 @@ func classifyFlushErr(err error) error {
 // to log a second time.
 func (f *flusher) Run(ctx context.Context, interval, perFlushTimeout time.Duration) {
 	flushloop.Run(ctx, flushloop.Config{
-		Name:     "unread-state flush",
+		Name:     "room-list state flush",
 		Interval: interval,
 		PerFlush: perFlushTimeout,
 	}, func(ctx context.Context) error {

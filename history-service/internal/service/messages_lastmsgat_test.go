@@ -104,7 +104,7 @@ func TestLoadHistory_Degraded_FloorsAtCachedCreatedAtAndKeepsTheCeilingAtNow(t *
 		"the ceiling stays at now, so messages written during the outage are still reachable")
 }
 
-// rooms.lastMsgAt is written by unread-worker on a coalescing flush, on a
+// rooms.lastMsgAt is written by roomlist-worker on a coalescing flush, on a
 // consumer separate from the message-worker that writes the Cassandra row — so
 // the pointer trails the data by at least one flush interval, and without bound
 // whenever that worker is backlogged or down. Capping the read's ceiling at it

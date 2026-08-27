@@ -6,15 +6,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY pkg/ pkg/
-COPY unread-worker/ unread-worker/
+COPY roomlist-worker/ roomlist-worker/
 
-RUN CGO_ENABLED=0 go build -o /unread-worker ./unread-worker/
+RUN CGO_ENABLED=0 go build -o /roomlist-worker ./roomlist-worker/
 
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 app
 
-COPY --from=builder /unread-worker /unread-worker
+COPY --from=builder /roomlist-worker /roomlist-worker
 
 USER app
-ENTRYPOINT ["/unread-worker"]
+ENTRYPOINT ["/roomlist-worker"]

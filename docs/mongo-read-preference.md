@@ -58,7 +58,7 @@ All reads go to a secondary except the pinned handles.
 
 broadcast-worker is read-mostly against MongoDB. Its room/subscription writes
 (`rooms.lastMsgAt`/`lastMsgId`, subscription `lastSeenAt`, `hasMention`) moved to
-`unread-worker`; what stays is the room-list preview (`rooms.preview*`), buffered
+`roomlist-worker`; what stays is the room-list preview (`rooms.preview*`), buffered
 and drained best-effort so no handler awaits it. The reads above are unaffected
 by that split, and the preview write is not read-preference sensitive — it is a
 write, and the reader tolerates a miss by walking Cassandra.
@@ -104,7 +104,7 @@ and adds parallel secondary-bound handles used only by the uniformly-safe reads.
 
 ## 4. Write-only services
 
-`unread-worker` derives its writes purely from the canonical event — it never
+`roomlist-worker` derives its writes purely from the canonical event — it never
 reads MongoDB to decide anything — so it deliberately has no `MONGO_READ_PREFERENCE`
 config field at all, not even pinned to `primary`. Its writes (via `BulkWrite`) always
 target the primary regardless; there is no read path for a preference to apply to.

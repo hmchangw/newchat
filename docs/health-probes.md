@@ -55,7 +55,7 @@ addition, since that is the failure neither current probe catches.)
 
 The ten message-pipeline NATS services (`broadcast-worker`, `history-service`,
 `inbox-worker`, `message-gatekeeper`, `message-worker`, `notification-worker`,
-`room-service`, `unread-worker`, `room-worker`, `search-sync-worker`) can mount the standard
+`room-service`, `roomlist-worker`, `room-worker`, `search-sync-worker`) can mount the standard
 `net/http/pprof` handlers (`/debug/pprof/*`) on the same health listener, gated
 by `PPROF_ENABLED` (default `false`). It is wired via
 `health.ServeWithPprof(addr, timeout, cfg.PProfEnabled, checks...)` — no extra

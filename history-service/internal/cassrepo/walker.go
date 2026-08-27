@@ -161,7 +161,7 @@ func gocqlBucketFetcher[T any](
 // The walk is contiguous by design: it visits every bucket between its start and
 // its floor, and never jumps over a run it believes is empty. That is worth
 // stating because the belief is tempting and unavailable. The obvious source for
-// it, rooms.lastMsgAt, is not a watermark for this table: unread-worker projects
+// it, rooms.lastMsgAt, is not a watermark for this table: roomlist-worker projects
 // it from MESSAGES-CANONICAL on a consumer separate from the message-worker that
 // writes these rows, with MaxDeliver=-1 holding batches un-acked through a Mongo
 // outage. The pointer therefore lags Cassandra by an unbounded amount by design

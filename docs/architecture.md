@@ -86,7 +86,7 @@ flowchart TB
         Gatekeeper["message-gatekeeper<br/>validate → canonical"]
         MsgWorker["message-worker<br/>persist + resolve mentions + fanout"]
         Broadcast["broadcast-worker<br/>deliver to members + metadata"]
-        RoomState["unread-worker<br/>room/sub state (250ms flush)"]
+        RoomState["roomlist-worker<br/>room/sub state (250ms flush)"]
         Notif["notification-worker<br/>push notifications"]
         RoomWorker["room-worker<br/>apply invites, sub events"]
         Inbox["inbox-worker<br/>consume remote OUTBOX"]
@@ -214,7 +214,7 @@ flowchart LR
 
     CANON --> MW[message-worker]
     CANON --> BW[broadcast-worker]
-    CANON --> RSW[unread-worker]
+    CANON --> RSW[roomlist-worker]
     CANON --> NW[notification-worker]
     CANON --> SS[search-sync-worker]
 
@@ -235,13 +235,13 @@ flowchart LR
     HS[history-service] -->|edited/deleted/reacted| CANON
 ```
 
-`unread-worker` consumes `MESSAGES-CANONICAL` on its own durable consumer
+`roomlist-worker` consumes `MESSAGES-CANONICAL` on its own durable consumer
 and owns every room-level MongoDB write derived from a canonical message event
 (`rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, subscription `lastSeenAt`,
 the `hasMention` badge). It coalesces writes on a 250ms flush and holds
 consumed messages unacked until the batch lands in MongoDB, so a MongoDB
 outage retries rather than drops. `broadcast-worker` no longer performs these
-writes — deploy order matters: `unread-worker` must be live *before*
+writes — deploy order matters: `roomlist-worker` must be live *before*
 `broadcast-worker` rolls to the release that removes them, or mention badges
 raised in the gap are lost.
 
@@ -278,7 +278,7 @@ sequenceDiagram
 
 | Store | Used for | Owners |
 |-------|----------|--------|
-| **MongoDB** | Operational data: rooms, subscriptions, room members, users, apps | room-service, user-service, room-worker, unread-worker, notification-worker, inbox-worker (write); broadcast-worker (read-mostly: one preview write — see §Event Flow) |
+| **MongoDB** | Operational data: rooms, subscriptions, room members, users, apps | room-service, user-service, room-worker, roomlist-worker, notification-worker, inbox-worker (write); broadcast-worker (read-mostly: one preview write — see §Event Flow) |
 | **Cassandra** | Message history (time-series, bucketed by `(room_id, bucket)`) | message-worker (write), history-service (read) |
 | **Elasticsearch** | Full-text search index (messages, rooms, users) | search-sync-worker (write), search-service (read) |
 | **Valkey** (cluster) | Subscription/room-meta caches, presence | message-gatekeeper, broadcast-worker, notification-worker, user-presence-service |

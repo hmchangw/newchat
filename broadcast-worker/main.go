@@ -109,7 +109,7 @@ type config struct {
 	// update, so this is what bounds the write rate, not the message rate. It
 	// also bounds how long a room's stored preview trails its newest message —
 	// keep it short: history-service serves a preview only while its freshness
-	// key matches the room's lastMsgId, which unread-worker advances on its own
+	// key matches the room's lastMsgId, which roomlist-worker advances on its own
 	// (equally short) cadence, and a room whose two halves disagree is served by
 	// the Cassandra walk instead.
 	PreviewFlushInterval time.Duration `env:"PREVIEW_FLUSH_INTERVAL" envDefault:"250ms"`
@@ -327,7 +327,7 @@ func main() {
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// The cross-site room-position announce. It used to ride the rooms.lastMsgAt
-	// flush; that write is unread-worker's now, so it fires from the fan-out path
+	// flush; that write is roomlist-worker's now, so it fires from the fan-out path
 	// instead — same one-per-created-message coverage, and the room meta the
 	// cross-site test needs is already in the handler's hand.
 	var activity *roomActivityRefresher

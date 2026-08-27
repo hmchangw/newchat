@@ -1,14 +1,14 @@
-# unread-worker Extraction Implementation Plan
+# roomlist-worker Extraction Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move broadcast-worker's three MongoDB writes into a new `unread-worker` service with its own durable consumer, so a MongoDB outage stops causing duplicate client broadcasts and the writes retry until they land.
+**Goal:** Move broadcast-worker's three MongoDB writes into a new `roomlist-worker` service with its own durable consumer, so a MongoDB outage stops causing duplicate client broadcasts and the writes retry until they land.
 
-**Architecture:** `unread-worker` consumes MESSAGES-CANONICAL on its own durable, derives write intents from each event (a pure function — no store reads), coalesces them into an in-memory batch, and drains the batch to MongoDB on a 250 ms ticker via three ordered unordered-BulkWrites. Consumed messages are held un-acked until their batch lands: Ack on success, Ack on a server-rejected write, NakWithDelay otherwise. During a MongoDB outage `MaxAckPending` fills and JetStream stops delivering to this consumer alone, leaving broadcast fan-out untouched.
+**Architecture:** `roomlist-worker` consumes MESSAGES-CANONICAL on its own durable, derives write intents from each event (a pure function — no store reads), coalesces them into an in-memory batch, and drains the batch to MongoDB on a 250 ms ticker via three ordered unordered-BulkWrites. Consumed messages are held un-acked until their batch lands: Ack on success, Ack on a server-rejected write, NakWithDelay otherwise. During a MongoDB outage `MaxAckPending` fills and JetStream stops delivering to this consumer alone, leaving broadcast fan-out untouched.
 
 **Tech Stack:** Go 1.25, NATS JetStream (`nats.go/jetstream`), MongoDB (`mongo-driver/v2`), `bytedance/sonic`, `caarlos0/env`, `go.uber.org/mock`, `testify`, `testcontainers-go` via `pkg/testutil`.
 
-**Design spec:** `docs/superpowers/specs/2026-08-13-unread-worker-extraction-design.md`
+**Design spec:** `docs/superpowers/specs/2026-08-13-roomlist-worker-extraction-design.md`
 
 ## Global Constraints
 
@@ -33,7 +33,7 @@
 
 ## File Structure
 
-**Create — `unread-worker/`:**
+**Create — `roomlist-worker/`:**
 
 | File | Responsibility |
 |---|---|
@@ -61,8 +61,8 @@
 The pure core: one canonical event in, the set of MongoDB writes it implies out. No store, no NATS, no user lookup — `mention.Parse` is a function of content alone and the room id rides on the message.
 
 **Files:**
-- Create: `unread-worker/handler.go`
-- Test: `unread-worker/handler_test.go`
+- Create: `roomlist-worker/handler.go`
+- Test: `roomlist-worker/handler_test.go`
 
 **Interfaces:**
 - Consumes: `model.MessageEvent`, `model.Message`, `mention.Parse` from `pkg/mention`.
@@ -70,7 +70,7 @@ The pure core: one canonical event in, the set of MongoDB writes it implies out.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `unread-worker/handler_test.go`:
+Create `roomlist-worker/handler_test.go`:
 
 ```go
 package main
@@ -262,12 +262,12 @@ func TestWriteIntents_HasWork(t *testing.T) {
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: FAIL — the package does not compile, `undefined: writeIntents`, `undefined: deriveIntents`.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `unread-worker/handler.go`:
+Create `roomlist-worker/handler.go`:
 
 ```go
 // Package main derives and applies the room-level MongoDB state writes implied
@@ -368,14 +368,14 @@ func deriveIntents(evt *model.MessageEvent) writeIntents {
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: PASS, all subtests green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add unread-worker/handler.go unread-worker/handler_test.go
-git commit -m "feat(unread-worker): derive room-level write intents from canonical events
+git add roomlist-worker/handler.go roomlist-worker/handler_test.go
+git commit -m "feat(roomlist-worker): derive room-level write intents from canonical events
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -388,8 +388,8 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 Collapse many messages into one write per room and per subscription, and hold every consumed message so it can be settled after the batch lands.
 
 **Files:**
-- Create: `unread-worker/batch.go`
-- Test: `unread-worker/batch_test.go`
+- Create: `roomlist-worker/batch.go`
+- Test: `roomlist-worker/batch_test.go`
 
 **Interfaces:**
 - Consumes: `writeIntents` (Task 1), `jsretry.Msg` from `pkg/jsretry` (interface with `Metadata() (*jetstream.MsgMetadata, error)`, `Ack() error`, `NakWithDelay(time.Duration) error`).
@@ -397,7 +397,7 @@ Collapse many messages into one write per room and per subscription, and hold ev
 
 - [ ] **Step 1: Write the failing test**
 
-Create `unread-worker/batch_test.go`:
+Create `roomlist-worker/batch_test.go`:
 
 ```go
 package main
@@ -502,12 +502,12 @@ func TestBatch_EmptyWhenNothingAdded(t *testing.T) {
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: FAIL — `undefined: newBatch`, `undefined: subKey`, `undefined: heldMsg`.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `unread-worker/batch.go`:
+Create `roomlist-worker/batch.go`:
 
 ```go
 package main
@@ -600,14 +600,14 @@ func (b *batch) empty() bool { return len(b.held) == 0 }
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add unread-worker/batch.go unread-worker/batch_test.go
-git commit -m "feat(unread-worker): coalesce write intents into a flushable batch
+git add roomlist-worker/batch.go roomlist-worker/batch_test.go
+git commit -m "feat(roomlist-worker): coalesce write intents into a flushable batch
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -620,8 +620,8 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 Three unordered BulkWrites, all safe to replay out of order. The `lastMsgAt` guard filter is the new part: broadcast-worker's coalescer has no such guard, so a redelivered older message could regress the room pointer.
 
 **Files:**
-- Create: `unread-worker/store.go`, `unread-worker/store_mongo.go`
-- Test: `unread-worker/store_mongo_test.go`
+- Create: `roomlist-worker/store.go`, `roomlist-worker/store_mongo.go`
+- Test: `roomlist-worker/store_mongo_test.go`
 
 **Interfaces:**
 - Consumes: `roomLastMsgUpdate`, `subKey` (Task 2).
@@ -631,7 +631,7 @@ Three unordered BulkWrites, all safe to replay out of order. The `lastMsgAt` gua
 
 The filter builders carry the correctness-critical logic and are testable without a database; the writes themselves are covered by the integration test in Task 7.
 
-Create `unread-worker/store_mongo_test.go`:
+Create `roomlist-worker/store_mongo_test.go`:
 
 ```go
 package main
@@ -672,12 +672,12 @@ func TestMentionFilter_SkipsAccountsThatAlreadyRead(t *testing.T) {
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: FAIL — `undefined: roomLastMsgFilter`, `undefined: mentionFilter`.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `unread-worker/store.go`:
+Create `roomlist-worker/store.go`:
 
 ```go
 package main
@@ -689,7 +689,7 @@ import (
 
 //go:generate mockgen -destination=mock_store_test.go -package=main . Store
 
-// Store is the unread-state write surface. Every method issues a single unordered
+// Store is the room-list state write surface. Every method issues a single unordered
 // BulkWrite and is safe to replay out of order — the flush path retries whole
 // batches, so any write may be applied more than once and after a newer one.
 type Store interface {
@@ -709,7 +709,7 @@ type Store interface {
 
 Missing rooms and subscriptions are deliberately not surfaced by any of the three methods: these are derived fields, and the message itself is already durable in Cassandra before this service sees the event.
 
-Create `unread-worker/store_mongo.go`:
+Create `roomlist-worker/store_mongo.go`:
 
 ```go
 package main
@@ -813,19 +813,19 @@ func (m *mongoStore) BulkSetMentions(ctx context.Context, updates map[subKey]tim
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: PASS.
 
 - [ ] **Step 5: Generate the mock and confirm the build**
 
-Run: `make generate SERVICE=unread-worker && make lint`
-Expected: `unread-worker/mock_store_test.go` created; lint clean.
+Run: `make generate SERVICE=roomlist-worker && make lint`
+Expected: `roomlist-worker/mock_store_test.go` created; lint clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add unread-worker/store.go unread-worker/store_mongo.go unread-worker/store_mongo_test.go unread-worker/mock_store_test.go
-git commit -m "feat(unread-worker): add replay-safe MongoDB bulk write store
+git add roomlist-worker/store.go roomlist-worker/store_mongo.go roomlist-worker/store_mongo_test.go roomlist-worker/mock_store_test.go
+git commit -m "feat(roomlist-worker): add replay-safe MongoDB bulk write store
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -838,8 +838,8 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 Where the durability guarantee lives. Writes run in a fixed order; the batch's held messages are Acked only after the writes land, Nak'd with backoff on a transient failure, and Ack-dropped on a server-rejected document so `MaxDeliver=-1` cannot wedge the consumer forever.
 
 **Files:**
-- Create: `unread-worker/flush.go`
-- Test: `unread-worker/flush_test.go`
+- Create: `roomlist-worker/flush.go`
+- Test: `roomlist-worker/flush_test.go`
 
 **Interfaces:**
 - Consumes: `Store` (Task 3), `batch`/`heldMsg`/`writeIntents` (Tasks 1-2), `jsretry.SettleQuiet`, `jsretry.DefaultBackoff`, `errcode.Permanent`, `errcode.Internal`, `errcode.WithCause`.
@@ -852,7 +852,7 @@ Expected: `BulkWriteException` has `WriteConcernError *WriteConcernError`, `Writ
 
 - [ ] **Step 2: Write the failing test**
 
-Create `unread-worker/flush_test.go`:
+Create `roomlist-worker/flush_test.go`:
 
 ```go
 package main
@@ -1067,7 +1067,7 @@ func TestClassifyFlushErr(t *testing.T) {
 
 - [ ] **Step 3: Write the implementation**
 
-Create `unread-worker/flush.go`:
+Create `roomlist-worker/flush.go`:
 
 ```go
 package main
@@ -1150,7 +1150,7 @@ func (f *flusher) write(ctx context.Context, b *batch) error {
 func (f *flusher) settle(ctx context.Context, b *batch, err error) {
 	classified := classifyFlushErr(err)
 	if classified != nil {
-		slog.ErrorContext(ctx, "unread-state flush failed",
+		slog.ErrorContext(ctx, "room-list state flush failed",
 			"error", classified,
 			"rooms", len(b.rooms),
 			"last_seen", len(b.lastSeen),
@@ -1180,7 +1180,7 @@ func classifyFlushErr(err error) error {
 			return err
 		}
 	}
-	return errcode.Permanent(errcode.Internal("mongo rejected unread-state bulk write", errcode.WithCause(err)))
+	return errcode.Permanent(errcode.Internal("mongo rejected room-list state bulk write", errcode.WithCause(err)))
 }
 
 // Run drives the flush ticker until ctx is cancelled, then performs one final
@@ -1205,14 +1205,14 @@ func (f *flusher) Run(ctx context.Context, interval, finalTimeout time.Duration)
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: PASS. If `classifyFlushErr` mis-classifies, re-check the field names against Step 1's `go doc` output.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add unread-worker/flush.go unread-worker/flush_test.go
-git commit -m "feat(unread-worker): flush batches with ack-after-write settlement
+git add roomlist-worker/flush.go roomlist-worker/flush_test.go
+git commit -m "feat(roomlist-worker): flush batches with ack-after-write settlement
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -1223,8 +1223,8 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 ### Task 5: Wiring — config, consumer, consume loop, shutdown
 
 **Files:**
-- Create: `unread-worker/main.go`, `unread-worker/bootstrap.go`, `unread-worker/pretouch.go`
-- Test: `unread-worker/main_test.go`
+- Create: `roomlist-worker/main.go`, `roomlist-worker/bootstrap.go`, `roomlist-worker/pretouch.go`
+- Test: `roomlist-worker/main_test.go`
 
 **Interfaces:**
 - Consumes: `flusher` (Task 4), `deriveIntents` (Task 1), `NewMongoStore` (Task 3), and from `pkg/`: `stream.Resolve`, `stream.Pipeline`, `stream.ConsumerSettings`, `stream.DurableConsumerDefaults`, `natsutil.Connect`, `natsutil.StampRequestID`, `mongoutil.Connect`, `health.ServeWithPprof`, `shutdown.Wait`, `obs.InitWithLoggerHandler`, `logctx`, `jsonwarm.Pretouch`.
@@ -1232,7 +1232,7 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `unread-worker/main_test.go`:
+Create `roomlist-worker/main_test.go`:
 
 ```go
 package main
@@ -1253,9 +1253,9 @@ func TestBuildConsumerConfig_UnlimitedDeliverAndDeliverNew(t *testing.T) {
 		MaxDeliver:    5,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
-	}, "unread-worker", "chat.msg.canonical.site-a.>")
+	}, "roomlist-worker", "chat.msg.canonical.site-a.>")
 
-	assert.Equal(t, "unread-worker", cc.Durable)
+	assert.Equal(t, "roomlist-worker", cc.Durable)
 	assert.Equal(t, "chat.msg.canonical.site-a.>", cc.FilterSubject)
 	assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 	// Durable retry: a MongoDB outage must not exhaust MaxDeliver and silently
@@ -1269,19 +1269,19 @@ func TestBuildConsumerConfig_UnlimitedDeliverAndDeliverNew(t *testing.T) {
 }
 
 func TestBuildConsumerConfig_BotModePrefixesDurable(t *testing.T) {
-	assert.Equal(t, "bot-unread-worker", stream.PipelineBot.ConsumerName("unread-worker"))
-	assert.Equal(t, "unread-worker", stream.PipelineUser.ConsumerName("unread-worker"))
+	assert.Equal(t, "bot-roomlist-worker", stream.PipelineBot.ConsumerName("roomlist-worker"))
+	assert.Equal(t, "roomlist-worker", stream.PipelineUser.ConsumerName("roomlist-worker"))
 }
 ```
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `make test SERVICE=unread-worker`
+Run: `make test SERVICE=roomlist-worker`
 Expected: FAIL — `undefined: buildConsumerConfig`.
 
 - [ ] **Step 3: Write `bootstrap.go` and `pretouch.go`**
 
-Create `unread-worker/bootstrap.go`:
+Create `roomlist-worker/bootstrap.go`:
 
 ```go
 package main
@@ -1331,7 +1331,7 @@ func bootstrapStreams(ctx context.Context, js streamManager, streamName, subject
 }
 ```
 
-Create `unread-worker/pretouch.go`:
+Create `roomlist-worker/pretouch.go`:
 
 ```go
 package main
@@ -1353,7 +1353,7 @@ func pretouchJSON() { jsonwarm.Pretouch(pretouchTypes...) }
 
 - [ ] **Step 4: Write `main.go`**
 
-Create `unread-worker/main.go`:
+Create `roomlist-worker/main.go`:
 
 ```go
 package main
@@ -1450,7 +1450,7 @@ func main() {
 	}
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name,
-		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("unread-worker"), wiring.CanonicalWildcard))
+		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("roomlist-worker"), wiring.CanonicalWildcard))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -1460,7 +1460,7 @@ func main() {
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
 	go func() { f.Run(flushCtx, cfg.FlushInterval, 5*time.Second); close(flushDone) }()
-	slog.Info("unread-state flusher started", "flush_interval", cfg.FlushInterval)
+	slog.Info("room-list state flusher started", "flush_interval", cfg.FlushInterval)
 
 	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
 	// the single consume goroutine fed without over-fetching during an outage.
@@ -1482,7 +1482,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("unread-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
+	slog.Info("roomlist-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
 
 	shutdown.Wait(ctx, 25*time.Second,
 		func(_ context.Context) error { iter.Stop(); return nil },
@@ -1570,14 +1570,14 @@ func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject strin
 
 - [ ] **Step 5: Run tests and build**
 
-Run: `make test SERVICE=unread-worker && make build SERVICE=unread-worker && make lint`
+Run: `make test SERVICE=roomlist-worker && make build SERVICE=roomlist-worker && make lint`
 Expected: tests PASS, binary builds, lint clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add unread-worker/main.go unread-worker/bootstrap.go unread-worker/pretouch.go unread-worker/main_test.go
-git commit -m "feat(unread-worker): wire consumer, flusher and graceful shutdown
+git add roomlist-worker/main.go roomlist-worker/bootstrap.go roomlist-worker/pretouch.go roomlist-worker/main_test.go
+git commit -m "feat(roomlist-worker): wire consumer, flusher and graceful shutdown
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -1588,12 +1588,12 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 ### Task 6: Deploy artifacts
 
 **Files:**
-- Create: `unread-worker/deploy/user/{Dockerfile,docker-compose.yml,azure-pipelines.yml}`, `unread-worker/deploy/bot/{Dockerfile,docker-compose.yml,azure-pipelines.yml}`, `unread-worker/deploy/README.md`
+- Create: `roomlist-worker/deploy/user/{Dockerfile,docker-compose.yml,azure-pipelines.yml}`, `roomlist-worker/deploy/bot/{Dockerfile,docker-compose.yml,azure-pipelines.yml}`, `roomlist-worker/deploy/README.md`
 - Modify: `docker-local/compose.services.yaml`
 
 - [ ] **Step 1: Write both Dockerfiles**
 
-`unread-worker/deploy/user/Dockerfile` and `unread-worker/deploy/bot/Dockerfile` are byte-identical (the mode is set by compose env, matching broadcast-worker):
+`roomlist-worker/deploy/user/Dockerfile` and `roomlist-worker/deploy/bot/Dockerfile` are byte-identical (the mode is set by compose env, matching broadcast-worker):
 
 ```dockerfile
 FROM golang:1.25.12-alpine AS builder
@@ -1604,32 +1604,32 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY pkg/ pkg/
-COPY unread-worker/ unread-worker/
+COPY roomlist-worker/ roomlist-worker/
 
-RUN CGO_ENABLED=0 go build -o /unread-worker ./unread-worker/
+RUN CGO_ENABLED=0 go build -o /roomlist-worker ./roomlist-worker/
 
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates && adduser -D -u 10001 app
 
-COPY --from=builder /unread-worker /unread-worker
+COPY --from=builder /roomlist-worker /roomlist-worker
 
 USER app
-ENTRYPOINT ["/unread-worker"]
+ENTRYPOINT ["/roomlist-worker"]
 ```
 
-- [ ] **Step 2: Write `unread-worker/deploy/user/docker-compose.yml`**
+- [ ] **Step 2: Write `roomlist-worker/deploy/user/docker-compose.yml`**
 
 ```yaml
-name: unread-worker
+name: roomlist-worker
 
 services:
-  unread-worker:
+  roomlist-worker:
     build:
       context: ../../..
-      dockerfile: unread-worker/deploy/user/Dockerfile
+      dockerfile: roomlist-worker/deploy/user/Dockerfile
     environment:
-      - OTEL_SERVICE_NAME=unread-worker
+      - OTEL_SERVICE_NAME=roomlist-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
@@ -1658,36 +1658,36 @@ networks:
     external: true
 ```
 
-- [ ] **Step 3: Write `unread-worker/deploy/bot/docker-compose.yml`**
+- [ ] **Step 3: Write `roomlist-worker/deploy/bot/docker-compose.yml`**
 
-Identical to Step 2 with these four substitutions: `name: bot-unread-worker`, service key `bot-unread-worker`, `dockerfile: unread-worker/deploy/bot/Dockerfile`, `OTEL_SERVICE_NAME=bot-unread-worker`, and `MODE=bot`.
+Identical to Step 2 with these four substitutions: `name: bot-roomlist-worker`, service key `bot-roomlist-worker`, `dockerfile: roomlist-worker/deploy/bot/Dockerfile`, `OTEL_SERVICE_NAME=bot-roomlist-worker`, and `MODE=bot`.
 
 - [ ] **Step 4: Write both azure-pipelines.yml**
 
-`unread-worker/deploy/user/azure-pipelines.yml` — copy `broadcast-worker/deploy/user/azure-pipelines.yml` verbatim, then change: the two `paths.include` entries from `broadcast-worker/` to `unread-worker/`, and `SERVICE_NAME: broadcast-worker` to `SERVICE_NAME: unread-worker`. The `Dockerfile:` input already interpolates `$(SERVICE_NAME)/deploy/user/Dockerfile`, so it needs no edit.
+`roomlist-worker/deploy/user/azure-pipelines.yml` — copy `broadcast-worker/deploy/user/azure-pipelines.yml` verbatim, then change: the two `paths.include` entries from `broadcast-worker/` to `roomlist-worker/`, and `SERVICE_NAME: broadcast-worker` to `SERVICE_NAME: roomlist-worker`. The `Dockerfile:` input already interpolates `$(SERVICE_NAME)/deploy/user/Dockerfile`, so it needs no edit.
 
-`unread-worker/deploy/bot/azure-pipelines.yml` — same, from `broadcast-worker/deploy/bot/azure-pipelines.yml`.
+`roomlist-worker/deploy/bot/azure-pipelines.yml` — same, from `broadcast-worker/deploy/bot/azure-pipelines.yml`.
 
 - [ ] **Step 5: Register both compose files**
 
 In `docker-local/compose.services.yaml`, add to the `include:` list (keep it alphabetical, so after the `push-notification-service` entries and before `room-service`):
 
 ```yaml
-  - ../unread-worker/deploy/user/docker-compose.yml
-  - ../unread-worker/deploy/bot/docker-compose.yml
+  - ../roomlist-worker/deploy/user/docker-compose.yml
+  - ../roomlist-worker/deploy/bot/docker-compose.yml
 ```
 
 And add to the o11y anchor block, after `room-service: *local-o11y`:
 
 ```yaml
-  unread-worker: *local-o11y
-  bot-unread-worker: *local-o11y
+  roomlist-worker: *local-o11y
+  bot-roomlist-worker: *local-o11y
 ```
 
-- [ ] **Step 6: Write `unread-worker/deploy/README.md`**
+- [ ] **Step 6: Write `roomlist-worker/deploy/README.md`**
 
 ```markdown
-# unread-worker deployment
+# roomlist-worker deployment
 
 Applies the room-level MongoDB state derived from MESSAGES-CANONICAL:
 `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt`, the sender's subscription
@@ -1697,7 +1697,7 @@ drained best-effort, which no handler awaits.
 
 ## Deploy order
 
-**Deploy unread-worker BEFORE rolling broadcast-worker to the release that
+**Deploy roomlist-worker BEFORE rolling broadcast-worker to the release that
 removes its writes.** In that order the old broadcast-worker keeps writing until
 the new worker is live, and the overlap is harmless — the writes are idempotent
 and additive. The reverse order leaves a window in which nobody writes, and the
@@ -1731,8 +1731,8 @@ Expected: no output, exit 0.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add unread-worker/deploy docker-local/compose.services.yaml
-git commit -m "feat(unread-worker): add user and bot deploy artifacts
+git add roomlist-worker/deploy docker-local/compose.services.yaml
+git commit -m "feat(roomlist-worker): add user and bot deploy artifacts
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -1743,14 +1743,14 @@ Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
 ### Task 7: Integration test
 
 **Files:**
-- Create: `unread-worker/integration_test.go`
+- Create: `roomlist-worker/integration_test.go`
 
 **Interfaces:**
 - Consumes: `testutil.MongoDB`, `testutil.RunTests`, `NewMongoStore`, `newFlusher`, `deriveIntents`, `fakeMsg`/`held` from `batch_test.go` (same package, both build tags compile together under `-tags integration`).
 
 - [ ] **Step 1: Write the failing test**
 
-Create `unread-worker/integration_test.go`:
+Create `roomlist-worker/integration_test.go`:
 
 ```go
 //go:build integration
@@ -1775,7 +1775,7 @@ func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 func setupStore(t *testing.T) (*mongoStore, *mongo.Database) {
 	t.Helper()
-	db := testutil.MongoDB(t, "unread_worker_test")
+	db := testutil.MongoDB(t, "roomlist_worker_test")
 	return NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions")), db
 }
 
@@ -1961,19 +1961,19 @@ func TestIntegration_AllEventsInOneBatchCoalesceToOneRoomWrite(t *testing.T) {
 
 - [ ] **Step 2: Run the test and verify it passes**
 
-Run: `make test-integration SERVICE=unread-worker`
+Run: `make test-integration SERVICE=roomlist-worker`
 Expected: PASS. Requires Docker. If `bson.DateTime` type assertions fail, the driver returned a different BSON representation — read the actual value with `t.Logf("%T", room["lastMsgAt"])` and adjust the assertion, keeping the assertion's meaning identical.
 
 - [ ] **Step 3: Check coverage**
 
-Run: `go test -tags integration -coverprofile=coverage.out ./unread-worker/ && go tool cover -func=coverage.out | tail -1`
+Run: `go test -tags integration -coverprofile=coverage.out ./roomlist-worker/ && go tool cover -func=coverage.out | tail -1`
 Expected: total ≥ 80%. If below, add unit cases to the file that is short — do not add assertions that do not test behaviour.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add unread-worker/integration_test.go
-git commit -m "test(unread-worker): integration coverage incl. stale-replay ordering
+git add roomlist-worker/integration_test.go
+git commit -m "test(roomlist-worker): integration coverage incl. stale-replay ordering
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"
@@ -1996,7 +1996,7 @@ In `broadcast-worker/handler_test.go`, remove every mock expectation for the thr
 
 In `broadcast-worker/store_mongo_test.go`, delete tests covering `subscriptionMentionsFilter`, `UpdateRoomLastMessage`, `BulkUpdateRoomLastMessage`, and `AdvanceSubscriptionLastSeen`.
 
-In `broadcast-worker/integration_test.go`, delete assertions that read `rooms.lastMsgAt`, `rooms.lastMsgId`, `rooms.lastMentionAllAt`, `subscriptions.hasMention`, or `subscriptions.lastSeenAt` — that behaviour now belongs to unread-worker's integration test.
+In `broadcast-worker/integration_test.go`, delete assertions that read `rooms.lastMsgAt`, `rooms.lastMsgId`, `rooms.lastMentionAllAt`, `subscriptions.hasMention`, or `subscriptions.lastSeenAt` — that behaviour now belongs to roomlist-worker's integration test.
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
@@ -2041,7 +2041,7 @@ Expected: PASS.
 
 ```bash
 git add -A broadcast-worker
-git commit -m "refactor(broadcast-worker): drop MongoDB writes now owned by unread-worker
+git commit -m "refactor(broadcast-worker): drop MongoDB writes now owned by roomlist-worker
 
 A MongoDB write failure used to NAK the canonical message, re-running the
 handler and re-broadcasting a message clients already had. broadcast-worker
@@ -2066,15 +2066,15 @@ In Section 1, replace the **Event flow** sentence:
 
 with:
 
-> **Event flow:** User publishes message to MESSAGES stream → `message-gatekeeper` validates and publishes to MESSAGES-CANONICAL → `message-worker` persists to Cassandra, `broadcast-worker` delivers to room members, `unread-worker` applies room/subscription state (`lastMsgAt`, `hasMention`, sender `lastSeenAt`), `notification-worker` sends notifications → cross-site events are published directly into remote sites' INBOX streams.
+> **Event flow:** User publishes message to MESSAGES stream → `message-gatekeeper` validates and publishes to MESSAGES-CANONICAL → `message-worker` persists to Cassandra, `broadcast-worker` delivers to room members, `roomlist-worker` applies room/subscription state (`lastMsgAt`, `hasMention`, sender `lastSeenAt`), `notification-worker` sends notifications → cross-site events are published directly into remote sites' INBOX streams.
 
 In Section 6 under **JetStream Streams**, append to the `MESSAGES-CANONICAL-{siteID}` bullet:
 
-> Consumed by `message-worker` (Cassandra persistence), `broadcast-worker` (fan-out; one buffered preview write), `unread-worker` (room/subscription MongoDB writes) and `notification-worker`. `unread-worker` runs with `MaxDeliver=-1` so a MongoDB outage retries rather than drops; broadcast-worker keeps only the room-list preview write, which is buffered and never awaited, so a MongoDB failure can never make it re-broadcast a message.
+> Consumed by `message-worker` (Cassandra persistence), `broadcast-worker` (fan-out; one buffered preview write), `roomlist-worker` (room/subscription MongoDB writes) and `notification-worker`. `roomlist-worker` runs with `MaxDeliver=-1` so a MongoDB outage retries rather than drops; broadcast-worker keeps only the room-list preview write, which is buffered and never awaited, so a MongoDB failure can never make it re-broadcast a message.
 
 - [ ] **Step 2: Update docs/architecture.md**
 
-Read the file first and follow its existing service-listing format. Add a `unread-worker` entry describing: consumes MESSAGES-CANONICAL; writes `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt` and `subscriptions.hasMention`/`lastSeenAt`; coalesces on a 250 ms flush and settles messages only after the write lands; deploy order requires it to be live before broadcast-worker rolls to the release that removes its writes.
+Read the file first and follow its existing service-listing format. Add a `roomlist-worker` entry describing: consumes MESSAGES-CANONICAL; writes `rooms.lastMsgAt`/`lastMsgId`/`lastMentionAllAt` and `subscriptions.hasMention`/`lastSeenAt`; coalesces on a 250 ms flush and settles messages only after the write lands; deploy order requires it to be live before broadcast-worker rolls to the release that removes its writes.
 
 - [ ] **Step 3: Run the full verification suite**
 
@@ -2083,7 +2083,7 @@ Run each and confirm the output before claiming success:
 ```bash
 make lint
 make test
-make test-integration SERVICE=unread-worker
+make test-integration SERVICE=roomlist-worker
 make test-integration SERVICE=broadcast-worker
 make sast
 ```
@@ -2099,7 +2099,7 @@ Expected: a clean tree; `docs/reviews/` either absent or empty. If it has files,
 
 ```bash
 git add CLAUDE.md docs/architecture.md
-git commit -m "docs: document unread-worker in event flow and architecture
+git commit -m "docs: document roomlist-worker in event flow and architecture
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01YK3aAf3kKfkzmtSYtmjicQ"

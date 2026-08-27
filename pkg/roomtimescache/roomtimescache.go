@@ -15,7 +15,7 @@
 //
 // lastMsgAt is deliberately absent, and this is the load-bearing part. It is
 // tempting — it looks like it says where the newest message is, which would let
-// a degraded read bound or skip its bucket walk. It does not. unread-worker
+// a degraded read bound or skip its bucket walk. It does not. roomlist-worker
 // projects it from MESSAGES-CANONICAL on a consumer separate from the
 // message-worker that writes the messages themselves, with MaxDeliver=-1 holding
 // batches un-acked through a MongoDB outage, so the pointer lags Cassandra by an

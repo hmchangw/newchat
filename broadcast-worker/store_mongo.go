@@ -36,7 +36,7 @@ type mongoStore struct {
 	// roomBulk is the same collection typed, used only for its BulkWrite, which
 	// supplies the empty-input guard, the unordered execution the preview flush
 	// depends on, and a %w wrap that keeps errors.As(BulkWriteException) working
-	// — the same reason unread-worker's store holds typed collections.
+	// — the same reason roomlist-worker's store holds typed collections.
 	roomBulk      *mongoutil.Collection[model.Room]
 	subCol        *mongo.Collection
 	threadRoomCol *mongo.Collection
@@ -154,7 +154,7 @@ func (m *mongoStore) BulkUpdateRoomPreview(ctx context.Context, updates map[stri
 // guards read the stored previewAsOf and lastMsgId, which a plain $set cannot do.
 //
 // It touches ONLY the preview fields. lastMsgAt/lastMsgId/lastMentionAllAt on the same
-// document belong to unread-worker; writing them here would race its durable, retried
+// document belong to roomlist-worker; writing them here would race its durable, retried
 // batch with a best-effort one that drops on failure. See previewWriter for what the
 // two halves of the document guarantee each other, and what they do not.
 func previewUpdate(u *roomPreviewUpdate) mongo.Pipeline {

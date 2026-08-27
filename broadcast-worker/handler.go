@@ -251,7 +251,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
 	// The room's own pointer (lastMsgAt/lastMsgId/lastMentionAllAt), the sender's
-	// lastSeenAt and the mention badges are unread-worker's and are off this path
+	// lastSeenAt and the mention badges are roomlist-worker's and are off this path
 	// entirely. The preview stays here because sealing one needs the users, mention
 	// participants and attachments the fan-out below has already resolved — see
 	// previewWriter for why the two halves of the room document can be written apart.
@@ -296,7 +296,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 	h.federateMentions(ctx, meta.ID, msg.ID, resolved.Participants, msg.CreatedAt)
 	// Announce the room's new position to remote sites. Fires from the same
 	// place the rooms.lastMsgAt write used to, so coverage is unchanged by that
-	// write moving to unread-worker.
+	// write moving to roomlist-worker.
 	h.activity.refresh(ctx, meta.ID, meta.CrossSite, msg.CreatedAt)
 	return nil
 }
@@ -341,7 +341,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		// unread-worker (not broadcast-worker) owns the room-level mention badge
+		// roomlist-worker (not broadcast-worker) owns the room-level mention badge
 		// derived from MESSAGES-CANONICAL, and correctly skips it here: TShow=false
 		// replies are invisible in the main channel, so a badge would appear with no
 		// visible message to explain it.
@@ -394,7 +394,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 	}
 
 	// Routing input for the cross-site relay only. The local badge write this
-	// used to perform is unread-worker's now — broadcast-worker makes no
+	// used to perform is roomlist-worker's now — broadcast-worker makes no
 	// MongoDB writes, so a badge failure can no longer suppress the edit
 	// reaching clients.
 	parsed := mention.Parse(msg.Content)
@@ -504,7 +504,7 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 // display info) for the edit event, mirroring the create path so an edit-added
 // mention renders like a fresh one. The event's mentions[] is best-effort
 // enrichment, NOT the durable signal: the unread badge is set separately by
-// unread-worker (deriveIntents, EventUpdated) and newContent still carries the
+// roomlist-worker (deriveIntents, EventUpdated) and newContent still carries the
 // raw @account, so on a
 // user-lookup error we drop the mentions[] enrichment entirely (return nil)
 // rather than emitting a partial set or failing/retrying the edit. nil when none.

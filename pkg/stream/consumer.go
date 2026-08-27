@@ -117,7 +117,7 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 // EffectiveAckWait is the ack deadline the server will actually enforce: the
 // head of the backoff schedule when one is derived, else AckWait. The server
 // overwrites AckWait with BackOff[0] (server/consumer.go:677-682), so a service
-// that sizes its own work against the deadline — unread-worker's flush budget —
+// that sizes its own work against the deadline — roomlist-worker's flush budget —
 // must read this rather than the configured field. The two agree today by
 // construction; reading the derived value keeps that from drifting silently.
 func (s ConsumerSettings) EffectiveAckWait() time.Duration {

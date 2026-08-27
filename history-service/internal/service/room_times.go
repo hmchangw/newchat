@@ -68,7 +68,7 @@ var minPlausibleEpoch = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 // walkBounds derives the bucket-walk (ceiling, floor).
 //
 // The ceiling is the server clock plus skew tolerance, never rooms.lastMsgAt.
-// That pointer is written by unread-worker on a coalescing flush, on a consumer
+// That pointer is written by roomlist-worker on a coalescing flush, on a consumer
 // separate from the message-worker that writes the Cassandra row, so it trails
 // the data by at least one flush interval — and without bound whenever that
 // worker is backlogged or down. A ceiling taken from it silently omits rows

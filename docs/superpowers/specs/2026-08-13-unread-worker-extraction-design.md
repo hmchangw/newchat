@@ -1,4 +1,4 @@
-# unread-worker: extracting broadcast-worker's MongoDB writes
+# roomlist-worker: extracting broadcast-worker's MongoDB writes
 
 **Date:** 2026-08-13
 **Status:** Design approved, not implemented
@@ -35,7 +35,7 @@ unavailable. This design protects the dominant created-channel path only.
 
 ## Approach
 
-A new flat service `unread-worker` at the repo root, `package main`, with its own
+A new flat service `roomlist-worker` at the repo root, `package main`, with its own
 durable consumer on MESSAGES-CANONICAL.
 
 Two alternatives were considered and rejected:
@@ -58,7 +58,7 @@ more service to deploy and operate.
 
 `mention.Parse(content)` is a pure function of the message content, and `meta.ID` /
 `room.ID` are `msg.RoomID` re-fetched. The write set is therefore a **pure function of
-the canonical event with zero MongoDB reads**. `unread-worker` needs no userstore,
+the canonical event with zero MongoDB reads**. `roomlist-worker` needs no userstore,
 no roomkeystore, no Valkey, and no room-type switch — in broadcast-worker the writes
 already run before the room-type switch, so they are room-type agnostic.
 
@@ -84,7 +84,7 @@ The filter matches on `roomId`, so a missing room is a no-op. Benign.
 
 ```
 MESSAGES-CANONICAL-{site}
-  └─ durable "unread-worker" (filter: chat.msg.canonical.{site}.>)
+  └─ durable "roomlist-worker" (filter: chat.msg.canonical.{site}.>)
        │
    consume loop (single goroutine — per-message work is parse + map merge, no I/O)
        │  derive intents, merge into batch, hold the jetstream.Msg
@@ -183,18 +183,18 @@ logic to be made twice. The services deploy independently, so a safe rollout nee
 only deploy ordering — not a dual-write window in source.
 
 1. Merge the single PR.
-2. Deploy `unread-worker` first, with `DeliverPolicy: New` so it does not replay
+2. Deploy `roomlist-worker` first, with `DeliverPolicy: New` so it does not replay
    stream history. The still-running old broadcast-worker image keeps writing; the
    overlap is harmless because the writes are idempotent and additive.
 3. Soak for as long as desired. Merge time and deploy time are decoupled, so soaking
    costs nothing in the repo.
-4. Roll broadcast-worker to the new image. From that point only `unread-worker`
+4. Roll broadcast-worker to the new image. From that point only `roomlist-worker`
    writes. There is no gap in either direction.
 
 Rollback is an ordinary image rollback of broadcast-worker — the previous image still
 writes.
 
-The ordering rule — **deploy `unread-worker` before rolling broadcast-worker** —
+The ordering rule — **deploy `roomlist-worker` before rolling broadcast-worker** —
 goes in the PR description and the deploy README.
 
 ## Consistency trade-off
@@ -245,7 +245,7 @@ Coverage: 80% floor, 90%+ target on `handler.go` and `batch.go`.
 
 ## Documentation
 
-- CLAUDE.md — add `unread-worker` to the event-flow paragraph.
+- CLAUDE.md — add `roomlist-worker` to the event-flow paragraph.
 - `docs/architecture.md` — add the service.
 - `docs/client-api.md` is **not** touched: no client-facing handler changes and no
   `pkg/model` struct changes.

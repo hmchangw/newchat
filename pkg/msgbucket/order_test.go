@@ -132,7 +132,7 @@ func TestNewerRow_IsAStrictOrderOverDistinctPositions(t *testing.T) {
 
 // Two Go times inside one millisecond carrying the same id are the same
 // Cassandra row, so neither is newer — in either direction. This is what lets
-// broadcast-worker and unread-worker, comparing the same pair from their own
+// broadcast-worker and roomlist-worker, comparing the same pair from their own
 // decode of the event, land on the same message.
 func TestNewerRow_SameMillisecondSameIDIsOneRow(t *testing.T) {
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)

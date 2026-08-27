@@ -10,7 +10,7 @@ import (
 // not express here. A generated mock would be regenerated but never compiled
 // against.
 
-// Store is the unread-state write surface. Every method issues a single unordered
+// Store is the room-list state write surface. Every method issues a single unordered
 // BulkWrite and is safe to replay out of order — the flush path retries whole
 // batches, so any write may be applied more than once and after a newer one.
 type Store interface {

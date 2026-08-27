@@ -493,7 +493,7 @@ func bucketsBack(start int64, n int) int64 {
 //
 // This is a correctness property, not an efficiency one. An earlier revision
 // took a skip hint derived from rooms.lastMsgAt so a degraded read could jump
-// the empty run. rooms.lastMsgAt is projected by unread-worker on a consumer
+// the empty run. rooms.lastMsgAt is projected by roomlist-worker on a consumer
 // separate from the message-worker that writes these rows, with MaxDeliver=-1
 // holding batches un-acked through a Mongo outage, so it lags Cassandra by an
 // unbounded amount and cannot authorize skipping any bucket. Reintroducing a

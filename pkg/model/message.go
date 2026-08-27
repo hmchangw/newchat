@@ -98,7 +98,7 @@ func (m *Message) SenderDisplayName() string {
 // not also appear in the room's main timeline.
 //
 // It lives here because it classifies the message, not any one service's
-// routing: broadcast-worker skips channel fan-out for these, unread-worker
+// routing: broadcast-worker skips channel fan-out for these, roomlist-worker
 // skips the room pointer and mention badge, and notification-worker skips the
 // room-wide push. Those three must agree on which messages exist in the
 // channel — a reply that fans out but never moves lastMsgAt, or a mention badge
@@ -110,7 +110,7 @@ func (m *Message) IsHiddenThreadReply() bool {
 
 // IsHiddenThreadReply is the rule behind the method, exposed for consumers that
 // decode a narrow projection of a message rather than the whole type (see
-// unread-worker). Keeping one definition is the point: the services that branch
+// roomlist-worker). Keeping one definition is the point: the services that branch
 // on this must agree on which messages exist in the channel.
 func IsHiddenThreadReply(threadParentMessageID string, tShow bool) bool {
 	return threadParentMessageID != "" && !tShow

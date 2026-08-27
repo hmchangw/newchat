@@ -34,7 +34,7 @@ func TestTier_StoreThenFallback_RoundTrips(t *testing.T) {
 }
 
 // The tier caches createdAt and nothing else. rooms.lastMsgAt is projected by
-// unread-worker on a consumer separate from the message-worker that writes to
+// roomlist-worker on a consumer separate from the message-worker that writes to
 // Cassandra, with MaxDeliver=-1 holding batches un-acked through a Mongo outage,
 // so it lags Cassandra by an unbounded amount and can bound no read of it.
 // Storing it here would only put it within reach of a caller who assumes it can.

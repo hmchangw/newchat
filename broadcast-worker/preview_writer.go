@@ -63,10 +63,10 @@ type bulkRoomPreviewWriter interface {
 // # Why this is broadcast-worker's only MongoDB write
 //
 // The room pointer, the sender's lastSeenAt and the mention badges all moved to
-// unread-worker, which holds messages un-acked until MongoDB takes them. The
+// roomlist-worker, which holds messages un-acked until MongoDB takes them. The
 // preview stayed because sealing one needs the users, mention participants and
 // attachments this service already resolved for the fan-out, and that
-// unread-worker deliberately does not read.
+// roomlist-worker deliberately does not read.
 //
 // Splitting is safe because the preview fields have their own watermark
 // (previewAsOf) and are guarded against it, not against lastMsgAt, so neither
@@ -76,7 +76,7 @@ type bulkRoomPreviewWriter interface {
 //   - An eligible insert writes body and key together, guarded only by the
 //     watermark. Ordinary messages are unaffected.
 //   - An ineligible one advances the key only while it still equals lastMsgId.
-//     If unread-worker flushed first that fails, and the room reads as a miss
+//     If roomlist-worker flushed first that fails, and the room reads as a miss
 //     until history-service walks Cassandra and warms it back. One walk, on
 //     system messages only.
 //
@@ -168,7 +168,7 @@ func (w *previewWriter) Flush(ctx context.Context) error {
 // PerFlush carries the bound rather than Flush imposing its own: the drained batch
 // stays live for the whole write while handlers fill the replacement map behind it,
 // so an unbounded write is an unbounded pair of maps. Keeping it on the shared knob
-// means there is one place to look when a flush hangs, as in unread-worker. The
+// means there is one place to look when a flush hangs, as in roomlist-worker. The
 // final drain takes flushloop.DefaultFinalTimeout.
 //
 // A flush failure is logged and never returned to the handler. The message is

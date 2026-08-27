@@ -5,7 +5,7 @@ trigger:
       - develop
   paths:
     include:
-      - unread-worker/
+      - roomlist-worker/
       - pkg/
 
 pr:
@@ -14,13 +14,13 @@ pr:
       - main
   paths:
     include:
-      - unread-worker/
+      - roomlist-worker/
       - pkg/
 
 variables:
   GO_VERSION: '1.25.13'
-  SERVICE_NAME: unread-worker
-  IMAGE_NAME: bot-unread-worker
+  SERVICE_NAME: roomlist-worker
+  IMAGE_NAME: bot-roomlist-worker
   REGISTRY: '$(containerRegistry)'
 
 stages:

@@ -58,9 +58,9 @@ services:
       - ATREST_VAULT_TRANSIT_KEY=${ATREST_VAULT_TRANSIT_KEY:-chat-kek}
       - PREVIEW_KEY_EPOCH=${PREVIEW_KEY_EPOCH:-1}
       # How often the buffered preview writes drain. The room's own lastMsgAt/lastMsgId
-      # are unread-worker's now and flush on its own cadence, and history-service serves
+      # are roomlist-worker's now and flush on its own cadence, and history-service serves
       # a stored preview only while the two halves agree — so keep this in the same
-      # ballpark as unread-worker's FLUSH_INTERVAL.
+      # ballpark as roomlist-worker's FLUSH_INTERVAL.
       - PREVIEW_FLUSH_INTERVAL=${PREVIEW_FLUSH_INTERVAL:-250ms}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).

@@ -138,7 +138,7 @@ func (m *panickyHeadersMsg) Headers() nats.Header {
 }
 
 // TestConsumeLoop_PanicInGuardedPathDoesNotKillLoopOrCrashMessage proves
-// jobguard.Guard does two things for unread-worker specifically: the
+// jobguard.Guard does two things for roomlist-worker specifically: the
 // panicking message is left un-acked (so JetStream redelivers it — the batch
 // writes are replay-safe, unlike broadcast-worker's Run which Acks-drops on
 // panic), and the consume loop itself survives to process the next message.

@@ -102,7 +102,7 @@ func main() {
 	// Majority, enforced here rather than left to the URI: the flusher acks a
 	// batch's JetStream messages once BulkWrite returns, so a write that a
 	// primary failover rolls back is one no redelivery will ever replace. The
-	// unread state it carried — badges, lastMsgAt, lastSeenAt — is simply lost.
+	// room-list state it carried — badges, lastMsgAt, lastSeenAt — is simply lost.
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
 		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
 		mongoutil.WithWriteConcern(writeconcern.Majority()))
@@ -132,7 +132,7 @@ func main() {
 	}
 
 	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name,
-		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("unread-worker"), wiring.CanonicalWildcard))
+		buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("roomlist-worker"), wiring.CanonicalWildcard))
 	if err != nil {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
@@ -142,7 +142,7 @@ func main() {
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
 	go func() { f.Run(flushCtx, cfg.FlushInterval, cfg.FlushTimeout); close(flushDone) }()
-	slog.Info("unread-state flusher started",
+	slog.Info("room-list state flusher started",
 		"flush_interval", cfg.FlushInterval, "flush_timeout", cfg.FlushTimeout)
 
 	// PullMaxMessages is bounded by MaxAckPending anyway; a modest buffer keeps
@@ -180,7 +180,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	slog.Info("unread-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
+	slog.Info("roomlist-worker started", "site", cfg.SiteID, "mode", string(cfg.Mode))
 
 	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		// Mark the stop as intended BEFORE iter.Stop(), so the consume loop's
@@ -337,7 +337,7 @@ func consumeLoop(iter messageIterator, f *flusher, wg *sync.WaitGroup, state *co
 			// way, and during shutdown failing readiness is what drains it from
 			// the load balancer.
 			state.stopped(err)
-			slog.Error("unread-worker consume loop stopped; no further unread state will be written",
+			slog.Error("roomlist-worker consume loop stopped; no further room-list state will be written",
 				"error", err)
 			return
 		}

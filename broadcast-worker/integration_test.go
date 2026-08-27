@@ -612,7 +612,7 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 	// rejects a submission without one), which is what the dedup ID keys on.
 	require.NoError(t, handler.HandleMessage(natsutil.WithRequestID(ctx, testMentionRequestID), data))
 
-	// The local badge is unread-worker's write, asserted in its own suite — all
+	// The local badge is roomlist-worker's write, asserted in its own suite — all
 	// that is checked here is that only the remote-homed mentionee is federated.
 	cons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, jetstream.ConsumerConfig{
 		Name: "mention-fed-assert", FilterSubject: subject.OutboxWildcard("site-a"),
@@ -650,7 +650,7 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 
 // The split's load-bearing claim, against a real MongoDB: this write reaches only the
 // preview half of the room document. lastMsgAt/lastMsgId/lastMentionAllAt belong to
-// unread-worker, which holds its messages un-acked until Mongo takes them; a
+// roomlist-worker, which holds its messages un-acked until Mongo takes them; a
 // best-effort write that also touched them could resurrect an older pointer over the
 // one that durable batch had already advanced.
 func TestBroadcastWorker_BulkUpdateRoomPreview_LeavesTheRoomPointerAlone_Integration(t *testing.T) {
@@ -662,7 +662,7 @@ func TestBroadcastWorker_BulkUpdateRoomPreview_LeavesTheRoomPointerAlone_Integra
 	mentionAllAt := pointerAt.Add(-time.Hour)
 	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{
 		"_id": "r-pvw", "name": "general", "type": model.RoomTypeChannel, "siteId": "site-a",
-		// As unread-worker left them.
+		// As roomlist-worker left them.
 		"lastMsgId": "m-pointer", "lastMsgAt": pointerAt, "lastMentionAllAt": mentionAllAt,
 	})
 	require.NoError(t, err)

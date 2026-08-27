@@ -2559,7 +2559,7 @@ func TestHandleThreadCreated_DMRoom_WithMention(t *testing.T) {
 
 	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
 
-	// DM thread-reply mention badges are owned by unread-worker
+	// DM thread-reply mention badges are owned by roomlist-worker
 	// (markThreadMentions on the thread_subscriptions row); broadcast-worker
 	// performs no subscription writes at all — its Store interface has none —
 	// so a mentioned DM thread reply still just fans out to both members.
@@ -3818,7 +3818,7 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 			rec := &mentionOutboxRecorder{err: tc.publishErr}
 
 			// No write expectations: broadcast-worker makes no MongoDB writes —
-			// unread-worker owns the room pointer, the sender's lastSeenAt and the
+			// roomlist-worker owns the room pointer, the sender's lastSeenAt and the
 			// mention badge. gomock fails the test if one is attempted.
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(tc.users, nil)
@@ -3890,7 +3890,7 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 
 			store.EXPECT().GetRoom(gomock.Any(), "room-1").Return(testChannelRoom, nil)
 			keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
-			// The badge write is unread-worker's; all that is left here is the
+			// The badge write is roomlist-worker's; all that is left here is the
 			// routing lookup, and it is skipped when the edit mentions nobody.
 			if tc.wantLookup != nil {
 				us.EXPECT().FindUsersByAccounts(gomock.Any(), tc.wantLookup).Return(tc.users, tc.lookupErr)
