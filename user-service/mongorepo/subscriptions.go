@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/user-service/models"
 )
 
@@ -102,6 +103,7 @@ func roomsEnrichStages() bson.A {
 					"userCount":         1,
 					"appCount":          1,
 					"lastMsgAt":         1,
+					"lastUserMsgAt":     1,
 					"lastMsgId":         1,
 					"lastMentionAllAt":  1,
 					"minUserLastSeenAt": 1,
@@ -117,6 +119,7 @@ func roomsEnrichStages() bson.A {
 		bson.M{"$addFields": bson.M{
 			"userCount":         "$room.userCount",
 			"lastMsgAt":         "$room.lastMsgAt",
+			"lastUserMsgAt":     "$room.lastUserMsgAt",
 			"lastMsgId":         "$room.lastMsgId",
 			"lastMentionAllAt":  "$room.lastMentionAllAt",
 			"minUserLastSeenAt": "$room.minUserLastSeenAt",
@@ -158,6 +161,7 @@ func roomMatchStages() []bson.D {
 					"userCount":         1,
 					"appCount":          1,
 					"lastMsgAt":         1,
+					"lastUserMsgAt":     1,
 					"lastMsgId":         1,
 					"lastMentionAllAt":  1,
 					"minUserLastSeenAt": 1,
@@ -220,7 +224,7 @@ func subscriptionFieldsProjection() bson.M {
 func subscriptionProjection() bson.M {
 	proj := subscriptionFieldsProjection()
 	for _, k := range []string{
-		"userCount", "lastMsgAt", "lastMsgId", "lastMentionAllAt",
+		"userCount", "lastMsgAt", "lastUserMsgAt", "lastMsgId", "lastMentionAllAt",
 		"minUserLastSeenAt", "appCount", "roomName", "crossSite",
 		"encKeyPriv", "encKeyVer",
 	} {
@@ -356,11 +360,19 @@ func listWindowCutoff(listType string, withinDays *int) *time.Time {
 // listRow pairs a fetched subscription with the position it sorts to.
 type listRow struct {
 	sub subLite
-	// sortAt is the room's lastMsgAt, or its createdAt when there are no
-	// messages. nil — room missing, or neither date — sorts after every dated
-	// row, as the old Mongo sort did.
+	// sortAt is the room's user-activity position: lastUserMsgAt, falling back
+	// to lastMsgAt, falling back to createdAt when the room is undated. nil —
+	// room missing, or neither date — sorts after every dated row, as the old
+	// Mongo sort did.
 	sortAt *time.Time
 	selfDM bool // favorite view only: pins the caller's self-DM first
+}
+
+// effectiveUserAt is the ordering/window position: the last USER message,
+// falling back to lastMsgAt for rooms that predate lastUserMsgAt. Never
+// createdAt — that stays buildListRows' final undated fallback only.
+func effectiveUserAt(k roomSortKey) *time.Time {
+	return timeutil.Coalesce(k.LastUserMsgAt, k.LastMsgAt)
 }
 
 // buildListRows drops rows that shouldn't appear — rooms soft-deleted here, and
@@ -368,14 +380,18 @@ type listRow struct {
 // owned by another site has no local document; it is kept, since its deletion
 // isn't visible here, but a window drops it because that needs a date. Window
 // membership is current: resolveSortKeys re-reads keys that miss the cutoff.
+// Both the window and the sort key key off user activity (effectiveUserAt), so
+// a system-only bump (e.g. a rename) can't resurface a dormant room or push it
+// above one with real recent conversation.
 func buildListRows(subs []subLite, keys map[string]roomSortKey, account string, favorite bool, cutoff *time.Time) []listRow {
 	rows := make([]listRow, 0, len(subs))
 	for i := range subs {
 		key := keys[subs[i].RoomID]
-		if cutoff != nil && (key.LastMsgAt == nil || key.LastMsgAt.Before(*cutoff)) {
+		at := effectiveUserAt(key)
+		if cutoff != nil && (at == nil || at.Before(*cutoff)) {
 			continue
 		}
-		sortAt := key.LastMsgAt
+		sortAt := at
 		if sortAt == nil {
 			sortAt = key.CreatedAt
 		}
@@ -481,8 +497,10 @@ func (r *SubscriptionRepo) resolveSortKeys(ctx context.Context, subs []subLite, 
 	for i := range subs {
 		id := subs[i].RoomID
 		k, ok := r.sortKeys.get(ctx, id)
-		if ok && cutoff != nil && !k.Missing && (k.LastMsgAt == nil || k.LastMsgAt.Before(*cutoff)) {
-			ok = false
+		if ok && cutoff != nil && !k.Missing {
+			if at := effectiveUserAt(k); at == nil || at.Before(*cutoff) {
+				ok = false
+			}
 		}
 		if ok {
 			keys[id] = k
@@ -494,20 +512,21 @@ func (r *SubscriptionRepo) resolveSortKeys(ctx context.Context, subs []subLite, 
 		return keys, nil
 	}
 	cur, err := r.rooms.Find(ctx, bson.M{"_id": bson.M{"$in": misses}},
-		options.Find().SetProjection(bson.M{"lastMsgAt": 1, "createdAt": 1}))
+		options.Find().SetProjection(bson.M{"lastMsgAt": 1, "lastUserMsgAt": 1, "createdAt": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find room sort keys: %w", err)
 	}
 	var docs []struct {
-		ID        string     `bson:"_id"`
-		LastMsgAt *time.Time `bson:"lastMsgAt"`
-		CreatedAt *time.Time `bson:"createdAt"`
+		ID            string     `bson:"_id"`
+		LastMsgAt     *time.Time `bson:"lastMsgAt"`
+		LastUserMsgAt *time.Time `bson:"lastUserMsgAt"`
+		CreatedAt     *time.Time `bson:"createdAt"`
 	}
 	if err := cur.All(ctx, &docs); err != nil {
 		return nil, fmt.Errorf("decode room sort keys: %w", err)
 	}
 	for i := range docs {
-		k := roomSortKey{LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt}
+		k := roomSortKey{LastUserMsgAt: docs[i].LastUserMsgAt, LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt}
 		keys[docs[i].ID] = k
 		r.sortKeys.add(docs[i].ID, k)
 	}
@@ -530,6 +549,7 @@ type roomBaseline struct {
 	UserCount         int        `bson:"userCount"`
 	AppCount          int        `bson:"appCount"`
 	LastMsgAt         *time.Time `bson:"lastMsgAt"`
+	LastUserMsgAt     *time.Time `bson:"lastUserMsgAt"`
 	LastMsgID         string     `bson:"lastMsgId"`
 	LastMentionAllAt  *time.Time `bson:"lastMentionAllAt"`
 	MinUserLastSeenAt *time.Time `bson:"minUserLastSeenAt"`
@@ -545,7 +565,7 @@ type roomBaseline struct {
 // fields, checked by TestRoomBaselineProjection_MatchesStructTags.
 func roomBaselineProjection() bson.M {
 	return bson.M{
-		"name": 1, "userCount": 1, "appCount": 1, "lastMsgAt": 1, "lastMsgId": 1,
+		"name": 1, "userCount": 1, "appCount": 1, "lastMsgAt": 1, "lastUserMsgAt": 1, "lastMsgId": 1,
 		"lastMentionAllAt": 1, "minUserLastSeenAt": 1, "createdAt": 1,
 		"encKey.priv": 1, "encKey.ver": 1, "crossSite": 1,
 	}
@@ -585,7 +605,7 @@ func (r *SubscriptionRepo) enrichListRows(ctx context.Context, match bson.M, row
 	for i := range docs {
 		baselines[docs[i].ID] = &docs[i]
 		r.sortKeys.add(docs[i].ID, roomSortKey{
-			LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt,
+			LastUserMsgAt: docs[i].LastUserMsgAt, LastMsgAt: docs[i].LastMsgAt, CreatedAt: docs[i].CreatedAt,
 		})
 	}
 	// Apply the list's filter again rather than just fetching the page's _ids: a
@@ -618,6 +638,7 @@ func (r *SubscriptionRepo) enrichListRows(ctx context.Context, match bson.M, row
 			es.UserCount = b.UserCount
 			es.AppCount = b.AppCount
 			es.LastMsgAt = b.LastMsgAt
+			es.LastUserMsgAt = b.LastUserMsgAt
 			es.LastMsgID = b.LastMsgID
 			es.LastMentionAllAt = b.LastMentionAllAt
 			es.MinUserLastSeenAt = b.MinUserLastSeenAt
@@ -673,6 +694,7 @@ func (r *SubscriptionRepo) FindChannelsByMembers(ctx context.Context, account st
 		bson.M{"$addFields": bson.M{
 			"userCount":         bson.M{"$first": "$" + matchedRoomField + ".userCount"},
 			"lastMsgAt":         bson.M{"$first": "$" + matchedRoomField + ".lastMsgAt"},
+			"lastUserMsgAt":     bson.M{"$first": "$" + matchedRoomField + ".lastUserMsgAt"},
 			"lastMsgId":         bson.M{"$first": "$" + matchedRoomField + ".lastMsgId"},
 			"lastMentionAllAt":  bson.M{"$first": "$" + matchedRoomField + ".lastMentionAllAt"},
 			"minUserLastSeenAt": bson.M{"$first": "$" + matchedRoomField + ".minUserLastSeenAt"},
@@ -772,12 +794,13 @@ func (r *SubscriptionRepo) activeFilter(account string) bson.M {
 // activeSubscriptionProjection is the terminal $project: exactly the fields models.ActiveSubscription decodes.
 func activeSubscriptionProjection() bson.M {
 	return bson.M{
-		"_id":          0,
-		"roomId":       1,
-		"siteId":       1,
-		"lastSeenAt":   1,
-		"threadUnread": 1,
-		"lastMsgAt":    1,
+		"_id":           0,
+		"roomId":        1,
+		"siteId":        1,
+		"lastSeenAt":    1,
+		"threadUnread":  1,
+		"lastMsgAt":     1,
+		"lastUserMsgAt": 1,
 	}
 }
 

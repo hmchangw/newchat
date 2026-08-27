@@ -49,3 +49,22 @@ func TestConfig_HRJetStreamDomain(t *testing.T) {
 		assert.Equal(t, "hr-hub", cfg.HRJetStreamDomain)
 	})
 }
+
+func TestConfig_PipelineDepth(t *testing.T) {
+	t.Run("defaults to 2 so one bulk request overlaps the next batch's build", func(t *testing.T) {
+		setRequiredConfigEnv(t)
+
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 2, cfg.PipelineDepth)
+	})
+
+	t.Run("reads PIPELINE_DEPTH when set", func(t *testing.T) {
+		setRequiredConfigEnv(t)
+		t.Setenv("PIPELINE_DEPTH", "4")
+
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 4, cfg.PipelineDepth)
+	})
+}

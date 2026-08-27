@@ -3394,7 +3394,7 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 	// finishCreateRoom calls resolveSubUpdateCounterpart per sub; the human sub has
 	// Name="helper.bot" (RoomTypeBotDM), so GetApp is invoked once.
 	// Assistant left nil to match the real store's {"name":1} projection.
-	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil)
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}, nil)
 
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-1").Return(nil)
 
@@ -3431,8 +3431,9 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
-	// ...and the app it is now talking to, so the client renders the row without a refetch.
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-helper", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	// ...and the full app it is now talking to (same shape subscription.list nests),
+	// so the client renders the row without a refetch.
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo)
 
 	// bot (helper.bot) subscription.update must carry the human's display name,
@@ -7314,7 +7315,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 		setupMock func(s *MockSubscriptionStore)
 		want      string
 		wantHR    *model.CounterpartHRInfo
-		wantApp   *model.CounterpartAppInfo
+		wantApp   *model.AppSubscription
 	}{
 		{
 			name: "channel uses sub.Name and carries no counterpart",
@@ -7353,14 +7354,13 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 			wantHR:  &model.CounterpartHRInfo{Account: "dave"},
 		},
 		{
-			// Assistant nil as in production; assistantName comes from the queried account.
 			name: "botDM resolves app name and appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}),
 		},
 		{
 			// The bot IS in userByAccount in production (FindUsersByAccounts returns it),
@@ -7384,7 +7384,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-9", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-9", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-9", Name: "Helper Bot"}),
 		},
 		{
 			name: "botDM GetApp infra error falls back to bot account and omits appInfo",
@@ -7401,7 +7401,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{ID: "app-3", Name: ""}, nil)
 			},
 			want:    "nameless.bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-3", Name: "", AssistantName: "nameless.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-3", Name: ""}),
 		},
 		{
 			name:    "botDM bot-side sub resolves human from map",
@@ -7544,7 +7544,7 @@ func TestServerCreateDM_DM_SetsCounterpartHRInfo(t *testing.T) {
 	assert.Nil(t, bobEvt.AppInfo)
 }
 
-func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
+func TestServerCreateDM_BotDM_SetsAppInfo(t *testing.T) {
 	h, store, capture := newSyncDMTestHandler(t)
 
 	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
@@ -7556,7 +7556,6 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"}, RoomType: model.RoomTypeBotDM, Name: "alice"},
 		nil)
-	// Assistant left nil to match the real store's {"name":1} projection.
 	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
@@ -7565,7 +7564,7 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 	// Human side sees the app; bot side sees the human.
 	humanEvt := decodeSubUpdate(t, capture.captured, "alice")
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo, "bot counterpart carries no hrInfo")
 
 	botEvt := decodeSubUpdate(t, capture.captured, "helper.bot")
@@ -7575,11 +7574,13 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 func TestSubscriptionRoomFor(t *testing.T) {
 	lastMsg := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC)
 	mention := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	floor := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
 	room := &model.Room{
 		ID: "r1", Name: "eng", Type: model.RoomTypeChannel, SiteID: "site-a",
 		UserCount: 3, AppCount: 1, LastMsgAt: &lastMsg, LastMsgID: "m123",
+		LastUserMsgAt:    &lastUserMsg,
 		LastMentionAllAt: &mention, MinUserLastSeenAt: &floor, CrossSite: ptrBool(false),
 	}
 
@@ -7595,7 +7596,8 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.False(t, *got.CrossSite)
 		assert.Equal(t, 3, got.UserCount)
 		assert.Equal(t, 1, got.AppCount)
-		assert.Equal(t, &lastMsg, got.LastMsgAt)
+		assert.Equal(t, &lastUserMsg, got.LastMsgAt,
+			"the wire carries ONE activity timestamp: the coalesced user-activity value, not the raw ceiling")
 		assert.Equal(t, "m123", got.LastMsgID)
 		assert.Equal(t, &mention, got.LastMentionAllAt)
 		assert.Equal(t, &floor, got.MinUserLastSeenAt)
@@ -7613,13 +7615,77 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, "eng", got.Name)
 	})
 
-	t.Run("nil time fields and nil CrossSite pass through", func(t *testing.T) {
-		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2}
+	t.Run("fresh room pins lastMsgAt to createdAt", func(t *testing.T) {
+		// The added event outruns broadcast-worker's freeze: for a brand-new room
+		// neither lastMsgAt nor lastUserMsgAt exists yet, so the event must carry
+		// the same reference the freeze will persist (createdAt) — without it the
+		// added member's client has nothing to flag the room unread against.
+		created := time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
+		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2, CreatedAt: created}
 		got := subscriptionRoomFor(bare, nil)
 		assert.Nil(t, got.CrossSite)
-		assert.Nil(t, got.LastMsgAt)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
 		assert.Nil(t, got.LastMentionAllAt)
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
+	})
+
+	t.Run("pre-freeze room falls back to the room's lastMsgAt", func(t *testing.T) {
+		created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		pre := &model.Room{
+			ID: "r3", Name: "legacy", SiteID: "site-a", UserCount: 2,
+			LastMsgAt: &lastMsg, LastMsgID: "m9", CreatedAt: created,
+		}
+		got := subscriptionRoomFor(pre, nil)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
+	})
+}
+
+// TestActorSubscriptionIsPreRead: whoever performs the creation has, by
+// definition, already seen the room, so their own subscription carries
+// lastSeenAt from the start. Without it their client flags the brand-new room
+// unread the moment they switch away — the room always ships a non-nil
+// user-activity reference (createdAt), and an absent read position reads as
+// "never opened". Members they invited get no lastSeenAt: the room IS new to
+// them, which is what makes an added member's room unread.
+func TestActorSubscriptionIsPreRead(t *testing.T) {
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	requester := &model.User{ID: "u-alice", Account: "alice"}
+	other := &model.User{ID: "u-bob", Account: "bob"}
+	bot := &model.User{ID: "u-helper", Account: "helper.bot"}
+	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
+
+	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
+		subs := buildDMSubs(requester, other, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Nil(t, subs[1].LastSeenAt, "the counterpart has not seen it")
+	})
+
+	t.Run("botDM: initiator pre-read", func(t *testing.T) {
+		subs := buildBotDMSubs(requester, bot, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt)
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+	})
+
+	t.Run("self-DM: sole member is pre-read", func(t *testing.T) {
+		sub := buildSelfDMSub(requester, room, at)
+		require.NotNil(t, sub.LastSeenAt)
+		assert.True(t, sub.LastSeenAt.Equal(at))
+	})
+
+	t.Run("channel: creator pre-read, invited members unread", func(t *testing.T) {
+		channel := &model.Room{ID: "r2", SiteID: "site-a", Type: model.RoomTypeChannel, Name: "eng", CreatedAt: at}
+		subs := buildChannelSubs(requester, []model.User{*other}, channel, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "creator")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Equal(t, []model.Role{model.RoleOwner}, subs[0].Roles)
+		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
+		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
 	})
 }

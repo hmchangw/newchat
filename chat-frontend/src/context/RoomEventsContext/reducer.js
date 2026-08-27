@@ -130,22 +130,29 @@ function toSummary(room) {
   }
 }
 
+// isSystemMessage: the ONE message-level test for server-generated system
+// chrome (room_renamed, members_added, …). isSystemMessageType is a
+// set-membership test, NOT `type !== ''`: the client-settable "important"
+// type is deliberately absent from that set and behaves like a normal
+// message. sysMsgData is checked belt-and-braces because that's the field
+// MessageList keys off to route a message to the SystemMessage renderer.
+// Preview eligibility and the unread/ordering gate both call this so the
+// two classifications can never drift apart.
+function isSystemMessage(msg) {
+  return isSystemMessageType(msg.type) || msg.sysMsgData != null
+}
+
 // Build a stored preview from a live message. Returns null when there is
 // nothing to store, so callers leave the map untouched rather than writing an
 // empty sentinel.
 function previewFromMessage(msg, fallbackMentions) {
   if (!msg || !msg.id) return null
-  // Fix 1: a system message (room_renamed, members_added, …) is published to
-  // MESSAGES-CANONICAL with non-empty content and fans out as an ordinary
-  // new_message event, but it must never become the room's sidebar snippet —
-  // history-service's previewMessage resolution already excludes it, so
-  // treating it as eligible here makes a reload flip the snippet back.
-  // isSystemMessageType is a set-membership test, NOT `type !== ''`: the
-  // client-settable "important" type is deliberately absent from that set
-  // and previews like a normal message. sysMsgData is checked belt-and-
-  // braces because that's the field MessageList actually keys off to route
-  // a message to the SystemMessage renderer.
-  if (isSystemMessageType(msg.type) || msg.sysMsgData != null) return null
+  // Fix 1: a system message is published to MESSAGES-CANONICAL with
+  // non-empty content and fans out as an ordinary new_message event, but it
+  // must never become the room's sidebar snippet — history-service's
+  // previewMessage resolution already excludes it, so treating it as
+  // eligible here makes a reload flip the snippet back.
+  if (isSystemMessage(msg)) return null
   return {
     messageId: msg.id,
     senderName: messageSenderName(msg),
@@ -610,6 +617,13 @@ export function roomEventsReducer(state, action) {
         }
       }
       const roomId = evt.roomId
+      // A system message renders in the timeline but is not activity: it must
+      // not bump the room's position, unread count, or sidebar order. The
+      // plaintext evt.systemMsg covers encrypted channels where msg.type is
+      // sealed; type/sysMsgData cover plaintext (and the synthesized
+      // encrypted placeholder, which has neither, correctly falls through
+      // only when the event itself isn't flagged).
+      const isSystemEvent = evt.systemMsg === true || isSystemMessage(msg)
       // Thread replies returned above, so anything reaching here belongs in
       // the room timeline and is a preview candidate. Computed once and
       // applied at every return point below.
@@ -620,13 +634,23 @@ export function roomEventsReducer(state, action) {
       // preview. That's fine only because this frontend has no tshow
       // support at all, so no thread reply ever reaches the room timeline
       // here. Anyone adding tshow must revisit this.
-      const nextPreview = previewFromMessage(msg, evt.mentions)
+      // isSystemEvent, not previewFromMessage alone: an encrypted system
+      // event synthesizes a placeholder with no type/sysMsgData, and
+      // "[encrypted message]" must not become the room's snippet.
+      const nextPreview = isSystemEvent ? null : previewFromMessage(msg, evt.mentions)
       const previews =
         !nextPreview || samePreview(state.previews[roomId], nextPreview)
           ? state.previews
           : { ...state.previews, [roomId]: nextPreview }
       const prev = state.roomState[roomId] ?? emptyRoomState()
       const isActive = state.activeRoomId === roomId
+      // Derived once for both buffer modes, so the "what counts as room
+      // activity" rule lives in one place rather than a copy per branch.
+      const nextLastMsgAt = isSystemEvent
+        ? prev.lastMsgAt
+        : (evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt)
+      const nextUnreadCount =
+        isActive || isSystemEvent ? prev.unreadCount : prev.unreadCount + 1
       if (prev.bufferMode === BUFFER_MODE.HISTORICAL) {
         if (
           prev.messages.some((m) => m.id === msg.id) ||
@@ -644,13 +668,13 @@ export function roomEventsReducer(state, action) {
         const nextRoomState = {
           ...prev,
           pendingLiveMessages,
-          lastMsgAt: evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt,
+          lastMsgAt: nextLastMsgAt,
           lastMsgId: evt.lastMsgId ?? prev.lastMsgId,
-          unreadCount: isActive ? prev.unreadCount : prev.unreadCount + 1,
-          hasMention: isActive ? false : prev.hasMention || !!evt.hasMention,
-          mentionAll: isActive ? false : prev.mentionAll || !!evt.mentionAll,
+          unreadCount: nextUnreadCount,
+          hasMention: isActive ? false : prev.hasMention || (!isSystemEvent && !!evt.hasMention),
+          mentionAll: isActive ? false : prev.mentionAll || (!isSystemEvent && !!evt.mentionAll),
         }
-        const summaries = state.summaries.some((r) => r.id === roomId)
+        const summaries = !isSystemEvent && state.summaries.some((r) => r.id === roomId)
           ? sortByLastMsgDesc(
               state.summaries.map((r) =>
                 r.id === roomId
@@ -700,13 +724,13 @@ export function roomEventsReducer(state, action) {
       const nextRoomState = {
         ...prev,
         messages,
-        lastMsgAt: evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt,
+        lastMsgAt: nextLastMsgAt,
         lastMsgId: evt.lastMsgId ?? prev.lastMsgId,
-        unreadCount: isActive ? prev.unreadCount : prev.unreadCount + 1,
-        hasMention: isActive ? false : prev.hasMention || !!evt.hasMention,
-        mentionAll: isActive ? false : prev.mentionAll || !!evt.mentionAll,
+        unreadCount: nextUnreadCount,
+        hasMention: isActive ? false : prev.hasMention || (!isSystemEvent && !!evt.hasMention),
+        mentionAll: isActive ? false : prev.mentionAll || (!isSystemEvent && !!evt.mentionAll),
       }
-      const summaries = state.summaries.some((r) => r.id === roomId)
+      const summaries = !isSystemEvent && state.summaries.some((r) => r.id === roomId)
         ? sortByLastMsgDesc(
             state.summaries.map((r) =>
               r.id === roomId

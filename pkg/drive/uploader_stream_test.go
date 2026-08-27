@@ -237,3 +237,42 @@ func TestClient_UploadGroupImages_HostileFilename(t *testing.T) {
 	}
 	require.Equal(t, 1, fileParts, "an injection would have split the file part")
 }
+
+// A non-ASCII filename (Chinese, spaces, emoji) must cross the wire as raw
+// UTF-8 — the multipart/form-data format resty and mime/multipart have always
+// sent, and the one RFC 7578 §4.2 mandates (it forbids RFC 5987/percent
+// encoding for this filename; Drive would store an encoded name literally).
+// quoteEscaper touches only `\`, `"`, CR and LF; every other byte passes
+// through untouched.
+func TestClient_UploadGroupImages_UnicodeFilename(t *testing.T) {
+	const filename = "中文檔名 报告.png"
+	const payload = "PAYLOAD"
+
+	type wireNames struct{ part, field string }
+	names := make(chan wireNames, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// assert (never require) here: the handler runs off the test goroutine,
+		// where FailNow is not allowed.
+		var n wireNames
+		// #nosec G120 -- test httptest server with a fixed 10MiB bound; not exposed to untrusted traffic
+		if err := r.ParseMultipartForm(10 << 20); assert.NoError(t, err, "parse multipart") {
+			if fhs := r.MultipartForm.File["files[0].file"]; assert.Len(t, fhs, 1, "file part") {
+				n.part = fhs[0].Filename
+			}
+			n.field = r.FormValue("files[0].fileName")
+		}
+		names <- n
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[]`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
+	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
+		[]MultipartFile{{File: fakeMultipart(payload), Filename: filename}})
+	require.NoError(t, err)
+
+	got := <-names
+	require.Equal(t, filename, got.part, "the part filename must arrive as raw UTF-8, not URL-encoded")
+	require.Equal(t, filename, got.field, "the fileName form field must carry the raw name")
+}

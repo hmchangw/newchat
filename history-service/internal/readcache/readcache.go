@@ -147,9 +147,8 @@ func (c *SubscriptionCache) GetHistorySharedSince(ctx context.Context, account, 
 	return entry.sharedSince, entry.subscribed, nil
 }
 
-// GetSubscription bypasses the access-window cache and delegates to the
-// underlying source. Pin/unpin paths need the full subscription doc (roles,
-// account) which we don't cache.
+// GetSubscription bypasses the access-window cache and delegates to the source, which
+// projects (mongorepo.subscriptionReadProjection) — read a new field, widen that first.
 func (c *SubscriptionCache) GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error) {
 	return c.inner.GetSubscription(ctx, account, roomID)
 }

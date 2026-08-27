@@ -1364,11 +1364,37 @@ func resolveRoomName(req *model.CreateRoomRequest, roomType model.RoomType) stri
 	return ""
 }
 
+// preRead marks sub as already seen at t. Whoever performs a creation has by
+// definition seen the room they just made, and the room ships a non-nil
+// user-activity reference from birth (createdAt), so without this their own
+// client reads "activity exists, never opened" and flags the room unread the
+// moment they switch away. broadcast-worker advances the actor's lastSeenAt
+// again when the creation system message flows; setting it here makes it
+// deterministic and puts it on the subscription.update payload clients seed
+// from. Members the actor invited are deliberately left unread.
+func preRead(sub *model.Subscription, t time.Time) *model.Subscription {
+	seen := t
+	sub.LastSeenAt = &seen
+	return sub
+}
+
+// buildChannelSubs returns the creator's owner sub (pre-read) followed by one
+// member sub per invited user, in the order given.
+func buildChannelSubs(requester *model.User, users []model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
+	subs := make([]*model.Subscription, 0, len(users)+1)
+	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Name, false, acceptedAt), acceptedAt))
+	for i := range users {
+		u := &users[i]
+		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt))
+	}
+	return subs
+}
+
 // buildDMSubs returns the two DM subs (each names the counterpart, IsSubscribed=false).
 
 func buildDMSubs(requester, other *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
 	return []*model.Subscription{
-		newSub(idgen.GenerateUUIDv7(), requester, room, nil, other.Account, false, acceptedAt),
+		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, other.Account, false, acceptedAt), acceptedAt),
 		newSub(idgen.GenerateUUIDv7(), other, room, nil, requester.Account, false, acceptedAt),
 	}
 }
@@ -1376,14 +1402,14 @@ func buildDMSubs(requester, other *model.User, room *model.Room, acceptedAt time
 // buildBotDMSubs returns the two botDM subs (human IsSubscribed=true, bot IsSubscribed=false).
 func buildBotDMSubs(requester, bot *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
 	return []*model.Subscription{
-		newSub(idgen.GenerateUUIDv7(), requester, room, nil, bot.Account, true, acceptedAt),
+		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, bot.Account, true, acceptedAt), acceptedAt),
 		newSub(idgen.GenerateUUIDv7(), bot, room, nil, requester.Account, false, acceptedAt),
 	}
 }
 
 // buildSelfDMSub builds the sole self-DM subscription: subscribed, self-named, favorited.
 func buildSelfDMSub(user *model.User, room *model.Room, joinedAt time.Time) *model.Subscription {
-	sub := newSub(idgen.GenerateUUIDv7(), user, room, nil, user.Account, true, joinedAt)
+	sub := preRead(newSub(idgen.GenerateUUIDv7(), user, room, nil, user.Account, true, joinedAt), joinedAt)
 	sub.Favorite = true
 	return sub
 }
@@ -1444,13 +1470,23 @@ func (h *Handler) createSelfDM(ctx context.Context, roomID string, requester *mo
 // (a subscription.list-shaped row); nil pair (keyless DM/botDM/self-DM) omits the key fields.
 func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) *model.SubscriptionRoom {
 	// PreviewMessage stays nil: a member added without shared history must not see the prior last message.
+	//
+	// The wire LastMsgAt is the room's USER-activity position, resolved here
+	// rather than passed through raw: this event races broadcast-worker's freeze
+	// (the membership system message is still in flight when it publishes), and
+	// the added member's client flags the room unread from this value — a nil
+	// reference on a brand-new room would leave their room dark until a reload.
+	// lastUserMsgAt ?? lastMsgAt ?? createdAt is what a reader resolves for this
+	// room either way: the freeze pins createdAt only for a room that has never
+	// carried a message, and otherwise leaves the field absent for the reader to
+	// coalesce to lastMsgAt.
 	sr := &model.SubscriptionRoom{
 		SiteID:            room.SiteID,
 		Name:              room.Name,
 		CrossSite:         room.CrossSite,
 		UserCount:         room.UserCount,
 		AppCount:          room.AppCount,
-		LastMsgAt:         room.LastMsgAt,
+		LastMsgAt:         timeutil.Coalesce(room.LastUserMsgAt, timeutil.Coalesce(room.LastMsgAt, &room.CreatedAt)),
 		LastMsgID:         room.LastMsgID,
 		LastMentionAllAt:  room.LastMentionAllAt,
 		MinUserLastSeenAt: room.MinUserLastSeenAt,
@@ -1711,15 +1747,7 @@ func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.Creat
 	allUsers = append(allUsers, *requester)
 	allUsers = append(allUsers, users...)
 
-	subs := make([]*model.Subscription, 0, len(allUsers))
-	for i := range allUsers {
-		u := &allUsers[i]
-		roles := []model.Role{model.RoleMember}
-		if u.ID == requester.ID {
-			roles = []model.Role{model.RoleOwner}
-		}
-		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, roles, room.Name, false, acceptedAt))
-	}
+	subs := buildChannelSubs(requester, users, room, acceptedAt)
 
 	if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
 		return fmt.Errorf("bulk create subs: %w", err)
@@ -2136,7 +2164,7 @@ func validateSyncCreateDMShape(req *model.SyncCreateDMRequest) error {
 
 // resolveSubUpdateCounterpart computes a subscription.update's roomName plus the
 // counterpart: appInfo for a bot, hrInfo for a human, neither elsewhere. Best-effort.
-func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) (string, *model.CounterpartHRInfo, *model.CounterpartAppInfo) {
+func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Subscription, userByAccount map[string]*model.User) (string, *model.CounterpartHRInfo, *model.AppSubscription) {
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
@@ -2154,9 +2182,8 @@ func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Su
 				}
 				return cp, nil, nil
 			}
-			// AssistantName is cp by construction — GetApp filters on assistant.name == cp,
-			// and the doc can't supply it anyway (projection leaves Assistant nil).
-			appInfo := &model.CounterpartAppInfo{ID: app.ID, Name: app.Name, AssistantName: cp}
+			// Full app record, same shape subscription.list nests as the botDM `app`.
+			appInfo := model.AppSubscriptionFromApp(app)
 			if app.Name == "" {
 				// Apps are always named, so this is a bad document; ship appInfo for its
 				// id but log which one, since roomName and appInfo.name now disagree.

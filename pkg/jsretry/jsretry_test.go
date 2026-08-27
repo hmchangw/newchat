@@ -181,6 +181,29 @@ func TestDefaultBackoff_Shape(t *testing.T) {
 	}, DefaultBackoff)
 }
 
+// BackpressureBackoff exists to be strictly gentler than DefaultBackoff on a
+// backend that just said it is full: never retry sooner, never give up earlier.
+// The second half matters as much as the first — a schedule that skipped the
+// fast rungs but capped its tail below DefaultBackoff would swap one failure
+// mode (amplifying the overload) for another (dropping writes while the cluster
+// is still draining).
+func TestBackpressureBackoff_DominatesDefault(t *testing.T) {
+	assert.GreaterOrEqual(t, BackpressureBackoff[0], DefaultBackoff[2],
+		"the first backpressure retry must skip the fast rungs that feed the overload")
+
+	sum := func(s []time.Duration) time.Duration {
+		var total time.Duration
+		for _, d := range s {
+			total += d
+		}
+		return total
+	}
+	assert.GreaterOrEqual(t, sum(BackpressureBackoff), sum(DefaultBackoff),
+		"a saturated cluster gets at least the retry budget an ordinary failure gets")
+	assert.GreaterOrEqual(t, BackpressureBackoff[len(BackpressureBackoff)-1], DefaultBackoff[len(DefaultBackoff)-1],
+		"the reused tail entry paces the long outage; it must not be shorter than the default tail")
+}
+
 // Deliberately not extended: broadcast fan-out is user-visible and a
 // 15-minute-late broadcast is worthless.
 // The schedule has two jobs and they pull in opposite directions: open fast so

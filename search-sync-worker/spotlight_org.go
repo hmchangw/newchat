@@ -12,6 +12,37 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
+// spotlightOrgUpsertScriptID is the stored-script id for the last-write-wins guard.
+// Bump the suffix if the source ever changes incompatibly, so a rolling deploy doesn't
+// leave old and new pods sharing one mutated definition.
+const spotlightOrgUpsertScriptID = "search-sync-spotlight-org-upsert-v1"
+
+// spotlightOrgUpsertScript applies one HR org row under a last-write-wins guard keyed on
+// params.seq — the source message's JetStream stream sequence, a strict total order
+// assigned server-side at publish time.
+//
+// The HR employees.upsert payload is a bare array carrying no timestamp of its own, so
+// the stream sequence is the only ordering token available. Without it the write is a
+// plain doc_as_upsert with no ordering semantics: a redelivered batch, or a batch from a
+// second pod sharing the durable consumer, can land after a newer one and leave the older
+// row stored.
+//
+// Merging params.doc key-by-key reproduces doc-merge semantics — the row is marshalled
+// with omitempty, so fields absent from a partial publish keep their stored values.
+//
+// Runs under scripted_upsert so a brand-new sectId also records its sequence;
+// ctx._source starts as the empty upsert doc and stored reads 0.
+//
+// Operational note: the guard compares sequences from ONE stream. If the HR stream is
+// ever recreated, sequences restart at 1 and will lose to the stored values, silently
+// dropping every subsequent update — clear orgSeq (or reindex) as part of any rebuild.
+const spotlightOrgUpsertScript = `long stored = ctx._source.orgSeq == null ? 0L : ((Number)ctx._source.orgSeq).longValue(); ` +
+	`long incoming = ((Number)params.seq).longValue(); ` +
+	`if (incoming > stored) { ` +
+	`for (entry in params.doc.entrySet()) { ctx._source[entry.getKey()] = entry.getValue(); } ` +
+	`ctx._source.orgSeq = incoming; ` +
+	`} else { ctx.op = 'none'; }`
+
 // spotlightOrgCollection maintains the spotlight-org ES index, one
 // document per sectId. Many employees collapse to one document via
 // dedup in BuildAction.
@@ -58,8 +89,12 @@ func (c *spotlightOrgCollection) TemplateBody() json.RawMessage {
 	return spotlightOrgTemplateBody(c.indexName, c.devMode)
 }
 
+// StoredScripts registers the last-write-wins guard; BuildAction references it by id
+// so the source isn't repeated in every fan-out action.
 func (c *spotlightOrgCollection) StoredScripts() map[string]json.RawMessage {
-	return nil
+	return map[string]json.RawMessage{
+		spotlightOrgUpsertScriptID: searchindex.StoredScriptBody(spotlightOrgUpsertScript),
+	}
 }
 
 // MappingUpdate returns no update — spotlight-org writes to one fixed index.
@@ -74,7 +109,18 @@ func (c *spotlightOrgCollection) MappingUpdate() (string, json.RawMessage) {
 // (last-wins) and emits one ES _update per unique sectId with doc_as_upsert:true.
 // Doc-merge + omitempty means partial-field publishes preserve stored values for
 // unset fields.
-func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
+// BuildAction satisfies Collection but cannot be used: without a stream sequence the
+// guard rejects every write — including the insert of a brand-new sectId, since the
+// upsert seeds stored=0 and the guard needs incoming > stored — and ES reports each one
+// as a successful no-op. Failing loudly beats a fleet of silently discarded writes;
+// Handler always routes through BuildActionSeq.
+func (c *spotlightOrgCollection) BuildAction([]byte) ([]searchengine.BulkAction, error) {
+	return nil, fmt.Errorf("spotlight-org requires the source stream sequence: use BuildActionSeq")
+}
+
+// BuildActionSeq is BuildAction plus the source message's JetStream stream sequence,
+// which the last-write-wins guard compares against the stored one.
+func (c *spotlightOrgCollection) BuildActionSeq(data []byte, streamSeq uint64) ([]searchengine.BulkAction, error) {
 	var rows []SpotlightOrgIndex
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, fmt.Errorf("unmarshal hr employees: %w", err)
@@ -98,7 +144,7 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 
 	actions := make([]searchengine.BulkAction, 0, len(deduped))
 	for sectID, row := range deduped {
-		body, err := buildSpotlightOrgUpdateBody(row)
+		body, err := buildSpotlightOrgUpdateBody(row, streamSeq)
 		if err != nil {
 			return nil, err
 		}
@@ -112,16 +158,33 @@ func (c *spotlightOrgCollection) BuildAction(data []byte) ([]searchengine.BulkAc
 	return actions, nil
 }
 
-func buildSpotlightOrgUpdateBody(row *SpotlightOrgIndex) (json.RawMessage, error) {
-	body := map[string]any{
-		"doc":           row,
-		"doc_as_upsert": true,
-	}
-	data, err := json.Marshal(body)
+func buildSpotlightOrgUpdateBody(row *SpotlightOrgIndex, streamSeq uint64) (json.RawMessage, error) {
+	// scripted_upsert + an empty seed: the script owns both the insert and the merge, so a
+	// new sectId records its sequence instead of landing without one.
+	body := spotlightOrgUpdateBody{ScriptedUpsert: true}
+	body.Script.ID = spotlightOrgUpsertScriptID
+	body.Script.Params.Doc = row
+	body.Script.Params.Seq = streamSeq
+
+	data, err := json.Marshal(&body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal spotlight-org update body: %w", err)
 	}
 	return data, nil
+}
+
+// spotlightOrgUpdateBody is the ES _update body for one org row. Typed rather than
+// nested map[string]any so marshalling stays allocation-cheap on the fan-out path.
+type spotlightOrgUpdateBody struct {
+	ScriptedUpsert bool     `json:"scripted_upsert"`
+	Upsert         struct{} `json:"upsert"`
+	Script         struct {
+		ID     string `json:"id"`
+		Params struct {
+			Doc *SpotlightOrgIndex `json:"doc"`
+			Seq uint64             `json:"seq"`
+		} `json:"params"`
+	} `json:"script"`
 }
 
 // SpotlightOrgIndex is the wire row, ES doc body, and ES mapping source
@@ -179,3 +242,7 @@ func spotlightOrgTemplateBody(indexName string, devMode bool) json.RawMessage {
 	data, _ := json.Marshal(tmpl)
 	return data
 }
+
+// spotlightOrgCollection needs the stream sequence for its ordering guard; the assertion
+// keeps that wiring compile-checked rather than silently lost to a renamed method.
+var _ sequencedCollection = (*spotlightOrgCollection)(nil)

@@ -11,9 +11,15 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 )
 
+// soakDefaultRoomZipfS and soakDefaultRoomZipfV reproduce the constants these
+// replaced, so a run that sets neither records the same distribution every
+// earlier percentile was measured against.
 const (
-	soakZipfS                 = 1.2
-	soakZipfV                 = 1.0
+	soakDefaultRoomZipfS = 1.2
+	soakDefaultRoomZipfV = 1.0
+)
+
+const (
 	soakGCMTagBytes           = 16
 	soakMaxClientContentBytes = 20 * 1024
 	soakThreadReplyP99        = 50
@@ -35,14 +41,29 @@ type soakRoomPicker struct {
 	zipf *rand.Zipf
 }
 
-func newSoakRoomPicker(seed int64, roomCount int) (*soakRoomPicker, error) {
+// newSoakRoomPicker builds the room-popularity distribution: P(rank) is
+// proportional to (v+rank)^-s, so s sets how steeply traffic concentrates and
+// v flattens the head. Raising v is the only way to model a site whose busiest
+// room is a few percent of the whole — math/rand cannot express s <= 1.
+func newSoakRoomPicker(seed int64, roomCount int, zipfS, zipfV float64) (*soakRoomPicker, error) {
 	if roomCount <= 0 {
 		return nil, fmt.Errorf("room count must be greater than zero")
 	}
+	// math/rand guards on `s <= 1`, which NaN and +Inf both slip past, and the
+	// generator it then returns is not nil — its Uint64 spins forever. Refusing
+	// non-finite values here is what keeps a typo from hanging the run silently.
+	if math.IsNaN(zipfS) || math.IsInf(zipfS, 0) || zipfS <= 1 {
+		return nil, fmt.Errorf("room Zipf exponent must be greater than 1, got %v", zipfS)
+	}
+	if math.IsNaN(zipfV) || math.IsInf(zipfV, 0) || zipfV < 1 {
+		return nil, fmt.Errorf("room Zipf offset must be at least 1, got %v", zipfV)
+	}
 	rng := rand.New(rand.NewSource(seed))
-	return &soakRoomPicker{
-		zipf: rand.NewZipf(rng, soakZipfS, soakZipfV, uint64(roomCount-1)),
-	}, nil
+	zipf := rand.NewZipf(rng, zipfS, zipfV, uint64(roomCount-1))
+	if zipf == nil {
+		return nil, fmt.Errorf("room Zipf generator rejected s=%v v=%v", zipfS, zipfV)
+	}
+	return &soakRoomPicker{zipf: zipf}, nil
 }
 
 func (p *soakRoomPicker) Next() int {

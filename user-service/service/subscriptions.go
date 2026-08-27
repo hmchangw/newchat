@@ -253,7 +253,7 @@ func (s *UserService) enrichLocal(subs []model.EnrichedSubscription, localIdx []
 		subs[j].Room = room
 		// hasUnread / hasGroupMention are computed at read time: room activity (resp.
 		// an @all mention) newer than lastSeenAt.
-		subs[j].HasUnread = unread(subs[j].LastSeenAt, timeutil.TimeToMillis(room.LastMsgAt))
+		subs[j].HasUnread = unread(subs[j].LastSeenAt, timeutil.TimeToMillis(timeutil.Coalesce(subs[j].LastUserMsgAt, room.LastMsgAt)))
 		subs[j].HasGroupMention = unread(subs[j].LastSeenAt, timeutil.TimeToMillis(room.LastMentionAllAt))
 	}
 }
@@ -594,7 +594,7 @@ func buildLocalRoom(sub *model.EnrichedSubscription) *model.SubscriptionRoom {
 		CrossSite:         sub.CrossSite,
 		UserCount:         sub.UserCount,
 		AppCount:          sub.AppCount,
-		LastMsgAt:         sub.LastMsgAt,
+		LastMsgAt:         timeutil.Coalesce(sub.LastUserMsgAt, sub.LastMsgAt),
 		LastMsgID:         sub.LastMsgID,
 		LastMentionAllAt:  sub.LastMentionAllAt,
 		MinUserLastSeenAt: sub.MinUserLastSeenAt,
@@ -627,7 +627,7 @@ func applyRoomInfo(sub *model.Subscription, info *model.RoomInfo) {
 		CrossSite:         info.CrossSite,
 		UserCount:         info.UserCount,
 		AppCount:          info.AppCount,
-		LastMsgAt:         timeutil.MillisToTime(info.LastMsgAt),
+		LastMsgAt:         timeutil.MillisToTime(timeutil.Coalesce(info.LastUserMsgAt, info.LastMsgAt)),
 		LastMsgID:         info.LastMsgID,
 		LastMentionAllAt:  timeutil.MillisToTime(info.LastMentionAllAt),
 		MinUserLastSeenAt: timeutil.MillisToTime(info.MinUserLastSeenAt),
@@ -637,7 +637,7 @@ func applyRoomInfo(sub *model.Subscription, info *model.RoomInfo) {
 	sub.Room = room
 	// hasUnread / hasGroupMention are computed at read time from the room's
 	// last-message / last-@all-mention time vs lastSeenAt.
-	sub.HasUnread = unread(sub.LastSeenAt, info.LastMsgAt)
+	sub.HasUnread = unread(sub.LastSeenAt, timeutil.Coalesce(info.LastUserMsgAt, info.LastMsgAt))
 	sub.HasGroupMention = unread(sub.LastSeenAt, info.LastMentionAllAt)
 }
 
@@ -780,7 +780,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 	roomIDsBySite := map[string][]string{}
 	for i := range subs {
 		if subs[i].SiteID == s.siteID {
-			if unread(subs[i].LastSeenAt, timeutil.TimeToMillis(subs[i].LastMsgAt)) || len(subs[i].ThreadUnread) > 0 {
+			if unread(subs[i].LastSeenAt, timeutil.TimeToMillis(timeutil.Coalesce(subs[i].LastUserMsgAt, subs[i].LastMsgAt))) || len(subs[i].ThreadUnread) > 0 {
 				ids = append(ids, subs[i].RoomID)
 			}
 			continue
@@ -837,7 +837,7 @@ func (s *UserService) unreadRooms(c *natsrouter.Context, account string) ([]stri
 					if !infos[k].Found {
 						continue
 					}
-					lastMsg[infos[k].RoomID] = infos[k].LastMsgAt
+					lastMsg[infos[k].RoomID] = timeutil.Coalesce(infos[k].LastUserMsgAt, infos[k].LastMsgAt)
 				}
 				var res []string
 				siteSubs := crossBySite[site]
