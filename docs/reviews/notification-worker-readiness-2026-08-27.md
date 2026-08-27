@@ -601,3 +601,146 @@ and `push-notification-service/deploy`.
 7. **`low`** — Delete `isDND`/`isPresenting` (`presence.go:132-135`) and the inert branch at `:160`
    until presence ships them; move `chunkStrings` (`presence.go:109`, duplicated at
    `user-service/service/threadunread.go:179`) into `pkg/`.
+
+---
+
+# Chapter 6 — Integration
+
+**Score: 3 / 5**
+
+A thoughtful service at its contract boundaries: every subject comes from `pkg/subject`, the hot
+loop follows the `Messages()` + semaphore pattern correctly, `jsretry.Settle` + `errcode.Permanent`
+discipline is exact, sonic is pretouched, and the cross-site badge/presence/history RPCs are
+fail-open by design. The integration defects are concentrated in bootstrap wiring and shutdown.
+
+## Verified clean
+
+- No raw `fmt.Sprintf` subjects anywhere.
+- No OUTBOX/INBOX participation — correct, since nothing this service emits is order-sensitive
+  federation. `inbox-worker`'s sole INBOX ownership is respected.
+- No Cassandra / `messages_by_room` access, so `MESSAGE_BUCKET_HOURS` does not apply.
+- No room-key access, so `ROOM_KEY_RETIRED_TTL` does not apply.
+- No `pkg/idgen` entity IDs minted, so there is no ad-hoc ID generation to flag.
+- No client-facing handler (`chat.user.*` or HTTP), so no `docs/client-api.md` §3 schema table is owed.
+- `roomsubcache` schema is versioned (`pkg/roomsubcache/roomsubcache.go:52`), so the `HomeSiteID`
+  addition cannot misroute badge RPCs.
+- Env vars in both `deploy/{user,bot}/docker-compose.yml` are a strict subset of the `config` struct,
+  with matching defaults.
+
+## Findings
+
+### `high` — Bootstrap narrows MESSAGES-CANONICAL to the `.created` leaf
+
+`main.go:268` passes `wiring.CanonicalCreated` as the *stream subject* into `bootstrapStreams`
+(`bootstrap.go:25-32`). The stream's real binding is `chat.msg.canonical.{site}.>`
+(`pkg/stream/stream.go:22-27`), as `message-gatekeeper` creates it
+(`message-gatekeeper/bootstrap.go:54-59`). Since `CreateOrUpdateStream` narrows an existing stream,
+whichever service boots last wins: with `BOOTSTRAP_STREAMS=true` (the compose default,
+`deploy/user/docker-compose.yml:44`) notification-worker silently strips
+`.edited/.deleted/.reacted/.pinned/.unpinned` and breaks every other canonical publisher.
+
+### `high` — Shutdown can panic on send to a closed channel
+
+The invalidation reader goroutine (`main.go:378-399`) is untracked by any `WaitGroup`. Shutdown step
+3 calls `invalIter.Stop()` (`main.go:490-492`) and step 4 immediately runs `close(invalCh)`
+(`main.go:494`). `Stop()` is asynchronous; a goroutine sitting between `invalIter.Next()` returning
+and `invalCh <- evt.RoomID` (`main.go:392`) sends on a closed channel and crashes the pod. The main
+consumer loop is correctly counted (`main.go:411-416`) — this one is not.
+
+### `medium` — Invalidation consumer bypasses `stream.DurableConsumerDefaults`
+
+`main.go:363-368` builds a raw `jetstream.ConsumerConfig` with only
+`Durable`/`FilterSubject`/`AckPolicy`/`DeliverPolicy`. It inherits none of `CONSUMER_*` (`AckWait`,
+`MaxDeliver`, `MaxAckPending`, derived `BackOff`) — so `MaxDeliver` is the server default (unlimited)
+and there is no backoff at all. Every sibling, including `push-notification-service/main.go:120-123`,
+routes through `DurableConsumerDefaults`.
+
+### `medium` — `X-Request-ID` is not propagated on any outbound NATS path
+
+`emit.go:48-54` hand-builds `&nats.Msg{Header: nats.Header{}}` and sets only `Content-Type` and
+`Nats-Msg-Id`; `badge_client.go:47` and `parent_fetcher.go:75` call `nc.Request` with bare bytes. The
+repo convention is `natsutil.NewMsg(ctx, subj, data)` (`pkg/natsutil/request_id.go:67-77`) —
+notification-worker is the only service constructing a publish `nats.Msg` by hand. user-service and
+history-service use lenient `RequestID()` middleware so nothing breaks functionally, but each remote
+mints a fresh ID and the correlation chain dies at this hop, contradicting CLAUDE.md Section 3
+(Request Logging & Tracing).
+
+### `medium` — `bootstrap.go` sets non-schema stream config
+
+`bootstrap.go:37` sets `Compression: jetstream.S2Compression` on PUSH-NOTIFICATION. CLAUDE.md's
+stream-bootstrap-ownership rule says the helper sets "ONLY the stream's schema — Name + Subjects". It
+is the only `Compression` in any service, repo-wide. A dev boot flips compression on a stream ops
+otherwise owns.
+
+### `medium` — Production path never verifies the output stream
+
+`bootstrap.go:43-46` skips verifying PUSH-NOTIFICATION, justified in-comment as "async publish
+surfaces errors per-publish" — but `jsPublisher.PublishMsg` (`emit.go:82-86`) is synchronous. A
+missing push stream in production becomes per-message naks until `MaxDeliver` drops them, instead of
+failing fast at startup the way `message-gatekeeper/bootstrap.go:64-71` does.
+
+### `medium` — `DefaultBackoff` on a user-visible delivery path
+
+`main.go:449` uses `jsretry.DefaultBackoff` (1s/5s/30s/2m/10m). The sibling fan-out worker uses
+`LowLatencyBackoff` (`broadcast-worker/main.go:446`), which `pkg/jsretry` documents as the choice
+"where the first retry must be near-immediate so a sub-second hiccup isn't user-visible". A blip on
+the member lookup delays a push by at least 1 s, then 5 s.
+
+### `medium` — `docs/client-api.md` drift on `@here`
+
+`docs/client-api.md:6566` states that large rooms push "only to mentioned recipients (`@user`, `@all`,
+`@here`)". `handler.go:135-136` states and implements the opposite — `mentionsAll` is `MentionAll`
+only, and `mention.Parse` never sets it for `@here` (`pkg/mention/mention.go:47-51`), with an explicit
+comment: "`@here` is deliberately NOT a push trigger."
+
+*Verified directly against all three files.*
+
+### `medium` — No sonic wire-compat test despite a map field on the wire
+
+`model.PushNotificationEvent.UnreadCounts` is `map[string]int` (`pkg/model/push.go:17`), marshaled by
+sonic at `emit.go:41` and decoded by `encoding/json` at `push-notification-service/handler.go:30`.
+CLAUDE.md requires confirming byte-compatibility when a path "marshals `map` fields — see the sonic
+wire-compat tests in `broadcast-worker`/`message-gatekeeper`". `broadcast-worker/sonic_wire_test.go`
+exists; notification-worker has only `pretouch_test.go`.
+
+### `medium` — `bootstrap_test.go` masks the production call
+
+`bootstrap_test.go:85` passes `"chat.msg.canonical.test.>"` where `main.go:268` passes the `.created`
+leaf. That mismatch is exactly why the `high` bootstrap finding above is invisible to CI.
+
+### `low` — Dedup key assumes a determinism the pipeline does not provide
+
+`handler.go:246` claims the sort yields "a deterministic account set across redeliveries", but batch
+*membership* depends on the fail-open `Settings`/`Presence` snapshots (`handler.go:243-244`). If a
+presence RPC fails on attempt 1 and succeeds on attempt 2, batch `b0`'s account set differs while
+`Nats-Msg-Id` (`handler.go:295`) is unchanged — so the corrected batch is deduped away inside the
+window. Sorting fixes ordering only, not membership.
+
+### `nitpick` — Minor contract hygiene
+
+`msg.Ack()` errors are discarded without the CLAUDE.md-required comment at `main.go:387` and
+`main.go:397`, and the decode-failure ack-drop there skips the `errcode.Permanent` idiom used on the
+main path (`handler.go:105`). `badgeFetchTimeout` (`badge_client.go:19`) is the only cross-site
+timeout that is not env-tunable, unlike `PRESENCE_RPC_TIMEOUT`/`USER_SETTINGS_TIMEOUT`.
+
+## Recommendations
+
+1. **`high`** — Pass `wiring.CanonicalStream.Subjects[0]` (not `wiring.CanonicalCreated`) at
+   `main.go:268`, and update `bootstrap_test.go:85` to assert the exact subject the production call
+   site supplies. Consider dropping the canonical-stream create entirely and only verifying it, since
+   `message-gatekeeper` owns it.
+2. **`high`** — Track the invalidation reader in `invalWG` (or a second `WaitGroup`) and wait on it
+   *before* `close(invalCh)`; alternatively, close the channel from inside that goroutine on
+   `Next()` error.
+3. **`medium`** — Build the invalidation consumer with `stream.DurableConsumerDefaults(cfg.Consumer)`,
+   overriding only `Durable`/`FilterSubject`/`DeliverPolicy`.
+4. **`medium`** — Replace the hand-built `nats.Msg` in `emit.go` with
+   `natsutil.NewMsg(ctx, e.sendSubject, data)`, and add `natsutil.RequestIDHeader` to the badge and
+   history-parent requests.
+5. **`medium`** — Drop `Compression` from `bootstrap.go:37`, and make the disabled path verify the
+   push stream too, matching `message-gatekeeper`'s fail-fast.
+6. **`medium`** — Switch `main.go:449` to `jsretry.LowLatencyBackoff` to match broadcast-worker's
+   user-visible fan-out.
+7. **`medium`** — Fix `docs/client-api.md:6566` to remove `@here` from the large-room push triggers,
+   and add a sonic↔stdlib wire-compat test for `PushNotificationEvent` (map field, plus HTML
+   metacharacters in `Title`/`Body`) mirroring `broadcast-worker/sonic_wire_test.go`.
