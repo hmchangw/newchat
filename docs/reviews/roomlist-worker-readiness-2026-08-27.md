@@ -239,3 +239,63 @@ a stalled flush plus the wait for the next tick plus this message's own flush is
 5. `low` — Either rename `TestBuildConsumerConfig_BotModePrefixesDurable` to reflect that it tests `stream.Pipeline.ConsumerName`, or make it call `buildConsumerConfig` with a bot-prefixed durable and assert `cc.Durable`.
 6. `low` — Add a unit test pinning `cc.BackOff` from `buildConsumerConfig` (length, and first entry equal to `AckWait`), guarding the MaxDeliver-override/BackOff-clamp interaction CLAUDE.md flags as a hard consumer-create error.
 7. `low` — Cover `requestSelfShutdown` by injecting the signal function, and drop the redundant `TestConsumeLoop_ReadyWhileConsuming`.
+
+---
+
+# 5. Maintainability — 4 / 5
+
+Small, cohesive, unusually well-tested, and the dense commenting is overwhelmingly load-bearing
+WHY rather than restatement. It loses a point for a `main.go` that has visibly outgrown its
+file, a dead config knob, an already-stale deploy README, and one Ack/Nak correctness invariant
+that lives entirely in `write`'s control flow.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `flush.go:139` → `pkg/jsretry/jsretry.go:113` | The drop-vs-retry decision runs `errcode.IsPermanent` — an `errors.As` **any-match** — over an `errors.Join`. A mixed join would silently Ack-drop a transient failure. The only guard is `write`'s early return at `:127`/`:131`/`:133`, and neither the `SettleQuiet` call at `:165` nor `IsPermanent`'s doc ("err's chain") mentions joins. Currently correct and pinned by `flush_test.go:158,:176` — but nothing tells the next editor that adding a stage which *records* rather than *returns* a transient error breaks it, and the failure mode is silent: an Ack looks identical to success from outside. |
+| `medium` | `main.go` (whole) | Four separable units in one 383-line file — config + `validateFlushBudget`; wiring/shutdown; `consumeState`/readiness; `consumeLoop` + `buildConsumerConfig`. `config_test.go` and `consumeloop_test.go` already exist with no matching production file, which is the codebase pointing at its own seams. |
+| `medium` | `batch.go:97-99` | `lastMentionAllAt` merges only inside the `in.LastMsgID != ""` branch, so any future intent carrying an `@all` timestamp without a room pointer — for instance an edit that *adds* `@all` — is dropped with no error. No test covers that combination. |
+| `medium` | `main.go:351` vs `:344-350` | `jobguard.Guard` turns a deterministic panic into an un-acked message under `MaxDeliver=-1` (unbounded redelivery) while `consumeState.Check` still reports ready. The comment describes the crash-loop it prevents, not the silent stall it leaves. (Same defect as Code quality `medium`; recorded once in the action list.) |
+| `medium` | `main.go:377` | `cc.MaxDeliver = -1` applied after the `BackOff` clamp has already used `CONSUMER_MAX_DELIVER`; nothing at the override says the env var silently degrades to a schedule-length knob. (Same defect as Architecture `medium`.) |
+| `low` | `main.go:57` | `MetricsAddr` / `METRICS_ADDR` is declared, defaulted to `:9090`, and never read — the real listener comes from `OTEL_EXPORTER_PROMETHEUS_PORT` (default `2112`, `pkg/obs/obs.go:88`). **Downgraded from `medium` after verification:** the identical dead knob exists in `message-gatekeeper`, `broadcast-worker`, `message-worker`, `history-service` and `room-worker`. This is inherited fleet-wide vestigial config, not something this service introduced — fix it fleet-wide or not at all. |
+| `low` | `deploy/README.md:57` | *"The health endpoint deliberately checks only NATS"* contradicts `main.go:174-177`, which registers `consume.Check()` alongside it. **Verified.** Already stale on a newly extracted service. |
+| `low` | `deploy/user/Dockerfile` vs `deploy/bot/Dockerfile` | Byte-identical; every change must be made twice and nothing enforces it. |
+| `low` | `deploy/README.md` Tuning table | Omits `FLUSH_TIMEOUT`, yet `validateFlushBudget` refuses startup when `2×FLUSH_TIMEOUT + FLUSH_INTERVAL >= CONSUMER_ACK_WAIT`. Following the table to tune `CONSUMER_ACK_WAIT` down hard-fails the pod. |
+| `low` | `flush.go:117-119` vs `:61-65` | The stage-name/codes rationale is written out twice; two copies of one rationale drift. |
+| `low` | `flush.go:126-134` | A permanent-then-transient sequence discards the recorded `stageCodes`/`mongoErrs`, so the poison document's codes are never logged on that pass. |
+| `nitpick` | `main.go:358` | `DefaultBackoff` passed alongside `errcode.Permanent(...)`; the permanent branch never reads it. |
+
+## Comment verdict
+
+31–37% comment lines in `main.go` and `flush.go`. The long blocks earn their length:
+`validateFlushBudget`'s 19 lines explain a `2×` factor no reader could derive,
+`classifyFlushErr`'s explains deny-by-default convergence, `projection.go`'s explains why a
+narrow struct exists at all. Genuine WHAT-noise is rare (`store_mongo.go:95-96`, `batch.go:118`).
+The real cost is **redundancy**: the readiness rationale is restated at `main.go:226-237`,
+`:311-313` and `:335-338`.
+
+## Adding a fourth write stage — the newcomer walkthrough
+
+Concretely, adding a room-level unread count:
+
+1. **`handler.go`** — add fields to `writeIntents` plus a presence marker, populate in `deriveIntents`. *Trap:* pick a marker that is not a sub-field of `LastMsgID` — see the `lastMentionAllAt` finding.
+2. **`batch.go`** — new map on `batch`, merge in `add`, size in `newBatch`. *Traps:* forgetting `newBatch` gives a nil map → panic → recovered by jobguard → message never acks → infinite redelivery **with a green readiness probe**; and a map keyed by anything not bounded by `held` breaks the documented `MaxAckPending` bound.
+3. **`store.go` + `store_mongo.go`** — new `Bulk*` method, models, and a `$not/$gte`-style filter if it must be replay-safe.
+4. **`flush.go:126-134`** — insert the stage. **Two non-obvious invariants:** it must go *after* `lastSeen` if it reads sender state, and it must use the `stage(...)` + early-return shape or the `errors.Join`/`IsPermanent` safety at `:139` collapses.
+5. **`flush.go:151-157`** — add the count to the failure log attrs, or it is silently omitted.
+6. **`flush_test.go`** — extend `stubStore` with the method, a `failWith` key and an `order` entry, or the package stops compiling. Then `batch_test.go`, `handler_test.go`, `integration_test.go`.
+7. **`deploy/README.md`** and both compose files if a knob is added.
+
+Realistically 6–8 files. The two that bite are step 4's ordering and error-shape invariants,
+both discoverable only by reading `write`'s 20-line doc comment.
+
+## Recommendations
+
+1. `high` — At `flush.go:165`, state the invariant in one line ("`out.err` is either a single transient error or a join of only permanents — see `write`") and add a note to `pkg/errcode.IsPermanent` that it matches **any** branch of an `errors.Join`.
+2. `medium` — Split `main.go` into `consumeloop.go` (loop + `consumeState` + `requestSelfShutdown`) and `config.go` (struct + `validateFlushBudget` + `buildConsumerConfig`), matching the test files that already exist. This also sets up the `run()` extraction the coverage chapter needs.
+3. `medium` — Add a `batch_test.go` case for `LastMentionAllAt` with an empty `LastMsgID`, and decide explicitly whether it should be dropped.
+4. `medium` — Add a one-line comment at `cc.MaxDeliver = -1` noting what it does to `CONSUMER_MAX_DELIVER`.
+5. `low` — Fix the deploy README's health-check sentence and add `FLUSH_TIMEOUT` (with the budget rule) to the Tuning table.
+6. `low` — Collapse the duplicated Dockerfile to one shared file referenced by both compose files; de-duplicate the three readiness comments down to one.
+7. `low` — Leave `MetricsAddr` alone unless doing a fleet-wide sweep; removing it here alone makes this service inconsistent with five siblings for no gain.
