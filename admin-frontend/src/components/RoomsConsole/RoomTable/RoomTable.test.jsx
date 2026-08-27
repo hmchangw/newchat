@@ -99,7 +99,7 @@ describe('RoomTable', () => {
     expect(within(cell).queryByRole('button', { name: /^set onduty/i })).not.toBeInTheDocument()
   })
 
-  it('offers no action for a restricted channel that is not on duty', () => {
+  it('offers "set onduty" for a half-set channel, so it can be brought fully on duty', () => {
     render(
       <RoomTable
         rooms={[room({ restricted: true })]}
@@ -108,7 +108,9 @@ describe('RoomTable', () => {
         onUnsetOnDuty={vi.fn()}
       />,
     )
-    expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
+    const cell = actionCell('r-1')
+    expect(within(cell).getByRole('button', { name: /^set onduty/i })).toBeInTheDocument()
+    expect(within(cell).queryByRole('button', { name: /unset onduty/i })).not.toBeInTheDocument()
   })
 
   it('offers no action for an on-duty DM', () => {

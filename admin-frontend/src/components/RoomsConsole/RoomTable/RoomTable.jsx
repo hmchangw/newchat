@@ -16,8 +16,8 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
   const minMembers = ondutyMinMembers()
 
   // The toggle writes `restricted` and `externalAccess` together, but they are
-  // stored independently — a half-set room is not on duty, and is left alone
-  // rather than offered a toggle in either direction.
+  // stored independently. A half-set room is not on duty, so it gets the "set"
+  // action — re-running the toggle is what brings it fully on duty.
   const isOnDuty = (room) => room.restricted && room.externalAccess
 
   return (
@@ -55,7 +55,6 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
                       unset onduty
                     </button>
                   ) : (
-                    !room.restricted &&
                     room.userCount >= minMembers && (
                       <button
                         type="button"
