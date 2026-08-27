@@ -374,6 +374,14 @@ func roomTypeToModel(t string) model.RoomType {
 
 // ----- remove-members ------------------------------------------------------
 
+// memberRemoval is one removal awaiting its cross-site publish, held between the
+// delete loop and the federation pass so the room-key rotation can run between them.
+type memberRemoval struct {
+	userID     string
+	account    string
+	destSiteID string
+}
+
 func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest) (*BotRemoveResponse, error) { //nolint:gocritic // hugeParam: natsrouter contract
 	roomID := c.Params.Get("roomID")
 	if roomID == "" {
@@ -401,6 +409,10 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 
 	removed := []string{}
 	removedAccounts := []string{}
+	// Collected in the loop and published after the rotation below, so a failed
+	// publish cannot skip it. See the rotation comment for why that ordering is
+	// load-bearing rather than cosmetic.
+	var pendingFederations []memberRemoval
 	// Deferred, not called at the end of the loop: every path out of here from
 	// this point on has already committed subscription deletes, so the cached
 	// positive subauthcache decisions must die on the error paths too. A
@@ -445,14 +457,27 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		}
 
 		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
-			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
-				return nil, err
-			}
+			pendingFederations = append(pendingFederations, memberRemoval{userID: u.ID, account: u.Account, destSiteID: u.SiteID})
 		}
 	}
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
+	//
+	// Rotation runs BEFORE the federation publishes, for the same reason the
+	// subauthcache bust above is deferred: by here the deletes are committed, and
+	// the retry cannot repair anything. It re-runs with wasThere=false on every
+	// user, so `removed` is empty, so it skips the rotation too — permanently.
+	// Federating first and returning on its failure therefore leaves the removed
+	// member holding a key that still opens every future message in the room,
+	// with nothing that ever rotates it. Rotating first downgrades that to the
+	// stranded-federation gap this handler already documents: the remote site
+	// still shows them subscribed, but they cannot read anything new.
 	if len(removed) > 0 {
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			return nil, err
+		}
+	}
+	for _, f := range pendingFederations {
+		if err := h.federateMemberRemoved(c, roomID, f.userID, f.account, f.destSiteID); err != nil {
 			return nil, err
 		}
 	}

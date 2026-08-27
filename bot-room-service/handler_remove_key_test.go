@@ -342,3 +342,48 @@ func TestHandleRemove_RotateFails_FansOutNothing(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, pub.payloads, "a failed rotation must not hand survivors a phantom key")
 }
+
+// A federation publish failure must not cancel the key rotation. The local
+// subscriptions are already deleted, and the retry cannot recover: it sees
+// wasThere=false, skips to the end, and never rotates. Returning before the
+// rotation therefore leaves the removed member holding a key that still opens
+// every future message in the room — permanently, since nothing rotates later.
+//
+// Sibling of TestHandleRemove_BustsWhenFederationFails: same committed-delete
+// reasoning, applied to the key instead of the cache entry.
+func TestHandleRemove_RotatesWhenFederationFails(t *testing.T) {
+	rotated := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			// A remote home site, so the removal federates and hits the failure.
+			return &model.User{ID: id, Account: "bob", SiteID: "site-b"}, nil
+		},
+		ListRoomMemberAccountsFn: func(_ context.Context, _ string) ([]string, error) {
+			return []string{"carol"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{
+				Version: 3,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
+			}, nil
+		},
+		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
+			rotated = true
+			return 4, nil
+		},
+	}
+	failing := func(context.Context, string, []byte, string) error { return errors.New("outbox down") }
+	h := newHandler(store, "site-a", []string{"site-b"}, failing, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+
+	require.Error(t, err, "the caller must still learn federation failed")
+	assert.True(t, rotated, "a federation failure must not leave the removed member holding the room key")
+}
