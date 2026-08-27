@@ -114,3 +114,66 @@ not execute.
 4. `low` — `roomactivity.go`: either switch `roomActivityPublisher` to sonic and add `model.RoomActivityEvent` to `pretouch.go`, or add one line stating why stdlib is retained.
 5. `low` — `roomactivity.go:78`: record the throttle watermark only after a successful publish, or say plainly that a failed announce is not retried within the interval.
 6. `low` — Normalize log keys to `room_id`/`message_id` in one pass.
+
+---
+
+# 3. Architecture — 4 / 5
+
+The extraction left a genuinely coherent residue: fan-out plus one un-awaited, structurally
+inert preview write, with unusually well-argued invariants. What keeps it off 5 is that the
+`previewForMsgId == lastMsgId` invariant is now jointly owned by three services with three
+different durability regimes and two independently-named flush knobs, and that the cross-site
+mention badge depends on a read whose failure is swallowed.
+
+## The split verdict — the claim verifies
+
+`Store` (`store.go:17-29`) is read-only. The sole write lives behind a separate
+consumer-defined `bulkRoomPreviewWriter` (`preview_writer.go:52`), reached only via
+`h.previews.buffer` — a mutex-guarded map insert with no error return, **structurally unable to
+fail a handler**. The one residual awaited MongoDB dependency is a *read* (bot app name),
+breaker-fenced, LRU-cached, and double-bounded by `previewSealTimeout` + `previewSealReserve`.
+
+Both writers call `msgbucket.NewerRow` (`preview_writer.go:114,120`; `roomlist-worker/batch.go:93`).
+`previewUpdate` (`store_mongo.go:160-187`) touches only preview fields under `previewAsOf` and
+never `lastMsgAt`/`lastMsgId`, so the two halves cannot overwrite each other.
+`GuardedAdvanceKeyFields`' second conjunct — the key must already equal `lastMsgId` — is the
+correct conservative choice.
+
+**The leak is not in the writes but in the read gate.** Between the two flushes every active
+room has `previewForMsgId != lastMsgId`, so `history-service` walks Cassandra. At 250 ms/250 ms
+that is a rounding error. But when `roomlist-worker` holds batches un-acked through a MongoDB
+hiccup (`MaxDeliver=-1`) while `broadcast-worker`'s writer *drops* failed batches and moves on,
+the two diverge for the whole outage and every room-list load walks — **a Cassandra load spike
+correlated with MongoDB degradation.** That failure mode is the one thing the otherwise
+exhaustive comments never name.
+
+## Findings
+
+| Severity | Location | Defect |
+|---|---|---|
+| `high` | `handler.go:243-249` → `:296`, `:419` | A `FindUsersByAccounts` failure is logged and swallowed; `mention.ResolveFromParsed` then emits no `Participant`, so `federateMentions` sees no `SiteID` and relays **nothing** — every cross-site mention badge is permanently lost for the duration of a user-store or MongoDB outage, while `roomlist-worker`'s local badge (parse-only, no read) still lands. The written justification, "simply relays nothing rather than failing the edit", is a false dichotomy: destination sites are derivable without user enrichment. Independently found by the integration expert. |
+| `medium` | `main.go:115` (`PREVIEW_FLUSH_INTERVAL`) vs `roomlist-worker/main.go:50` (`FLUSH_INTERVAL`) | Two separately-named env knobs in two services jointly define one coherence window, against CLAUDE.md §6's rule that a knob shared by more than one service is declared once in the package owning the thing it configures. Nothing validates them against each other — contrast `retiredTTLSafe` at `main.go:371`, which does exactly this for a comparable cross-service pair. |
+| `medium` | `handler.go:426-500` | `federateMentions` publishes to OUTBOX best-effort: a JetStream publish failure is logged, never returned, so the badge never reaches the stream whose entire purpose is durable retry. The 5 s `mentionFanoutTimeout` bounds it correctly, but a fan-out with `dropped > 0` is unrecoverable. |
+| `medium` | `main.go:228-239` | A transient Vault blip at startup **permanently disables preview persistence for that pod's whole lifetime**, with no re-attempt. In a rolling restart this yields a mixed fleet where some pods advance `previewForMsgId` and some do not, so rooms served by a degraded pod fall out of key/pointer agreement until an enabled pod handles their next message. |
+| `low` | `handler.go:262` | The preview is buffered *before* `GetRoomMeta` and before the room-type switch, so a room whose fan-out is refused (unknown type) or whose meta read fails still gets a `previewForMsgId` advance. Harmless today; wrong ordering if the buffer ever gains a side effect. |
+| `low` | `main.go:436` | Shutdown calls `broadcastSub.Unsubscribe()` rather than `Drain()`, discarding buffered server-broadcast (thread tcount) messages instead of processing them. |
+| `low` | `roomlist-worker/store_mongo.go:42` vs `pkg/msgbucket/order.go:20` | The tie-break rule exists in two forms — Go comparator and hand-written BSON filter — in two packages, pinned together only by comments. No conformance test renders one against the other. |
+
+## What checks out
+
+`cons.Messages()` + `natsmetrics.Start` semaphore sized by `MAX_WORKERS` — the correct
+high-throughput choice for fan-out. `WithOutageRetryBudget` with the *same* `LowLatencyBackoff`
+passed to `jsretry.Settle`. No bare `Nak()`, no hardcoded `cc.BackOff`. `bootstrap.go` sets only
+Name+Subjects and verifies-only in production. No raw `fmt.Sprintf` on any subject.
+`InboxSubscriptionMention` in exactly one `pkg/outbox` filter set. Shutdown order
+`Unsubscribe → iter.Stop → wg.Wait → flush → Drain → Mongo`.
+
+## Recommendations
+
+1. `high` — Route the cross-site badge off `mention.Parse` accounts plus a site lookup that fails *closed*, or return a transient error when mentions exist and the lookup failed so JetStream retries. Do not let a decorative read gate a durable federation event.
+2. `medium` — Have `federateMentions` return an error when `dropped > 0` or an `outbox.Publish` fails, and settle it as transient. Duplicate broadcasts are already accepted on every other error path in this handler.
+3. `medium` — Hoist the flush cadence into one shared config type mounted by both services, and add the coherence constraint to CLAUDE.md §6 beside `MESSAGE_BUCKET_HOURS`.
+4. `medium` — Make the Vault wrapper lazily retryable, or expose the disabled state on `/healthz`, so a startup blip is not a silent lifetime degradation.
+5. `medium` — Emit a metric for `previewForMsgId != lastMsgId` observed at read time in `history-service`. It is the only observable signal that the split's one gap is open, and the outage-correlated case above is invisible without it.
+6. `low` — Move `roomLastMsgFilter` into `pkg/msgbucket` beside `NewerRow` and add a test driving both forms over the same tie cases.
+7. `low` — Move `h.previews.buffer` below the room-type switch; swap `Unsubscribe()` for `Drain()` on the server-broadcast subscription.
