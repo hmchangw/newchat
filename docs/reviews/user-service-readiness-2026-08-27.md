@@ -726,3 +726,109 @@ need Docker — not run.
    concurrently — the handler should not pay N serialized gateway RTTs.
 7. **`low`** — Add a projection to `GetAppsByAssistants`, and bring `GetThreadUnreadSummary`'s
    fan-out in line with the `sem` + `c.Err()` pattern used everywhere else.
+
+---
+
+# Chapter 8 — Prioritized Action List
+
+Ordered by severity first, then impact ÷ effort. Items 1–3 are the ones that would block a
+confident production sign-off; 4–7 are the next sprint; 8–10 are cheap wins worth folding into any
+adjacent PR.
+
+### 1. `critical` — Wire a coverage gate for `user-service`, measured with `-tags integration`
+**Dimension:** Test coverage · **Where:** CI config, mirroring `coverage-loadgen-*` ·
+**Effort:** low
+Measured unit coverage is 52.6%, below the repo's 80% floor. But the honest finding is that
+**nobody measures this service**: `tools/coveragecheck` is wired only for `tools/loadgen`, and the
+52.6% counts 306 statements of generated mocks and excludes 88 Docker-gated integration tests.
+Gate at `-min 80 -exclude service/mocks` **with the integration tag**, so the number reflects what
+ships. Until this exists, the true figure is unknown to the team, not just to this audit — which
+makes every other coverage decision guesswork.
+
+### 2. `high` — Fix `BadgeCountBatch`'s serial recompute and the badge `$lookup` over-fetch
+**Dimension:** Performance · **Where:** `service/badge.go:24-41`,
+`mongorepo/subscriptions.go:797-810` · **Effort:** low–medium
+The notification hot path runs one heavy aggregation *per account, sequentially*, inside a 15s
+handler timeout — 50 accounts on a cold Valkey is 50 serial aggregations. The same aggregation
+materializes 11 room fields (including 32-byte E2E key blobs) per row and keeps exactly one
+(`lastMsgAt`). Batch the accounts into one `$in` query, and give the pipeline its own
+`{lastMsgAt: 1}` projection. Highest impact-to-effort ratio in the report.
+
+### 3. `high` — Bound the `subscription.list` phase-1 scan and the `resolveSortKeys` `$in`
+**Dimension:** Performance · **Where:** `mongorepo/subscriptions.go:295`, `:490`, `:496` ·
+**Effort:** low
+`Find` has no `$limit` — it reads *every* subscription for the account, and feeds an unbounded
+`$in`. A user in 20k channels with a cold 15s cache produces a 20k-element `$in` plus a 20k-row
+in-process sort on the service's most-called RPC. `maxSubs` bounds the page, not the scan. Add
+`.SetLimit(maxSubs + 1)` and chunk the `$in` at ~1000, mirroring the existing `roomBatchChunk`.
+
+### 4. `high` — Reconcile the badge-cache writer contract across three services
+**Dimension:** Architecture · **Where:** `main.go:213` vs `room-service/main.go:300` and
+`inbox-worker/main.go:862` · **Effort:** low
+`user-service` sets `WithMarkerTTL(10m)`; the two peer writers of the same Valkey keyspace set
+neither `WithMarkerTTL` nor `BADGE_COUNT_CAP`, so their marker inherits a 24h TTL. A peer's `Seed`
+marks the set fresh for 24h when the config promises 10m — silently invalidating the premise of
+`BADGE_COUNT_CACHE_FIRST`. Add the env vars to both peers; keep `BADGE_COUNT_CACHE_FIRST=false`
+until they ship.
+
+### 5. `high` — Test the six chatlist RPCs and `RegisterHandlers`
+**Dimension:** Test coverage · **Where:** `service/chatlist.go:27,45,74,91,116,131`,
+`service/service.go:232` · **Effort:** medium
+Six client-facing `chat.user.*` handlers sit at 0.0% — this gap is real independent of the Docker
+caveat, since they are unit-testable against existing mocks. `RegisterHandlers` (~40 subject
+registrations) is also untested, so a dropped or mistyped subject ships silently; asserting the
+exact subject set against a fake router is cheap insurance.
+
+### 6. `high` — Re-run `govulncheck` and semgrep registry rulesets in CI
+**Dimension:** Code quality · **Where:** the `sast` CI job · **Effort:** trivial
+Both are blocking gates per CLAUDE.md §5 and were **network-blocked in this audit environment**
+(403 CONNECT for `vuln.go.dev` and `semgrep.dev`). `gosec` and the repo-local semgrep rules passed
+with zero findings, but the dependency-vulnerability scan is genuinely unassessed. This audit does
+not substitute for it.
+
+### 7. `medium` — Move cross-site federation off the request path (OUTBOX or async)
+**Dimension:** Architecture / Integration / Performance · **Where:** `service/status.go:101`,
+`service/settings.go:138`, `service/chatlist.go:202` · **Effort:** medium
+**Flagged independently by three of six experts.** N serial blocking cross-WAN PubAcks run inside
+the user's 15s handler; a failed publish is logged WARN and dropped, leaving remote replicas stale
+until the user's next mutation. Route the three `user_*_updated` types through OUTBOX
+(`ConcurrentEventTypes` — they are HWM-guarded and order-insensitive), or at minimum publish
+concurrently off the request path with a `federation_publish_failed` counter so the staleness stops
+being invisible.
+
+### 8. `medium` — Validate `ALL_SITE_IDS` at startup
+**Dimension:** Integration · **Where:** `config/config.go:66` · **Effort:** trivial
+Unset today means federation silently iterates nothing — status, settings and chatlist never
+replicate, and the thread-inbox fanout collapses to local-only. Every one of those is a *silent
+success*. Reject empty, and reject a list not containing `SITE_ID`. One of the highest
+safety-per-line-of-code changes available.
+
+### 9. `medium` — Break up `UserService` and replace the 15-parameter constructor
+**Dimension:** Maintainability · **Where:** `service/service.go:127-169`, `:180`, `main.go:226,234`
+· **Effort:** high
+66 methods across 9 unrelated domains, built by a 15-arg positional constructor called twice — the
+HTTP instance silently omits `WithPageBudget` and the compiler cannot catch it. Two adjacent
+identically-typed publisher params can be transposed silently, sending federation events over
+unpersisted core NATS. Convert to a `Deps` struct first (low effort, kills the divergence class),
+then split along existing file seams. Sequenced last because it is the largest change and the
+least urgent — nothing is broken today.
+
+### 10. `medium` — De-duplicate the fan-out and lookup skeletons
+**Dimension:** Maintainability · **Where:** `subscriptions.go:495,805`, `threads.go:223`,
+`threadunread.go:58,147` · **Effort:** medium
+The bounded-fanout skeleton is hand-rolled five times and the degrade-to-nil lookup wrapper three
+times (~120 duplicated lines). This is not just tidiness: the unbounded goroutine spawn at
+`threadunread.go:58` — the one fan-out an operator cannot throttle via `MAX_SITE_FANOUT` — exists
+precisely *because* nobody can diff five near-identical copies. Extracting one
+`fanOutSites[T](ctx, sites, maxFanout, call)` fixes the bug and prevents the sixth copy.
+
+---
+
+## Verdict
+
+`user-service` is **fit to run in production today** — it is linted clean, gosec-clean, correctly
+shut down, fully documented against `docs/client-api.md`, and free of goroutine leaks and dead
+code. It is **not fit to absorb its next feature** until items 1–3 land: the coverage blind spot
+means regressions are currently invisible, and the two unbounded query paths degrade with user
+size rather than with traffic, so they will surface as an incident on the largest tenant rather
+than as a gradual slope.
