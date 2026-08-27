@@ -114,6 +114,9 @@ func TestValidateClientUpdate(t *testing.T) {
 		// *http.Transport rejects any other scheme at request time, so every upload
 		// would 503. Fail at startup instead.
 		{"ftp scheme", func(c *Config) { c.ClientUpdateURL = "ftp://client-update-service" }, true},
+		// url.Parse gives this a non-empty Host (":8080") but no Hostname, so a
+		// Host-only check lets it start and then fail every upload at dial time.
+		{"port-only authority", func(c *Config) { c.ClientUpdateURL = "http://:8080" }, true},
 		{"file scheme", func(c *Config) { c.ClientUpdateURL = "file:///etc/passwd" }, true},
 		{"empty token", func(c *Config) { c.ClientUpdateToken = "" }, true},
 		{"zero timeout", func(c *Config) { c.ClientUpdateTimeout = 0 }, true},
