@@ -446,3 +446,102 @@ and `pkg/valkeyutil` sets no pool or timeout overrides.
 5. `medium` — Add the three missing metrics: **preview shed/backlog** (buffered rooms, bodies shed at `maxPendingPreviews`, flush duration and failures — today the cap silently degrades previews with zero signal); **consumer backlog** (`ConsumerInfo.NumPending`/`NumAckPending`, the only way to see fan-out falling behind); **worker-pool occupancy** (a gauge on the `natsmetrics` semaphore, to tell whether `MAX_WORKERS` or a dependency is the constraint).
 6. `low` — Have a `roomsubcache` refresh failure rewrite the entry with a bumped `CachedAt` rather than `Slide` alone, so a fail-open entry stops re-entering the flight on every message.
 7. `low` — Add singleflight to `userstore.Cache.FindUsersByAccounts` and briefly negative-cache misses, so unknown mentions and non-`users` bot senders stop reaching MongoDB per message.
+
+---
+
+# 8. Prioritized action list
+
+Ordered by severity, then impact ÷ effort. Findings raised by more than one expert are merged
+and recorded once. Every item below was re-verified against source.
+
+### 1. `high` — Bound the thread-lane goroutine spawn
+**Performance · `handler.go:1266`**
+One goroutine per recipient, unbounded — 500 followers × `MAX_WORKERS=100` is 50,000 goroutines
+and ~200 MB of stacks. It buys nothing, because `nats.Conn.publish` serializes on the connection
+mutex. **Highest impact ÷ effort in the list:** the correct shape already exists 800 lines away
+in the same file (`federateMentions:454`), with a comment explaining precisely why it is needed.
+Copying it is a five-line change.
+
+### 2. `high` — Give each message a deadline against `AckWait`
+**Performance · `main.go:520`**
+There is no `context.WithTimeout` anywhere in `main.go`. The worst-case blocking sum
+(10s + 10s + 2s + 2s + 5s, plus go-redis retries) exceeds `AckWait=30s`, and exceeding it
+redelivers a message that is still in flight — **the whole room gets it twice**. One
+`context.WithTimeout(handlerCtx, ~0.6 × AckWait)` caps the sum and, as a bonus, activates the
+reserve logic at `preview.go:115` that is otherwise dead code in production.
+
+### 3. `high` — Stop losing cross-site mention badges on a best-effort read
+**Architecture + Integration · `handler.go:243-251`**
+A `FindUsersByAccounts` failure is logged and swallowed, so `federateMentions` relays nothing and
+the message Acks. The local badge survives (parse-only, `MaxDeliver=-1`); the remote badge is
+gone permanently. The justifying comment is true only for same-site mentionees — for a
+cross-site one, this publish *is* the durable signal. Found independently by two experts. Either
+NAK when mentions exist and the lookup failed, or derive destination sites without user
+enrichment.
+
+### 4. `high` — Repair or delete the `deploy/test/` harness
+**Maintainability · `deploy/test/README.md:7-10`, `deploy/test/verify/*.sh`**
+Both dev compose files were correctly updated for the split; `docker-compose.test.yml` was not,
+and three of four verify scripts still assert `rooms.lastMsgAt`, `subscriptions.hasMention` and
+`rooms.lastMentionAllAt` — all `roomlist-worker`'s now. The documented demo flow fails at step 4.
+This is the artifact a newcomer runs to learn what the service does, and it currently teaches the
+pre-split model.
+
+### 5. `high` — Make the thread-lane payload distinction type-safe
+**Maintainability · `handler.go:1073`**
+`publishChannelThreadEvent` takes two adjacent `[]byte` parameters where the first must be sealed
+and the second must not; `:612` deliberately passes the same buffer twice. A newcomer copying
+that call for an event *with* a body publishes plaintext room-wide, and nothing in the signature
+resists it. Distinct named types, or a `seal func()` taken inside, removes the whole class.
+
+### 6. `medium` — Add a `msgID` tiebreak to the preview watermark
+**Integration · `pkg/preview/preview.go:99`**
+`watermarkGuard` is `$gte` on the millisecond timestamp alone. `roomlist-worker`'s guard
+transliterates `NewerRow` faithfully, tiebreak included. So at a same-millisecond tie split
+across flush batches, `lastMsgId` resolves deterministically while `previewForMsgId` goes to
+whichever batch flushed last — they disagree, and the room takes a Cassandra walk. Self-healing,
+but it is exactly the tie `pkg/msgbucket` exists to make deterministic.
+
+### 7. `medium` — Handle a missing room as permanent
+**Code quality · `store_mongo.go:88-97` + nine call sites**
+No handler branches on `mongo.ErrNoDocuments`, though `pkg/roommetacache` deliberately preserves
+it "which callers branch on". A permanently-unsatisfiable message NAKs through the full retry
+budget — which this branch widened from 5 to ~17 deliveries over an hour. Unreachable today
+because nothing deletes rooms, which is the same latent class the PR body already records; it
+must close before any room-deletion feature lands.
+
+### 8. `medium` — Add the three missing metrics
+**Performance · service-wide**
+Preview shed/backlog (the `maxPendingPreviews` cap silently degrades previews with zero signal
+today), consumer backlog (`NumPending`/`NumAckPending` — the only way to see fan-out falling
+behind), and worker-pool occupancy. Add to these the architecture chapter's request for a
+`previewForMsgId != lastMsgId` metric in `history-service`: that is the only observable signal
+for the split's one real gap, which widens precisely during a MongoDB outage.
+
+### 9. `medium` — Make required config required
+**Code quality · `main.go:46,53`**
+`NATS_URL` and `MONGO_URI` default to localhost. Identical to the defect just fixed in
+`roomlist-worker`, and more consequential here. A misconfigured pod dials localhost and surfaces
+as an outage rather than a config error.
+
+### 10. `medium` — Split `handler.go` and centralize config validation
+**Maintainability · `handler.go` (1,407 lines), `main.go` (365-line `main()`)**
+`handleCreated` owns five responsibilities; the file spans two transports and seven event kinds.
+Thirty env knobs are validated in eight scattered places with no `cfg.Validate()`. Both are the
+kind of debt that only grows, and the test files already suggest the seams.
+
+---
+
+## Deferred deliberately
+
+- **Coverage 67.3%** — below the floor, but CI enforces no coverage gate, the breach is fleet-wide (siblings run 37–63%), and `main()` alone is 203 of 342 uncovered statements. Extracting `run(ctx, cfg) error` would clear it in one change if desired; it is policy debt, not a defect.
+- **`METRICS_ADDR` dead knob** — real, but identical in six sibling services. Fleet-wide sweep or nothing.
+- **`preview_writer.go`'s 2× live peak** — bounded in practice at 10–70 MB by `preview.Build`'s truncation. Worth stating in a comment; not worth code today.
+- **The `logctx` payload capture** — double-gated and repo-shared, not this service's invention. Belongs to a `pkg/logctx` conversation, not this audit.
+
+## Verification caveat
+
+`govulncheck` and the semgrep registry rulesets could not run in this environment — the egress
+proxy answers 403 for both `vuln.go.dev` and `semgrep.dev`, so `make sast` exits 1 overall.
+`gosec` and the repository's own `.semgrep/` rules ran clean over this service. **CI remains
+authoritative for the two scanners that did not execute.**
