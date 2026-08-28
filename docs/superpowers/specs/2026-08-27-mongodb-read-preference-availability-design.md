@@ -88,11 +88,13 @@ disqualifies both — failing closed is the correct behaviour there.
 | Service | Evidence |
 |---|---|
 | `tcard-service` | `ListCards` (`store_mongo.go:37`) is a full-collection scan feeding a cache refreshed **once daily** (`TCARD_CACHE_REFRESH_AT`). Nothing in the repo writes `cards`. Data is up to 24h stale by design; replica lag is noise. A full scan is also the single best offload candidate in the repo. |
-| `search-sync-worker` | Reads `teams_user` + `users` to enrich migrated Teams history. Misses are already an accepted outcome — `teams_user_store.go:31` documents "fills UserID … when it exists", unmatched ids are omitted. Widens an accepted race rather than opening a new one. |
 
-**Caveat on `search-sync-worker`:** a miss is durable — the ES document is
-indexed under-enriched and never retried. This is a deliberate acceptance, not an
-oversight.
+**`search-sync-worker` was moved to `primaryPreferred` after review.** The
+caveat that a miss is durable turned out to disqualify it rather than merely
+qualify it: `buildTeamsActions` emits an index action with empty author fields
+and `handler.go` Acks the source message once the bulk request succeeds, so
+nothing retries the under-enriched write. Only `tcard-service` takes
+`secondaryPreferred`.
 
 ### 5.2 `primaryPreferred`
 
@@ -102,7 +104,7 @@ oversight.
 | `message-worker` | See §6 for the full trace. Reads `users`, `thread_rooms`, `thread_subscriptions`, `subscriptions`; writes Cassandra. |
 | `bot-message-handler` | Same authz shape as gatekeeper (`FindSubscription`, `FindRoom`, `ListMemberIDs`) with **no cache at all**, so every request rides the preference. |
 | `upload-service` | `GetUpload` (`store_mongo.go:61`) fetches an upload doc by `_id` to build a download URL. **Nothing in this repo writes `uploads`** — the writer is external, so the write→read window cannot be bounded. Under secondary reads a just-uploaded file 404s. |
-| `botplatform-service` | `InsertSession` (`handler.go:145`) then `FindSessionByHash` on the next request (`handler.go:203`) — the canonical read-after-write. Secondary reads break auth immediately after login. |
+| `botplatform-service` | `InsertSession` (`handler.go:145`) then `FindSessionByHash` on the next request (`handler.go:203`) — the canonical read-after-write. Secondary reads break auth immediately after login. **Session reads are additionally pinned to primary inside `pkg/session` (see §15), so this client preference never reaches them.** |
 | `media-service` | `EmojiDoc`/`Avatar` are read right after `UpsertEmoji`/`SetBotAvatar` (upload, then display). Its avatar/emoji *serving* reads are strong offload candidates but need a per-collection split, not a client-level flip. |
 | `bot-room-service` | Creates rooms/subscriptions then reads them back. |
 | `admin-service` | **Requires a transaction guard — see §5.4.** |
@@ -259,9 +261,11 @@ Note that `ParseReadPreference` maps empty to `readpref.Primary()`
 - **Config.** Reject invalid values and assert the new `envDefault`, following
   `history-service/internal/config/config_test.go:126-156`.
 - **`admin-service` regression.** An integration test on the RS container
-  (`pkg/testutil/mongo_replicaset.go`) asserting `UpdateUserPasswordAndRevoke`
-  still succeeds with the client set to `primaryPreferred`. This is the one change
-  that can silently break a working path.
+  (`pkg/testutil/mongo_replicaset.go`) driving `withTransaction` with a probe
+  insert **and read** under a `primaryPreferred` client — the read is what
+  consults the session's preference. It does not exercise
+  `UpdateUserPasswordAndRevoke` itself; it covers the guard that method depends
+  on. This is the one change that can silently break a working path.
 - **Outage behaviour.** `tools/loadgen/mongo_outage_recovery_integration_test.go`
   already builds a dedicated Mongo container for outage simulation and is the
   natural home for an end-to-end assertion that reads survive primary loss.
@@ -401,7 +405,7 @@ Two deviations from this document, both decided during execution:
 
 - **Every integration test**, including the `admin-service` transaction guard —
   this environment has the Docker CLI but no daemon, so testcontainers cannot
-  start. They type-check under `go vet -tags integration`. The transaction guard
+  start. They compile and type-check (verified locally; `make lint` covers vet in CI). The transaction guard
   is the highest-value thing to run before merge: it is the one change that can
   break a working path.
 - **govulncheck** — blocked by the egress proxy (`vuln.go.dev` returns 403).
@@ -422,3 +426,43 @@ of this kind must run unbounded.
 
 §11's "encrypted-room message delivery" row is only true with all five sites
 relaxed together, which is now the case.
+
+
+## 15. Review corrections
+
+CodeRabbit reviewed the branch. Three findings changed the design; two did not.
+
+**Session lookups pinned to primary, unconditionally** (CWE-613). Both
+`botplatform-service` and `admin-service` build a `pkg/session` store on a client
+this branch moved to `primaryPreferred`, so during primary loss a revoked session
+that had not replicated could still authenticate. `pkg/session.NewMongoStore` now
+pins its collection to primary itself, rather than each service opting in — no
+caller should be able to trade authentication freshness for availability. The
+cost is that bot/admin session validation no longer survives primary loss; that
+was the pre-change behaviour, so it is a declined win rather than a regression.
+
+**`search-sync-worker` moved from `secondaryPreferred` to `primaryPreferred`.**
+See §5.1 — a resolver miss is durable and unretried, which disqualifies it.
+
+**File download qualified, not changed.** Under `primaryPreferred`, `GetUpload`
+can hit a secondary that has not yet received an externally-written `uploads`
+document and return `mongo.ErrNoDocuments`, which the handler surfaces as a 404 —
+semantically "gone" where a 503 would say "retry". Reverting to primary would
+lose the win for every already-replicated file, which is the overwhelming
+majority, so §12's "file download" row is **conditional**: replicated files
+download, a file written immediately before the incident may 404 until
+replication resumes.
+
+**Retired-key TTL: no migration.** `roomkeystore_mongo.go:318` writes
+`expiresAt` per document at rotation against a TTL index at `expireAfterSeconds:
+0`, so the 20m → 30m change does not extend documents already archived. Those
+expire on the old policy and new ones get the new policy; the discrepancy
+self-heals within 20 minutes of deploy. A migration is disproportionate to a
+bounded rollout window, but the window is real: avoid rotating keys during the
+first 20 minutes after deploying this change.
+
+**Empty-env normalization: not a defect.** The review held that setting
+`MONGO_READ_PREFERENCE=""` would override `envDefault` and collapse to `primary`,
+silently disabling fallback. Verified against the vendored
+`caarlos0/env v11.4.0`: an empty value falls back to `envDefault`, yielding
+`primaryPreferred`. No change made.

@@ -13,7 +13,7 @@ services:
       - SITE_ID=${SITE_ID:-site-local}
       # Backs the migrated-Teams-history author lookup (teams_user → account → user _id).
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
-      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.

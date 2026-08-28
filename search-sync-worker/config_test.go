@@ -54,9 +54,9 @@ func TestConfig_HRJetStreamDomain(t *testing.T) {
 	})
 }
 
-// The resolver already treats a missing user as a normal outcome
-// (teams_user_store.go:31), so secondary lag widens a race this code already
-// accepts rather than opening a new one.
+// primaryPreferred, not secondaryPreferred: a resolver miss is durable. The
+// bulk index action carries empty author fields and the source message is Acked
+// once the request succeeds, so nothing retries the under-enriched write.
 func TestConfig_ReadPreferenceDefault(t *testing.T) {
 	setRequiredConfigEnv(t)
 	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
@@ -64,11 +64,11 @@ func TestConfig_ReadPreferenceDefault(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Equal(t, "secondaryPreferred", cfg.ReadPreference)
+	assert.Equal(t, "primaryPreferred", cfg.ReadPreference)
 
 	rp, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
 	require.NoError(t, err)
-	assert.Equal(t, readpref.SecondaryPreferredMode, rp.Mode())
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }
 
 func TestConfig_PipelineDepth(t *testing.T) {
