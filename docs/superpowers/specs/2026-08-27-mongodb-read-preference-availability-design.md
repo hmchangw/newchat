@@ -96,6 +96,17 @@ and `handler.go` Acks the source message once the bulk request succeeds, so
 nothing retries the under-enriched write. Only `tcard-service` takes
 `secondaryPreferred`.
 
+Reverting it further, to `primary`, would make that outcome *worse*, not safer.
+`resolveTeamsIdentities` (`messages.go:296-310`) swallows a resolver error —
+logs it and returns `nil` — and `buildTeamsActions` indexes the batch with empty
+author fields either way. So during a primary-down incident `primary` guarantees
+the under-enriched write (every lookup errors), while `primaryPreferred` reads
+`teams_user`/`users` from a secondary and near-certainly gets the right answer:
+that mapping is migration-static, so replica lag is irrelevant to it. The only
+real fix for the durable miss is repair semantics — failing the batch instead of
+swallowing the resolver error — which is a behaviour change independent of read
+preference and out of scope here.
+
 ### 5.2 `primaryPreferred`
 
 | Service | Why not `secondaryPreferred` |
@@ -367,7 +378,7 @@ throughout** — this is about which reads survive.
 | **Room + subscription reads** | List Members, Get Member Statuses, Get Mentionable Subscriptions, Read Message Receipts, List Org Members, Room App Tabs / Command Menu. |
 | **User reads** | `me`, `status.getByName`, `profile.getByName`, `settings.get`, `priorityContacts.get`, all `subscription.*` reads, `apps.list`, `apps.categories`, thread list + unread summary. |
 | **Avatars + emoji (serving)** | `media-service` GET routes. |
-| **File download** | `upload-service` `GetUpload`. |
+| **File download** *(conditional on replication)* | `upload-service` `GetUpload`. Replicated files download; a file written by the external uploader immediately before the incident may 404 until replication resumes — see §15. |
 | **Bot/admin session validation** | `botplatform-service` `FindSessionByHash` — existing sessions keep working. |
 | **Admin console reads** | List users / sessions / audit log / permission grants. |
 
