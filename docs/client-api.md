@@ -79,6 +79,7 @@ paths.
    - [PUT /api/v1/emoji/:shortcode](#put-apiv1emojishortcode)
 8. [Presence](#8-presence)
 9. [Admin Service](#9-admin-service)
+    - [9.17 POST /v1/admin/client-updates](#917-http--post-v1adminclient-updates)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
@@ -8135,8 +8136,6 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `recordedBy` | string | The admin account that recorded this row (from the session token). |
 | `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
----
-
 ### 9.16 Resync user
 
 **Endpoint:** `POST /v1/admin/users/:account/resync`
@@ -8171,6 +8170,108 @@ None.
 | 404 | `not_found` | `user_not_found` | No user with that account homed at this site (unknown account, or a cross-site replica). |
 | 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
 | 403 | `forbidden` | `not_admin` | Session lacks the admin role. |
+
+### 9.17 HTTP — POST /v1/admin/client-updates
+
+**Auth:** admin session (`Authorization: Bearer <session token>`), same as every `/v1/admin/…` route.
+
+Publishes a client update artifact pair. `admin-service` relays both parts to
+`client-update-service` under its own service-account credential; the browser
+never holds that credential.
+
+**Disk-backed, not memory-backed.** The handler spools the incoming parts past
+1 MiB to a temp file, then re-encodes them into a streamed outbound body — small
+envelope snapshots interleaved with the spooled files' own readers — sent with an
+exact `Content-Length`. Peak heap is therefore independent of artifact size
+(measured: a 48 MiB artifact relays with a ~5 MiB peak). The cost is ephemeral
+storage: size `admin-service`'s disk for the concurrent-upload total, not its
+RAM. Temp files are removed when the request ends.
+
+**Size cap.** `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (default `2147483648`, i.e. 2 GiB)
+caps one request body, counted before anything is spooled, so an oversize upload
+cannot fill the disk on its way to being rejected. Exceeding it ends the request
+with a `400` naming the limit in bytes. It is a guard rail on this service's
+ephemeral storage, not the artifact-size policy — that lives in
+`client-update-service`.
+
+The artifacts themselves are validated by `client-update-service`, not here: file
+name and extension rules live there and are reported back verbatim on a `400`.
+
+#### Request
+
+`multipart/form-data`:
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. |
+| `executeFile` | file (binary) | yes | The executable. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both artifacts published. |
+| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the body exceeded `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (distinct message, names the limit), the browser did not finish sending within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
+| `401 Unauthorized` | Missing or invalid admin session. |
+| `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
+| `500 Internal Server Error` | This service could not extend its own I/O deadlines for the upload (deployment fault). |
+| `503 Service Unavailable` | `client-update-service` is unreachable, did not answer within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or this service's upload credential is not configured or was rejected. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+**Audit:** an upload that `client-update-service` accepted appends an
+`AuditEntry` with action `client_update.upload` and **no `details`** — the
+filenames are the upstream's record to keep, and duplicating them here made this
+service responsible for matching how the upstream picks parts. A rejected or
+failed upload is never audited. The append
+is best-effort, as it is for every mutating admin endpoint: the artifacts are
+already published by then, so a failed append is logged at `ERROR` and the
+response still reports the publication. Treat the audit log as a record of
+intent, not as a transaction log for the artifact store.
+
+**Not atomic across the pair:** `client-update-service` writes the two objects
+independently and without locking (§12). A `200` means both of this request's
+writes landed; a failure after the first leaves the new descriptor beside the
+previous executable, and two concurrent uploads can interleave into a mixed
+pair with both callers seeing `200`. Re-uploading the pair repairs either case.
+Publish one pair at a time. There is no versioning or rollback — a deliberate
+non-goal of this endpoint.
+
+**Redirects are refused.** A `3xx` from `client-update-service` is treated as an
+error, not followed. `net/http` strips `Authorization` only when the redirect
+changes host, so a same-host `https`→`http` hop would otherwise carry the
+service-account token onward in the clear.
+
+**Timeouts.** `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`) is ONE budget for
+the whole request — reading the browser's body and calling
+`client-update-service` — pinned on the request context. The two phases are
+sequential rather than overlapping: the handler spools the inbound parts in full
+before it dials upstream, because the outbound body is sent with an exact
+`Content-Length` and that length is only known once every part has arrived. Without
+a single budget the upstream call would start a second full timeout on top of the
+inbound one.
+
+Which half the budget ran out in decides the answer, because the two have
+different remedies: still receiving the browser's body is a `400` (the sender was
+too slow), still waiting on `client-update-service` is a `503` (the upstream was).
+
+The rest is ordered around it, so that whichever budget expires first the admin
+still gets an envelope rather than a dropped connection: that value < that value
++ 30s (this request's write deadline) < the browser's own upload timeout.
+`client-update-service`'s `HTTP_WRITE_TIMEOUT` should be at least
+`CLIENT_UPDATE_UPLOAD_TIMEOUT` so it does not abandon a request this service is
+still waiting on. Raising one without the others reintroduces a window where a
+published upload is reported as a failure.
+
+---
 
 ## 10. Botplatform Service
 
@@ -8644,17 +8745,51 @@ Uploads and downloads stream end-to-end; downloads are fronted by a bounded
 TTL+size in-memory cache.
 
 > [!WARNING]
-> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
-> can upload or download update artifacts. **They MUST be network-restricted
-> before any production exposure.**
+> **`GET /api/v1/version/:fileName` is UNAUTHENTICATED.** Anyone who can reach the
+> service can download update artifacts. It **MUST be network-restricted**. Uploads
+> are gated on a service account (below).
 
 ### POST /api/v1/version
 
-**Auth:** none (v1)
+**Auth:** `Authorization: Bearer <service-account token>`. The token must match an
+entry in the service's `UPLOAD_TOKENS` table (`account:token`, comma-separated).
+Only `admin-service` is provisioned; browsers and end-user clients never call this
+endpoint directly — they go through
+[`POST /v1/admin/client-updates`](#917-http--post-v1adminclient-updates).
 
-Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
-and streamed straight to MinIO (no size cap). An upload of an existing file name
-overwrites it and evicts any cached copy.
+`UPLOAD_TOKENS` is **optional**. Unset or empty authorizes nobody: the service
+starts normally and answers **every** upload with `401`, so a site that does not
+publish client updates can deploy without it. Downloads are unaffected.
+
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required.
+An upload of an existing file name overwrites it and evicts any cached copy.
+
+**Size cap.** `UPLOAD_MAX_BYTES` (default `2147483648`, i.e. 2 GiB) caps one
+request body, applied after the credential check and before anything is spooled,
+so an oversize upload cannot fill the disk on its way to being rejected.
+Exceeding it ends the request with a `400` naming the limit in bytes. It is a
+guard rail on this pod's ephemeral storage, not an artifact-size policy.
+
+**Disk-backed, not end-to-end streamed.** The handler reads its parts via
+`c.FormFile`, which buffers up to `MaxMultipartMemory` (**1 MiB**, lowered from
+gin's 32 MiB default) in memory and spills the remainder to a temporary file
+before the object is written to MinIO. Peak heap is therefore independent of
+artifact size — measured: a 48 MiB artifact peaks at ~5 MiB, against ~113 MiB at
+the old default. Size the container's ephemeral storage, not its RAM, for the
+largest artifact you intend to publish. The MinIO write itself streams from that
+temporary file.
+
+The two objects are written **independently, not atomically**, with no locking
+between requests. Two consequences:
+
+- A failure after the first write returns an error with that object already
+  replaced, so a downloader sees the new descriptor beside the previous
+  executable until the pair is re-uploaded.
+- Two uploads in flight at once can interleave their writes, leaving the
+  descriptor from one submission beside the executable from the other — and
+  **both callers receive `200`**. Publish one artifact pair at a time.
+
+Versioning and rollback are out of scope for this service.
 
 #### Request
 
@@ -8669,6 +8804,7 @@ overwrites it and evicts any cached copy.
 |---|---|
 | `200 OK` | Both files stored. |
 | `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `401 Unauthorized` | Missing, malformed, or unrecognized service-account token. Identical response for all three. |
 | `500 Internal Server Error` | MinIO write failure. |
 
 ##### Success response (`200`)

@@ -65,6 +65,13 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
+	// The upload relay authenticates with a bearer token; over http:// it crosses
+	// the network in the clear. Warned, not rejected — see clientUpdateSendsTokenInClear.
+	if clientUpdateSendsTokenInClear(cfg.ClientUpdateURL) {
+		slog.Warn("CLIENT_UPDATE_URL is http:// — the client-update service-account token is sent unencrypted; use https or an encrypted service mesh outside a trusted network",
+			"site", cfg.SiteID)
+	}
+
 	// Transactions pin primary independently — see storeMongo.withTransaction.
 	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
 	if err != nil {
@@ -105,10 +112,17 @@ func run() error {
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publish)
+	uploader := newHTTPVersionUploader(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
+	h := newHandler(st, sessStore, cfg, nc, publish, withVersionUploader(uploader))
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// Artifacts are streamed on to client-update-service, so nothing needs to stay
+	// resident. Gin's 32 MiB default would cost roughly 3x that per in-flight
+	// upload, because bytes.Buffer doubles as it grows. The trade is disk for RAM:
+	// parts over the cap spool to the OS temp dir (removed when the request ends),
+	// so ephemeral storage must fit the concurrent-upload total.
+	r.MaxMultipartMemory = maxMultipartMemory
 	obsMW := o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
 	applyBaseMiddleware(r, obsMW)
 	registerRoutes(r, h, sessStore, cfg.SiteID)
