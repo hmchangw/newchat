@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -120,4 +121,34 @@ func TestClampPayloadCap(t *testing.T) {
 			require.Equal(t, tt.want, clampPayloadCap(tt.in))
 		})
 	}
+}
+
+// An oversized batch is deterministic: survivors are sorted for redelivery
+// stability, so the same message marshals over the cap on every attempt.
+func TestMobileEmitter_OversizedBatchIsPermanent(t *testing.T) {
+	pub := &fakePublisher{}
+	em := newMobileEmitter(pub, "chat.server.notification.push.site-a.send", 64)
+
+	err := em.Emit(context.Background(), model.PushNotificationEvent{
+		ID:       "m1-b0",
+		Accounts: []string{"alice", "bob", "carol", "dave"},
+		Body:     "this body plus accounts and headers will marshal to more than 64 bytes",
+		RoomID:   "r1",
+	})
+
+	require.Error(t, err)
+	_, perm := errcode.IsPermanent(err)
+	assert.True(t, perm, "an oversized batch can never shrink on redelivery: %v", err)
+}
+
+// A publish failure is the transient counterpart — the broker may recover.
+func TestMobileEmitter_PublishFailureIsNotPermanent(t *testing.T) {
+	pub := &fakePublisher{failNext: errors.New("nats: full")}
+	em := newMobileEmitter(pub, "chat.server.notification.push.site-a.send", 0)
+
+	err := em.Emit(context.Background(), model.PushNotificationEvent{ID: "m1-b0", Accounts: []string{"bob"}})
+
+	require.Error(t, err)
+	_, perm := errcode.IsPermanent(err)
+	assert.False(t, perm, "a broker failure must keep its retry budget: %v", err)
 }

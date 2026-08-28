@@ -40,9 +40,17 @@ type config struct {
 	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
-	// MongoReadPreference routes the store's display/list reads to secondaries; the
-	// client stays on primary for authz/dedup/read-after-write.
+	// MongoReadPreference routes the store's display/list reads to secondaries.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// MongoClientReadPreference covers every handle WITHOUT an explicit override —
+	// plain collections inherit the client. primaryPreferred keeps authz/dedup/
+	// read-after-write on the primary in steady state, but falls back rather than
+	// failing when there is no primary to read from.
+	MongoClientReadPreference string `env:"MONGO_CLIENT_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
 	// so a burst can't open unbounded connections. Env tags already carry the
 	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
@@ -56,7 +64,7 @@ type config struct {
 	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"`
+	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -83,6 +91,11 @@ type config struct {
 	GraphProxyURL        string `env:"GRAPH_PROXY_URL" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
+	// Mentionable @-autocomplete page size. Default applies when the client sends
+	// no limit; Max clamps an explicit over-large limit. Both are validated > 0 at
+	// startup and are independent of a room's denormalized member counts.
+	MentionableDefaultLimit int `env:"MENTIONABLE_DEFAULT_LIMIT" envDefault:"3"`
+	MentionableMaxLimit     int `env:"MENTIONABLE_MAX_LIMIT"     envDefault:"50"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -102,6 +115,22 @@ type config struct {
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
+}
+
+// validateMentionableLimits enforces the mentionable page-size invariants at
+// startup: both bounds positive, and the no-limit default never exceeding the
+// max (otherwise a limit-less request would bypass the configured cap).
+func validateMentionableLimits(defaultLimit, maxLimit int) error {
+	switch {
+	case defaultLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT must be > 0, got %d", defaultLimit)
+	case maxLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_MAX_LIMIT must be > 0, got %d", maxLimit)
+	case defaultLimit > maxLimit:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT (%d) must be <= MENTIONABLE_MAX_LIMIT (%d)", defaultLimit, maxLimit)
+	default:
+		return nil
+	}
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -162,6 +191,10 @@ func main() {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
 		os.Exit(1)
 	}
+	if err := validateMentionableLimits(cfg.MentionableDefaultLimit, cfg.MentionableMaxLimit); err != nil {
+		slog.Error("invalid mentionable limits", "error", err)
+		os.Exit(1)
+	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
 	if err != nil {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
@@ -190,15 +223,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientReadPref, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo client read preference", "value", cfg.MongoClientReadPreference, "error", err)
+		os.Exit(1)
+	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo client read preference configured", "readPreference", clientReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
-	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
 	if err != nil {
 		slog.Error("open room key store failed", "error", err)
 		os.Exit(1)
@@ -334,6 +381,8 @@ func main() {
 	handler.teamsEmailDomain = cfg.TeamsEmailDomain
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
+	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
+	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
 
 	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
 	handler.Register(router)

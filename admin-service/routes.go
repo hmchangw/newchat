@@ -29,4 +29,5 @@ func registerRoutes(r *gin.Engine, h *Handler, sessions session.Store, siteID st
 	admin.POST("/permissions", h.createPermissions)
 	admin.GET("/permissions", h.listPermissions)
 	admin.POST("/permissions/resync", h.resyncPermissions)
+	admin.POST("/client-updates", h.uploadClientVersion)
 }

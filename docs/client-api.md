@@ -79,6 +79,7 @@ paths.
    - [PUT /api/v1/emoji/:shortcode](#put-apiv1emojishortcode)
 8. [Presence](#8-presence)
 9. [Admin Service](#9-admin-service)
+    - [9.17 POST /v1/admin/client-updates](#917-http--post-v1adminclient-updates)
 10. [Botplatform Service](#10-botplatform-service)
     - [10.1 POST /api/v1/login](#101-http--post-apiv1login-bot-sdk-direct) · [10.2 POST /api/v1/auth/validate](#102-http--post-apiv1authvalidate)
 11. [tcard-service](#11-tcard-service)
@@ -970,7 +971,7 @@ it is absent on every other action.
 | `u` | [SubscriptionUser](#subscriptionuser) | The subscribed user. |
 | `roomId` | string | The room. |
 | `siteId` | string | The room's home site. |
-| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. |
+| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — **as seen by this subscriber** (see [Effective room type](#effective-room-type)). |
 | `name` | string | Display name per room type (see above). |
 | `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
@@ -1090,6 +1091,33 @@ name**; the `app` object also carries its own `name`. All app fields are optiona
 | `userManualUrl` | string | App user-manual URL. |
 | `version` | string | App version. |
 | `sponsors` | [AppSponsor](#appsponsor)[] | App sponsors. |
+
+#### Effective room type
+
+`roomType` is the room as **this subscription's own subscriber** sees it, and it
+is stored that way — a reader never derives it.
+
+A DM between a person and an app is `botDM` on the person's subscription and
+`dm` on the app's own, because each row records the counterpart it faces. The
+room document keeps a single type: `botDM` when either participant is a `.bot`
+app, `dm` otherwise. `p_admin` owns no app record, so its DMs are `dm` on both
+sides.
+
+| Pair | Room doc | One side | The other |
+|---|---|---|---|
+| alice ↔ weather.bot | `botDM` | alice → `botDM` + `app` | weather.bot → `dm` + `hrInfo` |
+| alice ↔ bob | `dm` | `dm` + `hrInfo` | `dm` + `hrInfo` |
+| weather.bot ↔ sales.bot | `botDM` | `botDM` + `app` | `botDM` + `app` |
+| alice ↔ p_admin | `dm` | `dm` + `hrInfo` | `dm` + `hrInfo` |
+
+A bot signed into the client therefore sees its DMs with people in the common
+chat section, and every [subscription.update](#subscriptionupdate-event) reports
+the same `roomType` the subscription stores.
+
+`isSubscribed` is separate from the type. It records a **deliberate** app
+subscription, so only the account that opened the room carries it, and only when
+its own row faces an app: being DMed by an app never subscribes you to it. It
+gates `botDM` rows alone, so unsubscribing from an app still hides it.
 
 #### HrInfo
 
@@ -1221,7 +1249,7 @@ This is an **async-job RPC**: the synchronous reply only confirms acceptance. Th
 The room **type is inferred server-side** from the payload shape — the client does not send it:
 
 - `name` set → `channel`
-- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a `.bot` bot or the `p_admin` platform-admin pseudo-account; a QA `p_` account is an ordinary user, so it yields a regular `dm`)
+- `name` empty + exactly one entry in `users` → `dm`, or `botDM` when **either** participant is a `.bot` bot. The `p_admin` platform-admin pseudo-account and QA `p_` accounts are ordinary users here, so both yield a regular `dm`
 - `name` empty + `users` is just the caller (e.g. `[caller]` or empty) → **self-DM** (note-to-self): a single-member `dm` room, created through the same async path as any other room. The subscription is **favorited**, and it is **one-per-user** — a repeat create returns the existing room with `status: "exists"`.
 
 The creator's account and the site come from the subject (`chat.user.{account}.request.room.{siteID}.create`); the client does not pass them in the body.
@@ -1276,7 +1304,6 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously on val
 - `"channel name is required"` / `"channel name must be at most 100 characters"`
 - `"bots cannot be added to a channel"` / `"bot not available"` (botDM target whose assistant is disabled)
 - `user "<account>": user not found` / `org "<orgId>": invalid org` (each wrapped with the offending account/org ID)
-- `"user is missing required name fields"` — rejected only when BOTH `engName` and `chineseName` are empty (either one alone is sufficient)
 - `"exceeds maximum capacity (N): would create M members"`
 
 ```json
@@ -1461,7 +1488,7 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 | `type` | string | Always `"member_added"`. |
 | `roomId` | string | |
 | `roomName` | string | |
-| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
+| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — the **room document's** type. One event serves every recipient, so a subscriber's own `roomType` may differ (see [Effective room type](#effective-room-type)). Omitted when empty. |
 | `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
@@ -1980,7 +2007,7 @@ Used by the message composer's `@…` mention autocomplete. Returns subscription
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | When omitted, the server uses `min(3, room.userCount + room.appCount)` (small rooms cap automatically, empty rooms return an empty list). When supplied, must be `> 0`; a value larger than `room.userCount + room.appCount` is clamped to that cap (not rejected). |
+| `limit` | number | no | When omitted, the server uses a configured default page size (`MENTIONABLE_DEFAULT_LIMIT`, default `3`). When supplied, must be `> 0`; a value above the configured maximum (`MENTIONABLE_MAX_LIMIT`, default `50`) is clamped to that maximum (not rejected). The page size is independent of the room's member counts. |
 | `filter` | string | no | Defaults to `""` (matches everything). Treated as a literal substring; regex metacharacters are escaped server-side. Matched case-insensitively against a dash-joined keyword built from `account`, `engName`, `chineseName`, `app.name`, and `app.assistant.name`. |
 
 ```json
@@ -2037,7 +2064,7 @@ Used by the message composer's `@…` mention autocomplete. Returns subscription
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — caller has no subscription in the room.
-- `"limit must be > 0 and <= room user count + app count"` — limit was `0` or negative. (A positive limit larger than the room's combined user + app population is clamped to that cap, not rejected.)
+- `"limit must be > 0"` — limit was `0` or negative. (A positive limit larger than the configured maximum is clamped to that maximum, not rejected.)
 
 ##### Triggered events — success path
 
@@ -2905,7 +2932,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `createdAt` | string | RFC 3339 timestamp. |
 | `messageId` | string | 17- or 20-char base62. |
 | `sender` | [MessageParticipant](#messageparticipant) | The message author. |
-| `msg` | string | The message body. For legacy `members_removed` system messages, history-service substitutes the removed user's display name for the stored account identifier on read; an account with no matching user is returned unchanged. |
+| `msg` | string | The message body. For legacy `members_removed` system messages (`"{account}" has been removed from the channel.`), history-service substitutes the removed user's display name for the quoted account on read, keeping the quotes; an account with no matching user is returned unchanged. |
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Decoded attachment objects (history-service decodes the stored blobs on read). |
 | `card` | [MessageCard](#messagecard) | Optional. |
@@ -4255,7 +4282,7 @@ See [Error envelope](#6-error-envelope-reference).
 |---|---|---|
 | `id` | string | roomId |
 | `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
-| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
+| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion` — the [effective room type](#effective-room-type) for this caller. Omitted when the caller has no subscription for the room. |
 | `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
 | `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
 
@@ -5224,7 +5251,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 
 | Field               | Type    | Required | Notes |
 |---------------------|---------|----------|-------|
-| `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (botDM rooms). |
+| `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (subscribed app rooms). Buckets read the stored [room type](#effective-room-type), so a bot's own DM rows appear under `rooms`, never `apps`. |
 | `favorite`          | boolean | no       | When `true`, filters to favorited subscriptions only **and** moves the self-DM to the front of the list. |
 | `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last user message (`room.lastMsgAt`) is within the last N days** — user activity, not system bumps or the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
 | `includeLastMessage` | boolean | no      | Whether to embed each room's [`previewMessage`](#subscriptionroom). Omitted ⇒ include (backward-compatible default); `false` ⇒ skip the per-room last-message resolve (a client that renders no room-list snippet can send `false` to save the server-side work). |
@@ -5255,7 +5282,7 @@ Results are **paginated** by `offset`/`limit` (offset-based): the server returns
 - **Local** rows carry the full room object (metadata + E2E key) from the `$lookup` baseline. **Cross-site** rows are fetched per remote site in parallel; if a site's RPC fails or a room isn't found, those rows are returned with **no `room` object** (the field is omitted) — the subscription still carries its own top-level `siteId`. `alert` and `hasMention` are unaffected (they come from the subscription, not the RPC).
 - **Teams-migrated rooms** (`room.origin == "teams"`, server-side only — not sent on the wire): excluded from `subscription.list`/`subscription.count` when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter, no data change.
 
-**Per-room-type record shape.** The kinds returned by `subscription.list` differ by row schema: `channel` and `dm` rows use the [Subscription](#subscription) schema (§3.0) — `dm` adds a top-level `hrInfo` — while `botDM` rows add a nested `app` object ([AppSubscription](#appsubscription), §3.0). All carry the nested [SubscriptionRoom](#subscriptionroom) (§3.0). Every field except the ones below is identical across the three types (`id`, `u`, `roomId`, `siteId`, `roles`, `joinedAt`, `muted`, `favorite`, `alert`, `hasMention`, `hasUnread`, `hasGroupMention`, the per-attribute `*UpdatedAt` timestamps, and the rest of `room`). `isSubscribed` is a **base [Subscription](#subscription) field** (boolean, optional — omitted unless stored `true`) shared by all three types, not a type-specific field. Type-specific fields:
+**Per-room-type record shape.** Each row carries the [room type its own subscriber sees](#effective-room-type). The kinds returned by `subscription.list` differ by row schema: `channel` and `dm` rows use the [Subscription](#subscription) schema (§3.0) — `dm` adds a top-level `hrInfo` — while `botDM` rows add a nested `app` object ([AppSubscription](#appsubscription), §3.0). All carry the nested [SubscriptionRoom](#subscriptionroom) (§3.0). Every field except the ones below is identical across the three types (`id`, `u`, `roomId`, `siteId`, `roles`, `joinedAt`, `muted`, `favorite`, `alert`, `hasMention`, `hasUnread`, `hasGroupMention`, the per-attribute `*UpdatedAt` timestamps, and the rest of `room`). `isSubscribed` is a **base [Subscription](#subscription) field** (boolean, optional — omitted unless stored `true`) shared by all three types, not a type-specific field. Type-specific fields:
 
 | Field | `channel` | `dm` | `botDM` |
 |---|---|---|---|
@@ -5831,7 +5858,7 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 | `siteId` | string | The thread's owning site. |
 | `roomId` | string | The room the thread belongs to. |
 | `roomName` | string | Per-subscriber display label, sourced from the user's subscription: `channel` → room name; `dm` → counterpart account; `botDM` → app name. |
-| `roomType` | string | The owning room's type (`channel`, `dm`, `botDM`, `discussion`). |
+| `roomType` | string | The owning room's [effective room type](#effective-room-type) for this caller (`channel`, `dm`, `botDM`, `discussion`). |
 | `threadRoomId` | string | The thread room ID. |
 | `parentMessageId` | string | The thread's parent (top-level) message ID. |
 | `lastSeenAt` | number | Optional. UTC ms the user last read the thread; absent if never opened. |
@@ -6425,6 +6452,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `visibleTo exceeds maximum size of 4096 bytes` | `bad_request` | — | `visibleTo` > 4096 bytes. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
 | `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). Not raised when the room-metadata read is unavailable — the cap is spam control, not access control, so it fails open and the send proceeds. |
+| `thread parent message not found` | `not_found` | `thread_parent_not_found` | `threadParentMessageId` does not resolve to a message the sender can read, on two lookups spaced `GATEKEEPER_THREAD_PARENT_RECHECK_DELAY` (150ms) apart — the second covers a parent whose own write is still in flight. Rejected at send time so the reply is never published to workers that would each retry and drop it. |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
 
@@ -6876,6 +6904,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `promote_requires_individual` | bad_request | room-service role-update (only individual members can be owners) |
 | `large_room_post_restricted` | forbidden | message-gatekeeper (non-owner/admin posting in a large room) |
 | `not_subscribed` | forbidden | message-gatekeeper / history-service (caller not subscribed) |
+| `thread_parent_not_found` | not_found | message-gatekeeper (`threadParentMessageId` does not resolve) |
 | `outside_access_window` | forbidden | history-service (subscribed but message predates HSS) |
 | `pin_disabled` | forbidden | history-service pin/unpin/list (kill-switch `PIN_ENABLED=false`) |
 | `pin_limit_reached` | forbidden | history-service pin (room at `MAX_PINNED_PER_ROOM` hard cap) |
@@ -8133,8 +8162,6 @@ Projected user record returned by all admin user endpoints. The `services` / bcr
 | `recordedBy` | string | The admin account that recorded this row (from the session token). |
 | `recordedAt` | string | RFC 3339. Server clock at write time (when the decision was recorded). Independent of the validity window — a grant can be back- or future-dated via `effectiveFrom`/`expiresAt`. |
 
----
-
 ### 9.16 Resync user
 
 **Endpoint:** `POST /v1/admin/users/:account/resync`
@@ -8169,6 +8196,108 @@ None.
 | 404 | `not_found` | `user_not_found` | No user with that account homed at this site (unknown account, or a cross-site replica). |
 | 401 | `unauthenticated` | `invalid_token` | Missing/invalid session token. |
 | 403 | `forbidden` | `not_admin` | Session lacks the admin role. |
+
+### 9.17 HTTP — POST /v1/admin/client-updates
+
+**Auth:** admin session (`Authorization: Bearer <session token>`), same as every `/v1/admin/…` route.
+
+Publishes a client update artifact pair. `admin-service` relays both parts to
+`client-update-service` under its own service-account credential; the browser
+never holds that credential.
+
+**Disk-backed, not memory-backed.** The handler spools the incoming parts past
+1 MiB to a temp file, then re-encodes them into a streamed outbound body — small
+envelope snapshots interleaved with the spooled files' own readers — sent with an
+exact `Content-Length`. Peak heap is therefore independent of artifact size
+(measured: a 48 MiB artifact relays with a ~5 MiB peak). The cost is ephemeral
+storage: size `admin-service`'s disk for the concurrent-upload total, not its
+RAM. Temp files are removed when the request ends.
+
+**Size cap.** `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (default `2147483648`, i.e. 2 GiB)
+caps one request body, counted before anything is spooled, so an oversize upload
+cannot fill the disk on its way to being rejected. Exceeding it ends the request
+with a `400` naming the limit in bytes. It is a guard rail on this service's
+ephemeral storage, not the artifact-size policy — that lives in
+`client-update-service`.
+
+The artifacts themselves are validated by `client-update-service`, not here: file
+name and extension rules live there and are reported back verbatim on a `400`.
+
+#### Request
+
+`multipart/form-data`:
+
+| Part | Type | Required | Notes |
+|---|---|---|---|
+| `configFile` | file (`.yaml`/`.yml`) | yes | Update descriptor. |
+| `executeFile` | file (binary) | yes | The executable. |
+
+#### Response
+
+| Status | Condition |
+|---|---|
+| `200 OK` | Both artifacts published. |
+| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the body exceeded `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (distinct message, names the limit), the browser did not finish sending within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
+| `401 Unauthorized` | Missing or invalid admin session. |
+| `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
+| `500 Internal Server Error` | This service could not extend its own I/O deadlines for the upload (deployment fault). |
+| `503 Service Unavailable` | `client-update-service` is unreachable, did not answer within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or this service's upload credential is not configured or was rejected. |
+
+##### Success response (`200`)
+
+| Field | Type | Notes |
+|---|---|---|
+| `result` | string | Always `"success"`. |
+
+```json
+{ "result": "success" }
+```
+
+**Audit:** an upload that `client-update-service` accepted appends an
+`AuditEntry` with action `client_update.upload` and **no `details`** — the
+filenames are the upstream's record to keep, and duplicating them here made this
+service responsible for matching how the upstream picks parts. A rejected or
+failed upload is never audited. The append
+is best-effort, as it is for every mutating admin endpoint: the artifacts are
+already published by then, so a failed append is logged at `ERROR` and the
+response still reports the publication. Treat the audit log as a record of
+intent, not as a transaction log for the artifact store.
+
+**Not atomic across the pair:** `client-update-service` writes the two objects
+independently and without locking (§12). A `200` means both of this request's
+writes landed; a failure after the first leaves the new descriptor beside the
+previous executable, and two concurrent uploads can interleave into a mixed
+pair with both callers seeing `200`. Re-uploading the pair repairs either case.
+Publish one pair at a time. There is no versioning or rollback — a deliberate
+non-goal of this endpoint.
+
+**Redirects are refused.** A `3xx` from `client-update-service` is treated as an
+error, not followed. `net/http` strips `Authorization` only when the redirect
+changes host, so a same-host `https`→`http` hop would otherwise carry the
+service-account token onward in the clear.
+
+**Timeouts.** `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`) is ONE budget for
+the whole request — reading the browser's body and calling
+`client-update-service` — pinned on the request context. The two phases are
+sequential rather than overlapping: the handler spools the inbound parts in full
+before it dials upstream, because the outbound body is sent with an exact
+`Content-Length` and that length is only known once every part has arrived. Without
+a single budget the upstream call would start a second full timeout on top of the
+inbound one.
+
+Which half the budget ran out in decides the answer, because the two have
+different remedies: still receiving the browser's body is a `400` (the sender was
+too slow), still waiting on `client-update-service` is a `503` (the upstream was).
+
+The rest is ordered around it, so that whichever budget expires first the admin
+still gets an envelope rather than a dropped connection: that value < that value
++ 30s (this request's write deadline) < the browser's own upload timeout.
+`client-update-service`'s `HTTP_WRITE_TIMEOUT` should be at least
+`CLIENT_UPDATE_UPLOAD_TIMEOUT` so it does not abandon a request this service is
+still waiting on. Raising one without the others reintroduces a window where a
+published upload is reported as a failure.
+
+---
 
 ## 10. Botplatform Service
 
@@ -8642,17 +8771,51 @@ Uploads and downloads stream end-to-end; downloads are fronted by a bounded
 TTL+size in-memory cache.
 
 > [!WARNING]
-> **These endpoints are UNAUTHENTICATED in v1.** Anyone who can reach the service
-> can upload or download update artifacts. **They MUST be network-restricted
-> before any production exposure.**
+> **`GET /api/v1/version/:fileName` is UNAUTHENTICATED.** Anyone who can reach the
+> service can download update artifacts. It **MUST be network-restricted**. Uploads
+> are gated on a service account (below).
 
 ### POST /api/v1/version
 
-**Auth:** none (v1)
+**Auth:** `Authorization: Bearer <service-account token>`. The token must match an
+entry in the service's `UPLOAD_TOKENS` table (`account:token`, comma-separated).
+Only `admin-service` is provisioned; browsers and end-user clients never call this
+endpoint directly — they go through
+[`POST /v1/admin/client-updates`](#917-http--post-v1adminclient-updates).
 
-Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
-and streamed straight to MinIO (no size cap). An upload of an existing file name
-overwrites it and evicts any cached copy.
+`UPLOAD_TOKENS` is **optional**. Unset or empty authorizes nobody: the service
+starts normally and answers **every** upload with `401`, so a site that does not
+publish client updates can deploy without it. Downloads are unaffected.
+
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required.
+An upload of an existing file name overwrites it and evicts any cached copy.
+
+**Size cap.** `UPLOAD_MAX_BYTES` (default `2147483648`, i.e. 2 GiB) caps one
+request body, applied after the credential check and before anything is spooled,
+so an oversize upload cannot fill the disk on its way to being rejected.
+Exceeding it ends the request with a `400` naming the limit in bytes. It is a
+guard rail on this pod's ephemeral storage, not an artifact-size policy.
+
+**Disk-backed, not end-to-end streamed.** The handler reads its parts via
+`c.FormFile`, which buffers up to `MaxMultipartMemory` (**1 MiB**, lowered from
+gin's 32 MiB default) in memory and spills the remainder to a temporary file
+before the object is written to MinIO. Peak heap is therefore independent of
+artifact size — measured: a 48 MiB artifact peaks at ~5 MiB, against ~113 MiB at
+the old default. Size the container's ephemeral storage, not its RAM, for the
+largest artifact you intend to publish. The MinIO write itself streams from that
+temporary file.
+
+The two objects are written **independently, not atomically**, with no locking
+between requests. Two consequences:
+
+- A failure after the first write returns an error with that object already
+  replaced, so a downloader sees the new descriptor beside the previous
+  executable until the pair is re-uploaded.
+- Two uploads in flight at once can interleave their writes, leaving the
+  descriptor from one submission beside the executable from the other — and
+  **both callers receive `200`**. Publish one artifact pair at a time.
+
+Versioning and rollback are out of scope for this service.
 
 #### Request
 
@@ -8667,6 +8830,7 @@ overwrites it and evicts any cached copy.
 |---|---|
 | `200 OK` | Both files stored. |
 | `400 Bad Request` | Missing/empty `configFile` or `executeFile`; `configFile` not `.yaml`/`.yml`; malformed multipart body. |
+| `401 Unauthorized` | Missing, malformed, or unrecognized service-account token. Identical response for all three. |
 | `500 Internal Server Error` | MinIO write failure. |
 
 ##### Success response (`200`)

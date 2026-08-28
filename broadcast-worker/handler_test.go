@@ -4022,3 +4022,160 @@ func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
 	hadDeadline, _ := pub.calls()
 	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
 }
+
+// TestEventShapeViolations_ArePermanent pins that a canonical event missing a
+// required timestamp is dropped on the first delivery. Redelivery hands the
+// handler byte-identical data, so retrying only holds an ack-pending slot for
+// the full MaxDeliver budget before dropping it anyway.
+func TestEventShapeViolations_ArePermanent(t *testing.T) {
+	msgTime := time.Date(2026, 3, 26, 9, 0, 0, 0, time.UTC)
+
+	newHandler := func(t *testing.T) *Handler {
+		ctrl := gomock.NewController(t)
+		return NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
+			NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	}
+
+	baseMsg := func() model.Message {
+		return model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "hello", CreatedAt: msgTime,
+		}
+	}
+
+	// Reached through the public entry point.
+	dispatched := []struct {
+		name    string
+		event   model.EventType
+		wantMsg string
+	}{
+		{"updated event missing EditedAt", model.EventUpdated, "missing EditedAt"},
+		{"deleted event missing UpdatedAt", model.EventDeleted, "missing UpdatedAt"},
+		{"pinned event missing PinnedAt", model.EventPinned, "missing PinnedAt"},
+	}
+	for _, tc := range dispatched {
+		t.Run(tc.name, func(t *testing.T) {
+			evt := model.MessageEvent{Event: tc.event, SiteID: "site-a", Message: baseMsg()}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			err = newHandler(t).HandleMessage(context.Background(), data)
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.True(t, perm, "a publisher contract violation can never succeed on redelivery: %v", err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+		})
+	}
+
+	// Defensive backstops: the outer handler guards the same fields first, so
+	// these are only reachable directly. They must classify identically.
+	t.Run("thread updated event missing EditedAt", func(t *testing.T) {
+		evt := model.MessageEvent{Event: model.EventUpdated, SiteID: "site-a", Message: baseMsg()}
+		evt.Message.ThreadParentMessageID = "parent-1"
+
+		err := newHandler(t).handleThreadUpdated(context.Background(), &evt)
+
+		require.Error(t, err)
+		_, perm := errcode.IsPermanent(err)
+		assert.True(t, perm, "expected permanent, got %v", err)
+	})
+
+	t.Run("thread deleted event missing UpdatedAt", func(t *testing.T) {
+		evt := model.MessageEvent{Event: model.EventDeleted, SiteID: "site-a", Message: baseMsg()}
+		evt.Message.ThreadParentMessageID = "parent-1"
+
+		err := newHandler(t).handleThreadDeleted(context.Background(), &evt)
+
+		require.Error(t, err)
+		_, perm := errcode.IsPermanent(err)
+		assert.True(t, perm, "expected permanent, got %v", err)
+	})
+}
+
+// TestChannelThreadFanOut_ParentFetchClassification pins the Ack-drop vs Nak
+// split on the history-service reply. historyParentFetcher deliberately
+// propagates the typed remote *errcode.Error; the handler must not flatten it
+// into an untyped retry.
+func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name          string
+		fetchErr      error
+		attempt       uint64
+		wantPermanent bool
+	}{
+		// A bot can post a parent and reply to it milliseconds later, before
+		// bot-message-worker has written the parent to Cassandra. The first
+		// delivery must retry so that race resolves.
+		{"nonexistent parent retries on the first attempt", errcode.NotFound("message not found"), 1, false},
+		{"forbidden parent retries on the first attempt", errcode.Forbidden("no access"), 1, false},
+		// Past the short budget it is not a race — drop it rather than hold an
+		// ack-pending slot for the rest of MaxDeliver.
+		{"nonexistent parent is permanent once the budget is spent", errcode.NotFound("message not found"), 2, true},
+		{"forbidden parent is permanent once the budget is spent", errcode.Forbidden("no access"), 2, true},
+		// An outage keeps the full budget however many attempts have passed.
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), 2, false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), 6, false},
+		{"bare infra error stays retryable", errors.New("nats: timeout"), 6, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
+
+			evt := model.MessageEvent{
+				Event:     model.EventCreated,
+				SiteID:    "site-a",
+				Timestamp: msgTime.UnixMilli(),
+				Message: model.Message{
+					ID: "reply-1", RoomID: "r1", UserID: "u-alice", UserAccount: "alice",
+					Content: "a thread reply", CreatedAt: msgTime,
+					ThreadParentMessageID: "parent-1",
+					TShow:                 false,
+				},
+			}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, stubParentFetcher{err: tc.fetchErr}, false, subject.RouteGlobal)
+			err = h.HandleMessage(trackedDelivery(t, tc.attempt, 6), data)
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "permanence mismatch for %v", tc.fetchErr)
+			assert.Empty(t, pub.records, "no fan-out when the parent cannot be resolved")
+		})
+	}
+}
+
+// trackedDelivery returns a ctx reporting the given delivery attempt, mirroring
+// what natsmetrics.Consume stamps in the production loop.
+func trackedDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+	t.Helper()
+	ctx := context.Background()
+	m, _ := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Consumer: "broadcast-worker",
+	})
+	consumer.LoopStarted(ctx)
+	tracked := consumer.Track(ctx, &deliveryCountMsg{numDelivered: numDelivered}, natsmetrics.EventCreated, maxDeliver)
+	return tracked.Context(ctx)
+}
+
+// deliveryCountMsg is a jetstream.Msg carrying only the delivery count Track reads.
+type deliveryCountMsg struct {
+	jetstream.Msg
+	numDelivered uint64
+}
+
+func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
+}

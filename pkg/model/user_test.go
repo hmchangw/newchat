@@ -17,8 +17,8 @@ func TestUser_DisplayName(t *testing.T) {
 	}{
 		{"nil user", nil, ""},
 		{"both names empty -> account", &User{Account: "alice", EngName: "", ChineseName: ""}, "alice"},
-		{"eng empty -> account", &User{Account: "alice", EngName: "", ChineseName: "陳"}, "alice"},
-		{"chinese empty -> account", &User{Account: "alice", EngName: "Alice", ChineseName: ""}, "alice"},
+		{"eng only -> eng", &User{Account: "alice", EngName: "Alice", ChineseName: ""}, "Alice"},
+		{"chinese only -> chinese", &User{Account: "alice", EngName: "", ChineseName: "陳"}, "陳"},
 		{"equal names -> eng", &User{Account: "alice", EngName: "Same", ChineseName: "Same"}, "Same"},
 		{"distinct names -> joined", &User{Account: "alice", EngName: "Alice", ChineseName: "陳"}, "Alice 陳"},
 	}

@@ -229,14 +229,15 @@ Full decision logic, limits, and response schemas are in
 
 ### HTTP — Client Update Service
 
-Public HTTP endpoints served by `client-update-service` (no `ssoToken`/auth in v1
-— must be network-restricted). Full request/response schemas and the download
-cache behavior are in
+HTTP endpoints served by `client-update-service`. Uploads require a service-account
+bearer token (only `admin-service` holds one); downloads are unauthenticated and
+must be network-restricted. Full request/response schemas and the download cache
+behavior are in
 [../client-api.md §12](../client-api.md#12-client-update-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
-| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). |
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, capped by `UPLOAD_MAX_BYTES` (default 2 GiB); disk-backed — parts over 1 MiB spill to a temp file before the MinIO write). Service-account bearer token required; an unset/empty `UPLOAD_TOKENS` disables uploads entirely (every request `401`). |
 | `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
 | `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 
@@ -288,6 +289,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger, materializes the new state on each subject's user doc, and fans it out to every other site (unacknowledged destinations come back as `syncFailures`), with one slim audit entry per subject (§9.13). |
 | `GET /v1/admin/permissions` | synchronous HTTP | List the permission ledger newest-first — company-wide by default, with optional independent `subjectAccount` and `permission` query filters; `currentlyGranted` (read from the materialized state) is included only when both filters are set (§9.14). |
 | `POST /v1/admin/permissions/resync` | synchronous HTTP | Re-deliver the current materialized permission state for the given accounts to every other site; writes nothing, idempotent (§9.15). |
+| `POST /v1/admin/client-updates` | synchronous HTTP | Publish a client update artifact pair; relayed on to client-update-service under this service's own credential (streamed, disk-backed — see §9.17). Audited as `client_update.upload` on upstream success, with no details. |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
@@ -344,8 +346,9 @@ Room type is inferred server-side from the payload shape (`name` set → channel
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | `channel` only. Source channels whose members are copied in. |
 
 Room type is inferred: `name` set → channel; `name` empty + one `users` entry →
-DM/botDM; `name` empty + `users` is just the caller → **self-DM**, a
-single-member `dm` room, one-per-user.
+DM, or botDM when **either** participant is a `.bot` bot (`p_admin` and QA `p_`
+accounts are ordinary users, so both yield `dm`); `name` empty + `users` is just
+the caller → **self-DM**, a single-member `dm` room, one-per-user.
 
 #### Success response
 
@@ -565,7 +568,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Default: `min(3, room.userCount + room.appCount)`. Must be > 0 and ≤ combined count. |
+| `limit` | number | no | Default: configured `MENTIONABLE_DEFAULT_LIMIT` (3). Must be > 0; clamped to `MENTIONABLE_MAX_LIMIT` (50). Independent of room member counts. |
 | `filter` | string | no | Literal substring, case-insensitive. Matched against account, names, app name. |
 
 #### Success response
@@ -575,7 +578,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 #### Errors
 
-`"only room members can perform this action"`, `"limit must be > 0 and <= room user count + app count"` (fires only for a non-positive limit; an over-cap positive limit is clamped).
+`"only room members can perform this action"`, `"limit must be > 0"` (fires only for a non-positive limit; an over-max positive limit is clamped).
 
 **Emits:** None — reply only.
 
@@ -1400,9 +1403,10 @@ with `AND`) — terms split across e.g. message text and a filename match nothin
 `tshow` (boolean, omitted when false),
 `sender` (`{account, hr?, appInfo?}` — `hr` `{account, chineseName, engName}` for
 human senders, `appInfo` `{id, name, assistantName}` for bot senders),
-`room` (`{id, name, type, hrInfo?, appInfo?}` — `hrInfo` `{account, chineseName,
-engName}` only for `dm`, `appInfo` `{id, name, assistantName, isSubscribed}` only
-for `botDM`).
+`room` (`{id, name, type, hrInfo?, appInfo?}` — `type` is the
+[effective room type](../client-api.md#effective-room-type); `hrInfo` `{account,
+chineseName, engName}` only for `dm`, `appInfo` `{id, name, assistantName,
+isSubscribed}` only for `botDM`).
 Base fields are sourced from ES; `room`/`sender` are resolved server-side (best-effort,
 individual fields omitted when unresolved). `attachments`/`card` mirror the message
 payloads as-is (same wire shape as history reads) so hits render without a follow-up
@@ -1852,7 +1856,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
+| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (app rooms). Buckets read the stored [room type](../client-api.md#effective-room-type), so a bot's own DM rows appear under `rooms`, never `apps`. |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
 | `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` (the room's user-activity position) is within N days. Non-negative. |
 | `includeLastMessage` | boolean | no | Embed each room's [`previewMessage`](../client-api.md#subscriptionroom). Omitted ⇒ include (default); `false` ⇒ skip the per-room preview resolve. |
@@ -1867,7 +1871,9 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
-botDM rows add `app` (AppSubscription). See
+botDM rows add `app` (AppSubscription). Each row carries the
+[room type its own subscriber sees](../client-api.md#effective-room-type), stored
+at creation: a bot's own row in its DM with a person is `dm` with `hrInfo`. See
 [../client-api.md §3.4](../client-api.md#subscriptionlist) for the full schema + example.
 
 **Emits:** None.
@@ -2277,7 +2283,7 @@ and quoted message; variant determined by optional fields.
 | `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present. |
 | `requestId` | string | yes | 36-char hyphenated UUID (v4 or v7). Async reply delivered to `…response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded JSON of one [Attachment](../client-api.md#attachment) from the upload endpoint. Max 1 entry, ≤ 8 KiB total; returned decoded as `Attachment[]` in message payloads. |
-| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
+| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). The parent is resolved server-side; a genuinely missing/forbidden parent is rejected, while a *transient* history outage still accepts the reply. |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `visibleTo` | string | no | Opaque visibility marker, ≤ 4096 bytes. Stored and surfaced verbatim; the backend never filters on it. Oversize rejected with `bad_request`. |
@@ -2311,6 +2317,7 @@ error table. Key errors:
 - `"visibleTo exceeds maximum size of 4096 bytes"` (`bad_request`)
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
+- `"thread parent message not found"` (`not_found`, `thread_parent_not_found`)
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 

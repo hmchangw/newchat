@@ -43,6 +43,10 @@ type Handler struct {
 	// nil disables it. Set post-construction, mirroring room-service,
 	// room-worker, inbox-worker and bot-room-service.
 	valkey valkeyutil.Client
+	// uploader relays client update artifacts to client-update-service. Nil when
+	// unconfigured — the handler answers 503 rather than dereferencing it, the
+	// same tolerance roomRPC and publish already have.
+	uploader versionUploader
 }
 
 // newHandler constructs a Handler with the given stores, config, room RPC, and
@@ -50,11 +54,24 @@ type Handler struct {
 // route need not build one; the duty handler answers 503 rather than
 // dereferencing it. A nil publish is tolerated the same way — fanout
 // no-ops in tests that don't exercise it.
-func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publish func(ctx context.Context, subj string, data []byte, encoding string) error) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{
+func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publish func(ctx context.Context, subj string, data []byte, encoding string) error, opts ...handlerOption) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	h := &Handler{
 		store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publish: publish,
 		remoteDests: remoteSites(cfg.AllSiteIDs, cfg.SiteID),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// handlerOption configures optional Handler dependencies. Variadic, so adding
+// one does not churn newHandler's 50-plus existing call sites.
+type handlerOption func(*Handler)
+
+// withVersionUploader injects the client-update relay.
+func withVersionUploader(u versionUploader) handlerOption {
+	return func(h *Handler) { h.uploader = u }
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a

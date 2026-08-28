@@ -19,6 +19,7 @@ services:
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       # Shared Valkey cluster fronts the at-rest DEK L2 so the Cassandra write
       # path survives a Mongo outage. Empty disables the tier (fail-open).
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}

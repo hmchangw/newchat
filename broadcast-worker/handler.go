@@ -381,7 +381,8 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt"))
 	}
 
 	if msg.IsHiddenThreadReply() {
@@ -528,7 +529,8 @@ func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseR
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt for thread reply %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt for thread reply"))
 	}
 	parentMsgID := msg.ThreadParentMessageID
 
@@ -581,7 +583,8 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 	parentMsgID := msg.ThreadParentMessageID
 
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("missing UpdatedAt for thread message %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("missing UpdatedAt for thread message"))
 	}
 
 	// GetRoom first so the routing decision (thread followers vs all DM
@@ -704,7 +707,8 @@ func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, n
 func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("deleted event missing UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("deleted event missing UpdatedAt"))
 	}
 
 	if msg.IsHiddenThreadReply() {
@@ -744,7 +748,8 @@ func (h *Handler) publishThreadBadge(ctx context.Context, room *model.Room, newT
 func (h *Handler) handlePinned(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.PinnedAt == nil {
-		return fmt.Errorf("pinned event missing PinnedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("pinned event missing PinnedAt"))
 	}
 
 	room, err := h.store.GetRoom(ctx, msg.RoomID)
@@ -1381,6 +1386,17 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	} else {
 		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		if err != nil {
+			// historyParentFetcher propagates the typed remote error precisely so it
+			// can be classified here. A not_found/forbidden parent is retried once —
+			// a bot can post a parent and reply to it before bot-message-worker has
+			// written the parent to Cassandra — and then dropped: past that the
+			// parent is genuinely absent, and spending the rest of MaxDeliver on it
+			// would hold an ack-pending slot for 66s per message, which is what
+			// fills the consumer's budget and stops it consuming anything at all.
+			if ee, terminal := errcode.Terminal(err); terminal && parentResolveExhausted(ctx) {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+				return nil, errcode.Permanent(ee)
+			}
 			return nil, fmt.Errorf("fetch thread parent %s: %w", parentMsgID, err)
 		}
 		parent = fetched
@@ -1404,4 +1420,20 @@ func usersByAccount(users []model.User) map[string]model.User {
 		byAccount[users[i].Account] = users[i]
 	}
 	return byAccount
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (a bot replying to its own just-posted parent), so the full
+// MaxDeliver budget buys nothing and costs a lot: on LowLatencyBackoff each
+// waiting reply holds its ack-pending slot for 66s, and ~15 of them per second
+// fills the budget and stalls the whole site's fan-out.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

@@ -36,6 +36,7 @@ type config struct {
 	MongoDB            string `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername      string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword      string `env:"MONGO_PASSWORD"  envDefault:""`
+	ReadPreference     string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	Pool               mongoutil.PoolConfig
 	MaxWorkers         int           `env:"MAX_WORKERS"     envDefault:"100"`
 	LargeRoomThreshold int           `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
@@ -44,21 +45,25 @@ type config struct {
 	ChatBaseURL        string        `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
 	SubCacheSize       int           `env:"GATEKEEPER_SUB_CACHE_SIZE"  envDefault:"100000"`
 	SubCacheTTL        time.Duration `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
-	RoomMetaCacheSize  int           `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
-	RoomMetaCacheTTL   time.Duration `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
-	Valkey             valkeyutil.Config
-	RoomMetaL2         roommetacache.TTLConfig
-	SubL2              subauthcache.TTLConfig  `envPrefix:"GATEKEEPER_"`
-	Breaker            mongoutil.BreakerConfig `envPrefix:"GATEKEEPER_"`
-	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
-	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
-	UserL2             userstore.TTLConfig
-	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
-	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`
-	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	DebugLog           logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	// ThreadParentRecheckDelay spaces the one re-check of a thread parent history
+	// reports missing, covering the lag between the parent's publish and
+	// message-worker's write. Zero rejects on the first miss.
+	ThreadParentRecheckDelay time.Duration `env:"GATEKEEPER_THREAD_PARENT_RECHECK_DELAY" envDefault:"150ms"`
+	RoomMetaCacheSize        int           `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
+	RoomMetaCacheTTL         time.Duration `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
+	Valkey                   valkeyutil.Config
+	RoomMetaL2               roommetacache.TTLConfig
+	SubL2                    subauthcache.TTLConfig  `envPrefix:"GATEKEEPER_"`
+	Breaker                  mongoutil.BreakerConfig `envPrefix:"GATEKEEPER_"`
+	UserCacheSize            int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
+	UserCacheTTL             time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
+	UserL2                   userstore.TTLConfig
+	HealthAddr               string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
+	PProfEnabled             bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr              string                  `env:"METRICS_ADDR"               envDefault:":9090"`
+	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -113,11 +118,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+	// primaryPreferred, not secondaryPreferred: the sub cache means Mongo is hit only
+	// on a cold miss, which is exactly the just-joined-a-room case a stale read breaks.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
 	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
@@ -181,7 +195,8 @@ func main() {
 		return nil
 	}
 	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
-	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL, withGatekeeperMetrics(domainMetrics))
+	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL,
+		withGatekeeperMetrics(domainMetrics), withThreadParentRecheckDelay(cfg.ThreadParentRecheckDelay))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)

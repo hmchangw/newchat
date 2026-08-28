@@ -3,6 +3,7 @@
 
 export {
   AsyncJobError,
+  envelopeErrorFromBody,
   formatAsyncJobError,
   parseHttpEnvelopeError,
 } from './_transport/httpEnvelope'
@@ -24,6 +25,7 @@ export {
   revokeSession,
   setPassword,
   updateUser,
+  uploadClientVersion,
 } from './admin'
 export type {
   AdminSession,

@@ -67,7 +67,11 @@ type config struct {
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
+	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"30m"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	// MemberCountReconcileTTL bounds how often the add-member hot path runs a
 	// full O(room) recompute of userCount/appCount. Between recomputes the
@@ -162,7 +166,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	keyStore, err := roomkeystore.OpenMongo(ctx, mongoClient.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, mongoClient.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
 	if err != nil {
 		slog.Error("open room key store failed", "error", err)
 		os.Exit(1)

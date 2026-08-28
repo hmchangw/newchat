@@ -21,16 +21,32 @@ const (
 )
 
 // extractRemovedAccount returns the account baked into a legacy members_removed
-// row's text. Reports false for every other row, leaving it untouched.
+// row's text, which quotes it: `"bob" has been removed from the channel.`
+// Reports false for every other row, leaving it untouched.
+//
+// The quotes are part of the stored sentence, not delimiters we may keep: an
+// account carrying them matches no user document, so the row would silently go
+// unresolved.
 func extractRemovedAccount(m *models.Message) (string, bool) {
 	if m == nil || m.Type != legacyMembersRemovedType {
 		return "", false
 	}
-	account, found := strings.CutSuffix(m.Msg, removedFromChannelSuffix)
-	if !found || account == "" {
+	quoted, found := strings.CutSuffix(m.Msg, removedFromChannelSuffix)
+	if !found {
 		return "", false
 	}
-	return account, true
+	// Needs both quotes plus at least one character between them; `""` and a
+	// lone `"` name nobody. An inner quote belongs to the account itself.
+	if len(quoted) < 3 || !strings.HasPrefix(quoted, `"`) || !strings.HasSuffix(quoted, `"`) {
+		return "", false
+	}
+	return quoted[1 : len(quoted)-1], true
+}
+
+// quoteRemoved renders the sentence back with name where the account stood,
+// keeping the quotes the stored form uses.
+func quoteRemoved(name string) string {
+	return `"` + name + `"` + removedFromChannelSuffix
 }
 
 // resolveRemovedMemberNames rewrites every legacy members_removed row in msgs,
@@ -83,7 +99,7 @@ func (s *HistoryService) resolveRemovedMemberNames(ctx context.Context, msgs []m
 			continue
 		}
 		if name, found := names[account]; found {
-			msgs[i].Msg = name + removedFromChannelSuffix
+			msgs[i].Msg = quoteRemoved(name)
 		}
 	}
 }

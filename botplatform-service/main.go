@@ -59,10 +59,17 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)

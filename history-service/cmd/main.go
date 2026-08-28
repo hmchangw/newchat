@@ -151,6 +151,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.Mongo.KeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
@@ -191,7 +197,7 @@ func main() {
 		// DEKs are written by other services; pin to primary so a fresh key isn't
 		// missed on a lagging secondary.
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		// Front the Mongo DEK store with the shared Valkey L2 so an active room's
 		// key stays reachable during a Mongo outage (the in-process DEK cache
 		// expires on a fixed TTL and cannot refetch while Mongo is down).
@@ -212,7 +218,7 @@ func main() {
 		// FROM Mongo, so its DEK is never needed on a request the outage did not
 		// already fail — caching it would front a read that cannot happen.
 		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(preview.DEKCollection,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 

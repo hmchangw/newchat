@@ -16,6 +16,7 @@ services:
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - CHAT_BASE_URL=${CHAT_BASE_URL:-http://localhost:3000}
       # User cache fronts users-collection lookups so the per-message sender
       # display-name composition stays off the hot Mongo path. In-process LRU

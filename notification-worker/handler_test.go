@@ -9,11 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 )
@@ -1881,4 +1884,156 @@ func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
 	require.Len(t, emit.emitted, 1)
 	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
 	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
+}
+
+// TestHandle_ThreadOnlyReply_ParentFetchClassification pins the Ack-drop vs Nak
+// split. historyParentFetcher propagates the typed remote *errcode.Error for
+// "accurate classification"; the handler must act on it instead of retrying a
+// parent that will never resolve.
+func TestHandle_ThreadOnlyReply_ParentFetchClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		fetchErr      error
+		attempt       uint64
+		wantPermanent bool
+	}{
+		// The parent's Cassandra row is written asynchronously off the same stream,
+		// so the first delivery must retry to cover that ordering race.
+		{"nonexistent parent retries on the first attempt", errcode.NotFound("message not found"), 1, false},
+		{"forbidden parent retries on the first attempt", errcode.Forbidden("no access"), 1, false},
+		// Past the short budget it is not a race. On DefaultBackoff the remaining
+		// attempts would hold an ack-pending slot for 756s.
+		{"nonexistent parent is permanent once the budget is spent", errcode.NotFound("message not found"), 2, true},
+		{"forbidden parent is permanent once the budget is spent", errcode.Forbidden("no access"), 2, true},
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), 2, false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), 6, false},
+		{"bare infra error stays retryable", errors.New("history timeout"), 6, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &stubMembers{out: map[string][]roomsubcache.Member{
+				"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+			}}
+			followers := &stubFollowers{out: map[string]map[string]struct{}{"parent-1": {"bob": {}}}}
+			emit := &recordingEmitter{}
+			h := NewHandler(HandlerDeps{
+				Members:            members,
+				Followers:          followers,
+				Parent:             stubParent{err: tc.fetchErr},
+				Presence:           noopPresenceSnapshotter{},
+				Hook:               noopVetoer{},
+				Emitter:            emit,
+				LargeRoomThreshold: 500,
+			})
+
+			msg := model.Message{
+				ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+				ThreadParentMessageID: "parent-1",
+				TShow:                 false,
+				Content:               "thread reply",
+			}
+			err := h.HandleMessage(trackedDelivery(t, tc.attempt, 6), msgEvent(&msg))
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "permanence mismatch for %v", tc.fetchErr)
+			assert.Empty(t, emit.accounts(), "no notifications emitted when the parent cannot be resolved")
+		})
+	}
+}
+
+// perBatchEmitter returns a caller-supplied error per batch index so a test can
+// mix a permanent failure with a transient one.
+type perBatchEmitter struct {
+	mu   sync.Mutex
+	errs []error
+	n    int
+}
+
+func (e *perBatchEmitter) Emit(_ context.Context, _ model.PushNotificationEvent) error { //nolint:gocritic // hugeParam: must match Emitter interface value semantics
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	i := e.n
+	e.n++
+	if i < len(e.errs) {
+		return e.errs[i]
+	}
+	return nil
+}
+
+// TestHandle_EmitBatchErrors_Aggregate pins that one permanent batch failure
+// cannot strip the retry budget from a sibling batch that failed transiently.
+// Ack-dropping the message would silently lose that batch's recipients.
+func TestHandle_EmitBatchErrors_Aggregate(t *testing.T) {
+	permanent := errcode.Permanent(errcode.Internal("push batch m1-b0 exceeds NATS max_payload: wire=99, cap=64"))
+	transient := errors.New("nats: broker unavailable")
+
+	tests := []struct {
+		name          string
+		errs          []error
+		wantPermanent bool
+	}{
+		{"every batch permanent → drop", []error{permanent, permanent}, true},
+		{"one batch transient → retry", []error{permanent, transient}, false},
+		{"transient first → retry", []error{transient, permanent}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &stubMembers{out: map[string][]roomsubcache.Member{
+				"r1": {
+					{ID: "alice", Account: "alice"},
+					{ID: "bob", Account: "bob"},
+					{ID: "carol", Account: "carol"},
+				},
+			}}
+			emit := &perBatchEmitter{errs: tc.errs}
+			h := NewHandler(HandlerDeps{
+				Members:            members,
+				Followers:          &stubFollowers{},
+				Parent:             stubParent{},
+				Presence:           noopPresenceSnapshotter{},
+				Hook:               noopVetoer{},
+				Emitter:            emit,
+				LargeRoomThreshold: 500,
+				RecipientBatchSize: 1, // one recipient per batch → two batches
+			})
+
+			msg := model.Message{
+				ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+				CreatedAt: time.Now(), Content: "hello",
+			}
+			err := h.HandleMessage(context.Background(), msgEvent(&msg))
+
+			require.Error(t, err)
+			require.Equal(t, 2, emit.n, "both batches must be attempted")
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "aggregate permanence mismatch: %v", err)
+		})
+	}
+}
+
+// trackedDelivery returns a ctx reporting the given delivery attempt, mirroring
+// what natsmetrics.Track stamps in main.go's consume loop.
+func trackedDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+	t.Helper()
+	ctx := context.Background()
+	consumer := natsmetrics.NewFromProvider(sdkmetric.NewMeterProvider()).
+		Consumer(natsmetrics.ConsumerConfig{
+			Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Consumer: "notification-worker",
+		})
+	consumer.LoopStarted(ctx)
+	tracked := consumer.Track(ctx, &deliveryCountMsg{numDelivered: numDelivered}, natsmetrics.EventCreated, maxDeliver)
+	return tracked.Context(ctx)
+}
+
+// deliveryCountMsg is a jetstream.Msg carrying only the delivery count Track reads.
+type deliveryCountMsg struct {
+	jetstream.Msg
+	numDelivered uint64
+}
+
+func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
 }

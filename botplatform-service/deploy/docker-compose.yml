@@ -18,6 +18,7 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
       # Keeps already-authenticated bots working while Mongo is unreachable.

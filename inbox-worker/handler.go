@@ -308,15 +308,16 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			missing = append(missing, account)
 			continue
 		}
+		name := subscriptionName(roomType, event.RoomName, event.RequesterAccount)
+		subType := model.SubscriptionRowType(roomType, name)
 		sub := &model.Subscription{
 			ID:                 idgen.GenerateUUIDv7(),
 			User:               model.SubscriptionUser{ID: user.ID, Account: user.Account},
 			RoomID:             event.RoomID,
-			RoomType:           roomType,
+			RoomType:           subType,
 			SiteID:             event.SiteID,
 			Roles:              rolesForType(roomType),
-			Name:               subscriptionName(roomType, event.RoomName, event.RequesterAccount),
-			IsSubscribed:       subscriptionIsSubscribed(roomType, &user),
+			Name:               name,
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,
@@ -764,18 +765,4 @@ func subscriptionName(roomType model.RoomType, roomName, requesterAccount string
 		return requesterAccount
 	}
 	return ""
-}
-
-// isBot reports whether account is bot-like — a real ".bot" bot or the
-// "p_admin" platform-admin pseudo-account — via the model taxonomy. Plain
-// "p_" QA test accounts are ordinary users and return false.
-func isBot(account string) bool {
-	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
-}
-
-func subscriptionIsSubscribed(roomType model.RoomType, u *model.User) bool {
-	if roomType != model.RoomTypeBotDM {
-		return false
-	}
-	return !isBot(u.Account)
 }

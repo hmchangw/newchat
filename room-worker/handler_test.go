@@ -2799,21 +2799,23 @@ func TestResolveRoomName(t *testing.T) {
 	}
 }
 
-func TestDetermineRoomTypeFromPayload(t *testing.T) {
+func TestCreateRoomType(t *testing.T) {
 	tests := map[string]struct {
 		req  model.CreateRoomRequest
 		want model.RoomType
 	}{
-		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
-		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
-		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeBotDM},
-		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
-		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
-		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
+		"single human user → DM":   {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
+		"single .bot user → botDM": {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
+		// p_admin is human-operated and has no app document; mirrors room-service.
+		"single platform-admin pseudo-account → regular DM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeDM},
+		"bot requester with a human counterpart → botDM":    {model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}}, model.RoomTypeBotDM},
+		"single QA p_ user → regular DM":                    {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
+		"named → channel":                                   {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
+		"multi-user → channel":                              {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, determineRoomTypeFromPayload(&tc.req))
+			assert.Equal(t, tc.want, model.CreateRoomType(&tc.req))
 		})
 	}
 }
@@ -7658,7 +7660,7 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
 
 	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
-		subs := buildDMSubs(requester, other, room, at)
+		subs := buildDMPairSubs(requester, other, room, at)
 		require.Len(t, subs, 2)
 		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
 		assert.True(t, subs[0].LastSeenAt.Equal(at))
@@ -7666,7 +7668,7 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 	})
 
 	t.Run("botDM: initiator pre-read", func(t *testing.T) {
-		subs := buildBotDMSubs(requester, bot, room, at)
+		subs := buildDMPairSubs(requester, bot, room, at)
 		require.Len(t, subs, 2)
 		require.NotNil(t, subs[0].LastSeenAt)
 		assert.True(t, subs[0].LastSeenAt.Equal(at))
@@ -7688,4 +7690,165 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
 		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
 	})
+}
+
+// The frontend files a sidebar row by Subscription.RoomType, taken from this
+// event as well as from subscription.list. The bot's own copy of a bot<->human
+// DM must therefore carry the effective type, or a freshly created DM lands in
+// the App section until the next refetch — and the human's copy of the same
+// room must still say botDM, since the two sides classify independently.
+func TestPublishSubscriptionAdded_StampsEffectiveRoomType(t *testing.T) {
+	tests := []struct {
+		name        string
+		account     string
+		counterpart string
+		wantType    model.RoomType
+	}{
+		{"bot's own copy of its DM with a human", "weather.bot", "alice", model.RoomTypeDM},
+		{"human's copy of the same room", "alice", "weather.bot", model.RoomTypeBotDM},
+		{"a p_admin DM is an ordinary DM to both sides", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"bot's DM with another bot stays an app room", "weather.bot", "sales.bot", model.RoomTypeBotDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			// Only an app room reaches the app lookup; a human counterpart must not.
+			if model.IsAppRoom(model.RoomTypeBotDM, tt.counterpart) {
+				store.EXPECT().GetApp(gomock.Any(), tt.counterpart).
+					Return(nil, ErrAppNotFound).AnyTimes()
+			}
+
+			var published []publishedMsg
+			h := NewHandler(store, "site-a", func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, testKeyStore, testKeySender, subject.RouteGlobal)
+
+			sub := &model.Subscription{
+				ID: "s1", RoomID: "r1", SiteID: "site-a", Name: tt.counterpart,
+				RoomType: model.RoomTypeBotDM,
+				User:     model.SubscriptionUser{ID: "u1", Account: tt.account},
+			}
+			h.publishSubscriptionAdded(context.Background(), []*model.Subscription{sub}, nil, nil, 1, "req-1")
+
+			require.Len(t, published, 1)
+			assert.Equal(t, subject.SubscriptionUpdate(tt.account), published[0].subj)
+			var evt model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(published[0].data, &evt))
+			assert.Equal(t, tt.wantType, evt.Subscription.RoomType)
+			assert.Equal(t, tt.counterpart, evt.Subscription.Name,
+				"the stamp must not disturb the raw counterpart account")
+		})
+	}
+}
+
+// Each row stores the room as ITS OWN subscriber sees it, so the two sides of a
+// bot<->human DM differ. The room doc keeps a single type.
+func TestBuildDMPairSubs_PerSubscriberRoomType(t *testing.T) {
+	tests := []struct {
+		name             string
+		requester, other string
+		roomType         model.RoomType
+		wantRequester    model.RoomType
+		wantOther        model.RoomType
+	}{
+		{"user creates a DM with a bot", "alice", "weather.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeDM},
+		{"bot creates a DM with a user", "weather.bot", "alice", model.RoomTypeBotDM, model.RoomTypeDM, model.RoomTypeBotDM},
+		{"two humans", "alice", "bob", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+		{"two bots", "weather.bot", "sales.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeBotDM},
+		{"platform admin", "alice", "p_adminsiteA", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requester := &model.User{ID: "u_" + tt.requester, Account: tt.requester}
+			other := &model.User{ID: "u_" + tt.other, Account: tt.other}
+			room := &model.Room{ID: "r1", SiteID: "site-A", Type: tt.roomType}
+
+			subs := buildDMPairSubs(requester, other, room, time.Now().UTC())
+
+			require.Len(t, subs, 2)
+			assert.Equal(t, tt.other, subs[0].Name, "requester's row names the counterpart")
+			assert.Equal(t, tt.wantRequester, subs[0].RoomType)
+			assert.Equal(t, tt.requester, subs[1].Name, "counterpart's row names the requester")
+			assert.Equal(t, tt.wantOther, subs[1].RoomType)
+		})
+	}
+}
+
+// Only a row facing a real app is soft-unsubscribable; the bot's own row is not.
+func TestBuildDMPairSubs_IsSubscribed(t *testing.T) {
+	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeBotDM}
+	subs := buildDMPairSubs(
+		&model.User{ID: "u_a", Account: "alice"},
+		&model.User{ID: "u_w", Account: "weather.bot"}, room, time.Now().UTC())
+
+	assert.True(t, subs[0].IsSubscribed, "alice initiated and faces an app")
+	assert.False(t, subs[1].IsSubscribed, "the bot faces a person")
+
+	// The initiator faces an app here too, so only its own row is subscribed.
+	botPair := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_s", Account: "sales.bot"}, room, time.Now().UTC())
+	assert.True(t, botPair[0].IsSubscribed)
+	assert.False(t, botPair[1].IsSubscribed)
+
+	// The initiator faces a person: nobody is subscribed, Alice included.
+	botFirst := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_a", Account: "alice"}, room, time.Now().UTC())
+	assert.False(t, botFirst[0].IsSubscribed)
+	assert.False(t, botFirst[1].IsSubscribed, "Alice never asked for this app")
+}
+
+// isSubscribed marks a person's deliberate subscription to an app, so only the
+// initiator's own row can carry it. A bot opening the DM must not subscribe
+// Alice to itself.
+func TestProcessCreateRoom_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
+	h, mockStore, _ := newCreateRoomTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	bot := &model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-A"}
+	alice := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice A", SiteID: "site-A"}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(bot, nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(alice, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+
+	var capturedSubs []*model.Subscription
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, subs []*model.Subscription) error {
+			capturedSubs = subs
+			return nil
+		})
+	mockStore.EXPECT().FindDMSubscriptionPair(gomock.Any(), gomock.Any(), "helper.bot").
+		DoAndReturn(func(_ context.Context, _, _ string) (*model.Subscription, *model.Subscription, error) {
+			return capturedSubs[0], capturedSubs[1], nil
+		})
+	// Alice's row faces the bot, so the update fan-out resolves the app once.
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").
+		Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil).AnyTimes()
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-2").Return(nil)
+
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-bot-2", RequesterAccount: "helper.bot",
+		Users:     []string{"alice"},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	require.Len(t, capturedSubs, 2)
+	byAccount := map[string]*model.Subscription{}
+	for _, s := range capturedSubs {
+		byAccount[s.User.Account] = s
+	}
+
+	// The bot initiated, so its own row faces a person: a plain dm, unsubscribed.
+	assert.Equal(t, model.RoomTypeDM, byAccount["helper.bot"].RoomType)
+	assert.False(t, byAccount["helper.bot"].IsSubscribed)
+
+	// Alice's row still faces an app, but she never asked for it.
+	assert.Equal(t, model.RoomTypeBotDM, byAccount["alice"].RoomType)
+	assert.False(t, byAccount["alice"].IsSubscribed,
+		"only setAppSubscription initiated by Alice may set isSubscribed")
 }

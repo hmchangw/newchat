@@ -52,7 +52,6 @@ var (
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
 	// Bots hold plain member roles only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
-	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")
 
@@ -74,7 +73,7 @@ var (
 
 	// Sentinels for member.statuses + subscription.mentionable limit validation.
 	errMemberStatusesLimitInvalid = errcode.BadRequest("limit must be > 0 and <= room user count")
-	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0 and <= room user count + app count")
+	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0")
 
 	// errRoomKeyAbsent is returned when the requested key version is not held
 	// by the key store (either the current key is missing or the historical
@@ -170,20 +169,6 @@ func dedup(items []string) []string {
 		}
 	}
 	return result
-}
-
-// determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM whose counterpart is a bot (".bot") or the "p_admin" platform-admin
-// pseudo-account is a botDM — the same union enforced by the channel-membership guards
-// (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
-func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
-	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
-			return model.RoomTypeBotDM
-		}
-		return model.RoomTypeDM
-	}
-	return model.RoomTypeChannel
 }
 
 // contextWithMemberListTimeout returns a derived context bounded by the

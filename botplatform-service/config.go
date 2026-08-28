@@ -20,6 +20,9 @@ type config struct {
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
 	Breaker       mongoutil.BreakerConfig
+	// primaryPreferred, not secondaryPreferred: InsertSession then FindSessionByHash
+	// on the next request is a read-after-write; secondary lag breaks auth after login.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	// SessionCache keeps already-authenticated bots working while Mongo is
 	// unreachable. 0 disables the tier. Matches the other L2 tiers at 90m.
 	SessionCache sessioncache.TTLConfig

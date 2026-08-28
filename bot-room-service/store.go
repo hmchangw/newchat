@@ -85,11 +85,15 @@ type Participant struct {
 
 // Subscription is the projection of a subscriptions doc bot-room-service upserts/deletes.
 type Subscription struct {
-	ID        string
-	RoomID    string
-	UserID    string
-	Account   string
-	SiteID    string
+	ID      string
+	RoomID  string
+	UserID  string
+	Account string
+	SiteID  string
+	// Name is the counterpart account; RoomType is the room as THIS subscriber
+	// sees it, so the two sides of a bot<->human DM differ.
+	Name      string
+	RoomType  model.RoomType
 	CreatedAt time.Time
 	IsBot     bool
 }

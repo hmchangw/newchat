@@ -7,7 +7,9 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -140,4 +142,49 @@ func TestConfig_L2TTLEnvNamesUnchanged(t *testing.T) {
 	require.Equal(t, 11*time.Minute, cfg.RoomMetaL2.TTL)
 	require.Equal(t, 33*time.Minute, cfg.UserL2.TTL)
 	require.Equal(t, 44*time.Minute, cfg.RoomSubCache.TTL)
+}
+
+// The primary pin makes encrypted-room delivery fail outright when there is no
+// primary: currentRoomKey treats a key miss as a hard error. primaryPreferred is
+// safe because a stale DEK read cannot diverge ($setOnInsert plus a re-read
+// comparison) and a missing room key is already retryable.
+func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
+	t.Setenv("MODE", "user")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	require.NoError(t, err)
+	require.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// Retention has to outlast a cache entry plus the client's key.get and retry,
+// and a secondary key read widens the window it absorbs. The default was exactly
+// at the 2x floor with no slack; 30m against a 10m cache restores margin.
+func TestConfig_RetiredTTLKeepsMarginOverCacheTTL(t *testing.T) {
+	t.Setenv("MODE", "user")
+	require.NoError(t, os.Unsetenv("ROOM_KEY_RETIRED_TTL"))
+	require.NoError(t, os.Unsetenv("ROOM_KEY_CACHE_TTL"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.True(t, retiredTTLSafe(cfg.RoomKeyRetiredTTL, cfg.RoomKeyCacheTTL))
+	require.Greater(t, cfg.RoomKeyRetiredTTL, 2*cfg.RoomKeyCacheTTL,
+		"defaults must leave slack above the 2x floor, not sit exactly on it")
+}
+
+// broadcast-worker encrypts against its own key handle while room-service's
+// key.get serves from another. Both must bind the same wire name.
+func TestConfig_KeyReadPreferenceWireName(t *testing.T) {
+	t.Setenv("MODE", "user")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "nearest") // a value no default would produce
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "nearest", cfg.MongoKeyReadPreference,
+		"the field must bind to MONGO_KEY_READ_PREFERENCE, not a prefixed variant")
 }

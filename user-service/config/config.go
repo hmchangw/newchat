@@ -16,9 +16,12 @@ type MongoConfig struct {
 	DB       string `env:"DB"       envDefault:"chat"`
 	Username string `env:"USERNAME" envDefault:""`
 	Password string `env:"PASSWORD" envDefault:""`
-	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
-	// the client stays on primary for dedup/read-after-write.
+	// ReadPreference routes staleness-tolerant reads to secondaries per read site.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// ClientReadPreference covers every handle WITHOUT an explicit override — plain
+	// collections inherit the client. primaryPreferred keeps dedup/read-after-write
+	// on the primary in steady state but falls back rather than failing without one.
+	ClientReadPreference string `env:"CLIENT_READ_PREFERENCE" envDefault:"primaryPreferred"`
 }
 
 // HTTPConfig configures the client-facing HTTP listener (env prefix: HTTP_).
@@ -267,6 +270,9 @@ func Load() (Config, error) {
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return Config{}, fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ClientReadPreference); err != nil {
+		return Config{}, fmt.Errorf("MONGO_CLIENT_READ_PREFERENCE: %w", err)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
 		return Config{}, err

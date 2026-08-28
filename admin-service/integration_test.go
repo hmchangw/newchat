@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
@@ -1367,4 +1368,42 @@ func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
 	// New password does
 	w = postJSON(t, r, "/v1/login", map[string]string{"username": "p_alice", "password": "newp@ss"})
 	require.Equal(t, http.StatusOK, w.Code)
+}
+
+// -------------------------------------------------------------------------
+// Transaction read-preference guard
+// -------------------------------------------------------------------------
+
+// TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference pins the
+// guard that lets the client prefer a secondary. A session inherits the CLIENT
+// read preference and MongoDB rejects a non-primary one inside a transaction, so
+// without an explicit pin this flip would break password reset in normal
+// operation — not only during an incident.
+//
+// The read below is what makes this falsifiable. driver v2 checks the transaction
+// read preference in createReadPref (x/mongo/driver/operation.go:1886), during
+// command construction rather than server selection, so the single-node
+// directConnection harness does not weaken it. That function returns early for
+// op.Type == Write, so a write-only transaction body never reaches the check;
+// only a read does. Remove the pin in withTransaction and this test must fail
+// with "read preference in a transaction must be primary".
+func TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference(t *testing.T) {
+	db := testutil.MongoDBReplicaSetWithReadPreference(t, "adminsvc_rp", readpref.PrimaryPreferred())
+	st := newStoreMongo(db)
+
+	ctx := context.Background()
+	err := st.withTransaction(ctx, func(ctx context.Context) error {
+		if _, insErr := st.users.InsertOne(ctx, bson.M{"_id": "txn-guard-probe", "account": "txn-probe"}); insErr != nil {
+			return insErr
+		}
+		// A READ inside the transaction is what consults the session's read
+		// preference — a write-only body routes through the write selector and
+		// would never exercise the pin.
+		return st.users.FindOne(ctx, bson.M{"_id": "txn-guard-probe"}).Err()
+	})
+	require.NoError(t, err, "a primaryPreferred client must not leak its read preference into the transaction")
+
+	var got bson.M
+	require.NoError(t, db.Collection("users").FindOne(ctx, bson.M{"_id": "txn-guard-probe"}).Decode(&got))
+	assert.Equal(t, "txn-probe", got["account"])
 }

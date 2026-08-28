@@ -671,3 +671,30 @@ func TestLoad_PageTrimming(t *testing.T) {
 		})
 	}
 }
+
+// Plain collection handles inherit the client preference; only 16 of the 39
+// repo methods use a *Secondary handle, so the client is what decides whether
+// the rest survive a primary-down incident.
+func TestLoad_DefaultsClientReadPreferenceToPrimaryPreferred(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	testutil.UnsetEnv(t, "MONGO_READ_PREFERENCE")
+	testutil.UnsetEnv(t, "MONGO_CLIENT_READ_PREFERENCE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "secondaryPreferred", cfg.Mongo.ReadPreference)
+	assert.Equal(t, "primaryPreferred", cfg.Mongo.ClientReadPreference)
+}
+
+func TestValidate_RejectsInvalidClientReadPreference(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_CLIENT_READ_PREFERENCE", "quorum")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_CLIENT_READ_PREFERENCE")
+}

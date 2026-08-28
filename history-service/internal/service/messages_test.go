@@ -3049,7 +3049,7 @@ func TestHistoryService_LoadHistory_ResolvesRemovedMemberNames(t *testing.T) {
 
 	messages := []models.Message{{
 		MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute),
-		Type: "members_removed", Msg: "bob has been removed from the channel.",
+		Type: "members_removed", Msg: `"bob" has been removed from the channel.`,
 	}}
 	msgs.EXPECT().
 		GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
@@ -3062,7 +3062,7 @@ func TestHistoryService_LoadHistory_ResolvesRemovedMemberNames(t *testing.T) {
 	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
 	require.NoError(t, err)
 	require.Len(t, resp.Messages, 1)
-	assert.Equal(t, "Bob 鮑勃 has been removed from the channel.", resp.Messages[0].Msg)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, resp.Messages[0].Msg)
 }
 
 // The ordinary page must not acquire a Mongo round trip: gomock fails the test
