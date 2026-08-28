@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -78,6 +79,13 @@ type config struct {
 	// the time-based counterpart to the size trigger, bounding write latency during idle periods.
 	BulkFlushInterval int `env:"BULK_FLUSH_INTERVAL" envDefault:"5"`
 
+	// PipelineDepth is how many ES bulk requests one collection keeps in flight while later
+	// batches fetch and build. 1 serializes fetch/build behind every round-trip; higher trades
+	// ack-pending headroom for throughput when ES latency dominates. Costs are per collection
+	// AND per pod, so the cluster sees depth x collections x replicas concurrent bulk requests.
+	// Needs (PipelineDepth+1) * BulkBatchSize <= CONSUMER_MAX_ACK_PENDING — see checkBatchAckCoupling.
+	PipelineDepth int `env:"PIPELINE_DEPTH" envDefault:"2"`
+
 	Consumer  stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 
@@ -121,6 +129,12 @@ func main() {
 		slog.Error("invalid config", "name", "BULK_FLUSH_INTERVAL", "value", cfg.BulkFlushInterval, "reason", "must be > 0")
 		os.Exit(1)
 	}
+	// A non-positive depth would make the pipeline's slot channel unbuffered and park the
+	// consumer on its first flush forever.
+	if cfg.PipelineDepth <= 0 {
+		slog.Error("invalid config", "name", "PIPELINE_DEPTH", "value", cfg.PipelineDepth, "reason", "must be > 0")
+		os.Exit(1)
+	}
 	if _, _, ok := searchindex.StripVersion(cfg.MsgIndexPrefix); !ok {
 		slog.Error("invalid config", "name", "MSG_INDEX_PREFIX", "value", cfg.MsgIndexPrefix, "reason", "must end with -v<N>, e.g. messages-site-a-v1")
 		os.Exit(1)
@@ -140,10 +154,11 @@ func main() {
 	}
 
 	// Warn (don't fail) if the bulk batch size can't be reached under the consumer's ack-pending ceiling — see checkBatchAckCoupling.
-	if warning := checkBatchAckCoupling(cfg.BulkBatchSize, cfg.Consumer.MaxAckPending); warning != "" {
+	if warning := checkBatchAckCoupling(cfg.BulkBatchSize, cfg.Consumer.MaxAckPending, cfg.PipelineDepth); warning != "" {
 		slog.Warn("batch/ack-pending config coupling",
 			"bulkBatchSize", cfg.BulkBatchSize,
 			"maxAckPending", cfg.Consumer.MaxAckPending,
+			"pipelineDepth", cfg.PipelineDepth,
 			"detail", warning,
 		)
 	}
@@ -340,7 +355,11 @@ func main() {
 			"filters", consumerCfg.FilterSubjects,
 		)
 
-		go runConsumer(ctx, fetcher, handler, cfg.FetchBatchSize, cfg.BulkBatchSize, bulkFlushInterval, stopCh, doneCh)
+		go runConsumer(ctx, fetcher, handler, consumerTuning{
+			fetchBatchSize:    cfg.FetchBatchSize,
+			bulkFlushInterval: bulkFlushInterval,
+			pipelineDepth:     cfg.PipelineDepth,
+		}, stopCh, doneCh)
 	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -403,23 +422,90 @@ func pushMappings(ctx context.Context, engine searchengine.SearchEngine, collect
 	return nil
 }
 
-// runConsumer is the batch-flush consumer loop: fetchBatchSize bounds JetStream Fetch() pulls
-// (client-tuning only), bulkBatchSize caps buffered ES actions (flushed on stopCh, size, or bulkFlushInterval; the loop clamps fetch to remaining bulk capacity, but a fan-out message can still overshoot mid-loop and triggers its own flush).
+// flushPipeline overlaps up to `depth` ES bulk requests with the fetch and build of the
+// batches behind them. The slot channel is the cap: unbounded concurrency would queue
+// batches against ES without limit and blow through the consumer's ack-pending budget.
+//
+// Concurrent flushes can reach ES out of order, which is safe only because every
+// collection carries an ordering guard — external versioning on messages and spotlight,
+// a painless timestamp compare on user-room, a stream-sequence compare on spotlight-org.
+// A collection added without one MUST run at depth 1.
+//
+// Only the consumer goroutine calls run/wait, so the struct needs no lock of its own.
+type flushPipeline struct {
+	slots chan struct{} // buffered to depth; a token is held for each in-flight flush
+	wg    sync.WaitGroup
+}
+
+func newFlushPipeline(depth int) *flushPipeline {
+	return &flushPipeline{slots: make(chan struct{}, depth)}
+}
+
+// wait blocks until every in-flight flush has finished.
+func (p *flushPipeline) wait() {
+	p.wg.Wait()
+}
+
+// run detaches whatever the handler has buffered and flushes it in the background,
+// blocking for a slot once `depth` flushes are already in flight. Taking the batch first
+// frees the buffer immediately, so ActionCount() reads 0 on return.
+func (p *flushPipeline) run(ctx context.Context, h *Handler) {
+	batch := h.Take()
+	if batch == nil {
+		return
+	}
+	p.slots <- struct{}{}
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		defer func() { <-p.slots }()
+		// jobguard recovers panics from the batch handler so a poison message or malformed
+		// bulk response can't crash this collection's consumer; the batch's messages stay
+		// un-acked and JetStream redelivers after AckWait.
+		jobguard.Guard("search-sync flush", func() { h.FlushBatch(ctx, batch) })
+	}()
+}
+
+// consumerTuning groups runConsumer's throughput knobs so call sites name them instead
+// of passing a run of bare numbers.
+type consumerTuning struct {
+	fetchBatchSize    int
+	bulkFlushInterval time.Duration
+	pipelineDepth     int
+}
+
+// runConsumer is the batch-flush consumer loop: tune.fetchBatchSize bounds JetStream Fetch()
+// pulls (client-tuning only), while the handler's own bulk size caps buffered ES actions
+// (flushed on stopCh, size, or tune.bulkFlushInterval; the loop clamps fetch to remaining bulk
+// capacity, but a fan-out message can still overshoot mid-loop and triggers its own flush).
+//
+// Each flush is handed to a flushPipeline holding up to pipelineDepth requests in flight, so
+// ES round-trips overlap with the fetch and build behind them rather than serializing; the
+// loop only stalls once every slot is busy, which is the backpressure we want.
 func runConsumer(
 	ctx context.Context,
 	cons msgFetcher,
 	handler *Handler,
-	fetchBatchSize, bulkBatchSize int,
-	bulkFlushInterval time.Duration,
+	tune consumerTuning,
 	stopCh <-chan struct{},
 	doneCh chan<- struct{},
 ) {
 	defer close(doneCh)
 	lastFlush := time.Now()
 
-	// jobguard recovers panics from the batch handler so a poison message or malformed bulk response
-	// can't crash this collection's consumer goroutine; in-flight messages stay un-acked and JetStream redelivers after AckWait.
-	flush := func() { jobguard.Guard("search-sync flush", func() { handler.Flush(ctx) }) }
+	// bulkBatchSize is the handler's own cap — read it from there rather than passing the
+	// same number twice and letting the two drift.
+	bulkBatchSize := handler.bulkSize
+
+	pipe := newFlushPipeline(tune.pipelineDepth)
+	// flushNow hands the buffered batch to the pipeline and restarts the interval clock.
+	flushNow := func() {
+		pipe.run(ctx, handler)
+		lastFlush = time.Now()
+	}
+	// drain also waits on the in-flight bulk requests, so shutdown never abandons a write
+	// that is already on its way to ES.
+	drain := func() { flushNow(); pipe.wait() }
 	add := func(msgCtx context.Context, m jetstream.Msg) {
 		jobguard.Guard("search-sync add: "+m.Subject(), func() { handler.AddWithContext(msgCtx, m) })
 	}
@@ -427,35 +513,25 @@ func runConsumer(
 	for {
 		select {
 		case <-stopCh:
-			flush()
+			drain()
 			return
 		default:
 		}
 
 		// Bound the next Fetch by remaining bulk capacity so a steady stream of 1:1 messages can't
 		// overshoot bulkBatchSize; fan-out messages may still push us over, handled mid-loop below.
-		remaining := bulkBatchSize - handler.ActionCount()
-		if remaining <= 0 {
-			flush()
-			lastFlush = time.Now()
-			continue
-		}
-		fetchCount := fetchBatchSize
-		if fetchCount > remaining {
-			fetchCount = remaining
-		}
+		fetchCount := min(tune.fetchBatchSize, bulkBatchSize-handler.ActionCount())
 
 		batch, err := cons.Fetch(ctx, fetchCount, jetstream.FetchMaxWait(time.Second))
 		if err != nil {
 			select {
 			case <-stopCh:
-				flush()
+				drain()
 				return
 			default:
 			}
-			if handler.ActionCount() > 0 && time.Since(lastFlush) >= bulkFlushInterval {
-				flush()
-				lastFlush = time.Now()
+			if handler.ActionCount() > 0 && time.Since(lastFlush) >= tune.bulkFlushInterval {
+				flushNow()
 			}
 			continue
 		}
@@ -464,34 +540,35 @@ func runConsumer(
 		// goroutine blocked on an unbuffered send; an early break would leak it and stall shutdown.
 		for msg := range batch.Messages() {
 			add(msg.Ctx, msg.Msg)
-			// Mid-batch flush: if a fan-out message just pushed the buffer over the bulk cap, flush
-			// immediately — otherwise the next message's actions add to an already-oversized request.
+			// Size trigger, checked per message: a fan-out message can cross the cap on its own, and
+			// flushing here keeps the next message's actions out of an already-oversized request.
+			// Take() empties the buffer synchronously, so ActionCount stays under the cap after this.
 			if handler.ActionCount() >= bulkBatchSize {
-				flush()
-				lastFlush = time.Now()
+				flushNow()
 			}
 		}
 
-		if handler.ActionCount() >= bulkBatchSize {
-			flush()
-			lastFlush = time.Now()
-		} else if handler.ActionCount() > 0 && time.Since(lastFlush) >= bulkFlushInterval {
-			flush()
-			lastFlush = time.Now()
+		// Interval trigger: the size trigger above already fired for anything at the cap.
+		if handler.ActionCount() > 0 && time.Since(lastFlush) >= tune.bulkFlushInterval {
+			flushNow()
 		}
 	}
 }
 
-// checkBatchAckCoupling warns when bulkBatchSize exceeds maxAckPending: a 1:1 collection then
-// stalls at maxAckPending un-acked messages before the size-based flush can fire, undersizing every batch. Fan-out collections are unaffected. Empty string = no issue.
-func checkBatchAckCoupling(bulkBatchSize, maxAckPending int) string {
-	if bulkBatchSize > maxAckPending {
+// checkBatchAckCoupling warns when the pipelined batches can't fit under maxAckPending.
+// depth batches can be in flight while one more fills, so a 1:1 collection needs headroom
+// for (depth+1)*bulkBatchSize un-acked messages; below that it stalls before the size-based
+// flush can fire, undersizing every batch. Fan-out collections are unaffected. "" = no issue.
+func checkBatchAckCoupling(bulkBatchSize, maxAckPending, pipelineDepth int) string {
+	needed := (pipelineDepth + 1) * bulkBatchSize
+	if needed > maxAckPending {
 		return fmt.Sprintf(
-			"BULK_BATCH_SIZE (%d) exceeds CONSUMER_MAX_ACK_PENDING (%d): "+
-				"the size-based flush can never fire for 1:1 collections, so flushes "+
-				"will wait the full BULK_FLUSH_INTERVAL and batches stay undersized. "+
-				"Lower BULK_BATCH_SIZE to <= MAX_ACK_PENDING or raise MAX_ACK_PENDING.",
-			bulkBatchSize, maxAckPending,
+			"BULK_BATCH_SIZE (%[1]d) at PIPELINE_DEPTH %[2]d needs CONSUMER_MAX_ACK_PENDING >= "+
+				"%[3]d (%[2]d in flight plus one filling) but it is %[4]d: the size-based flush "+
+				"can never fire for 1:1 collections, so flushes will wait the full "+
+				"BULK_FLUSH_INTERVAL and batches stay undersized. Raise MAX_ACK_PENDING to "+
+				"%[3]d, or lower BULK_BATCH_SIZE to %[5]d, or drop PIPELINE_DEPTH.",
+			bulkBatchSize, pipelineDepth, needed, maxAckPending, maxAckPending/(pipelineDepth+1),
 		)
 	}
 	return ""

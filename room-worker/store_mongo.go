@@ -215,7 +215,10 @@ func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, 
 func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App, error) {
 	var a model.App
 	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount},
-		options.FindOne().SetProjection(bson.M{"name": 1, "_id": 1})).Decode(&a)
+		options.FindOne().SetProjection(bson.M{
+			"name": 1, "_id": 1, "description": 1, "assistant": 1, "appViewUrl": 1,
+			"reportUrl": 1, "forumUrl": 1, "userManualUrl": 1, "version": 1, "sponsors": 1,
+		})).Decode(&a)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, ErrAppNotFound
 	}

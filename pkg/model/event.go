@@ -85,9 +85,11 @@ type SubscriptionUpdateEvent struct {
 	RoomName     string       `json:"roomName,omitempty"`
 	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
 	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
-	HRInfo    *CounterpartHRInfo  `json:"hrInfo,omitempty"`
-	AppInfo   *CounterpartAppInfo `json:"appInfo,omitempty"`
-	Timestamp int64               `json:"timestamp" bson:"timestamp"`
+	HRInfo *CounterpartHRInfo `json:"hrInfo,omitempty"`
+	// AppInfo is the full app record on a botDM "added" — same shape subscription.list
+	// nests as its `app` object, so the client needs no follow-up apps.list.
+	AppInfo   *AppSubscription `json:"appInfo,omitempty"`
+	Timestamp int64            `json:"timestamp" bson:"timestamp"`
 }
 
 // CounterpartHRInfo is the DM counterpart's HR record on a subscription.update.
@@ -96,14 +98,6 @@ type CounterpartHRInfo struct {
 	Account     string `json:"account"`
 	ChineseName string `json:"chineseName,omitempty"`
 	EngName     string `json:"engName,omitempty"`
-}
-
-// CounterpartAppInfo is the botDM counterpart's app record on a subscription.update.
-// AssistantName is the bot account the app answers on.
-type CounterpartAppInfo struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	AssistantName string `json:"assistantName"`
 }
 
 // CanonicalMemberEventMuted is the only event type currently published on this stream.
@@ -396,6 +390,10 @@ type RoomEvent struct {
 	MentionAll bool          `json:"mentionAll,omitempty"`
 
 	HasMention bool `json:"hasMention,omitempty"`
+	// SystemMsg marks a system-message new_message (IsSystemMessageType) in
+	// plaintext, so clients can exclude it from unread/ordering even when the
+	// message itself is sealed inside EncryptedMessage.
+	SystemMsg bool `json:"systemMsg,omitempty"`
 
 	Message          *ClientMessage  `json:"message,omitempty"`
 	EncryptedMessage json.RawMessage `json:"encryptedMessage,omitempty"`

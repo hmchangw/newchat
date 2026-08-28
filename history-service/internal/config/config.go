@@ -106,6 +106,14 @@ type Config struct {
 	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
 	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
 
+	// Background writer that stores walk-resolved previews back onto the room doc,
+	// off the request path. Queue depth is what bounds the memory a burst of cold
+	// rooms can pin; overflow sheds the write, which the next read re-derives.
+	// Non-positive takes the built-in default for either — warm-back is what keeps
+	// the lazy walk from repeating forever, so there is no disable value.
+	PreviewWarmBackWorkers int `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
+	PreviewWarmBackQueue   int `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -158,6 +166,14 @@ func validate(cfg *Config) error {
 	}
 	if cfg.UserCacheTTL < 0 {
 		return fmt.Errorf("USER_CACHE_TTL must be >= 0, got %s", cfg.UserCacheTTL)
+	}
+	// Non-positive means "take the default" here, not "disable", so only a negative
+	// is rejected — it would otherwise read as an intent the wiring cannot honour.
+	if cfg.PreviewWarmBackWorkers < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_WORKERS must be >= 0, got %d", cfg.PreviewWarmBackWorkers)
+	}
+	if cfg.PreviewWarmBackQueue < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_QUEUE must be >= 0, got %d", cfg.PreviewWarmBackQueue)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)

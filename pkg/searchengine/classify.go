@@ -47,3 +47,44 @@ func IsBulkItemSuccess(action ActionType, result BulkResult) bool {
 	}
 	return false
 }
+
+// ErrRejectedExecution / ErrCircuitBreaking are the ES error types that mean
+// "the cluster is saturated", not "this write is invalid". They arrive as
+// per-item failures inside an otherwise-200 _bulk response.
+const (
+	ErrRejectedExecution = "es_rejected_execution_exception"
+	ErrCircuitBreaking   = "circuit_breaking_exception"
+)
+
+// IsBulkItemBackpressure reports whether a failed bulk item was rejected
+// because the search backend is overloaded rather than because the write
+// itself was bad. Callers use it to retry on a longer delay: retrying
+// promptly against a cluster that just shed load is what turns a transient
+// overload into a sustained one.
+//
+// Matched on status (429) or on the error type, since a circuit breaker can
+// surface under a 503 as well.
+func IsBulkItemBackpressure(result BulkResult) bool {
+	if result.Status == 429 {
+		return true
+	}
+	switch result.ErrorType {
+	case ErrRejectedExecution, ErrCircuitBreaking:
+		return true
+	}
+	return false
+}
+
+// IsBulkItemPermanent reports whether a failed bulk item can never succeed on
+// retry. A 400 means the backend rejected the document itself — a mapping
+// conflict, an unparseable field, an illegal argument — so redelivering
+// identical bytes can only fail identically. Callers drop it rather than
+// burning the consumer's redelivery budget on a doomed retry.
+//
+// Deliberately narrow: 429/503 are backpressure (IsBulkItemBackpressure), a 409
+// on an update is a live conflict a retry can win, and a 404
+// index_not_found_exception clears once the index or template exists. None of
+// those are permanent.
+func IsBulkItemPermanent(result BulkResult) bool {
+	return result.Status == 400
+}

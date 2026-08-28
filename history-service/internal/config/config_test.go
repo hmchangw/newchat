@@ -24,8 +24,11 @@ func baseValid() Config {
 		PreviewKeyEpoch:  1,
 		PreviewCacheSize: 50000,
 		PreviewCacheTTL:  10 * time.Second,
-		Pool:             mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
-		Guard:            natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
+
+		PreviewWarmBackWorkers: 8,
+		PreviewWarmBackQueue:   1024,
+		Pool:                   mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
+		Guard:                  natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
 	}
 }
 
@@ -109,6 +112,46 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{name: "workers", set: func(c *Config) { c.PreviewWarmBackWorkers = -1 }, want: "PREVIEW_WARMBACK_WORKERS"},
+		{name: "queue", set: func(c *Config) { c.PreviewWarmBackQueue = -1 }, want: "PREVIEW_WARMBACK_QUEUE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseValid()
+			tc.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
+// repeating forever, so the wiring never turns it off.
+func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewWarmBackWorkers = 0
+	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+}
+
+func TestLoad_WarmBackDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	unsetEnv(t, "PREVIEW_WARMBACK_WORKERS")
+	unsetEnv(t, "PREVIEW_WARMBACK_QUEUE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 8, cfg.PreviewWarmBackWorkers)
+	assert.Equal(t, 1024, cfg.PreviewWarmBackQueue)
 }
 
 // The epoch is part of the preview DEK id, so a non-positive value mints a

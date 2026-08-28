@@ -86,20 +86,59 @@ func TestBuildConsumerConfig(t *testing.T) {
 	})
 }
 
+// The flush pipeline keeps `depth` batches in flight while the next one fills, so a
+// 1:1 collection needs ack-pending headroom for (depth+1) x the bulk size before the
+// size-based flush trigger can fire.
 func TestCheckBatchAckCoupling(t *testing.T) {
-	t.Run("ok when bulk size below ack pending", func(t *testing.T) {
-		assert.Empty(t, checkBatchAckCoupling(500, 1000))
-	})
+	tests := []struct {
+		name          string
+		bulkBatchSize int
+		maxAckPending int
+		depth         int
+		wantWarning   bool
+	}{
+		{
+			name:          "depth 1 fits at 2x",
+			bulkBatchSize: 500,
+			maxAckPending: 1000,
+			depth:         1,
+		},
+		{
+			name:          "depth 2 needs 3x and has it",
+			bulkBatchSize: 500,
+			maxAckPending: 1500,
+			depth:         2,
+		},
+		{
+			name:          "depth 2 at only 2x headroom warns",
+			bulkBatchSize: 500,
+			maxAckPending: 1000,
+			depth:         2,
+			wantWarning:   true,
+		},
+		{
+			name:          "smaller batches buy depth within the same budget",
+			bulkBatchSize: 250,
+			maxAckPending: 1000,
+			depth:         2,
+		},
+		{
+			name:          "single batch alone exceeds ack pending",
+			bulkBatchSize: 2000,
+			maxAckPending: 1000,
+			depth:         1,
+			wantWarning:   true,
+		},
+	}
 
-	t.Run("ok when bulk size equals ack pending", func(t *testing.T) {
-		// At equality a 1:1 collection can still just reach the threshold
-		// (the size trigger fires at ActionCount >= bulkBatchSize), so this
-		// is not flagged.
-		assert.Empty(t, checkBatchAckCoupling(1000, 1000))
-	})
-
-	t.Run("warns when bulk size exceeds ack pending", func(t *testing.T) {
-		msg := checkBatchAckCoupling(2000, 1000)
-		assert.NotEmpty(t, msg, "bulk size above ack pending must produce a warning")
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := checkBatchAckCoupling(tt.bulkBatchSize, tt.maxAckPending, tt.depth)
+			if tt.wantWarning {
+				assert.NotEmpty(t, msg)
+				return
+			}
+			assert.Empty(t, msg)
+		})
+	}
 }

@@ -59,7 +59,7 @@ func newPinTestService(t *testing.T) (*service.HistoryService, *mocks.MockMessag
 		MaxPinnedPerRoom:        testMaxPinnedPerRoom,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg), msgs, subs, rooms, pub, threadRooms
+	return closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)), msgs, subs, rooms, pub, threadRooms
 }
 
 // testMaxPinnedPerRoom: kept small (3) so fixtures stay short.
@@ -116,12 +116,12 @@ func TestPinMessage_KillSwitchDisabled(t *testing.T) {
 		Return(defaultRoomLastMsgAt, defaultRoomCreatedAt, nil).
 		MinTimes(0)
 	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, &config.Config{
+	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, &config.Config{
 		MessageHistoryFloorDays: 90,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        testMaxPinnedPerRoom,
 		PinEnabled:              false,
-	})
+	}))
 
 	_, err := svc.PinMessage(testContext(), "site-a", models.PinMessageRequest{MessageID: "m1"})
 

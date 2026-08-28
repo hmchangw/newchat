@@ -32,6 +32,12 @@ services:
       # - HR_JETSTREAM_DOMAIN=hr-hub
       - USER_ROOM_INDEX=${USER_ROOM_INDEX:-user-room-mv-${SITE_ID:-site-local}}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+      # PIPELINE_DEPTH bulk requests can be in flight while one more batch fills, so the
+      # consumer needs ack-pending headroom for (PIPELINE_DEPTH+1) * BULK_BATCH_SIZE.
+      # At the defaults (depth 2, bulk 500) that is 1500; the shared default is 1000, which
+      # would leave the size-based flush unable to fire. Production must set this too.
+      - CONSUMER_MAX_ACK_PENDING=${CONSUMER_MAX_ACK_PENDING:-1500}
+      # - PIPELINE_DEPTH=2
       # Optional YYYY-MM-DD (UTC) cutoff for the messages collection.
       # When set, events whose Message.CreatedAt predates the date are
       # skipped — used during legacy-data migration. Leave unset/empty

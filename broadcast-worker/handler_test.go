@@ -413,6 +413,47 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 	}
 }
 
+// A system message (members_added) must flag the room-doc update so the
+// store's coalescer freezes lastUserMsgAt instead of advancing it.
+func TestHandler_HandleMessage_SystemMessageFlagsStore(t *testing.T) {
+	msgTime := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
+
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	pub := &mockPublisher{}
+
+	key := testRoomKey(t)
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(key, nil)
+
+	var captured roomLastMessage
+	store.EXPECT().UpdateRoomLastMessage(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, upd roomLastMessage) error {
+			captured = upd
+			return nil
+		})
+	store.EXPECT().AdvanceSubscriptionLastSeen(gomock.Any(), "room-1", "sender", msgTime).Return(nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	evt := model.MessageEvent{
+		Event:  model.EventCreated,
+		SiteID: "site-a",
+		Message: model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "added members", CreatedAt: msgTime, Type: model.MessageTypeMembersAdded,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
+	require.NoError(t, h.HandleMessage(context.Background(), data))
+
+	assert.True(t, captured.SystemMsg, "a members_added message must flag the room-doc update as a system message")
+}
+
 func TestHandler_HandleMessage_Errors(t *testing.T) {
 	msgTime := time.Date(2026, 3, 26, 12, 0, 0, 0, time.UTC)
 

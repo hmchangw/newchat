@@ -31,6 +31,14 @@ import (
 // dir, so ephemeral storage must fit the concurrent-upload total.
 const maxMultipartMemory = 1 << 20
 
+// httpTimeout bounds both directions of a transfer:
+// FILE_UPLOAD_MAX_FILE_SIZE (2 GiB in production) / slowest supported client
+// bandwidth, so 15m serves clients down to ~2.3 MiB/s. It is also the ceiling on
+// how long a stalled connection holds its spooled temp file. Read and Write are
+// equal because WriteTimeout starts at end-of-header and so must cover the body
+// read as well; the post-read Drive leg is internal and takes seconds.
+const httpTimeout = 15 * time.Minute
+
 type config struct {
 	Port    string `env:"PORT"      envDefault:"8080"`
 	DevMode bool   `env:"DEV_MODE"  envDefault:"false"`
@@ -47,8 +55,8 @@ type config struct {
 
 	Pool mongoutil.PoolConfig
 	// No blanket request timeout here: upload-service streams potentially-large
-	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout
-	// (both 5m); a short per-request context deadline would cancel those streams.
+	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout;
+	// a short per-request context deadline would cancel those streams.
 
 	// MaxImages caps the number of images per image-upload request.
 	MaxImages int `env:"MAX_IMAGES" envDefault:"10"`
@@ -180,10 +188,13 @@ func run() error {
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute, // downloads stream potentially-large bodies
+		Addr:    addr,
+		Handler: r,
+		// The header phase keeps a short bound of its own: httpTimeout is sized for
+		// bodies, and inheriting it would let a slowloris hold a connection for 15m.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       httpTimeout,
+		WriteTimeout:      httpTimeout,
 	}
 
 	srvErr := make(chan error, 1)

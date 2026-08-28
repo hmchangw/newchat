@@ -51,3 +51,19 @@ type Collection interface {
 type ByQueryCollection interface {
 	BuildByQuery(data []byte) (index string, body json.RawMessage, ok bool, err error)
 }
+
+// sequencedCollection is a Collection whose ordering guard needs the source
+// message's JetStream stream sequence — a strict total order assigned
+// server-side at publish. Handler routes through BuildActionSeq when a
+// collection implements this, and through BuildAction otherwise. Same
+// optional-capability shape as ByQueryCollection above.
+//
+// Only spotlight-org needs it. The INBOX and canonical collections carry an
+// event timestamp in their payload and guard on that (external versioning for
+// messages/spotlight, a painless timestamp compare for user-room); the HR
+// employees.upsert payload is a bare array with no timestamp of its own, so the
+// stream sequence is the only ordering token available to it.
+type sequencedCollection interface {
+	Collection
+	BuildActionSeq(data []byte, streamSeq uint64) ([]searchengine.BulkAction, error)
+}

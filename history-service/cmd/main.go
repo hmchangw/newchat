@@ -54,6 +54,10 @@ func checkConfig(cfg *config.Config) {
 	}
 }
 
+// previewDrainTimeout caps the preview warm-back drain at shutdown, well inside the 25s
+// total so the closers after it keep their share.
+const previewDrainTimeout = 3 * time.Second
+
 func main() {
 	logctx.SetupDefault(os.Stdout)
 
@@ -258,6 +262,15 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		// After the router stops (no new warm-backs queued), before Mongo closes under them.
+		// On its own sub-budget: the drain is optional work, and letting a deep queue on a
+		// slow Mongo spend the shared window would starve the steps below it — Mongo,
+		// Cassandra, Vault, and the telemetry flush that reports this shutdown at all.
+		func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, previewDrainTimeout)
+			defer cancel()
+			return svc.Close(ctx)
+		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error {
