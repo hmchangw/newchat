@@ -464,6 +464,61 @@ and the number is not an SLI, it is a graph.
    overlay. A latency number taken while a consumer is backing up is measuring a
    queue, not a service.
 
+### If your driver is `soak` rather than `run` / `max-rps`
+
+Most of §7 assumes the ramp modes. The soak workload covers more of it than
+expected, and needs almost nothing changed.
+
+**What the soak already does right, by default:**
+
+| | |
+|---|---|
+| Rate | `SOAK_SEND_RATE=100`, `SOAK_READ_RATE=700` (`soak_config.go:35-36`) — **literally the workload model's I1 and the 7:1 ratio of I2.** No tuning needed to run at the declared baseline |
+| SLO-4's RPC | The read lane calls `subject.MsgHistory` (`soak_read.go:162`) → `rpc.method="channel_history"` |
+| SLO-5's RPC | The read lane calls `subject.MsgThread` (`soak_read.go:236`) → `rpc.method="thread_open"`. #337's classifier separates `.msg.thread` from `.msg.thread.parent` by suffix precisely so these two SLOs get disjoint series |
+| SLO-7 | The `search_read` lane drives the real search RPCs. Message queries match nothing by construction, but an empty result set is still `status=ok`, so the availability ratio is unaffected |
+| SLO-1a | The send lane goes through the real gatekeeper, so both counters move |
+| Warm-up | `SOAK_WARMUP=30s` exists, and `loadgen_soak_*` series carry a `phase` label — `loadgen_soak_rpc_latency_seconds` is recorded **only** in the `measured` phase (`soak_collector.go:257`), so the boundary is already respected on the loadgen side |
+| Isolation | `SOAK_RUN_ID` + a dedicated `SITE_ID` are already the soak's operating model |
+
+**The one thing that blocks it, and it is not code.** Prometheus, Grafana,
+cAdvisor and the NATS exporter all sit behind `profiles: [dashboards]`
+(`deploy/docker-compose.yml:119,157,164,184`). `make soak-run` does **not** start
+them — unlike `run-max-rps`, which does
+`$(COMPOSE) --profile dashboards up -d cadvisor prometheus`. So a soak run today
+has nothing scraping the service counters, and the SLO numbers simply are not
+collected.
+
+Fix: bring the profile up first, or add the same line to the `soak-run` target.
+Prometheus `depends_on` cadvisor and nats-exporter, so starting it pulls in the
+JetStream backlog exporter too — which the async SLOs need as their backstop.
+
+**What the soak cannot give you:**
+
+| Gap | Why | Workaround |
+|---|---|---|
+| **SLO-2's one-sided bound** | The soak has no publish→broadcast correlation. `E1Latency`/`E2Latency` belong to the `run`/`daily`/`max-rps` collector; the soak's recipient observer records delivery **presence/absence against a deadline**, not latency | A separate short `run --preset=realistic --rate=100` pass, which costs minutes. Adding E2 correlation to the soak send lane is a real loadgen change and is not worth it for a first run |
+| **SLO-3 login** | The soak connects with backend creds and never touches auth-service's HTTP leg | `max-rps --workload=login` — a separate, short run |
+| **SLO-8** | Not server-side measurable at all (no `status` on the histogram), and the soak has no client-side SLO-8 scoring — that lives in the `max-rps` search workload | Skip, or a short `max-rps --workload=search` |
+
+**Two caveats on how to read a soak-derived number:**
+
+1. **The soak drives a much broader mix than J1** — room and member mutations,
+   14 user-service reads, presence, search, read receipts. Their RPCs land in the
+   same `rpc.server.call.duration` family under different `rpc.method` values, so
+   the slices stay clean; but SLO-4/5 are measured under contention from all the
+   other lanes. For an *achievability* check that is a feature, not a problem —
+   it is closer to production than a single-journey test.
+2. **SLO-4's number will be optimistic.** The soak has no historical backfill, so
+   `LoadHistory` reads hit only run-generated, shallow, dense data — the soak plan
+   names this as its own blind spot. Production reads walk aged buckets. Record
+   the number, and record that caveat next to it.
+
+**So the practical answer:** once #337 is in, a soak run with the dashboards
+profile up produces real run-window numbers for **SLO-1a, 4, 5 and 7**, plus the
+loadgen-vs-production latency comparison for 4/5 — with no loadgen code change at
+all. SLO-2's bound and SLO-3 each need a short separate run in a different mode.
+
 ### What the number is, and what it is not
 
 | It is | It is not |
