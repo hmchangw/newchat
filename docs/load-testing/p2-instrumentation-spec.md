@@ -343,6 +343,172 @@ wait for steps 1–3 to begin.
 
 ---
 
+## 5b. The actual diff, file by file
+
+Verified call sites, so the change can be estimated rather than guessed.
+
+### A — the `broadcast_path` label · `message-gatekeeper`
+
+| | |
+|---|---|
+| Files | `handler.go`, `nats_metrics.go` |
+| Size | ~30 lines |
+| Hot-path cost | none — the counter is already incremented on this line |
+
+**The label must be computed inside `processMessage`, not at the `Record` call.**
+`resultAccepted` is recorded at `handler.go:218`, in `HandleJetStreamMsg`. Two of
+the three inputs (`req.ThreadParentMessageID`, `req.TShow`) are in scope there,
+but the two that decide the answer are not:
+
+- `sub.RoomType` is fetched inside `processMessage` (`handler.go:376`).
+- **`TShow` must be the normalized value.** `processMessage` computes
+  `tshow := req.TShow && req.ThreadParentMessageID != ""` (`handler.go:455`) and
+  it is that value which lands on the message and which
+  `shouldUseThreadFanOut` reads. Using the raw `req.TShow` would misclassify a
+  `tshow=true` send that carries no thread parent.
+
+So: compute the path in `processMessage` next to the built `msg`, and return it —
+`processMessage(...) ([]byte, broadcastPath, error)`. There is exactly one call
+site (`handler.go:176`), so the signature change is contained. `Record` then takes
+the path and applies it **only to the `resultAccepted` key**; the other three
+results have no fan-out route and must not gain the label.
+
+*(Alternative: record the accepted outcome inside `processMessage` right after the
+publish succeeds. That is arguably more correct — "accepted" would then mean
+published rather than published-and-replied — but it moves the call site, and
+`sendReply` returns no error today, so nothing observable changes. Not worth the
+churn.)*
+
+### C — `broadcast_channel_enqueue_total{result}` · `broadcast-worker`
+
+| | |
+|---|---|
+| Files | `handler.go`, `nats_metrics.go` |
+| Size | ~25 lines |
+| Hot-path cost | one counter add per canonical channel message |
+
+`publishChannelEvent` (`handler.go:1034`) currently ends with
+`return h.publishRoomEvent(...)`. Capture that error, record once, return it. That
+is the whole change.
+
+**The denominator match is exact, and this is worth checking rather than
+assuming.** `publishChannelEvent` has **one caller** — `handleCreated`
+(`handler.go:285`). Mutations (edit, delete, pin, react) reach the room subject
+through `publishMutation` → `publishRoomEvent`, bypassing `publishChannelEvent`
+entirely. So a counter placed here counts exactly "created channel messages on the
+room-subject path", which is precisely SLO-1b's denominator. No filtering, no
+event-type label needed.
+
+### D + E — the age histogram · `broadcast-worker`
+
+| | |
+|---|---|
+| Files | `main.go`, `handler.go`, `nats_metrics.go` |
+| Size | ~60 lines plus a benchmark |
+| Hot-path cost | one `msg.Metadata()` parse per consumed message |
+
+1. `broadcastProcessor` (`main.go:427`) parses `msg.Metadata()` once and keeps
+   `meta.Timestamp`. The existing flow-log branch (`main.go:436`) then **reuses**
+   it instead of parsing again.
+2. **Carry it in the context value that already exists.** `HandleMessage` already
+   does two `context.WithValue` calls per message
+   (`obs.ContextWithIdentity`, `withBroadcastMetricLabels`), so a third would be
+   out of step — instead add a `streamTS time.Time` field to the existing
+   `broadcastMetricLabels` struct. It is already a ctx value, so a bigger struct
+   costs no additional allocation. The three re-stamping call sites
+   (`handler.go:665, 887, 1060`) must preserve it rather than zeroing it — that is
+   the one thing a test should pin.
+3. `publishChannelEvent` records `now − streamTS` into the histogram, or
+   increments `_age_invalid_total{missing_metadata|negative_age}` when the reading
+   is broken.
+
+Threading it as an explicit parameter would touch `HandleMessage`,
+`handleCreated` and `publishChannelEvent` signatures; the ctx-field approach
+touches one struct and three call sites. Prefer the latter **only because the ctx
+value already exists on this path** — do not add a new one.
+
+---
+
+## 5c. Which PR
+
+**Not #337.** That PR is 67 files, +4 435 / −912, 61 commits, 74 comments, and has
+been in review for a week with `mergeable_state: blocked`. Adding a new
+instrument family to it resets that review for everyone, and P2 is a different
+question from "cut the metrics down to what is read".
+
+**A new PR, based on #337's branch.** Two reasons to stack rather than branch from
+`main`:
+
+- #337 **moves the metrics contract** from
+  `docs/load-testing/failure/nats-metrics-contract.md` to
+  `docs/specs/o11y/nats-metrics-contract.md`. A P2 branch off `main` would
+  document its four instruments in the old path and conflict on merge.
+- #337 adds the guards P2 has to satisfy anyway — the `pkg/obs` registry test,
+  the `.semgrep/metrics.yml` cardinality and attribute-construction rules, and the
+  nil-collapse recorder pattern. Stacking means they run against P2 from the first
+  commit instead of after the rebase.
+
+If #337 merges first, rebase onto `main` and nothing else changes.
+
+**Split it in two, by cost and by risk:**
+
+| PR | Contents | Why separate |
+|---|---|---|
+| **P2a** | A + C + E | Zero hot-path cost, ~55 lines, no plumbing. **Delivers SLO-1b outright.** Reviewable in one sitting |
+| **P2b** | D | Needs the metadata plumbing, a ctx-struct change, and a before/after benchmark. **Delivers SLO-2.** Its review is about the cost, not the metric |
+
+Shipping P2a alone is a real milestone: J1 goes from one enforceable SLO to two.
+
+---
+
+## 5d. What happens if P2 is never built
+
+Be precise about this — the cost is **not** "we cannot see problems". Several
+signals survive.
+
+**What you keep without P2:**
+
+- `broadcast_worker_recipient_deliveries_total{room_kind="channel", result="failed"}`
+  — publish errors on the channel lane are already counted.
+- Consumer lag on broadcast-worker's MESSAGES-CANONICAL durable — which
+  `sli-slo.md` §0.1 names the **primary** enforcement signal for every async SLO,
+  precisely because the v1 ratios are approximate.
+- `chat.nats.client.connected` / `_connection_events_total` — the connection-risk
+  backstop for the core-NATS hop.
+- loadgen's one-sided bound in a test window (`slo-measurement-map.md` §7).
+
+**What you lose, specifically:**
+
+1. **No error budget for J1's delivery half.** Burn-rate alerting (`sli-slo.md`
+   §7) is defined on event ratios. An error counter with no denominator cannot
+   produce one, so SLO-1b and SLO-2 can never be alerted on the way every other
+   SLO is. They stay 🔧 permanently, and J1 ships with one of its three SLOs
+   enforceable.
+2. **SLO-2's failure mode has no proportional signal.** Consumer lag reports
+   **queue depth, not age**. `sli-slo.md` §6 already makes this exact argument for
+   federation: growth alone is insufficient, because a lane can park a small,
+   constant backlog forever and look stable. The same trap applies here — a
+   broadcast-worker that is *steadily* a minute behind shows a flat, non-zero
+   pending and no alert, while every user sees late messages. Age is the signal
+   that distinguishes "slow" from "backed up", and nothing else produces it.
+3. **A delivery incident is not attributable from metrics.** When messages stop
+   arriving, the question is "did broadcast-worker fail to enqueue, or did the
+   delivery lane drop them?" Without the enqueue ratio both look identical from
+   the dashboards, and the investigation falls back to logs.
+4. **Calibration for 1b/2 is pushed out by a full window.** §0.2 asks for 4–6
+   weeks of observation before targets are set. That clock cannot start until the
+   counters exist, so deferring P2 by N weeks delays *enforceable* J1 SLOs by
+   N + 6.
+5. **Every load-test verdict on 1b/2 stays one-sided.** A pass is conclusive; a
+   miss is unattributable. Good enough for the first achievability run
+   (`slo-measurement-map.md` §7), not good enough for a release gate.
+
+**The honest summary:** without P2 you can still tell that something is wrong on
+the J1 delivery path. You cannot say *how often*, cannot set a budget, cannot
+page on the burn rate, and cannot separate a slow worker from a backed-up one.
+
+---
+
 ## 6. X9 without advisories — the premise changed
 
 Capturing `$JS.EVENT.ADVISORY.>` needs a stream provisioned on the NATS cluster,
