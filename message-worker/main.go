@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -68,6 +69,24 @@ type config struct {
 	Atrest             atrest.Config
 	Vault              atrest.VaultConfig
 	DebugLog           logctx.Config `envPrefix:"DEBUG_LOG_"`
+	DegradeRefresh     time.Duration `env:"DEGRADE_REFRESH_INTERVAL" envDefault:"5s"`
+	// InvalidRetryWindow is how long a request-class Cassandra failure (see
+	// cqlclass.go) is retried before the message is dropped, measured as
+	// accumulated NAK backoff. A duration rather than a delivery count because the
+	// question it answers is "will this error resolve on its own?": schema drift
+	// resolves when the migration finishes. 1h matches the outage length this
+	// service is sized for and sits above any plausible rolling migration.
+	InvalidRetryWindow time.Duration `env:"INVALID_RETRY_WINDOW" envDefault:"1h"`
+	// HistoryDropEnabled is the brake for a migration that turns every write
+	// request-class: false keeps NAKing past the window instead of dropping.
+	HistoryDropEnabled bool `env:"HISTORY_DROP_ENABLED" envDefault:"true"`
+	// MaxDropsPerMinute caps destruction per pod per minute, the unattended
+	// counterpart to HistoryDropEnabled. Genuine poison is a trickle, so 10/min is
+	// generous for real bad rows while capping a schema-drift wave at well under 1% of
+	// a ~34/s feed: "the whole hour's feed is destroyed" becomes "a few hundred
+	// messages are destroyed and the metric is screaming". Per-pod and in-process, so
+	// N pods allow N × this in aggregate.
+	MaxDropsPerMinute uint64 `env:"MAX_DROPS_PER_MINUTE" envDefault:"10"`
 }
 
 func main() {
@@ -100,6 +119,33 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("message bucket configured", "hours", cfg.MessageBucketHours)
+
+	if cfg.InvalidRetryWindow <= 0 {
+		slog.Error("invalid config", "INVALID_RETRY_WINDOW", cfg.InvalidRetryWindow.String(),
+			"reason", "a non-positive window would drop a request-class failure on its first delivery")
+		os.Exit(1)
+	}
+	if cfg.MaxDropsPerMinute < 1 {
+		slog.Error("invalid config", "MAX_DROPS_PER_MINUTE", cfg.MaxDropsPerMinute,
+			"reason", "a zero cap would suppress every drop, retrying an unwritable message forever")
+		os.Exit(1)
+	}
+	// The window's effect on redeliveries is logged, not left implied: the count is
+	// what an operator sees in consumer state, and deriving it from the backoff
+	// schedule by hand is what made the previous count-based knob confusing.
+	slog.Info("history drop policy configured",
+		"invalid_retry_window", cfg.InvalidRetryWindow.String(),
+		"approx_deliveries", deliveriesToDrop(cfg.InvalidRetryWindow),
+		"drop_enabled", cfg.HistoryDropEnabled,
+		"max_drops_per_minute", cfg.MaxDropsPerMinute)
+
+	// time.NewTicker panics on a non-positive interval, and the refresher builds its
+	// ticker inside a goroutine — a bad value would crash the pod after startup
+	// looked clean, instead of here.
+	if cfg.DegradeRefresh <= 0 {
+		slog.Error("invalid config", "DEGRADE_REFRESH_INTERVAL", cfg.DegradeRefresh.String())
+		os.Exit(1)
+	}
 
 	bucketSizer := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
 
@@ -202,7 +248,7 @@ func main() {
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
-	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
+	publishFn := func(ctx context.Context, subj string, data []byte, msgID string) error {
 		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
 		// verbose-tracing intent ride onto downstream badge/inbox events.
 		msg := natsutil.NewMsg(ctx, subj, data)
@@ -220,7 +266,7 @@ func main() {
 			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 		}
 		return nil
-	}, withPersistenceMetrics(domainMetrics))
+	}
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -233,6 +279,11 @@ func main() {
 	}
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode, cfg.SiteID)
+	if err := validateConsumerConfig(&consumerCfg, cfg.Mode); err != nil {
+		slog.Error("invalid consumer config", "error", err, "mode", cfg.Mode)
+		os.Exit(1)
+	}
+
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
 		Site:   cfg.SiteID,
 		Stream: streamName, Consumer: consumerCfg.Durable,
@@ -250,6 +301,41 @@ func main() {
 		os.Exit(1)
 	}
 	consumerMetrics.LoopStarted(ctx)
+
+	mtr, err := newMetrics()
+	if err != nil {
+		slog.Error("init metrics failed", "error", err)
+		os.Exit(1)
+	}
+	stopLagPoller := startLagPoller(ctx, mtr, func(ctx context.Context) (*jetstream.ConsumerInfo, error) {
+		return cons.Info(ctx)
+	}, 15*time.Second)
+
+	degradeTr := newDegradeTracker(histdegrade.NewStore(db), cfg.SiteID,
+		func(ctx context.Context) (uint64, uint64, error) {
+			ci, err := cons.Info(ctx)
+			if err != nil {
+				return 0, 0, fmt.Errorf("consumer info: %w", err)
+			}
+			// NumAckPending rides along with NumPending: history has caught up only
+			// when nothing is left to deliver AND nothing is still cycling through
+			// redelivery.
+			// #nosec G115 -- NumAckPending is a queue depth bounded by MaxAckPending; never negative
+			return ci.NumPending, uint64(ci.NumAckPending), nil
+		}, mtr, nil)
+	// tickAfterInterval, not tickOnStart: the marker is read at startup by the
+	// first message that needs it, and an immediate tick would race the consumer
+	// coming up.
+	stopDegradeRefresher := startTicker(ctx, cfg.DegradeRefresh, tickAfterInterval, degradeTr.Refresh)
+
+	// The live handler sees a store that tags its own errors as history failures, so
+	// no call site can reopen the loss window by forgetting to wrap. teamsMigration
+	// below deliberately gets the bare store: that lane is a separate stream and
+	// durable, and a bulk-migration persist failure must not tell every live client
+	// on the site that their history is incomplete.
+	handler := NewHandler(historyStore{store}, us, threadStore, cfg.SiteID, publishFn, mtr, degradeTr,
+		newDropPolicy(cfg.InvalidRetryWindow, cfg.HistoryDropEnabled, cfg.MaxDropsPerMinute, nil),
+		withPersistenceMetrics(domainMetrics))
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
@@ -331,6 +417,8 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		func(ctx context.Context) error { stopLagPoller(); return nil },
+		func(ctx context.Context) error { stopDegradeRefresher(); return nil },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
@@ -346,23 +434,45 @@ func main() {
 	)
 }
 
+// teamsMaxDeliver is the redelivery cap teams mode falls back to when the
+// service-wide CONSUMER_MAX_DELIVER is the default mode's -1 (both modes are the
+// same binary and share one env block). Matches stream.ConsumerSettings' own
+// default, so a teams pod keeps the plain finite-cap behavior.
+const teamsMaxDeliver = 5
+
 // buildConsumerConfig returns the durable consumer config for the given mode.
 // default mode binds only the live .created feed on MESSAGES-CANONICAL (.updated/
 // .deleted are excluded — history-service already wrote Cassandra synchronously for
 // those, so re-processing would duplicate writes). teams mode binds only the Teams
 // migration batch subject on MESSAGES-TEAMS, its own durable.
-// buildConsumerConfig applies the outage retry budget: a thread reply whose
-// thread-room write cannot reach MongoDB is NAKed, and at the package default
-// it would be dropped after ~2.6 minutes — after the gatekeeper already told the
-// sender the message was accepted. The longer budget holds it in the stream
-// until MongoDB returns.
+// The two modes take opposite redelivery caps, and neither is left to the env.
+//
+// Default mode uses stream.WithUnlimitedRedelivery: the give-up decision lives in
+// settle.go, which drops only a request-class failure that outlived its retry
+// window, rather than letting JetStream terminate a message no one persisted.
+// Applied to the settings — not to the built config — because MaxDeliver has to be
+// unlimited before backOffSchedule derives the steps; mutating cc.MaxDeliver
+// afterwards leaves the clamp already fired against a cap that no longer applies.
+//
+// Teams mode keeps a finite cap: it settles through plain jsretry.Settle with no
+// give-up path of its own, so an unbounded NAK there would never retire anything.
+// It takes the outage retry budget so a thread reply whose thread-room write cannot
+// reach MongoDB is held in the stream until MongoDB returns, rather than dropped
+// after ~2.6 minutes — after the gatekeeper already told the sender it was accepted.
 func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 	if mode == "teams" {
+		cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 		cc.Durable = "message-worker-teams"
 		cc.FilterSubjects = []string{subject.MsgTeamsCanonicalBatch(siteID)}
+		if cc.MaxDeliver <= 0 {
+			// -1 (or jetstream's 0 "unset") would turn the batch handler's Nak into
+			// an infinite retry with nothing to retire it. 0 is folded in here
+			// because jetstream reads it as "no cap", not as "cap of zero".
+			cc.MaxDeliver = teamsMaxDeliver
+		}
 		return cc
 	}
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = "message-worker"
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
@@ -386,4 +496,23 @@ func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj str
 			h.HandleJetStreamMsg(handlerCtx, msg)
 		})
 	}
+}
+
+// validateConsumerConfig rejects a consumer whose redelivery cap contradicts its
+// mode's give-up policy. It re-checks in main what buildConsumerConfig just set, so
+// a future edit that lets CONSUMER_MAX_DELIVER back through fails at startup rather
+// than silently restoring the loss boundary this service exists to remove:
+// JetStream terminating a message that broadcast-worker already delivered and
+// search-sync-worker already indexed, while the marker reports history complete.
+func validateConsumerConfig(cc *jetstream.ConsumerConfig, mode string) error {
+	if mode == "teams" {
+		if cc.MaxDeliver <= 0 {
+			return fmt.Errorf("teams mode needs a finite MaxDeliver (has %d): an infinite NAK would never give up", cc.MaxDeliver)
+		}
+		return nil
+	}
+	if cc.MaxDeliver >= 0 {
+		return fmt.Errorf("default mode needs MaxDeliver=-1 (has %d): a finite cap terminates messages behind settle.go's give-up decision", cc.MaxDeliver)
+	}
+	return nil
 }
