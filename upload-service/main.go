@@ -52,6 +52,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	// primaryPreferred: GetUpload reads a doc written outside this repo, so the
+	// write-to-read window cannot be bounded from here.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	Pool mongoutil.PoolConfig
 	// No blanket request timeout here: upload-service streams potentially-large
@@ -127,10 +130,17 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	driveClient := drive.NewClient(&cfg.Drive)
 	legacyDriveClient := drive.NewClient(&cfg.LegacyDrive)
