@@ -543,3 +543,45 @@ error. Every caller in this change supplies an `envDefault`, so an unset
 variable never reaches the empty branch (verified against `caarlos0/env
 v11.4.0`, above). The branch is the fail-safe for any future caller that does
 reach it: an empty value can only narrow staleness, never silently widen it.
+
+## 16. The stale-authorization trade, stated plainly
+
+Four blocking review threads make the same true observation from different
+files: once an authorization read can fall back to a secondary, a membership
+removal that committed on the primary but had not replicated when the primary
+died leaves a *positive* subscription visible. A removed member can then send
+(`message-gatekeeper`), a removed bot can act (`bot-message-handler`), and
+`room-service`'s plain handles can report stale membership.
+
+This is real, and it is the price of the change rather than a defect in it. It
+is stated here so it is signed off rather than discovered.
+
+**Shape of the exposure.** It requires all of: a removal committed inside the
+replication window, the primary dying inside that same window, and the removed
+principal acting during the outage. It cannot be *created* during the outage —
+no removal can be written at all while there is no primary, so the set of
+at-risk principals is frozen at the moment the primary died and does not grow.
+It closes as soon as replication catches up or a primary returns.
+
+**Why not fail closed.** `primary` does not make the authorization correct; it
+makes it *absent*. Every send, every bot action and every membership read fails
+for every user for the whole incident, to deny a removed member a window
+measured in the replication lag. §11 lists exactly that as what this change
+buys back.
+
+**Room keys are the same trade.** A rotation that commits version N+1 before the
+primary dies can leave a secondary reporting N, so `broadcast-worker` keeps
+encrypting with N and a member removed by that rotation can still read. Same
+window, same freeze property, and the alternative is that encrypted rooms cannot
+send at all — which §11 identifies as one of the two largest wins here.
+
+**Not in this family: `message-worker`'s Mongo/Cassandra atomicity.** A review
+thread notes that `AdvanceThreadSubscriptionLastSeen` can fail after the
+Cassandra write succeeded, and the message is still Acked. True, and unchanged
+by this PR: that is a *write*, writes always go to the primary, and no read
+preference can make one succeed or fail. During an outage it fails identically
+before and after this change.
+
+If a reviewer would rather take the outage than the window, the lever is
+per-service and already in place: set that service's `MONGO_READ_PREFERENCE`
+back to `primary`. That is a deployment decision, not a code change.
