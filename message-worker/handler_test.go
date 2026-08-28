@@ -2974,6 +2974,64 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 		require.NoError(t, err, "the reply must be salvaged without spending the whole retry budget")
 	})
 
+	// history-service gates the thread list on threadParentCreatedAt >= the
+	// member's historySharedSince (mongorepo/pipelines.go buildBaseThreadMatch).
+	// A zero value fails that for every member with a history window, so a
+	// salvaged thread would be saved and then permanently invisible to them.
+	t.Run("salvaged thread room is visible to members with a history window", func(t *testing.T) {
+		store, us, ts, h := setup(t)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(time.Time{}, false, nil)
+
+		var created *model.ThreadRoom
+		ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, room *model.ThreadRoom) error {
+				cp := *room
+				created = &cp
+				return nil
+			})
+		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(nil, errMessageNotFound)
+		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+		newTcount := 1
+		store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), &expectedSender, "site-a", gomock.Any()).
+			Return(&newTcount, nil)
+
+		require.NoError(t, h.processMessage(trackedDelivery(t, 2, 6), data, false))
+
+		require.NotNil(t, created)
+		assert.False(t, created.ThreadParentCreatedAt.IsZero(),
+			"a zero parent timestamp hides the salvaged thread from every member with a history window")
+		assert.Equal(t, now, created.ThreadParentCreatedAt,
+			"the thread's only surviving content is the reply, so it is gated on the reply's own time")
+	})
+
+	// The reply's own parent coords stay unknown: stamping a fabricated time into
+	// messages_by_id/messages_by_room would point at a partition that isn't the
+	// parent's. Only the thread room's visibility field gets the fallback.
+	t.Run("salvage does not fabricate the message's parent coords", func(t *testing.T) {
+		store, us, ts, h := setup(t)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(time.Time{}, false, nil)
+		ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(nil, errMessageNotFound)
+		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+		// No UpdateParentMessageThreadRoomID expectation: gomock fails the test if
+		// the salvage path tries to stamp a parent row that does not exist.
+		var saved *model.Message
+		newTcount := 1
+		store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), &expectedSender, "site-a", gomock.Any()).
+			DoAndReturn(func(_ context.Context, m *model.Message, _ *cassParticipant, _, _ string) (*int, error) {
+				saved = m
+				return &newTcount, nil
+			})
+
+		require.NoError(t, h.processMessage(trackedDelivery(t, 2, 6), data, false))
+
+		require.NotNil(t, saved)
+		assert.Nil(t, saved.ThreadParentMessageCreatedAt,
+			"the message's parent createdAt must stay unknown, not be back-filled with the reply's time")
+	})
+
 	t.Run("persists without parent linkage on the final delivery", func(t *testing.T) {
 		store, us, ts, h := setup(t)
 		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)

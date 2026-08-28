@@ -331,7 +331,16 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, []string, error) {
 	now := msg.CreatedAt
 
-	var parentCreatedAt time.Time
+	// history-service gates the thread list on threadParentCreatedAt >= the
+	// member's historySharedSince (mongorepo.buildBaseThreadMatch), so a zero
+	// value here hides the thread from every member with a history window —
+	// permanently, and silently. On the salvage path the parent does not exist in
+	// history, so the thread's only content is this reply: gate it on the reply's
+	// own time, which is exactly what a member entitled to see the reply is
+	// entitled to see. Deliberately scoped to this document — msg's own parent
+	// coords stay unknown, because fabricating them would point the
+	// messages_by_id/messages_by_room writes at a partition that isn't the parent's.
+	parentCreatedAt := msg.CreatedAt
 	if msg.ThreadParentMessageCreatedAt != nil {
 		parentCreatedAt = *msg.ThreadParentMessageCreatedAt
 	}
