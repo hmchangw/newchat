@@ -161,14 +161,28 @@ margin before merging; it is not a blocker but it is not free.
 
 ### 5.4 `admin-service` transaction guard
 
-`store_mongo.go:249` runs `withTransaction` via `StartSession()` with no options.
-Per the driver, a transaction's read preference defaults to the session's, which
-defaults to the **client's** — and MongoDB rejects a non-primary read preference
-inside a transaction. Moving this client to `primaryPreferred` therefore breaks
-`UpdateUserPasswordAndRevoke` unless the same change sets an explicit
-`SetReadPreference(readpref.Primary())` on the session or transaction options.
+`store_mongo.go` runs `withTransaction` via `StartSession()` with no options. A
+transaction's read preference defaults to the session's, which defaults to the
+**client's** (`mongo/client.go:461` → `session/client_session.go:236,474`), and
+the driver rejects a non-primary one inside a transaction. The guard sets it
+explicitly via `SetDefaultTransactionOptions(options.Transaction().
+SetReadPreference(readpref.Primary()))` — `SessionOptionsBuilder` has no
+`SetDefaultReadPreference` in driver v2.
 
-**This guard and the client flip must land in the same commit.**
+**It is not load-bearing today, and this section originally overstated it.** The
+check lives in `createReadPref` (`x/mongo/driver/operation.go:1886-1895`), which
+returns early for `op.Type == Write`. All three current transaction bodies are
+write-only — `UpdateUserPasswordAndRevoke` (`UpdateOne` + `DeleteMany`),
+`DeactivateAndRevoke` (`FindOneAndUpdate`, a write command, + `DeleteMany`) and
+`RecordPermissionChange` (`InsertMany` + `UpdateMany`) — so none of them reaches
+the check. Without the guard, nothing breaks now.
+
+Keep it anyway, as future-proofing with a sharp edge behind it: the moment
+anyone adds a *read* inside one of these transactions — reading the user doc
+before updating it is the obvious next step — it fails with `read preference in
+a transaction must be primary`, and it fails in **normal operation**, not only
+during an incident, because `primaryPreferred` is already a non-primary mode.
+The guard turns a latent landmine into a non-issue for one line.
 
 ### 5.5 Stay on `primary` — deliberate
 
@@ -264,8 +278,11 @@ Note that `ParseReadPreference` maps empty to `readpref.Primary()`
   (`pkg/testutil/mongo_replicaset.go`) driving `withTransaction` with a probe
   insert **and read** under a `primaryPreferred` client — the read is what
   consults the session's preference. It does not exercise
-  `UpdateUserPasswordAndRevoke` itself; it covers the guard that method depends
-  on. This is the one change that can silently break a working path.
+  `UpdateUserPasswordAndRevoke` itself; it covers the guard directly. The read
+  is what makes it falsifiable: the driver checks the transaction read preference
+  during command construction, not server selection, so the single-node
+  `directConnection` harness does not weaken it. Remove the pin and this test
+  must fail.
 - **Outage behaviour.** `tools/loadgen/mongo_outage_recovery_integration_test.go`
   already builds a dedicated Mongo container for outage simulation and is the
   natural home for an end-to-end assertion that reads survive primary loss.
@@ -278,8 +295,8 @@ Ordered by value, each independently shippable:
 
 1. `message-gatekeeper` + `message-worker` — together these keep the plain-message
    send-and-store path alive (§12).
-2. `admin-service` with its transaction guard — the only change that can break a
-   working path, so it lands early and alone.
+2. `admin-service` with its transaction guard — lands early and alone, though
+   see §5.4: the guard is future-proofing, not a live fix.
 3. The remaining `primaryPreferred` services.
 4. `tcard-service` + `search-sync-worker` (`secondaryPreferred`).
 5. The four DEK/room-key sites, after the §5.3 retention re-check.
@@ -326,7 +343,7 @@ outage-time:
 
 | Risk | Mitigation |
 |---|---|
-| `admin-service` password reset breaks in *normal* operation if the client flips without the transaction guard | §5.4 — same commit, plus the §9 regression test |
+| A *read* added to any `admin-service` transaction fails in normal operation once the client is non-primary | §5.4 — the guard makes this a non-issue; today's bodies are all write-only |
 | `tcard-service`, `search-sync-worker` accept permanent replica lag | §5.1 — argued per service |
 | Retired-key retention budget narrows | §5.3 action item |
 
@@ -403,7 +420,8 @@ Two deviations from this document, both decided during execution:
 
 ### Not verified here
 
-- **Every integration test**, including the `admin-service` transaction guard —
+- **Every integration test** — including the `admin-service` transaction guard,
+  since resolved: CI ran it green on `aa1a433` and after —
   this environment has the Docker CLI but no daemon, so testcontainers cannot
   start. They compile and type-check (verified locally; `make lint` covers vet in CI). The transaction guard
   is the highest-value thing to run before merge: it is the one change that can

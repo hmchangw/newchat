@@ -1379,11 +1379,13 @@ func TestLoginAndChangePasswordEndToEnd(t *testing.T) {
 // without an explicit pin this flip would break password reset in normal
 // operation — not only during an incident.
 //
-// LIMITATION: the shared harness is a single node reached over directConnection,
-// which puts the driver in Single topology where server selection ignores read
-// preference. This therefore smoke-tests that the transaction still commits; it
-// does NOT prove the pin is load-bearing. Proving that needs a real multi-node
-// replica set, where removing the pin must make this fail.
+// The read below is what makes this falsifiable. driver v2 checks the transaction
+// read preference in createReadPref (x/mongo/driver/operation.go:1886), during
+// command construction rather than server selection, so the single-node
+// directConnection harness does not weaken it. That function returns early for
+// op.Type == Write, so a write-only transaction body never reaches the check;
+// only a read does. Remove the pin in withTransaction and this test must fail
+// with "read preference in a transaction must be primary".
 func TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference(t *testing.T) {
 	db := testutil.MongoDBReplicaSetWithReadPreference(t, "adminsvc_rp", readpref.PrimaryPreferred())
 	st := newStoreMongo(db)
