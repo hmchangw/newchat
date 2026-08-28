@@ -1,24 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-resty/resty/v2"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
+	"github.com/hmchangw/chat/pkg/restyutil"
 )
 
 // clientUpdateVersionPath is client-update-service's upload endpoint
@@ -28,44 +27,71 @@ const clientUpdateVersionPath = "/api/v1/version"
 // versionUploader ships one artifact pair to client-update-service. Defined here,
 // in the consumer, so tests can substitute a fake without an HTTP server.
 type versionUploader interface {
-	// Upload streams body — an already-encoded multipart payload whose boundary
-	// contentType declares — to the upload endpoint.
-	Upload(ctx context.Context, contentType string, body io.Reader) error
+	Upload(ctx context.Context, body *uploadBody) error
 }
 
-// restyVersionUploader is the production versionUploader over resty.
-type restyVersionUploader struct {
-	client *resty.Client
-}
-
-// newRestyVersionUploader wraps a client built by restyutil.New with the
-// service-account bearer token and the upload timeout already applied.
+// httpVersionUploader is the production versionUploader.
 //
-// Three properties of that client are load-bearing and must not change:
-//   - SetContentLength stays OFF. resty measures an io.Reader body when it is
-//     on (v2.17.2 middleware.go:519-527), sending a fixed Content-Length.
-//   - No retries. The body is a pipe; once drained, a retry would send nothing.
-//   - Redirects are refused, set here rather than left to the caller. The
-//     upload endpoint has no reason to redirect, and net/http strips
-//     Authorization only when the HOST changes (shouldCopyHeaderOnRedirect
-//     compares hosts, not schemes), so a same-host https->http hop would carry
-//     the service-account token onward in the clear. A 3xx becomes an error.
-func newRestyVersionUploader(client *resty.Client) *restyVersionUploader {
-	client.SetRedirectPolicy(resty.NoRedirectPolicy())
-	return &restyVersionUploader{client: client}
+// It drives net/http directly rather than resty — the same deliberate exception
+// pkg/drive/uploader.go takes, for the same reason: resty v2 materializes any
+// io.Reader body it cannot natively replay (createHTTPRequest -> getBodyCopy ->
+// io.ReadAll), which is exactly the buffering this path exists to avoid. The
+// client still comes from restyutil so the shared transport, OTel
+// instrumentation and timeout are preserved; only resty's body handling and its
+// request/response log hooks are given up, and upload failures are logged once
+// at the caller's errhttp boundary anyway.
+type httpVersionUploader struct {
+	client   *http.Client
+	endpoint string
+	token    string
 }
 
-func (u *restyVersionUploader) Upload(ctx context.Context, contentType string, body io.Reader) error {
-	resp, err := u.client.R().
-		SetContext(ctx).
-		SetHeader("Content-Type", contentType).
-		SetBody(body).
-		Post(clientUpdateVersionPath)
+// maxUpstreamBodyReadLen caps how much of an upstream response is read. An
+// errcode envelope is far smaller; the cap stops a large error page from being
+// pulled into memory just to be truncated for a log line.
+const maxUpstreamBodyReadLen = 8 << 10
+
+// newHTTPVersionUploader builds the uploader for baseURL. Redirects are refused:
+// the upload endpoint has no reason to redirect, and net/http strips
+// Authorization only when the HOST changes (shouldCopyHeaderOnRedirect compares
+// hosts, not schemes), so a same-host https->http hop would carry the
+// service-account token onward in the clear. ErrUseLastResponse surfaces the 3xx
+// as a status for mapUpstreamStatus rather than following it.
+func newHTTPVersionUploader(baseURL, token string, timeout time.Duration) *httpVersionUploader {
+	client := restyutil.New(baseURL, restyutil.WithTimeout(timeout)).GetClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &httpVersionUploader{
+		client:   client,
+		endpoint: strings.TrimRight(baseURL, "/") + clientUpdateVersionPath,
+		token:    token,
+	}
+}
+
+func (u *httpVersionUploader) Upload(ctx context.Context, body *uploadBody) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.endpoint, body.reader)
+	if err != nil {
+		return errcode.Unavailable("client update upload is misconfigured",
+			errcode.WithCause(fmt.Errorf("build client update request: %w", err)))
+	}
+	// Set explicitly: net/http cannot infer the length of a reader chain and
+	// would fall back to chunked encoding without it.
+	req.ContentLength = body.length
+	req.Header.Set("Content-Type", body.contentType)
+	req.Header.Set("Authorization", "Bearer "+u.token)
+
+	resp, err := u.client.Do(req)
 	if err != nil {
 		return errcode.Unavailable("client update service is unavailable",
 			errcode.WithCause(fmt.Errorf("post client update: %w", err)))
 	}
-	return mapUpstreamStatus(resp.StatusCode(), resp.String())
+	defer func() { _ = resp.Body.Close() }()
+
+	// Bounded: a read error here is irrelevant next to the status, and
+	// mapUpstreamStatus treats an unparseable body as no body at all.
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBodyReadLen))
+	return mapUpstreamStatus(resp.StatusCode, string(snippet))
 }
 
 // mapUpstreamStatus turns client-update-service's verdict into this service's.
@@ -159,12 +185,127 @@ const maxUploadParts = 16
 // matching pkg/drive/multipart.go's escaper rather than diverging from it.
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "%0D", "\n", "%0A")
 
-// relayResult carries the relay goroutine's outcome back to the handler. The
-// filenames travel on the channel rather than a shared map so the handler can
-// read them without racing the goroutine that filled them.
-type relayResult struct {
+// uploadBody is a multipart payload whose file bytes are never copied into
+// memory: small envelope snapshots (boundaries and part headers) are
+// interleaved with the uploaded files' own readers, so peak memory is
+// independent of artifact size. The exact length is summed up front so the
+// request still carries a Content-Length instead of falling back to chunked.
+type uploadBody struct {
+	reader      io.Reader
+	contentType string
+	length      int64
+	// names is field->filename for the audit entry, contract fields only.
 	names map[string]string
-	err   error
+	files []multipart.File
+}
+
+// Close releases the opened form files. The temp files themselves are removed by
+// net/http, which calls MultipartForm.RemoveAll when the request finishes
+// (server.go:1709).
+func (b *uploadBody) Close() error {
+	for _, f := range b.files {
+		_ = f.Close()
+	}
+	return nil
+}
+
+// partHeader builds a file part's MIME header. Concatenated rather than
+// %q-formatted: the values are already escaped by quoteEscaper, and Go quoting
+// would escape them a second time. Content-Type is copied only when the incoming
+// part carried one, so a bare part stays bare and client-update-service's own
+// fallback still applies.
+func partHeader(field, filename, contentType string) textproto.MIMEHeader {
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", `form-data; name="`+quoteEscaper.Replace(field)+
+		`"; filename="`+quoteEscaper.Replace(filename)+`"`)
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	}
+	return h
+}
+
+// buildUploadBody re-encodes the parsed form into a streamed multipart body,
+// preserving every file part unvalidated — client-update-service remains the
+// sole judge of the artifacts.
+//
+// Fields are walked in sorted order because Go map iteration is random and the
+// body must be deterministic; multipart imposes no ordering, and the upstream
+// selects parts by name. Within a field the wire order is preserved.
+func buildUploadBody(form *multipart.Form) (*uploadBody, error) {
+	var env bytes.Buffer
+	mw := multipart.NewWriter(&env)
+	b := &uploadBody{names: make(map[string]string), contentType: mw.FormDataContentType()}
+
+	var chain []io.Reader
+	// flush moves everything the writer emitted since the last call into the
+	// chain. The bytes are copied out because env reuses its array after Reset.
+	flush := func() {
+		if env.Len() == 0 {
+			return
+		}
+		buf := append([]byte(nil), env.Bytes()...)
+		env.Reset()
+		chain = append(chain, bytes.NewReader(buf))
+		b.length += int64(len(buf))
+	}
+
+	fields := make([]string, 0, len(form.File))
+	for field := range form.File {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+
+	parts := 0
+	for _, field := range fields {
+		for _, fh := range form.File[field] {
+			parts++
+			if parts > maxUploadParts {
+				_ = b.Close()
+				return nil, fmt.Errorf("upload has more than %d parts", maxUploadParts)
+			}
+			f, err := fh.Open()
+			if err != nil {
+				_ = b.Close()
+				return nil, fmt.Errorf("open upload part %q: %w", field, err)
+			}
+			b.files = append(b.files, f)
+			b.recordAuditName(field, fh.Filename)
+
+			if _, err := mw.CreatePart(partHeader(field, fh.Filename, fh.Header.Get("Content-Type"))); err != nil {
+				_ = b.Close()
+				return nil, fmt.Errorf("create relay part %q: %w", field, err)
+			}
+			flush()
+			chain = append(chain, f)
+			b.length += fh.Size
+		}
+	}
+
+	if err := mw.Close(); err != nil {
+		_ = b.Close()
+		return nil, fmt.Errorf("finish relay body: %w", err)
+	}
+	flush()
+
+	b.reader = io.MultiReader(chain...)
+	return b, nil
+}
+
+// recordAuditName retains a filename for the audit entry, bounded to the two
+// contract fields so a caller choosing arbitrary field names cannot grow the
+// map (and the AuditEntry built from it) without bound.
+//
+// FIRST wins, never overwritten: client-update-service reads its parts with
+// c.FormFile, which selects the first file for a field name, so a later
+// duplicate would make the audit entry name a file the upstream did not store.
+func (b *uploadBody) recordAuditName(field, filename string) {
+	if _, ok := auditedUploadFields[field]; !ok {
+		return
+	}
+	if _, seen := b.names[field]; seen {
+		return
+	}
+	b.names[field] = truncateFileName(filename)
 }
 
 // uploadClientVersion relays an artifact pair to client-update-service under this
@@ -174,11 +315,10 @@ type relayResult struct {
 // extension and content rules, and duplicating them here would let the two
 // services disagree about what a valid upload is.
 func (h *Handler) uploadClientVersion(c *gin.Context) {
-	// ONE budget for the whole request, inherited by the upstream call. resty
-	// drains the relay pipe before dialling, so the inbound and outbound phases
-	// run back to back rather than overlapping: without this, each would get its
-	// own ClientUpdateTimeout and the handler could run to 2d against a write
-	// deadline of d + uploadResponseMargin.
+	// ONE budget for the whole request, inherited by the upstream call: the
+	// inbound parse and the outbound send run back to back, so without this each
+	// would get its own ClientUpdateTimeout and the handler could run to 2d
+	// against a write deadline of d + uploadResponseMargin.
 	ctx, cancel := context.WithTimeout(c.Request.Context(), h.cfg.ClientUpdateTimeout)
 	defer cancel()
 
@@ -196,108 +336,28 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 		return
 	}
 
-	mr, err := c.Request.MultipartReader()
+	// Spills past MaxMultipartMemory to a temp file, so a large artifact costs
+	// disk rather than heap. net/http removes those files when the request ends.
+	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request body must be multipart/form-data"))
-		return
-	}
-
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	done := make(chan relayResult, 1)
-	go func() {
-		names, relayErr := relayParts(mr, mw)
-		// Publish BEFORE closing, onto the buffered channel so this never blocks.
-		// CloseWithError is what wakes Upload, so anything that observes the close
-		// — including an Upload that returns because of it — must already be able
-		// to see this result; otherwise awaitRelay's non-blocking receive races the
-		// send and a genuine bad-body error reports as an upstream outage.
-		done <- relayResult{names: names, err: relayErr}
-		// Closing the pipe is what unblocks the reader, so it must happen on every
-		// path out of this goroutine.
-		_ = pw.CloseWithError(relayErr)
-	}()
-
-	// Deferred as well as called inline: the inline close is what unblocks the
-	// goroutine before <-done, and the defer is what unblocks it if Upload panics
-	// and gin.Recovery unwinds this frame — otherwise the relay would park on
-	// pw.Write forever, pinning the request body reader.
-	var uploadErr error
-	defer func() { _ = pr.CloseWithError(uploadErr) }()
-
-	uploadErr = h.uploader.Upload(ctx, mw.FormDataContentType(), pr)
-	// Unblocks the goroutine if the upload gave up mid-body; a no-op otherwise.
-	_ = pr.CloseWithError(uploadErr)
-
-	res, relayKilled := h.awaitRelay(c, done, uploadErr)
-
-	// res.err first, but only when the relay failed on its own terms — the
-	// client's body — rather than because we tore it down after the upstream
-	// rejected the request. Whether the relay had already finished is the
-	// discriminator: awaitRelay reports relayKilled only when it was still
-	// parked when we closed the request body under it. Without this split, a bad
-	// client body reports as an upstream outage and sends ops chasing a phantom
-	// one — or, once the teardown exists, an upstream 401 reports as a bad body.
-	if res.err != nil && !relayKilled {
-		// Still 4xx — the client did not finish sending — but a clock running out
-		// is not malformed data, and saying so sends an operator hunting the wrong
-		// bug.
-		if uploadDeadlineExpired(ctx, res.err) {
-			errhttp.Write(ctx, c, errcode.BadRequest("the upload did not finish within the allowed time"))
-			return
-		}
 		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
 		return
 	}
-	if uploadErr != nil {
-		errhttp.Write(ctx, c, uploadErr)
+
+	body, err := buildUploadBody(form)
+	if err != nil {
+		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
+		return
+	}
+	defer func() { _ = body.Close() }()
+
+	if err := h.uploader.Upload(ctx, body); err != nil {
+		errhttp.Write(ctx, c, err)
 		return
 	}
 
-	h.audit(ctx, c, clientUpdateAuditAction, "", "", res.names)
+	h.audit(ctx, c, clientUpdateAuditAction, "", "", body.names)
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
-}
-
-// uploadDeadlineExpired reports whether the relay failed because the request ran
-// out of time rather than because the body was malformed. Two clocks can fire:
-// the request's read deadline, which surfaces through the relay's read as
-// os.ErrDeadlineExceeded, and this handler's own budget on ctx.
-func uploadDeadlineExpired(ctx context.Context, relayErr error) bool {
-	return errors.Is(relayErr, os.ErrDeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
-}
-
-// awaitRelay collects the relay's outcome, tearing it down first if the upload
-// already failed while the relay is still running.
-//
-// Closing the pipe only unblocks a relay parked on pw.Write. When the upstream
-// answers before the browser finishes sending — an immediate 401 from a bad
-// service token is the clearest case — the relay is parked on the REQUEST body
-// instead, and a bare <-done would pin this handler, its goroutine and both
-// connections until the client sends more or the extended read deadline expires.
-//
-// killed reports whether the relay was still running when we cut the body out
-// from under it, which is what tells the caller the relay's error is ours rather
-// than the client's. A relay that had already finished keeps its own verdict.
-//
-// The teardown is an immediate read deadline, NOT c.Request.Body.Close():
-// net/http's server body guards Read and Close with the same mutex, so closing
-// during an in-flight read blocks behind that read instead of interrupting it.
-// Expiring the deadline fails the read itself.
-func (h *Handler) awaitRelay(c *gin.Context, done <-chan relayResult, uploadErr error) (res relayResult, killed bool) {
-	if uploadErr == nil {
-		return <-done, false
-	}
-	select {
-	case res = <-done:
-		return res, false // finished on its own; its error is genuine
-	default:
-	}
-	if err := http.NewResponseController(c.Writer).SetReadDeadline(time.Now()); err != nil {
-		// Nothing better to do than wait: the relay still exits when the client
-		// stops sending or the extended deadline expires.
-		slog.WarnContext(c.Request.Context(), "could not expire the upload read deadline", "error", err)
-	}
-	return <-done, true
 }
 
 // uploadResponseMargin is how much longer this request's WRITE deadline runs
@@ -348,82 +408,6 @@ func extendUploadDeadlines(c *gin.Context, d time.Duration) error {
 	}
 	if err := rc.SetWriteDeadline(write); err != nil {
 		return fmt.Errorf("extend upload write deadline: %w", err)
-	}
-	return nil
-}
-
-// relayParts copies every file part through to mw, preserving each part's field
-// name, filename and declared Content-Type, and returns field->filename for the
-// audit entry. Non-file fields are skipped: client-update-service reads only
-// file parts.
-//
-// CreatePart, not CreateFormFile: the latter stamps application/octet-stream on
-// every part, which would change what client-update-service stores the .yaml as.
-func relayParts(mr *multipart.Reader, mw *multipart.Writer) (map[string]string, error) {
-	names := make(map[string]string)
-	parts := 0
-	for {
-		part, err := mr.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return names, fmt.Errorf("read upload part: %w", err)
-		}
-		parts++
-		if parts > maxUploadParts {
-			_ = part.Close()
-			return names, fmt.Errorf("upload has more than %d parts", maxUploadParts)
-		}
-		if err := relayOnePart(part, mw, names); err != nil {
-			_ = part.Close()
-			return names, err
-		}
-		if err := part.Close(); err != nil {
-			return names, fmt.Errorf("close upload part: %w", err)
-		}
-	}
-	if err := mw.Close(); err != nil {
-		return names, fmt.Errorf("finish relay body: %w", err)
-	}
-	return names, nil
-}
-
-// relayOnePart copies a single part and records its filename.
-func relayOnePart(part *multipart.Part, mw *multipart.Writer, names map[string]string) error {
-	if part.FileName() == "" {
-		return nil // not a file part
-	}
-	// Audit only the two contract fields. Every part is still relayed unvalidated
-	// — client-update-service remains the sole judge of the artifacts — but a
-	// caller sending millions of distinct field names must not be able to grow
-	// this map (and the AuditEntry built from it) without bound.
-	//
-	// FIRST wins, never overwritten: client-update-service reads its parts with
-	// c.FormFile, which selects the first file for a field name. Recording a
-	// later duplicate would make the audit entry name a file the upstream did
-	// not store.
-	if _, ok := auditedUploadFields[part.FormName()]; ok {
-		if _, seen := names[part.FormName()]; !seen {
-			names[part.FormName()] = truncateFileName(part.FileName())
-		}
-	}
-
-	hdr := textproto.MIMEHeader{}
-	// %q rather than "%s" would re-escape what quoteEscaper already escaped.
-	hdr.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, //nolint:gocritic // sprintfQuotedString
-		quoteEscaper.Replace(part.FormName()), quoteEscaper.Replace(part.FileName())))
-	// Copied only when present, so a bare part stays bare and the upstream's own
-	// content-type fallback still applies.
-	if ct := part.Header.Get("Content-Type"); ct != "" {
-		hdr.Set("Content-Type", ct)
-	}
-	fw, err := mw.CreatePart(hdr)
-	if err != nil {
-		return fmt.Errorf("create relay part %q: %w", part.FormName(), err)
-	}
-	if _, err := io.Copy(fw, part); err != nil {
-		return fmt.Errorf("relay part %q: %w", part.FormName(), err)
 	}
 	return nil
 }

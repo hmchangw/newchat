@@ -16,6 +16,11 @@ import (
 // the handler always wins the race against net/http closing the connection.
 const httpWriteTimeout = 40 * time.Second
 
+// maxMultipartMemory caps how much of an upload Gin keeps in memory before
+// spilling the part to a temp file. Matches upload-service's cap for the same
+// reason: the body is streamed onward, so it never needs to be resident.
+const maxMultipartMemory = 1 << 20
+
 // requestBudget is the absolute per-request deadline the permission handlers pin at
 // entry (withRequestBudget): httpWriteTimeout minus a margin to write the response
 // after the last in-handler wait, so syncFailures always reaches the caller.

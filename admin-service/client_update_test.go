@@ -27,8 +27,8 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/obs"
-	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 func TestMapUpstreamStatus(t *testing.T) {
@@ -151,7 +151,7 @@ func TestMapUpstreamStatus_DoesNotCopyUpstreamReason(t *testing.T) {
 	assert.Empty(t, ec.Reason)
 }
 
-func TestRestyVersionUploader_PostsBodyAndCredential(t *testing.T) {
+func TestHTTPVersionUploader_PostsBodyAndCredential(t *testing.T) {
 	var gotAuth, gotContentType, gotBody, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -164,11 +164,11 @@ func TestRestyVersionUploader_PostsBodyAndCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := newRestyVersionUploader(restyutil.New(srv.URL,
-		restyutil.WithBearerToken("0123456789abcdef"),
-		restyutil.WithTimeout(30*time.Second)))
+	u := newHTTPVersionUploader(srv.URL, "0123456789abcdef", 30*time.Second)
 
-	err := u.Upload(context.Background(), "multipart/form-data; boundary=xyz", strings.NewReader("PAYLOAD"))
+	err := u.Upload(context.Background(), &uploadBody{
+		reader: strings.NewReader("PAYLOAD"), contentType: "multipart/form-data; boundary=xyz", length: int64(len("PAYLOAD")),
+	})
 
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer 0123456789abcdef", gotAuth)
@@ -177,38 +177,35 @@ func TestRestyVersionUploader_PostsBodyAndCredential(t *testing.T) {
 	assert.Equal(t, clientUpdateVersionPath, gotPath)
 }
 
-// resty buffers an entire io.Reader body into memory when SetContentLength is
-// on (resty v2.17.2 middleware.go:519-527), which would defeat streaming for a
-// multi-hundred-MB artifact. This pins that it stays off.
-// NOTE: this does NOT prove streaming, and the name must not suggest it does.
-// resty v2.17.2 drains an io.Reader body with io.ReadAll before dialling, so a
-// chunked encoding here only shows the body went out with no Content-Length —
-// it says nothing about when the connection opened relative to EOF. What it
-// does guard is the SetContentLength=off property in newRestyVersionUploader:
-// turning it on would make resty measure the body and send a fixed length.
-func TestRestyVersionUploader_SendsChunkedWithoutContentLength(t *testing.T) {
-	const size = 4 << 20 // 4 MiB — larger than any internal buffer
-	var gotLen int
-	var gotTransferEncoding []string
+// The body must go out with an exact Content-Length rather than chunked: the
+// length is summed while the reader chain is assembled precisely so net/http
+// does not have to guess, and client-update-service gets a declared size.
+func TestHTTPVersionUploader_SendsExactContentLength(t *testing.T) {
+	const size = 4 << 20 // larger than any internal buffer
+	var declared, received int64
+	var transferEncoding []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotTransferEncoding = r.TransferEncoding
-		b, _ := io.ReadAll(r.Body)
-		gotLen = len(b)
+		declared = r.ContentLength
+		transferEncoding = r.TransferEncoding
+		received, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	u := newRestyVersionUploader(restyutil.New(srv.URL,
-		restyutil.WithBearerToken("0123456789abcdef"),
-		restyutil.WithTimeout(30*time.Second)))
+	u := newHTTPVersionUploader(srv.URL, "0123456789abcdef", 30*time.Second)
 
-	err := u.Upload(context.Background(), "application/octet-stream",
-		io.LimitReader(zeroReader{}, size))
+	err := u.Upload(context.Background(), testBody(io.LimitReader(zeroReader{}, size), size))
 
 	require.NoError(t, err)
-	assert.Equal(t, size, gotLen, "the whole body must arrive intact")
-	assert.Contains(t, gotTransferEncoding, "chunked",
-		"a body of unknown length must go out chunked, not measured with a Content-Length")
+	assert.Equal(t, int64(size), received, "the whole body must arrive intact")
+	assert.Equal(t, int64(size), declared, "Content-Length must be declared, not inferred")
+	assert.Empty(t, transferEncoding, "a body with a known length must not be chunked")
+}
+
+// testBody wraps a plain reader as an uploadBody for the uploader-level tests,
+// which exercise transport behaviour rather than body assembly.
+func testBody(r io.Reader, length int64) *uploadBody {
+	return &uploadBody{reader: r, contentType: "application/octet-stream", length: length}
 }
 
 // zeroReader is an endless source of zero bytes; pair it with io.LimitReader.
@@ -221,15 +218,13 @@ func (zeroReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestRestyVersionUploader_TransportFailureIsUnavailable(t *testing.T) {
+func TestHTTPVersionUploader_TransportFailureIsUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // closed: every request fails at the transport
 
-	u := newRestyVersionUploader(restyutil.New(srv.URL,
-		restyutil.WithBearerToken("0123456789abcdef"),
-		restyutil.WithTimeout(2*time.Second)))
+	u := newHTTPVersionUploader(srv.URL, "0123456789abcdef", 2*time.Second)
 
-	err := u.Upload(context.Background(), "application/octet-stream", strings.NewReader("x"))
+	err := u.Upload(context.Background(), testBody(strings.NewReader("x"), 1))
 
 	var ec *errcode.Error
 	require.ErrorAs(t, err, &ec)
@@ -242,11 +237,16 @@ type fakeUploader struct {
 	called      bool
 	contentType string
 	body        []byte
+	length      int64
+	names       map[string]string
 	err         error
 }
 
-func (f *fakeUploader) Upload(_ context.Context, contentType string, body io.Reader) error {
-	b, readErr := io.ReadAll(body)
+func (f *fakeUploader) Upload(_ context.Context, body *uploadBody) error {
+	contentType := body.contentType
+	b, readErr := io.ReadAll(body.reader)
+	f.length = body.length
+	f.names = body.names
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.called = true
@@ -338,6 +338,7 @@ func uploadTestServer(t *testing.T, h *Handler) *httptest.Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory // mirror main.go, or the spill threshold differs
 	obsMW := o11ygin.Middleware("admin-service", tracenoop.NewTracerProvider(), noop.NewMeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
 	applyBaseMiddleware(r, obsMW)
 	r.POST("/v1/admin/client-updates", func(c *gin.Context) {
@@ -351,7 +352,7 @@ func uploadTestServer(t *testing.T, h *Handler) *httptest.Server {
 
 // uploadBody builds a multipart payload; a part with an empty contentType is
 // written with no Content-Type header at all.
-func uploadBody(t *testing.T, parts map[string]struct{ filename, content, contentType string }) (*bytes.Buffer, string) {
+func multipartPayload(t *testing.T, parts map[string]struct{ filename, content, contentType string }) (*bytes.Buffer, string) {
 	t.Helper()
 	body := &bytes.Buffer{}
 	w := multipart.NewWriter(body)
@@ -392,7 +393,7 @@ func TestUploadClientVersion_Success(t *testing.T) {
 	h := newHandler(store, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", "text/yaml"},
 		"executeFile": {"app.exe", "MZbinary", ""},
 	})
@@ -418,7 +419,7 @@ func TestUploadClientVersion_PreservesPartContentTypes(t *testing.T) {
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", "text/yaml"},
 		"executeFile": {"app.exe", "MZbinary", ""},
 	})
@@ -472,7 +473,7 @@ func TestUploadClientVersion_LargeBodyArrivesIntact(t *testing.T) {
 	srv := uploadTestServer(t, h)
 
 	big := strings.Repeat("A", size)
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", big, ""},
 	})
@@ -501,7 +502,7 @@ func TestUploadClientVersion_UpstreamErrorsAreMapped(t *testing.T) {
 			h := newHandler(store, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 			srv := uploadTestServer(t, h)
 
-			body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+			body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 				"configFile":  {"app.yaml", "version: 1", ""},
 				"executeFile": {"app.exe", "MZ", ""},
 			})
@@ -534,7 +535,7 @@ func TestUploadClientVersion_UnconfiguredUploaderIsUnavailable(t *testing.T) {
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil)
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile": {"app.yaml", "version: 1", ""},
 	})
 	status, _ := postUpload(t, srv, body, ct)
@@ -551,7 +552,7 @@ func TestUploadClientVersion_ExtendsItsOwnDeadlines(t *testing.T) {
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", "MZ", ""},
 	})
@@ -559,191 +560,6 @@ func TestUploadClientVersion_ExtendsItsOwnDeadlines(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, status,
 		"a 500 here means SetReadDeadline/SetWriteDeadline returned ErrNotSupported")
-}
-
-// errTestTornDown ends a deliberately unfinished request body at test cleanup.
-var errTestTornDown = errors.New("test torn down")
-
-// streamProbeUploader closes saw on its first non-empty read, then drains the
-// rest. A handler that buffered the request body would not even call Upload
-// until the body was complete, so the signal arriving while the test is still
-// holding the body open is what distinguishes streaming from buffering.
-type streamProbeUploader struct {
-	saw  chan struct{}
-	once sync.Once
-}
-
-func (s *streamProbeUploader) Upload(_ context.Context, _ string, body io.Reader) error {
-	buf := make([]byte, 32<<10)
-	for {
-		n, err := body.Read(buf)
-		if n > 0 {
-			s.once.Do(func() { close(s.saw) })
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
-// writeHeldBody writes the first part, waits for release, then writes the second
-// and terminates the body — so the request is deliberately incomplete until the
-// test says otherwise.
-func writeHeldBody(mw *multipart.Writer, bodyW *io.PipeWriter, release <-chan struct{}) error {
-	first := textproto.MIMEHeader{}
-	first.Set("Content-Disposition", `form-data; name="configFile"; filename="app.yaml"`)
-	fw, err := mw.CreatePart(first)
-	if err != nil {
-		return err
-	}
-	// Comfortably past the transport's and the multipart reader's buffers, so a
-	// pass cannot be an artefact of something small sitting in a buffer.
-	if _, err := io.WriteString(fw, strings.Repeat("A", 64<<10)); err != nil {
-		return err
-	}
-
-	<-release
-
-	second := textproto.MIMEHeader{}
-	second.Set("Content-Disposition", `form-data; name="executeFile"; filename="app.exe"`)
-	fw2, err := mw.CreatePart(second)
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(fw2, "MZ"); err != nil {
-		return err
-	}
-	if err := mw.Close(); err != nil {
-		return err
-	}
-	return bodyW.Close()
-}
-
-// Streaming is this branch's central performance claim, so it gets a test that
-// only a streaming handler can pass: the request body is driven from a test-side
-// pipe and deliberately left incomplete, and the uploader must already have seen
-// bytes before the remainder is written. A handler that did io.ReadAll on the
-// request body and handed Upload a buffer would block here until the timeout.
-func TestUploadClientVersion_RelaysBeforeBodyIsComplete(t *testing.T) {
-	up := &streamProbeUploader{saw: make(chan struct{})}
-	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
-	srv := uploadTestServer(t, h)
-
-	bodyR, bodyW := io.Pipe()
-	mw := multipart.NewWriter(bodyW)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseBody := func() { releaseOnce.Do(func() { close(release) }) }
-	writeErr := make(chan error, 1)
-	go func() { writeErr <- writeHeldBody(mw, bodyW, release) }()
-
-	// Without this, a buffering regression would time out below and then hang the
-	// suite: httptest.Server.Close waits for the in-flight request, whose body
-	// never ends. Releasing the writer and tearing down both pipe ends lets the
-	// handler unwind so the failure is reported promptly. All no-ops on success.
-	t.Cleanup(func() {
-		releaseBody()
-		_ = bodyW.CloseWithError(errTestTornDown)
-		_ = bodyR.CloseWithError(errTestTornDown)
-	})
-
-	type result struct {
-		status int
-		err    error
-	}
-	got := make(chan result, 1)
-	go func() {
-		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", bodyR)
-		if err != nil {
-			got <- result{err: err}
-			return
-		}
-		req.Header.Set("Content-Type", mw.FormDataContentType())
-		resp, err := srv.Client().Do(req)
-		if err != nil {
-			got <- result{err: err}
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		got <- result{status: resp.StatusCode}
-	}()
-
-	select {
-	case <-up.saw:
-	case r := <-got:
-		t.Fatalf("request finished before any part reached the uploader: status=%d err=%v", r.status, r.err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("no bytes reached the uploader while the request body was still open — the handler buffered instead of streaming")
-	}
-
-	releaseBody() // only now does the rest of the body exist
-	require.NoError(t, <-writeErr)
-
-	select {
-	case r := <-got:
-		require.NoError(t, r.err)
-		assert.Equal(t, http.StatusOK, r.status)
-	case <-time.After(10 * time.Second):
-		t.Fatal("request did not complete after the body was finished")
-	}
-}
-
-// A truncated client body is the admin's fault, not an upstream outage. The
-// relay's pipe close propagates its read error into Upload, which maps it to
-// Unavailable — so without the handler's errors.Is guard this would answer 503
-// and send ops chasing a phantom outage while the upstream is healthy.
-func TestUploadClientVersion_TruncatedBodyIsBadRequest(t *testing.T) {
-	up := &fakeUploader{}
-	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
-	srv := uploadTestServer(t, h)
-
-	// Hand-built rather than truncated from uploadBody's output, so it is
-	// unambiguous where the body stops: mid-part, with no closing boundary.
-	const boundary = "truncatedbodyboundary"
-	raw := "--" + boundary + "\r\n" +
-		"Content-Disposition: form-data; name=\"configFile\"; filename=\"app.yaml\"\r\n\r\n" +
-		"version: 1"
-
-	status, body := postUpload(t, srv, bytes.NewBufferString(raw), "multipart/form-data; boundary="+boundary)
-
-	assert.Equal(t, http.StatusBadRequest, status)
-	assert.Contains(t, string(body), "could not read the uploaded files")
-}
-
-// abortingUploader reads one chunk and then rejects, the way an upstream that
-// validates the first part does — leaving the relay still writing, so the
-// handler's pr.CloseWithError injects the upstream's own error into the pipe and
-// res.err comes back wrapping it.
-type abortingUploader struct{ err error }
-
-func (a *abortingUploader) Upload(_ context.Context, _ string, body io.Reader) error {
-	var buf [16]byte
-	_, _ = body.Read(buf[:])
-	return a.err
-}
-
-// The mirror of the truncation case: when the upstream is the one that rejects
-// mid-body, its message must survive rather than being replaced by the generic
-// client-side one. Swapping the two checks unconditionally would break this.
-func TestUploadClientVersion_UpstreamRejectionSurvivesTheRelayAbort(t *testing.T) {
-	up := &abortingUploader{err: errcode.BadRequest("configFile must be a .yaml or .yml file")}
-	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
-	srv := uploadTestServer(t, h)
-
-	// Large enough that the relay is certainly still writing when Upload returns.
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
-		"executeFile": {"app.exe", strings.Repeat("A", 4<<20), ""},
-	})
-	status, respBody := postUpload(t, srv, body, ct)
-
-	assert.Equal(t, http.StatusBadRequest, status)
-	assert.Contains(t, string(respBody), "configFile must be a .yaml or .yml file")
-	assert.NotContains(t, string(respBody), "could not read the uploaded files",
-		"the upstream's own message must not be replaced by the client-side one")
 }
 
 // The route must sit inside the /v1/admin group so requireAdmin gates it. A
@@ -768,7 +584,7 @@ func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", "MZ", ""},
 	})
@@ -784,138 +600,15 @@ func TestRoutes_ClientUpdatesRequiresAdmin(t *testing.T) {
 	assert.False(t, up.wasCalled(), "a non-admin request must never reach the upstream")
 }
 
-// stalledUploadBody returns a request body carrying one complete multipart part
-// and then nothing: the client never finishes sending, so the request stays open
-// until a deadline fires. The writer goroutine has a real termination path —
-// CLAUDE.md forbids launching one without — so cleanup signals it and waits
-// rather than leaving it parked for the rest of the run.
-func stalledUploadBody(t *testing.T) (io.Reader, string) {
-	t.Helper()
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	t.Cleanup(func() {
-		close(stop)
-		_ = pw.Close()
-		<-done
-	})
-	go func() {
-		defer close(done)
-		fw, err := mw.CreateFormFile("configFile", "app.yaml")
-		if err != nil {
-			return
-		}
-		_, _ = fw.Write([]byte("version: 1"))
-		<-stop // the writer is never Closed: the body has no terminating boundary
-	}()
-	return pr, mw.FormDataContentType()
-}
-
-// rejectingUploader answers immediately without reading a byte of the body —
-// the shape of a misconfigured service token drawing an instant 401 upstream.
-type rejectingUploader struct{ err error }
-
-func (r *rejectingUploader) Upload(_ context.Context, _ string, _ io.Reader) error { return r.err }
-
-// An upstream that answers before the browser finishes sending must not pin the
-// handler. The relay is parked reading the request body, which closing the pipe
-// does not unblock, so without the teardown in awaitRelay this waits out the
-// extended read deadline. It must also still report the UPSTREAM error: the
-// relay's read failure is our doing, not a bad client body.
-func TestUploadClientVersion_EarlyUpstreamFailureDoesNotStrandTheRelay(t *testing.T) {
-	up := &rejectingUploader{err: errcode.Unavailable("client update upload is misconfigured")}
-	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
-	srv := uploadTestServer(t, h)
-
-	body, ct := stalledUploadBody(t)
-	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", body)
-	require.NoError(t, err)
-	req.Header.Set("Content-Type", ct)
-
-	type result struct {
-		status int
-		err    error
-	}
-	resCh := make(chan result, 1)
-	go func() {
-		resp, doErr := srv.Client().Do(req)
-		if doErr != nil {
-			resCh <- result{err: doErr}
-			return
-		}
-		defer resp.Body.Close()
-		resCh <- result{status: resp.StatusCode}
-	}()
-
-	select {
-	case got := <-resCh:
-		// A transport error is acceptable here — the server closing the request
-		// body mid-send is exactly the teardown under test. What must NOT happen
-		// is hanging until the deadline.
-		if got.err == nil {
-			assert.Equal(t, http.StatusServiceUnavailable, got.status,
-				"the upstream verdict must survive; a 400 would mean the forced-close read error was mistaken for a bad client body")
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("handler did not return promptly — the relay was stranded on the request body")
-	}
-}
-
-func TestRelayParts_RejectsTooManyParts(t *testing.T) {
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	for i := 0; i < maxUploadParts+1; i++ {
-		fw, err := mw.CreateFormFile(fmt.Sprintf("extra%d", i), fmt.Sprintf("f%d.bin", i))
-		require.NoError(t, err)
-		_, err = fw.Write([]byte("x"))
-		require.NoError(t, err)
-	}
-	require.NoError(t, mw.Close())
-
-	out := &bytes.Buffer{}
-	_, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "more than")
-}
-
-// Every part is relayed, but only the contract fields are retained for the audit
-// entry — otherwise a caller choosing arbitrary field names controls how much
-// this map (and the AuditEntry built from it) grows.
-func TestRelayParts_AuditsOnlyTheContractFields(t *testing.T) {
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	for field, name := range map[string]string{
-		"configFile":  "app.yaml",
-		"executeFile": "app.exe",
-		"stowaway":    "junk.bin",
-	} {
-		fw, err := mw.CreateFormFile(field, name)
-		require.NoError(t, err)
-		_, err = fw.Write([]byte("x"))
-		require.NoError(t, err)
-	}
-	require.NoError(t, mw.Close())
-
-	out := &bytes.Buffer{}
-	outWriter := multipart.NewWriter(out)
-	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), outWriter)
-	require.NoError(t, err)
-
-	assert.Equal(t, map[string]string{"configFile": "app.yaml", "executeFile": "app.exe"}, names)
-	// The unknown part is still relayed — admin-service validates nothing.
-	assert.Contains(t, out.String(), "junk.bin")
-}
-
 // slowUploader answers only after the delay elapses, without failing early —
-// the shape of resty's own outbound timeout firing on a stalled upstream.
+// the shape of the outbound timeout firing on a stalled upstream.
 type slowUploader struct {
 	after time.Duration
 	err   error
 }
 
-func (s *slowUploader) Upload(_ context.Context, _ string, body io.Reader) error {
-	_, _ = io.Copy(io.Discard, body)
+func (s *slowUploader) Upload(_ context.Context, body *uploadBody) error {
+	_, _ = io.Copy(io.Discard, body.reader)
 	<-time.After(s.after)
 	return s.err
 }
@@ -933,7 +626,7 @@ func TestUploadClientVersion_AnswersAfterTheOutboundBudgetExpires(t *testing.T) 
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", "MZ", ""},
 	})
@@ -948,31 +641,6 @@ func TestUploadClientVersion_AnswersAfterTheOutboundBudgetExpires(t *testing.T) 
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
-// truncateForLog cuts at a byte offset, which is fine for a log line but not for
-// a value stored in Mongo: a filename over the cap whose boundary falls inside a
-// multi-byte rune would be persisted as invalid UTF-8.
-func TestRelayOnePart_AuditedFileNameStaysValidUTF8(t *testing.T) {
-	// Each 'あ' is 3 bytes, so no multiple of 3 lands on maxAuditFileNameLen —
-	// a byte-offset cut is guaranteed to split a rune.
-	long := strings.Repeat("あ", maxAuditFileNameLen)
-
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	fw, err := mw.CreateFormFile("configFile", long+".yaml")
-	require.NoError(t, err)
-	_, err = fw.Write([]byte("version: 1"))
-	require.NoError(t, err)
-	require.NoError(t, mw.Close())
-
-	out := &bytes.Buffer{}
-	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
-	require.NoError(t, err)
-
-	got := names["configFile"]
-	assert.True(t, utf8.ValidString(got), "audited filename must be valid UTF-8, got %q", got)
-	assert.LessOrEqual(t, len(got), maxAuditFileNameLen+len("...(truncated)"))
-}
-
 // deadlineCapturingUploader records the context it was handed.
 type deadlineCapturingUploader struct {
 	mu       sync.Mutex
@@ -980,8 +648,8 @@ type deadlineCapturingUploader struct {
 	hasDL    bool
 }
 
-func (d *deadlineCapturingUploader) Upload(ctx context.Context, _ string, body io.Reader) error {
-	_, _ = io.Copy(io.Discard, body)
+func (d *deadlineCapturingUploader) Upload(ctx context.Context, body *uploadBody) error {
+	_, _ = io.Copy(io.Discard, body.reader)
 	dl, ok := ctx.Deadline()
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -1002,7 +670,7 @@ func TestUploadClientVersion_UpstreamCallInheritsTheRequestBudget(t *testing.T) 
 	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	body, ct := uploadBody(t, map[string]struct{ filename, content, contentType string }{
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
 		"configFile":  {"app.yaml", "version: 1", ""},
 		"executeFile": {"app.exe", "MZ", ""},
 	})
@@ -1022,41 +690,12 @@ func TestUploadClientVersion_UpstreamCallInheritsTheRequestBudget(t *testing.T) 
 		"the upstream call must inherit the request's budget, not start a fresh one on top of it")
 }
 
-// client-update-service reads its parts with c.FormFile, which selects the FIRST
-// file for a field name. The audit map recorded the LAST, so a request carrying
-// two configFile parts stored file A while the audit entry named file B.
-func TestRelayParts_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
-	body := &bytes.Buffer{}
-	mw := multipart.NewWriter(body)
-	for _, f := range []struct{ field, name string }{
-		{"configFile", "first.yaml"},
-		{"configFile", "second.yaml"},
-		{"executeFile", "first.exe"},
-		{"executeFile", "second.exe"},
-	} {
-		fw, err := mw.CreateFormFile(f.field, f.name)
-		require.NoError(t, err)
-		_, err = fw.Write([]byte("x"))
-		require.NoError(t, err)
-	}
-	require.NoError(t, mw.Close())
-
-	out := &bytes.Buffer{}
-	names, err := relayParts(multipart.NewReader(body, mw.Boundary()), multipart.NewWriter(out))
-	require.NoError(t, err)
-
-	assert.Equal(t, "first.yaml", names["configFile"], "the audit must name the file the upstream actually stores")
-	assert.Equal(t, "first.exe", names["executeFile"])
-	// Every part is still relayed — admin-service validates nothing.
-	assert.Contains(t, out.String(), "second.yaml")
-}
-
 // The upload endpoint has no legitimate reason to redirect, and following one
 // risks the service-account token: net/http strips Authorization only when the
 // HOST changes (shouldCopyHeaderOnRedirect compares hosts, not schemes), so a
 // same-host https->http downgrade — or a hop to a subdomain — would carry the
 // credential onward, in the clear. A 3xx here is an error, not a hop.
-func TestRestyVersionUploader_DoesNotFollowRedirects(t *testing.T) {
+func TestHTTPVersionUploader_DoesNotFollowRedirects(t *testing.T) {
 	var reachedTarget bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reachedTarget = true
@@ -1069,11 +708,9 @@ func TestRestyVersionUploader_DoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := newRestyVersionUploader(restyutil.New(srv.URL,
-		restyutil.WithBearerToken("0123456789abcdef"),
-		restyutil.WithTimeout(5*time.Second)))
+	u := newHTTPVersionUploader(srv.URL, "0123456789abcdef", 5*time.Second)
 
-	err := u.Upload(context.Background(), "application/octet-stream", strings.NewReader("x"))
+	err := u.Upload(context.Background(), testBody(strings.NewReader("x"), 1))
 
 	require.Error(t, err, "a redirect must not be followed silently")
 	assert.False(t, reachedTarget, "the credential must not reach the redirect target")
@@ -1082,34 +719,157 @@ func TestRestyVersionUploader_DoesNotFollowRedirects(t *testing.T) {
 	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
 }
 
-// A client that stalls mid-body trips the request's read deadline. relayParts
-// then fails on its own terms, so the handler's "relay failed and we did not
-// kill it" branch is taken — and it used to answer "could not read the uploaded
-// files", pointing an operator at malformed multipart data when the real cause
-// was the clock. The status stays 4xx (the client did not finish sending), but
-// the message must say so.
-func TestUploadClientVersion_StalledBodyReportsATimeoutNotAMalformedUpload(t *testing.T) {
-	cfg := uploadTestCfg()
-	cfg.ClientUpdateTimeout = 300 * time.Millisecond
-	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(&fakeUploader{}))
+// The whole point of the rewrite: peak memory must stay flat regardless of
+// artifact size. The old io.Pipe relay fed resty, which ran io.ReadAll on the
+// body before dialling, so admin-service held the entire artifact in RAM.
+func TestUploadClientVersion_StreamsWithoutBufferingTheArtifact(t *testing.T) {
+	const artifactSize = 48 << 20
+	// Generous next to the artifact, but far under it: the handler holds only
+	// MaxMultipartMemory plus envelope snapshots, and the rest lives on disk.
+	const maxPeak = 24 << 20
+
+	var received int64
+	up := &countingUploader{onBody: func(r io.Reader) { received, _ = io.Copy(io.Discard, r) }}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
 	srv := uploadTestServer(t, h)
 
-	reqBody, ct := stalledUploadBody(t)
+	// The request body is streamed too — a bytes.Buffer here would put the
+	// artifact on the test's own heap and swamp the measurement.
+	reqBody, ct := streamingPayload(t, artifactSize)
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", reqBody)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", ct)
 
-	// Required, not skipped: the write deadline outlives the read deadline by
-	// uploadResponseMargin precisely so this answer arrives. A closed connection
-	// here is the regression this test exists to catch.
-	resp, err := srv.Client().Do(req)
-	require.NoError(t, err, "the handler must answer the timeout, not drop the connection")
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	var status int
+	peak := testutil.PeakHeapDuring(func() {
+		resp, doErr := srv.Client().Do(req)
+		require.NoError(t, doErr)
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		status = resp.StatusCode
+	})
+
+	require.Equal(t, http.StatusOK, status)
+	require.Greater(t, received, int64(artifactSize), "the artifact must arrive whole")
+	require.LessOrEqualf(t, peak, uint64(maxPeak),
+		"peak heap %d MiB while relaying a %d MiB artifact: the body is being buffered",
+		peak>>20, artifactSize>>20)
+	t.Logf("relayed %d MiB with a %d MiB peak heap", artifactSize>>20, peak>>20)
+}
+
+// streamingPayload builds a multipart request body whose large part is generated
+// on the fly, so constructing it costs no heap.
+func streamingPayload(t *testing.T, bigSize int64) (io.Reader, string) {
+	t.Helper()
+	const boundary = "streamingpayloadboundary"
+	var head bytes.Buffer
+	mw := multipart.NewWriter(&head)
+	require.NoError(t, mw.SetBoundary(boundary))
+
+	fw, err := mw.CreateFormFile("configFile", "app.yaml")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("version: 1"))
+	require.NoError(t, err)
+	// Header only: the content is appended as a generated reader below.
+	_, err = mw.CreateFormFile("executeFile", "app.exe")
 	require.NoError(t, err)
 
-	assert.NotContains(t, string(body), "could not read the uploaded files",
-		"a deadline expiry must not be reported as malformed multipart data")
-	assert.Contains(t, strings.ToLower(string(body)), "time",
-		"the message must name the real cause: the upload ran out of time")
+	tail := "\r\n--" + boundary + "--\r\n"
+	return io.MultiReader(
+		bytes.NewReader(append([]byte(nil), head.Bytes()...)),
+		io.LimitReader(zeroReader{}, bigSize),
+		strings.NewReader(tail),
+	), mw.FormDataContentType()
+}
+
+// countingUploader hands the assembled body to a callback.
+type countingUploader struct{ onBody func(io.Reader) }
+
+func (c *countingUploader) Upload(_ context.Context, body *uploadBody) error {
+	c.onBody(body.reader)
+	return nil
+}
+
+// client-update-service reads its parts with c.FormFile, which selects the FIRST
+// file for a field name. The audit entry must name that file, not a later
+// duplicate, or the log claims something the upstream never stored.
+func TestUploadClientVersion_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
+	up := &fakeUploader{}
+	store := &recordingAuditStore{}
+	h := newHandler(store, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	raw := &bytes.Buffer{}
+	mw := multipart.NewWriter(raw)
+	for _, f := range []struct{ field, name string }{
+		{"configFile", "first.yaml"}, {"configFile", "second.yaml"},
+		{"executeFile", "first.exe"}, {"executeFile", "second.exe"},
+	} {
+		fw, err := mw.CreateFormFile(f.field, f.name)
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+
+	status, _ := postUpload(t, srv, raw, mw.FormDataContentType())
+	require.Equal(t, http.StatusOK, status)
+
+	entries := store.audited()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "first.yaml", entries[0].Details["configFile"])
+	assert.Equal(t, "first.exe", entries[0].Details["executeFile"])
+	// Every part is still relayed — admin-service validates nothing.
+	assert.Contains(t, string(up.relayedBody()), "second.yaml")
+}
+
+// A caller must not be able to hold the relay open with an unbounded number of
+// parts, nor grow the audit entry by choosing arbitrary field names.
+func TestUploadClientVersion_RejectsTooManyParts(t *testing.T) {
+	up := &fakeUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	raw := &bytes.Buffer{}
+	mw := multipart.NewWriter(raw)
+	for i := 0; i <= maxUploadParts; i++ {
+		fw, err := mw.CreateFormFile(fmt.Sprintf("extra%02d", i), fmt.Sprintf("f%d.bin", i))
+		require.NoError(t, err)
+		_, err = fw.Write([]byte("x"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, mw.Close())
+
+	status, respBody := postUpload(t, srv, raw, mw.FormDataContentType())
+
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, string(respBody), "could not read the uploaded files")
+	assert.False(t, up.wasCalled(), "nothing may reach the upstream once the part cap trips")
+}
+
+// An audited filename over the cap must stay valid UTF-8 in Mongo: a byte-offset
+// cut could split a multi-byte rune.
+func TestBuildUploadBody_AuditedFileNameStaysValidUTF8(t *testing.T) {
+	// Each rune is 3 bytes, so no multiple lands on the cap: a byte cut splits one.
+	long := strings.Repeat("あ", maxAuditFileNameLen)
+
+	raw := &bytes.Buffer{}
+	mw := multipart.NewWriter(raw)
+	fw, err := mw.CreateFormFile("configFile", long+".yaml")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("version: 1"))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	form, err := multipart.NewReader(raw, mw.Boundary()).ReadForm(1 << 20)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = form.RemoveAll() })
+
+	body, err := buildUploadBody(form)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = body.Close() })
+
+	got := body.names["configFile"]
+	assert.True(t, utf8.ValidString(got), "audited filename must be valid UTF-8, got %q", got)
+	assert.LessOrEqual(t, len(got), maxAuditFileNameLen+len("...(truncated)"))
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
-	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
@@ -105,14 +104,17 @@ func run() error {
 		}
 		return nil
 	}
-	// No retries and no SetContentLength on this client — see newRestyVersionUploader.
-	uploader := newRestyVersionUploader(restyutil.New(cfg.ClientUpdateURL,
-		restyutil.WithBearerToken(cfg.ClientUpdateToken),
-		restyutil.WithTimeout(cfg.ClientUpdateTimeout)))
+	uploader := newHTTPVersionUploader(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
 	h := newHandler(st, sessStore, cfg, nc, publish, withVersionUploader(uploader))
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// Artifacts are streamed on to client-update-service, so nothing needs to stay
+	// resident. Gin's 32 MiB default would cost roughly 3x that per in-flight
+	// upload, because bytes.Buffer doubles as it grows. The trade is disk for RAM:
+	// parts over the cap spool to the OS temp dir (removed when the request ends),
+	// so ephemeral storage must fit the concurrent-upload total.
+	r.MaxMultipartMemory = maxMultipartMemory
 	obsMW := o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
 	applyBaseMiddleware(r, obsMW)
 	registerRoutes(r, h, sessStore, cfg.SiteID)
