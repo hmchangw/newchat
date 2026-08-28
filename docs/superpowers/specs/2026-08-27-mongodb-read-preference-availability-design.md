@@ -520,6 +520,17 @@ meantime either — the archive is a write, so during the outage that blocked th
 index it cannot land at all; the first rotation *after* a primary returns is
 both the first write at risk and the point the index is repaired.
 
+A repair that keeps failing — an `IndexOptionsConflict`, meaning someone changed
+the index deliberately — is an operator condition, so it is metered
+(`room_key_store_errors_total{op="RepairIndexes"}`) and logged at `Error`. Alert
+on that counter: the absence of expiry is otherwise invisible until the
+collection has already grown. The archive still writes in that state, and that
+is deliberate. Refusing to archive would trade a retention leak for **losing
+retired key material**, and `key.get` would then permanently fail for messages
+already encrypted under the rotated-out version — the exact failure §5.3 exists
+to prevent. Unbounded retention is recoverable by fixing the index; a lost key
+is not.
+
 This does **not** reopen §3. Pod restarts mid-incident still depend on the
 startup-ping PR; this only removes a blocker that sits *behind* the ping and is
 specific to the three services whose key handles this change makes

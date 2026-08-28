@@ -367,7 +367,14 @@ func (s *mongoStore) repairIndexes(ctx context.Context) {
 	idxCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), indexRepairTimeout)
 	defer cancel()
 	if err := s.EnsureIndexes(idxCtx); err != nil {
-		slog.WarnContext(ctx, "retired room key TTL index still unavailable; archiving anyway", "error", err)
+		// Error, not Warn, and metered: a repair that keeps failing is an
+		// operator-actionable condition (an index changed out from under us),
+		// not a transient blip. Alert on this counter rather than on the absence
+		// of expiry, which is invisible until the collection has already grown.
+		roomkeymetrics.StoreErrors.Add(ctx, 1,
+			metric.WithAttributes(attribute.String("op", "RepairIndexes")))
+		slog.ErrorContext(ctx, "retired room key TTL index unavailable; archiving without expiry",
+			"error", err)
 	}
 }
 
