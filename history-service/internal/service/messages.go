@@ -89,6 +89,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.resolveRemovedMemberNames(c, page.Data)
 	// Trim last: both passes above change encoded size. Rows are DESC, so
 	// dropping the tail leaves the client's next before = oldest kept createdAt.
 	kept, trimmed, err := s.fitPage(c, page.Data, pageEnvelope)
@@ -159,6 +160,7 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
+	s.resolveRemovedMemberNames(c, page.Data)
 	return &models.LoadNextMessagesResponse{
 		Messages:          page.Data,
 		NextCursor:        page.NextCursor,
@@ -225,6 +227,7 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 		only := *centralMsg
 		redactUnavailableQuote(&only, accessSince)
 		decodeMessageAttachments(c, &only)
+		s.resolveRemovedMemberName(c, &only)
 		// Serial best-effort read — this path issues no page reads to parallelise against.
 		return &models.LoadSurroundingMessagesResponse{
 			Messages:          []models.Message{only},
@@ -369,6 +372,7 @@ func (s *HistoryService) assembleSurrounding(
 
 	redactUnavailableQuotes(messages, accessSince)
 	setDecodedAttachments(c, messages)
+	s.resolveRemovedMemberNames(c, messages)
 	// Trim outward from the pivot so the caller keeps the row they centred on;
 	// each end that loses rows sets its own "more" flag.
 	lo, hi, narrowed, err := s.fitWindow(c, messages, len(beforePage.Data), pageEnvelope)
@@ -434,6 +438,7 @@ func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMes
 
 	redactUnavailableQuote(msg, accessSince)
 	decodeMessageAttachments(c, msg)
+	s.resolveRemovedMemberName(c, msg)
 	return msg, nil
 }
 
@@ -478,6 +483,7 @@ func (s *HistoryService) GetMessagesByIDs(c *natsrouter.Context, req models.GetM
 
 	redactUnavailableQuotes(kept, accessSince)
 	setDecodedAttachments(c, kept)
+	s.resolveRemovedMemberNames(c, kept)
 	return &models.GetMessagesByIDsResponse{Messages: kept}, nil
 }
 

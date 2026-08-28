@@ -83,6 +83,10 @@ func (s subL2Source) GetSubscription(ctx context.Context, account, roomID string
 	return s.inner.GetSubscription(ctx, account, roomID)
 }
 
+// previewDrainTimeout caps the preview warm-back drain at shutdown, well inside the 25s
+// total so the closers after it keep their share.
+const previewDrainTimeout = 3 * time.Second
+
 func main() {
 	logctx.SetupDefault(os.Stdout)
 
@@ -282,6 +286,20 @@ func main() {
 		)
 	}
 
+	// Collapses the repeated account lookups a scroll-back makes while resolving
+	// legacy members_removed rows. Sized and expired like the other services
+	// fronting this store — see the config field for why the TTL is not longer.
+	var userSource service.UserStore = userStore
+	if cfg.UserCacheSize > 0 && cfg.UserCacheTTL > 0 {
+		uc, err := userstore.NewCache(userStore, cfg.UserCacheSize, cfg.UserCacheTTL)
+		if err != nil {
+			slog.Error("init user cache failed", "error", err)
+			os.Exit(1)
+		}
+		userSource = uc
+		slog.Info("user cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
+	}
+
 	// Fence the room reads before the L1 cache wraps them: they fail open, but
 	// only once they fail FAST (see breakerRoomRepo). Its own breaker, so
 	// room-read health and subscription-read health cannot mask each other.
@@ -345,7 +363,7 @@ func main() {
 		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
 
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
+	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
 	// per-site + metrics router options and the guard's admission cap; the
@@ -372,6 +390,15 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		// After the router stops (no new warm-backs queued), before Mongo closes under them.
+		// On its own sub-budget: the drain is optional work, and letting a deep queue on a
+		// slow Mongo spend the shared window would starve the steps below it — Mongo,
+		// Cassandra, Vault, and the telemetry flush that reports this shutdown at all.
+		func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, previewDrainTimeout)
+			defer cancel()
+			return svc.Close(ctx)
+		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error {

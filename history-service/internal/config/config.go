@@ -139,6 +139,23 @@ type Config struct {
 	// long a room stays cheap to read *during* an outage.
 	// 0 disables it, leaving the walk as wide as the configured history floor.
 	RoomTimesL2 roomtimescache.TTLConfig
+	// User profile cache, fronting both account lookups: the batch that resolves
+	// legacy members_removed display names, and reactions' single-account read,
+	// whose name is denormalized into the persisted ReactorInfo — so the TTL
+	// bounds how long a renamed user's reactions are written under the old name.
+	// Unprefixed and 10000/5m to match the six other services that front this
+	// same store, so a fleet-wide USER_CACHE_* change reaches history-service
+	// too. Set size or ttl to 0 to disable.
+	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
+
+	// Background writer that stores walk-resolved previews back onto the room doc,
+	// off the request path. Queue depth is what bounds the memory a burst of cold
+	// rooms can pin; overflow sheds the write, which the next read re-derives.
+	// Non-positive takes the built-in default for either — warm-back is what keeps
+	// the lazy walk from repeating forever, so there is no disable value.
+	PreviewWarmBackWorkers int `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
+	PreviewWarmBackQueue   int `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
@@ -186,6 +203,20 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.UserCacheSize < 0 {
+		return fmt.Errorf("USER_CACHE_SIZE must be >= 0, got %d", cfg.UserCacheSize)
+	}
+	if cfg.UserCacheTTL < 0 {
+		return fmt.Errorf("USER_CACHE_TTL must be >= 0, got %s", cfg.UserCacheTTL)
+	}
+	// Non-positive means "take the default" here, not "disable", so only a negative
+	// is rejected — it would otherwise read as an intent the wiring cannot honour.
+	if cfg.PreviewWarmBackWorkers < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_WORKERS must be >= 0, got %d", cfg.PreviewWarmBackWorkers)
+	}
+	if cfg.PreviewWarmBackQueue < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_QUEUE must be >= 0, got %d", cfg.PreviewWarmBackQueue)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)

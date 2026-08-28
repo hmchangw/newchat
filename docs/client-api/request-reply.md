@@ -137,7 +137,8 @@ Uploads a single file (image/audio/video/document) and returns a render-ready
 [Attachment](../client-api.md#attachment) for the client to embed in a `msg.send`
 (§4) — pure HTTP, does **not** itself publish a message. `Content-Type:
 multipart/form-data`. `ssoToken` header **or** `x-user-id` + `x-auth-token` required;
-caller must be a room member. See
+caller must be a room member. The returned `fileType` is server-derived — the
+part's declared `Content-Type` is used only when it is specific. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadfile).
 
 **Emits:** `None — HTTP-only.`

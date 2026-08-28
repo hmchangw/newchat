@@ -189,12 +189,12 @@ func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
-	})
+	}))
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-integ"
@@ -253,12 +253,12 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
-	})
+	}))
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-del-integ"
@@ -315,12 +315,12 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
-	})
+	}))
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-parent-cascade"
@@ -384,12 +384,12 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
-	})
+	}))
 
 	sender := models.Participant{ID: "u1", Account: "alice"}
 	roomID := "r-thread-meta-event"

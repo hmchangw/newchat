@@ -27,12 +27,9 @@ const (
 	lastMsgWalkMaxScan   = 250
 	lastMsgWalkMaxPage   = cassrepo.MaxPageSize
 
-	// Bounds the optional write: it runs before the reply, so a stall can't eat the deadline.
+	// Bounds one preview write. Shared with the mutation path's repair (persistMutatedPreview),
+	// which stays inline because withdrawing a stale preview is correctness, not optimization.
 	warmBackTimeout = 2 * time.Second
-	// warmBackReserve is the budget left for the reply itself. Below timeout+reserve the
-	// warm-back is skipped: it holds one of maxRoomsGetConcurrency slots for its whole
-	// run, so on a cold batch the waves compound and would otherwise overrun the request.
-	warmBackReserve = 250 * time.Millisecond
 )
 
 // RoomsGet returns each room's list preview from the doc, falling back to the walk so a
@@ -151,24 +148,22 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt m
 
 // warmBackPreview stores a walk-resolved preview, making an eager-path miss self-healing.
 // asOf is walk time: on createdAt, an edited room would reject this write forever.
+//
+// Queued rather than written here: the write is optional and the reply is not, and sharing
+// the request's budget skipped it exactly where it mattered — a cold batch is what leaves
+// no budget, and a room that never warms back is what makes the next batch cold. See
+// previewWarmer.
 func (s *HistoryService) warmBackPreview(ctx context.Context, roomID string, w *previewWalk, now time.Time) {
 	// No observed id means no key to invalidate against later.
 	if w.NewestObservedID == "" {
 		return
 	}
-	// Storing the preview is optional; returning it is not. A skipped warm-back costs one
-	// re-walk on a later read, when the budget may be whole — overrunning costs the reply.
-	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < warmBackTimeout+warmBackReserve {
-		slog.DebugContext(ctx, "room preview warm-back skipped; too little request budget left",
-			"room_id", roomID, "request_id", natsutil.RequestIDFromContext(ctx))
-		return
-	}
-	wctx, cancel := context.WithTimeout(ctx, warmBackTimeout)
-	defer cancel()
-	if err := s.rooms.SetPreviewMessage(wctx, roomID, w.Preview, w.NewestObservedID, now.UnixMilli()); err != nil {
-		slog.WarnContext(ctx, "room preview warm-back failed", "room_id", roomID,
-			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
-	}
+	s.warmer.Submit(ctx, &warmBackJob{
+		roomID:   roomID,
+		preview:  w.Preview,
+		forMsgID: w.NewestObservedID,
+		asOf:     now.UnixMilli(),
+	})
 }
 
 // previewResolveState separates previewEmpty (safe to clear) from previewDegraded (unknown).

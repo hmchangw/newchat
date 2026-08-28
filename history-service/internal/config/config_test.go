@@ -18,15 +18,19 @@ import (
 // doesn't touch them.
 func baseValid() Config {
 	return Config{
-		SubCacheSize:     100000,
-		SubCacheTTL:      2 * time.Minute,
-		RoomCacheSize:    50000,
-		RoomCacheTTL:     10 * time.Second,
-		PreviewKeyEpoch:  1,
-		PreviewCacheSize: 50000,
-		PreviewCacheTTL:  10 * time.Second,
-		Pool:             mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0, ServerSelectionTimeout: 2 * time.Second},
-		Guard:            natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
+		SubCacheSize:           100000,
+		SubCacheTTL:            2 * time.Minute,
+		RoomCacheSize:          50000,
+		RoomCacheTTL:           10 * time.Second,
+		PreviewKeyEpoch:        1,
+		PreviewCacheSize:       50000,
+		PreviewCacheTTL:        10 * time.Second,
+		PreviewWarmBackWorkers: 8,
+		PreviewWarmBackQueue:   1024,
+		// ServerSelectionTimeout is this branch's: a stopped Mongo goes quiet
+		// rather than erroring, so an unbounded selection outlives the caller.
+		Pool:  mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0, ServerSelectionTimeout: 2 * time.Second},
+		Guard: natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
 	}
 }
 
@@ -115,6 +119,46 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{name: "workers", set: func(c *Config) { c.PreviewWarmBackWorkers = -1 }, want: "PREVIEW_WARMBACK_WORKERS"},
+		{name: "queue", set: func(c *Config) { c.PreviewWarmBackQueue = -1 }, want: "PREVIEW_WARMBACK_QUEUE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseValid()
+			tc.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
+// repeating forever, so the wiring never turns it off.
+func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewWarmBackWorkers = 0
+	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+}
+
+func TestLoad_WarmBackDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	testutil.UnsetEnv(t, "PREVIEW_WARMBACK_WORKERS")
+	testutil.UnsetEnv(t, "PREVIEW_WARMBACK_QUEUE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 8, cfg.PreviewWarmBackWorkers)
+	assert.Equal(t, 1024, cfg.PreviewWarmBackQueue)
 }
 
 // The epoch is part of the preview DEK id, so a non-positive value mints a
@@ -380,4 +424,20 @@ func TestLoad_L2TTLEnvNamesUnchanged(t *testing.T) {
 	assert.Equal(t, 22*time.Minute, cfg.SubL2.TTL)
 	assert.Equal(t, 55*time.Minute, cfg.DEKL2.TTL)
 	assert.Equal(t, 66*time.Minute, cfg.RoomTimesL2.TTL)
+}
+
+func TestValidate_RejectsNegativeUserCacheSize(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheSize = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_SIZE")
+}
+
+func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
 }
