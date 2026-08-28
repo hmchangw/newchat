@@ -99,8 +99,16 @@ func TestConfig_MentionableLimits(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 
 	t.Run("defaults", func(t *testing.T) {
-		require.NoError(t, os.Unsetenv("MENTIONABLE_DEFAULT_LIMIT"))
-		require.NoError(t, os.Unsetenv("MENTIONABLE_MAX_LIMIT"))
+		// Unset both and restore the caller's env after the subtest so later
+		// tests don't observe defaults instead of their configured values.
+		for _, k := range []string{"MENTIONABLE_DEFAULT_LIMIT", "MENTIONABLE_MAX_LIMIT"} {
+			if v, ok := os.LookupEnv(k); ok {
+				t.Cleanup(func() { _ = os.Setenv(k, v) })
+			} else {
+				t.Cleanup(func() { _ = os.Unsetenv(k) })
+			}
+			require.NoError(t, os.Unsetenv(k))
+		}
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
 		assert.Equal(t, 3, cfg.MentionableDefaultLimit)
