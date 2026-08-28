@@ -13,6 +13,7 @@ services:
       - SITE_ID=site-local
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=chat
       - MAX_CONCURRENCY=200
       # Owns BOT-MESSAGES-CANONICAL-{siteID}; provisions on boot in dev.

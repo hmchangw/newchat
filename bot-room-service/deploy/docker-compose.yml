@@ -14,9 +14,11 @@ services:
       - ALL_SITE_IDS=site-local
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_KEY_READ_PREFERENCE=${MONGO_KEY_READ_PREFERENCE:-primaryPreferred}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=chat
       - ROOM_KEY_GRACE_PERIOD=24h
-      - ROOM_KEY_RETIRED_TTL=20m
+      - ROOM_KEY_RETIRED_TTL=30m
       - MAX_CONCURRENCY=200
     volumes:
       - ../../docker-local/backend.creds:/etc/nats/backend.creds:ro

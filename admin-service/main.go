@@ -65,10 +65,18 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+	// Transactions pin primary independently — see storeMongo.withTransaction.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	db := mongoClient.Database(cfg.MongoDB)
 	st := newStoreMongo(db)

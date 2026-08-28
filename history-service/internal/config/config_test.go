@@ -265,3 +265,39 @@ func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
 }
+
+// Without this, encrypted history cannot be read at all when there is no
+// primary: cassrepo/decrypt.go cannot decrypt without the DEK.
+func TestLoad_DefaultsKeyReadPreferenceToPrimaryPreferred(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	unsetEnv(t, "MONGO_KEY_READ_PREFERENCE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.Mongo.KeyReadPreference)
+}
+
+func TestValidate_RejectsInvalidKeyReadPreference(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.KeyReadPreference = "quorum"
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_KEY_READ_PREFERENCE")
+}
+
+// history-service's DEK handles must bind the same wire name as the other
+// key-touching services; its Mongo block carries an envPrefix, so the tag is
+// KEY_READ_PREFERENCE and the wire name is MONGO_KEY_READ_PREFERENCE.
+func TestLoad_KeyReadPreferenceWireName(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "nearest") // a value no default would produce
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "nearest", cfg.Mongo.KeyReadPreference,
+		"the field must bind to MONGO_KEY_READ_PREFERENCE via the MONGO_ envPrefix")
+}

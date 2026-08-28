@@ -60,6 +60,8 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred: EmojiDoc/Avatar are read right after UpsertEmoji/SetBotAvatar.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	// Pool bounds the shared Mongo client's connection pool
 	// (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).

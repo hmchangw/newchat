@@ -32,6 +32,11 @@ type MongoConfig struct {
 	// ReadPreference is the client-level read preference; secondaryPreferred offloads
 	// history reads. DEK reads pin to primary in code regardless.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// KeyReadPreference covers the at-rest and preview DEK collections. Separate
+	// from the client-wide preference because key freshness matters more, but
+	// primaryPreferred rather than primary: without it, encrypted history cannot be
+	// read at all when there is no primary.
+	KeyReadPreference string `env:"KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -177,6 +182,9 @@ func validate(cfg *Config) error {
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
+	}
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference); err != nil {
+		return fmt.Errorf("MONGO_KEY_READ_PREFERENCE: %w", err)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
 		return err

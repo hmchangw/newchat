@@ -19,6 +19,7 @@ services:
       - CASSANDRA_KEYSPACE=${CASSANDRA_KEYSPACE:-chat}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       # In-process user cache (pkg/userstore.Cache, shared with message-gatekeeper
       # and broadcast-worker). Defaults: 10000 entries, 5m TTL.
       - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}

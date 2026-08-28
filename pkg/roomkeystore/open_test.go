@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // OpenMongo validates before touching the DB, so a nil database proves the guards short-circuit.
@@ -30,4 +31,28 @@ func TestOpenMongo_RejectsNonPositiveDurations(t *testing.T) {
 			assert.Nil(t, store, "no store may be returned alongside an error")
 		})
 	}
+}
+
+// The key.get that resolves a stamped version is served through OpenMongo, while
+// broadcast-worker encrypts against its own handle. If the two disagree about
+// falling back to a secondary, the producer keeps delivering messages whose keys
+// the consumer cannot fetch — worse than both failing together.
+func TestOpenMongo_ReadPreferenceOption(t *testing.T) {
+	t.Run("defaults to primaryPreferred", func(t *testing.T) {
+		cfg := newOpenConfig()
+		require.NotNil(t, cfg.readPref)
+		assert.Equal(t, readpref.PrimaryPreferredMode, cfg.readPref.Mode())
+	})
+
+	t.Run("explicit preference is honoured", func(t *testing.T) {
+		cfg := newOpenConfig(WithKeyReadPreference(readpref.Primary()))
+		require.NotNil(t, cfg.readPref)
+		assert.Equal(t, readpref.PrimaryMode, cfg.readPref.Mode())
+	})
+
+	t.Run("nil preference falls back to the default rather than unsetting it", func(t *testing.T) {
+		cfg := newOpenConfig(WithKeyReadPreference(nil))
+		require.NotNil(t, cfg.readPref, "a nil option must not leave the handles on the driver default")
+		assert.Equal(t, readpref.PrimaryPreferredMode, cfg.readPref.Mode())
+	})
 }
