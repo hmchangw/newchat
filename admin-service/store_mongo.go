@@ -9,6 +9,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -247,7 +248,14 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 // replica-set deployment (production, and the RS container in integration tests).
 // The driver retries fn on transient transaction errors.
 func (s *storeMongo) withTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	sess, err := s.users.Database().Client().StartSession()
+	// The session — and therefore the transaction — inherits the CLIENT read
+	// preference, and MongoDB rejects a non-primary one inside a transaction.
+	// SessionOptionsBuilder has no SetDefaultReadPreference in driver v2, so the
+	// transaction options are the seam. Pinning here keeps the client free to
+	// prefer a secondary for ordinary reads.
+	sess, err := s.users.Database().Client().StartSession(
+		options.Session().SetDefaultTransactionOptions(
+			options.Transaction().SetReadPreference(readpref.Primary())))
 	if err != nil {
 		return fmt.Errorf("start session: %w", err)
 	}
