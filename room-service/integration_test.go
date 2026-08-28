@@ -198,12 +198,8 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.WithinDuration(t, hss, *got.HistorySharedSince, time.Second)
 }
 
-// TestMongoStore_GetUser_ProjectionFields_Integration pins the field set that
-// GetUser's projection must return: every User field read by a room-service
-// call site (createRoom's requester/counterpart name validation, the
-// IsPlatformAdmin gate on roomRename/roomRestricted, and the Teams system
-// message's display name). It also pins what must NOT come back — the
-// users.services credential block above all.
+// Pins every User field a room-service call site reads, and — above all —
+// that users.services never comes back.
 func TestMongoStore_GetUser_ProjectionFields_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -236,9 +232,7 @@ func TestMongoStore_GetUser_ProjectionFields_Integration(t *testing.T) {
 	assert.False(t, got.StatusIsShow)
 }
 
-// TestMongoStore_GetApp_ProjectionFields_Integration pins the narrow app read:
-// both room-service call sites (botDM create, addMembers bot validation) read
-// only Assistant.Enabled, so nothing else needs to cross the wire.
+// Pins the narrow app read: both call sites need only Assistant.Enabled.
 func TestMongoStore_GetApp_ProjectionFields_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -267,9 +261,7 @@ func TestMongoStore_GetApp_ProjectionFields_Integration(t *testing.T) {
 	assert.Nil(t, got.Sponsors)
 }
 
-// TestMongoStore_FindDMSubscription_ProjectionFields_Integration pins the
-// dedup read: both call sites use the result solely to return an existing
-// RoomID, so the fat ~35-field Subscription doc is never needed here.
+// Pins the dedup read: both call sites use only RoomID.
 func TestMongoStore_FindDMSubscription_ProjectionFields_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -299,9 +291,7 @@ func TestMongoStore_FindDMSubscription_ProjectionFields_Integration(t *testing.T
 	assert.False(t, got.Alert)
 }
 
-// TestMongoStore_GetThreadSubscriptionByParent_ProjectionFields_Integration
-// pins the narrow thread read: the single call site (messageThreadRead) uses
-// the result only for ThreadRoomID and the not-found sentinel.
+// Pins the narrow thread read: messageThreadRead uses only ThreadRoomID.
 func TestMongoStore_GetThreadSubscriptionByParent_ProjectionFields_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -330,10 +320,8 @@ func TestMongoStore_GetThreadSubscriptionByParent_ProjectionFields_Integration(t
 	assert.False(t, got.HasMention)
 }
 
-// TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration guards the
-// projected getRoomSubscriptions path: the fallback (enrich=false) build of
-// RoomMember reads only _id, u._id, u.account, roles and joinedAt off each
-// subscription. Dropping one from the projection zeroes it in the result.
+// Guards the getRoomSubscriptions fallback (no room_members doc): dropping any
+// projected field zeroes it in the RoomMember result.
 func TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)

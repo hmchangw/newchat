@@ -708,10 +708,7 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 	}
 }
 
-// roomMemberSubProjection: the RoomMember rows this path builds read only _id,
-// u._id, u.account, roles and joinedAt, so the ~35-field Subscription doc is
-// never decoded for a member list. Note SubscriptionUser.ID maps to bson
-// "_id", so the nested path is u._id — "u.id" would project nothing.
+// The nested path is u._id, not u.id — SubscriptionUser.ID is bson "_id".
 var roomMemberSubProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u._id", Value: 1}, {Key: "u.account", Value: 1},
 	{Key: "roles", Value: 1}, {Key: "joinedAt", Value: 1},
@@ -880,13 +877,8 @@ func (s *MongoStore) findAppsForDisplay(ctx context.Context, botAccounts []strin
 	return out, nil
 }
 
-// userReadProjection is the field set GetUser returns — the union of every
-// User field a room-service call site reads: _id and account (BuildDMRoomID /
-// RequesterAccount), engName and chineseName (the create-room name validation
-// and the Teams system-message display name) and roles (IsPlatformAdmin gates
-// roomRename and roomRestricted). Projecting keeps users.services — the bcrypt
-// credential block — off this path entirely; the projection-field integration
-// test guards drift.
+// Keeps users.services (bcrypt) off this path. Omits active, so a caller
+// adding an IsActive check must add it back — nil reads as active.
 var userReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "account", Value: 1},
 	{Key: "engName", Value: 1}, {Key: "chineseName", Value: 1},
@@ -906,9 +898,7 @@ func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, 
 	return &u, nil
 }
 
-// appAssistantReadProjection: both GetApp call sites (botDM create, addMembers
-// bot validation) read only Assistant.Enabled, so the app's display metadata,
-// sponsors and per-locale view URLs never need to cross the wire.
+// Both call sites read only Assistant.Enabled.
 var appAssistantReadProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "assistant", Value: 1},
 }
@@ -926,8 +916,7 @@ func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App,
 	return &a, nil
 }
 
-// dmDedupProjection: the open-or-create dedup check uses the hit solely to
-// return the existing RoomID, so the fat Subscription doc is never decoded.
+// The open-or-create dedup check returns only the existing RoomID.
 var dmDedupProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "roomId", Value: 1},
 }
@@ -1528,8 +1517,7 @@ func (s *MongoStore) ListThreadReadReceipts(
 	return rows, nil
 }
 
-// threadSubParentProjection: the single call site (messageThreadRead) reads
-// only ThreadRoomID off the hit — everything else is the not-found sentinel.
+// messageThreadRead reads only ThreadRoomID; the rest is the not-found sentinel.
 var threadSubParentProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "threadRoomId", Value: 1},
 }
