@@ -46,7 +46,7 @@ func newThreadListService(t *testing.T) (
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg))
 	return svc, msgs, subs, rooms, threadSubs
 }
 

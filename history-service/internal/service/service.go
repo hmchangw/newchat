@@ -180,6 +180,8 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	// warmer stores walk-resolved previews off the request path; Close drains it.
+	warmer *previewWarmer
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
@@ -212,6 +214,7 @@ func New(
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
 	}
+	s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
 	// A method value derefs its receiver where written, so this is guarded, not eager.
 	if apps != nil {
 		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
@@ -220,6 +223,13 @@ func New(
 		opt(s)
 	}
 	return s
+}
+
+// Close stops the background preview writer and waits for its queue to drain. Call once
+// the router has stopped accepting requests and before the Mongo client closes; ctx bounds
+// the drain, and an expired one abandons the remaining writes rather than holding shutdown.
+func (s *HistoryService) Close(ctx context.Context) error {
+	return s.warmer.Close(ctx)
 }
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).
