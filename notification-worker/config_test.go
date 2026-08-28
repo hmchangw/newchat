@@ -138,8 +138,12 @@ func TestConfig_PoolValidate(t *testing.T) {
 func TestConfig_UserReadPreferenceDefault(t *testing.T) {
 	t.Setenv("VALKEY_ADDRS", "valkey:6379")
 	t.Setenv("MODE", "user")
+	// Both vars must be unset: the assertions below cover the client-wide
+	// preference too, so a host value for either would fail the test spuriously.
 	t.Setenv("MONGO_USER_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	t.Setenv("MONGO_READ_PREFERENCE", "")
 	require.NoError(t, os.Unsetenv("MONGO_USER_READ_PREFERENCE"))
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE"))
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
