@@ -129,3 +129,32 @@ func TestSubL2Source_SubscribedResolvesThroughBaseSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, subscribed, "a subscribed user resolves through the base L2 source with no L1")
 }
+
+// A cancelled caller is evidence about the CALLER, not about MongoDB. This
+// breaker fences the subauth tier, whose read fails CLOSED: counting
+// cancellations would let a burst of them open it and reject every cold access
+// check against a perfectly healthy database.
+func TestSubBreakerFailure_CancelledCallerDoesNotTripBreaker(t *testing.T) {
+	b := circuitbreaker.New(2, time.Minute,
+		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+
+	for range 5 {
+		err := b.Do(func() error { return context.Canceled })
+		require.ErrorIs(t, err, context.Canceled, "the cancellation must still reach the caller")
+	}
+	assert.Equal(t, circuitbreaker.StateClosed, b.State(),
+		"a cancelled caller must not count as a Mongo failure")
+}
+
+// An unreachable MongoDB reports itself as a DeadlineExceeded from the driver's
+// server-selection bound, so it must still count or the fence never engages.
+func TestSubBreakerFailure_DeadlineExceededTripsBreaker(t *testing.T) {
+	b := circuitbreaker.New(2, time.Minute,
+		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+
+	for range 2 {
+		require.ErrorIs(t, b.Do(func() error { return context.DeadlineExceeded }), context.DeadlineExceeded)
+	}
+	assert.Equal(t, circuitbreaker.StateOpen, b.State(),
+		"an unreachable MongoDB must open the subscription breaker")
+}

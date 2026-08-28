@@ -73,3 +73,13 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetaca
 // healthy Mongo; counting it would let a burst of requests for deleted or
 // mistyped rooms open the breaker and degrade every other room's meta read.
 var metaBreakerFailure = mongoutil.BreakerFailure()
+
+// subBreakerFailure is the failure predicate the subscription breaker must be
+// constructed with. Unlike metaBreakerFailure it is not about not-founds:
+// subauthcache's loader already turns mongo.ErrNoDocuments into "not
+// subscribed" before the breaker sees it. What this buys is the context.Canceled
+// exemption — a cancelled caller is evidence about the caller, not about Mongo,
+// and counting it would let cancellations fence a healthy database. Note the
+// asymmetry it preserves: context.DeadlineExceeded still counts, because that is
+// how an unreachable MongoDB reports itself.
+var subBreakerFailure = mongoutil.BreakerFailure()

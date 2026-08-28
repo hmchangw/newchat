@@ -15,6 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -158,7 +159,8 @@ func main() {
 	// survives an outage that outlasts its deadline.
 	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
 	// Guard the loader, not the Lookup: an open breaker must still serve L2 hits.
-	memberBreaker := cfg.Breaker.New(ctx, "roomsub")
+	memberBreaker := cfg.Breaker.New(ctx, "roomsub",
+		circuitbreaker.WithFailurePredicate(memberBreakerFailure))
 	memberLookup := roomsubcache.NewLookup(cache,
 		roomsubcache.GuardLoader(loader, memberBreaker), cfg.RoomSubCache.TTL)
 

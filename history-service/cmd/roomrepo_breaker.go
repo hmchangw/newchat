@@ -102,3 +102,14 @@ func (r *breakerRoomRepo) InvalidatePreviewKey(ctx context.Context, roomID, msgI
 		return r.inner.InvalidatePreviewKey(ctx, roomID, msgID, asOf)
 	})
 }
+
+// subBreakerFailure is the failure predicate the subscription-tier breaker must
+// be built with. Not a not-found rule like roomBreakerFailure: subauthcache's
+// loader resolves mongo.ErrNoDocuments to "not subscribed" before the breaker
+// sees it. What this buys is the context.Canceled exemption. It matters more
+// here than on the room reads because this tier fails CLOSED — an open breaker
+// rejects the access check rather than widening a walk — so cancellations
+// counted as failures would deny cold reads against a healthy database.
+// context.DeadlineExceeded still counts: that is how an unreachable MongoDB
+// reports itself, and it is what the fence exists to catch.
+var subBreakerFailure = mongoutil.BreakerFailure()

@@ -243,7 +243,8 @@ func main() {
 	// outage TTL-slide can extend that further.
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2.TTL,
-		cfg.Breaker.New(ctx, "subscription"),
+		cfg.Breaker.New(ctx, "subscription",
+			circuitbreaker.WithFailurePredicate(subBreakerFailure)),
 		cachemetrics.For("subauth", "l2"))
 	// history-service needs only the access-window bound out of the shared
 	// projection, so this adapts the tier's SubAuth to that narrower shape.

@@ -96,3 +96,38 @@ func TestNewMongoStore_UsesIndependentBreakers(t *testing.T) {
 	_, err = s.GetRoomMeta(context.Background(), "room1")
 	assert.ErrorIs(t, err, circuitbreaker.ErrOpen)
 }
+
+// A cancelled caller is evidence about the CALLER, not about MongoDB — the call
+// may not even have been issued. Counting it would let a burst of cancellations
+// fence a healthy database, and every cold subscription read fails with it.
+func TestSubBreaker_CancelledCallerDoesNotTripBreaker(t *testing.T) {
+	subBreaker := circuitbreaker.New(2, time.Minute,
+		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+
+	for range 5 {
+		err := subBreaker.Do(func() error {
+			return fmt.Errorf("resolve subscription: %w", context.Canceled)
+		})
+		require.ErrorIs(t, err, context.Canceled, "the cancellation must still reach the caller")
+	}
+	assert.Equal(t, circuitbreaker.StateClosed, subBreaker.State(),
+		"a cancelled caller must not count as a Mongo failure")
+}
+
+// The asymmetry the fence rests on: the driver bounds server selection with
+// MONGO_SERVER_SELECTION_TIMEOUT and reports an unreachable MongoDB as an error
+// matching DeadlineExceeded, so exempting it would hold the breaker closed
+// through exactly the outage it exists for.
+func TestSubBreaker_DeadlineExceededTripsBreaker(t *testing.T) {
+	subBreaker := circuitbreaker.New(2, time.Minute,
+		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+
+	for range 2 {
+		err := subBreaker.Do(func() error {
+			return fmt.Errorf("server selection: %w", context.DeadlineExceeded)
+		})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	assert.Equal(t, circuitbreaker.StateOpen, subBreaker.State(),
+		"an unreachable MongoDB must open the subscription breaker")
+}

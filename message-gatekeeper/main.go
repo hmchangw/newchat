@@ -132,7 +132,8 @@ func main() {
 	// Separate instances so a warm room-meta L2 hit can't reset the subscription
 	// breaker's failure count. Each reports under its own name, so the two health
 	// signals stay distinguishable on the shared gauge.
-	subBreaker := cfg.Breaker.New(ctx, "subscription")
+	subBreaker := cfg.Breaker.New(ctx, "subscription",
+		circuitbreaker.WithFailurePredicate(subBreakerFailure))
 	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
 		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
 	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
