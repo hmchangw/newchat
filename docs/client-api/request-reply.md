@@ -2277,7 +2277,7 @@ and quoted message; variant determined by optional fields.
 | `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present. |
 | `requestId` | string | yes | 36-char hyphenated UUID (v4 or v7). Async reply delivered to `…response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded JSON of one [Attachment](../client-api.md#attachment) from the upload endpoint. Max 1 entry, ≤ 8 KiB total; returned decoded as `Attachment[]` in message payloads. |
-| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
+| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). The parent is resolved server-side; a genuinely missing/forbidden parent is rejected, while a *transient* history outage still accepts the reply. |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `visibleTo` | string | no | Opaque visibility marker, ≤ 4096 bytes. Stored and surfaced verbatim; the backend never filters on it. Oversize rejected with `bad_request`. |
@@ -2311,6 +2311,7 @@ error table. Key errors:
 - `"visibleTo exceeds maximum size of 4096 bytes"` (`bad_request`)
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
+- `"thread parent message not found"` (`not_found`, `thread_parent_not_found`)
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 

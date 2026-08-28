@@ -157,6 +157,14 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			// The reply sender can always read the parent they replied to; fetch on their behalf.
 			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
 			if perr != nil {
+				// The fetch is race-free (the parent pre-exists), so a not_found or
+				// forbidden reply reads the same on every redelivery — Ack-drop rather
+				// than hold an ack-pending slot for the whole MaxDeliver budget. Only
+				// an outage (unavailable/internal/infra) earns a retry.
+				if ee, terminal := errcode.Terminal(perr); terminal {
+					natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+					return errcode.Permanent(ee)
+				}
 				return fmt.Errorf("fetch thread parent %s: %w", msg.ThreadParentMessageID, perr)
 			}
 			pc := parent.CreatedAt
@@ -306,7 +314,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		}
 	}
 	if len(emitErrs) > 0 {
-		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
+		joined := errors.Join(emitErrs...)
+		// Ack-drop only when EVERY batch is unretryable (e.g. all oversized).
+		// {messageID}-b{N} dedup makes re-emitting the succeeded batches harmless,
+		// so a single transient failure keeps the whole message retryable — and the
+		// aggregate deliberately does NOT %w-wrap, because one permanent batch in
+		// the chain would otherwise strip a sibling transient batch of its retries.
+		if allBatchErrsPermanent(emitErrs) {
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			return errcode.Permanent(errcode.Internal(
+				fmt.Sprintf("emit push batches for message %s: %s", msg.ID, joined.Error())))
+		}
+		return fmt.Errorf("emit push batches for message %s: %s", msg.ID, joined.Error())
 	}
 	outcome = notifySent
 	return nil
@@ -461,4 +480,15 @@ func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType mode
 		return sender.Account
 	}
 	return ""
+}
+
+// allBatchErrsPermanent reports whether every push-batch failure is unretryable,
+// which is the only case where dropping the message loses nothing.
+func allBatchErrsPermanent(errs []error) bool {
+	for _, err := range errs {
+		if _, ok := errcode.IsPermanent(err); !ok {
+			return false
+		}
+	}
+	return true
 }

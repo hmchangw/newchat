@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,8 +17,13 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
+	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // plainIterAdapter adapts the standard nats.go jetstream iterator (Next returns
@@ -41,6 +48,23 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 // to publish canonical messages on, and the durable's MaxDeliver.
 func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
 	t.Helper()
+	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
+	// visibly redelivers within the test window. jobguard Acks the poison
+	// message, so it must NOT redeliver.
+	js, iter, _, subj, maxDeliver := startEmbeddedCanonicalConsumerWith(t, siteID, stream.ConsumerSettings{
+		AckWait:       time.Second,
+		MaxDeliver:    10,
+		MaxWaiting:    512,
+		MaxAckPending: 1000,
+	})
+	return js, iter, subj, maxDeliver
+}
+
+// startEmbeddedCanonicalConsumerWith is startEmbeddedCanonicalConsumer with
+// caller-chosen consumer settings, and also returns the consumer handle so a
+// test can read server-side state such as NumAckPending.
+func startEmbeddedCanonicalConsumerWith(t *testing.T, siteID string, settings stream.ConsumerSettings) (jetstream.JetStream, natsmetrics.Iterator, jetstream.Consumer, string, int) {
+	t.Helper()
 	opts := &natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()}
 	ns, err := natsserver.NewServer(opts)
 	require.NoError(t, err)
@@ -59,15 +83,6 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 	_, err = js.CreateOrUpdateStream(context.Background(), jetstream.StreamConfig{Name: sc.Name, Subjects: sc.Subjects})
 	require.NoError(t, err)
 
-	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
-	// visibly redelivers within the test window. jobguard Acks the poison
-	// message, so it must NOT redeliver.
-	settings := stream.ConsumerSettings{
-		AckWait:       time.Second,
-		MaxDeliver:    10,
-		MaxWaiting:    512,
-		MaxAckPending: 1000,
-	}
 	cc := buildConsumerConfig(settings, "broadcast-worker", sc.Subjects[0])
 	cons, err := js.CreateOrUpdateConsumer(context.Background(), sc.Name, cc)
 	require.NoError(t, err)
@@ -76,7 +91,7 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 	require.NoError(t, err)
 	t.Cleanup(iter.Stop)
 
-	return js, plainIterAdapter{inner: iter}, "chat.msg.canonical." + siteID + ".created", settings.MaxDeliver
+	return js, plainIterAdapter{inner: iter}, cons, "chat.msg.canonical." + siteID + ".created", settings.MaxDeliver
 }
 
 // TestConsume_PoisonMessageDoesNotBlockStream is the regression test for the
@@ -284,4 +299,162 @@ func sumOf(t *testing.T, rm metricdata.ResourceMetrics, name string, want map[st
 		}
 	}
 	return total
+}
+
+// ackPendingStore is a hand-written Store for the ack-pending regression test.
+// gomock is avoided deliberately: these calls run on Consume goroutines, where
+// a controller's t.Fatalf would be an illegal FailNow off the test goroutine.
+type ackPendingStore struct{}
+
+func (ackPendingStore) GetRoomMeta(context.Context, string) (roommetacache.Meta, error) {
+	return roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, SiteID: "site-ackpending", UserCount: 2}, nil
+}
+
+func (ackPendingStore) GetThreadFollowers(context.Context, string) (map[string]struct{}, error) {
+	return map[string]struct{}{"bob": {}}, nil
+}
+
+func (ackPendingStore) GetRoom(context.Context, string) (*model.Room, error) { return nil, nil }
+func (ackPendingStore) ListSubscriptions(context.Context, string) ([]model.Subscription, error) {
+	return nil, nil
+}
+func (ackPendingStore) UpdateRoomLastMessage(context.Context, roomLastMessage) error { return nil }
+func (ackPendingStore) SetSubscriptionMentions(context.Context, string, []string, time.Time) error {
+	return nil
+}
+func (ackPendingStore) GetHistorySharedSince(context.Context, string, []string) (map[string]*time.Time, error) {
+	return map[string]*time.Time{}, nil
+}
+func (ackPendingStore) AdvanceSubscriptionLastSeen(context.Context, string, string, time.Time) error {
+	return nil
+}
+
+type ackPendingUsers struct{}
+
+func (ackPendingUsers) FindUserByID(context.Context, string) (*model.User, error) { return nil, nil }
+func (ackPendingUsers) FindUserByAccount(context.Context, string) (*model.User, error) {
+	return nil, nil
+}
+func (ackPendingUsers) FindUsersByAccounts(context.Context, []string) ([]model.User, error) {
+	return nil, nil
+}
+
+// perParentFetcher resolves realParentID and reports every other parent as
+// not_found, the way history-service answers for a parent that never existed.
+type perParentFetcher struct{ realParentID string }
+
+func (f perParentFetcher) FetchParent(_ context.Context, _, _, _, messageID string) (*ParentMessageInfo, error) {
+	if messageID == f.realParentID {
+		return &ParentMessageInfo{SenderAccount: "carol", CreatedAt: time.Now().UTC().Add(-time.Hour)}, nil
+	}
+	return nil, errcode.NotFound("message not found")
+}
+
+// TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending is the
+// regression test for the ack-pending stall.
+//
+// A reply whose thread parent does not exist fails identically on every
+// delivery. While that failure was classified transient, each such message
+// NAK'd and held its ack-pending slot for the whole MaxDeliver budget — so a
+// burst larger than MaxAckPending filled the consumer's budget and JetStream
+// stopped delivering ANYTHING, healthy messages included. Now the failure is
+// classified permanent and Ack-dropped on the first delivery, so the budget is
+// released immediately.
+//
+// The test publishes 3x MaxAckPending unresolvable replies and then one
+// resolvable one. The good message is the assertion: it sits behind the whole
+// burst in stream order, so it can only be delivered if the burst released its
+// slots.
+func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T) {
+	const (
+		maxAckPending = 4
+		burst         = 3 * maxAckPending
+		realParentID  = "real-parent"
+	)
+
+	// AckWait is long on purpose: nothing in this test may redeliver because it
+	// timed out. Every redelivery must come from a NAK, so a stall here proves
+	// the classification and nothing else.
+	js, iter, cons, subj, maxDeliver := startEmbeddedCanonicalConsumerWith(t, "site-ackpending", stream.ConsumerSettings{
+		AckWait:       30 * time.Second,
+		MaxDeliver:    6,
+		MaxWaiting:    512,
+		MaxAckPending: maxAckPending,
+	})
+
+	h := NewHandler(ackPendingStore{}, ackPendingUsers{}, &mockPublisher{}, nil,
+		perParentFetcher{realParentID: realParentID}, false, subject.RouteGlobal)
+
+	good := make(chan struct{}, 1)
+	var settled atomic.Int32
+	// The production composition: the same Settle call and backoff schedule
+	// main.go's consume loop uses.
+	process := func(ctx context.Context, msg jetstream.Msg) {
+		err := h.HandleMessage(ctx, msg.Data())
+		jsretry.Settle(ctx, msg, jsretry.LowLatencyBackoff, err)
+		settled.Add(1)
+		if err == nil {
+			select {
+			case good <- struct{}{}:
+			default:
+			}
+		}
+	}
+
+	m, _ := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		Site:   "site-ackpending",
+		Stream: "MESSAGES-CANONICAL-site-ackpending", Consumer: "broadcast-worker",
+	})
+	consumer.LoopStarted(context.Background())
+
+	var wg sync.WaitGroup
+	go natsmetrics.Consume(context.Background(), iter, consumer, maxAckPending, maxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(process))
+
+	publishReply := func(id, parentID string) {
+		t.Helper()
+		evt := model.MessageEvent{
+			Event: model.EventCreated, SiteID: "site-ackpending", Timestamp: time.Now().UTC().UnixMilli(),
+			Message: model.Message{
+				ID: id, RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+				Content: "a thread reply", CreatedAt: time.Now().UTC(),
+				ThreadParentMessageID: parentID,
+				TShow:                 false,
+			},
+		}
+		data, err := json.Marshal(evt)
+		require.NoError(t, err)
+		_, err = js.Publish(context.Background(), subj, data)
+		require.NoError(t, err)
+	}
+
+	for i := range burst {
+		publishReply(fmt.Sprintf("ghost-reply-%d", i), fmt.Sprintf("ghost-parent-%d", i))
+	}
+	// Published last, so it is behind the entire burst in stream order.
+	publishReply("good-reply", realParentID)
+
+	select {
+	case <-good:
+	case <-time.After(15 * time.Second):
+		info, err := cons.Info(context.Background())
+		pending := -1
+		if err == nil {
+			pending = info.NumAckPending
+		}
+		t.Fatalf("the resolvable reply was never delivered: %d unresolvable replies wedged the consumer "+
+			"(num_ack_pending=%d, cap=%d, settled=%d)", burst, pending, maxAckPending, settled.Load())
+	}
+
+	// The burst must also have released every slot, not merely enough of them
+	// for one message to squeeze past.
+	require.Eventually(t, func() bool {
+		info, err := cons.Info(context.Background())
+		return err == nil && info.NumAckPending == 0
+	}, 10*time.Second, 50*time.Millisecond, "unresolvable replies must not hold ack-pending slots")
+
+	assert.Equal(t, int32(burst+1), settled.Load(),
+		"every message is settled exactly once — an unresolvable reply must not be redelivered")
 }

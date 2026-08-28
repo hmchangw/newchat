@@ -6425,6 +6425,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `visibleTo exceeds maximum size of 4096 bytes` | `bad_request` | — | `visibleTo` > 4096 bytes. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
 | `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). |
+| `thread parent message not found` | `not_found` | `thread_parent_not_found` | `threadParentMessageId` does not resolve to a message the sender can read. Rejected at send time: a reply whose parent never resolves cannot be persisted or fanned out by any downstream worker. |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
 
@@ -6876,6 +6877,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `promote_requires_individual` | bad_request | room-service role-update (only individual members can be owners) |
 | `large_room_post_restricted` | forbidden | message-gatekeeper (non-owner/admin posting in a large room) |
 | `not_subscribed` | forbidden | message-gatekeeper / history-service (caller not subscribed) |
+| `thread_parent_not_found` | not_found | message-gatekeeper (`threadParentMessageId` does not resolve) |
 | `outside_access_window` | forbidden | history-service (subscribed but message predates HSS) |
 | `pin_disabled` | forbidden | history-service pin/unpin/list (kill-switch `PIN_ENABLED=false`) |
 | `pin_limit_reached` | forbidden | history-service pin (room at `MAX_PINNED_PER_ROOM` hard cap) |

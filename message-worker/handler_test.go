@@ -13,10 +13,13 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -2894,4 +2897,85 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	h := NewHandler(mockStore, mockUserStore, mockThreadStore, "site-a",
 		func(_ context.Context, _ string, _ []byte, _ string) error { return nil })
 	require.NoError(t, h.processMessage(context.Background(), data, false))
+}
+
+// trackedFinalDelivery returns a ctx that reports the current delivery as the
+// consumer's last attempt, mirroring what natsmetrics.Track stamps in main.go.
+func trackedFinalDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+	t.Helper()
+	ctx := context.Background()
+	consumer := natsmetrics.New(metricnoop.NewMeterProvider().Meter("test")).Consumer(natsmetrics.ConsumerConfig{
+		Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Consumer: "message-worker",
+	})
+	consumer.LoopStarted(ctx)
+	tracked := consumer.Track(ctx, &fakeJSMsg{numDelivered: numDelivered}, natsmetrics.EventCreated, maxDeliver)
+	return tracked.Context(ctx)
+}
+
+// TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery pins the
+// terminal branch of the missing-parent gate. Retrying is right while the
+// parent's own canonical write may still land, but on the last attempt the
+// choice is "persist without parent linkage" or "lose the reply forever" —
+// message-worker is the sole persister of history, and there is no DLQ.
+func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	user := &model.User{ID: "u-1", Account: "alice", SiteID: "site-a", EngName: "Alice Wang", ChineseName: "愛麗絲"}
+	expectedSender := cassParticipant{ID: "u-1", EngName: "Alice Wang", CompanyName: "愛麗絲", Account: "alice"}
+
+	replyMsg := model.Message{
+		ID: "msg-reply", RoomID: "r1", UserID: "u-1", UserAccount: "alice",
+		Content: "a reply", CreatedAt: now,
+		ThreadParentMessageID: "msg-parent",
+	}
+	data, err := json.Marshal(model.MessageEvent{Message: replyMsg, SiteID: "site-a", Timestamp: now.UnixMilli()})
+	require.NoError(t, err)
+
+	setup := func(t *testing.T) (*MockStore, *MockUserStore, *MockThreadStore, *Handler) {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		store := NewMockStore(ctrl)
+		us := NewMockUserStore(ctrl)
+		ts := NewMockThreadStore(ctrl)
+		h := NewHandler(store, us, ts, "site-a", func(context.Context, string, []byte, string) error { return nil })
+		return store, us, ts, h
+	}
+
+	t.Run("retries while the parent write may still land", func(t *testing.T) {
+		store, us, _, h := setup(t)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(time.Time{}, false, nil)
+
+		// No tracked context → not the final delivery. No writes may happen.
+		err := h.processMessage(context.Background(), data, false)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not yet persisted")
+		_, perm := errcode.IsPermanent(err)
+		assert.False(t, perm, "the race window must keep its retry budget")
+	})
+
+	t.Run("persists without parent linkage on the final delivery", func(t *testing.T) {
+		store, us, ts, h := setup(t)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(time.Time{}, false, nil)
+		ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(nil)
+		// The parent is genuinely absent, so its sender cannot be resolved either.
+		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(nil, errMessageNotFound)
+		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+
+		var saved *model.Message
+		newTcount := 1
+		store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), &expectedSender, "site-a", gomock.Any()).
+			DoAndReturn(func(_ context.Context, m *model.Message, _ *cassParticipant, _, _ string) (*int, error) {
+				saved = m
+				return &newTcount, nil
+			})
+
+		err := h.processMessage(trackedFinalDelivery(t, 6, 6), data, false)
+
+		require.NoError(t, err, "the reply must survive rather than be dropped at MaxDeliver")
+		require.NotNil(t, saved)
+		assert.Nil(t, saved.ThreadParentMessageCreatedAt, "no parent coords are available to stamp")
+		assert.Equal(t, "msg-parent", saved.ThreadParentMessageID, "thread linkage on the reply is preserved")
+	})
 }

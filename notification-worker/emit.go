@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
@@ -43,7 +44,12 @@ func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEven
 		return fmt.Errorf("marshal push batch %s: %w", evt.ID, err)
 	}
 	if e.maxPayloadBytes > 0 && len(data) > e.maxPayloadBytes {
-		return fmt.Errorf("push batch %s exceeds NATS max_payload: wire=%d, cap=%d", evt.ID, len(data), e.maxPayloadBytes)
+		// Deterministic: the handler sorts survivors so batch N carries the same
+		// accounts on every redelivery, and the body comes from the message. An
+		// oversized batch is oversized on all MaxDeliver attempts, so drop it
+		// rather than let it hold an ack-pending slot for the full budget.
+		return errcode.Permanent(errcode.Internal(
+			fmt.Sprintf("push batch %s exceeds NATS max_payload: wire=%d, cap=%d", evt.ID, len(data), e.maxPayloadBytes)))
 	}
 	msg := &nats.Msg{
 		Subject: e.sendSubject,

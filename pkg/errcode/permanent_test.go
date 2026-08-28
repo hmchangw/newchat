@@ -61,3 +61,43 @@ func TestIsPermanent_FalseOnPlainErrcode(t *testing.T) {
 		t.Fatal("nil is not permanent")
 	}
 }
+
+func TestTerminal(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		want     bool
+		wantCode Code
+	}{
+		{"not found is terminal", NotFound("gone"), true, CodeNotFound},
+		{"forbidden is terminal", Forbidden("nope"), true, CodeForbidden},
+		{"bad request is terminal", BadRequest("bad"), true, CodeBadRequest},
+		{"wrapped terminal is still terminal", fmt.Errorf("fetch: %w", NotFound("gone")), true, CodeNotFound},
+		// The remote may recover, so these must keep their retry budget.
+		{"unavailable is transient", Unavailable("history down"), false, ""},
+		{"internal is transient", Internal("boom"), false, ""},
+		// Infra failures carry no errcode and are always retryable.
+		{"bare error is transient", errors.New("dial tcp: timeout"), false, ""},
+		{"nil is transient", nil, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ee, got := Terminal(tc.err)
+			if got != tc.want {
+				t.Fatalf("Terminal(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+			if !tc.want {
+				if ee != nil {
+					t.Fatalf("non-terminal must return a nil *Error, got %+v", ee)
+				}
+				return
+			}
+			if ee == nil {
+				t.Fatal("terminal must return the typed *Error")
+			}
+			if ee.Code != tc.wantCode {
+				t.Fatalf("Code = %v, want %v", ee.Code, tc.wantCode)
+			}
+		})
+	}
+}

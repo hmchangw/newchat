@@ -1882,3 +1882,124 @@ func TestHandle_MentionsAndBadgeCountsCoexist(t *testing.T) {
 	assert.Equal(t, "hey Bob Chen", emit.emitted[0].Body, "body substitution survives the badge phase")
 	assert.Equal(t, map[string]int{"bob": 7}, emit.emitted[0].UnreadCounts, "badge counts survive substitution")
 }
+
+// TestHandle_ThreadOnlyReply_ParentFetchClassification pins the Ack-drop vs Nak
+// split. historyParentFetcher propagates the typed remote *errcode.Error for
+// "accurate classification"; the handler must act on it instead of retrying a
+// parent that will never resolve.
+func TestHandle_ThreadOnlyReply_ParentFetchClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		fetchErr      error
+		wantPermanent bool
+	}{
+		{"nonexistent parent is permanent", errcode.NotFound("message not found"), true},
+		{"forbidden parent is permanent", errcode.Forbidden("no access"), true},
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), false},
+		{"bare infra error stays retryable", errors.New("history timeout"), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &stubMembers{out: map[string][]roomsubcache.Member{
+				"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+			}}
+			followers := &stubFollowers{out: map[string]map[string]struct{}{"parent-1": {"bob": {}}}}
+			emit := &recordingEmitter{}
+			h := NewHandler(HandlerDeps{
+				Members:            members,
+				Followers:          followers,
+				Parent:             stubParent{err: tc.fetchErr},
+				Presence:           noopPresenceSnapshotter{},
+				Hook:               noopVetoer{},
+				Emitter:            emit,
+				LargeRoomThreshold: 500,
+			})
+
+			msg := model.Message{
+				ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice", CreatedAt: time.Now(),
+				ThreadParentMessageID: "parent-1",
+				TShow:                 false,
+				Content:               "thread reply",
+			}
+			err := h.HandleMessage(context.Background(), msgEvent(&msg))
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "permanence mismatch for %v", tc.fetchErr)
+			assert.Empty(t, emit.accounts(), "no notifications emitted when the parent cannot be resolved")
+		})
+	}
+}
+
+// perBatchEmitter returns a caller-supplied error per batch index so a test can
+// mix a permanent failure with a transient one.
+type perBatchEmitter struct {
+	mu   sync.Mutex
+	errs []error
+	n    int
+}
+
+func (e *perBatchEmitter) Emit(_ context.Context, _ model.PushNotificationEvent) error { //nolint:gocritic // hugeParam: must match Emitter interface value semantics
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	i := e.n
+	e.n++
+	if i < len(e.errs) {
+		return e.errs[i]
+	}
+	return nil
+}
+
+// TestHandle_EmitBatchErrors_Aggregate pins that one permanent batch failure
+// cannot strip the retry budget from a sibling batch that failed transiently.
+// Ack-dropping the message would silently lose that batch's recipients.
+func TestHandle_EmitBatchErrors_Aggregate(t *testing.T) {
+	permanent := errcode.Permanent(errcode.Internal("push batch m1-b0 exceeds NATS max_payload: wire=99, cap=64"))
+	transient := errors.New("nats: broker unavailable")
+
+	tests := []struct {
+		name          string
+		errs          []error
+		wantPermanent bool
+	}{
+		{"every batch permanent → drop", []error{permanent, permanent}, true},
+		{"one batch transient → retry", []error{permanent, transient}, false},
+		{"transient first → retry", []error{transient, permanent}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			members := &stubMembers{out: map[string][]roomsubcache.Member{
+				"r1": {
+					{ID: "alice", Account: "alice"},
+					{ID: "bob", Account: "bob"},
+					{ID: "carol", Account: "carol"},
+				},
+			}}
+			emit := &perBatchEmitter{errs: tc.errs}
+			h := NewHandler(HandlerDeps{
+				Members:            members,
+				Followers:          &stubFollowers{},
+				Parent:             stubParent{},
+				Presence:           noopPresenceSnapshotter{},
+				Hook:               noopVetoer{},
+				Emitter:            emit,
+				LargeRoomThreshold: 500,
+				RecipientBatchSize: 1, // one recipient per batch → two batches
+			})
+
+			msg := model.Message{
+				ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+				CreatedAt: time.Now(), Content: "hello",
+			}
+			err := h.HandleMessage(context.Background(), msgEvent(&msg))
+
+			require.Error(t, err)
+			require.Equal(t, 2, emit.n, "both batches must be attempted")
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "aggregate permanence mismatch: %v", err)
+		})
+	}
+}

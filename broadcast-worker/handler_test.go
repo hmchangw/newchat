@@ -4239,3 +4239,127 @@ func TestHandler_FederateMentions_LatencyDoesNotScaleWithBatches(t *testing.T) {
 	hadDeadline, _ := pub.calls()
 	assert.LessOrEqual(t, len(hadDeadline), 3*maxSiteFanout)
 }
+
+// TestEventShapeViolations_ArePermanent pins that a canonical event missing a
+// required timestamp is dropped on the first delivery. Redelivery hands the
+// handler byte-identical data, so retrying only holds an ack-pending slot for
+// the full MaxDeliver budget before dropping it anyway.
+func TestEventShapeViolations_ArePermanent(t *testing.T) {
+	msgTime := time.Date(2026, 3, 26, 9, 0, 0, 0, time.UTC)
+
+	newHandler := func(t *testing.T) *Handler {
+		ctrl := gomock.NewController(t)
+		return NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
+			NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	}
+
+	baseMsg := func() model.Message {
+		return model.Message{
+			ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
+			Content: "hello", CreatedAt: msgTime,
+		}
+	}
+
+	// Reached through the public entry point.
+	dispatched := []struct {
+		name    string
+		event   model.EventType
+		wantMsg string
+	}{
+		{"updated event missing EditedAt", model.EventUpdated, "missing EditedAt"},
+		{"deleted event missing UpdatedAt", model.EventDeleted, "missing UpdatedAt"},
+		{"pinned event missing PinnedAt", model.EventPinned, "missing PinnedAt"},
+	}
+	for _, tc := range dispatched {
+		t.Run(tc.name, func(t *testing.T) {
+			evt := model.MessageEvent{Event: tc.event, SiteID: "site-a", Message: baseMsg()}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			err = newHandler(t).HandleMessage(context.Background(), data)
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.True(t, perm, "a publisher contract violation can never succeed on redelivery: %v", err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+		})
+	}
+
+	// Defensive backstops: the outer handler guards the same fields first, so
+	// these are only reachable directly. They must classify identically.
+	t.Run("thread updated event missing EditedAt", func(t *testing.T) {
+		evt := model.MessageEvent{Event: model.EventUpdated, SiteID: "site-a", Message: baseMsg()}
+		evt.Message.ThreadParentMessageID = "parent-1"
+
+		err := newHandler(t).handleThreadUpdated(context.Background(), &evt)
+
+		require.Error(t, err)
+		_, perm := errcode.IsPermanent(err)
+		assert.True(t, perm, "expected permanent, got %v", err)
+	})
+
+	t.Run("thread deleted event missing UpdatedAt", func(t *testing.T) {
+		evt := model.MessageEvent{Event: model.EventDeleted, SiteID: "site-a", Message: baseMsg()}
+		evt.Message.ThreadParentMessageID = "parent-1"
+
+		err := newHandler(t).handleThreadDeleted(context.Background(), &evt)
+
+		require.Error(t, err)
+		_, perm := errcode.IsPermanent(err)
+		assert.True(t, perm, "expected permanent, got %v", err)
+	})
+}
+
+// TestChannelThreadFanOut_ParentFetchClassification pins the Ack-drop vs Nak
+// split on the history-service reply. historyParentFetcher deliberately
+// propagates the typed remote *errcode.Error; the handler must not flatten it
+// into an untyped retry.
+func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
+	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name          string
+		fetchErr      error
+		wantPermanent bool
+	}{
+		{"nonexistent parent is permanent", errcode.NotFound("message not found"), true},
+		{"forbidden parent is permanent", errcode.Forbidden("no access"), true},
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), false},
+		{"bare infra error stays retryable", errors.New("nats: timeout"), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockStore(ctrl)
+			us := NewMockUserStore(ctrl)
+			pub := &mockPublisher{}
+			keyStore := NewMockRoomKeyProvider(ctrl)
+
+			store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(metaOf(testChannelRoom), nil)
+
+			evt := model.MessageEvent{
+				Event:     model.EventCreated,
+				SiteID:    "site-a",
+				Timestamp: msgTime.UnixMilli(),
+				Message: model.Message{
+					ID: "reply-1", RoomID: "r1", UserID: "u-alice", UserAccount: "alice",
+					Content: "a thread reply", CreatedAt: msgTime,
+					ThreadParentMessageID: "parent-1",
+					TShow:                 false,
+				},
+			}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			h := NewHandler(store, us, pub, keyStore, stubParentFetcher{err: tc.fetchErr}, false, subject.RouteGlobal)
+			err = h.HandleMessage(context.Background(), data)
+
+			require.Error(t, err)
+			_, perm := errcode.IsPermanent(err)
+			assert.Equal(t, tc.wantPermanent, perm, "permanence mismatch for %v", tc.fetchErr)
+			assert.Empty(t, pub.records, "no fan-out when the parent cannot be resolved")
+		})
+	}
+}

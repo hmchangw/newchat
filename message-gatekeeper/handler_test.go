@@ -247,6 +247,86 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
+			// A parent that does not exist can never be resolved by a downstream
+			// worker either, so the send is rejected here rather than published as
+			// an event doomed to burn every consumer's retry budget.
+			name:    "thread reply to nonexistent parent — rejected",
+			account: validAccount,
+			roomID:  validRoomID,
+			siteID:  validSiteID,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.NotFound("message not found"))
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeNotFound, ee.Code)
+				assert.Equal(t, errcode.MessageThreadParentNotFound, ee.Reason)
+			},
+		},
+		{
+			// Forbidden is terminal for the same reason not_found is: retrying
+			// cannot grant access the sender does not have.
+			name:    "thread reply to forbidden parent — rejected",
+			account: validAccount,
+			roomID:  validRoomID,
+			siteID:  validSiteID,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.Forbidden("not allowed"))
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeForbidden, ee.Code)
+			},
+		},
+		{
 			name:    "invalid UUID",
 			account: validAccount,
 			roomID:  validRoomID,

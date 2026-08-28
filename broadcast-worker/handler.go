@@ -380,7 +380,8 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt"))
 	}
 
 	if shouldUseThreadFanOut(&msg) {
@@ -530,7 +531,8 @@ func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseR
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt for thread reply %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt for thread reply"))
 	}
 	parentMsgID := msg.ThreadParentMessageID
 
@@ -583,7 +585,8 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 	parentMsgID := msg.ThreadParentMessageID
 
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("missing UpdatedAt for thread message %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("missing UpdatedAt for thread message"))
 	}
 
 	// GetRoom first so the routing decision (thread followers vs all DM
@@ -706,7 +709,8 @@ func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, n
 func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("deleted event missing UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("deleted event missing UpdatedAt"))
 	}
 
 	if shouldUseThreadFanOut(&msg) {
@@ -746,7 +750,8 @@ func (h *Handler) publishThreadBadge(ctx context.Context, room *model.Room, newT
 func (h *Handler) handlePinned(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.PinnedAt == nil {
-		return fmt.Errorf("pinned event missing PinnedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("pinned event missing PinnedAt"))
 	}
 
 	room, err := h.store.GetRoom(ctx, msg.RoomID)
@@ -1381,6 +1386,15 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	} else {
 		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		if err != nil {
+			// historyParentFetcher propagates the typed remote error precisely so it
+			// can be classified here: a not_found/forbidden parent reads the same on
+			// every redelivery, so Ack-drop instead of holding an ack-pending slot
+			// for the whole MaxDeliver budget. The gatekeeper rejects these at send
+			// time; this covers events published before that guard existed.
+			if ee, terminal := errcode.Terminal(err); terminal {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+				return nil, errcode.Permanent(ee)
+			}
 			return nil, fmt.Errorf("fetch thread parent %s: %w", parentMsgID, err)
 		}
 		parent = fetched

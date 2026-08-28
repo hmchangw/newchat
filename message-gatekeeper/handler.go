@@ -425,11 +425,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID, "unverified", quotedUnverified)
 	}
 
-	// Resolve the thread parent's createdAt + sender account server-side,
-	// best-effort: a fetch failure ships the event without the values (each
-	// consumer falls back to a store it owns), so a Cassandra outage never blocks
-	// the send path. Both ride the same fetch.
-	threadParentCreatedAt, threadParentSenderAccount := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	// Resolve the thread parent's createdAt + sender account server-side. A
+	// TRANSIENT fetch failure ships the event without the values (each consumer
+	// falls back to a store it owns), so a Cassandra outage never blocks the send
+	// path; a TERMINAL one rejects the send. Both ride the same fetch.
+	threadParentCreatedAt, threadParentSenderAccount, err := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	if err != nil {
+		return nil, err
+	}
 
 	// Compose the sender's render-ready display name once at write time so every
 	// downstream consumer (notification-worker, future search-sync-worker) reads
@@ -506,27 +509,42 @@ func (h *Handler) resolveThreadParent(
 	req *model.SendMessageRequest,
 	quotedSnapshot *cassandra.QuotedParentMessage,
 	quotedUnverified bool,
-) (*time.Time, string) {
+) (*time.Time, string, error) {
 	if req.ThreadParentMessageID == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	if quotedSnapshot != nil && !quotedUnverified && req.QuotedParentMessageID == req.ThreadParentMessageID {
 		t := quotedSnapshot.CreatedAt.UTC()
-		return &t, quotedSnapshot.Sender.Account
+		return &t, quotedSnapshot.Sender.Account, nil
 	}
 	if h.parentFetcher == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
 	if err != nil || snap == nil {
+		// Terminal (not_found, forbidden, …): the parent will not resolve for any
+		// downstream consumer either, so reject here. Publishing it would hand
+		// message-worker, broadcast-worker and notification-worker an event each
+		// must retry to MaxDeliver and then drop, holding an ack-pending slot the
+		// whole time. Same tiering as resolveQuoteSnapshot.
+		var ee *errcode.Error
+		if quoteFetchErrIsTerminal(err) && errors.As(err, &ee) {
+			if ee.Code == errcode.CodeNotFound {
+				// Own reason: a bare not_found on msg.send is ambiguous with a
+				// missing room, and the frontend refreshes different state for each.
+				return nil, "", errcode.NotFound("thread parent message not found",
+					errcode.WithReason(errcode.MessageThreadParentNotFound))
+			}
+			return nil, "", ee
+		}
 		slog.WarnContext(ctx, "thread parent resolution failed, publishing without it",
 			"error", err,
 			"parent_message_id", req.ThreadParentMessageID,
 			"request_id", req.RequestID)
-		return nil, ""
+		return nil, "", nil
 	}
 	t := snap.CreatedAt.UTC()
-	return &t, snap.Sender.Account
+	return &t, snap.Sender.Account, nil
 }
 
 // resolveQuoteSnapshot resolves the quoted parent into a snapshot, preferring the
@@ -576,26 +594,18 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 	return snap, false, nil
 }
 
-// quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
-// permanent reason not to quote (reject) vs a transient infra failure (degrade
-// to the placeholder). Only unavailable/internal errcodes and non-errcode infra
-// failures (unmarshal) are transient; every other errcode category (not_found,
-// forbidden, bad_request, …) is terminal. NATS timeout and no-responders arrive
-// as errcode.CodeUnavailable (via natsutil.RequestFailure) and are handled by
-// the unavailable case below, not the non-errcode fallback.
-// history-service collapses a Cassandra read failure to code=internal, so
-// internal is treated as transient here.
+// quoteFetchErrIsTerminal reports whether a parent fetch error is a permanent
+// reason not to proceed (reject) vs a transient infra failure (degrade to the
+// placeholder for a quote, publish without the value for a thread parent).
+// NATS timeout and no-responders arrive as errcode.CodeUnavailable (via
+// natsutil.RequestFailure) and are transient, as is the internal code
+// history-service collapses a Cassandra read failure to.
+//
+// Delegates to errcode.Terminal so this rejection and the Ack-drop the same
+// reply produces in broadcast-worker and notification-worker cannot drift.
 func quoteFetchErrIsTerminal(err error) bool {
-	var ee *errcode.Error
-	if errors.As(err, &ee) {
-		switch ee.Code {
-		case errcode.CodeUnavailable, errcode.CodeInternal:
-			return false
-		default:
-			return true
-		}
-	}
-	return false
+	_, terminal := errcode.Terminal(err)
+	return terminal
 }
 
 // placeholderQuoteSnapshot builds the degraded-mode quoted-parent snapshot for a

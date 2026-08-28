@@ -150,10 +150,26 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			if err != nil {
 				return fmt.Errorf("resolve thread parent createdAt: %w", err)
 			}
-			if !found {
+			switch {
+			case found:
+				evt.Message.ThreadParentMessageCreatedAt = &createdAt
+			case !natsmetrics.IsFinalDeliveryFromContext(ctx):
+				// The parent's own canonical write may still land — MESSAGES-CANONICAL
+				// does not order it relative to this reply — so retry rather than
+				// persist a null and corrupt the parent's partition coords.
 				return fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)
+			default:
+				// Last attempt: the choice is now "persist without parent coords" or
+				// "lose the reply". message-worker is the sole persister of history and
+				// nothing dead-letters a MaxDeliver drop, so salvage the content. The
+				// writes below already tolerate a nil parent createdAt — the
+				// thread_room_id stamp is skipped and logged instead.
+				slog.ErrorContext(ctx, "thread parent never persisted — saving reply without parent linkage",
+					"request_id", natsutil.RequestIDFromContext(ctx),
+					"replyID", evt.Message.ID,
+					"parentMessageID", evt.Message.ThreadParentMessageID,
+					"room_id", evt.Message.RoomID)
 			}
-			evt.Message.ThreadParentMessageCreatedAt = &createdAt
 		}
 
 		// Resolve (or create) the thread room first so we have the threadRoomID
