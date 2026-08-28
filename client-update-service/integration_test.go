@@ -82,7 +82,7 @@ func TestIntegration_DownloadServesFromCacheOnSecondHit(t *testing.T) {
 	cs := &countingStore{versionStore: base}
 	h := NewHandler(cs, newBlobCache(4, time.Hour, 1024))
 	r := gin.New()
-	registerRoutes(r, h, testTokens())
+	registerRoutes(r, h, testTokens(), 1<<20)
 
 	for i := 0; i < 2; i++ {
 		w := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestIntegration_UploadRequiresServiceAccountThenRoundTrips(t *testing.T) {
 
 	tokens := map[string]string{"admin-service": "0123456789abcdef"}
 	r := gin.New()
-	registerRoutes(r, h, tokens)
+	registerRoutes(r, h, tokens, 1<<20)
 
 	newUpload := func() (*http.Request, error) {
 		body, ct := multipartBody(t, map[string]fileSpec{

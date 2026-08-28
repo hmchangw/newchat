@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,7 +396,7 @@ func TestHandleUpload_DoesNotBufferTheArtifactInMemory(t *testing.T) {
 
 	r := gin.New()
 	r.MaxMultipartMemory = maxMultipartMemory
-	registerRoutes(r, NewHandler(store, testCache(1024)), testTokens())
+	registerRoutes(r, NewHandler(store, testCache(1024)), testTokens(), 1<<30)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -419,4 +421,69 @@ func TestHandleUpload_DoesNotBufferTheArtifactInMemory(t *testing.T) {
 		"peak heap %d MiB while storing a %d MiB artifact: the body is being buffered",
 		peak>>20, artifactSize>>20)
 	t.Logf("stored %d MiB with a %d MiB peak heap", artifactSize>>20, peak>>20)
+}
+
+// An oversize body must be refused before it is spooled, and the refusal must
+// name the limit — otherwise the generic "configFile is required" sends an
+// operator hunting a malformed form when the real cause was the cap.
+func TestHandleUpload_RejectsAnOversizeBody(t *testing.T) {
+	const cap = 512
+
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	// No EXPECT(): gomock fails if Put runs, which is the assertion — an
+	// over-cap upload must never reach MinIO.
+
+	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
+	registerRoutes(r, NewHandler(store, testCache(1024)), testTokens(), cap)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "app.yaml", content: "version: 1"},
+		"executeFile": {name: "app.exe", content: strings.Repeat("x", cap)},
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/version", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, string(got), "too large")
+	assert.Contains(t, string(got), strconv.Itoa(cap), "the message must name the limit")
+}
+
+// A body under the cap is unaffected: the cap is a guard rail, not a policy.
+func TestHandleUpload_AcceptsABodyUnderTheCap(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	store.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil).Times(2)
+
+	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
+	registerRoutes(r, NewHandler(store, testCache(1024)), testTokens(), 1<<20)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	body, ct := multipartBody(t, map[string]fileSpec{
+		"configFile":  {name: "app.yaml", content: "version: 1"},
+		"executeFile": {name: "app.exe", content: "bin!"},
+	})
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/version", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

@@ -71,7 +71,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, handler, cfg.UploadTokens)
+	registerRoutes(r, handler, cfg.UploadTokens, cfg.UploadMaxBytes)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{

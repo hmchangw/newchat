@@ -97,7 +97,7 @@ func TestRoutesRegistered(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	h := NewHandler(NewMockversionStore(ctrl), testCache(1024))
 	r := gin.New()
-	registerRoutes(r, h, testTokens())
+	registerRoutes(r, h, testTokens(), 1<<20)
 
 	got := map[string]bool{}
 	for _, ri := range r.Routes() {
@@ -125,7 +125,7 @@ func TestRoutes_UploadRequiresServiceAccount(t *testing.T) {
 	h := NewHandler(store, testCache(1024))
 
 	r := gin.New()
-	registerRoutes(r, h, testTokens())
+	registerRoutes(r, h, testTokens(), 1<<20)
 
 	body, ct := multipartBody(t, map[string]fileSpec{
 		"configFile":  {name: "app.yaml", content: "config"},
@@ -147,7 +147,7 @@ func TestRoutes_UploadSucceedsWithServiceAccount(t *testing.T) {
 	h := NewHandler(store, testCache(1024))
 
 	r := gin.New()
-	registerRoutes(r, h, testTokens())
+	registerRoutes(r, h, testTokens(), 1<<20)
 
 	body, ct := multipartBody(t, map[string]fileSpec{
 		"configFile":  {name: "app.yaml", content: "config"},
@@ -172,7 +172,7 @@ func TestRoutes_DownloadStaysUnauthenticated(t *testing.T) {
 	h := NewHandler(store, testCache(1024))
 
 	r := gin.New()
-	registerRoutes(r, h, testTokens())
+	registerRoutes(r, h, testTokens(), 1<<20)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/version/app.yaml", nil)
 	w := httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestRoutes_EmptyTokenTableRefusesEveryUpload(t *testing.T) {
 		h := NewHandler(store, testCache(1024))
 
 		r := gin.New()
-		registerRoutes(r, h, tokens)
+		registerRoutes(r, h, tokens, 1<<20)
 
 		body, ct := multipartBody(t, map[string]fileSpec{
 			"configFile":  {name: "app.yaml", content: "config"},
@@ -220,7 +220,7 @@ func TestRoutes_EmptyTokenTableStillServesDownloads(t *testing.T) {
 	h := NewHandler(store, testCache(1024))
 
 	r := gin.New()
-	registerRoutes(r, h, nil)
+	registerRoutes(r, h, nil, 1<<20)
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/version/app.yaml", nil))

@@ -236,7 +236,7 @@ behavior are in
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
-| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, no size cap; disk-backed — parts over 32 MiB spill to a temp file before the MinIO write). Service-account bearer token required; an unset/empty `UPLOAD_TOKENS` disables uploads entirely (every request `401`). |
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, capped by `UPLOAD_MAX_BYTES` (default 2 GiB); disk-backed — parts over 1 MiB spill to a temp file before the MinIO write). Service-account bearer token required; an unset/empty `UPLOAD_TOKENS` disables uploads entirely (every request `401`). |
 | `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
 | `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 

@@ -39,6 +39,13 @@ type config struct {
 
 	HTTPWriteTimeout time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"10m"`
 
+	// UploadMaxBytes caps one upload's request body. A guard rail on this pod's
+	// ephemeral storage, not the artifact-size policy: c.FormFile spools
+	// everything past MaxMultipartMemory to a temp file before HandleUpload's own
+	// checks run, so without it one service account could fill the disk. The
+	// default sits far above any real artifact.
+	UploadMaxBytes int64 `env:"UPLOAD_MAX_BYTES" envDefault:"2147483648"`
+
 	CacheMaxEntries     int           `env:"CACHE_MAX_ENTRIES" envDefault:"4"`
 	CacheTTL            time.Duration `env:"CACHE_TTL" envDefault:"24h"`
 	CacheMaxObjectBytes int64         `env:"CACHE_MAX_OBJECT_BYTES" envDefault:"536870912"`

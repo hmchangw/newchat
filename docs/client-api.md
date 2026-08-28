@@ -8748,15 +8748,23 @@ endpoint directly — they go through
 starts normally and answers **every** upload with `401`, so a site that does not
 publish client updates can deploy without it. Downloads are unaffected.
 
-Uploads an update-artifact pair as `multipart/form-data`. Both parts are required
-and there is no size cap. An upload of an existing file name overwrites it and
-evicts any cached copy.
+Uploads an update-artifact pair as `multipart/form-data`. Both parts are required.
+An upload of an existing file name overwrites it and evicts any cached copy.
+
+**Size cap.** `UPLOAD_MAX_BYTES` (default `2147483648`, i.e. 2 GiB) caps one
+request body, applied after the credential check and before anything is spooled,
+so an oversize upload cannot fill the disk on its way to being rejected.
+Exceeding it ends the request with a `400` naming the limit in bytes. It is a
+guard rail on this pod's ephemeral storage, not an artifact-size policy.
 
 **Disk-backed, not end-to-end streamed.** The handler reads its parts via
-`c.FormFile`, which buffers up to 32 MiB in memory and spills the remainder to
-a temporary file before the object is written to MinIO. Size the container's
-ephemeral storage for the largest artifact you intend to publish. The MinIO
-write itself streams from that temporary file.
+`c.FormFile`, which buffers up to `MaxMultipartMemory` (**1 MiB**, lowered from
+gin's 32 MiB default) in memory and spills the remainder to a temporary file
+before the object is written to MinIO. Peak heap is therefore independent of
+artifact size — measured: a 48 MiB artifact peaks at ~5 MiB, against ~113 MiB at
+the old default. Size the container's ephemeral storage, not its RAM, for the
+largest artifact you intend to publish. The MinIO write itself streams from that
+temporary file.
 
 The two objects are written **independently, not atomically**, with no locking
 between requests. Two consequences:

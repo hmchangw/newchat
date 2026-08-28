@@ -31,6 +31,7 @@ services:
       # prefix below is service-specific (UPLOAD_TOKENS is account:token, not
       # a bare token).
       - UPLOAD_TOKENS=admin-service:${CLIENT_UPDATE_TOKEN:-local-dev-token-0123456789}
+      - UPLOAD_MAX_BYTES=${UPLOAD_MAX_BYTES:-2147483648}
     networks:
       - chat-local
 
