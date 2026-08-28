@@ -95,7 +95,7 @@ func TestExtractRemovedAccount(t *testing.T) {
 func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 	t.Helper()
 	ctrl := gomock.NewController(t)
-	return New(
+	return closeOnCleanupIn(t, New(
 		mocks.NewMockMessageRepository(ctrl),
 		mocks.NewMockSubscriptionRepository(ctrl),
 		mocks.NewMockRoomRepository(ctrl),
@@ -105,7 +105,7 @@ func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 		users,
 		mocks.NewMockAppStore(ctrl),
 		&config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10},
-	)
+	))
 }
 
 // legacyRemoved builds a legacy members_removed row for the given account.

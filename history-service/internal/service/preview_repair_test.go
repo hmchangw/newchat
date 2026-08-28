@@ -29,7 +29,7 @@ func newRepairFixture(t *testing.T) *repairFixture {
 	rooms := mocks.NewMockRoomRepository(ctrl)
 	return &repairFixture{
 		rooms: rooms,
-		svc: New(
+		svc: closeOnCleanupIn(t, New(
 			mocks.NewMockMessageRepository(ctrl),
 			mocks.NewMockSubscriptionRepository(ctrl),
 			rooms,
@@ -39,7 +39,7 @@ func newRepairFixture(t *testing.T) *repairFixture {
 			mocks.NewMockUserStore(ctrl),
 			mocks.NewMockAppStore(ctrl),
 			&config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10},
-		),
+		)),
 	}
 }
 
@@ -113,4 +113,14 @@ func TestPersistMutatedPreview_SkippedWalkTouchesNothing(t *testing.T) {
 	f := newRepairFixture(t)
 	f.svc.persistMutatedPreview(natsrouter.NewContext(nil), "r1", "m1",
 		&previewWalk{State: previewSkipped}, time.Now().UTC())
+}
+
+// closeOnCleanupIn drains the service's background preview writer when the test ends. New
+// starts those workers, so every construction needs a termination path. The in-package
+// twin of closeOnCleanup in rooms_test.go; this file is untagged, so the integration
+// build sees it too.
+func closeOnCleanupIn(t *testing.T, svc *HistoryService) *HistoryService {
+	t.Helper()
+	t.Cleanup(func() { _ = svc.Close(context.Background()) })
+	return svc
 }

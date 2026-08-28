@@ -6,6 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
@@ -27,6 +31,35 @@ type warmBackJob struct {
 	forMsgID  string
 	asOf      int64
 	requestID string
+}
+
+// warmBackMetrics counts what the queue would otherwise hide. A shed job and a failed
+// write are both ways a room silently stays on the lazy walk, which is the failure this
+// whole path exists to end — and at saturation they arrive too fast to log one by one.
+// Instruments are no-ops without a MeterProvider, so recording is always safe.
+type warmBackMetrics struct {
+	stored  metric.Int64Counter
+	dropped metric.Int64Counter
+	failed  metric.Int64Counter
+}
+
+var warmBackCounters = newWarmBackMetrics(otel.Meter("history_preview_warmback"))
+
+func newWarmBackMetrics(m metric.Meter) warmBackMetrics {
+	stored, sErr := m.Int64Counter("preview_warmback_stored_total",
+		metric.WithDescription("Walk-resolved room previews written back to the room document."))
+	dropped, dErr := m.Int64Counter("preview_warmback_dropped_total",
+		metric.WithDescription("Room preview warm-backs shed because the writer queue was full."))
+	failed, fErr := m.Int64Counter("preview_warmback_failed_total",
+		metric.WithDescription("Room preview warm-backs that reached the store and failed to write."))
+	if sErr != nil || dErr != nil || fErr != nil {
+		// Recording must never be conditional on the meter having accepted the instruments.
+		n := noop.NewMeterProvider().Meter("history_preview_warmback")
+		stored, _ = n.Int64Counter("preview_warmback_stored_total")
+		dropped, _ = n.Int64Counter("preview_warmback_dropped_total")
+		failed, _ = n.Int64Counter("preview_warmback_failed_total")
+	}
+	return warmBackMetrics{stored: stored, dropped: dropped, failed: failed}
 }
 
 // previewWarmer stores walk-resolved previews off the request path.
@@ -85,6 +118,7 @@ func (w *previewWarmer) Submit(ctx context.Context, job *warmBackJob) {
 	select {
 	case w.jobs <- job:
 	default:
+		warmBackCounters.dropped.Add(ctx, 1)
 		slog.DebugContext(ctx, "room preview warm-back dropped; writer queue full",
 			"room_id", job.roomID, "request_id", job.requestID)
 	}
@@ -102,9 +136,12 @@ func (w *previewWarmer) store(job *warmBackJob) {
 	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), job.requestID), w.timeout)
 	defer cancel()
 	if err := w.rooms.SetPreviewMessage(ctx, job.roomID, job.preview, job.forMsgID, job.asOf); err != nil {
+		warmBackCounters.failed.Add(ctx, 1)
 		slog.WarnContext(ctx, "room preview warm-back failed", "room_id", job.roomID,
 			"request_id", job.requestID, "error", err)
+		return
 	}
+	warmBackCounters.stored.Add(ctx, 1)
 }
 
 // Close stops accepting work and waits for the queue to drain, giving up when ctx expires
