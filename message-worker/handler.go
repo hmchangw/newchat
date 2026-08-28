@@ -153,13 +153,13 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			switch {
 			case found:
 				evt.Message.ThreadParentMessageCreatedAt = &createdAt
-			case !natsmetrics.IsFinalDeliveryFromContext(ctx):
+			case !parentResolveExhausted(ctx):
 				// The parent's own canonical write may still land — MESSAGES-CANONICAL
 				// does not order it relative to this reply — so retry rather than
 				// persist a null and corrupt the parent's partition coords.
 				return fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)
 			default:
-				// Last attempt: the choice is now "persist without parent coords" or
+				// Budget spent: the choice is now "persist without parent coords" or
 				// "lose the reply". message-worker is the sole persister of history and
 				// nothing dead-letters a MaxDeliver drop, so salvage the content. The
 				// writes below already tolerate a nil parent createdAt — the
@@ -784,4 +784,20 @@ func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Messag
 		return fmt.Errorf("marshal thread reply event: %w", err)
 	}
 	return h.publish(ctx, subject.ServerBroadcastThreadTCount(h.siteID), data, "")
+}
+
+// parentResolveAttempts caps how many deliveries are spent waiting for a thread
+// parent's own canonical write to land. The race it covers is milliseconds —
+// message-worker persists the parent as soon as it processes it — so the full
+// MaxDeliver budget buys nothing and costs a lot: on DefaultBackoff each waiting
+// reply holds its ack-pending slot for 756s, and ~1.3 of them per second fills
+// the consumer's budget and stops it consuming anything at all.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than silently degrading the write.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

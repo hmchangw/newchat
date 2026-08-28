@@ -2899,9 +2899,9 @@ func TestHandler_ProcessMessage_ThreadReply_EventCarriedParentCreatedAt_SkipsLoo
 	require.NoError(t, h.processMessage(context.Background(), data, false))
 }
 
-// trackedFinalDelivery returns a ctx that reports the current delivery as the
-// consumer's last attempt, mirroring what natsmetrics.Track stamps in main.go.
-func trackedFinalDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+// trackedDelivery returns a ctx reporting the given delivery attempt, mirroring
+// what natsmetrics.Track stamps in main.go's consume loop.
+func trackedDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
 	t.Helper()
 	ctx := context.Background()
 	consumer := natsmetrics.New(metricnoop.NewMeterProvider().Meter("test")).Consumer(natsmetrics.ConsumerConfig{
@@ -2954,6 +2954,26 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 		assert.False(t, perm, "the race window must keep its retry budget")
 	})
 
+	// The race this retry covers is a parent write landing milliseconds later, not
+	// minutes. Spending the full MaxDeliver budget on it holds an ack-pending slot
+	// for DefaultBackoff's 756s, which is what fills the budget at ~1.3 msg/s.
+	t.Run("salvages on the second attempt, not the sixth", func(t *testing.T) {
+		store, us, ts, h := setup(t)
+		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
+		store.EXPECT().GetMessageCreatedAt(gomock.Any(), "msg-parent").Return(time.Time{}, false, nil)
+		ts.EXPECT().CreateThreadRoom(gomock.Any(), gomock.Any()).Return(nil)
+		store.EXPECT().GetMessageSender(gomock.Any(), "msg-parent").Return(nil, errMessageNotFound)
+		ts.EXPECT().AdvanceThreadSubscriptionLastSeen(gomock.Any(), gomock.Any(), "alice", now).Return(nil)
+		newTcount := 1
+		store.EXPECT().SaveThreadMessage(gomock.Any(), gomock.Any(), &expectedSender, "site-a", gomock.Any()).
+			Return(&newTcount, nil)
+
+		// Attempt 2 of a MaxDeliver=6 consumer: nowhere near the final delivery.
+		err := h.processMessage(trackedDelivery(t, 2, 6), data, false)
+
+		require.NoError(t, err, "the reply must be salvaged without spending the whole retry budget")
+	})
+
 	t.Run("persists without parent linkage on the final delivery", func(t *testing.T) {
 		store, us, ts, h := setup(t)
 		us.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
@@ -2971,7 +2991,7 @@ func TestProcessMessage_UnresolvableThreadParent_SalvagedOnFinalDelivery(t *test
 				return &newTcount, nil
 			})
 
-		err := h.processMessage(trackedFinalDelivery(t, 6, 6), data, false)
+		err := h.processMessage(trackedDelivery(t, 6, 6), data, false)
 
 		require.NoError(t, err, "the reply must survive rather than be dropped at MaxDeliver")
 		require.NotNil(t, saved)

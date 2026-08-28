@@ -46,9 +46,15 @@ func IsPermanent(err error) (*Error, bool) {
 // from the service you called reads the same on every redelivery, so retrying
 // it only holds an ack-pending slot until MaxDeliver drops the message anyway.
 //
-// Unavailable and Internal are transient — the remote may recover, and
-// history-service collapses a Cassandra read failure to internal. A non-errcode
-// error is an infra failure (timeout, unmarshal) and is likewise transient.
+// The split is "a fact about THIS message" vs "a state of the world". Facts
+// (not_found, forbidden, bad_request, conflict) are terminal. States are not:
+// Unavailable and Internal because the remote may recover (history-service
+// collapses a Cassandra read failure to internal), TooManyRequests because
+// "retry shortly" must never mean "drop" — that is what jsretry's
+// BackpressureBackoff exists for — and Unauthenticated because a credential
+// problem hits every message at once, so dropping them is mass data loss rather
+// than poison rejection. A non-errcode error is an infra failure (timeout,
+// unmarshal) and is likewise transient.
 //
 // Terminal classifies; it does not wrap. Pair it with Permanent at the call
 // site so the worker keeps its own message and terminal metric:
@@ -62,7 +68,7 @@ func Terminal(err error) (*Error, bool) {
 		return nil, false
 	}
 	switch ee.Code {
-	case CodeUnavailable, CodeInternal:
+	case CodeUnavailable, CodeInternal, CodeTooManyRequests, CodeUnauthenticated:
 		return nil, false
 	default:
 		return ee, true

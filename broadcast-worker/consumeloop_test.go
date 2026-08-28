@@ -474,8 +474,10 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 		return err == nil && info.NumAckPending == 0
 	}, 10*time.Second, 50*time.Millisecond, "unresolvable replies must not hold ack-pending slots")
 
-	assert.Equal(t, int32(burst+1), settled.Load(),
-		"every message is settled exactly once — an unresolvable reply must not be redelivered")
+	// Each unresolvable reply gets exactly one retry (the bot race window) and is
+	// then dropped — bounded work, not the full MaxDeliver budget.
+	assert.Equal(t, int32(burst*parentResolveAttempts+1), settled.Load(),
+		"each unresolvable reply must settle within its short retry budget, never at MaxDeliver")
 }
 
 // TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver is the
@@ -485,9 +487,9 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 // METRICS.md), and the pending gauges look recovered afterwards.
 //
 // The assertions are the broker's own counters, not an inference from the
-// handler: an unresolvable reply must be delivered exactly once and settled,
-// consuming 1 of its 3 deliveries and never entering the redelivery cycle at
-// all — which is what makes reaching MaxDeliver impossible.
+// handler: an unresolvable reply must be delivered exactly twice — once to
+// cover the bot race, once to settle — and must never approach MaxDeliver,
+// where the broker abandons it with no dead-letter behind it.
 //
 // Deliberately NOT asserted: the $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>
 // advisory. The broker publishes it only once the final NAK delay elapses
@@ -496,7 +498,9 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 // being abandoned — measured: deliveries=3, advisories=0 at the 5s mark. The
 // delivery counters below settle it decisively and immediately instead.
 func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T) {
-	const maxDeliver = 3
+	// MaxDeliver stays at the production default so the assertions below prove the
+	// parent-resolution CAP, not a coincidence with the consumer's own limit.
+	const maxDeliver = 6
 
 	// AckWait far exceeds the test window, so every redelivery here can only come
 	// from a NAK — i.e. from the classification under test.
@@ -542,16 +546,18 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T)
 	_, err = e.js.Publish(context.Background(), e.subject, data)
 	require.NoError(t, err)
 
-	require.Eventually(t, func() bool { return deliveries.Load() >= 1 }, 10*time.Second, 20*time.Millisecond,
-		"the reply was never delivered")
+	require.Eventually(t, func() bool { return deliveries.Load() >= parentResolveAttempts }, 10*time.Second, 20*time.Millisecond,
+		"the reply never used its retry — the bot race window is not being honoured")
 
-	// The full LowLatencyBackoff prefix for MaxDeliver=3 is ~1.2s, so 5s covers
-	// every redelivery the pre-fix classification would have produced.
-	require.Never(t, func() bool { return deliveries.Load() > 1 }, 5*time.Second, 100*time.Millisecond,
-		"an unresolvable reply was redelivered — it is burning its MaxDeliver budget instead of being dropped on the first delivery")
+	// The full LowLatencyBackoff chain is 66s, so 5s is well past the point where
+	// an uncapped retry would have delivered a third time.
+	require.Never(t, func() bool { return deliveries.Load() > parentResolveAttempts }, 5*time.Second, 100*time.Millisecond,
+		"an unresolvable reply kept retrying past its budget — it is burning MaxDeliver and holding an ack-pending slot")
 	info, err := e.cons.Info(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, info.NumAckPending, "the reply must be settled, not left pending")
-	assert.Zero(t, info.NumRedelivered, "the reply must not have been redelivered")
-	assert.Equal(t, uint64(1), info.Delivered.Consumer, "exactly one delivery")
+	assert.Equal(t, uint64(parentResolveAttempts), info.Delivered.Consumer,
+		"delivered exactly twice: the race window, then the drop")
+	assert.Less(t, info.Delivered.Consumer, uint64(maxDeliver),
+		"the reply must never reach MaxDeliver, where the broker abandons it with no dead-letter")
 }

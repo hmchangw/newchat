@@ -1387,11 +1387,13 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		if err != nil {
 			// historyParentFetcher propagates the typed remote error precisely so it
-			// can be classified here: a not_found/forbidden parent reads the same on
-			// every redelivery, so Ack-drop instead of holding an ack-pending slot
-			// for the whole MaxDeliver budget. The gatekeeper rejects these at send
-			// time; this covers events published before that guard existed.
-			if ee, terminal := errcode.Terminal(err); terminal {
+			// can be classified here. A not_found/forbidden parent is retried once —
+			// a bot can post a parent and reply to it before bot-message-worker has
+			// written the parent to Cassandra — and then dropped: past that the
+			// parent is genuinely absent, and spending the rest of MaxDeliver on it
+			// would hold an ack-pending slot for 66s per message, which is what
+			// fills the consumer's budget and stops it consuming anything at all.
+			if ee, terminal := errcode.Terminal(err); terminal && parentResolveExhausted(ctx) {
 				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
 				return nil, errcode.Permanent(ee)
 			}
@@ -1418,4 +1420,20 @@ func usersByAccount(users []model.User) map[string]model.User {
 		byAccount[users[i].Account] = users[i]
 	}
 	return byAccount
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (a bot replying to its own just-posted parent), so the full
+// MaxDeliver budget buys nothing and costs a lot: on LowLatencyBackoff each
+// waiting reply holds its ack-pending slot for 66s, and ~15 of them per second
+// fills the budget and stalls the whole site's fan-out.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

@@ -4320,13 +4320,22 @@ func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
 	tests := []struct {
 		name          string
 		fetchErr      error
+		attempt       uint64
 		wantPermanent bool
 	}{
-		{"nonexistent parent is permanent", errcode.NotFound("message not found"), true},
-		{"forbidden parent is permanent", errcode.Forbidden("no access"), true},
-		{"history unavailable stays retryable", errcode.Unavailable("history down"), false},
-		{"history internal stays retryable", errcode.Internal("cassandra read failed"), false},
-		{"bare infra error stays retryable", errors.New("nats: timeout"), false},
+		// A bot can post a parent and reply to it milliseconds later, before
+		// bot-message-worker has written the parent to Cassandra. The first
+		// delivery must retry so that race resolves.
+		{"nonexistent parent retries on the first attempt", errcode.NotFound("message not found"), 1, false},
+		{"forbidden parent retries on the first attempt", errcode.Forbidden("no access"), 1, false},
+		// Past the short budget it is not a race — drop it rather than hold an
+		// ack-pending slot for the rest of MaxDeliver.
+		{"nonexistent parent is permanent once the budget is spent", errcode.NotFound("message not found"), 2, true},
+		{"forbidden parent is permanent once the budget is spent", errcode.Forbidden("no access"), 2, true},
+		// An outage keeps the full budget however many attempts have passed.
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), 2, false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), 6, false},
+		{"bare infra error stays retryable", errors.New("nats: timeout"), 6, false},
 	}
 
 	for _, tc := range tests {
@@ -4354,7 +4363,7 @@ func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
 			require.NoError(t, err)
 
 			h := NewHandler(store, us, pub, keyStore, stubParentFetcher{err: tc.fetchErr}, false, subject.RouteGlobal)
-			err = h.HandleMessage(context.Background(), data)
+			err = h.HandleMessage(trackedDelivery(t, tc.attempt, 6), data)
 
 			require.Error(t, err)
 			_, perm := errcode.IsPermanent(err)
@@ -4362,4 +4371,28 @@ func TestChannelThreadFanOut_ParentFetchClassification(t *testing.T) {
 			assert.Empty(t, pub.records, "no fan-out when the parent cannot be resolved")
 		})
 	}
+}
+
+// trackedDelivery returns a ctx reporting the given delivery attempt, mirroring
+// what natsmetrics.Consume stamps in the production loop.
+func trackedDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+	t.Helper()
+	ctx := context.Background()
+	m, _ := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Consumer: "broadcast-worker",
+	})
+	consumer.LoopStarted(ctx)
+	tracked := consumer.Track(ctx, &deliveryCountMsg{numDelivered: numDelivered}, natsmetrics.EventCreated, maxDeliver)
+	return tracked.Context(ctx)
+}
+
+// deliveryCountMsg is a jetstream.Msg carrying only the delivery count Track reads.
+type deliveryCountMsg struct {
+	jetstream.Msg
+	numDelivered uint64
+}
+
+func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
 }

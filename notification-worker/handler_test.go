@@ -9,11 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 )
@@ -1891,13 +1894,20 @@ func TestHandle_ThreadOnlyReply_ParentFetchClassification(t *testing.T) {
 	tests := []struct {
 		name          string
 		fetchErr      error
+		attempt       uint64
 		wantPermanent bool
 	}{
-		{"nonexistent parent is permanent", errcode.NotFound("message not found"), true},
-		{"forbidden parent is permanent", errcode.Forbidden("no access"), true},
-		{"history unavailable stays retryable", errcode.Unavailable("history down"), false},
-		{"history internal stays retryable", errcode.Internal("cassandra read failed"), false},
-		{"bare infra error stays retryable", errors.New("history timeout"), false},
+		// The parent's Cassandra row is written asynchronously off the same stream,
+		// so the first delivery must retry to cover that ordering race.
+		{"nonexistent parent retries on the first attempt", errcode.NotFound("message not found"), 1, false},
+		{"forbidden parent retries on the first attempt", errcode.Forbidden("no access"), 1, false},
+		// Past the short budget it is not a race. On DefaultBackoff the remaining
+		// attempts would hold an ack-pending slot for 756s.
+		{"nonexistent parent is permanent once the budget is spent", errcode.NotFound("message not found"), 2, true},
+		{"forbidden parent is permanent once the budget is spent", errcode.Forbidden("no access"), 2, true},
+		{"history unavailable stays retryable", errcode.Unavailable("history down"), 2, false},
+		{"history internal stays retryable", errcode.Internal("cassandra read failed"), 6, false},
+		{"bare infra error stays retryable", errors.New("history timeout"), 6, false},
 	}
 
 	for _, tc := range tests {
@@ -1923,7 +1933,7 @@ func TestHandle_ThreadOnlyReply_ParentFetchClassification(t *testing.T) {
 				TShow:                 false,
 				Content:               "thread reply",
 			}
-			err := h.HandleMessage(context.Background(), msgEvent(&msg))
+			err := h.HandleMessage(trackedDelivery(t, tc.attempt, 6), msgEvent(&msg))
 
 			require.Error(t, err)
 			_, perm := errcode.IsPermanent(err)
@@ -2002,4 +2012,28 @@ func TestHandle_EmitBatchErrors_Aggregate(t *testing.T) {
 			assert.Equal(t, tc.wantPermanent, perm, "aggregate permanence mismatch: %v", err)
 		})
 	}
+}
+
+// trackedDelivery returns a ctx reporting the given delivery attempt, mirroring
+// what natsmetrics.Track stamps in main.go's consume loop.
+func trackedDelivery(t *testing.T, numDelivered uint64, maxDeliver int) context.Context {
+	t.Helper()
+	ctx := context.Background()
+	consumer := natsmetrics.NewFromProvider(sdkmetric.NewMeterProvider()).
+		Consumer(natsmetrics.ConsumerConfig{
+			Site: "site-a", Stream: "MESSAGES-CANONICAL-site-a", Consumer: "notification-worker",
+		})
+	consumer.LoopStarted(ctx)
+	tracked := consumer.Track(ctx, &deliveryCountMsg{numDelivered: numDelivered}, natsmetrics.EventCreated, maxDeliver)
+	return tracked.Context(ctx)
+}
+
+// deliveryCountMsg is a jetstream.Msg carrying only the delivery count Track reads.
+type deliveryCountMsg struct {
+	jetstream.Msg
+	numDelivered uint64
+}
+
+func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
 }

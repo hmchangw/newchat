@@ -139,7 +139,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 
 	var followers map[string]struct{}
 	// parentCreatedAt/parentSenderAccount feed the suppression gate; use gatekeeper-carried values
-	// when present, else fetch from history-service (parent pre-exists, so the fetch is race-free).
+	// when present, else fetch from history-service. That fetch can race the parent's own
+	// Cassandra write (same stream, no ordering), which parentResolveAttempts covers.
 	var parentCreatedAt *time.Time
 	var parentSenderAccount string
 	if isThreadOnlyReply {
@@ -157,11 +158,13 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			// The reply sender can always read the parent they replied to; fetch on their behalf.
 			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
 			if perr != nil {
-				// The fetch is race-free (the parent pre-exists), so a not_found or
-				// forbidden reply reads the same on every redelivery — Ack-drop rather
-				// than hold an ack-pending slot for the whole MaxDeliver budget. Only
-				// an outage (unavailable/internal/infra) earns a retry.
-				if ee, terminal := errcode.Terminal(perr); terminal {
+				// The parent's Cassandra row is written asynchronously off the same
+				// stream, so a not_found can be an ordering race — retry once to cover
+				// it. Past that the parent is genuinely absent, and on DefaultBackoff
+				// the remaining attempts would hold an ack-pending slot for 756s, which
+				// is what fills the budget at ~1.3 msg/s. Only an outage
+				// (unavailable/internal/infra) keeps the full budget.
+				if ee, terminal := errcode.Terminal(perr); terminal && parentResolveExhausted(ctx) {
 					natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
 					return errcode.Permanent(ee)
 				}
@@ -491,4 +494,20 @@ func allBatchErrsPermanent(errs []error) bool {
 		}
 	}
 	return true
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (message-worker persists the parent off the same stream), so the
+// full MaxDeliver budget buys nothing and costs a lot: on DefaultBackoff each
+// waiting reply holds its ack-pending slot for 756s, and ~1.3 of them per
+// second fills the consumer's budget and stops push delivery entirely.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

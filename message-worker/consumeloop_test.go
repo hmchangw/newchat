@@ -165,9 +165,10 @@ func (salvageThreads) AddThreadUnread(context.Context, string, string, []string)
 // main.go stopped calling tracked.Context, the unit test would still pass and
 // this test would fail.
 func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
-	// MaxDeliver=2 keeps the run short: one retry on DefaultBackoff's 1s rung,
-	// then delivery 2 is final and must salvage.
-	const maxDeliver = 2
+	// MaxDeliver stays at the production default so the assertion below proves the
+	// parent-resolution CAP (2 attempts), not a coincidence with the consumer's
+	// own limit. One retry on DefaultBackoff's 1s rung, then salvage.
+	const maxDeliver = 6
 
 	e := startEmbeddedCanonical(t, "site-salvage", stream.ConsumerSettings{
 		AckWait:       30 * time.Second, // beyond the test window: every redelivery must come from a NAK
@@ -229,10 +230,11 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	assert.Equal(t, "never-persisted-parent", saved.ThreadParentMessageID, "thread linkage on the reply is preserved")
 	assert.Nil(t, saved.ThreadParentMessageCreatedAt, "no parent coords exist to stamp")
 
-	// Salvage happens on the LAST delivery, not the first: the earlier deliveries
-	// are the race window where the parent's own write may still land.
-	assert.Equal(t, int32(maxDeliver), deliveries.Load(),
-		"the reply must use its full retry budget before being salvaged")
+	// Salvage happens on the second delivery, not the first (the race window) and
+	// not the sixth: spending the whole MaxDeliver budget would hold this message's
+	// ack-pending slot for DefaultBackoff's 756s.
+	assert.Equal(t, int32(parentResolveAttempts), deliveries.Load(),
+		"the reply must be salvaged once the short parent-resolution budget is spent, not at MaxDeliver")
 
 	// Settled, so the slot is released and the broker has nothing left to abandon.
 	require.Eventually(t, func() bool {

@@ -73,9 +73,16 @@ func TestTerminal(t *testing.T) {
 		{"forbidden is terminal", Forbidden("nope"), true, CodeForbidden},
 		{"bad request is terminal", BadRequest("bad"), true, CodeBadRequest},
 		{"wrapped terminal is still terminal", fmt.Errorf("fetch: %w", NotFound("gone")), true, CodeNotFound},
-		// The remote may recover, so these must keep their retry budget.
+		// The remote may recover, so these must keep their retry budget. These are
+		// states of the world, not facts about this message.
 		{"unavailable is transient", Unavailable("history down"), false, ""},
 		{"internal is transient", Internal("boom"), false, ""},
+		// "retry shortly" must never mean "drop" — that is what BackpressureBackoff
+		// exists for. pkg/ginutil/limit.go sheds load with exactly this code.
+		{"too many requests is transient", TooManyRequests("server is at capacity"), false, ""},
+		// A credential problem hits every message at once; dropping them would be
+		// mass data loss, not poison rejection.
+		{"unauthenticated is transient", Unauthenticated("token expired"), false, ""},
 		// Infra failures carry no errcode and are always retryable.
 		{"bare error is transient", errors.New("dial tcp: timeout"), false, ""},
 		{"nil is transient", nil, false, ""},
