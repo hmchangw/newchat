@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -133,25 +132,6 @@ func truncateForLog(s string) string {
 	return s[:maxUpstreamBodyLogLen] + "...(truncated)"
 }
 
-// maxAuditFileNameLen caps an audited filename. Separate from
-// maxUpstreamBodyLogLen: that one bounds a log line, this one bounds a value
-// persisted to Mongo, and the two are free to move independently.
-const maxAuditFileNameLen = 256
-
-// truncateFileName caps a filename on a rune boundary. A byte-offset cut (what
-// truncateForLog does, correctly, for a log value) could split a multi-byte
-// rune and store invalid UTF-8 in the audit entry.
-func truncateFileName(s string) string {
-	if len(s) <= maxAuditFileNameLen {
-		return s
-	}
-	cut := maxAuditFileNameLen
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "...(truncated)"
-}
-
 // upstreamMessage lifts the human-readable text out of an errcode envelope. The
 // upstream `reason` is deliberately NOT copied: reasons are a contract between a
 // service and its own clients, and re-emitting another service's would put
@@ -165,14 +145,6 @@ func upstreamMessage(body, fallback string) string {
 
 // clientUpdateAuditAction is the audit action for a published artifact pair.
 const clientUpdateAuditAction = "client_update.upload"
-
-// auditedUploadFields bounds what the audit entry records. These are the two
-// fields client-update-service's contract defines; anything else is relayed but
-// not retained, so the entry's cardinality cannot grow with the part count.
-var auditedUploadFields = map[string]struct{}{
-	"configFile":  {},
-	"executeFile": {},
-}
 
 // maxUploadParts caps the file parts one request may carry. The contract needs
 // two; the ceiling is generous but finite, so a caller cannot hold a relay open
@@ -194,9 +166,7 @@ type uploadBody struct {
 	reader      io.Reader
 	contentType string
 	length      int64
-	// names is field->filename for the audit entry, contract fields only.
-	names map[string]string
-	files []multipart.File
+	files       []multipart.File
 }
 
 // Close releases the opened form files. The temp files themselves are removed by
@@ -234,7 +204,7 @@ func partHeader(field, filename, contentType string) textproto.MIMEHeader {
 func buildUploadBody(form *multipart.Form) (*uploadBody, error) {
 	var env bytes.Buffer
 	mw := multipart.NewWriter(&env)
-	b := &uploadBody{names: make(map[string]string), contentType: mw.FormDataContentType()}
+	b := &uploadBody{contentType: mw.FormDataContentType()}
 
 	var chain []io.Reader
 	// flush moves everything the writer emitted since the last call into the
@@ -269,7 +239,6 @@ func buildUploadBody(form *multipart.Form) (*uploadBody, error) {
 				return nil, fmt.Errorf("open upload part %q: %w", field, err)
 			}
 			b.files = append(b.files, f)
-			b.recordAuditName(field, fh.Filename)
 
 			if _, err := mw.CreatePart(partHeader(field, fh.Filename, fh.Header.Get("Content-Type"))); err != nil {
 				_ = b.Close()
@@ -289,23 +258,6 @@ func buildUploadBody(form *multipart.Form) (*uploadBody, error) {
 
 	b.reader = io.MultiReader(chain...)
 	return b, nil
-}
-
-// recordAuditName retains a filename for the audit entry, bounded to the two
-// contract fields so a caller choosing arbitrary field names cannot grow the
-// map (and the AuditEntry built from it) without bound.
-//
-// FIRST wins, never overwritten: client-update-service reads its parts with
-// c.FormFile, which selects the first file for a field name, so a later
-// duplicate would make the audit entry name a file the upstream did not store.
-func (b *uploadBody) recordAuditName(field, filename string) {
-	if _, ok := auditedUploadFields[field]; !ok {
-		return
-	}
-	if _, seen := b.names[field]; seen {
-		return
-	}
-	b.names[field] = truncateFileName(filename)
 }
 
 // uploadClientVersion relays an artifact pair to client-update-service under this
@@ -356,7 +308,10 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 		return
 	}
 
-	h.audit(ctx, c, clientUpdateAuditAction, "", "", body.names)
+	// Only after the upstream accepted the pair, and with no details: the
+	// filenames are the upstream's record to keep, and auditing them here made
+	// this service responsible for matching how it picks parts.
+	h.audit(ctx, c, clientUpdateAuditAction, "", "", nil)
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
 }
 

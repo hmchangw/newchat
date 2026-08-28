@@ -15,7 +15,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -238,7 +237,6 @@ type fakeUploader struct {
 	contentType string
 	body        []byte
 	length      int64
-	names       map[string]string
 	err         error
 }
 
@@ -246,7 +244,6 @@ func (f *fakeUploader) Upload(_ context.Context, body *uploadBody) error {
 	contentType := body.contentType
 	b, readErr := io.ReadAll(body.reader)
 	f.length = body.length
-	f.names = body.names
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.called = true
@@ -406,8 +403,8 @@ func TestUploadClientVersion_Success(t *testing.T) {
 	entries := store.audited()
 	require.Len(t, entries, 1)
 	assert.Equal(t, clientUpdateAuditAction, entries[0].Action)
-	assert.Equal(t, "app.yaml", entries[0].Details["configFile"])
-	assert.Equal(t, "app.exe", entries[0].Details["executeFile"])
+	// No per-file details: the filenames are client-update-service's record.
+	assert.Empty(t, entries[0].Details)
 }
 
 // client-update-service picks a stored object's content type from the part's own
@@ -790,10 +787,9 @@ func (c *countingUploader) Upload(_ context.Context, body *uploadBody) error {
 	return nil
 }
 
-// client-update-service reads its parts with c.FormFile, which selects the FIRST
-// file for a field name. The audit entry must name that file, not a later
-// duplicate, or the log claims something the upstream never stored.
-func TestUploadClientVersion_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
+// admin-service validates nothing: duplicate parts for a contract field are
+// relayed as sent, and client-update-service decides what to do with them.
+func TestUploadClientVersion_RelaysDuplicatePartsUnvalidated(t *testing.T) {
 	up := &fakeUploader{}
 	store := &recordingAuditStore{}
 	h := newHandler(store, emptySessionStore(), uploadTestCfg(), nil, nil, withVersionUploader(up))
@@ -815,12 +811,12 @@ func TestUploadClientVersion_DuplicateFieldAuditsTheStoredFile(t *testing.T) {
 	status, _ := postUpload(t, srv, raw, mw.FormDataContentType())
 	require.Equal(t, http.StatusOK, status)
 
-	entries := store.audited()
-	require.Len(t, entries, 1)
-	assert.Equal(t, "first.yaml", entries[0].Details["configFile"])
-	assert.Equal(t, "first.exe", entries[0].Details["executeFile"])
-	// Every part is still relayed — admin-service validates nothing.
-	assert.Contains(t, string(up.relayedBody()), "second.yaml")
+	relayed := string(up.relayedBody())
+	for _, name := range []string{"first.yaml", "second.yaml", "first.exe", "second.exe"} {
+		assert.Contains(t, relayed, name, "every part must reach the upstream")
+	}
+	require.Len(t, store.audited(), 1)
+	assert.Empty(t, store.audited()[0].Details)
 }
 
 // A caller must not be able to hold the relay open with an unbounded number of
@@ -845,31 +841,4 @@ func TestUploadClientVersion_RejectsTooManyParts(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, string(respBody), "could not read the uploaded files")
 	assert.False(t, up.wasCalled(), "nothing may reach the upstream once the part cap trips")
-}
-
-// An audited filename over the cap must stay valid UTF-8 in Mongo: a byte-offset
-// cut could split a multi-byte rune.
-func TestBuildUploadBody_AuditedFileNameStaysValidUTF8(t *testing.T) {
-	// Each rune is 3 bytes, so no multiple lands on the cap: a byte cut splits one.
-	long := strings.Repeat("あ", maxAuditFileNameLen)
-
-	raw := &bytes.Buffer{}
-	mw := multipart.NewWriter(raw)
-	fw, err := mw.CreateFormFile("configFile", long+".yaml")
-	require.NoError(t, err)
-	_, err = fw.Write([]byte("version: 1"))
-	require.NoError(t, err)
-	require.NoError(t, mw.Close())
-
-	form, err := multipart.NewReader(raw, mw.Boundary()).ReadForm(1 << 20)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = form.RemoveAll() })
-
-	body, err := buildUploadBody(form)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = body.Close() })
-
-	got := body.names["configFile"]
-	assert.True(t, utf8.ValidString(got), "audited filename must be valid UTF-8, got %q", got)
-	assert.LessOrEqual(t, len(got), maxAuditFileNameLen+len("...(truncated)"))
 }

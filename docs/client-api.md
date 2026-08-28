@@ -8166,11 +8166,13 @@ Publishes a client update artifact pair. `admin-service` relays both parts to
 `client-update-service` under its own service-account credential; the browser
 never holds that credential.
 
-**Memory note.** The handler re-encodes the multipart body through an `io.Pipe`,
-but the outbound HTTP client (`resty` v2.17.2) reads an `io.Reader` body into
-memory before dialling, so one in-flight upload currently costs `admin-service`
-roughly the artifact size in RAM. Treat the relay as buffered when sizing the
-pod, not as constant-memory.
+**Disk-backed, not memory-backed.** The handler spools the incoming parts past
+1 MiB to a temp file, then re-encodes them into a streamed outbound body — small
+envelope snapshots interleaved with the spooled files' own readers — sent with an
+exact `Content-Length`. Peak heap is therefore independent of artifact size
+(measured: a 48 MiB artifact relays with a ~5 MiB peak). The cost is ephemeral
+storage: size `admin-service`'s disk for the concurrent-upload total, not its
+RAM. Temp files are removed when the request ends.
 
 The artifacts themselves are validated by `client-update-service`, not here: file
 name and extension rules live there and are reported back verbatim on a `400`.
@@ -8205,10 +8207,11 @@ name and extension rules live there and are reported back verbatim on a `400`.
 { "result": "success" }
 ```
 
-**Audit:** a successful upload appends an `AuditEntry` with action
-`client_update.upload` and `details` naming both uploaded file names. If a field
-appears more than once, the entry names the **first** occurrence — the one
-`client-update-service` actually stores. The append
+**Audit:** an upload that `client-update-service` accepted appends an
+`AuditEntry` with action `client_update.upload` and **no `details`** — the
+filenames are the upstream's record to keep, and duplicating them here made this
+service responsible for matching how the upstream picks parts. A rejected or
+failed upload is never audited. The append
 is best-effort, as it is for every mutating admin endpoint: the artifacts are
 already published by then, so a failed append is logged at `ERROR` and the
 response still reports the publication. Treat the audit log as a record of
