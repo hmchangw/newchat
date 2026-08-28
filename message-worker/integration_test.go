@@ -5,7 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,9 +20,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -459,9 +464,9 @@ func TestHandler_Integration(t *testing.T) {
 	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
 	us := userstore.NewMongoStore(userCol)
 	threadStore := newThreadStoreMongo(mongoDB)
-	h := NewHandler(store, us, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+	h := NewHandler(historyStore{store}, us, threadStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	evt := model.MessageEvent{
@@ -523,9 +528,9 @@ func TestHandler_Integration_ThreadReply(t *testing.T) {
 	us := userstore.NewMongoStore(userCol)
 	ts := newThreadStoreMongo(db)
 	require.NoError(t, ts.EnsureIndexes(ctx))
-	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+	h := NewHandler(historyStore{store}, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -655,9 +660,9 @@ func TestHandler_Integration_ThreadReplyWithMention(t *testing.T) {
 	us := userstore.NewMongoStore(userCol)
 	ts := newThreadStoreMongo(db)
 	require.NoError(t, ts.EnsureIndexes(ctx))
-	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+	h := NewHandler(historyStore{store}, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -744,9 +749,9 @@ func TestHandler_Integration_ThreadReplyMentionNonMemberExcluded(t *testing.T) {
 	us := userstore.NewMongoStore(userCol)
 	ts := newThreadStoreMongo(db)
 	require.NoError(t, ts.EnsureIndexes(ctx))
-	h := NewHandler(store, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
+	h := NewHandler(historyStore{store}, us, ts, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error {
 		return nil
-	})
+	}, nil, testDegradeTracker(), testDropPolicy())
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -2433,4 +2438,148 @@ func TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable(t *testing.T) {
 				"%s: an unpinned redelivery must be the write that won", tc.name)
 		})
 	}
+}
+
+// failingStore wraps a real Store and fails history writes until healthy is set.
+type failingStore struct {
+	Store
+	mu      sync.Mutex
+	healthy bool
+	saved   []string
+}
+
+func (s *failingStore) SaveMessage(ctx context.Context, msg *model.Message, sender *cassParticipant, siteID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.healthy {
+		return errors.New("gocql: no connections available")
+	}
+	s.saved = append(s.saved, msg.ID)
+	return s.Store.SaveMessage(ctx, msg, sender, siteID)
+}
+
+func (s *failingStore) setHealthy(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.healthy = v
+}
+
+func (s *failingStore) savedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.saved...)
+}
+
+func TestHandler_Integration_CassandraOutageDoesNotLoseMessages(t *testing.T) {
+	ctx := context.Background()
+
+	cassSession := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	userCol := mongoDB.Collection("users")
+	_, err := userCol.InsertOne(ctx, bson.M{
+		"_id": "u-1", "account": "alice", "siteId": "site-a",
+		"engName": "Alice Wang", "chineseName": "愛麗絲", "employeeId": "EMP001",
+	})
+	require.NoError(t, err)
+
+	base := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	store := &failingStore{Store: base}
+
+	mtr, err := newMetrics()
+	require.NoError(t, err)
+	degradeStore := histdegrade.NewStore(mongoDB)
+
+	// pending reports a non-empty backlog until drained is flipped, mirroring the
+	// consumer's NumPending during and after a replay. The clock is test-controlled
+	// so the 5s backlog-check throttle in OnWriteSuccess can be stepped past
+	// deterministically — never with time.Sleep.
+	var drained atomic.Bool
+	clockOffset := atomic.Int64{} // seconds added to the tracker's view of now
+	tracker := newDegradeTracker(degradeStore, "site-a", func(context.Context) (uint64, uint64, error) {
+		if drained.Load() {
+			return 0, 0, nil
+		}
+		return 12, 0, nil
+	}, mtr, func() time.Time {
+		return time.Now().UTC().Add(time.Duration(clockOffset.Load()) * time.Second)
+	})
+
+	publish := func(context.Context, string, []byte, string) error { return nil }
+	// The real production window: an infra-class outage must never reach a drop no
+	// matter how many redeliveries pile up, so the window's value is irrelevant to
+	// this test's assertions — only the error class is.
+	h := NewHandler(historyStore{store}, userstore.NewMongoStore(userCol), newThreadStoreMongo(mongoDB),
+		"site-a", publish, mtr, tracker, newDropPolicy(time.Hour, true, 10, nil))
+
+	newEvent := func(id string, at time.Time) []byte {
+		data, err := json.Marshal(model.MessageEvent{
+			Message: model.Message{
+				ID: id, RoomID: "r-out", UserID: "u-1", UserAccount: "alice",
+				Content: "outage message " + id, CreatedAt: at,
+			},
+			SiteID: "site-a", Timestamp: at.UnixMilli(),
+		})
+		require.NoError(t, err)
+		return data
+	}
+
+	// --- Outage: every write fails; nothing may be dropped or lost. ---
+	ids := make([]string, 0, 20)
+	for i := range 20 {
+		id := fmt.Sprintf("m-out-%02d", i)
+		ids = append(ids, id)
+		at := time.Now().UTC().Truncate(time.Millisecond)
+
+		procErr := h.processMessage(ctx, newEvent(id, at), false)
+		require.Error(t, procErr, "a failed history write must surface as an error")
+
+		// NumDelivered is deliberately enormous on the later messages: an outage is
+		// exactly when a message accumulates redeliveries, and the whole point of
+		// classifying the error is that no delivery count can turn an infra-class
+		// failure into a drop. i==0 covers the first failure of the whole outage,
+		// before the tracker has recorded anything.
+		msg := &fakeJetStreamMsg{subject: subject.MsgCanonicalCreated("site-a"), data: newEvent(id, at), numDelivered: uint64(i) * 500}
+		h.settle(ctx, msg, procErr)
+		assert.True(t, msg.naked, "an infra-class failure must NAK, not give up")
+		assert.False(t, msg.acked, "no delivery count may turn a Cassandra outage into a drop")
+	}
+
+	assert.True(t, tracker.Degraded())
+
+	marker, err := degradeStore.Get(ctx, "site-a")
+	require.NoError(t, err)
+	require.NotNil(t, marker, "the marker must be durable in Mongo, not just in-process")
+
+	// A sibling pod that saw no failures of its own must adopt the marker.
+	sibling := newDegradeTracker(degradeStore, "site-a",
+		func(context.Context) (uint64, uint64, error) { return 12, 0, nil }, mtr, nil)
+	sibling.Refresh(ctx)
+	assert.True(t, sibling.Degraded())
+
+	// --- Recovery: the backlog replays and every message persists. ---
+	store.setHealthy(true)
+	for _, id := range ids {
+		at := time.Now().UTC().Truncate(time.Millisecond)
+		msg := &fakeJetStreamMsg{subject: subject.MsgCanonicalCreated("site-a"), data: newEvent(id, at), numDelivered: 401}
+		procErr := h.processMessage(ctx, newEvent(id, at), false)
+		require.NoError(t, procErr)
+		h.settle(ctx, msg, procErr)
+		assert.True(t, msg.acked)
+	}
+
+	assert.ElementsMatch(t, ids, store.savedIDs(), "every message from the outage window must persist")
+	assert.True(t, tracker.Degraded(), "marker is held while the backlog still has pending messages")
+
+	// --- Drained: the marker clears only once the backlog is empty. ---
+	drained.Store(true)
+	clockOffset.Add(60) // step past the backlog-check throttle without sleeping
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, h.processMessage(ctx, newEvent("m-out-final", at), false))
+	tracker.OnWriteSuccess(ctx)
+
+	assert.False(t, tracker.Degraded())
+	cleared, err := degradeStore.Get(ctx, "site-a")
+	require.NoError(t, err)
+	assert.Nil(t, cleared, "the marker must be removed from Mongo once history has caught up")
 }
