@@ -70,14 +70,19 @@ func newHTTPVersionUploader(baseURL, token string, timeout time.Duration) *httpV
 	}
 }
 
+// Upload POSTs body to client-update-service under this service's own
+// credential. The body is streamed, not buffered, so ContentLength must be set
+// explicitly from what buildUploadBody counted — net/http cannot infer a reader
+// chain's length and would otherwise fall back to chunked encoding, which the
+// upstream's multipart parser has no reason to accept. ctx carries the whole
+// request's remaining budget, so an expiry here is reported as a timeout rather
+// than as an unreachable upstream.
 func (u *httpVersionUploader) Upload(ctx context.Context, body *uploadBody) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.endpoint, body.reader)
 	if err != nil {
 		return errcode.Unavailable("client update upload is misconfigured",
 			errcode.WithCause(fmt.Errorf("build client update request: %w", err)))
 	}
-	// Set explicitly: net/http cannot infer the length of a reader chain and
-	// would fall back to chunked encoding without it.
 	req.ContentLength = body.length
 	req.Header.Set("Content-Type", body.contentType)
 	req.Header.Set("Authorization", "Bearer "+u.token)

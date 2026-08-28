@@ -463,6 +463,9 @@ func TestUploadClientVersion_PreservesPartContentTypes(t *testing.T) {
 // relayedPart is one part as it arrived at the uploader.
 type relayedPart struct{ filename, content, contentType string }
 
+// parseRelayed re-parses the multipart body the uploader actually sent, keyed by
+// form field, so a test can assert on what crossed the wire rather than on how
+// the handler chose to build it.
 func parseRelayed(t *testing.T, body []byte, contentType string) map[string]relayedPart {
 	t.Helper()
 	_, params, err := mime.ParseMediaType(contentType)
