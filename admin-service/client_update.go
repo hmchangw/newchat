@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -288,17 +290,22 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 		return
 	}
 
+	// Capped BEFORE parsing: c.MultipartForm spools the whole body to disk, and
+	// maxUploadParts is only consulted afterwards, so without this one caller
+	// could fill the pod's ephemeral storage regardless of the part count.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.cfg.ClientUpdateMaxUploadBytes)
+
 	// Spills past MaxMultipartMemory to a temp file, so a large artifact costs
 	// disk rather than heap. net/http removes those files when the request ends.
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
+		errhttp.Write(ctx, c, uploadReadError(ctx, err))
 		return
 	}
 
 	body, err := buildUploadBody(form)
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("could not read the uploaded files"))
+		errhttp.Write(ctx, c, uploadReadError(ctx, err))
 		return
 	}
 	defer func() { _ = body.Close() }()
@@ -313,6 +320,22 @@ func (h *Handler) uploadClientVersion(c *gin.Context) {
 	// this service responsible for matching how it picks parts.
 	h.audit(ctx, c, clientUpdateAuditAction, "", "", nil)
 	c.JSON(http.StatusOK, gin.H{"result": "success"})
+}
+
+// uploadReadError classifies a failure to obtain a usable request body. All
+// three are 4xx — the client did not deliver one — but the message must say
+// which, or an operator hunts malformed multipart data when the real cause was
+// a size cap or the clock. errcode has no 413, so an oversize body is a
+// bad_request whose message names the limit.
+func uploadReadError(ctx context.Context, err error) error {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		return errcode.BadRequest(fmt.Sprintf("the upload is too large: the limit is %d bytes", tooBig.Limit))
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errcode.BadRequest("the upload did not finish within the allowed time")
+	}
+	return errcode.BadRequest("could not read the uploaded files")
 }
 
 // uploadResponseMargin is how much longer this request's WRITE deadline runs

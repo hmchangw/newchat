@@ -97,9 +97,10 @@ func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
 func TestValidateClientUpdate(t *testing.T) {
 	base := func() Config {
 		return Config{
-			ClientUpdateURL:     "http://client-update-service:8080",
-			ClientUpdateToken:   "0123456789abcdef",
-			ClientUpdateTimeout: 10 * time.Minute,
+			ClientUpdateURL:            "http://client-update-service:8080",
+			ClientUpdateToken:          "0123456789abcdef",
+			ClientUpdateTimeout:        10 * time.Minute,
+			ClientUpdateMaxUploadBytes: 2 << 30,
 		}
 	}
 	tests := []struct {
@@ -121,6 +122,10 @@ func TestValidateClientUpdate(t *testing.T) {
 		{"empty token", func(c *Config) { c.ClientUpdateToken = "" }, true},
 		{"zero timeout", func(c *Config) { c.ClientUpdateTimeout = 0 }, true},
 		{"negative timeout", func(c *Config) { c.ClientUpdateTimeout = -time.Second }, true},
+		// Without a positive cap MaxBytesReader would admit an unbounded body,
+		// which c.MultipartForm spools to the pod's disk.
+		{"zero max upload bytes", func(c *Config) { c.ClientUpdateMaxUploadBytes = 0 }, true},
+		{"negative max upload bytes", func(c *Config) { c.ClientUpdateMaxUploadBytes = -1 }, true},
 		// Deliberately ABOVE httpWriteTimeout — that is the whole point of the
 		// per-route deadline extension. checkHandlerTimeout must not be applied.
 		{"timeout far above httpWriteTimeout", func(c *Config) { c.ClientUpdateTimeout = 30 * time.Minute }, false},
@@ -129,7 +134,7 @@ func TestValidateClientUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := base()
 			tt.mutate(&cfg)
-			err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
+			err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout, cfg.ClientUpdateMaxUploadBytes)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -145,7 +150,7 @@ func TestValidateClientUpdate_ErrorNeverLeaksTheToken(t *testing.T) {
 		ClientUpdateToken:   "supersecrettoken0123",
 		ClientUpdateTimeout: time.Minute,
 	}
-	err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
+	err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout, cfg.ClientUpdateMaxUploadBytes)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "supersecrettoken0123")
 }

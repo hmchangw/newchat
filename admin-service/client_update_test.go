@@ -308,10 +308,11 @@ func (r *recordingAuditStore) audited() []AuditEntry {
 // uploadTestCfg is a Config with only what the upload handler reads.
 func uploadTestCfg() Config {
 	return Config{
-		SiteID:              "site-A",
-		ClientUpdateURL:     "http://client-update-service:8080",
-		ClientUpdateToken:   "0123456789abcdef",
-		ClientUpdateTimeout: 10 * time.Minute,
+		SiteID:                     "site-A",
+		ClientUpdateURL:            "http://client-update-service:8080",
+		ClientUpdateToken:          "0123456789abcdef",
+		ClientUpdateTimeout:        10 * time.Minute,
+		ClientUpdateMaxUploadBytes: 2 << 30,
 	}
 }
 
@@ -841,4 +842,97 @@ func TestUploadClientVersion_RejectsTooManyParts(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, string(respBody), "could not read the uploaded files")
 	assert.False(t, up.wasCalled(), "nothing may reach the upstream once the part cap trips")
+}
+
+// stalledUploadBody returns a body carrying one complete part and then nothing:
+// the client never finishes sending, so the request stays open until a deadline
+// fires. The writer goroutine has a real termination path — cleanup signals it
+// and waits — so a run leaves nothing parked behind.
+func stalledUploadBody(t *testing.T) (io.Reader, string) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		_ = pw.Close()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		fw, err := mw.CreateFormFile("configFile", "app.yaml")
+		if err != nil {
+			return
+		}
+		_, _ = fw.Write([]byte("version: 1"))
+		<-stop // never Closed: the body has no terminating boundary
+	}()
+	return pr, mw.FormDataContentType()
+}
+
+// A client that stalls mid-body trips the request's read deadline. The status is
+// right either way — the client did not finish sending — but answering "could
+// not read the uploaded files" points an operator at malformed multipart data
+// when the cause was the clock.
+func TestUploadClientVersion_StalledBodyReportsATimeout(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateTimeout = 300 * time.Millisecond
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(&fakeUploader{}))
+	srv := uploadTestServer(t, h)
+
+	reqBody, ct := stalledUploadBody(t)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/admin/client-updates", reqBody)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err, "the handler must answer the timeout, not drop the connection")
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.NotContains(t, string(body), "could not read the uploaded files",
+		"a deadline expiry must not be reported as malformed multipart data")
+	assert.Contains(t, strings.ToLower(string(body)), "time")
+}
+
+// Without a byte cap the spooled temp files are unbounded: c.MultipartForm
+// writes the whole body to disk before maxUploadParts is ever consulted, so a
+// single caller could fill the pod's ephemeral storage.
+func TestUploadClientVersion_RejectsAnOversizeBody(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateMaxUploadBytes = 4 << 10
+	up := &fakeUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
+		"configFile":  {"app.yaml", "version: 1", ""},
+		"executeFile": {"app.exe", strings.Repeat("A", 64<<10), ""},
+	})
+	status, respBody := postUpload(t, srv, body, ct)
+
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, strings.ToLower(string(respBody)), "too large")
+	assert.False(t, up.wasCalled(), "nothing may reach the upstream once the cap trips")
+}
+
+// The cap must not reject an upload that fits.
+func TestUploadClientVersion_AcceptsABodyUnderTheCap(t *testing.T) {
+	cfg := uploadTestCfg()
+	cfg.ClientUpdateMaxUploadBytes = 1 << 20
+	up := &fakeUploader{}
+	h := newHandler(&recordingAuditStore{}, emptySessionStore(), cfg, nil, nil, withVersionUploader(up))
+	srv := uploadTestServer(t, h)
+
+	body, ct := multipartPayload(t, map[string]struct{ filename, content, contentType string }{
+		"configFile":  {"app.yaml", "version: 1", ""},
+		"executeFile": {"app.exe", strings.Repeat("A", 8<<10), ""},
+	})
+	status, _ := postUpload(t, srv, body, ct)
+
+	assert.Equal(t, http.StatusOK, status)
+	assert.True(t, up.wasCalled())
 }

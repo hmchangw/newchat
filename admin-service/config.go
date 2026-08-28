@@ -72,6 +72,11 @@ type Config struct {
 	// HTTP_WRITE_TIMEOUT should be at least this value, so a slow upstream is not
 	// cut off mid-write on a request this service is still waiting on.
 	ClientUpdateTimeout time.Duration `env:"CLIENT_UPDATE_UPLOAD_TIMEOUT" envDefault:"10m"`
+	// ClientUpdateMaxUploadBytes caps one upload's request body. A guard rail,
+	// not a policy: the default is far above any real artifact, but without it
+	// c.MultipartForm spools an unbounded body to the pod's ephemeral storage
+	// before maxUploadParts is ever consulted, so one caller could fill the disk.
+	ClientUpdateMaxUploadBytes int64 `env:"CLIENT_UPDATE_MAX_UPLOAD_BYTES" envDefault:"2147483648"`
 
 	// Pool caps the Mongo connection pool. NOTE: admin-service deliberately takes
 	// NO shared HTTP request-timeout (ginutil.TimeoutConfig): its permission
@@ -96,7 +101,7 @@ func loadConfig() (Config, error) {
 	if err := c.Pool.Validate(); err != nil {
 		return Config{}, err
 	}
-	if err := validateClientUpdate(c.ClientUpdateURL, c.ClientUpdateToken, c.ClientUpdateTimeout); err != nil {
+	if err := validateClientUpdate(c.ClientUpdateURL, c.ClientUpdateToken, c.ClientUpdateTimeout, c.ClientUpdateMaxUploadBytes); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -131,7 +136,7 @@ func clientUpdateSendsTokenInClear(rawURL string) bool {
 
 // validateClientUpdate checks the relay's configuration at startup. Error text
 // names the field only — never the token, which would reach the logs.
-func validateClientUpdate(rawURL, token string, timeout time.Duration) error {
+func validateClientUpdate(rawURL, token string, timeout time.Duration, maxBytes int64) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid CLIENT_UPDATE_URL: %w", err)
@@ -149,6 +154,9 @@ func validateClientUpdate(rawURL, token string, timeout time.Duration) error {
 	}
 	if timeout <= 0 {
 		return fmt.Errorf("invalid CLIENT_UPDATE_UPLOAD_TIMEOUT %s: must be > 0", timeout)
+	}
+	if maxBytes <= 0 {
+		return fmt.Errorf("invalid CLIENT_UPDATE_MAX_UPLOAD_BYTES %d: must be > 0", maxBytes)
 	}
 	return nil
 }

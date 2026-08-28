@@ -8174,6 +8174,13 @@ exact `Content-Length`. Peak heap is therefore independent of artifact size
 storage: size `admin-service`'s disk for the concurrent-upload total, not its
 RAM. Temp files are removed when the request ends.
 
+**Size cap.** `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (default `2147483648`, i.e. 2 GiB)
+caps one request body, counted before anything is spooled, so an oversize upload
+cannot fill the disk on its way to being rejected. Exceeding it ends the request
+with a `400` naming the limit in bytes. It is a guard rail on this service's
+ephemeral storage, not the artifact-size policy — that lives in
+`client-update-service`.
+
 The artifacts themselves are validated by `client-update-service`, not here: file
 name and extension rules live there and are reported back verbatim on a `400`.
 
@@ -8191,7 +8198,7 @@ name and extension rules live there and are reported back verbatim on a `400`.
 | Status | Condition |
 |---|---|
 | `200 OK` | Both artifacts published. |
-| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the upload did not finish within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
+| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the body exceeded `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (distinct message, names the limit), the upload did not finish within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
 | `401 Unauthorized` | Missing or invalid admin session. |
 | `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
 | `500 Internal Server Error` | This service could not extend its own I/O deadlines for the upload (deployment fault). |
@@ -8233,9 +8240,11 @@ service-account token onward in the clear.
 **Timeouts.** `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default `10m`) is ONE budget for
 the whole request — reading the browser's body and calling
 `client-update-service` — pinned on the request context. The two phases are
-sequential rather than overlapping, because the outbound client buffers the body
-before dialling (see the memory note above), so without a single budget the
-upstream call would start a second full timeout on top of the inbound one.
+sequential rather than overlapping: the handler spools the inbound parts in full
+before it dials upstream, because the outbound body is sent with an exact
+`Content-Length` and that length is only known once every part has arrived. Without
+a single budget the upstream call would start a second full timeout on top of the
+inbound one.
 
 The rest is ordered around it, so that whichever budget expires first the admin
 still gets an envelope rather than a dropped connection: that value < that value
