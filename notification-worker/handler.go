@@ -139,7 +139,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 
 	var followers map[string]struct{}
 	// parentCreatedAt/parentSenderAccount feed the suppression gate; use gatekeeper-carried values
-	// when present, else fetch from history-service (parent pre-exists, so the fetch is race-free).
+	// when present, else fetch from history-service. That fetch can race the parent's own
+	// Cassandra write (same stream, no ordering), which parentResolveAttempts covers.
 	var parentCreatedAt *time.Time
 	var parentSenderAccount string
 	if isThreadOnlyReply {
@@ -157,6 +158,16 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			// The reply sender can always read the parent they replied to; fetch on their behalf.
 			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
 			if perr != nil {
+				// The parent's Cassandra row is written asynchronously off the same
+				// stream, so a not_found can be an ordering race — retry once to cover
+				// it. Past that the parent is genuinely absent, and on DefaultBackoff
+				// the remaining attempts would hold an ack-pending slot for 756s, which
+				// is what fills the budget at ~1.3 msg/s. Only an outage
+				// (unavailable/internal/infra) keeps the full budget.
+				if ee, terminal := errcode.Terminal(perr); terminal && parentResolveExhausted(ctx) {
+					natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+					return errcode.Permanent(ee)
+				}
 				return fmt.Errorf("fetch thread parent %s: %w", msg.ThreadParentMessageID, perr)
 			}
 			pc := parent.CreatedAt
@@ -306,7 +317,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		}
 	}
 	if len(emitErrs) > 0 {
-		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
+		joined := errors.Join(emitErrs...)
+		// Ack-drop only when EVERY batch is unretryable (e.g. all oversized).
+		// {messageID}-b{N} dedup makes re-emitting the succeeded batches harmless,
+		// so a single transient failure keeps the whole message retryable — and the
+		// aggregate deliberately does NOT %w-wrap, because one permanent batch in
+		// the chain would otherwise strip a sibling transient batch of its retries.
+		if allBatchErrsPermanent(emitErrs) {
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			return errcode.Permanent(errcode.Internal(
+				fmt.Sprintf("emit push batches for message %s: %s", msg.ID, joined.Error())))
+		}
+		return fmt.Errorf("emit push batches for message %s: %s", msg.ID, joined.Error())
 	}
 	outcome = notifySent
 	return nil
@@ -461,4 +483,31 @@ func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType mode
 		return sender.Account
 	}
 	return ""
+}
+
+// allBatchErrsPermanent reports whether every push-batch failure is unretryable,
+// which is the only case where dropping the message loses nothing.
+func allBatchErrsPermanent(errs []error) bool {
+	for _, err := range errs {
+		if _, ok := errcode.IsPermanent(err); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (message-worker persists the parent off the same stream), so the
+// full MaxDeliver budget buys nothing and costs a lot: on DefaultBackoff each
+// waiting reply holds its ack-pending slot for 756s, and ~1.3 of them per
+// second fills the consumer's budget and stops push delivery entirely.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

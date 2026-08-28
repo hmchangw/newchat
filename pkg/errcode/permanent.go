@@ -39,3 +39,38 @@ func IsPermanent(err error) (*Error, bool) {
 	}
 	return nil, false
 }
+
+// Terminal reports whether err carries a typed *Error whose outcome cannot
+// change on retry, returning that *Error. Use it in a JetStream worker to
+// decide Ack-drop vs Nak on a REMOTE reply: a not_found/forbidden/bad_request
+// from the service you called reads the same on every redelivery, so retrying
+// it only holds an ack-pending slot until MaxDeliver drops the message anyway.
+//
+// The split is "a fact about THIS message" vs "a state of the world". Facts
+// (not_found, forbidden, bad_request, conflict) are terminal. States are not:
+// Unavailable and Internal because the remote may recover (history-service
+// collapses a Cassandra read failure to internal), TooManyRequests because
+// "retry shortly" must never mean "drop" — that is what jsretry's
+// BackpressureBackoff exists for — and Unauthenticated because a credential
+// problem hits every message at once, so dropping them is mass data loss rather
+// than poison rejection. A non-errcode error is an infra failure (timeout,
+// unmarshal) and is likewise transient.
+//
+// Terminal classifies; it does not wrap. Pair it with Permanent at the call
+// site so the worker keeps its own message and terminal metric:
+//
+//	if ee, terminal := errcode.Terminal(err); terminal {
+//	    return errcode.Permanent(ee)
+//	}
+func Terminal(err error) (*Error, bool) {
+	var ee *Error
+	if !errors.As(err, &ee) {
+		return nil, false
+	}
+	switch ee.Code {
+	case CodeUnavailable, CodeInternal, CodeTooManyRequests, CodeUnauthenticated:
+		return nil, false
+	default:
+		return ee, true
+	}
+}

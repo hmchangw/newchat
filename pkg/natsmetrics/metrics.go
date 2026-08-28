@@ -420,6 +420,27 @@ func MarkTerminalFromContext(ctx context.Context, reason TerminalReason) {
 	}
 }
 
+// DeliveryAttemptFromContext returns the broker's delivery count for the
+// current message (1 on the first delivery), and whether ctx carries a tracked
+// delivery whose metadata was readable.
+//
+// Use it to give ONE error class a short retry budget independent of the
+// consumer's MaxDeliver. A sub-second ordering race does not need the budget
+// sized for a database outage, and spending that budget holds an ack-pending
+// slot for its whole duration — enough of those and the consumer stops
+// receiving anything at all.
+//
+// ok is false for an untracked context and when the message carried no
+// metadata; treat that as "keep retrying" rather than "give up", so a missing
+// count never silently discards work.
+func DeliveryAttemptFromContext(ctx context.Context) (uint64, bool) {
+	msg, ok := ctx.Value(messageContextKey{}).(*Message)
+	if !ok || msg.numDelivered == 0 {
+		return 0, false
+	}
+	return msg.numDelivered, true
+}
+
 // IsFinalDeliveryFromContext reports whether ctx carries metadata proving the
 // current delivery is the configured final attempt.
 func IsFinalDeliveryFromContext(ctx context.Context) bool {

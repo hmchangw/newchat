@@ -35,26 +35,30 @@ type config struct {
 	MongoPassword      string `env:"MONGO_PASSWORD"  envDefault:""`
 	ReadPreference     string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	Pool               mongoutil.PoolConfig
-	MaxWorkers         int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	LargeRoomThreshold int                     `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
-	MaxAttachments     int                     `env:"MAX_ATTACHMENTS"      envDefault:"1"`
-	MaxAttachmentBytes int                     `env:"MAX_ATTACHMENT_BYTES" envDefault:"8192"`
-	ChatBaseURL        string                  `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
-	SubCacheSize       int                     `env:"GATEKEEPER_SUB_CACHE_SIZE"  envDefault:"100000"`
-	SubCacheTTL        time.Duration           `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
-	RoomMetaCacheSize  int                     `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
-	RoomMetaCacheTTL   time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
-	ValkeyAddrs        []string                `env:"VALKEY_ADDRS"               envSeparator:","`
-	ValkeyPassword     string                  `env:"VALKEY_PASSWORD"            envDefault:""`
-	RoomMetaL2TTL      time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
-	UserCacheSize      int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
-	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
-	HealthAddr         string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
-	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr        string                  `env:"METRICS_ADDR"               envDefault:":9090"`
-	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	DebugLog           logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	MaxWorkers         int           `env:"MAX_WORKERS"     envDefault:"100"`
+	LargeRoomThreshold int           `env:"LARGE_ROOM_THRESHOLD" envDefault:"500"`
+	MaxAttachments     int           `env:"MAX_ATTACHMENTS"      envDefault:"1"`
+	MaxAttachmentBytes int           `env:"MAX_ATTACHMENT_BYTES" envDefault:"8192"`
+	ChatBaseURL        string        `env:"CHAT_BASE_URL"   envDefault:"http://localhost:3000"`
+	SubCacheSize       int           `env:"GATEKEEPER_SUB_CACHE_SIZE"  envDefault:"100000"`
+	SubCacheTTL        time.Duration `env:"GATEKEEPER_SUB_CACHE_TTL"   envDefault:"2m"`
+	// ThreadParentRecheckDelay spaces the one re-check of a thread parent history
+	// reports missing, covering the lag between the parent's publish and
+	// message-worker's write. Zero rejects on the first miss.
+	ThreadParentRecheckDelay time.Duration           `env:"GATEKEEPER_THREAD_PARENT_RECHECK_DELAY" envDefault:"150ms"`
+	RoomMetaCacheSize        int                     `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
+	RoomMetaCacheTTL         time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
+	ValkeyAddrs              []string                `env:"VALKEY_ADDRS"               envSeparator:","`
+	ValkeyPassword           string                  `env:"VALKEY_PASSWORD"            envDefault:""`
+	RoomMetaL2TTL            time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
+	UserCacheSize            int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
+	UserCacheTTL             time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
+	HealthAddr               string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
+	PProfEnabled             bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr              string                  `env:"METRICS_ADDR"               envDefault:":9090"`
+	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 }
@@ -173,7 +177,8 @@ func main() {
 		return nil
 	}
 	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
-	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL, withGatekeeperMetrics(domainMetrics))
+	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL,
+		withGatekeeperMetrics(domainMetrics), withThreadParentRecheckDelay(cfg.ThreadParentRecheckDelay))
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)

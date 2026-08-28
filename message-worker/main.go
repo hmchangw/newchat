@@ -241,6 +241,7 @@ func main() {
 			return nil
 		}, domainMetrics)
 	teamsBatchSubj := subject.MsgTeamsCanonicalBatch(cfg.SiteID)
+	process := canonicalProcessor(handler, teamsMigration, teamsBatchSubj)
 
 	wg.Add(1)
 	go func() {
@@ -265,22 +266,7 @@ func main() {
 					<-sem
 					wg.Done()
 				}()
-				// jobguard recovers handler panics — this goroutine runs outside
-				// natsrouter's Recovery middleware, so an unrecovered panic would
-				// crash the worker and crash-loop on JetStream redelivery.
-				jobguard.Run(msg, func() {
-					handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-					handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-					// Dispatch by subject: the one-time .teams.batch migration
-					// writes straight to Cassandra; the live .created feed runs the
-					// normal pipeline.
-					if msg.Subject() == teamsBatchSubj {
-						teamsMigration.consume(handlerCtx, msg)
-						return
-					}
-					logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
-					handler.HandleJetStreamMsg(handlerCtx, msg)
-				})
+				process(msgCtx, msg)
 			}(msgCtx, msg)
 		}
 	}()
@@ -340,4 +326,26 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 	cc.Durable = "message-worker"
 	cc.FilterSubjects = []string{subject.MsgCanonicalCreated(siteID)}
 	return cc
+}
+
+// canonicalProcessor returns the consume loop's per-message body: subject
+// dispatch plus request-id and log-context stamping, wrapped by jobguard so a
+// handler panic Acks instead of crash-looping on JetStream redelivery. Named
+// rather than inlined in main so the consumer test drives this exact
+// composition, matching broadcast-worker's guardedProcessor.
+func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		jobguard.Run(msg, func() {
+			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+			// Dispatch by subject: the one-time .teams.batch migration writes
+			// straight to Cassandra; the live .created feed runs the normal pipeline.
+			if msg.Subject() == teamsBatchSubj {
+				teams.consume(handlerCtx, msg)
+				return
+			}
+			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			h.HandleJetStreamMsg(handlerCtx, msg)
+		})
+	}
 }
