@@ -37,14 +37,20 @@ type config struct {
 	// Mode selects which collections this pod binds: "default" runs the live
 	// message/bot/spotlight/user-room consumers; "teams" runs only the
 	// migrated-Teams-history consumer (MESSAGES-TEAMS).
-	Mode                string `env:"MODE" envDefault:"default"`
-	NatsURL             string `env:"NATS_URL,required"`
-	NatsCredsFile       string `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID              string `env:"SITE_ID,required"`
-	MongoURI            string `env:"MONGO_URI,required"`
-	MongoDB             string `env:"MONGO_DB"      envDefault:"chat"`
-	MongoUsername       string `env:"MONGO_USERNAME" envDefault:""`
-	MongoPassword       string `env:"MONGO_PASSWORD" envDefault:""`
+	Mode          string `env:"MODE" envDefault:"default"`
+	NatsURL       string `env:"NATS_URL,required"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID,required"`
+	MongoURI      string `env:"MONGO_URI,required"`
+	MongoDB       string `env:"MONGO_DB"      envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// ReadPreference: primaryPreferred, not secondaryPreferred. A resolver miss is
+	// durable — buildTeamsActions emits an index action with empty author fields and
+	// handler.go Acks the source message once the bulk request succeeds, so nothing
+	// retries the under-enriched write. The primary-offload win is not worth a
+	// permanently mis-indexed document.
+	ReadPreference      string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	Pool                mongoutil.PoolConfig
 	SearchURL           string `env:"SEARCH_URL,required"`
 	SearchBackend       string `env:"SEARCH_BACKEND"         envDefault:"elasticsearch"`
@@ -184,11 +190,18 @@ func main() {
 	}
 
 	// Mongo backs the migrated-Teams-history author lookup (teams_user → account → user _id).
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
 	// obs.Init installed the SDK's MeterProvider as the OTel global, so this

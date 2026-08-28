@@ -20,6 +20,7 @@ services:
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_KEY_READ_PREFERENCE=${MONGO_KEY_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}

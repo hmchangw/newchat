@@ -19,6 +19,7 @@ services:
       - PAGE_TRIMMING_ENABLED=${PAGE_TRIMMING_ENABLED:-true}
       - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_CLIENT_READ_PREFERENCE=${MONGO_CLIENT_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}

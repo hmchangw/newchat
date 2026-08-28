@@ -8,6 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
@@ -181,4 +184,26 @@ func TestConfig_GuardsDelegateValidation(t *testing.T) {
 	assert.Error(t, config{}.Pool.Validate(), "zero MaxPoolSize must fail")
 	assert.Error(t, config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}.Guard.Validate(),
 		"negative MaxConcurrency must fail")
+}
+
+func TestConfig_ReadPreferenceDefault(t *testing.T) {
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("CLUSTER_DOMAINS", `[{"siteID":"site-a","domain":"https://a"}]`)
+	t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+	t.Setenv("MINIO_ACCESS_KEY", "k")
+	t.Setenv("MINIO_SECRET_KEY", "s")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
+	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE")) // the default only applies when unset
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.ReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

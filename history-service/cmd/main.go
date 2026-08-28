@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
@@ -122,6 +121,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.Mongo.KeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
@@ -150,13 +155,13 @@ func main() {
 		// DEKs are written by other services; pin to primary so a fresh key isn't
 		// missed on a lagging secondary.
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 		// Preview DEKs live in their own collection (written by broadcast-worker), so
 		// they need their own cipher over the same wrapper. Sharing one cipher would
 		// also share its DEK cache across two id spaces for no benefit.
 		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(preview.DEKCollection,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
