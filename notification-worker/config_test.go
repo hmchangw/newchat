@@ -6,8 +6,11 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
 )
 
@@ -128,4 +131,22 @@ func TestConfig_PoolValidate(t *testing.T) {
 	cfg, err = env.ParseAs[config]()
 	require.NoError(t, err)
 	require.NoError(t, cfg.Pool.Validate()) // envDefault applies
+}
+
+// The primary pin took push delivery down with the primary. A stale mute read
+// notifies a just-muted user — recoverable; a dead push pipeline is not.
+func TestConfig_UserReadPreferenceDefault(t *testing.T) {
+	t.Setenv("VALKEY_ADDRS", "valkey:6379")
+	t.Setenv("MODE", "user")
+	t.Setenv("MONGO_USER_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_USER_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.MongoUserReadPreference)
+	assert.Equal(t, "secondaryPreferred", cfg.MongoReadPreference, "the client-wide preference is unchanged")
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoUserReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }
