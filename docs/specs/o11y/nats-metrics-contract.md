@@ -830,6 +830,19 @@ to this contract.
 | `search_sync_worker_bulk_item_failures_total`<br><sub>`search_sync_worker_bulk_item_failures`</sub> | counter | search-sync-worker | on first item failure | none — 429 visibility exists nowhere else | ES rejection attribution |
 | `search_sync_worker_messages_total`<br><sub>`search_sync_worker_messages`</sub> | counter | search-sync-worker | on first message | partial: `jetstream_consumer_num_redelivered` counts redeliveries but not their cause | redelivery-source attribution |
 | `search_sync_worker_parent_resolve_duration_seconds`<br><sub>`search_sync_worker_parent_resolve_duration`</sub> | histogram | search-sync-worker | on first thread reply | none | consumer-loop drag attribution |
+| `preview_warmback_stored_total` | counter | history-service | on first successful warm-back write | none | warm-back repair health, and the denominator that makes the two failure counters a rate rather than an absolute count |
+| `preview_warmback_dropped_total` | counter | history-service | on first shed job | none — the job is shed before any store call, so no driver metric sees it | warm-back saturation. The writer queue is bounded and a full queue drops the job, so a rising share means rooms stay on the lazy bucket walk — which is SLO-4's cost model, making this a leading indicator for the walk-depth tail `sli-slo.md` §3 Caveats names |
+| `preview_warmback_failed_total` | counter | history-service | on first failed warm-back write | partial: Mongo driver metrics cover write I/O broadly, not this operation | the same outcome as `dropped` reached the other way — the write was attempted and lost. Separate because saturation and a broken store need different responses |
+
+**The three `preview_warmback_*` rows are provisional in their Read-by column.**
+They arrived with #406, which merged before this registry existed, so nobody was
+asked the question this table exists to ask. The rows above are read off the
+implementation and the author's own comment — *"counts what the queue would
+otherwise hide … a shed job and a failed write are both ways a room silently
+stays on the lazy walk"* — not off a dashboard or alert that consumes them
+today. Whoever owns #406 should confirm or replace them; if the honest answer is
+that nothing reads these, §13.4 step 1 applies and the finding is the metrics,
+not the rows.
 
 ### 13.4 Adding an instrument
 
