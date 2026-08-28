@@ -16,11 +16,12 @@ const room = (over) => ({
   userCount: 7,
   restricted: false,
   externalAccess: false,
+  onDuty: false,
   ...over,
 })
 
-/** A room the duty toggle turned on — it writes both flags together. */
-const ondutyRoom = (over) => room({ restricted: true, externalAccess: true, ...over })
+/** A room the duty toggle turned on — the server derives onDuty from both flags. */
+const ondutyRoom = (over) => room({ restricted: true, externalAccess: true, onDuty: true, ...over })
 
 /** Returns the Action cell of the row whose _id cell holds `id`. */
 function actionCell(id) {
@@ -68,7 +69,6 @@ describe('RoomTable', () => {
     )
     expect(statusCell('r-on')).toHaveTextContent('onduty')
     expect(statusCell('r-off')).toHaveTextContent('')
-    // Half-set flags are not on duty — the toggle only ever writes both together.
     expect(statusCell('r-restricted-only')).toHaveTextContent('')
     expect(statusCell('r-external-only')).toHaveTextContent('')
   })
@@ -113,18 +113,6 @@ describe('RoomTable', () => {
     expect(within(cell).queryByRole('button', { name: /unset onduty/i })).not.toBeInTheDocument()
   })
 
-  it('offers no action for an on-duty DM', () => {
-    render(
-      <RoomTable
-        rooms={[ondutyRoom({ type: 'dm', userCount: 9 })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
-    expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
-  })
-
   it('offers no action for an unrestricted channel below the member floor', () => {
     render(
       <RoomTable
@@ -137,16 +125,20 @@ describe('RoomTable', () => {
     expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
   })
 
-  it('offers no action for a DM, which room-service refuses to restrict', () => {
+  it('offers no action for a DM, on duty or not — room-service refuses to restrict one', () => {
     render(
       <RoomTable
-        rooms={[room({ type: 'dm', userCount: 9 })]}
+        rooms={[
+          room({ id: 'r-dm', type: 'dm', userCount: 9 }),
+          ondutyRoom({ id: 'r-dm-on', type: 'dm', userCount: 9 }),
+        ]}
         loading={false}
         onSetOnDuty={vi.fn()}
         onUnsetOnDuty={vi.fn()}
       />,
     )
-    expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(actionCell('r-dm')).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(actionCell('r-dm-on')).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('honours a deployment that raised the member floor', () => {

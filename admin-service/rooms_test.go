@@ -63,6 +63,8 @@ func TestHandler_listRooms(t *testing.T) {
 				assert.Equal(t, "channel", room["type"])
 				assert.Equal(t, float64(7), room["userCount"])
 				assert.Equal(t, true, room["restricted"])
+				assert.Equal(t, true, room["externalAccess"])
+				assert.Equal(t, true, room["onDuty"])
 			},
 		},
 		{
@@ -105,9 +107,13 @@ func TestHandler_listRooms(t *testing.T) {
 				require.Len(t, rooms, 1)
 				room, ok := rooms[0].(map[string]any)
 				require.True(t, ok)
-				// The UI branches on this field, so it must always be present.
+				// The console branches on these, so they must always be present.
 				assert.Contains(t, room, "restricted")
 				assert.Equal(t, false, room["restricted"])
+				assert.Contains(t, room, "externalAccess")
+				assert.Equal(t, false, room["externalAccess"])
+				assert.Contains(t, room, "onDuty")
+				assert.Equal(t, false, room["onDuty"])
 			},
 		},
 		{
@@ -129,6 +135,31 @@ func TestHandler_listRooms(t *testing.T) {
 				require.True(t, ok)
 				assert.Equal(t, true, room["restricted"])
 				assert.Equal(t, false, room["externalAccess"])
+				// Half-set is not on duty — this is the case a copy-pasted
+				// derivation from either flag alone would get wrong.
+				assert.Equal(t, false, room["onDuty"])
+			},
+		},
+		{
+			name:  "reports external access without the restriction as not on duty",
+			query: "",
+			setupMock: func(m *MockAdminStore) {
+				m.EXPECT().ListRooms(gomock.Any(), "site-A", 1, 20).
+					Return([]model.Room{{
+						ID: "r4", Name: "other-half", Type: model.RoomTypeChannel,
+						UserCount: 9, ExternalAccess: true,
+					}}, int64(1), nil)
+			},
+			wantStatus: http.StatusOK,
+			checkBody: func(t *testing.T, body map[string]any) {
+				rooms, ok := body["rooms"].([]any)
+				require.True(t, ok)
+				require.Len(t, rooms, 1)
+				room, ok := rooms[0].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, false, room["restricted"])
+				assert.Equal(t, true, room["externalAccess"])
+				assert.Equal(t, false, room["onDuty"])
 			},
 		},
 		{

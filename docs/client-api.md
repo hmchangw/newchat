@@ -8336,8 +8336,9 @@ Lists the rooms homed at admin-service's own site, newest paging first by `_id`.
 | `userCount` | number | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
 | `restricted` | boolean | Only owners may change the roster. Always present, including when `false`. |
 | `externalAccess` | boolean | Members may connect from outside the company network. Always present, including when `false`. |
+| `onDuty` | boolean | `restricted && externalAccess`, derived server-side — the inverse of the mapping [§9.12](#912-set-room-on-duty) writes. Branch on this rather than re-deriving it. Always present, including when `false`. |
 
-A room is **on duty** only when `restricted` AND `externalAccess` are both true. [§9.12](#912-set-room-on-duty) writes the pair together, but they are stored as independent fields, so a room can be found half-set (for example by an older write); such a room is not on duty.
+[§9.12](#912-set-room-on-duty) writes the pair together, but they are stored as independent fields, so a room can be found half-set (for example by an older write). Such a room reports `onDuty: false` while `restricted` stays `true`; the raw flags are returned alongside `onDuty` so that state remains visible.
 
 ```json
 {
@@ -8348,7 +8349,8 @@ A room is **on duty** only when `restricted` AND `externalAccess` are both true.
       "type": "channel",
       "userCount": 7,
       "restricted": true,
-      "externalAccess": true
+      "externalAccess": true,
+      "onDuty": true
     }
   ],
   "total": 1

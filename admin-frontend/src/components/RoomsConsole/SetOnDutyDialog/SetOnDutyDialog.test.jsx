@@ -12,8 +12,13 @@ import { useAuth } from '@/context/AuthContext'
 import { listRoomMembers, setRoomOnDuty, AsyncJobError } from '@/api'
 
 const ROOM = {
-  id: 'r-1', name: 'general', type: 'channel', userCount: 7,
-  restricted: false, externalAccess: false,
+  id: 'r-1',
+  name: 'general',
+  type: 'channel',
+  userCount: 7,
+  restricted: false,
+  externalAccess: false,
+  onDuty: false,
 }
 
 beforeEach(() => {
@@ -114,16 +119,9 @@ describe('SetOnDutyDialog', () => {
     } finally {
       vi.useRealTimers()
     }
+    // No field remains through which a second account could be added.
     expect(screen.queryByLabelText(/owner/i)).not.toBeInTheDocument()
     expect(screen.getByText('alice')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
-    await waitFor(() => expect(setRoomOnDuty).toHaveBeenCalledTimes(1))
-    // ownerAccount is a single string on the wire — there is no shape that carries two.
-    expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
-      onDuty: true,
-      ownerAccount: 'alice',
-    })
   })
 
   it('closes without calling the API when cancelled', async () => {

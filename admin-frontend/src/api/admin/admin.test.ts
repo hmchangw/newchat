@@ -54,6 +54,7 @@ const ROOM = {
   userCount: 7,
   restricted: true,
   externalAccess: true,
+  onDuty: true,
 }
 
 describe('listUsers', () => {

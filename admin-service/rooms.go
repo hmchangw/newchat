@@ -10,11 +10,11 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 )
 
-// roomView is the admin-console projection of a room: identity plus the fields
-// the duty toggle branches on. A room is on duty only with both flags set —
-// the toggle writes them together, but they are stored independently. Neither
-// carries omitempty: the console renders on their values, so they must survive
-// as false rather than vanish.
+// roomView is the admin-console projection of a room. OnDuty is the inverse of
+// the mapping setRoomOnDuty writes (one boolean onto both flags), kept in this
+// package so the two directions cannot drift; the raw flags ride along so a
+// half-set room stays diagnosable. None carries omitempty: the console renders
+// on their values, so they must survive as false rather than vanish.
 type roomView struct {
 	ID             string         `json:"id"`
 	Name           string         `json:"name"`
@@ -22,6 +22,7 @@ type roomView struct {
 	UserCount      int            `json:"userCount"`
 	Restricted     bool           `json:"restricted"`
 	ExternalAccess bool           `json:"externalAccess"`
+	OnDuty         bool           `json:"onDuty"`
 }
 
 // roomMemberView is one member of a room, projected to what the owner picker
@@ -52,6 +53,7 @@ func (h *Handler) listRooms(c *gin.Context) {
 			UserCount:      rooms[i].UserCount,
 			Restricted:     rooms[i].Restricted,
 			ExternalAccess: rooms[i].ExternalAccess,
+			OnDuty:         rooms[i].Restricted && rooms[i].ExternalAccess,
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"rooms": views, "total": total})

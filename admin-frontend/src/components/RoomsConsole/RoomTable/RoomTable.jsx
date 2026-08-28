@@ -15,11 +15,6 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
   // would reject gets no button rather than a guaranteed error.
   const minMembers = ondutyMinMembers()
 
-  // The toggle writes `restricted` and `externalAccess` together, but they are
-  // stored independently. A half-set room is not on duty, so it gets the "set"
-  // action — re-running the toggle is what brings it fully on duty.
-  const isOnDuty = (room) => room.restricted && room.externalAccess
-
   return (
     <div className="rooms-table-wrap">
       <table className="data-table rooms-table">
@@ -41,12 +36,12 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
               <td>{room.type}</td>
               <td>{room.userCount}</td>
               <td>
-                {isOnDuty(room) && <span className="status-badge is-onduty">onduty</span>}
+                {room.onDuty && <span className="status-badge is-onduty">onduty</span>}
               </td>
               <td className="rooms-table-actions">
                 {/* Channels only — room-service rejects a DM with non_channel_operation. */}
                 {room.type === 'channel' &&
-                  (isOnDuty(room) ? (
+                  (room.onDuty ? (
                     <button
                       type="button"
                       className="btn btn-ghost"

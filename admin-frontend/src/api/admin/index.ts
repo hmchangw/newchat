@@ -39,9 +39,8 @@ export interface AuditEntry {
   timestamp: number
 }
 
-/** Admin-facing room projection (mirrors admin-service's `roomView`). */
-/** A room is on duty only when BOTH flags are set — the duty toggle writes them
- * together, but they are stored independently. */
+/** Admin-facing room projection (mirrors admin-service's `roomView`). `onDuty` is
+ * derived server-side from both flags — branch on it, not on the raw pair. */
 export interface AdminRoom {
   id: string
   name: string
@@ -49,6 +48,7 @@ export interface AdminRoom {
   userCount: number
   restricted: boolean
   externalAccess: boolean
+  onDuty: boolean
 }
 
 /** One member of a room, sourced from the subscriptions the duty toggle validates against. */
