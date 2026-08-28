@@ -312,7 +312,9 @@ func runLoop(t *testing.T, src fetchSource, stopCh chan struct{}) {
 	t.Helper()
 	doneCh := make(chan struct{})
 	handler, _ := newFlushCountingHandler(t)
-	go runConsumer(context.Background(), src, handler, 10, 500, time.Minute, stopCh, doneCh)
+	go runConsumer(context.Background(), src, handler, consumerTuning{
+		fetchBatchSize: 10, bulkFlushInterval: time.Minute, pipelineDepth: 1,
+	}, stopCh, doneCh)
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
@@ -522,7 +524,9 @@ func TestRunConsumer_FlushesBufferedActionsBeforeRecovering(t *testing.T) {
 			src.onError = func() { once.Do(func() { close(stopCh) }) }
 
 			doneCh := make(chan struct{})
-			go runConsumer(context.Background(), src, handler, 10, 500, time.Hour, stopCh, doneCh)
+			go runConsumer(context.Background(), src, handler, consumerTuning{
+				fetchBatchSize: 10, bulkFlushInterval: time.Hour, pipelineDepth: 1,
+			}, stopCh, doneCh)
 			select {
 			case <-doneCh:
 			case <-time.After(5 * time.Second):

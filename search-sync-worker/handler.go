@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/searchengine"
@@ -119,7 +121,7 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 		}
 	}
 
-	actions, err := h.collection.BuildAction(data)
+	actions, err := h.buildActions(msg, data)
 	if err != nil {
 		// Every BuildAction error is parse/validation poison — Ack drops it for
 		// good, so this line is the only trace; keep it identifying the message.
@@ -146,18 +148,89 @@ func (h *Handler) AddWithContext(ctx context.Context, msg jetstream.Msg) {
 	h.mu.Unlock()
 }
 
-// Flush sends all buffered actions to ES and acks/naks per source message.
-func (h *Handler) Flush(ctx context.Context) {
-	h.mu.Lock()
-	if len(h.pending) == 0 {
-		h.mu.Unlock()
-		return
+// bulkItemError builds the settle error for one failed bulk item. A permanent failure
+// is wrapped with errcode.Permanent so jsretry Ack-drops it instead of retrying — the
+// backend rejected the document itself, so redelivering identical bytes can only fail
+// identically, and retrying would just hold an ack-pending slot for the full window.
+//
+// Only the status and error type go into the message; the document body never belongs
+// in an error that reaches the server log.
+func bulkItemError(result searchengine.BulkResult) error {
+	if searchengine.IsBulkItemPermanent(result) {
+		return errcode.Permanent(errcode.BadRequest(
+			fmt.Sprintf("search backend rejected the document: status %d %q", result.Status, result.ErrorType)))
 	}
-	pending := h.pending
-	actions := h.actions
+	return fmt.Errorf("bulk item failed: status %d %q", result.Status, result.ErrorType)
+}
+
+// itemBackoff picks the retry schedule a failed bulk item calls for. Backpressure gets
+// the slow curve; everything else rides the shared default.
+func itemBackoff(result searchengine.BulkResult) []time.Duration {
+	if searchengine.IsBulkItemBackpressure(result) {
+		return jsretry.BackpressureBackoff
+	}
+	return jsretry.DefaultBackoff
+}
+
+// buildActions converts one payload, handing collections that guard on stream order
+// the message's sequence (see sequencedCollection).
+func (h *Handler) buildActions(msg jetstream.Msg, data []byte) ([]searchengine.BulkAction, error) {
+	sc, ok := h.collection.(sequencedCollection)
+	if !ok {
+		return h.collection.BuildAction(data)
+	}
+	return sc.BuildActionSeq(data, streamSequence(msg))
+}
+
+// streamSequence returns the message's position in its stream, or 0 when the metadata
+// can't be read. Zero is the fail-closed value: it loses to any stored sequence, so a
+// message we can't order is skipped rather than allowed to overwrite a newer row.
+func streamSequence(msg jetstream.Msg) uint64 {
+	md, err := msg.Metadata()
+	if err != nil || md == nil {
+		return 0
+	}
+	return md.Sequence.Stream
+}
+
+// flushBatch is one detached unit of work: the buffered source messages and
+// the ES bulk actions they produced. Take hands it off so the consumer loop can
+// keep buffering the next batch while this one's bulk request is still in
+// flight.
+type flushBatch struct {
+	pending []pendingMsg
+	actions []searchengine.BulkAction
+}
+
+// Take detaches everything currently buffered and resets the buffer, returning
+// nil when there is nothing to flush. It never touches the search engine, so
+// the caller can hand the returned batch to a background flusher and keep
+// buffering immediately — ActionCount() reads 0 as soon as this returns.
+func (h *Handler) Take() *flushBatch {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.pending) == 0 {
+		return nil
+	}
+	batch := &flushBatch{pending: h.pending, actions: h.actions}
 	h.pending = make([]pendingMsg, 0, h.bulkSize)
 	h.actions = make([]searchengine.BulkAction, 0, h.bulkSize)
-	h.mu.Unlock()
+	return batch
+}
+
+// Flush detaches the buffer and sends it to ES. Callers that want the bulk
+// request to overlap with the next batch use Take + FlushBatch instead.
+func (h *Handler) Flush(ctx context.Context) {
+	h.FlushBatch(ctx, h.Take())
+}
+
+// FlushBatch sends one detached batch to ES and acks/naks per source message.
+// A nil batch is a no-op.
+func (h *Handler) FlushBatch(ctx context.Context, batch *flushBatch) {
+	if batch == nil {
+		return
+	}
+	pending, actions := batch.pending, batch.actions
 
 	bulkCtx, span := h.startFlushSpan(ctx, pending, len(actions))
 	defer span.End()
@@ -194,35 +267,57 @@ func (h *Handler) Flush(ctx context.Context) {
 
 	h.metrics.recordFlush(bulkCtx, flushSuccess, elapsed, len(actions))
 
-	var acked, nakked int
+	var acked, poisoned, nakked int
 	for _, p := range pending {
-		allOK := true
+		var itemErr error
+		backoff := jsretry.DefaultBackoff
+		failed, permanent := false, false
 		for i := p.actionStart; i < p.actionStart+p.actionCount; i++ {
 			if searchengine.IsBulkItemSuccess(actions[i].Action, results[i]) {
 				continue
 			}
 			h.metrics.recordItemFailure(bulkCtx, string(actions[i].Action), results[i].Status)
-			if allOK {
-				// Log only the first failed item per message; the counter above still
-				// sees every failed action.
-				slog.Error("bulk item failed",
-					"status", results[i].Status,
-					"error", results[i].Error,
-					"docID", actions[i].DocID,
-					"index", actions[i].Index,
-				)
+			if failed {
+				continue // the counter above sees every failed action; the rest is decided once
 			}
-			allOK = false
+			failed = true
+			// The first failure decides the message's fate. disposition spells out what that
+			// was, because SettleQuiet leaves the Ack-drop of a permanent failure otherwise
+			// unlogged; it reads from the result, not the error, so the log cannot disagree
+			// with the settle decision.
+			permanent = searchengine.IsBulkItemPermanent(results[i])
+			disposition := "retry"
+			if permanent {
+				disposition = "drop"
+			}
+			slog.ErrorContext(p.ctx, "bulk item failed",
+				"status", results[i].Status,
+				"error", results[i].Error,
+				"errorType", results[i].ErrorType,
+				"backpressure", searchengine.IsBulkItemBackpressure(results[i]),
+				"disposition", disposition,
+				"docID", actions[i].DocID,
+				"index", actions[i].Index,
+			)
+			itemErr, backoff = bulkItemError(results[i]), itemBackoff(results[i])
 		}
-		if allOK {
+		// A permanent failure is Acked, not nakked, so it counts as a poison drop rather
+		// than inflating the nakked series with messages that were never retried.
+		switch {
+		case !failed:
 			acked++
-			natsutil.Ack(p.jsMsg, "bulk actions succeeded")
-		} else {
+		case permanent:
+			poisoned++
+		default:
 			nakked++
-			jsretry.Nak(bulkCtx, p.jsMsg, jsretry.DefaultBackoff, "bulk action failed")
 		}
+		// One SettleQuiet covers all three dispositions: a nil error acks, a permanent
+		// error Ack-drops, anything else naks on `backoff`. Quiet because the failure is
+		// already logged above with its ES detail.
+		jsretry.SettleQuiet(p.ctx, p.jsMsg, backoff, itemErr)
 	}
 	h.metrics.recordMessages(bulkCtx, dispAckedSuccess, acked)
+	h.metrics.recordMessages(bulkCtx, dispAckedPoison, poisoned)
 	h.metrics.recordMessages(bulkCtx, dispNakkedItemFailed, nakked)
 }
 

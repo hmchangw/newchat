@@ -41,13 +41,31 @@ type config struct {
 	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
-	// MongoReadPreference routes the store's display/list reads to secondaries; the
-	// client stays on primary for authz/dedup/read-after-write.
-	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	// MongoReadPreference routes the store's display/list reads to secondaries.
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// MongoClientReadPreference covers every handle WITHOUT an explicit override —
+	// plain collections inherit the client. primaryPreferred keeps authz/dedup/
+	// read-after-write on the primary in steady state, but falls back rather than
+	// failing when there is no primary to read from.
+	MongoClientReadPreference string `env:"MONGO_CLIENT_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
+	// so a burst can't open unbounded connections. Env tags already carry the
+	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) so a burst or slow dependency can't saturate the
+	// Mongo pool with unbounded, indefinitely-held work.
+	Guard              natsrouter.GuardConfig
+	MaxRoomSize        int           `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize       int           `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -92,10 +110,6 @@ type config struct {
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
-	// disables the cap (unbounded spawn).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -136,6 +150,14 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid guard config", "error", err)
+		os.Exit(1)
+	}
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -176,19 +198,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	clientReadPref, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo client read preference", "value", cfg.MongoClientReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo client read preference configured", "readPreference", clientReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",
-			"room_key_grace_period", cfg.RoomKeyGracePeriod)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
 		os.Exit(1)
 	}
-	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), cfg.RoomKeyGracePeriod)
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
+	if err != nil {
+		slog.Error("open room key store failed", "error", err)
+		os.Exit(1)
+	}
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -327,14 +363,7 @@ func main() {
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "room-service", routerOpts...)
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

@@ -41,6 +41,13 @@ export interface SubscriptionRoom {
   crossSite?: boolean
   userCount?: number
   appCount?: number
+  /** The room's USER-activity position — what unread and sidebar ordering
+   *  are computed from. System events (member added/removed, rename, …)
+   *  never advance it. The server resolves this before serializing, so it
+   *  needs no fallback rule here; on a subscription.update `added` payload
+   *  for a room with no messages yet it is the room's createdAt, so a
+   *  just-added member has something to flag the room unread against.
+   *  Mirrors model.SubscriptionRoom.LastMsgAt. */
   lastMsgAt?: string | null
   lastMsgId?: string
   lastMentionAllAt?: string | null
@@ -243,7 +250,9 @@ export interface Attachment {
 export interface PreviewMessage {
   messageId: string
   sender: Participant
-  /** The full message body; the client truncates for display. */
+  /** On `subscription.list` rows the server has already truncated this to a short
+   *  preview (50 characters by default); on `message_edited` / `message_deleted`
+   *  events it is the full body. The client truncates further for display. */
   content: string
   /** RFC3339. */
   createdAt: string

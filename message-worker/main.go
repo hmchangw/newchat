@@ -34,21 +34,23 @@ type config struct {
 	// Mode selects which stream/consumer this pod binds: "default" runs the live
 	// .created feed off MESSAGES-CANONICAL; "teams" runs the Teams-migration batch
 	// feed off MESSAGES-TEAMS. Two deploys of the same binary, gated by env only.
-	Mode               string                  `env:"MODE"                 envDefault:"default"`
-	NatsURL            string                  `env:"NATS_URL,required"`
-	NatsCredsFile      string                  `env:"NATS_CREDS_FILE"      envDefault:""`
-	SiteID             string                  `env:"SITE_ID,required"`
-	CassandraHosts     string                  `env:"CASSANDRA_HOSTS"      envDefault:"localhost"`
-	CassandraKeyspace  string                  `env:"CASSANDRA_KEYSPACE"   envDefault:"chat"`
-	CassandraUsername  string                  `env:"CASSANDRA_USERNAME"   envDefault:""`
-	CassandraPassword  string                  `env:"CASSANDRA_PASSWORD"   envDefault:""`
-	CassandraNumConns  int                     `env:"CASSANDRA_NUM_CONNS"  envDefault:"8"`
-	MaxWorkers         int                     `env:"MAX_WORKERS"          envDefault:"100"`
-	MessageBucketHours int                     `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
-	MongoURI           string                  `env:"MONGO_URI,required"`
-	MongoDB            string                  `env:"MONGO_DB"             envDefault:"chat"`
-	MongoUsername      string                  `env:"MONGO_USERNAME"       envDefault:""`
-	MongoPassword      string                  `env:"MONGO_PASSWORD"       envDefault:""`
+	Mode               string `env:"MODE"                 envDefault:"default"`
+	NatsURL            string `env:"NATS_URL,required"`
+	NatsCredsFile      string `env:"NATS_CREDS_FILE"      envDefault:""`
+	SiteID             string `env:"SITE_ID,required"`
+	CassandraHosts     string `env:"CASSANDRA_HOSTS"      envDefault:"localhost"`
+	CassandraKeyspace  string `env:"CASSANDRA_KEYSPACE"   envDefault:"chat"`
+	CassandraUsername  string `env:"CASSANDRA_USERNAME"   envDefault:""`
+	CassandraPassword  string `env:"CASSANDRA_PASSWORD"   envDefault:""`
+	CassandraNumConns  int    `env:"CASSANDRA_NUM_CONNS"  envDefault:"8"`
+	MaxWorkers         int    `env:"MAX_WORKERS"          envDefault:"100"`
+	MessageBucketHours int    `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
+	MongoURI           string `env:"MONGO_URI,required"`
+	MongoDB            string `env:"MONGO_DB"             envDefault:"chat"`
+	MongoUsername      string `env:"MONGO_USERNAME"       envDefault:""`
+	MongoPassword      string `env:"MONGO_PASSWORD"       envDefault:""`
+	ReadPreference     string `env:"MONGO_READ_PREFERENCE"      envDefault:"primaryPreferred"`
+	Pool               mongoutil.PoolConfig
 	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
 	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
 	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
@@ -74,6 +76,11 @@ func main() {
 
 	if cfg.Mode != "default" && cfg.Mode != "teams" {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
+		os.Exit(1)
+	}
+
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 
@@ -119,11 +126,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	// Mongo writes precede the Cassandra write (handler.go:159-201), so an outage
+	// aborts before persisting rather than persisting against a stale read.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongodb connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
 		cfg.UserCacheSize, cfg.UserCacheTTL)

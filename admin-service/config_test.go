@@ -1,11 +1,15 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 func TestLoadConfig_Defaults(t *testing.T) {
@@ -75,4 +79,29 @@ func TestLoadConfig_RejectsUnusableHandlerTimeouts(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
+	t.Setenv("SITE_ID", "site-local")
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
+	_, err := loadConfig()
+	assert.Error(t, err)
+}
+
+func TestLoadConfig_ReadPreferenceDefault(t *testing.T) {
+	t.Setenv("SITE_ID", "site-local")
+	t.Setenv("MONGO_URI", "mongodb://x")
+	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE")) // the default only applies when unset
+
+	cfg, err := loadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.ReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

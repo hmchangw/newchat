@@ -35,11 +35,7 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 	cfg := newConnectConfig(opts...)
 	cfg.applyTuning(clientOpts)
 
-	// An explicit WithReadPreference overrides whatever clientOpts carried
-	// (e.g. ConnectRead's secondaryPreferred).
-	if cfg.readPref != nil {
-		clientOpts.SetReadPreference(cfg.readPref)
-	}
+	cfg.applyReadPreference(clientOpts)
 
 	var cleanup func(context.Context) error
 	if cfg.obs != nil {
@@ -69,6 +65,15 @@ func connect(ctx context.Context, clientOpts *options.ClientOptions, uri string,
 	}
 	slog.Info("connected to MongoDB", "uri", sanitizeURI(uri))
 	return client, nil
+}
+
+// applyReadPreference binds an explicit WithReadPreference onto clientOpts,
+// overriding whatever it carried (e.g. ConnectRead's secondaryPreferred). A nil
+// preference is left alone so an unset option never clobbers a URI-provided value.
+func (c connectConfig) applyReadPreference(clientOpts *options.ClientOptions) {
+	if c.readPref != nil {
+		clientOpts.SetReadPreference(c.readPref)
+	}
 }
 
 // sanitizeURI reduces a connection string to scheme://host/path so it is safe

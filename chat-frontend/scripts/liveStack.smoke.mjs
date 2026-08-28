@@ -61,6 +61,11 @@ async function main() {
   const nc = await connect({
     servers: NATS_WS,
     authenticator: jwtAuthenticator(natsJwt, seed),
+    // Replies ride the client's own user namespace, already granted as
+    // `chat.user.{{tag(account)}}.>`. Used verbatim: auth-service returns the
+    // JWT tag value itself. Inlined rather than imported from
+    // src/api/_transport/inbox.js — this script runs outside the bundler.
+    inboxPrefix: `chat.user.${user.account}`,
   })
   check('connected', !!nc, nc.getServer())
 

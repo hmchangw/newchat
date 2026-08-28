@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,8 +65,9 @@ func TestHistoryService_ReactMessage_NotSubscribed(t *testing.T) {
 	assertForbiddenErr(t, err, "not subscribed to room")
 }
 
-// Every pre-storage rejection path: empty fields, regex fail. Shortcode acceptance
-// is format-only (emoji.Canonicalize) — there is no registration lookup to fail.
+// Every pre-storage rejection path: empty fields, and the only remaining emoji
+// guard (oversize). Reactions accept any emoji — no support check
+// (emoji.CanonicalizeReaction) — so raw-unicode/uppercase/colon forms are NOT rejected.
 func TestHistoryService_ReactMessage_ValidationErrors(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -87,16 +89,10 @@ func TestHistoryService_ReactMessage_ValidationErrors(t *testing.T) {
 			wantMsg:      "shortcode is required",
 		},
 		{
-			name:      "invalid shortcode format (colons)",
-			shortcode: ":thumbsup:", messageID: "m1",
+			name:      "oversize rejected",
+			shortcode: strings.Repeat("a", 65), messageID: "m1",
 			wantCategory: errcode.CodeBadRequest,
-			wantMsg:      "invalid reaction shortcode",
-		},
-		{
-			name:      "invalid shortcode format (uppercase)",
-			shortcode: "ThumbsUp", messageID: "m1",
-			wantCategory: errcode.CodeBadRequest,
-			wantMsg:      "invalid reaction shortcode",
+			wantMsg:      "reaction emoji too large",
 		},
 	}
 	for _, tc := range cases {
@@ -119,7 +115,7 @@ func TestHistoryService_ReactMessage_ValidationErrors(t *testing.T) {
 // TestHistoryService_ReactMessage_UnregisteredShortcode_Accepted covers the
 // behavior flip: a well-formed shortcode that is neither a standard emoji nor
 // registered in any site's custom_emojis collection is now accepted — format
-// validation (emoji.Canonicalize) is the only gate.
+// validation (emoji.CanonicalizeReaction) is the only gate.
 func TestHistoryService_ReactMessage_UnregisteredShortcode_Accepted(t *testing.T) {
 	f := newReactFixture(t)
 	createdAt := joinTime.Add(1 * time.Minute)

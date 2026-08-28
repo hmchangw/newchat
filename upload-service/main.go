@@ -23,6 +23,22 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
+// maxMultipartMemory caps how much of an upload Gin keeps in memory before
+// spilling the part to a temp file. Uploads are streamed on to Drive, so nothing
+// needs to stay resident; peak heap runs roughly 3x this because bytes.Buffer
+// doubles as it grows, and Gin's own 32 MiB default costs ~97 MiB per upload in
+// flight. The trade is disk for RAM: parts over the cap spool to the OS temp
+// dir, so ephemeral storage must fit the concurrent-upload total.
+const maxMultipartMemory = 1 << 20
+
+// httpTimeout bounds both directions of a transfer:
+// FILE_UPLOAD_MAX_FILE_SIZE (2 GiB in production) / slowest supported client
+// bandwidth, so 15m serves clients down to ~2.3 MiB/s. It is also the ceiling on
+// how long a stalled connection holds its spooled temp file. Read and Write are
+// equal because WriteTimeout starts at end-of-header and so must cover the body
+// read as well; the post-read Drive leg is internal and takes seconds.
+const httpTimeout = 15 * time.Minute
+
 type config struct {
 	Port    string `env:"PORT"      envDefault:"8080"`
 	DevMode bool   `env:"DEV_MODE"  envDefault:"false"`
@@ -36,6 +52,14 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	// primaryPreferred: GetUpload reads a doc written outside this repo, so the
+	// write-to-read window cannot be bounded from here.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+
+	Pool mongoutil.PoolConfig
+	// No blanket request timeout here: upload-service streams potentially-large
+	// file downloads bounded by MinioDownloadTimeout and the server WriteTimeout;
+	// a short per-request context deadline would cancel those streams.
 
 	// MaxImages caps the number of images per image-upload request.
 	MaxImages int `env:"MAX_IMAGES" envDefault:"10"`
@@ -93,6 +117,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool: %w", err)
+	}
 
 	ctx := context.Background()
 	cfg.Drive.LoadBaseURLs()
@@ -103,10 +130,17 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
 	driveClient := drive.NewClient(&cfg.Drive)
 	legacyDriveClient := drive.NewClient(&cfg.LegacyDrive)
@@ -139,11 +173,12 @@ func run() error {
 
 	mimeFilter := newMediaTypeFilter(cfg.FileUploadMediaTypeWhitelist, cfg.FileUploadMediaTypeBlacklist)
 	handler := NewHandler(store, driveClient, s3Store, cfg.MaxImages, cfg.MaxAttachments, cfg.MaxImageSizeBytes,
-		cfg.FileUploadMaxFileSize, mimeFilter, imagePreview, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
+		cfg.FileUploadMaxFileSize, mimeFilter, cfg.FileDownloadCacheMaxAgeSeconds, cfg.SetCookiePartitioned,
 		legacyDriveClient)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
 	// CORS handles preflight before tracing so OPTIONS noise does not pollute Tempo.
 	r.Use(corsMiddleware(cfg.CORSAllowedOrigins))
 	// o11y server-span middleware wraps real requests so downstream slog/handlers
@@ -163,10 +198,13 @@ func run() error {
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute, // downloads stream potentially-large bodies
+		Addr:    addr,
+		Handler: r,
+		// The header phase keeps a short bound of its own: httpTimeout is sized for
+		// bodies, and inheriting it would let a slowloris hold a connection for 15m.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       httpTimeout,
+		WriteTimeout:      httpTimeout,
 	}
 
 	srvErr := make(chan error, 1)

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
 // clusterDomain maps a site to its media-service base URL (incl. scheme).
@@ -57,6 +60,12 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred: EmojiDoc/Avatar are read right after UpsertEmoji/SetBotAvatar.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+
+	// Pool bounds the shared Mongo client's connection pool
+	// (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
+	Pool mongoutil.PoolConfig
 
 	MinioEndpoint  string `env:"MINIO_ENDPOINT,required"`
 	MinioAccessKey string `env:"MINIO_ACCESS_KEY,required"`
@@ -69,6 +78,11 @@ type config struct {
 
 	MaxUploadBytes     int64 `env:"MAX_UPLOAD_BYTES" envDefault:"1048576"`
 	CacheMaxAgeSeconds int   `env:"CACHE_MAX_AGE_SECONDS" envDefault:"21600"`
+
+	// DefaultAvatarEnabled gates the generated "initials" default avatar. When
+	// false, the avatar endpoints return 404 instead of synthesizing an SVG, so
+	// the client renders its own fallback.
+	DefaultAvatarEnabled bool `env:"DEFAULT_AVATAR_ENABLED" envDefault:"true"`
 
 	// Custom-emoji upload limits. Bytes cap the raw body; dimension caps the
 	// decoded width AND height independently.
@@ -91,10 +105,9 @@ type config struct {
 	// the service must not start in a configuration that serves the writes anonymously.
 	BotplatformURL string `env:"BOTPLATFORM_URL,required,notEmpty"`
 
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB/MinIO.
-	// 0 disables the cap (unbounded spawn).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+	// Guard bounds in-flight NATS request handlers (MAX_CONCURRENCY) and
+	// per-request duration (REQUEST_TIMEOUT) on the NATS request/reply side.
+	Guard natsrouter.GuardConfig
 }
 
 // clusterBaseURL returns the configured base URL for a site, or "" if unknown.

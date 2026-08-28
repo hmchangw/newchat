@@ -22,7 +22,7 @@ func fileURL(roomID, fileID, driveHost string) string {
 
 // buildAttachment assembles the render-ready attachment, adding media-specific
 // fields based on the MIME prefix.
-func buildAttachment(m fileMeta, description, url, imagePreview string, dims *model.ImageDimensions) model.Attachment {
+func buildAttachment(m fileMeta, description, url string, dims *model.ImageDimensions) model.Attachment {
 	mime := strings.ToLower(strings.TrimSpace(m.mime))
 	att := model.Attachment{
 		ID:                m.id,
@@ -39,7 +39,8 @@ func buildAttachment(m fileMeta, description, url, imagePreview string, dims *mo
 		att.ImageType = mime
 		att.ImageSize = m.size
 		att.ImageDimensions = dims
-		att.ImagePreview = imagePreview
+		// Attachment.ImagePreview is deliberately left unset: the blurred preview was
+		// dropped, and the field survives only so stored history keeps serving its own.
 	case strings.HasPrefix(mime, "audio/"):
 		att.AudioURL = url
 		att.AudioType = mime

@@ -396,19 +396,22 @@ func (l *soakRoomLanes) Reconcile(
 	if l.ledger == nil || verifier == nil {
 		return false, fmt.Errorf("soak room reconciliation is not configured")
 	}
-	now := l.now().UTC()
-	operation, ok := l.ledger.ClaimDueLanes(now, soakRoomLaneNames)
+	claimAt := l.now().UTC()
+	operation, ok := l.ledger.ClaimDueLanes(claimAt, soakRoomLaneNames)
 	if !ok {
 		return false, nil
 	}
 
 	result, reason, err := verifier.Verify(ctx, &operation)
+	completedAt := l.now().UTC()
 	switch {
 	case err != nil, result == soakRoomStateUnknown:
-		if now.Before(operation.Deadline) {
-			return true, l.release(operation.ID, now)
+		if completedAt.Before(operation.Deadline) {
+			return true, l.releaseProbe(&operation, completedAt)
 		}
-		return true, l.observe(operation.ID, failureObservationUnverified, failureReasonNone, now)
+		return true, l.observe(
+			operation.ID, failureObservationUnverified, failureReasonNone, completedAt,
+		)
 	case result == soakRoomStateMatched:
 		// Ownership is a durable prerequisite of finishing a create, not an
 		// afterthought: once the ledger records the terminal observation the
@@ -417,27 +420,37 @@ func (l *soakRoomLanes) Reconcile(
 		// budget. Hold the operation open and try again while the deadline
 		// allows it.
 		if operation.OperationType == failureOperationRoomCreate {
-			if err := l.claimCreatedRoom(ctx, &operation); err != nil {
-				if now.Before(operation.Deadline) {
-					return true, l.release(operation.ID, now)
+			claimCtx, cancelClaim := context.WithTimeout(ctx, soakRoomStateTimeout)
+			claimErr := l.claimCreatedRoom(claimCtx, &operation)
+			cancelClaim()
+			completedAt = l.now().UTC()
+			if claimErr != nil {
+				if completedAt.Before(operation.Deadline) {
+					return true, l.releaseFailedCall(
+						operation.ID, completedAt, operation.Deadline,
+					)
 				}
 				slog.Error("created soak room could not be claimed before its deadline",
 					"runId", l.cfg.RunID,
-					"roomName", operation.Targets["roomName"], "error", err)
+					"roomName", operation.Targets["roomName"], "error", claimErr)
 				l.countUntracked("ownership")
 			}
 		}
-		return true, l.observe(operation.ID, failureObservationGood, failureReasonNone, now)
+		return true, l.observe(
+			operation.ID, failureObservationGood, failureReasonNone, completedAt,
+		)
 	case result == soakRoomStateMismatch:
-		return true, l.observe(operation.ID, failureObservationBad, reason, now)
+		return true, l.observe(operation.ID, failureObservationBad, reason, completedAt)
 	default:
-		if now.Before(operation.Deadline) {
-			return true, l.release(operation.ID, now)
+		if completedAt.Before(operation.Deadline) {
+			return true, l.releaseProbe(&operation, completedAt)
 		}
 		// Past the deadline with both sources agreeing the effect is absent.
 		// failureOperationResult still refuses to call this data loss unless
 		// admission accepted the request.
-		return true, l.observe(operation.ID, failureObservationMissingAfterDeadline, reason, now)
+		return true, l.observe(
+			operation.ID, failureObservationMissingAfterDeadline, reason, completedAt,
+		)
 	}
 }
 
@@ -483,8 +496,12 @@ func (l *soakRoomLanes) ProbeQuarantine(
 	if !ok {
 		return false, nil
 	}
+	probeCtx, cancel := context.WithTimeout(ctx, soakRoomStateTimeout)
+	defer cancel()
 	if probe.Mute {
-		muted, found, err := verifier.store.SubscriptionMuted(ctx, probe.RoomID, probe.Account)
+		muted, found, err := verifier.store.SubscriptionMuted(
+			probeCtx, probe.RoomID, probe.Account,
+		)
 		if err != nil || !found {
 			l.pool.ReleaseProbe(probe)
 			l.countProbe("unresolved")
@@ -496,7 +513,7 @@ func (l *soakRoomLanes) ProbeQuarantine(
 		l.pool.ResolveMuteProbe(probe.RoomID, probe.Account, muted)
 		return true, nil
 	}
-	member, err := verifier.store.IsRoomMember(ctx, probe.RoomID, probe.Account)
+	member, err := verifier.store.IsRoomMember(probeCtx, probe.RoomID, probe.Account)
 	if err != nil {
 		l.pool.ReleaseProbe(probe)
 		l.countProbe("unresolved")
@@ -584,9 +601,10 @@ func (l *soakRoomLanes) observeAdmission(
 			return fmt.Errorf("record unreadable soak room admission: %w", observeErr)
 		}
 		return nil
-	case transientSoakError(outcome.ErrorClass):
-		// Ambiguous: the request may or may not have been accepted. It is never
-		// resent and never called not_sent; reconciliation decides.
+	case outcome.ErrorClass == soakErrorCanceled || transientSoakError(outcome.ErrorClass):
+		// Ambiguous: the request may or may not have been accepted, and a
+		// teardown says nothing about whether it reached the server. Never
+		// resent, never called not_sent; reconciliation decides.
 		if _, observeErr := l.ledger.Observe(
 			operationID, failureObserverAdmission, failureObservationUnverified, l.now().UTC(),
 		); observeErr != nil {
@@ -625,9 +643,30 @@ func (l *soakRoomLanes) observe(
 	return nil
 }
 
-func (l *soakRoomLanes) release(operationID string, now time.Time) error {
-	if err := l.ledger.ReleaseClaim(operationID, now.Add(l.cfg.RetryInterval)); err != nil {
+func (l *soakRoomLanes) releaseProbe(operation *failureOperation, now time.Time) error {
+	if operation == nil {
+		return fmt.Errorf("reschedule soak room operation: operation is required")
+	}
+	next := nextReconcileProbe(
+		now, operation.VerifyAfter, operation.Deadline, l.cfg.RetryInterval,
+	)
+	if err := l.ledger.ReleaseClaim(operation.ID, next); err != nil {
 		return fmt.Errorf("reschedule soak room operation: %w", err)
+	}
+	return nil
+}
+
+func (l *soakRoomLanes) releaseFailedCall(
+	operationID string,
+	now time.Time,
+	deadline time.Time,
+) error {
+	next := now.Add(l.cfg.RetryInterval)
+	if next.After(deadline) {
+		next = deadline
+	}
+	if err := l.ledger.ReleaseClaim(operationID, next); err != nil {
+		return fmt.Errorf("reschedule failed soak room call: %w", err)
 	}
 	return nil
 }

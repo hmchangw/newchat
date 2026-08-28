@@ -19,6 +19,7 @@ export {
   listSessions,
   listUsers,
   resyncPermissions,
+  resyncUser,
   revokeAllSessions,
   revokeSession,
   setPassword,

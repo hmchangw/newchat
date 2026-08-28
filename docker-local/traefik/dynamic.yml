@@ -29,6 +29,12 @@ http:
         - web
       service: media-service
 
+    subscriptions:
+      rule: "PathPrefix(`/api/v1/subscriptions`)"
+      entryPoints:
+        - web
+      service: user-service
+
   services:
     auth-service:
       loadBalancer:
@@ -44,3 +50,8 @@ http:
       loadBalancer:
         servers:
           - url: "http://media-service:8080"
+
+    user-service:
+      loadBalancer:
+        servers:
+          - url: "http://user-service:8080"

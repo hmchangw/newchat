@@ -43,16 +43,29 @@ func run() error {
 	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
 		return fmt.Errorf("BCRYPT_COST must be in [4, 31], got %d", cfg.BcryptCost)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
+	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)
@@ -100,6 +113,7 @@ func run() error {
 	r.Use(o11ygin.Middleware("botplatform-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
+	r.Use(cfg.HTTP.Middleware())
 	r.Use(accessLogMiddleware())
 	registerRoutes(r, h)
 	registerBotRoutes(r, sessionStore, valkey, &cfg, h)

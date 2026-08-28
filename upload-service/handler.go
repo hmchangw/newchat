@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,8 +31,9 @@ const imageFormField = "images"
 // fileFormField is the multipart form field carrying the single-endpoint upload.
 const fileFormField = "file"
 
-// defaultUploadContentType is the fallback MIME for the single-file endpoint when
-// the multipart part carries no Content-Type.
+// defaultUploadContentType marks a declared Content-Type as generic (so
+// resolveMediaType knows to look past it) and is the final fallback when
+// nothing else — sniff or extension — can name the file.
 const defaultUploadContentType = "application/octet-stream"
 
 // driveClient is the subset of the Drive client the handlers use.
@@ -42,10 +42,6 @@ type driveClient interface {
 	GetGroupImage(host, groupID, fileID string) (*drive.GetGroupImageResponse, error)
 	GetBaseURLFromRoomOrigin(origin string) string
 }
-
-// previewFunc decodes an image once, returning a base64 preview and the source
-// dimensions; injected for testability.
-type previewFunc func(data []byte, mime string) (string, *model.ImageDimensions, error)
 
 // objectStore streams a stored object by key. Satisfied by *minioObjectStore.
 type objectStore interface {
@@ -63,23 +59,22 @@ type Handler struct {
 	maxImageSize   int64
 	maxFileSize    int64
 	mimeFilter     *mediaTypeFilter
-	preview        previewFunc
 	cacheMaxAge    int
 
 	setCookiePartitioned bool
 }
 
 // NewHandler wires the handler dependencies. maxImages/maxImageSize gate the image
-// endpoint; maxAttachments/maxFileSize/mimeFilter/preview gate the file endpoint; s3
+// endpoint; maxAttachments/maxFileSize/mimeFilter gate the file endpoint; s3
 // backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in
 // seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie;
 // legacyDrive serves the /api/v3 download from a separate (legacy) Drive backend.
 func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttachments int, maxImageSize, maxFileSize int64,
-	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
+	mimeFilter *mediaTypeFilter, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
 	return &Handler{
 		store: store, drive: dc, legacyDrive: legacyDrive, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
-		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
+		cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
 	}
 }
 
@@ -174,7 +169,9 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[imageFormField]
@@ -257,7 +254,9 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[fileFormField]
@@ -275,44 +274,37 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	// Normalize the (client-controlled) declared type: lowercase + strip params so
-	// the filter and the image branch see a clean value.
-	mime := normalizeMediaType(fh.Header.Get("Content-Type"))
-	if mime == "" {
-		mime = defaultUploadContentType
-	}
-	if !h.mimeFilter.allowed(mime) {
-		errhttp.Write(ctx, c, errcode.BadRequest("file type is not allowed"))
-		return
-	}
-
-	// Images are buffered once (for preview + dimensions) and the same bytes are
-	// reused for the Drive upload, so the file is read exactly once. Non-image
-	// types are streamed straight to Drive without buffering (a large video must
-	// not be held in memory).
-	var data []byte
-	var driveFile multipart.File
-	if strings.HasPrefix(mime, "image/") {
-		if data, err = readMultipartFile(fh); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("read uploaded file: %w", err))
-			return
-		}
-		driveFile = bytesFile{bytes.NewReader(data)}
-	} else if driveFile, err = fh.Open(); err != nil {
+	// The upload is handed to the resolver, the header read and Drive as a reader,
+	// so the file is never held in memory whatever its type or size.
+	driveFile, err := fh.Open()
+	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("open uploaded file: %w", err))
 		return
 	}
 	defer driveFile.Close()
 
-	// Build the preview + dimensions BEFORE the Drive upload so a preview failure
-	// can't leave an orphaned Drive file. data is non-nil only for images.
-	var preview string
-	var dims *model.ImageDimensions
-	if data != nil {
-		if preview, dims, err = h.preview(data, mime); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("build image preview: %w", err))
-			return
-		}
+	// The declared Content-Type is a client-controlled hint — browsers send
+	// application/octet-stream for any file the OS cannot type — so the real type
+	// comes from the bytes and the name. Filtering THAT rather than the declared
+	// value is what stops a blacklisted upload arriving under a generic label.
+	mime, err := resolveMediaType(fh.Header.Get("Content-Type"), fh.Filename, driveFile)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("resolve uploaded file media type: %w", err))
+		return
+	}
+	if !h.mimeFilter.allowed(mime) {
+		errhttp.Write(errcode.WithLogValues(ctx, "media_type", mime), c,
+			errcode.BadRequest("file type is not allowed"))
+		return
+	}
+
+	// Read the dimensions BEFORE the Drive upload so a read failure can't leave an
+	// orphaned Drive file. imageDimensions rewinds driveFile for us and no-ops on
+	// a non-image MIME, so the caller needs no image check of its own.
+	dims, err := imageDimensions(driveFile, mime)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("read image dimensions: %w", err))
+		return
 	}
 
 	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, siteID,
@@ -336,7 +328,7 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 	meta := fileMeta{id: obj.FileID, name: fh.Filename, mime: mime, size: obj.FileSize}
 	url := fileURL(roomID, obj.FileID, h.drive.GetBaseURLFromRoomOrigin(siteID))
 
-	att := buildAttachment(meta, c.PostForm("description"), url, preview, dims)
+	att := buildAttachment(meta, c.PostForm("description"), url, dims)
 	c.JSON(http.StatusOK, gin.H{"success": true, "attachments": []model.Attachment{att}})
 }
 
@@ -495,16 +487,6 @@ func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []up
 	return results, fileHeaders
 }
 
-// readMultipartFile opens, reads, and closes a multipart file header's content.
-func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
-	f, err := fh.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}
-
 // contentDisposition builds an attachment Content-Disposition value. A non-empty
 // name is appended as an RFC 5987 filename* (percent-encoded, space -> %20, not +).
 func contentDisposition(name string) string {
@@ -514,10 +496,3 @@ func contentDisposition(name string) string {
 	encodedName := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 	return fmt.Sprintf("attachment; filename*=UTF-8''%s", encodedName)
 }
-
-// bytesFile adapts a *bytes.Reader (Read/ReadAt/Seek) to multipart.File by adding
-// a no-op Close, so already-buffered image bytes can be handed to Drive without
-// re-reading the upload.
-type bytesFile struct{ *bytes.Reader }
-
-func (bytesFile) Close() error { return nil }

@@ -130,22 +130,29 @@ function toSummary(room) {
   }
 }
 
+// isSystemMessage: the ONE message-level test for server-generated system
+// chrome (room_renamed, members_added, …). isSystemMessageType is a
+// set-membership test, NOT `type !== ''`: the client-settable "important"
+// type is deliberately absent from that set and behaves like a normal
+// message. sysMsgData is checked belt-and-braces because that's the field
+// MessageList keys off to route a message to the SystemMessage renderer.
+// Preview eligibility and the unread/ordering gate both call this so the
+// two classifications can never drift apart.
+function isSystemMessage(msg) {
+  return isSystemMessageType(msg.type) || msg.sysMsgData != null
+}
+
 // Build a stored preview from a live message. Returns null when there is
 // nothing to store, so callers leave the map untouched rather than writing an
 // empty sentinel.
 function previewFromMessage(msg, fallbackMentions) {
   if (!msg || !msg.id) return null
-  // Fix 1: a system message (room_renamed, members_added, …) is published to
-  // MESSAGES-CANONICAL with non-empty content and fans out as an ordinary
-  // new_message event, but it must never become the room's sidebar snippet —
-  // history-service's previewMessage resolution already excludes it, so
-  // treating it as eligible here makes a reload flip the snippet back.
-  // isSystemMessageType is a set-membership test, NOT `type !== ''`: the
-  // client-settable "important" type is deliberately absent from that set
-  // and previews like a normal message. sysMsgData is checked belt-and-
-  // braces because that's the field MessageList actually keys off to route
-  // a message to the SystemMessage renderer.
-  if (isSystemMessageType(msg.type) || msg.sysMsgData != null) return null
+  // Fix 1: a system message is published to MESSAGES-CANONICAL with
+  // non-empty content and fans out as an ordinary new_message event, but it
+  // must never become the room's sidebar snippet — history-service's
+  // previewMessage resolution already excludes it, so treating it as
+  // eligible here makes a reload flip the snippet back.
+  if (isSystemMessage(msg)) return null
   return {
     messageId: msg.id,
     senderName: messageSenderName(msg),
@@ -199,6 +206,15 @@ function isOlderPreview(nextCreatedAt, curCreatedAt) {
   const curT = Date.parse(curCreatedAt)
   if (Number.isNaN(nextT) || Number.isNaN(curT)) return false
   return nextT < curT
+}
+
+// Whether the stored preview wins over an incoming wire preview. Two reasons
+// it can: the live path stored an encrypted placeholder for that same message
+// (Fix 3), or the wire preview is strictly older than what's displayed (Fix 7).
+function storedPreviewWins(cur, next) {
+  if (!cur) return false
+  if (cur.encrypted && cur.messageId === next.messageId) return true
+  return isOlderPreview(next.createdAt, cur.createdAt)
 }
 
 /**
@@ -354,17 +370,21 @@ export function roomEventsReducer(state, action) {
     }
     case 'BUCKETS_LOADED': {
       const subs = action.subscriptions ?? {}
-      // Seed only rooms with no preview yet. A live message can land before
-      // fetchSidebarBuckets resolves (the DM subscription goes live first), and
-      // that message is NEWER than this list snapshot — overwriting it would show
-      // an older message in the sidebar than the room itself displays.
+      // Take the server's preview unless what's stored wins on recency (a live
+      // message that landed before this fetch resolved) or is an encrypted
+      // placeholder for the same message — NOT a fill-if-absent seed: hydration
+      // replays this action with the previous session's cached previewMessage,
+      // so on a re-login every room already has a stale entry to replace.
       // Shared by both paths: a degraded bootstrap still carries real previews
       // for the buckets it did reach.
       let previews = state.previews
       for (const [roomId, sub] of Object.entries(subs)) {
-        if (previews[roomId]) continue
         const preview = previewFromWire(sub?.room?.previewMessage)
         if (!preview) continue
+        const cur = previews[roomId]
+        // samePreview keeps the map reference stable on a no-op resync, which
+        // would otherwise re-render every row in the sidebar.
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
         if (previews === state.previews) previews = { ...state.previews }
         previews[roomId] = preview
       }
@@ -434,6 +454,21 @@ export function roomEventsReducer(state, action) {
         subscriptions: subs,
         previews,
       }
+    }
+    case 'PREVIEWS_HYDRATED': {
+      // The previous session's previews, overlaid on what BUCKETS_LOADED just
+      // seeded from the cached subscriptions. Live messages update previews but
+      // never the subscription's previewMessage, so either side can be the
+      // fresher one — the same take-if-newer rule picks the winner.
+      let previews = state.previews
+      for (const [roomId, preview] of Object.entries(action.previews ?? {})) {
+        if (!preview?.messageId) continue
+        const cur = previews[roomId]
+        if (storedPreviewWins(cur, preview) || samePreview(cur, preview)) continue
+        if (previews === state.previews) previews = { ...state.previews }
+        previews[roomId] = preview
+      }
+      return previews === state.previews ? state : { ...state, previews }
     }
     case 'SUBSCRIPTION_UPSERTED': {
       // Upsert a single subscription record (live delta from
@@ -582,6 +617,13 @@ export function roomEventsReducer(state, action) {
         }
       }
       const roomId = evt.roomId
+      // A system message renders in the timeline but is not activity: it must
+      // not bump the room's position, unread count, or sidebar order. The
+      // plaintext evt.systemMsg covers encrypted channels where msg.type is
+      // sealed; type/sysMsgData cover plaintext (and the synthesized
+      // encrypted placeholder, which has neither, correctly falls through
+      // only when the event itself isn't flagged).
+      const isSystemEvent = evt.systemMsg === true || isSystemMessage(msg)
       // Thread replies returned above, so anything reaching here belongs in
       // the room timeline and is a preview candidate. Computed once and
       // applied at every return point below.
@@ -592,13 +634,23 @@ export function roomEventsReducer(state, action) {
       // preview. That's fine only because this frontend has no tshow
       // support at all, so no thread reply ever reaches the room timeline
       // here. Anyone adding tshow must revisit this.
-      const nextPreview = previewFromMessage(msg, evt.mentions)
+      // isSystemEvent, not previewFromMessage alone: an encrypted system
+      // event synthesizes a placeholder with no type/sysMsgData, and
+      // "[encrypted message]" must not become the room's snippet.
+      const nextPreview = isSystemEvent ? null : previewFromMessage(msg, evt.mentions)
       const previews =
         !nextPreview || samePreview(state.previews[roomId], nextPreview)
           ? state.previews
           : { ...state.previews, [roomId]: nextPreview }
       const prev = state.roomState[roomId] ?? emptyRoomState()
       const isActive = state.activeRoomId === roomId
+      // Derived once for both buffer modes, so the "what counts as room
+      // activity" rule lives in one place rather than a copy per branch.
+      const nextLastMsgAt = isSystemEvent
+        ? prev.lastMsgAt
+        : (evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt)
+      const nextUnreadCount =
+        isActive || isSystemEvent ? prev.unreadCount : prev.unreadCount + 1
       if (prev.bufferMode === BUFFER_MODE.HISTORICAL) {
         if (
           prev.messages.some((m) => m.id === msg.id) ||
@@ -616,13 +668,13 @@ export function roomEventsReducer(state, action) {
         const nextRoomState = {
           ...prev,
           pendingLiveMessages,
-          lastMsgAt: evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt,
+          lastMsgAt: nextLastMsgAt,
           lastMsgId: evt.lastMsgId ?? prev.lastMsgId,
-          unreadCount: isActive ? prev.unreadCount : prev.unreadCount + 1,
-          hasMention: isActive ? false : prev.hasMention || !!evt.hasMention,
-          mentionAll: isActive ? false : prev.mentionAll || !!evt.mentionAll,
+          unreadCount: nextUnreadCount,
+          hasMention: isActive ? false : prev.hasMention || (!isSystemEvent && !!evt.hasMention),
+          mentionAll: isActive ? false : prev.mentionAll || (!isSystemEvent && !!evt.mentionAll),
         }
-        const summaries = state.summaries.some((r) => r.id === roomId)
+        const summaries = !isSystemEvent && state.summaries.some((r) => r.id === roomId)
           ? sortByLastMsgDesc(
               state.summaries.map((r) =>
                 r.id === roomId
@@ -672,13 +724,13 @@ export function roomEventsReducer(state, action) {
       const nextRoomState = {
         ...prev,
         messages,
-        lastMsgAt: evt.lastMsgAt ?? msg.createdAt ?? prev.lastMsgAt,
+        lastMsgAt: nextLastMsgAt,
         lastMsgId: evt.lastMsgId ?? prev.lastMsgId,
-        unreadCount: isActive ? prev.unreadCount : prev.unreadCount + 1,
-        hasMention: isActive ? false : prev.hasMention || !!evt.hasMention,
-        mentionAll: isActive ? false : prev.mentionAll || !!evt.mentionAll,
+        unreadCount: nextUnreadCount,
+        hasMention: isActive ? false : prev.hasMention || (!isSystemEvent && !!evt.hasMention),
+        mentionAll: isActive ? false : prev.mentionAll || (!isSystemEvent && !!evt.mentionAll),
       }
-      const summaries = state.summaries.some((r) => r.id === roomId)
+      const summaries = !isSystemEvent && state.summaries.some((r) => r.id === roomId)
         ? sortByLastMsgDesc(
             state.summaries.map((r) =>
               r.id === roomId
@@ -1025,9 +1077,15 @@ export function roomEventsReducer(state, action) {
       // message buffer — which is the normal case for a sidebar row.
       const { roomId, previewMessage, deletedMessageId } = action
       if (!roomId) return state
+      const cur = state.previews[roomId]
+      // True when this event removed the very message the sidebar is showing.
+      // Both branches below turn on it: the server has spoken about THIS
+      // preview, so its answer wins over what we hold.
+      const supersedesDisplayed = Boolean(
+        deletedMessageId && cur && cur.messageId === deletedMessageId
+      )
       const next = previewFromWire(previewMessage)
       if (next) {
-        const cur = state.previews[roomId]
         // Fix 3: the live path already knows this message can't be decrypted
         // and stored the "[encrypted message]" placeholder. history-service /
         // broadcast-worker relay previewMessage.content unencrypted, so a
@@ -1039,21 +1097,26 @@ export function roomEventsReducer(state, action) {
         // bootstrap still shows the server's plaintext — fully closing that
         // needs a backend change (withholding plaintext for encrypted rooms
         // server-side), not something this guard can fix client-side.
-        if (cur?.encrypted && cur.messageId === next.messageId) return state
         // Fix 7: broadcast-worker processes canonical messages concurrently,
         // so an edit/delete's server-resolved preview can be computed before
         // a genuinely newer message and still arrive after it — reject only
         // a STRICTLY older write; missing/unparseable timestamps are
         // accepted rather than dropped (see isOlderPreview).
-        if (isOlderPreview(next.createdAt, cur?.createdAt)) return state
+        //
+        // Both guards are retired when this event deleted the message on
+        // display. Its replacement is the room's PREVIOUS eligible message,
+        // so it is necessarily older than the one just removed — Fix 7 would
+        // reject every such delete, and Fix 3 would pin an encrypted
+        // placeholder for a message that no longer exists. Neither guard is
+        // about a server statement concerning this exact preview.
+        if (!supersedesDisplayed && storedPreviewWins(cur, next)) return state
         return { ...state, previews: { ...state.previews, [roomId]: next } }
       }
       // No preview on the event. For a delete that means nothing eligible is
       // left — but only when the deleted message is the one on display. Any
       // other id is contradictory input (the server would have echoed the
       // unchanged preview), so leave what's there.
-      const cur = state.previews[roomId]
-      if (!deletedMessageId || !cur || cur.messageId !== deletedMessageId) return state
+      if (!supersedesDisplayed) return state
       const { [roomId]: _cleared, ...rest } = state.previews
       return { ...state, previews: rest }
     }

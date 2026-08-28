@@ -9,11 +9,18 @@ services:
       dockerfile: hr-sync-worker/deploy/Dockerfile
     restart: unless-stopped
     environment:
-      - SITE_IDS=${SITE_IDS:-site-local}
-      - NATS_URL=nats://nats:4222
-      - MONGO_WRITE_URI=mongodb://mongodb:27017
-      - MONGO_WRITE_DB=chat
-      - BOOTSTRAP_STREAMS=true
+      - OTEL_SERVICE_NAME=hr-sync-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      # One consumer per site: every site's worker drains every site's HR
+      # stream, so an account created at one site reaches all of them.
+      - SITE_IDS=${ALL_SITE_IDS:-site-local}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
+      - MONGO_WRITE_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_WRITE_DB=${MONGO_DB:-chat}
+      - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
+    volumes:
+      - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:
       - chat-local
 

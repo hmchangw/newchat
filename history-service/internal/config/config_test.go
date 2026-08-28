@@ -7,6 +7,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
 // baseValid returns a Config with all tunable knobs at valid values so each test
@@ -18,14 +21,14 @@ func baseValid() Config {
 		SubCacheTTL:      2 * time.Minute,
 		RoomCacheSize:    50000,
 		RoomCacheTTL:     10 * time.Second,
+		PreviewKeyEpoch:  1,
 		PreviewCacheSize: 50000,
 		PreviewCacheTTL:  10 * time.Second,
-		MaxConcurrency:   256,
-		RequestTimeout:   10 * time.Second,
-		Mongo: MongoConfig{
-			MaxPoolSize: 100,
-			MinPoolSize: 0,
-		},
+
+		PreviewWarmBackWorkers: 8,
+		PreviewWarmBackQueue:   1024,
+		Pool:                   mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
+		Guard:                  natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
 	}
 }
 
@@ -40,8 +43,6 @@ func TestValidate_AcceptsZerosAsDisable(t *testing.T) {
 	cfg.SubCacheTTL = 0
 	cfg.RoomCacheSize = 0
 	cfg.RoomCacheTTL = 0
-	cfg.PreviewCacheSize = 0
-	cfg.PreviewCacheTTL = 0
 	require.NoError(t, validate(&cfg), "zero is the documented disable value")
 }
 
@@ -77,61 +78,24 @@ func TestValidate_RejectsNegativeRoomCacheTTL(t *testing.T) {
 	assert.Contains(t, err.Error(), "HISTORY_ROOM_CACHE_TTL")
 }
 
-// maxPoolSize=0 makes the driver treat the pool as unbounded — the opposite of
-// an explicit cap — so it is rejected rather than silently uncapping the pool.
-func TestValidate_RejectsZeroMaxPoolSize(t *testing.T) {
+// validate() delegates pool checks to mongoutil.PoolConfig.Validate — the
+// exhaustive cases live in that package's tests; this just proves it's wired.
+func TestValidate_DelegatesPoolValidation(t *testing.T) {
 	cfg := baseValid()
-	cfg.Mongo.MaxPoolSize = 0
+	cfg.Pool.MaxPoolSize = 0
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE")
 }
 
-func TestValidate_RejectsMinPoolSizeAboveMax(t *testing.T) {
+// validate() delegates the concurrency/timeout checks to
+// natsrouter.GuardConfig.Validate — again just proving the wiring.
+func TestValidate_DelegatesGuardValidation(t *testing.T) {
 	cfg := baseValid()
-	cfg.Mongo.MaxPoolSize = 100
-	cfg.Mongo.MinPoolSize = 200
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "MONGO_MIN_POOL_SIZE")
-}
-
-func TestValidate_AcceptsMinPoolSizeEqualToMax(t *testing.T) {
-	cfg := baseValid()
-	cfg.Mongo.MaxPoolSize = 100
-	cfg.Mongo.MinPoolSize = 100
-	require.NoError(t, validate(&cfg))
-}
-
-// 0 disables the concurrency cap (unbounded spawn); it is the documented
-// disable value, so it must validate.
-func TestValidate_AcceptsZeroMaxConcurrencyAsDisable(t *testing.T) {
-	cfg := baseValid()
-	cfg.MaxConcurrency = 0
-	require.NoError(t, validate(&cfg))
-}
-
-func TestValidate_RejectsNegativeMaxConcurrency(t *testing.T) {
-	cfg := baseValid()
-	cfg.MaxConcurrency = -1
+	cfg.Guard.MaxConcurrency = -1
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
-}
-
-// 0 disables the per-request timeout; it is the documented disable value.
-func TestValidate_AcceptsZeroRequestTimeoutAsDisable(t *testing.T) {
-	cfg := baseValid()
-	cfg.RequestTimeout = 0
-	require.NoError(t, validate(&cfg))
-}
-
-func TestValidate_RejectsNegativeRequestTimeout(t *testing.T) {
-	cfg := baseValid()
-	cfg.RequestTimeout = -1 * time.Second
-	err := validate(&cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "REQUEST_TIMEOUT")
 }
 
 func TestValidate_RejectsNegativePreviewCacheSize(t *testing.T) {
@@ -148,6 +112,58 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{name: "workers", set: func(c *Config) { c.PreviewWarmBackWorkers = -1 }, want: "PREVIEW_WARMBACK_WORKERS"},
+		{name: "queue", set: func(c *Config) { c.PreviewWarmBackQueue = -1 }, want: "PREVIEW_WARMBACK_QUEUE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseValid()
+			tc.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
+// repeating forever, so the wiring never turns it off.
+func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewWarmBackWorkers = 0
+	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+}
+
+func TestLoad_WarmBackDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	unsetEnv(t, "PREVIEW_WARMBACK_WORKERS")
+	unsetEnv(t, "PREVIEW_WARMBACK_QUEUE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 8, cfg.PreviewWarmBackWorkers)
+	assert.Equal(t, 1024, cfg.PreviewWarmBackQueue)
+}
+
+// The epoch is part of the preview DEK id, so a non-positive value mints a
+// sentinel rotation could never move forward from.
+func TestValidate_RejectsNonPositivePreviewKeyEpoch(t *testing.T) {
+	for _, epoch := range []int{0, -1} {
+		cfg := baseValid()
+		cfg.PreviewKeyEpoch = epoch
+		err := validate(&cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PREVIEW_KEY_EPOCH")
+	}
 }
 
 func TestValidate_RejectsInvalidReadPreference(t *testing.T) {
@@ -195,4 +211,93 @@ func unsetEnv(t *testing.T, key string) {
 			_ = os.Setenv(key, prev)
 		}
 	})
+}
+
+// Trimming is on unless an operator turns it off. Flipping this default would
+// silently switch every deployment that does not set the var back to the
+// pre-pagefit behaviour of letting the broker refuse the reply.
+func TestLoad_PageTrimming(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{name: "defaults to enabled", env: "", want: true},
+		{name: "disabled by the operator", env: "false", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tc.env == "" {
+				unsetEnv(t, "PAGE_TRIMMING_ENABLED")
+			} else {
+				t.Setenv("PAGE_TRIMMING_ENABLED", tc.env)
+			}
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.PageTrimming)
+		})
+	}
+}
+
+// setRequiredEnv fills the vars Load rejects when absent, so a test can vary
+// the one knob it cares about.
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+}
+
+func TestValidate_RejectsNegativeUserCacheSize(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheSize = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_SIZE")
+}
+
+func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
+}
+
+// Without this, encrypted history cannot be read at all when there is no
+// primary: cassrepo/decrypt.go cannot decrypt without the DEK.
+func TestLoad_DefaultsKeyReadPreferenceToPrimaryPreferred(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	unsetEnv(t, "MONGO_KEY_READ_PREFERENCE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.Mongo.KeyReadPreference)
+}
+
+func TestValidate_RejectsInvalidKeyReadPreference(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.KeyReadPreference = "quorum"
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_KEY_READ_PREFERENCE")
+}
+
+// history-service's DEK handles must bind the same wire name as the other
+// key-touching services; its Mongo block carries an envPrefix, so the tag is
+// KEY_READ_PREFERENCE and the wire name is MONGO_KEY_READ_PREFERENCE.
+func TestLoad_KeyReadPreferenceWireName(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "nearest") // a value no default would produce
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "nearest", cfg.Mongo.KeyReadPreference,
+		"the field must bind to MONGO_KEY_READ_PREFERENCE via the MONGO_ envPrefix")
 }

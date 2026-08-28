@@ -1784,23 +1784,87 @@ describe('roomEventsReducer previews', () => {
     // resolves, so a live message can land and be written to previews via
     // MESSAGE_RECEIVED before this dispatch fires. That live entry is NEWER
     // than the list snapshot's previewMessage and must survive.
-    const seeded = {
-      ...initialState,
-      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+    const live = {
+      messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived',
+      createdAt: '2026-08-14T11:00:00Z',
     }
+    const seeded = { ...initialState, previews: { r1: live } }
     const next = roomEventsReducer(seeded, {
       type: 'BUCKETS_LOADED',
       favoriteIds: [], appIds: [], channelDmIds: ['r1'],
       rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
       subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-stale' }) } } },
     })
-    expect(next.previews.r1).toEqual({ messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' })
+    expect(next.previews.r1).toEqual(live)
+  })
+
+  it('BUCKETS_LOADED replaces a stale stored preview with a newer wire one', () => {
+    // Regression: `hydrateFromCache` replays BUCKETS_LOADED with LAST session's
+    // cached previewMessage, so by the time the network bootstrap lands every
+    // room already has an entry. A fill-if-absent seed drops the fresh server
+    // preview and the sidebar keeps showing the previous session's message.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: {
+          messageId: 'm-cached', senderName: 'Alice Chen', text: 'from last session',
+          createdAt: '2026-08-13T09:00:00Z',
+        },
+      },
+    }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview({ messageId: 'm-newest' }) } } },
+    })
+    expect(next.previews.r1).toEqual({
+      messageId: 'm-newest', senderName: 'Alice Chen', text: 'hello there',
+      createdAt: '2026-08-14T10:00:00Z',
+    })
+  })
+
+  it('BUCKETS_LOADED keeps an encrypted placeholder for the same message', () => {
+    // Fix 3 parity: a resync's wire preview relays the body unencrypted, and
+    // must not flip a row the timeline is deliberately refusing to render.
+    const placeholder = {
+      messageId: 'm1', senderName: 'Alice Chen', text: '[encrypted message]',
+      createdAt: '2026-08-14T10:00:00Z', encrypted: true,
+    }
+    const seeded = { ...initialState, previews: { r1: placeholder } }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview() } } },
+    })
+    expect(next.previews.r1).toEqual(placeholder)
+  })
+
+  it('BUCKETS_LOADED keeps the previews reference stable when nothing changes', () => {
+    const stored = {
+      messageId: 'm1', senderName: 'Alice Chen', text: 'hello there',
+      createdAt: '2026-08-14T10:00:00Z',
+    }
+    const seeded = { ...initialState, previews: { r1: stored } }
+    const next = roomEventsReducer(seeded, {
+      type: 'BUCKETS_LOADED',
+      favoriteIds: [], appIds: [], channelDmIds: ['r1'],
+      rooms: [{ id: 'r1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 2 }],
+      subscriptions: { r1: { roomId: 'r1', name: 'General', room: { previewMessage: wirePreview() } } },
+    })
+    expect(next.previews).toBe(seeded.previews)
   })
 
   it('BUCKETS_LOADED still seeds a room with no prior preview alongside one that is guarded', () => {
     const seeded = {
       ...initialState,
-      previews: { r1: { messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived' } },
+      previews: {
+        r1: {
+          messageId: 'm-live', senderName: 'Live Sender', text: 'just arrived',
+          createdAt: '2026-08-14T11:00:00Z',
+        },
+      },
     }
     const next = roomEventsReducer(seeded, {
       type: 'BUCKETS_LOADED',
@@ -1817,6 +1881,40 @@ describe('roomEventsReducer previews', () => {
     // r1's live entry survives; r2 (no prior entry) is seeded normally.
     expect(next.previews.r1.messageId).toBe('m-live')
     expect(next.previews.r2.messageId).toBe('m-new-r2')
+  })
+
+  it('PREVIEWS_HYDRATED takes the cached preview when it is newer', () => {
+    // Live messages update state.previews but never the cached subscription's
+    // previewMessage, so the cache carries the fresher snippet of the two.
+    const seeded = {
+      ...initialState,
+      previews: {
+        r1: { messageId: 'm-wire', senderName: 'Alice Chen', text: 'older', createdAt: '2026-08-14T10:00:00Z' },
+      },
+    }
+    const cached = { messageId: 'm-live', senderName: 'Bob Lin', text: 'newer', createdAt: '2026-08-14T12:00:00Z' }
+    const next = roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: { r1: cached, r2: cached } })
+    expect(next.previews.r1).toEqual(cached)
+    expect(next.previews.r2).toEqual(cached)
+  })
+
+  it('PREVIEWS_HYDRATED keeps a newer seeded preview', () => {
+    const wire = { messageId: 'm-wire', senderName: 'Alice Chen', text: 'newer', createdAt: '2026-08-14T12:00:00Z' }
+    const seeded = { ...initialState, previews: { r1: wire } }
+    const next = roomEventsReducer(seeded, {
+      type: 'PREVIEWS_HYDRATED',
+      previews: { r1: { messageId: 'm-old', senderName: 'Bob Lin', text: 'older', createdAt: '2026-08-14T10:00:00Z' } },
+    })
+    expect(next.previews.r1).toEqual(wire)
+  })
+
+  it('PREVIEWS_HYDRATED leaves the map alone when there is nothing to apply', () => {
+    const seeded = {
+      ...initialState,
+      previews: { r1: { messageId: 'm1', senderName: 'A', text: 'x', createdAt: '2026-08-14T10:00:00Z' } },
+    }
+    expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED', previews: {} }).previews).toBe(seeded.previews)
+    expect(roomEventsReducer(seeded, { type: 'PREVIEWS_HYDRATED' }).previews).toBe(seeded.previews)
   })
 
   it('MESSAGE_RECEIVED overwrites the preview for a room with no message buffer', () => {
@@ -2217,6 +2315,48 @@ describe('roomEventsReducer previews', () => {
         })
         expect(next.previews.r1).toBeUndefined()
       })
+
+      // Deleting the displayed preview replaces it with the room's PREVIOUS
+      // eligible message, which is necessarily older than the one just removed.
+      // The guard exists for out-of-order live previews, not for this: applying
+      // it here leaves the deleted message on the sidebar until the next reload.
+      it('accepts an older replacement when the delete removed the displayed preview', () => {
+        const next = roomEventsReducer(seededWithCreatedAt(), {
+          type: 'ROOM_PREVIEW_UPDATED',
+          roomId: 'r1',
+          deletedMessageId: 'm1',
+          previewMessage: {
+            messageId: 'm0',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'the previous message, now the newest',
+            createdAt: '2026-08-14T14:00:00Z',
+          },
+        })
+        expect(next.previews.r1).toEqual({
+          messageId: 'm0', senderName: 'Bob Lin',
+          text: 'the previous message, now the newest',
+          createdAt: '2026-08-14T14:00:00Z',
+        })
+      })
+
+      // Only the displayed preview's own delete earns that exemption. A delete
+      // of some other message leaves the preview alone, so a stale older wire
+      // preview riding along with it must still be rejected.
+      it('still rejects an older preview when the delete removed some other message', () => {
+        const state = seededWithCreatedAt()
+        const next = roomEventsReducer(state, {
+          type: 'ROOM_PREVIEW_UPDATED',
+          roomId: 'r1',
+          deletedMessageId: 'm-somewhere-else',
+          previewMessage: {
+            messageId: 'm-late-arriving',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'resolved before the newer message but delivered after',
+            createdAt: '2026-08-14T14:00:00Z',
+          },
+        })
+        expect(next).toBe(state)
+      })
     })
   })
 })
@@ -2554,5 +2694,170 @@ describe('roomEventsReducer: BUCKETS_LOADED merge mode', () => {
     expect(next.summaries.map((r) => r.id)).toEqual(['a'])
     expect(Object.keys(next.subscriptions)).toEqual(['a'])
     expect(next.appIds.size).toBe(0)
+  })
+})
+
+// Helper: seed a state with one summary (via ROOMS_LOADED) AND a matching
+// live-mode roomState buffer (lastMsgAt mirrors the room's), so both the
+// summaries-resort guard and the roomState guard can be asserted against
+// the same base state.
+function seededStateWithRoom(roomId, roomOverrides = {}) {
+  const withSummary = roomEventsReducer(initialState, {
+    type: 'ROOMS_LOADED',
+    rooms: [room(roomId, roomOverrides)],
+  })
+  return {
+    ...withSummary,
+    roomState: {
+      ...withSummary.roomState,
+      [roomId]: {
+        messages: [],
+        hasLoadedHistory: false,
+        historyError: null,
+        unreadCount: 0,
+        hasMention: false,
+        mentionAll: false,
+        lastMsgAt: roomOverrides.lastMsgAt ?? null,
+        lastMsgId: null,
+        bufferMode: BUFFER_MODE.LIVE,
+        pendingLiveMessages: [],
+        focusMessageId: null,
+        hasMoreOlder: false,
+        loadingOlder: false,
+      },
+    },
+  }
+}
+
+describe('MESSAGE_RECEIVED system messages', () => {
+  const base = seededStateWithRoom('r1', { lastMsgAt: '2026-08-01T00:00:00Z' })
+
+  const sysEvent = {
+    type: 'new_message',
+    roomId: 'r1',
+    lastMsgAt: '2026-08-26T10:00:00.000Z',
+    lastMsgId: 'm-sys',
+    message: {
+      id: 'm-sys', roomId: 'r1', type: 'members_added',
+      content: 'bob joined', createdAt: '2026-08-26T10:00:00.000Z',
+    },
+  }
+
+  it('appends to the timeline but does not bump lastMsgAt, unreadCount, or re-sort', () => {
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: sysEvent })
+    const rs = next.roomState['r1']
+    expect(rs.messages.map((m) => m.id)).toContain('m-sys')
+    expect(rs.lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(rs.unreadCount).toBe(base.roomState['r1']?.unreadCount ?? 0)
+    expect(next.summaries).toBe(base.summaries) // untouched reference: no resort, no bump
+    expect(next.msgRecvSeq).toBe(base.msgRecvSeq + 1)
+  })
+
+  it('gates on the plaintext systemMsg flag when the body is encrypted', () => {
+    const encEvent = {
+      type: 'new_message', roomId: 'r1', systemMsg: true,
+      lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+      encryptedMessage: { v: 1 },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: encEvent })
+    expect(next.roomState['r1'].lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(next.summaries).toBe(base.summaries)
+  })
+
+  it('a normal message still bumps and re-sorts', () => {
+    const userEvent = { ...sysEvent, lastMsgId: 'm-user', message: { ...sysEvent.message, id: 'm-user', type: undefined } }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: userEvent })
+    expect(next.roomState['r1'].lastMsgAt).toBe('2026-08-26T10:00:00.000Z')
+    expect(next.summaries).not.toBe(base.summaries)
+  })
+})
+
+describe('MESSAGE_RECEIVED system messages — historical buffer mode', () => {
+  function historicalBase(roomId, lastMsgAt) {
+    const loaded = seededStateWithRoom(roomId, { lastMsgAt })
+    return roomEventsReducer(loaded, {
+      type: 'REPLACE_ROOM_BUFFER',
+      roomId,
+      messages: [],
+      focusMessageId: null,
+    })
+  }
+
+  it('buffers a system message into pendingLiveMessages without bumping lastMsgAt/unreadCount/summaries', () => {
+    const base = historicalBase('r2', '2026-08-01T00:00:00Z')
+    const sysEvent = {
+      type: 'new_message',
+      roomId: 'r2',
+      lastMsgAt: '2026-08-26T10:00:00.000Z',
+      lastMsgId: 'm-sys2',
+      message: {
+        id: 'm-sys2', roomId: 'r2', type: 'room_renamed',
+        content: 'renamed the room', createdAt: '2026-08-26T10:00:00.000Z',
+      },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: sysEvent })
+    const rs = next.roomState['r2']
+    expect(rs.pendingLiveMessages.map((m) => m.id)).toContain('m-sys2')
+    expect(rs.lastMsgAt).toBe('2026-08-01T00:00:00Z')
+    expect(rs.unreadCount).toBe(0)
+    expect(next.summaries).toBe(base.summaries)
+  })
+
+  it('a normal message in historical mode still bumps lastMsgAt/unreadCount and re-sorts', () => {
+    const base = historicalBase('r2', '2026-08-01T00:00:00Z')
+    const userEvent = {
+      type: 'new_message', roomId: 'r2',
+      lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-user2',
+      message: { id: 'm-user2', roomId: 'r2', content: 'hi', createdAt: '2026-08-26T10:00:00.000Z' },
+    }
+    const next = roomEventsReducer(base, { type: 'MESSAGE_RECEIVED', event: userEvent })
+    expect(next.roomState['r2'].lastMsgAt).toBe('2026-08-26T10:00:00.000Z')
+    expect(next.roomState['r2'].unreadCount).toBe(1)
+    expect(next.summaries).not.toBe(base.summaries)
+  })
+})
+
+describe('MESSAGE_RECEIVED: system events touch no user-facing room state', () => {
+  const base = seededStateWithRoom('r1', { lastMsgAt: '2026-08-01T00:00:00Z' })
+
+  it('an encrypted system event does not become the sidebar preview', () => {
+    // The synthesized placeholder carries no type/sysMsgData, so only the
+    // plaintext systemMsg flag can keep "[encrypted message]" out of the snippet.
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', systemMsg: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+        encryptedMessage: { v: 1 },
+      },
+    })
+    expect(next.previews).toBe(base.previews)
+  })
+
+  it('a system event never sets mention state', () => {
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', systemMsg: true,
+        hasMention: true, mentionAll: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-sys',
+        message: { id: 'm-sys', roomId: 'r1', type: 'members_added', content: 'bob joined', createdAt: '2026-08-26T10:00:00.000Z' },
+      },
+    })
+    expect(next.roomState.r1.hasMention).toBe(false)
+    expect(next.roomState.r1.mentionAll).toBe(false)
+  })
+
+  it('a normal message still sets mention state', () => {
+    const next = roomEventsReducer(base, {
+      type: 'MESSAGE_RECEIVED',
+      event: {
+        type: 'new_message', roomId: 'r1', hasMention: true, mentionAll: true,
+        lastMsgAt: '2026-08-26T10:00:00.000Z', lastMsgId: 'm-user',
+        message: { id: 'm-user', roomId: 'r1', content: 'hi @alice', createdAt: '2026-08-26T10:00:00.000Z' },
+      },
+    })
+    expect(next.roomState.r1.hasMention).toBe(true)
+    expect(next.roomState.r1.mentionAll).toBe(true)
   })
 })

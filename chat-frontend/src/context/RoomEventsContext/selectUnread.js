@@ -20,6 +20,25 @@ function isAfter(at, lastSeenAt) {
 }
 
 /**
+ * The ONE per-room unread rule, shared by the badge fold below and the
+ * sidebar row's bold state (stamped as `room.hasUnread` by
+ * useSidebarSections): not muted, and either the room's newest user message
+ * is past the member's read position or it carries an unread followed
+ * thread. `reading` suppresses the MAIN FEED only — sitting in a room does
+ * not read its threads.
+ *
+ * @param {object} room summary carrying `lastMsgAt` (user-activity semantics)
+ * @param {object|undefined} sub the member's subscription record, if any
+ * @param {boolean} reading whether the member is looking at this room right now
+ */
+export function isRoomUnread(room, sub, reading) {
+  if (sub?.muted) return false
+  const unreadByMessage = !reading && isAfter(room.lastMsgAt, sub?.lastSeenAt)
+  const unreadByThread = (sub?.threadUnread?.length ?? 0) > 0
+  return unreadByMessage || unreadByThread
+}
+
+/**
  * @param {object} state RoomEventsContext state (summaries + subscriptions + activeRoomId)
  * @param {boolean} isVisible whether the window is in front of the user — when
  *   false there is no room being read, so the active room is NOT suppressed
@@ -28,14 +47,8 @@ function isAfter(at, lastSeenAt) {
 export function selectUnreadRoomIds(state, isVisible) {
   const ids = []
   for (const room of state.summaries) {
-    const sub = state.subscriptions[room.id]
-    if (sub?.muted) continue
-    // Suppression covers the MAIN FEED only: sitting in a room does not read
-    // its threads, and the server counts an unread thread either way.
     const reading = isVisible && room.id === state.activeRoomId
-    const unreadByMessage = !reading && isAfter(room.lastMsgAt, sub?.lastSeenAt)
-    const unreadByThread = (sub?.threadUnread?.length ?? 0) > 0
-    if (unreadByMessage || unreadByThread) ids.push(room.id)
+    if (isRoomUnread(room, state.subscriptions[room.id], reading)) ids.push(room.id)
   }
   return ids
 }

@@ -28,6 +28,7 @@ import {
   subToRoom,
 } from '@/api'
 import { deriveSidebarSections } from '@/lib/chatlist'
+import { isRoomUnread } from './selectUnread'
 import { loadSubscriptionCache, saveSubscriptionCache } from '@/lib/subscriptionCache'
 import type {
   ChatlistState,
@@ -114,6 +115,11 @@ interface RoomSummary {
    *  room has no preview — the row still renders at full height with a blank
    *  snippet line. */
   preview?: RoomPreview
+  /** Read-position unread (the same rule as the header badge, via
+   *  isRoomUnread) — stamped by useSidebarSections so the row bolds for a
+   *  member whose read position is behind even when no live message counter
+   *  has accrued (e.g. she was just added to the room). */
+  hasUnread?: boolean
 }
 
 /** Top-level state shape returned by `roomEventsReducer`. */
@@ -214,8 +220,15 @@ function hydrateFromCache(user: Nats['user']): RoomEventsState {
     subscriptions: cached.subscriptions,
     rooms,
   })
-  if (!cached.chatlist) return seeded as RoomEventsState
-  return roomEventsReducer(seeded, {
+  // Overlay the previews the last session ended on — the cached subscriptions
+  // only carry the previewMessage its bootstrap saw, so a message that arrived
+  // afterwards lives here.
+  const withPreviews = roomEventsReducer(seeded, {
+    type: 'PREVIEWS_HYDRATED',
+    previews: cached.previews,
+  })
+  if (!cached.chatlist) return withPreviews as RoomEventsState
+  return roomEventsReducer(withPreviews, {
     type: 'CHATLIST_LOADED',
     chatlist: cached.chatlist,
   }) as RoomEventsState
@@ -271,22 +284,23 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
     seedKeys,
   )
 
-  // Write-through to the browser cache. Keyed by reference on the five
-  // persisted slices: message traffic churns roomState / summaries /
-  // msgRecvSeq but never these, so this stays quiet during a busy session.
+  // Write-through to the browser cache, keyed by reference on the persisted
+  // slices. `previews` is the one that message traffic churns, and the trailing
+  // debounce is what keeps a busy room from writing per message: the timer
+  // restarts on each change, so a burst costs one write once it settles.
   //
   // The identity check is the teardown guard. `RESET` returns the
   // `initialState` OBJECT, so `=== initialState.subscriptions` is an exact
   // "we've been reset" test — without it, logout (and StrictMode's
   // double-mount) would persist the empty post-RESET state over a good cache.
-  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist } = state
+  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews } = state
   useEffect(() => {
     if (subscriptions === initialState.subscriptions) return undefined
     const timer = setTimeout(() => {
-      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist })
+      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews })
     }, CACHE_WRITE_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist])
+  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews])
 
   const loadHistory = useCallback(
     async (roomId: string) => {
@@ -561,22 +575,25 @@ export interface SidebarSection {
  */
 export function useSidebarSections(): SidebarSection[] {
   const { state } = useRoomEventsInternal()
-  const { summaries, subscriptions, chatlist, previews } = state
+  const { summaries, subscriptions, chatlist, previews, activeRoomId } = state
   return useMemo(() => {
     const enrich = (room: RoomSummary): RoomSummary => {
       const sub = subscriptions[room.id]
       const preview = previews[room.id]
-      if (!sub && !preview) return room
+      // Stamped even when the room has no subscription record yet: a
+      // never-read room with activity is unread by the shared rule.
+      const hasUnread = isRoomUnread(room, sub, room.id === activeRoomId)
       return {
         ...room,
         subscriptionName: sub?.name ?? room.subscriptionName,
         hrInfo: sub?.hrInfo ?? room.hrInfo,
         preview,
+        hasUnread,
       }
     }
     const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
     return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
-  }, [summaries, subscriptions, chatlist, previews])
+  }, [summaries, subscriptions, chatlist, previews, activeRoomId])
 }
 
 /** Raw overlay section order (the full list the backend stores — built-ins +

@@ -9,8 +9,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// main wires cfg.Pool.Validate / cfg.Guard.Validate; the exhaustive cases live
+// in those packages' tests — these just prove the fields are on config and are
+// validated.
+func TestConfig_DelegatesPoolValidation(t *testing.T) {
+	cfg := config{Pool: mongoutil.PoolConfig{MaxPoolSize: 0}}
+	err := cfg.Pool.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE")
+}
+
+func TestConfig_DelegatesGuardValidation(t *testing.T) {
+	cfg := config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}
+	err := cfg.Guard.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
+}
 
 func TestConfig_RoomSubjectMode(t *testing.T) {
 	cases := []struct {
@@ -80,4 +99,24 @@ func hasComposeEnvironmentEntry(content, entry string) bool {
 		}
 	}
 	return false
+}
+
+// All five key-touching services must resolve MONGO_KEY_READ_PREFERENCE to the
+// same wire name and default. room-worker's field is deliberately top-level (see
+// the comment above it) so the MONGO_ envPrefix cannot double it.
+func TestConfig_KeyReadPreferenceWireName(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "nearest") // a value no default would produce
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "nearest", cfg.MongoKeyReadPreference,
+		"the field must bind to MONGO_KEY_READ_PREFERENCE, not a prefixed variant")
+
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+	cfg, err = env.ParseAs[config]()
+	require.NoError(t, err)
+	require.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
 }

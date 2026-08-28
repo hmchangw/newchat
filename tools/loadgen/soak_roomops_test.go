@@ -14,24 +14,31 @@ import (
 )
 
 type soakRoomOpsTransport struct {
-	mu       sync.Mutex
-	subjects []string
-	bodies   [][]byte
-	reply    []byte
-	err      error
+	mu        sync.Mutex
+	subjects  []string
+	bodies    [][]byte
+	reply     []byte
+	err       error
+	requestFn func(context.Context) ([]byte, error)
 }
 
 func (t *soakRoomOpsTransport) Request(
-	_ context.Context,
+	ctx context.Context,
 	requestSubject string,
 	data []byte,
 	_ time.Duration,
 ) ([]byte, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.subjects = append(t.subjects, requestSubject)
 	t.bodies = append(t.bodies, append([]byte(nil), data...))
-	return t.reply, t.err
+	requestFn := t.requestFn
+	reply := t.reply
+	err := t.err
+	t.mu.Unlock()
+	if requestFn != nil {
+		return requestFn(ctx)
+	}
+	return reply, err
 }
 
 func (t *soakRoomOpsTransport) calls() int {

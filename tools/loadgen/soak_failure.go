@@ -147,7 +147,7 @@ func reportSoakFailureSweepError(onError func(error), err error) {
 		onError(err)
 		return
 	}
-	slog.Error("Cassandra soak failure sweep", "error", err)
+	slog.Error("Cassandra soak failure sweep", soakErrorAttrs(err)...)
 }
 
 // failureWALPath separates the two identities the journal name used to
@@ -567,6 +567,8 @@ func (v *soakFailureRPCVerifier) Verify(
 	rpcResult, err := v.rpc.Call(ctx, soakRPCRequest{
 		Action:    soakRPCGetMessage,
 		Subject:   subject.MsgGet(account, roomID, v.siteID),
+		Account:   account,
+		RoomID:    roomID,
 		Body:      soakGetMessageByIDRequest{MessageID: operation.ID},
 		Timeout:   soakRequestTimeout,
 		RetryMode: soakRetrySafe,
@@ -1113,7 +1115,7 @@ func reconcileReadAction(
 	for range soakReconcileFreeClaimBurst {
 		handled, spentRead, err := reconciler.Try(ctx)
 		if err != nil {
-			slog.Error("reconcile Cassandra soak operation", "error", err)
+			slog.Error("reconcile Cassandra soak operation", soakErrorAttrs(err)...)
 		}
 		if spentRead {
 			return true

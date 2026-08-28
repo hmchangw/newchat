@@ -17,6 +17,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -495,6 +497,10 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 		return nil, fmt.Errorf("get room key: %w", err)
 	}
 	if pair == nil {
+		// No slot and no archive entry: the only signal retention was too short.
+		// op separates this from room-worker's unrelated use of the same counter.
+		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1,
+			metric.WithAttributes(attribute.String("op", "GetByVersion")))
 		return nil, errRoomKeyAbsent
 	}
 	// #nosec G117 -- RoomKeyGetResponse.PrivateKey is the intended payload: on-demand key delivery to the authorized room member over an auth-callout-gated per-user NATS subject, not a leak
@@ -1298,6 +1304,7 @@ func (h *Handler) aggregateRoomInfo(ids []string, rooms []model.Room, keys map[s
 		entry.AppCount = r.AppCount
 		entry.LastMsgID = r.LastMsgID
 		entry.LastMsgAt = timePtrToMillis(r.LastMsgAt)
+		entry.LastUserMsgAt = timePtrToMillis(r.LastUserMsgAt)
 		entry.LastMentionAllAt = timePtrToMillis(r.LastMentionAllAt)
 		entry.MinUserLastSeenAt = timePtrToMillis(r.MinUserLastSeenAt)
 		entry.CrossSite = r.CrossSite

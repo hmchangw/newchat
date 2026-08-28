@@ -237,6 +237,7 @@ func (r *soakUserReader) Me(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserMe,
 		Subject: subject.UserMe(account, r.cfg.SiteID),
+		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
 }
@@ -247,6 +248,7 @@ func (r *soakUserReader) ProfileByName(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserProfileGet,
 		Subject: subject.UserProfileGetByName(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserNameRequest{Name: target},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
@@ -258,6 +260,7 @@ func (r *soakUserReader) StatusByName(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserStatusGet,
 		Subject: subject.UserStatusGetByName(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserNameRequest{Name: target},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
@@ -269,6 +272,7 @@ func (r *soakUserReader) Settings(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSettingsGet,
 		Subject: subject.UserSettingsGet(account, r.cfg.SiteID),
+		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
 }
@@ -279,9 +283,10 @@ func (r *soakUserReader) Chatlist(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserChatlistGet,
 		Subject: subject.UserChatlistGet(account, r.cfg.SiteID),
+		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Sections)
+		sample.countRows(len(response.Sections))
 	})
 }
 
@@ -291,9 +296,10 @@ func (r *soakUserReader) PriorityContacts(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserPriorityContacts,
 		Subject: subject.UserPriorityContactsGet(account, r.cfg.SiteID),
+		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Contacts)
+		sample.countRows(len(response.Contacts))
 	})
 }
 
@@ -303,10 +309,11 @@ func (r *soakUserReader) AppsList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserAppsList,
 		Subject: subject.UserAppsList(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Apps)
+		sample.countRows(len(response.Apps))
 	})
 }
 
@@ -316,9 +323,10 @@ func (r *soakUserReader) AppsCategories(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserAppsCategories,
 		Subject: subject.UserAppsCategories(account, r.cfg.SiteID),
+		Account: account,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Categories)
+		sample.countRows(len(response.Categories))
 	})
 }
 
@@ -328,6 +336,7 @@ func (r *soakUserReader) SubscriptionCount(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionCount,
 		Subject: subject.UserSubscriptionCount(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserCountRequest{},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -346,9 +355,11 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionByRoom,
 		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
+		// A 0-or-1 answer for the room asked about, not a page.
 		sample.Messages = len(response.Subscriptions)
 	})
 }
@@ -370,12 +381,13 @@ func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionChannel,
 		Subject: subject.UserSubscriptionGetChannels(account, r.cfg.SiteID),
+		Account: account,
 		Body: soakUserChannelsRequest{
 			MembersContain: coMember, Limit: r.cfg.PageLimit,
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 }
 
@@ -393,6 +405,7 @@ func (r *soakUserReader) SubscriptionDM(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserSubscriptionDM,
 		Subject: subject.UserSubscriptionGetDM(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserAccountNameRequest{AccountName: target},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
@@ -404,10 +417,11 @@ func (r *soakUserReader) ThreadList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserThreadList,
 		Subject: subject.UserThreadList(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Items)
+		sample.countRows(len(response.Items))
 	})
 }
 
@@ -417,6 +431,7 @@ func (r *soakUserReader) ThreadUnread(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCUserThreadUnread,
 		Subject: subject.UserThreadUnreadSummary(account, r.cfg.SiteID),
+		Account: account,
 		Body:    soakUserEmptyRequest{},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, nil)
@@ -479,6 +494,7 @@ func (r *soakUserReader) pickRoom() (string, bool) {
 	return r.rooms[r.rng.Intn(len(r.rooms))], true
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakUserReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -491,13 +507,14 @@ func (r *soakUserReader) call(
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
 	sample := soakReadSample{
-		Action: request.Action, Latency: r.now().Sub(startedAt), Retries: result.Retries,
+		Action: request.Action, Latency: r.now().Sub(startedAt),
+		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		r.record(&sample)
-		return fmt.Errorf("issue %s request: %w", request.Action, err)
+		return fmt.Errorf("user read lane: %w", err)
 	}
 	if apply != nil {
 		apply(&sample)

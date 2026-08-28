@@ -24,14 +24,16 @@ func lazyDB(t *testing.T) *mongo.Database {
 func TestSubscriptionRepo_ReadPreferenceRouting(t *testing.T) {
 	db := lazyDB(t)
 
+	// The sort-key cache is disabled here (0, 0): this test covers read-preference
+	// routing only, and a disabled cache keeps the repo allocation-free.
 	t.Run("no option aliases the primary handles", func(t *testing.T) {
-		r := NewSubscriptionRepo(db, "site-a")
+		r := NewSubscriptionRepo(db, 0, 0)
 		assert.Same(t, r.enriched, r.enrichedSecondary)
 		assert.Same(t, r.subscriptions, r.subscriptionsSecondary)
 	})
 
 	t.Run("secondary preference clones read handles but not the primary ones", func(t *testing.T) {
-		r := NewSubscriptionRepo(db, "site-a", WithReadPreference(readpref.SecondaryPreferred()))
+		r := NewSubscriptionRepo(db, 0, 0, WithReadPreference(readpref.SecondaryPreferred()))
 		assert.NotSame(t, r.enriched.Raw(), r.enrichedSecondary.Raw())
 		assert.NotSame(t, r.subscriptions.Raw(), r.subscriptionsSecondary.Raw())
 		// GetAppSubscription (dedup guard) must keep using the primary handle.

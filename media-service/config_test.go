@@ -7,6 +7,11 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
 func TestClusterBaseURL(t *testing.T) {
@@ -80,14 +85,46 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.MaxConcurrency)
+		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.MaxConcurrency)
+		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
+	})
+}
+
+func TestConfig_DefaultAvatarEnabled(t *testing.T) {
+	t.Setenv("SITE_ID", "s1")
+	t.Setenv("CLUSTER_DOMAINS", `[{"siteID":"s1","domain":"http://localhost:8080"}]`)
+	t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+	t.Setenv("MINIO_ACCESS_KEY", "k")
+	t.Setenv("MINIO_SECRET_KEY", "s")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
+
+	t.Run("default true", func(t *testing.T) {
+		orig, had := os.LookupEnv("DEFAULT_AVATAR_ENABLED")
+		require.NoError(t, os.Unsetenv("DEFAULT_AVATAR_ENABLED"))
+		t.Cleanup(func() {
+			if had {
+				_ = os.Setenv("DEFAULT_AVATAR_ENABLED", orig)
+			}
+		})
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.True(t, cfg.DefaultAvatarEnabled)
+	})
+
+	t.Run("override false", func(t *testing.T) {
+		t.Setenv("DEFAULT_AVATAR_ENABLED", "false")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.False(t, cfg.DefaultAvatarEnabled)
 	})
 }
 
@@ -141,4 +178,32 @@ func TestConfig_NATSURLRequired(t *testing.T) {
 	_, err := env.ParseAs[config]()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "NATS_URL")
+}
+
+func TestConfig_GuardsDelegateValidation(t *testing.T) {
+	assert.Error(t, config{}.Pool.Validate(), "zero MaxPoolSize must fail")
+	assert.Error(t, config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}.Guard.Validate(),
+		"negative MaxConcurrency must fail")
+}
+
+func TestConfig_ReadPreferenceDefault(t *testing.T) {
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("CLUSTER_DOMAINS", `[{"siteID":"site-a","domain":"https://a"}]`)
+	t.Setenv("EMPLOYEE_PHOTO_BASE_URL", "https://photos.example.com")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MINIO_ENDPOINT", "localhost:9000")
+	t.Setenv("MINIO_ACCESS_KEY", "k")
+	t.Setenv("MINIO_SECRET_KEY", "s")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("BOTPLATFORM_URL", "https://botplatform.example.com")
+	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE")) // the default only applies when unset
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.ReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

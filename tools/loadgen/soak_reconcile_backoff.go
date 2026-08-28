@@ -2,15 +2,15 @@ package main
 
 import "time"
 
-// nextReconcileProbe schedules the next history probe for an operation whose
-// message has not landed yet.
+// nextReconcileProbe schedules the next query probe for an operation whose
+// effect is not visible yet or whose authoritative store is unavailable.
 //
 // The wait is the time already spent waiting, which doubles the interval on
 // every probe and needs no attempt counter: verifyAfter and the deadline are
 // both persisted with the operation, so a run that recovers from its journal
 // resumes the same schedule rather than restarting the walk. A flat interval
 // costs deadline/interval claims for one operation — ~590 at the defaults —
-// which is enough for a small fraction of late messages to demand more
+// which is enough for late messages or a storage outage to demand more
 // reconcile capacity than the read lane has.
 //
 // The last probe is pulled back inside the deadline: expiring an operation

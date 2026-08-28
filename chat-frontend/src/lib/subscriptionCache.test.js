@@ -25,6 +25,16 @@ function sub(roomId, overrides = {}) {
   }
 }
 
+function preview(over = {}) {
+  return {
+    messageId: 'm1',
+    senderName: 'Alice Chen',
+    text: 'the latest message',
+    createdAt: '2026-08-14T10:00:00Z',
+    ...over,
+  }
+}
+
 function payload(overrides = {}) {
   return {
     subscriptions: { r1: sub('r1') },
@@ -32,6 +42,7 @@ function payload(overrides = {}) {
     appIds: [],
     channelDmIds: ['r1'],
     chatlist: { sectionOrder: ['favorites'], sections: {}, sortMode: 'recent' },
+    previews: { r1: preview() },
     ...overrides,
   }
 }
@@ -124,6 +135,39 @@ describe('subscriptionCache', () => {
     expect(loadSubscriptionCache(USER).favoriteIds).toEqual([])
   })
 
+  it('drops an encrypted placeholder rather than pinning it past a reload', () => {
+    // The placeholder means "this client could not decrypt it THEN". After a
+    // reload the room key is seeded from subscription.list and the message may
+    // well render, so the stored snippet must not outlive the session.
+    saveSubscriptionCache(USER, payload({
+      previews: { r1: preview({ text: '[encrypted message]', encrypted: true }), r2: preview() },
+    }))
+    expect(loadSubscriptionCache(USER).previews).toEqual({ r2: preview() })
+  })
+
+  it('drops preview entries that are malformed', () => {
+    saveSubscriptionCache(USER, payload({
+      previews: { r1: preview(), r2: null, r3: { senderName: 'No Id' }, r4: 'nope' },
+    }))
+    expect(loadSubscriptionCache(USER).previews).toEqual({ r1: preview() })
+  })
+
+  it('falls back to empty previews for a record that has none', () => {
+    saveSubscriptionCache(USER, payload())
+    const record = JSON.parse(window.localStorage.getItem(CACHE_KEY))
+    delete record.previews
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(record))
+    expect(loadSubscriptionCache(USER).previews).toEqual({})
+  })
+
+  it('falls back to empty previews when the stored value is not an object', () => {
+    saveSubscriptionCache(USER, payload())
+    const record = JSON.parse(window.localStorage.getItem(CACHE_KEY))
+    record.previews = 'tampered'
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(record))
+    expect(loadSubscriptionCache(USER).previews).toEqual({})
+  })
+
   it('clearSubscriptionCache removes the record', () => {
     saveSubscriptionCache(USER, payload())
     clearSubscriptionCache()
@@ -152,6 +196,29 @@ describe('subscriptionCache', () => {
     // The five oldest rooms are the ones dropped.
     expect(loaded.subscriptions.r0).toBeUndefined()
     expect(loaded.subscriptions[`r${QUOTA_RETRY_LIMIT + 4}`]).toBeDefined()
+  })
+
+  it('trims previews to the rooms the quota retry kept', () => {
+    const subscriptions = {}
+    const previews = {}
+    for (let i = 0; i < QUOTA_RETRY_LIMIT + 5; i++) {
+      subscriptions[`r${i}`] = sub(`r${i}`, {
+        room: { lastMsgAt: new Date(1_700_000_000_000 + i * 1000).toISOString() },
+      })
+      previews[`r${i}`] = preview({ messageId: `m${i}` })
+    }
+    const quotaErr = new Error('quota')
+    quotaErr.name = 'QuotaExceededError'
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => {
+      throw quotaErr
+    })
+    saveSubscriptionCache(USER, payload({ subscriptions, previews }))
+    setItem.mockRestore()
+
+    const loaded = loadSubscriptionCache(USER)
+    expect(Object.keys(loaded.previews)).toHaveLength(QUOTA_RETRY_LIMIT)
+    expect(loaded.previews.r0).toBeUndefined()
+    expect(loaded.previews[`r${QUOTA_RETRY_LIMIT + 4}`]).toBeDefined()
   })
 
   it('clears the record when even the trimmed retry exceeds quota', () => {

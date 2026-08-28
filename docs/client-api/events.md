@@ -111,7 +111,7 @@ Two shapes exist — discriminated by `action`:
 | `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"section_moved"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. |
 | `hrInfo` | [CounterpartHRInfo](../client-api.md#counterparthrinfo) | `{account, chineseName, engName}` — the DM counterpart's HR record, so a newly created DM renders from this event alone. Sent on `added` `dm` / `botDM` when the counterpart account does **not** end in `.bot`; on a self-DM it carries the recipient's own record. Both name fields are `omitempty`. Omitted on `channel` / `discussion` rooms and on a lookup miss. |
-| `appInfo` | [CounterpartAppInfo](../client-api.md#counterpartappinfo) | `{id, name, assistantName}` — the counterpart's app record, sent on `added` `botDM` when the counterpart account ends in `.bot`. `name` is empty when the app document has none, and `roomName` then falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
+| `appInfo` | [AppSubscription](../client-api.md#appsubscription) | The counterpart's **full app record** — the same shape `subscription.list` nests as a botDM row's `app` object (`appId`, `name`, `description`, `assistant`, `appViewUrl`, `reportUrl`, `forumUrl`, `userManualUrl`, `version`, `sponsors`; all `omitempty`). Sent on `added` `botDM` when the counterpart account ends in `.bot`. When the app has no name, `roomName` falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -204,7 +204,8 @@ fields are sent.
 
 **Triggered by:** Add Members (`added`), Remove Member (`removed`), Update Member Role
 (`role_updated`), Toggle Mute (`mute_toggled`), Toggle Favorite (`favorite_toggled`),
-Open Room (`opened`), Mark Messages Read (`read`) — see [request-reply.md](request-reply.md).
+Open Room (`opened`), Mark Messages Read (`read`), Set App Subscription (`removed` on
+unsubscribe, `added` on reactivate) — see [request-reply.md](request-reply.md).
 
 ---
 
@@ -385,11 +386,12 @@ messages through a separate backend path.
 | `roomType` | string | `"channel"`, `"dm"`, etc. |
 | `siteId` | string | |
 | `userCount` | number | |
-| `lastMsgAt` | string | RFC 3339. |
+| `lastMsgAt` | string | RFC 3339. **This message's own time** — not the room object's `lastMsgAt`, which is the room's user-activity position. A system message carries its own timestamp here, so folding this into a room summary unconditionally would let a rename or a member change reorder the sidebar. Gate on `systemMsg` first. |
 | `lastMsgId` | string | The new message's ID. |
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
 | `hasMention` | boolean | Optional. Per-recipient flag — present only on DM events. |
+| `systemMsg` | boolean | Optional. `true` when the message is a server-generated system message (`room_created`, `members_added`, …). Clients must not advance unread state or sidebar ordering from a flagged event — present in plaintext even when the body is sealed in `encryptedMessage`. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
 | `encryptedMessage` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. Set for encrypted channel rooms. Decrypt with room key for `version`. |
 
@@ -422,6 +424,7 @@ Cassandra projection).
 | `quotedParentMessage` | [QuotedParentMessage](../client-api.md#quotedparentmessage) | Optional. |
 | `pinnedAt` | string | Optional. RFC 3339. |
 | `pinnedBy` | [Participant](../client-api.md#participant) | Optional. |
+| `truncated` | boolean | Optional. `true` when the server blanked this row to make the page fit — either the row alone exceeded the transport's `max_payload`, or it shares a `createdAt` millisecond with such a row. `msg`, `mentions`, `attachments`, `card`, `cardAction`, `quotedParentMessage`, `reactions`, `sysMsgData`, `encPayload` and `encMeta` are cleared; identifiers, `sender`, `createdAt` and `type` are retained for placeholder rendering. Absent on every ordinary row. |
 
 Channel example (encrypted):
 
@@ -610,12 +613,14 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `messageId` | string | The edited message's ID. |
 | `newContent` | string | Optional. New plaintext content. Present for DMs and unencrypted channels. |
 | `encryptedNewContent` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. For encrypted channel rooms. Decrypt with the room key to obtain the new content string. |
+| `mentions` | [Participant](../client-api.md#participant)[] | Optional. `@`-mentions resolved from the edited content, so an edit that adds a mention renders like a fresh message. Omitted when none. |
+| `mentionAll` | boolean | Optional. `true` when the edited content mentions `@all`, mirroring the new-message / new-thread events so an edit that adds or removes `@all` conveys it. Omitted when `false`. |
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message, or on a read error. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -666,7 +671,7 @@ Thread-reply deletes **additionally** emit a
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or on a read error. |
+| `previewMessage` | [PreviewMessage](../client-api.md#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -687,7 +692,7 @@ Thread-reply deletes **additionally** emit a
 }
 ```
 
-When the deleted message was the room's last eligible message, `previewMessage` is **omitted**.
+When the deleted message was the room's last eligible message, `previewMessage` is **omitted**. An omission is not "leave the preview as it is" — if the deleted `messageId` matches the preview being displayed, the client must clear it. See [Reacting to a preview change](../client-api.md#reacting-to-a-preview-change).
 
 ---
 
@@ -977,6 +982,10 @@ genuinely new org is added, or an existing org member is upgraded to an individu
 The event carries no separate account list — member identities are in `members`. When new members
 actually join (or a new org is added), a `members_added` system message also flows through the
 message pipeline as a `new_message` room event; a pure org→individual upgrade posts no such message.
+
+The cross-site INBOX copy additionally carries `accounts` and `lastMsgAt` (the room's activity
+position, epoch ms). Both are server-internal federation fields, stripped from the client-facing
+copy documented above — clients never receive them.
 
 > **No-op:** when the request changes nothing — every requested account already subscribed, no org
 > member upgraded to an individual membership, and every requested org already present — no

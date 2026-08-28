@@ -115,6 +115,8 @@ the recipient callback queue and invalidate positive absence claims.
 | `SOAK_USER_READ_RATE` | `10` | user-service reads per second, split evenly across its reads |
 | `SOAK_SUBSCRIPTION_LIST_LIMIT` | unset | Page size for the subscription-list read. Unset leaves user-service's own default (40) in force |
 | `SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE` | unset | Last-message enrichment, which fans every listed room out to history-service. Unset sends nothing and the service enriches; `false` isolates that fan-out's cost |
+| `SOAK_ROOM_ZIPF_S` | `1.2` | Room-popularity exponent for the send lane: P(rank) ∝ (V+rank)^-S. Must exceed 1 — `math/rand` cannot express a flatter exponent, and the run refuses to start below it |
+| `SOAK_ROOM_ZIPF_V` | `1.0` | Offset that flattens the head. At the defaults the hottest room takes ~21% of all sends; `5` puts it near 5%, closer to a real workspace |
 | `SOAK_SEARCH_READ_RATE` | `5` | search-service reads per second |
 | `SOAK_SEARCH_OBSERVER_ENABLED` | `false` | Opt in to search-index observation |
 | `SOAK_SEARCH_SETTLE` | `30s` | Grace before the index probe asks about a message |
@@ -354,6 +356,13 @@ inconclusive rather than left to a log line: the ledger is invalidated with
 `loadgen_failure_invalidations_total`, is journaled so a restart recovers it,
 and appears on the **Reconcile lane capacity** dashboard panel.
 
+The same panel surfaces `lease_abort`. That runtime reason means heartbeat
+renewal reached the teardown lease boundary and at least one in-flight lane did
+not drain within half a heartbeat interval. Loadgen abandons those observations
+to preserve the lease fence, so the affected campaign interval is
+**INCONCLUSIVE** even when the remaining operations later recover as
+`unverified` from the WAL.
+
 An outage proves nothing about the message, so an unreachable search-service is
 never a loss claim.
 
@@ -412,6 +421,8 @@ and every mutation eventually expires unverified.
 | `loadgen_soak_presence_signals_total{signal}` | Presence signals published, by kind |
 | `loadgen_soak_presence_checks_total{result}` | Batch-query comparison outcomes |
 | `loadgen_soak_presence_connections` | Connections the lane currently claims online |
+| `loadgen_soak_reply_bytes{action}` | Wire size of a successful paged read, bucketed to the 128 KiB `max_payload`. A distribution climbing into the top bucket is the warning that the next reply comes back as `response_too_large` instead of data |
+| `loadgen_soak_rows{action}` | Rows returned per paged read. Separates "the page is slow" from "the page is large". Emitted only where the count is real — a mutation has no rows, and a read whose count is a constant, a server-side total, or a 0-or-1 point lookup is not reporting rows either |
 | `loadgen_failure_abandoned_journals` | Retained journals from earlier epochs |
 
 The existing `loadgen_failure_operations_total`,
@@ -419,3 +430,11 @@ The existing `loadgen_failure_operations_total`,
 `loadgen_soak_*` pacing families cover the new lanes through their existing
 `lane` and `observer` labels. Room IDs, accounts, and operation IDs remain WAL
 and log content only.
+
+A metric names the action that failed and nothing else, so every lane failure
+is logged with the account, room, subject, error class and reason that identify
+the request — `account` is what joins a loadgen error to the `subject` on the
+server's own log line for the same call. A run torn down mid-flight reports
+`error_class=canceled` rather than an empty class: the run going away is not the
+site failing, and an empty class would have been counted as a completed
+operation.

@@ -1341,7 +1341,12 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	}
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
+	// GetRoomMeta is served from roommetacache.Meta, which has no LastMsgAt
+	// field — the real store can never return one here. Mirroring that exactly
+	// is the point: the activity position must come from the full-room read, so
+	// a regression that reads it off the meta view fails this test.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
+	roomLastMsgAt := time.UnixMilli(1735689500000).UTC()
 	// bob is the direct add; carol joins via org expansion only (not in req.Users).
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, []string{"bob"}, "r1").
 		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-b"}}, nil)
@@ -1360,7 +1365,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 		})
 	// Room already tracks individuals → no first-org backfill.
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
-	expectGetRoom(store, "r1", "eng")
+	expectGetRoom(store, "r1", "eng", roomLastMsgAt)
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, members []*model.RoomMember) error {
 			return nil
@@ -1431,6 +1436,13 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	var relayEvt model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(relayEnv.Payload, &relayEvt))
 	assert.Equal(t, []string{"carol"}, relayEvt.Accounts, "the cross-site lane keeps the destination-site accounts")
+
+	// The destination site holds no rooms doc for r1, so the cross-site copy
+	// carries the room's activity position to seed its chat-list ordering.
+	require.NotNil(t, relayEvt.LastMsgAt, "cross-site member_added carries the room's activity position")
+	assert.Equal(t, roomLastMsgAt.UnixMilli(), *relayEvt.LastMsgAt)
+	assert.Nil(t, evt.LastMsgAt, "stripped from the room-scoped (frontend) copy, like accounts")
+	assert.Nil(t, internalEvt.LastMsgAt, "the same-site INBOX lane has a local rooms doc and needs no seed")
 }
 
 func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) {
@@ -3380,7 +3392,7 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 	// finishCreateRoom calls resolveSubUpdateCounterpart per sub; the human sub has
 	// Name="helper.bot" (RoomTypeBotDM), so GetApp is invoked once.
 	// Assistant left nil to match the real store's {"name":1} projection.
-	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil)
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}, nil)
 
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-1").Return(nil)
 
@@ -3417,8 +3429,9 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
-	// ...and the app it is now talking to, so the client renders the row without a refetch.
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-helper", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	// ...and the full app it is now talking to (same shape subscription.list nests),
+	// so the client renders the row without a refetch.
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo)
 
 	// bot (helper.bot) subscription.update must carry the human's display name,
@@ -3646,9 +3659,14 @@ func TestProcessCreateRoom_Channel_NoRoomKeyEvent(t *testing.T) {
 
 // expectGetRoom stubs the fan-out room re-read tolerantly (0+ calls) so tests
 // not asserting on the event room view stay independent of the read.
-func expectGetRoom(s *MockSubscriptionStore, roomID, name string) {
-	s.EXPECT().GetRoom(gomock.Any(), roomID).
-		Return(&model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil).AnyTimes()
+// expectGetRoom stubs the full-room re-read. An optional lastMsgAt sets the
+// room's activity position, which the cross-site MemberAddEvent carries.
+func expectGetRoom(s *MockSubscriptionStore, roomID, name string, lastMsgAt ...time.Time) {
+	room := &model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	if len(lastMsgAt) > 0 {
+		room.LastMsgAt = &lastMsgAt[0]
+	}
+	s.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil).AnyTimes()
 }
 
 // assertNoRoomKeyPublished pins the no-separate-room.key invariant on the accounts' key subjects.
@@ -6303,53 +6321,160 @@ func TestHandler_ProcessAddMembers_HasAnyRoomMembersError_FailsClosed(t *testing
 // TestRequireDedupRequestID retired — the strict X-Request-ID gate now lives in
 // pkg/natsrouter.RequireRequestID (see TestRequireRequestID_* there).
 
-// TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion pins the
-// contract that when Rotate returns ErrNoCurrentKey (Valkey lost the key between
-// Get and Rotate), the fallback calls SetWithVersion at predictedVersion
-// (currentPair.Version+1) rather than Set (which would stamp v0), preventing the
-// version mismatch that would render the next encrypted message undecryptable.
-func TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockKeys := NewMockRoomKeyStore(ctrl)
+// keyEventRecorder captures published RoomKeyEvents; fanOutKey is concurrent, hence the mutex.
+type keyEventRecorder struct {
+	mu     sync.Mutex
+	events []model.RoomKeyEvent
+}
 
-	// currentPair simulates the key the handler fetched before calling rotateAndFanOut.
-	currentPair := &roomkeystore.VersionedKeyPair{
-		Version: 4,
-		KeyPair: roomkeystore.RoomKeyPair{
-			PrivateKey: bytes.Repeat([]byte{0xAA}, 32),
-		},
+func (r *keyEventRecorder) Publish(_ string, data []byte) error {
+	var evt model.RoomKeyEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return err
 	}
-	// predictedVersion = currentPair.Version + 1 = 5
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, evt)
+	return nil
+}
 
-	// Step 1: Rotate fails with ErrNoCurrentKey — Valkey lost the current key
-	// between Get (which returned currentPair) and Rotate.
-	gomock.InOrder(
-		mockKeys.EXPECT().
-			Rotate(gomock.Any(), "test-room", gomock.Any()).
-			Return(0, roomkeystore.ErrNoCurrentKey),
-		// Step 2: fallback must write at predictedVersion=5, NOT at v0 via Set.
-		// If the bug were present (Set called instead), gomock would raise
-		// "unexpected call to Set" because Set is not expected here.
-		mockKeys.EXPECT().
-			SetWithVersion(gomock.Any(), "test-room", gomock.Any(), 5).
-			Return(nil),
-	)
+func (r *keyEventRecorder) captured() []model.RoomKeyEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]model.RoomKeyEvent(nil), r.events...)
+}
 
+// newRotateTestHandler wires a Handler to mockKeys and a recording key sender.
+func newRotateTestHandler(t *testing.T, ctrl *gomock.Controller, mockKeys *MockRoomKeyStore) (*Handler, *keyEventRecorder) {
+	t.Helper()
+	rec := &keyEventRecorder{}
 	h := &Handler{
 		store:     NewMockSubscriptionStore(ctrl),
 		siteID:    "site-a",
 		keyStore:  mockKeys,
-		keySender: testKeySender,
+		keySender: roomkeysender.NewSender(rec),
 		publish: func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
 		},
 	}
+	return h, rec
+}
 
-	// Call rotateAndFanOut directly — it is unexported but lives in package main,
-	// so the test (same package) can call it without test infrastructure.
-	// Pass an empty survivors slice: no fan-out side effects needed for this test.
-	err := h.rotateAndFanOut(context.Background(), "test-room", currentPair, nil)
-	require.NoError(t, err)
+func TestHandler_RotateAndFanOut_FansOutStoreAssignedVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// The store assigns 7, not the predicted 6: fanning out 6 would label these
+	// bytes with a version the store gave to a different key.
+	var committed []byte
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
+			committed = pair.PrivateKey
+			return 7, nil
+		})
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 7, events[0].Version,
+		"fan-out must carry the version the store assigned, never current+1")
+	require.NotEmpty(t, committed)
+	assert.Equal(t, committed, events[0].PrivateKey,
+		"survivors must receive exactly the bytes the store committed")
+}
+
+func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetIfAbsentVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// Key vanished between Get and Rotate: the v0 fallback lost the set-if-absent
+	// race here, so the winner's bytes — not the local pair — must reach survivors.
+	winner := bytes.Repeat([]byte{0xBB}, 32)
+	var offeredPriv []byte
+	gomock.InOrder(
+		mockKeys.EXPECT().
+			Rotate(gomock.Any(), "test-room", gomock.Any()).
+			Return(0, roomkeystore.ErrNoCurrentKey),
+		mockKeys.EXPECT().
+			SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+				offeredPriv = pair.PrivateKey
+				return &roomkeystore.VersionedKeyPair{
+					Version: 0,
+					KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
+				}, nil
+			}),
+	)
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 4,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 0, events[0].Version, "the set-if-absent fallback adopts version 0")
+	assert.Equal(t, winner, events[0].PrivateKey,
+		"the fallback must fan out the store's post-image bytes, not the locally generated pair")
+	require.NotEmpty(t, offeredPriv)
+	assert.NotEqual(t, offeredPriv, events[0].PrivateKey,
+		"the locally generated pair lost the race and must never reach survivors")
+}
+
+// Without an authoritative post-image the committed bytes are unknown, and handing
+// survivors an unconfirmed key is the failure this ordering exists to prevent.
+func TestHandler_RotateAndFanOut_SetIfAbsentFailure_FansOutNothing(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{name: "store errors", err: errors.New("mongo down"), wantMsg: "store room key"},
+		{name: "room gone", err: roomkeystore.ErrRoomNotFound, wantMsg: "store room key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockKeys := NewMockRoomKeyStore(ctrl)
+			mockKeys.EXPECT().SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).Return(nil, tc.err)
+
+			h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+
+			err := h.rotateAndFanOut(context.Background(), "test-room", nil, []string{"alice"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+			assert.Empty(t, rec.captured(), "an unconfirmed key must never reach survivors")
+		})
+	}
+}
+
+func TestHandler_RotateAndFanOut_StoreFailureFansOutNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		Return(0, errors.New("mongo down"))
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.Error(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+	assert.Empty(t, rec.captured(), "a failed rotation must not hand survivors a phantom key")
 }
 
 // Dept-first tiebreak: on overlap (org membership reachable via both sect and
@@ -7099,7 +7224,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 		setupMock func(s *MockSubscriptionStore)
 		want      string
 		wantHR    *model.CounterpartHRInfo
-		wantApp   *model.CounterpartAppInfo
+		wantApp   *model.AppSubscription
 	}{
 		{
 			name: "channel uses sub.Name and carries no counterpart",
@@ -7138,14 +7263,13 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 			wantHR:  &model.CounterpartHRInfo{Account: "dave"},
 		},
 		{
-			// Assistant nil as in production; assistantName comes from the queried account.
 			name: "botDM resolves app name and appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}),
 		},
 		{
 			// The bot IS in userByAccount in production (FindUsersByAccounts returns it),
@@ -7169,7 +7293,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-9", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-9", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-9", Name: "Helper Bot"}),
 		},
 		{
 			name: "botDM GetApp infra error falls back to bot account and omits appInfo",
@@ -7186,7 +7310,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{ID: "app-3", Name: ""}, nil)
 			},
 			want:    "nameless.bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-3", Name: "", AssistantName: "nameless.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-3", Name: ""}),
 		},
 		{
 			name:    "botDM bot-side sub resolves human from map",
@@ -7329,7 +7453,7 @@ func TestServerCreateDM_DM_SetsCounterpartHRInfo(t *testing.T) {
 	assert.Nil(t, bobEvt.AppInfo)
 }
 
-func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
+func TestServerCreateDM_BotDM_SetsAppInfo(t *testing.T) {
 	h, store, capture := newSyncDMTestHandler(t)
 
 	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
@@ -7341,7 +7465,6 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"}, RoomType: model.RoomTypeBotDM, Name: "alice"},
 		nil)
-	// Assistant left nil to match the real store's {"name":1} projection.
 	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
@@ -7350,7 +7473,7 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 	// Human side sees the app; bot side sees the human.
 	humanEvt := decodeSubUpdate(t, capture.captured, "alice")
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo, "bot counterpart carries no hrInfo")
 
 	botEvt := decodeSubUpdate(t, capture.captured, "helper.bot")
@@ -7360,11 +7483,13 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 func TestSubscriptionRoomFor(t *testing.T) {
 	lastMsg := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC)
 	mention := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	floor := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
 	room := &model.Room{
 		ID: "r1", Name: "eng", Type: model.RoomTypeChannel, SiteID: "site-a",
 		UserCount: 3, AppCount: 1, LastMsgAt: &lastMsg, LastMsgID: "m123",
+		LastUserMsgAt:    &lastUserMsg,
 		LastMentionAllAt: &mention, MinUserLastSeenAt: &floor, CrossSite: ptrBool(false),
 	}
 
@@ -7380,7 +7505,8 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.False(t, *got.CrossSite)
 		assert.Equal(t, 3, got.UserCount)
 		assert.Equal(t, 1, got.AppCount)
-		assert.Equal(t, &lastMsg, got.LastMsgAt)
+		assert.Equal(t, &lastUserMsg, got.LastMsgAt,
+			"the wire carries ONE activity timestamp: the coalesced user-activity value, not the raw ceiling")
 		assert.Equal(t, "m123", got.LastMsgID)
 		assert.Equal(t, &mention, got.LastMentionAllAt)
 		assert.Equal(t, &floor, got.MinUserLastSeenAt)
@@ -7398,13 +7524,77 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, "eng", got.Name)
 	})
 
-	t.Run("nil time fields and nil CrossSite pass through", func(t *testing.T) {
-		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2}
+	t.Run("fresh room pins lastMsgAt to createdAt", func(t *testing.T) {
+		// The added event outruns broadcast-worker's freeze: for a brand-new room
+		// neither lastMsgAt nor lastUserMsgAt exists yet, so the event must carry
+		// the same reference the freeze will persist (createdAt) — without it the
+		// added member's client has nothing to flag the room unread against.
+		created := time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
+		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2, CreatedAt: created}
 		got := subscriptionRoomFor(bare, nil)
 		assert.Nil(t, got.CrossSite)
-		assert.Nil(t, got.LastMsgAt)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
 		assert.Nil(t, got.LastMentionAllAt)
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
+	})
+
+	t.Run("pre-freeze room falls back to the room's lastMsgAt", func(t *testing.T) {
+		created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		pre := &model.Room{
+			ID: "r3", Name: "legacy", SiteID: "site-a", UserCount: 2,
+			LastMsgAt: &lastMsg, LastMsgID: "m9", CreatedAt: created,
+		}
+		got := subscriptionRoomFor(pre, nil)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
+	})
+}
+
+// TestActorSubscriptionIsPreRead: whoever performs the creation has, by
+// definition, already seen the room, so their own subscription carries
+// lastSeenAt from the start. Without it their client flags the brand-new room
+// unread the moment they switch away — the room always ships a non-nil
+// user-activity reference (createdAt), and an absent read position reads as
+// "never opened". Members they invited get no lastSeenAt: the room IS new to
+// them, which is what makes an added member's room unread.
+func TestActorSubscriptionIsPreRead(t *testing.T) {
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	requester := &model.User{ID: "u-alice", Account: "alice"}
+	other := &model.User{ID: "u-bob", Account: "bob"}
+	bot := &model.User{ID: "u-helper", Account: "helper.bot"}
+	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
+
+	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
+		subs := buildDMSubs(requester, other, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Nil(t, subs[1].LastSeenAt, "the counterpart has not seen it")
+	})
+
+	t.Run("botDM: initiator pre-read", func(t *testing.T) {
+		subs := buildBotDMSubs(requester, bot, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt)
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+	})
+
+	t.Run("self-DM: sole member is pre-read", func(t *testing.T) {
+		sub := buildSelfDMSub(requester, room, at)
+		require.NotNil(t, sub.LastSeenAt)
+		assert.True(t, sub.LastSeenAt.Equal(at))
+	})
+
+	t.Run("channel: creator pre-read, invited members unread", func(t *testing.T) {
+		channel := &model.Room{ID: "r2", SiteID: "site-a", Type: model.RoomTypeChannel, Name: "eng", CreatedAt: at}
+		subs := buildChannelSubs(requester, []model.User{*other}, channel, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "creator")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Equal(t, []model.Role{model.RoleOwner}, subs[0].Roles)
+		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
+		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
 	})
 }

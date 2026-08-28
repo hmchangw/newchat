@@ -121,6 +121,11 @@ const (
 	soakErrorAmbiguous             soakErrorClass = "ambiguous"
 	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
 	soakErrorResponseTooLarge      soakErrorClass = "response_too_large"
+	// soakErrorCanceled is the run itself going away, not the site failing.
+	// Folding it into internal would spike a server-fault class at every
+	// shutdown; leaving it empty made the recorder count the operation as a
+	// success, because the outcome is derived from the class alone.
+	soakErrorCanceled soakErrorClass = "canceled"
 )
 
 func validSoakErrorClass(class soakErrorClass) bool {
@@ -130,7 +135,8 @@ func validSoakErrorClass(class soakErrorClass) bool {
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
 		soakErrorRequestEncode, soakErrorResponseDecode,
 		soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
+		soakErrorMutationTargetMissing, soakErrorResponseTooLarge,
+		soakErrorCanceled:
 		return true
 	default:
 		return false
@@ -233,6 +239,9 @@ func classifySoakRPCError(err error) soakErrorClass {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 		return soakErrorTimeout
 	}
+	if errors.Is(err, context.Canceled) {
+		return soakErrorCanceled
+	}
 	if errors.Is(err, nats.ErrNoResponders) {
 		return soakErrorNoResponder
 	}
@@ -312,8 +321,13 @@ func (soakTimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type soakRPCRequest struct {
-	Action           soakRPCAction
-	Subject          string
+	Action  soakRPCAction
+	Subject string
+	// Account and RoomID identify the request in the failure log. A metric
+	// label cannot hold them (unbounded), so this is the only place a reader
+	// learns which account to grep the server's logs for.
+	Account          string
+	RoomID           string
 	Body             any
 	Timeout          time.Duration
 	RetryMode        soakRetryMode
@@ -321,8 +335,12 @@ type soakRPCRequest struct {
 }
 
 type soakRPCResult struct {
-	Attempts          int
-	Retries           int
+	Attempts int
+	Retries  int
+	// ReplyBytes is the wire size of a SUCCESSFUL reply. A transport failure
+	// has nothing to size and an oversize failure carries only the compact
+	// envelope, so both leave it zero rather than reporting a tiny page.
+	ReplyBytes        int
 	ErrorClass        soakErrorClass
 	ErrorReason       soakErrorReason
 	AmbiguityResolved bool
@@ -367,28 +385,65 @@ func newSoakRPCClient(
 	}
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) Call(
 	ctx context.Context,
 	request soakRPCRequest,
 	response any,
 ) (soakRPCResult, error) {
 	var result soakRPCResult
+	// carry stamps the request identity onto every failure leaving this
+	// function, so the lane logger above does not have to thread it through.
+	// Declared before the first guard: a context that died before the wire is
+	// still a failure the operator has to be able to place.
+	carry := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return &soakRequestError{
+			Action: request.Action, Subject: request.Subject,
+			Account: request.Account, RoomID: request.RoomID,
+			Class: result.ErrorClass, Reason: result.ErrorReason,
+			Attempts: result.Attempts, Retries: result.Retries,
+			err: err,
+		}
+	}
 	if err := ctx.Err(); err != nil {
-		return result, err
+		result.ErrorClass = classifySoakRPCError(err)
+		return result, carry(soakInterruptedError(request.Action, err, nil))
 	}
 	if !validSoakRPCAction(request.Action) {
 		result.ErrorClass = soakErrorInternal
-		return result, fmt.Errorf("invalid soak RPC action %q", request.Action)
+		return result, carry(fmt.Errorf("invalid soak RPC action %q", request.Action))
 	}
 	body, err := json.Marshal(request.Body)
 	if err != nil {
 		result.ErrorClass = soakErrorRequestEncode
-		return result, fmt.Errorf("marshal %s request: %w", request.Action, err)
+		return result, carry(fmt.Errorf("marshal %s request: %w", request.Action, err))
 	}
 
+	// The failure that sent the last attempt back for a retry. A cancellation
+	// stops the retrying without explaining anything, so both exits below name
+	// this too — otherwise the message contradicts the class kept with it.
+	var lastRequestErr error
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			// Only when no attempt reached the wire. Once one has failed, that
+			// failure is why the operation failed and the cancellation merely
+			// ended the retrying — overwriting it would erase a timeout whose
+			// effect on the server is unknown.
+			if result.ErrorClass == "" {
+				result.ErrorClass = classifySoakRPCError(err)
+			}
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
+		}
+		if attempt > 1 {
+			// Counted here rather than after the backoff: a run torn down
+			// between the two would otherwise report a retry that never
+			// reached the transport. Retries stays Attempts-1.
+			result.Retries++
 		}
 		result.Attempts++
 		reply, requestErr := c.transport.Request(
@@ -404,11 +459,12 @@ func (c *soakRPCClient) Call(
 			if response != nil {
 				if err := json.Unmarshal(reply, response); err != nil {
 					result.ErrorClass = soakErrorResponseDecode
-					return result, fmt.Errorf("decode %s response: %w", request.Action, err)
+					return result, carry(fmt.Errorf("decode %s response: %w", request.Action, err))
 				}
 			}
 			result.ErrorClass = ""
 			result.ErrorReason = ""
+			result.ReplyBytes = len(reply)
 			return result, nil
 		}
 
@@ -419,7 +475,7 @@ func (c *soakRPCClient) Call(
 		if resolveErr != nil {
 			result.ErrorClass = classifySoakRPCError(resolveErr)
 			result.ErrorReason = classifySoakRPCReason(resolveErr)
-			return result, fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr)
+			return result, carry(fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr))
 		}
 		if resolved {
 			result.AmbiguityResolved = true
@@ -433,32 +489,35 @@ func (c *soakRPCClient) Call(
 		if !retry {
 			if request.RetryMode == soakRetryAmbiguous && transientSoakError(class) {
 				result.ErrorClass = soakErrorAmbiguous
-				return result, fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr)
+				return result, carry(fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr))
 			}
-			return result, fmt.Errorf("%s request failed: %w", request.Action, requestErr)
+			return result, carry(fmt.Errorf("%s request failed: %w", request.Action, requestErr))
 		}
 		if attempt == c.retry.MaxAttempts {
-			return result, fmt.Errorf(
+			return result, carry(fmt.Errorf(
 				"%w: %s: %w",
 				errSoakRetryExhausted,
 				request.Action,
 				requestErr,
-			)
+			))
 		}
 
+		lastRequestErr = requestErr
 		delay := c.backoff(result.Retries)
 		if err := c.sleeper.Sleep(ctx, delay); err != nil {
-			return result, fmt.Errorf("wait to retry %s: %w", request.Action, err)
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
 		}
-		result.Retries++
 	}
 
-	return result, fmt.Errorf(
+	return result, carry(fmt.Errorf(
 		"RPC retry loop exited unexpectedly: %w",
 		errSoakRetryExhausted,
-	)
+	))
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) shouldRetryAmbiguous(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -475,6 +534,18 @@ func (c *soakRPCClient) shouldRetryAmbiguous(
 		return false, false, err
 	}
 	return retryNeeded, !retryNeeded, nil
+}
+
+// soakInterruptedError names both halves of an interrupted request: why the
+// operation failed, and why it stopped being retried. Reporting only the
+// cancellation would leave the message disagreeing with the error class, which
+// is kept from the attempt that actually reached the wire.
+func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("%s interrupted: %w", action, cancelErr)
+	}
+	return fmt.Errorf("%s retry interrupted: %w: last attempt: %w",
+		action, cancelErr, lastErr)
 }
 
 func transientSoakError(class soakErrorClass) bool {

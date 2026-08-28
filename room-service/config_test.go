@@ -8,9 +8,29 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// main wires cfg.Pool.Validate / cfg.Guard.Validate; the exhaustive cases live
+// in those packages' tests — these just prove the fields are on config and are
+// validated.
+func TestConfig_DelegatesPoolValidation(t *testing.T) {
+	cfg := config{Pool: mongoutil.PoolConfig{MaxPoolSize: 0}}
+	err := cfg.Pool.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE")
+}
+
+func TestConfig_DelegatesGuardValidation(t *testing.T) {
+	cfg := config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}
+	err := cfg.Guard.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
+}
 
 func TestLegacyRoomOrigins_UnmarshalText(t *testing.T) {
 	var l legacyRoomOrigins
@@ -101,21 +121,21 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.MaxConcurrency)
+		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.MaxConcurrency)
+		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("zero_disables", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "0")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 0, cfg.MaxConcurrency)
+		assert.Equal(t, 0, cfg.Guard.MaxConcurrency)
 	})
 }
 
@@ -157,4 +177,50 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 			assert.Equal(t, tc.want, mode)
 		})
 	}
+}
+
+// The plain collection handles are created without collection options, so they
+// inherit the CLIENT preference. Only 12 of MongoStore's methods use a
+// *Secondary handle; every other read fails during a primary-down incident
+// unless the client itself falls back.
+func TestConfig_ClientReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_CLIENT_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	t.Setenv("MONGO_READ_PREFERENCE", "")
+	require.NoError(t, os.Unsetenv("MONGO_CLIENT_READ_PREFERENCE"))
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	// The per-collection override keeps its vetted staleness-tolerant setting...
+	assert.Equal(t, "secondaryPreferred", cfg.MongoReadPreference)
+	// ...while every handle without an override now falls back instead of failing.
+	assert.Equal(t, "primaryPreferred", cfg.MongoClientReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// broadcast-worker encrypts against its own room-key handle while key.get is
+// served from here. If the two disagree about falling back, the producer keeps
+// delivering messages whose keys the consumer cannot fetch. Both read
+// MONGO_KEY_READ_PREFERENCE and must default the same way.
+func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

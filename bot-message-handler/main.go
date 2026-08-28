@@ -25,9 +25,16 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred: same authz shape as message-gatekeeper, with no cache in front.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
-	// MaxConcurrency caps in-flight req/reply handlers across all routes.
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"200"`
+	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
+	// handlers — kept at this service's historical 200 default (below the fleet
+	// 256) — and RequestTimeout bounds each handler, so a burst or slow
+	// dependency can't saturate the pool with unbounded work.
+	Pool           mongoutil.PoolConfig
+	MaxConcurrency int           `env:"MAX_CONCURRENCY" envDefault:"200"`
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 
 	HealthAddr   string          `env:"HEALTH_ADDR"    envDefault:":8081"`
 	PProfEnabled bool            `env:"PPROF_ENABLED"  envDefault:"false"`
@@ -47,6 +54,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
+	}
+	guard := natsrouter.GuardConfig{MaxConcurrency: cfg.MaxConcurrency, RequestTimeout: cfg.RequestTimeout}
+	if err := guard.Validate(); err != nil {
+		return fmt.Errorf("validate guard config: %w", err)
+	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
@@ -65,17 +79,23 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := newStoreMongo(mongoClient.Database(cfg.MongoDB))
 
 	pub := JetStreamPublisher{JS: js}
 	h := newHandler(store, pub, cfg.SiteID)
 
-	router := natsrouter.New(nc, "bot-message-handler", natsrouter.WithMaxConcurrency(cfg.MaxConcurrency), natsrouter.WithSiteID(cfg.SiteID))
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "bot-message-handler", guard)
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

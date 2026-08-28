@@ -7,6 +7,8 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 func setRequiredEnv(t *testing.T) {
@@ -62,6 +64,7 @@ func TestConfig_MissingDefaultSiteID(t *testing.T) {
 func baseConfig() Config {
 	return Config{
 		MongoURI: "mongodb://localhost:27017", MongoDB: "chat",
+		Pool:               mongoutil.PoolConfig{MaxPoolSize: 500},
 		MaxWorkers:         8,
 		DefaultFrom:        "2026-04-01T00:00:00Z",
 		GraphTenantID:      "tenant",
@@ -111,6 +114,11 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name:    "empty default from",
 			mutate:  func(c *Config) { c.DefaultFrom = "" },
+			wantErr: true,
+		},
+		{
+			name:    "zero max pool size",
+			mutate:  func(c *Config) { c.Pool.MaxPoolSize = 0 },
 			wantErr: true,
 		},
 	}

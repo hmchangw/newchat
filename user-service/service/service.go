@@ -8,6 +8,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/oidc"
+	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/models"
@@ -22,11 +23,9 @@ type SubscriptionRepository interface {
 	GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error)
 	GetSubscriptionByRoomID(ctx context.Context, account, roomID string) (*model.EnrichedSubscription, error)
 	CountActiveSubscriptions(ctx context.Context, account string) (int, error)
-	// GetActiveSubscriptions returns up to limit active subscriptions. The cap
-	// is applied before the deleted-room filter, so a page whose capped slice
-	// contains soft-deleted rooms comes back slightly short of limit — fine for
-	// the unread count (its only consumer), not a general pagination surface.
-	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]model.EnrichedSubscription, error)
+	// GetActiveSubscriptions returns the active set, capped at limit when limit > 0 and
+	// projected to the unread count's fields; no stage after the cap drops a row.
+	GetActiveSubscriptions(ctx context.Context, account string, limit int) ([]models.ActiveSubscription, error)
 	GetAppSubscription(ctx context.Context, account, botName string) (*model.Subscription, error)
 	SetAppSubscribed(ctx context.Context, account, botName string, subscribed, muted bool) error
 }
@@ -152,14 +151,34 @@ type UserService struct {
 	badgeCacheFirst bool
 	maxSubs         int
 	defaultLimit    int
+	// roomBatchChunk caps room ids per enrichment RPC (history-service hard-rejects
+	// over 100, and each reply must fit the 128 KB NATS payload).
+	roomBatchChunk int
+	// previewChars truncates each preview body at read time (PREVIEW_CONTENT_CHARS).
+	// Room count cannot bound preview memory on its own: the gatekeeper caps a body
+	// at 20 KB, but not a 400-row page at 400 of them.
+	previewChars int
+	// maxFanout bounds concurrent enrichment RPCs per request (MAX_SITE_FANOUT).
+	maxFanout       int
 	maxApps         int
 	defaultApps     int
 	maxAccountNames int
+	// pageBudget caps a paginated reply so it is trimmed to fit the broker
+	// rather than refused by it. Zero value disables trimming.
+	pageBudget pagefit.Budget
+}
+
+// Option customises a UserService after construction.
+type Option func(*UserService)
+
+// WithPageBudget caps paginated replies at b.
+func WithPageBudget(b pagefit.Budget) Option {
+	return func(s *UserService) { s.pageBudget = b }
 }
 
 // New constructs a UserService with the given dependencies and configuration.
-func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config) *UserService {
-	return &UserService{
+func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, threadSubs ThreadSubscriptionRepository, rooms RoomClient, history HistoryClient, presence PresenceClient, pub, clientPub EventPublisher, badge badgeCache, ssoTokens SSOTokenRepository, tokenValidator TokenValidator, tokenRefresher TokenRefresher, cfg *config.Config, opts ...Option) *UserService {
+	s := &UserService{
 		subs:             subs,
 		users:            users,
 		apps:             apps,
@@ -179,11 +198,33 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		badgeCap:         cfg.BadgeCountCap,
 		badgeCacheFirst:  cfg.BadgeCountCacheFirst,
 		maxSubs:          cfg.MaxSubscriptionLimit,
+		roomBatchChunk:   cfg.RoomBatchChunk,
+		previewChars:     cfg.PreviewContentChars,
+		maxFanout:        cfg.MaxSiteFanout,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,
 		defaultApps:      cfg.DefaultAppsLimit,
 		maxAccountNames:  cfg.MaxAccountNames,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// defaultSiteFanout is the fallback when maxFanout is unset.
+const defaultSiteFanout = 8
+
+// fanout is the per-request enrichment RPC bound. It normalises a non-positive
+// value because the semaphores sized by it send before spawning their receiver:
+// a capacity of zero would be an unbuffered channel, and the send would block
+// forever. Config validation keeps production above zero; this covers a
+// directly-constructed UserService.
+func (s *UserService) fanout() int {
+	if s.maxFanout < 1 {
+		return defaultSiteFanout
+	}
+	return s.maxFanout
 }
 
 // RegisterHandlers wires all UserService endpoints onto the router.

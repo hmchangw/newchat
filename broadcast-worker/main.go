@@ -12,10 +12,10 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsiter"
@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
@@ -42,31 +43,49 @@ type config struct {
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
-	MongoURI      string `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
-	MongoDB       string `env:"MONGO_DB"                  envDefault:"chat"`
-	MongoUsername string `env:"MONGO_USERNAME"            envDefault:""`
-	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
+	// AllSiteIDs is every site in the supercluster, this one included. Peers are
+	// the destinations for the cross-site room-activity refresh; empty (the
+	// single-site default) disables it.
+	AllSiteIDs    []string `env:"ALL_SITE_IDS" envSeparator:","`
+	MongoURI      string   `env:"MONGO_URI"                 envDefault:"mongodb://localhost:27017"`
+	MongoDB       string   `env:"MONGO_DB"                  envDefault:"chat"`
+	MongoUsername string   `env:"MONGO_USERNAME"            envDefault:""`
+	MongoPassword string   `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
-	MongoReadPreference  string          `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	MaxWorkers           int             `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration   `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
-	UserCacheSize        int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL         time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	RoomMetaCacheSize    int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL     time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomKeyGracePeriod   time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
-	RoomKeyCacheTTL      time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
-	RoomKeyCacheSize     int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	RoomMetaL2TTL        time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs          []string        `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword       string          `env:"VALKEY_PASSWORD"           envDefault:""`
-	ValkeyKeyGracePeriod time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
-	HealthAddr           string          `env:"HEALTH_ADDR"              envDefault:":8081"`
-	PProfEnabled         bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr          string          `env:"METRICS_ADDR"             envDefault:":9090"`
-	Mode                 stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	RoomSubjectMode      string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	// MongoKeyReadPreference covers room keys and preview DEKs. Separate from the
+	// client-wide preference because key freshness matters more than room meta, but
+	// primaryPreferred rather than primary: a stale DEK read cannot diverge
+	// ($setOnInsert plus a re-read comparison) and a missing room key is already a
+	// retryable error, so failing outright only costs encrypted delivery.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool                   mongoutil.PoolConfig
+	MaxWorkers             int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LastMsgFlushInterval   time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	// RoomActivityRefreshInterval caps how often one room's position is announced
+	// cross-site, independently of the Mongo flush above. Generous by design: the
+	// subscription list serves ordering from a cache with a far longer TTL, so a
+	// position a few seconds behind is indistinguishable from a fresh one.
+	// Non-positive announces on every flush.
+	RoomActivityRefreshInterval time.Duration   `env:"ROOM_ACTIVITY_REFRESH_INTERVAL" envDefault:"5s"`
+	UserCacheSize               int             `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL                time.Duration   `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	RoomMetaCacheSize           int             `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL            time.Duration   `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomKeyGracePeriod          time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	RoomKeyCacheTTL             time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
+	RoomKeyCacheSize            int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
+	RoomKeyRetiredTTL           time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"` // read only, to fail fast when too short for this cache's TTL
+	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	ValkeyAddrs                 []string        `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword              string          `env:"VALKEY_PASSWORD"           envDefault:""`
+	ValkeyKeyGracePeriod        time.Duration   `env:"VALKEY_KEY_GRACE_PERIOD" envDefault:"24h"`
+	HealthAddr                  string          `env:"HEALTH_ADDR"              envDefault:":8081"`
+	PProfEnabled                bool            `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr                 string          `env:"METRICS_ADDR"             envDefault:":9090"`
+	Mode                        stream.Pipeline `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	RoomSubjectMode             string          `env:"ROOM_SUBJECT_MODE"        envDefault:"global"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
 	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
@@ -77,6 +96,17 @@ type config struct {
 	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
+
+	// Atrest/Vault gate room-list preview persistence. Distinct from Encryption
+	// above, which is the client-facing room-key transport: this is at-rest
+	// protection for the preview body this worker writes into the room doc.
+	Atrest atrest.Config      // env vars are already prefixed ATREST_*
+	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Rotation is an ops action — bump and redeploy. Keep it in step with
+	// history-service, which reads what this writes: a reader on another epoch
+	// treats the preview as absent.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
 }
 
 func main() {
@@ -89,6 +119,11 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
@@ -119,12 +154,18 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
@@ -138,7 +179,43 @@ func main() {
 		}
 		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
 	}
-	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL)
+	var (
+		previewCipher atrest.Cipher
+		vaultWrapper  atrest.KeyWrapperCloser
+	)
+	if cfg.Atrest.Enabled {
+		if cfg.PreviewKeyEpoch < 1 {
+			// The epoch is part of the DEK id, so a non-positive value mints a
+			// sentinel rotation could never move forward from.
+			slog.Error("PREVIEW_KEY_EPOCH must be >= 1", "preview_key_epoch", cfg.PreviewKeyEpoch)
+			os.Exit(1)
+		}
+		// Degrade, don't refuse to start. This worker exists for the canonical fan-out;
+		// the preview is an optional rider on it, and the runtime seal already degrades
+		// on the same dependency failing. Exiting here would stop message delivery for
+		// every room on this site because an optional feature's key store was down --
+		// history-service still serves previews from the lazy walk meanwhile.
+		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
+		if err != nil {
+			slog.Error("Vault key wrapper unavailable; starting with room-preview persistence disabled",
+				"addr", cfg.Vault.Address, "error", err)
+		} else {
+			vaultWrapper = w
+			// The preview DEK lives in its own collection, and is written here on first
+			// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
+			dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(keyReadPref))
+			previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+			slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
+		}
+	} else {
+		slog.Info("room-preview persistence disabled (ATREST_ENABLED=false); the room doc must never hold a plaintext body")
+	}
+	// Cached: the lookup sits on the message path and an app's name changes about as
+	// often as the app is renamed, so an uncached read per bot message bought nothing.
+	sealer := newPreviewSealer(previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch},
+		preview.CachedAppNameLookup(newAppNameRepo(db.Collection("apps"))))
+
+	store := NewMongoStore(db.Collection("rooms"), db.Collection("subscriptions"), db.Collection("thread_rooms"), metaValkey, cfg.RoomMetaL2TTL, sealer.enabled())
 	if err := store.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
@@ -165,8 +242,8 @@ func main() {
 		}
 		// Room keys are written by other services; pin to primary so a fresh/rotated
 		// key isn't missed on a lagging secondary.
-		roomsPrimary := db.Collection("rooms", options.Collection().SetReadPreference(readpref.Primary()))
-		keyStore = roomkeystore.NewMongoStore(roomsPrimary, cfg.RoomKeyGracePeriod)
+		roomsForKeys := db.Collection("rooms", options.Collection().SetReadPreference(keyReadPref))
+		keyStore = roomkeystore.NewMongoStore(roomsForKeys, cfg.RoomKeyGracePeriod)
 	}
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -200,6 +277,20 @@ func main() {
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
 	// UpdateRoomLastMessage; the coalescing wrapper buffers it and drains via flushCtx/Run.
 	coalescer := newCoalescingStore(cachedStore, store)
+	if peers := remotePeers(cfg.SiteID, cfg.AllSiteIDs); len(peers) > 0 {
+		coalescer.crossSite = crossSiteChecker(cachedStore)
+		coalescer.publishActivity = roomActivityPublisher(publisher, cfg.SiteID, peers)
+		coalescer.refreshInterval = cfg.RoomActivityRefreshInterval
+		coalescer.lastRefreshed = make(map[string]time.Time)
+		slog.Info("cross-site room-activity refresh enabled",
+			"peers", peers, "refresh_interval", cfg.RoomActivityRefreshInterval)
+	} else {
+		// Correct for a single-site deployment, but in a federated one it means
+		// remote chat lists cannot order this site's rooms — say so rather than
+		// leaving a missing ALL_SITE_IDS to look like everything is fine.
+		slog.Warn("cross-site room-activity refresh disabled: no remote peers configured",
+			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
+	}
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	go coalescer.Run(flushCtx, cfg.LastMsgFlushInterval, 5*time.Second)
 	slog.Info("last-msg coalescer enabled", "flush_interval", cfg.LastMsgFlushInterval)
@@ -215,15 +306,33 @@ func main() {
 		// Caching beyond the grace period could serve a rotated-out key that clients can no longer decrypt; refuse to cache rather than risk it.
 		slog.Warn("room-key cache disabled: TTL must be below key grace period",
 			"ttl", cfg.RoomKeyCacheTTL, "grace_period", cfg.RoomKeyGracePeriod)
+	case !retiredTTLSafe(cfg.RoomKeyRetiredTTL, cfg.RoomKeyCacheTTL):
+		// Too short a retention breaks the client's later fetch; refuse to start.
+		slog.Error("ROOM_KEY_RETIRED_TTL must be at least twice ROOM_KEY_CACHE_TTL",
+			"retired_ttl", cfg.RoomKeyRetiredTTL, "cache_ttl", cfg.RoomKeyCacheTTL)
+		os.Exit(1)
 	default:
 		keyCache = NewCachedKeyProvider(keyStore, cfg.RoomKeyCacheSize, cfg.RoomKeyCacheTTL)
 		keyProvider = keyCache
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
+	// JetStream publish for the OUTBOX mention relay; the client fan-out stays on
+	// core NATS (publisher above).
+	outboxPublish := func(ctx context.Context, subj string, data []byte, msgID string) error {
+		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
+		if err != nil {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Attempt(ctx, destination, operation, err)
+			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
+		}
+		return nil
+	}
+
 	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
 	handler := NewHandler(coalescer, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
-		withBroadcastMetrics(domainMetrics), withThreadViewSubject(cfg.ThreadViewSubjectEnabled))
+		withBroadcastMetrics(domainMetrics), withOutboxFederation(cfg.SiteID, outboxPublish),
+		withThreadViewSubject(cfg.ThreadViewSubjectEnabled), withPreviewSealer(sealer))
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -290,6 +399,9 @@ func main() {
 	}
 	if keyStore != nil {
 		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })
+	}
+	if vaultWrapper != nil {
+		hooks = append(hooks, func(_ context.Context) error { return vaultWrapper.Close() })
 	}
 	hooks = append(hooks,
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },

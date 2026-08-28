@@ -36,10 +36,14 @@ var (
 	ErrDuplicate = errors.New("bot-room-service: duplicate")
 )
 
-// RoomKeyStore is the narrow room-key store surface bot-room-service needs: Set on create,
-// Get to fan the current key to new members, Rotate/SetWithVersion on remove.
+// RoomKeyStore is the narrow room-key surface bot-room-service needs.
 type RoomKeyStore interface {
+	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
+
+	// SetIfAbsent is the rotate fallback when no current key exists: it installs pair
+	// at version 0 only if the slot is free and returns the key the room then holds.
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 
 	// Get returns the room's current key pair, or roomkeystore.ErrNoCurrentKey if the room has no key (legacy/broken room).
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
@@ -47,18 +51,17 @@ type RoomKeyStore interface {
 	// Rotate is the normal remove-member path: swaps in newPair as the room's current key.
 	// Returns roomkeystore.ErrNoCurrentKey if the key was concurrently deleted mid-rotation.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
-
-	// SetWithVersion is the Rotate-ErrNoCurrentKey fallback: stamps newPair at the caller-supplied version so it matches what was already fanned out to survivors.
-	SetWithVersion(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair, version int) error
 }
 
 // Room is the projection of a rooms doc bot-room-service reads and writes.
 type Room struct {
-	ID           string
-	Type         string
-	Name         string
-	Topic        string
-	SiteID       string
+	ID     string
+	Type   string
+	Name   string
+	Topic  string
+	SiteID string
+	// LastMsgAt rides cross-site member_added; see model.MemberAddEvent.
+	LastMsgAt    *time.Time
 	CreatedAt    time.Time
 	Owner        *Participant
 	CreatedByBot string

@@ -67,8 +67,9 @@ func (stubRoomKeyStore) Set(_ context.Context, _ string, _ roomkeystore.RoomKeyP
 	return 0, nil
 }
 
-func (stubRoomKeyStore) SetWithVersion(_ context.Context, _ string, _ roomkeystore.RoomKeyPair, _ int) error {
-	return nil
+func (stubRoomKeyStore) SetIfAbsent(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+	// Default: the caller wins the race, so it gets its own bytes back at v0.
+	return &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}, nil
 }
 
 func (stubRoomKeyStore) Rotate(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {

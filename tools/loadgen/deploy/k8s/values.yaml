@@ -130,6 +130,9 @@ soak:
   randomSeed: 42
   warmup: 30s
   heartbeatInterval: 30s
+  # Must be at least 2 * heartbeatInterval + 5s. For a Mongo fault campaign,
+  # override this lease beyond the planned outage and recovery window; see the
+  # staging campaign overlay in README.md.
   heartbeatStaleAfter: 2m
   terminationGracePeriodSeconds: 60
   maxInFlight: 200
@@ -155,6 +158,12 @@ soak:
   # history-service, isolating that cost from the rest of the request.
   subscriptionListLimit: ""
   subscriptionListIncludeLastMessage: ""
+  # Room-popularity distribution for the send lane: P(rank) is proportional to
+  # (V+rank)^-S. Empty leaves the defaults every baseline was recorded against
+  # (S=1.2, V=1.0 — the hottest room takes ~21% of all sends). S must exceed 1;
+  # raise V to flatten instead (V=5 puts the hottest room near 5%).
+  roomZipfS: ""
+  roomZipfV: ""
   searchReadRate: "5"
   searchSettle: 30s
   roomCreateRate: "0.05"

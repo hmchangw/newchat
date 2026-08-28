@@ -89,8 +89,9 @@ func TerminateMongo() {
 // No-t variant intended for TestMain pre-warming.
 func EnsureMongo() error { _, err := ensureMongoClient(); return err }
 
-// MongoDB returns an isolated Mongo database for the current test; dropped on t.Cleanup.
-func MongoDB(t *testing.T, prefix string) *mongo.Database {
+// MongoDB returns an isolated Mongo database for the current test or benchmark;
+// dropped on t.Cleanup.
+func MongoDB(t testing.TB, prefix string) *mongo.Database {
 	t.Helper()
 	c, err := ensureMongoClient()
 	if err != nil {

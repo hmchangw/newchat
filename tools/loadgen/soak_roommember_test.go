@@ -210,6 +210,73 @@ func TestSoakRoomLanes_ReconcileRetriesBeforeTheDeadline(t *testing.T) {
 		"an absent effect before the deadline is retried, not concluded")
 }
 
+func TestSoakRoomLanes_ReconcileBacksOffRepeatedRoomStateProbes(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.store.member = false
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	fixture.advance(time.Second)
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, fixture.now.Add(2*time.Second), operation.nextVerifyAt)
+
+	fixture.advance(time.Second)
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.False(t, reconciled, "the fixed one-second retry would probe again here")
+}
+
+func TestSoakRoomLanes_ReconcileSchedulesProbeFromVerificationCompletion(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.advance(2 * time.Second)
+	fixture.store.contextErr = func(context.Context) error {
+		fixture.advance(5 * time.Second)
+		return errors.New("primary unavailable")
+	}
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	wait := max(
+		fixture.now.Sub(operation.VerifyAfter), fixture.lanes.cfg.RetryInterval,
+	)
+	assert.Equal(t, fixture.now.Add(wait), operation.nextVerifyAt,
+		"verification latency must not make the released probe immediately due")
+}
+
+func TestSoakRoomLanes_RepeatedAbsentProbesStillReachTheDeadlineVerdict(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.store.member = false
+
+	probes := 0
+	for probes < 16 && len(fixture.ledger.ActiveOperations()) > 0 {
+		operation := soakSingleActiveOperation(t, fixture.ledger)
+		if operation.nextVerifyAt.After(fixture.now) {
+			fixture.advance(operation.nextVerifyAt.Sub(fixture.now))
+		}
+		reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+		require.NoError(t, err)
+		require.True(t, reconciled)
+		probes++
+	}
+
+	assert.Greater(t, probes, 2, "the regression requires a real backoff walk")
+	assert.Empty(t, fixture.ledger.ActiveOperations())
+	assert.Equal(t, uint64(1),
+		fixture.ledger.Snapshot().Results[failureResultMissingAfterDeadline],
+		"the last authoritative probe must run at the deadline instead of expiring unverified")
+}
+
 func TestSoakRoomLanes_AcceptedThenAbsentAtDeadlineIsMissing(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
@@ -387,6 +454,27 @@ func TestSoakRoomLanes_QuarantineProbeKeepsUnansweredPairs(t *testing.T) {
 		fixture.metrics.SoakRoomQuarantineProbes.WithLabelValues("unresolved")))
 	_, ok := fixture.pool.NextProbe()
 	assert.True(t, ok, "an unanswered probe stays queued")
+}
+
+func TestSoakRoomLanes_QuarantineProbeBoundsAuthoritativeReads(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, nil, nats.ErrTimeout)
+	require.NoError(t, fixture.lanes.MemberMutation(context.Background()))
+	fixture.advance(2 * time.Minute)
+	_, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	fixture.store.contextErr = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		assert.WithinDuration(
+			t, time.Now().Add(soakRoomStateTimeout), deadline, time.Second,
+		)
+		return errors.New("primary unavailable")
+	}
+
+	probed, err := fixture.lanes.ProbeQuarantine(context.Background(), fixture.verifier)
+
+	require.Error(t, err)
+	assert.True(t, probed)
 }
 
 func TestSoakRoomLanes_ProbeIsANoOpWithoutQuarantine(t *testing.T) {
@@ -669,6 +757,14 @@ func TestSoakRoomMutationNeverSent_OnlyProvenLocalFailures(t *testing.T) {
 		{
 			name: "context canceled", err: context.Canceled, want: false,
 		},
+		// A cancellation now carries a class, and the guard that fires between
+		// attempts cannot tell "nothing was sent" from "an attempt is already on
+		// the wire". Claiming not_sent for either would erase a real effect, so
+		// the conservative answer has to survive the class becoming non-empty.
+		{
+			name: "canceled with a class", err: context.Canceled,
+			outcome: soakRoomMutationOutcome{ErrorClass: soakErrorCanceled}, want: false,
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			assert.Equal(t, testCase.want,
@@ -699,10 +795,14 @@ func TestSoakRoomLanes_ObserveReleasesTheClaimOnLedgerFailure(t *testing.T) {
 	assert.Len(t, fixture.ledger.ActiveOperations(), 1)
 }
 
-func TestSoakRoomLanes_ReleaseRejectsUnknownOperations(t *testing.T) {
+func TestSoakRoomLanes_ReleaseProbeRejectsUnknownOperations(t *testing.T) {
 	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
 
-	err := fixture.lanes.release("missing-operation", fixture.now)
+	err := fixture.lanes.releaseProbe(&failureOperation{
+		ID:          "missing-operation",
+		VerifyAfter: fixture.now,
+		Deadline:    fixture.now.Add(time.Minute),
+	}, fixture.now)
 
 	require.Error(t, err)
 }
@@ -980,6 +1080,105 @@ func TestSoakRoomLanes_RoomCreateHoldsTheOperationUntilOwnershipLands(t *testing
 	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
 }
 
+func TestSoakRoomLanes_RoomCreateRetriesOwnershipFailuresAtTheFlatInterval(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.store.appendHook = func() { fixture.advance(5 * time.Second) }
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	first := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), first.nextVerifyAt)
+
+	fixture.advance(fixture.lanes.cfg.RetryInterval)
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	second := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, fixture.now.Add(fixture.lanes.cfg.RetryInterval), second.nextVerifyAt,
+		"a failed ownership call must not inherit pending-effect backoff")
+}
+
+func TestSoakRoomLanes_RoomCreateBoundsOwnershipPersistence(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendContextErr = func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "ownership persistence must have a bounded context")
+		assert.WithinDuration(
+			t, time.Now().Add(soakRoomStateTimeout), deadline, time.Second,
+		)
+		return errors.New("primary unavailable")
+	}
+	fixture.advance(2 * time.Second)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Len(t, fixture.ledger.ActiveOperations(), 1)
+}
+
+func TestSoakRoomLanes_RoomCreateCapsOwnershipRetryAtDeadline(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.advance(operation.Deadline.Sub(fixture.now) - 500*time.Millisecond)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	retry := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, operation.Deadline, retry.nextVerifyAt,
+		"the terminal ownership attempt must remain claimable at the deadline")
+}
+
+func TestSoakRoomLanes_ExpiryLeavesTerminalOwnershipAttemptToTheLane(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t,
+		[]byte(`{"status":"accepted","roomId":"room-new","roomType":"channel"}`), nil)
+	require.NoError(t, fixture.lanes.RoomCreate(context.Background()))
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	fixture.store.byNameOK = true
+	fixture.store.byName = "room-new"
+	fixture.store.appendErr = errors.New("primary unavailable")
+	fixture.advance(operation.Deadline.Sub(fixture.now) - 500*time.Millisecond)
+
+	reconciled, err := fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	require.True(t, reconciled)
+	retry := soakSingleActiveOperation(t, fixture.ledger)
+	require.Equal(t, operation.Deadline, retry.nextVerifyAt)
+
+	fixture.advance(500 * time.Millisecond)
+	expiredIDs, err := fixture.ledger.Expire(fixture.now)
+	require.NoError(t, err)
+	assert.Empty(t, expiredIDs,
+		"expiry grace must leave a deadline probe to the reconciliation lane")
+
+	reconciled, err = fixture.lanes.Reconcile(context.Background(), fixture.verifier)
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.Empty(t, fixture.ledger.ActiveOperations())
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		fixture.metrics.FailureUntracked.WithLabelValues("ownership")),
+		"a terminal ownership failure must remain visible to teardown operators")
+	assert.Equal(t, uint64(1), fixture.ledger.Snapshot().Results[failureResultGood])
+}
+
 // Reads against a created room are issued as the account that created it. Any
 // other account is not a member, so the room_read lane would measure
 // authorization failures instead of the reads it is there to exercise.
@@ -1000,4 +1199,26 @@ func TestSoakRoomLanes_RoomCreateRegistersTheRequesterAsReader(t *testing.T) {
 	account, ok := fixture.lanes.reader.Account("room-new")
 	require.True(t, ok, "a created room joins the read mix")
 	assert.Equal(t, requester, account)
+}
+
+// A teardown is not a refusal. Closing the operation as `bad` with
+// `admission_rejected` asserts the service turned the mutation down, and the
+// candidate goes back to the pool as untouched — so if the request did reach
+// the server, a real effect is left with nothing to reconcile it. That is the
+// failure the unknown-status branch above already refuses to cause.
+func TestSoakRoomLanes_CanceledMutationIsUnverifiedNotRejected(t *testing.T) {
+	fixture := newSoakRoomLaneFixture(t, []byte(`{"status":"accepted"}`), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, fixture.lanes.MemberMutation(ctx))
+
+	snapshot := fixture.ledger.Snapshot()
+	assert.Zero(t, snapshot.Results[failureResultBad],
+		"a cancellation is not an explicit rejection")
+	assert.Zero(t, snapshot.Results[failureResultNotSent],
+		"nor is it proof the request stayed local")
+	operation := soakSingleActiveOperation(t, fixture.ledger)
+	assert.Equal(t, failureObservationUnverified,
+		operation.Observations[failureObserverAdmission])
 }

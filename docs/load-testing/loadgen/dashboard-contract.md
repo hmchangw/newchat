@@ -30,6 +30,31 @@ A missing, stale, truncated, or undersampled required series makes the
 dependent absence claim `INCONCLUSIVE`. Queries must not use `or vector(0)` for
 required evidence.
 
+Loadgen's own Mongo control plane is a separate validity gate. An absence
+claim is `INCONCLUSIVE` when `loadgen_mongo_up != 1`, when the Mongo probe
+timestamp is zero, when `time() - loadgen_mongo_probe_timestamp_seconds`
+exceeds 60 seconds, or when
+`increase(loadgen_mongo_probe_attempts_total{outcome="error"}[2m]) > 0`. The
+counter preserves a failed probe even if a later success replaces
+the latest status before the next 30-second scrape. The probe runs every 5
+seconds, but the contract allows two scrape intervals before calling the
+series stale.
+
+The soak manifest heartbeat is valid when
+`loadgen_soak_heartbeat_degraded == 0`, its success timestamp is non-zero, and
+`time() - loadgen_soak_heartbeat_success_timestamp_seconds` does not exceed 90
+seconds. This dashboard freshness threshold is deliberately independent from
+`SOAK_HEARTBEAT_STALE_AFTER`: the latter is a seed/teardown lease and may be
+much longer during a planned Mongo fault. Positive correctness evidence
+survives either control-plane blind interval.
+
+Any increase in
+`loadgen_failure_invalidations_total{reason="lease_abort"}` makes the affected
+campaign interval `INCONCLUSIVE`. It means loadgen deliberately stopped waiting
+for one or more in-flight lanes so the process could exit before the Mongo
+heartbeat lease became stale; the structured error log carries the lane names
+and counts.
+
 ## Dispatch validity
 
 The dispatch ratio for each enabled lane is:
@@ -146,6 +171,17 @@ Metrics added by this work:
 - `loadgen_failure_observation_reasons_total` and
   `loadgen_failure_not_sent_total`;
 - `loadgen_consumer_ack_floor_stall_seconds`.
+- `loadgen_mongo_up`, `loadgen_mongo_probe_timestamp_seconds`,
+  `loadgen_mongo_probe_attempts_total`,
+  `loadgen_soak_heartbeat_degraded`,
+  `loadgen_soak_heartbeat_success_timestamp_seconds`, and
+  `loadgen_soak_heartbeat_attempts_total`.
+
+Heartbeat attempt outcomes are `success`, `error`, and `not_active`. They count
+attempts, not outage episodes: use the degraded gauge's transitions for the
+trend and the structured degraded/recovered logs for exact episode duration.
+Retries begin five seconds after a failed attempt completes. A full five-second
+attempt timeout therefore produces about one `error` attempt every ten seconds.
 - `loadgen_failure_wal_append_duration_seconds`,
   `loadgen_failure_wal_appends_total`,
   `loadgen_failure_wal_flush_duration_seconds`,

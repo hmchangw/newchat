@@ -33,4 +33,9 @@ const (
 	// the two call for opposite recoveries. Retry with a narrower request
 	// (a smaller limit or page), never with the same one.
 	ResponseTooLarge Reason = "response_too_large"
+
+	// Overloaded marks a request shed at an HTTP listener's in-flight cap
+	// (ginutil.MaxConcurrency). Retryable after the Retry-After it ships with;
+	// it says the pod is momentarily full, not that the request was wrong.
+	Overloaded Reason = "overloaded"
 )

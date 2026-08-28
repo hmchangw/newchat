@@ -44,8 +44,13 @@ type MessageEvent struct {
 	// ThreadParentSenderAccount is the thread parent's author, resolved best-effort by the
 	// gatekeeper (empty on soft-fail/edit/delete); lets workers skip their own parent fetch.
 	ThreadParentSenderAccount string `json:"threadParentSenderAccount,omitempty" bson:"-"`
-	// PreviewMessage is the room's refreshed preview, computed by history-service on
-	// edit/delete for broadcast-worker to relay. nil for other events or when cleared.
+	// PreviewMessage is the room's refreshed preview, computed AND persisted by
+	// history-service on edit/delete; it rides the event purely so broadcast-worker can
+	// relay it to clients. nil for other events, for a hidden thread reply, or when the
+	// mutation left the room with no eligible message.
+	//
+	// A nil therefore carries no storage instruction: the walk that could tell "the room
+	// is empty" from "the walk gave up" is the one that already acted on the difference.
 	PreviewMessage *PreviewMessage `json:"previewMessage,omitempty" bson:"-"`
 }
 
@@ -80,9 +85,11 @@ type SubscriptionUpdateEvent struct {
 	RoomName     string       `json:"roomName,omitempty"`
 	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
 	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
-	HRInfo    *CounterpartHRInfo  `json:"hrInfo,omitempty"`
-	AppInfo   *CounterpartAppInfo `json:"appInfo,omitempty"`
-	Timestamp int64               `json:"timestamp" bson:"timestamp"`
+	HRInfo *CounterpartHRInfo `json:"hrInfo,omitempty"`
+	// AppInfo is the full app record on a botDM "added" — same shape subscription.list
+	// nests as its `app` object, so the client needs no follow-up apps.list.
+	AppInfo   *AppSubscription `json:"appInfo,omitempty"`
+	Timestamp int64            `json:"timestamp" bson:"timestamp"`
 }
 
 // CounterpartHRInfo is the DM counterpart's HR record on a subscription.update.
@@ -91,14 +98,6 @@ type CounterpartHRInfo struct {
 	Account     string `json:"account"`
 	ChineseName string `json:"chineseName,omitempty"`
 	EngName     string `json:"engName,omitempty"`
-}
-
-// CounterpartAppInfo is the botDM counterpart's app record on a subscription.update.
-// AssistantName is the bot account the app answers on.
-type CounterpartAppInfo struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	AssistantName string `json:"assistantName"`
 }
 
 // CanonicalMemberEventMuted is the only event type currently published on this stream.
@@ -138,6 +137,18 @@ type InboxMemberEvent struct {
 	Origin string `json:"origin,omitempty"`
 }
 
+// RoomActivityEvent refreshes a remote room's chat-list ordering position on a
+// destination site, which holds no Room document for it. Published on the
+// core-NATS subject.RoomActivity lane, coalesced per room by the origin's
+// last-message flush, and applied under a $max guard — so it is safe to lose,
+// duplicate, or deliver out of order. LastMsgAt and Timestamp are epoch millis.
+type RoomActivityEvent struct {
+	RoomID    string `json:"roomId"    bson:"roomId"`
+	SiteID    string `json:"siteId"    bson:"siteId"`
+	LastMsgAt int64  `json:"lastMsgAt" bson:"lastMsgAt"`
+	Timestamp int64  `json:"timestamp" bson:"timestamp"`
+}
+
 // NotificationEvent is the per-user reaction notification on chat.user.{account}.notification;
 // distinct from PushNotificationEvent (batched mobile) — this is the legacy single-user envelope the FE listens on.
 type NotificationEvent struct {
@@ -170,8 +181,10 @@ const (
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
 	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
+	InboxUserAccountUpdated          InboxEventType = "user_account_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
+	InboxSubscriptionMention         InboxEventType = "subscription_mention"
 )
 
 // UserSettingsUpdated is the cross-site inbox event user-service publishes on settings.set, applied
@@ -193,6 +206,22 @@ type UserPermissionsUpdated struct {
 	Timestamp  int64           `json:"timestamp"  bson:"timestamp"`
 }
 
+// UserAccountUpdated is the InboxEvent.Payload for user_account_updated: the
+// admin-owned account state as a whole snapshot (identity included, so the
+// event alone materializes a complete remote doc). Published by admin-service
+// after createUser / updateUser / DeactivateAndRevoke; inbox-worker upserts it
+// under the accountUpdatedAt watermark.
+type UserAccountUpdated struct {
+	ID          string     `json:"id"          bson:"id"`
+	Account     string     `json:"account"     bson:"account"`
+	SiteID      string     `json:"siteId"      bson:"siteId"` // home site; immutable, $setOnInsert only
+	EngName     string     `json:"engName"     bson:"engName"`
+	ChineseName string     `json:"chineseName" bson:"chineseName"`
+	Roles       []UserRole `json:"roles"       bson:"roles"`     // always an array, never nil
+	Active      bool       `json:"active"      bson:"active"`    // resolved via IsActive()
+	Timestamp   int64      `json:"timestamp"   bson:"timestamp"` // unix ms; doubles as the watermark
+}
+
 // SubscriptionReadEvent is InboxEvent.Payload for "subscription_read": sent room-home→user-home
 // on read, updating the local subscription cache. LastSeenAt is UnixMilli UTC for wire safety.
 type SubscriptionReadEvent struct {
@@ -204,6 +233,18 @@ type SubscriptionReadEvent struct {
 	// reading a room clears the alert.
 	Alert     bool  `json:"alert"      bson:"alert"`
 	Timestamp int64 `json:"timestamp"  bson:"timestamp"`
+}
+
+// SubscriptionMentionEvent is InboxEvent.Payload for "subscription_mention":
+// sent room-home→user-home so a federated mentionee's badge lands on the site
+// they read from. Accounts holds only the accounts homed at the destination.
+type SubscriptionMentionEvent struct {
+	RoomID   string   `json:"roomId"   bson:"roomId"`
+	Accounts []string `json:"accounts" bson:"accounts"`
+	// MentionedAt is when the mention appeared — the message's createdAt, or its
+	// editedAt when an edit added it. Feeds the destination's already-read guard.
+	MentionedAt int64 `json:"mentionedAt" bson:"mentionedAt"`
+	Timestamp   int64 `json:"timestamp"   bson:"timestamp"`
 }
 
 // ThreadReadEvent is the InboxEvent.Payload for "thread_read": the destination
@@ -270,6 +311,11 @@ type MemberAddEvent struct {
 	RequesterAccount   string   `json:"requesterAccount,omitempty" bson:"requesterAccount,omitempty"`
 	JoinedAt           int64    `json:"joinedAt"           bson:"joinedAt"`
 	HistorySharedSince *int64   `json:"historySharedSince,omitempty" bson:"historySharedSince,omitempty"`
+	// LastMsgAt is the room's activity position (epoch millis), nil when the room
+	// has never had a message. Cross-site INBOX copies only — like Accounts, it is
+	// stripped from the room-scoped (frontend) copy. The destination holds no rooms
+	// doc for a remote room, so this is the only key it can order the room by.
+	LastMsgAt *int64 `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
 	// Members carries the member.list (enrich=true) display entries; org-expanded accounts ride Accounts only.
 	// Room-scoped event only — INBOX copies omit it (remote sites re-resolve display data).
 	Members []RoomMemberEntry `json:"members,omitempty" bson:"members,omitempty"`
@@ -344,6 +390,10 @@ type RoomEvent struct {
 	MentionAll bool          `json:"mentionAll,omitempty"`
 
 	HasMention bool `json:"hasMention,omitempty"`
+	// SystemMsg marks a system-message new_message (IsSystemMessageType) in
+	// plaintext, so clients can exclude it from unread/ordering even when the
+	// message itself is sealed inside EncryptedMessage.
+	SystemMsg bool `json:"systemMsg,omitempty"`
 
 	Message          *ClientMessage  `json:"message,omitempty"`
 	EncryptedMessage json.RawMessage `json:"encryptedMessage,omitempty"`
@@ -379,9 +429,15 @@ type EditRoomEvent struct {
 	MessageID           string          `json:"messageId" bson:"messageId"`
 	NewContent          string          `json:"newContent,omitempty" bson:"newContent,omitempty"`
 	EncryptedNewContent json.RawMessage `json:"encryptedNewContent,omitempty" bson:"encryptedNewContent,omitempty"`
-	EditedBy            string          `json:"editedBy" bson:"editedBy"`
-	EditedAt            time.Time       `json:"editedAt" bson:"editedAt"`
-	UpdatedAt           time.Time       `json:"updatedAt" bson:"updatedAt"`
+	// Mentions are the @-mentions resolved from the edited content, so an edit that
+	// adds a mention renders it the same as a freshly-sent message. Omitted when none.
+	Mentions []Participant `json:"mentions,omitempty" bson:"mentions,omitempty"`
+	// MentionAll reflects the edited content's @all, mirroring the create/new-thread events
+	// so an edit that adds or removes @all conveys it. Omitted when false.
+	MentionAll bool      `json:"mentionAll,omitempty" bson:"mentionAll,omitempty"`
+	EditedBy   string    `json:"editedBy" bson:"editedBy"`
+	EditedAt   time.Time `json:"editedAt" bson:"editedAt"`
+	UpdatedAt  time.Time `json:"updatedAt" bson:"updatedAt"`
 	// ThreadParentMessageID is set when the edited message is a thread reply; its presence lets
 	// clients tell a thread-reply edit from a top-level one. Omitted for top-level messages.
 	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`

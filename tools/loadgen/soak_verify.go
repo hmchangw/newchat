@@ -198,6 +198,8 @@ func (v *soakVerifier) VerifyByID(
 			roomID,
 			v.cfg.SiteID,
 		),
+		Account:   expected.Author,
+		RoomID:    roomID,
 		Body:      soakGetMessageByIDRequest{MessageID: messageID},
 		Timeout:   v.cfg.RequestTimeout,
 		RetryMode: soakRetrySafe,
@@ -249,6 +251,7 @@ func (v *soakVerifier) VerifyHistory(
 				roomID,
 				v.cfg.SiteID,
 			),
+			Account: expected.Author, RoomID: roomID,
 			Body: soakLoadHistoryRequest{
 				Before: before,
 				Limit:  v.cfg.PageLimit,

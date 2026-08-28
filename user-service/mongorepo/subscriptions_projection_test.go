@@ -10,7 +10,7 @@ import (
 // and must no longer include the dead _updatedAt field (nothing decodes it and
 // no $match keys on it — the activity window keys on room.lastMsgAt).
 func TestSubscriptionProjection_TimestampFields(t *testing.T) {
-	proj := subscriptionProjection(nil)
+	proj := subscriptionProjection()
 
 	for _, k := range []string{"favoriteUpdatedAt", "muteUpdatedAt", "rolesUpdatedAt", "nameUpdatedAt", "restrictUpdatedAt"} {
 		_, ok := proj[k]

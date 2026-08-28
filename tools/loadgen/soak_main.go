@@ -156,6 +156,7 @@ func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
 		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
+		RowsCounted: sample.RowsCounted, ReplyBytes: sample.ReplyBytes, Rows: sample.Messages,
 	}))
 }
 
@@ -255,7 +256,7 @@ func newSoakRuntimeSelector(
 	if cfg == nil {
 		return nil, fmt.Errorf("soak configuration is required")
 	}
-	picker, err := newSoakRoomPicker(seed, len(topology.Rooms))
+	picker, err := newSoakRoomPicker(seed, len(topology.Rooms), cfg.RoomZipfS, cfg.RoomZipfV)
 	if err != nil {
 		return nil, fmt.Errorf("build soak room distribution: %w", err)
 	}
@@ -433,6 +434,12 @@ func runSoakWorkload(
 	opts soakOptions,
 ) (exitCode int) {
 	seed := opts.Seed
+	fastLeaseAbort := false
+	// Zero until the run stops because its lease is at risk. The NATS drain is
+	// registered before the ledger exists, so both are declared here and filled
+	// in once the workload has returned.
+	leaseShutdownBudget := time.Duration(0)
+	invalidateEvidence := func(string) {}
 	client, err := mongoutil.Connect(
 		ctx,
 		cfg.MongoURI,
@@ -443,7 +450,11 @@ func runSoakWorkload(
 		slog.Error("connect Mongo for Cassandra soak", "error", err)
 		return 1
 	}
-	defer mongoutil.Disconnect(context.Background(), client)
+	defer func() {
+		if !fastLeaseAbort {
+			mongoutil.Disconnect(context.Background(), client)
+		}
+	}()
 	store := &mongoSoakStore{db: client.Database(cfg.MongoDB)}
 
 	topology, err := store.LoadTopology(ctx, cfg.Soak.RunID, cfg.SiteID)
@@ -451,6 +462,9 @@ func runSoakWorkload(
 		slog.Error("load Cassandra soak topology", "runId", cfg.Soak.RunID, "error", err)
 		return 1
 	}
+	slog.Info("Cassandra soak topology loaded",
+		append([]any{"runId", cfg.Soak.RunID},
+			summarizeSoakTopology(&topology, cfg.Soak.SendRate).LogValues()...)...)
 	selector, err := newSoakRuntimeSelector(&topology, &cfg.Soak, seed)
 	if err != nil {
 		slog.Error("prepare Cassandra soak distributions", "error", err)
@@ -458,18 +472,30 @@ func runSoakWorkload(
 	}
 
 	metrics := NewMetrics()
+	heartbeatStatus := newSoakHeartbeatStatus(metrics)
+	shutdownMongoProbe := startSoakMongoProbe(ctx, client, metrics, time.Now)
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownMongoProbe()
+		}
+	}()
 	reconcileBreaches := warnSoakReconcileConfig(&cfg.Soak)
 	setSoakRunInfo(metrics, cfg.Soak.Environment)
-	defer metrics.stopNATSHealth()
+	defer func() {
+		if !fastLeaseAbort {
+			metrics.stopNATSHealth()
+		}
+	}()
 	nc, err := dialNATSWithMetrics(cfg.NatsURL, cfg.NatsCredsFile, metrics)
 	if err != nil {
 		slog.Error("connect NATS for Cassandra soak", "error", err)
 		return 1
 	}
 	defer func() {
-		if err := nc.Drain(); err != nil {
-			slog.Error("drain Cassandra soak NATS connection", "error", err)
+		if fastLeaseAbort {
+			return
 		}
+		drainSoakNATS(nc.NatsConn(), leaseShutdownBudget, invalidateEvidence)
 	}()
 	// Fail before any load is generated: derive max_payload from the connected
 	// server's INFO so non-default brokers are neither overrun nor needlessly
@@ -485,6 +511,9 @@ func runSoakWorkload(
 
 	metricsServer := startSoakMetricsServer(cfg.MetricsAddr, metrics)
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
@@ -499,6 +528,9 @@ func runSoakWorkload(
 	}
 	if pprofServer != nil {
 		defer func() {
+			if fastLeaseAbort {
+				return
+			}
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := pprofServer.Shutdown(shutdownCtx); err != nil {
@@ -523,6 +555,9 @@ func runSoakWorkload(
 			heapProfiler.Run(profileCtx, profileTicker.C)
 		}()
 		defer func() {
+			if fastLeaseAbort {
+				return
+			}
 			stopProfiling()
 			<-profileDone
 		}()
@@ -558,7 +593,11 @@ func runSoakWorkload(
 	if dropped := ledger.Snapshot().Dropped; dropped > 0 {
 		metrics.FailureDropped.Add(float64(dropped))
 	}
+	invalidateEvidence = ledger.Invalidate
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		err := ledger.Close()
 		if err != nil {
 			slog.Error("close Cassandra soak failure ledger", "error", err)
@@ -623,7 +662,11 @@ func runSoakWorkload(
 			<-expiryDone
 		})
 	}
-	defer shutdownExpiry()
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownExpiry()
+		}
+	}()
 	consumerSamplerCtx, stopConsumerSamplers := context.WithCancel(context.Background())
 	var consumerSamplerWG sync.WaitGroup
 	js, jetStreamErr := jetstream.New(nc.NatsConn())
@@ -661,7 +704,11 @@ func runSoakWorkload(
 			consumerSamplerWG.Wait()
 		})
 	}
-	defer shutdownConsumerSamplers()
+	defer func() {
+		if !fastLeaseAbort {
+			shutdownConsumerSamplers()
+		}
+	}()
 	if cfg.Soak.RecipientObserverEnabled {
 		recipientObserver := observationRuntime.Recipient()
 		recipientSource := newPooledNATSFailureRecipientSource(
@@ -687,6 +734,9 @@ func runSoakWorkload(
 		}
 	}
 	defer func() {
+		if fastLeaseAbort {
+			return
+		}
 		if err := observationRuntime.Close(); err != nil {
 			slog.Error("shutdown recipient observer", "error", err)
 		}
@@ -777,7 +827,11 @@ func runSoakWorkload(
 		slog.Error("subscribe Cassandra soak send responses", "error", err)
 		return 1
 	}
-	defer func() { _ = responseSub.Unsubscribe() }()
+	defer func() {
+		if !fastLeaseAbort {
+			_ = responseSub.Unsubscribe()
+		}
+	}()
 
 	if err := runSoakEncryptionPreflight(
 		ctx,
@@ -1078,13 +1132,13 @@ func runSoakWorkload(
 		},
 		MemberMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.MemberMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak member mutation", "error", err)
+				slog.Error("run Cassandra soak member mutation", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room mutation", "error", err)
+				slog.Error("run Cassandra soak room mutation", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
@@ -1095,7 +1149,7 @@ func runSoakWorkload(
 			if roomReconcileGate.Allow() {
 				reconciled, err := roomLanes.Reconcile(actionCtx, roomVerifier)
 				if err != nil {
-					slog.Error("reconcile Cassandra soak room operation", "error", err)
+					slog.Error("reconcile Cassandra soak room operation", soakErrorAttrs(err)...)
 				}
 				if reconciled {
 					return nil
@@ -1116,37 +1170,37 @@ func runSoakWorkload(
 				}
 			}
 			if err := roomReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room read", "error", err)
+				slog.Error("run Cassandra soak room read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		UserRead: func(actionCtx context.Context, _ bool) error {
 			if err := userReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak user read", "error", err)
+				slog.Error("run Cassandra soak user read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		SearchRead: func(actionCtx context.Context, _ bool) error {
 			if err := searchReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak search read", "error", err)
+				slog.Error("run Cassandra soak search read", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room create", "error", err)
+				slog.Error("run Cassandra soak room create", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		ReadReceipt: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.ReadReceipt(actionCtx); err != nil {
-				slog.Error("run Cassandra soak read receipt", "error", err)
+				slog.Error("run Cassandra soak read receipt", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
 		Presence: func(actionCtx context.Context, _ bool) error {
 			if err := presenceLane.Signal(actionCtx); err != nil {
-				slog.Error("run Cassandra soak presence signal", "error", err)
+				slog.Error("run Cassandra soak presence signal", soakErrorAttrs(err)...)
 			}
 			return nil
 		},
@@ -1159,8 +1213,26 @@ func runSoakWorkload(
 		now,
 		nil,
 		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
+		withSoakHeartbeatObserver(heartbeatStatus),
+		withSoakFailureInvalidation(ledger.Invalidate),
 	)
 	result, runErr := workload.Run(workloadCtx)
+	if errors.Is(runErr, errSoakHeartbeatLeaseAtRisk) {
+		// Half the margin went to draining the lanes; the rest is all the
+		// shutdown may spend, and the NATS drain is the part of it that can
+		// still put traffic on the wire.
+		leaseShutdownBudget = cfg.Soak.HeartbeatInterval / 2
+	}
+	if result.LeaseAbort {
+		fastLeaseAbort = true
+		stopWorkload(runErr)
+		slog.Error(
+			"bypass graceful soak cleanup after lease abort",
+			"consequence", "process must exit before the teardown lease becomes stale",
+			"error", runErr,
+		)
+		return 1
+	}
 	shutdownExpiry()
 	shutdownConsumerSamplers()
 	if err := observationRuntime.Close(); err != nil {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { NatsContext } from '../NatsContext/NatsContext'
-import { RoomEventsProvider, useRoomSummaries } from './RoomEventsContext'
+import { RoomEventsProvider, useRoomSummaries, useSidebarSections } from './RoomEventsContext'
 import { CACHE_KEY, loadSubscriptionCache, saveSubscriptionCache } from '@/lib/subscriptionCache'
 
 vi.mock('@/context/RoomKeysContext', () => ({
@@ -55,9 +55,16 @@ function mockNats({ request, subscribe } = {}) {
 
 function Probe() {
   const { summaries, error } = useRoomSummaries()
+  const sections = useSidebarSections()
+  const previews = sections
+    .flatMap((s) => s.rooms)
+    .map((r) => `${r.id}:${r.preview?.text ?? ''}`)
+    .sort()
+    .join(',')
   return (
     <div>
       <div data-testid="ids">{summaries.map((r) => r.id).sort().join(',')}</div>
+      <div data-testid="previews">{previews}</div>
       <div data-testid="error">{error ?? ''}</div>
     </div>
   )
@@ -172,6 +179,104 @@ describe('RoomEventsProvider: subscription cache', () => {
     unmount()
     await new Promise((r) => setTimeout(r, 1100))
     expect(Object.keys(loadSubscriptionCache(USER)?.subscriptions ?? {})).toEqual(['r1'])
+  })
+
+  it('replaces a cached preview with the fresher one the bootstrap fetched', async () => {
+    // Re-login regression: hydration seeds previews from the PREVIOUS session's
+    // cached previewMessage, so the sidebar must still take the newer snippet
+    // `subscription.list` returns rather than keeping the stale one.
+    const previewMessage = (messageId, content, createdAt) => ({
+      messageId,
+      sender: { account: 'bob', displayName: 'Bob Lin' },
+      content,
+      createdAt,
+    })
+    seedCache({
+      r1: sub('r1', {
+        room: {
+          userCount: 3,
+          lastMsgAt: '2026-08-01T00:00:00Z',
+          crossSite: false,
+          previewMessage: previewMessage('m-old', 'last session', '2026-08-01T00:00:00Z'),
+        },
+      }),
+    })
+    render(wrap(mockNats()))
+    expect(screen.getByTestId('previews').textContent).toBe('r1:last session')
+
+    const fresh = sub('r1', {
+      room: {
+        userCount: 3,
+        lastMsgAt: '2026-08-02T00:00:00Z',
+        crossSite: false,
+        previewMessage: previewMessage('m-new', 'newest message', '2026-08-02T00:00:00Z'),
+      },
+    })
+    const request = bucketRequest({ favorites: [], apps: [], rooms: [fresh] })
+    render(wrap(mockNats({ request })))
+    await waitFor(() =>
+      expect(screen.getAllByTestId('previews').at(-1).textContent).toBe('r1:newest message'),
+    )
+  })
+
+  it('paints last session\'s newest snippet on the very first render', async () => {
+    // The cached subscription's previewMessage is the bootstrap snapshot from
+    // the previous session; the persisted preview is where its live messages
+    // landed. The warm paint must show the latter.
+    seedCache(
+      {
+        r1: sub('r1', {
+          room: {
+            userCount: 3,
+            lastMsgAt: '2026-08-01T00:00:00Z',
+            crossSite: false,
+            previewMessage: {
+              messageId: 'm-old',
+              sender: { account: 'bob', displayName: 'Bob Lin' },
+              content: 'bootstrap snapshot',
+              createdAt: '2026-08-01T00:00:00Z',
+            },
+          },
+        }),
+      },
+      {
+        previews: {
+          r1: {
+            messageId: 'm-live',
+            senderName: 'Bob Lin',
+            text: 'arrived while I was logged in',
+            createdAt: '2026-08-02T00:00:00Z',
+          },
+        },
+      },
+    )
+    render(wrap(mockNats()))
+    expect(screen.getByTestId('previews').textContent).toBe('r1:arrived while I was logged in')
+  })
+
+  it('persists the previews it holds for the next session', async () => {
+    const request = bucketRequest({
+      favorites: [],
+      apps: [],
+      rooms: [sub('r1', {
+        room: {
+          userCount: 3,
+          lastMsgAt: '2026-08-02T00:00:00Z',
+          crossSite: false,
+          previewMessage: {
+            messageId: 'm-new',
+            sender: { account: 'bob', displayName: 'Bob Lin' },
+            content: 'newest message',
+            createdAt: '2026-08-02T00:00:00Z',
+          },
+        },
+      })],
+    })
+    render(wrap(mockNats({ request })))
+    await waitFor(
+      () => expect(loadSubscriptionCache(USER)?.previews?.r1?.text).toBe('newest message'),
+      { timeout: 3000 },
+    )
   })
 
   it('writes nothing when storage is unavailable', async () => {

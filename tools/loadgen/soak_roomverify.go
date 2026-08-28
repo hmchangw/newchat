@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+const (
+	soakRoomStateTimeout    = 5 * time.Second
+	soakRoomStateRPCTimeout = 2 * time.Second
+)
+
 // Attribute keys the room and member lanes stamp on an operation so the
 // observer can reconstruct the expected final state without holding run state
 // in memory. They survive a restart because they live in the WAL record.
@@ -45,12 +50,14 @@ const (
 // the RPC settles alone is a positive: if room-service already shows the effect,
 // the write landed.
 type soakRoomStateVerifier struct {
-	reader  *soakRoomReader
-	store   soakRoomStateStore
-	siteID  string
-	metrics *Metrics
-	health  *failureObserverHealth
-	now     func() time.Time
+	reader     *soakRoomReader
+	store      soakRoomStateStore
+	siteID     string
+	metrics    *Metrics
+	health     *failureObserverHealth
+	now        func() time.Time
+	timeout    time.Duration
+	rpcTimeout time.Duration
 }
 
 func newSoakRoomStateVerifier(
@@ -67,6 +74,7 @@ func newSoakRoomStateVerifier(
 	return &soakRoomStateVerifier{
 		reader: reader, store: store, siteID: siteID,
 		metrics: metrics, health: health, now: now,
+		timeout: soakRoomStateTimeout, rpcTimeout: soakRoomStateRPCTimeout,
 	}
 }
 
@@ -82,6 +90,16 @@ func (v *soakRoomStateVerifier) Verify(
 		return soakRoomStateUnknown, failureReasonNone,
 			fmt.Errorf("soak room state verification requires an operation")
 	}
+	timeout := v.timeout
+	if timeout <= 0 {
+		timeout = soakRoomStateTimeout
+	}
+	// Keep the complete two-source probe bounded, but cap the RPC phase sooner
+	// so a service timeout cannot consume the authoritative Mongo fallback's
+	// entire budget. A fast healthy RPC still settles without touching Mongo.
+	verifyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ctx = verifyCtx
 	// A created room is identified by the name journaled before the request,
 	// because its ID does not exist until the server answers.
 	if operation.OperationType == failureOperationRoomCreate {
@@ -138,7 +156,10 @@ func (v *soakRoomStateVerifier) verifyMember(
 
 	rpc := soakRoomStateUnknown
 	if requester, ok := v.readerAccount(roomID, operation); ok {
-		if response, err := v.reader.RoomState(ctx, roomID, requester); err == nil {
+		rpcCtx, cancel := v.rpcContext(ctx)
+		response, err := v.reader.RoomState(rpcCtx, roomID, requester)
+		cancel()
+		if err == nil {
 			rpc = soakRoomStateAbsent
 			for i := range response.Members {
 				if response.Members[i].Member.Account == account {
@@ -190,7 +211,10 @@ func (v *soakRoomStateVerifier) verifyRename(
 	// it a store-only verifier panics instead of falling back to the store.
 	rpc := soakRoomStateUnknown
 	if v.reader != nil {
-		if info, err := v.reader.RoomInfoFor(ctx, roomID); err == nil {
+		rpcCtx, cancel := v.rpcContext(ctx)
+		info, err := v.reader.RoomInfoFor(rpcCtx, roomID)
+		cancel()
+		if err == nil {
 			rpc = classifySoakRoomName(info.Found, info.Name, expected, previous)
 		}
 	}
@@ -227,7 +251,10 @@ func (v *soakRoomStateVerifier) verifyMute(
 
 	rpc := soakRoomStateUnknown
 	if v.reader != nil {
-		if response, err := v.reader.SubscriptionFor(ctx, account, roomID); err == nil {
+		rpcCtx, cancel := v.rpcContext(ctx)
+		response, err := v.reader.SubscriptionFor(rpcCtx, account, roomID)
+		cancel()
+		if err == nil {
 			rpc = soakRoomStateMismatch
 			for i := range response.Subscriptions {
 				if response.Subscriptions[i].RoomID != roomID {
@@ -320,7 +347,10 @@ func (v *soakRoomStateVerifier) verifyRead(
 
 	rpc := soakRoomStateUnknown
 	if v.reader != nil {
-		if response, err := v.reader.SubscriptionFor(ctx, account, roomID); err == nil {
+		rpcCtx, cancel := v.rpcContext(ctx)
+		response, err := v.reader.SubscriptionFor(rpcCtx, account, roomID)
+		cancel()
+		if err == nil {
 			rpc = soakRoomStateMismatch
 			for i := range response.Subscriptions {
 				if response.Subscriptions[i].RoomID != roomID {
@@ -410,6 +440,14 @@ func (v *soakRoomStateVerifier) readerAccount(
 	}
 	requester := operation.Attributes[soakFailureAttributeRequester]
 	return requester, requester != ""
+}
+
+func (v *soakRoomStateVerifier) rpcContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := v.rpcTimeout
+	if timeout <= 0 {
+		timeout = soakRoomStateRPCTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (v *soakRoomStateVerifier) countSource(source string, result soakRoomStateResult) {

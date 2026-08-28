@@ -31,6 +31,14 @@ func TestConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "chat", cfg.DirectWriteDB)
 }
 
+func TestConfig_ZeroMaxPoolSizeFails(t *testing.T) {
+	e := validEnv()
+	e["MONGO_MAX_POOL_SIZE"] = "0"
+	cfg, err := env.ParseAsWithOptions[config](env.Options{Environment: e})
+	require.NoError(t, err)
+	assert.Error(t, cfg.Pool.Validate(), "a zero MONGO_MAX_POOL_SIZE must be rejected")
+}
+
 func TestConfig_DirectModeRequiresWriteURI(t *testing.T) {
 	e := validEnv()
 	e["HR_SYNC_MODE"] = modeDirect

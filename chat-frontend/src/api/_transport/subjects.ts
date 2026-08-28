@@ -1,3 +1,10 @@
+// Subject builders take the account exactly as auth-service returned it in
+// `user.account`. That value has to match the JWT's own `account` tag, which
+// is what the scoped template's `chat.user.{{tag(account)}}.>` grant is
+// evaluated against — so it is used verbatim here. Do NOT re-normalise it: Go
+// and JavaScript disagree on non-ASCII lowercasing, and re-deriving would
+// reintroduce that divergence.
+
 // NATS subject builders — mirrors Go pkg/subject/subject.go
 // Keep in sync with the Go definitions when adding new subjects.
 

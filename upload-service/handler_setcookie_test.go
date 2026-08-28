@@ -23,7 +23,7 @@ func TestHandleSetCookie_SessionCaller_400(t *testing.T) {
 	c.Set(ctxUserKey, &AuthenticatedUser{User: model.User{Account: p.Account}, Session: &p})
 
 	NewHandler(nil, nil, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize,
-		0, nil, nil, testCacheMaxAge, false, &fakeDrive{}).HandleSetCookie(c)
+		0, nil, testCacheMaxAge, false, &fakeDrive{}).HandleSetCookie(c)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Empty(t, w.Header().Get("Set-Cookie"), "no cookie may be issued to a session caller")
@@ -42,7 +42,7 @@ func TestHandleSetCookie_Partitioned(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewHandler(nil, nil, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, nil, testCacheMaxAge, tt.partitioned, &fakeDrive{})
+			h := NewHandler(nil, nil, &fakeS3{}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, testCacheMaxAge, tt.partitioned, &fakeDrive{})
 
 			gin.SetMode(gin.TestMode)
 			w := httptest.NewRecorder()

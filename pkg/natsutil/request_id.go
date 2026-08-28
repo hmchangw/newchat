@@ -73,6 +73,20 @@ func NewMsg(ctx context.Context, subj string, data []byte) *nats.Msg {
 	}
 }
 
+// NewMsgEncoded is NewMsg plus a Nats-Encoding header when encoding is
+// non-empty. NewMsg returns a nil Header when ctx carries no request-id, so
+// this owns that guard — callers don't need to know the quirk.
+func NewMsgEncoded(ctx context.Context, subj string, data []byte, encoding string) *nats.Msg {
+	msg := NewMsg(ctx, subj, data)
+	if encoding != "" {
+		if msg.Header == nil {
+			msg.Header = nats.Header{}
+		}
+		msg.Header.Set(HeaderNatsEncoding, encoding)
+	}
+	return msg
+}
+
 // StampRequestID is the single boundary helper every NATS entry point should
 // use. It:
 //  1. Resolves the inbound X-Request-ID via idgen.ResolveRequestID (mint when
