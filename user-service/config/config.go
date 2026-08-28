@@ -84,11 +84,14 @@ type Config struct {
 	// large page issue several per site, so this is the knob that throttles the
 	// resulting downstream load without a rebuild.
 	MaxSiteFanout int `env:"MAX_SITE_FANOUT" envDefault:"8"`
-	// MaxBadgeSeedFanout bounds concurrent per-account badge seeds within one
-	// badge.count.batch. Each seed runs the unread aggregate (one Mongo
-	// connection) and opens its own MaxSiteFanout-bounded cross-site fan-out, so
-	// the worst-case concurrent RPC count is the product of the two — keep this
-	// at or below the Mongo pool size.
+	// MaxBadgeSeedFanout bounds concurrent per-account badge seeds within ONE
+	// badge.count.batch, and nothing rate-limits that subject: the reachable peak
+	// is this times MaxConcurrency, since every admitted handler may be a badge
+	// batch, with each seed opening its own MaxSiteFanout cross-site fan-out on
+	// top. A seed holds a Mongo connection only for the unread aggregate, not for
+	// the RPC half, and that pool ceiling is per replica-set member and shared
+	// with every other NATS handler. So this is NOT a knob to raise toward the
+	// pool size — single digits is the intended range.
 	MaxBadgeSeedFanout int `env:"MAX_BADGE_SEED_FANOUT" envDefault:"8"`
 	// Room sort-key cache for subscription.list (see
 	// mongorepo.NewSubscriptionRepo). An entry is at most TTL old and staleness
