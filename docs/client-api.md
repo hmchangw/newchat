@@ -605,7 +605,7 @@ pure-HTTP endpoint — it does **not** publish a message.
 | `ssoToken` | header | string | conditional | OIDC-issued SSO token; identifies the uploader. Required unless the session-token pair below is sent. |
 | `x-user-id` + `x-auth-token` | header | string | conditional | Botplatform session token (§10.1); identifies a bot/admin uploader. Required unless `ssoToken` is sent. |
 | `roomId` | path | string | yes | Target room ID; the caller must be a member. |
-| `file` | form file | file | yes | The single file, ≤ `FILE_UPLOAD_MAX_FILE_SIZE` (default 100 MiB). At most `MAX_ATTACHMENTS` (default 1) parts may be sent under this field; more is rejected with `too many files`. Its MIME type must pass the server's allow/deny lists (`FILE_UPLOAD_MEDIA_TYPE_WHITELIST`/`BLACKLIST`; `image/svg+xml` is blocked by default). |
+| `file` | form file | file | yes | The single file, ≤ `FILE_UPLOAD_MAX_FILE_SIZE` (default 100 MiB). At most `MAX_ATTACHMENTS` (default 1) parts may be sent under this field; more is rejected with `too many files`. The part's `Content-Type` is a hint, not the answer: when it is absent or `application/octet-stream`, the server derives the type from the file's leading bytes and its extension. The **resolved** type is what must pass the server's allow/deny lists (`FILE_UPLOAD_MEDIA_TYPE_WHITELIST`/`BLACKLIST`; `image/svg+xml` is blocked by default) and what comes back as `fileType`. |
 | `description` | form field | string | no | Optional attachment description. |
 
 #### Success response
@@ -627,7 +627,8 @@ pure-HTTP endpoint — it does **not** publish a message.
       "type": "file",
       "description": "Q2 report",
       "titleLink": "api/v1/file/rooms/abc123/file/drive-file-1?drive_host=https://drive.example.com",
-      "titleLinkDownload": true
+      "titleLinkDownload": true,
+      "fileType": "application/pdf"
     }
   ]
 }
@@ -898,7 +899,7 @@ any other attachment, and the media fields are absent.
 | `description` | string | Optional. |
 | `titleLink` | string | Relative download URL (the GET image endpoint). |
 | `titleLinkDownload` | boolean | Always `true`. |
-| `fileType` | string | Optional. Canonical lowercased MIME type, present on every attachment family. |
+| `fileType` | string | Optional. Canonical lowercased MIME type, present on every attachment family. Server-derived on upload — a declared type that is absent or `application/octet-stream` may be replaced by a more specific type detected from the file's bytes or extension; otherwise it stays `application/octet-stream`. |
 | `imageUrl` | string | Image only. Same as `titleLink`. |
 | `imageType` | string | Image only. MIME type. |
 | `imageSize` | number | Image only. Bytes. |
