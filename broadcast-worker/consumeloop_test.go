@@ -406,9 +406,18 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 
 	good := make(chan struct{}, 1)
 	var settled atomic.Int32
+	// Record what the handler could actually see, so a failure reports observed
+	// facts rather than asserting a cause. The drop hinges on
+	// DeliveryAttemptFromContext returning (>=2, true).
+	var lastAttempt atomic.Uint64
+	var attemptVisible atomic.Bool
 	// The production composition: the same Settle call and backoff schedule
 	// main.go's consume loop uses.
 	process := func(ctx context.Context, msg jetstream.Msg) {
+		if attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx); ok {
+			lastAttempt.Store(attempt)
+			attemptVisible.Store(true)
+		}
 		err := h.HandleMessage(ctx, msg.Data())
 		jsretry.Settle(ctx, msg, jsretry.LowLatencyBackoff, err)
 		settled.Add(1)
@@ -464,7 +473,10 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 			pending = info.NumAckPending
 		}
 		t.Fatalf("the resolvable reply was never delivered: %d unresolvable replies wedged the consumer "+
-			"(num_ack_pending=%d, cap=%d, settled=%d)", burst, pending, maxAckPending, settled.Load())
+			"(num_ack_pending=%d, cap=%d, settled=%d, lastAttempt=%d, attemptVisible=%t, need attempt >= parentResolveAttempts=%d); "+
+			"if attemptVisible is false the consume loop is not stamping delivery metadata into the handler context, so nothing can "+
+			"ever exhaust its retry budget — run TestDeliveryAttemptFromContext_AgainstRealJetStream in pkg/natsmetrics to confirm",
+			burst, pending, maxAckPending, settled.Load(), lastAttempt.Load(), attemptVisible.Load(), parentResolveAttempts)
 	}
 
 	// The burst must also have released every slot, not merely enough of them
@@ -515,8 +527,14 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T)
 		perParentFetcher{realParentID: "real-parent"}, false, subject.RouteGlobal)
 
 	var deliveries atomic.Int32
+	var mdLastAttempt atomic.Uint64
+	var mdAttemptVisible atomic.Bool
 	process := func(ctx context.Context, msg jetstream.Msg) {
 		deliveries.Add(1)
+		if attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx); ok {
+			mdLastAttempt.Store(attempt)
+			mdAttemptVisible.Store(true)
+		}
 		jsretry.Settle(ctx, msg, jsretry.LowLatencyBackoff, h.HandleMessage(ctx, msg.Data()))
 	}
 
@@ -551,8 +569,13 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T)
 
 	// The full LowLatencyBackoff chain is 66s, so 5s is well past the point where
 	// an uncapped retry would have delivered a third time.
-	require.Never(t, func() bool { return deliveries.Load() > parentResolveAttempts }, 5*time.Second, 100*time.Millisecond,
-		"an unresolvable reply kept retrying past its budget — it is burning MaxDeliver and holding an ack-pending slot")
+	if !assert.Never(t, func() bool { return deliveries.Load() > parentResolveAttempts }, 5*time.Second, 100*time.Millisecond,
+		"an unresolvable reply kept retrying past its budget — it is burning MaxDeliver and holding an ack-pending slot") {
+		t.Fatalf("retries were never capped: deliveries=%d lastAttempt=%d attemptVisible=%t (need attempt >= parentResolveAttempts=%d); "+
+			"if attemptVisible is false the consume loop is not stamping delivery metadata into the handler context — "+
+			"run TestDeliveryAttemptFromContext_AgainstRealJetStream in pkg/natsmetrics to confirm",
+			deliveries.Load(), mdLastAttempt.Load(), mdAttemptVisible.Load(), parentResolveAttempts)
+	}
 	info, err := e.cons.Info(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, info.NumAckPending, "the reply must be settled, not left pending")
