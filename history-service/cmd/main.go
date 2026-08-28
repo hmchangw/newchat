@@ -184,6 +184,20 @@ func main() {
 		slog.Info("subscription cache enabled", "size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL)
 	}
 
+	// Collapses the repeated account lookups a scroll-back makes while resolving
+	// legacy members_removed rows. Sized and expired like the other services
+	// fronting this store — see the config field for why the TTL is not longer.
+	var userSource service.UserStore = userStore
+	if cfg.UserCacheSize > 0 && cfg.UserCacheTTL > 0 {
+		uc, err := userstore.NewCache(userStore, cfg.UserCacheSize, cfg.UserCacheTTL)
+		if err != nil {
+			slog.Error("init user cache failed", "error", err)
+			os.Exit(1)
+		}
+		userSource = uc
+		slog.Info("user cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
+	}
+
 	var roomSource service.RoomRepository = roomRepo
 	if cfg.RoomCacheSize > 0 && cfg.RoomCacheTTL > 0 {
 		rc, err := readcache.NewRoomCache(roomRepo, cfg.RoomCacheSize, cfg.RoomCacheTTL)
@@ -217,7 +231,7 @@ func main() {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	opts = append(opts, service.WithPageBudget(pageBudget))
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
+	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
 	// per-site + metrics router options and the guard's admission cap; the

@@ -206,3 +206,19 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 }
+
+func TestValidate_RejectsNegativeUserCacheSize(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheSize = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_SIZE")
+}
+
+func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
+}

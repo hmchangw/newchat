@@ -96,6 +96,16 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// User profile cache, fronting both account lookups: the batch that resolves
+	// legacy members_removed display names, and reactions' single-account read,
+	// whose name is denormalized into the persisted ReactorInfo — so the TTL
+	// bounds how long a renamed user's reactions are written under the old name.
+	// Unprefixed and 10000/5m to match the six other services that front this
+	// same store, so a fleet-wide USER_CACHE_* change reaches history-service
+	// too. Set size or ttl to 0 to disable.
+	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
+
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
 
@@ -142,6 +152,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
+	}
+	if cfg.UserCacheSize < 0 {
+		return fmt.Errorf("USER_CACHE_SIZE must be >= 0, got %d", cfg.UserCacheSize)
+	}
+	if cfg.UserCacheTTL < 0 {
+		return fmt.Errorf("USER_CACHE_TTL must be >= 0, got %s", cfg.UserCacheTTL)
 	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
