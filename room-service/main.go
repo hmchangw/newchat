@@ -41,9 +41,17 @@ type config struct {
 	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
-	// MongoReadPreference routes the store's display/list reads to secondaries; the
-	// client stays on primary for authz/dedup/read-after-write.
+	// MongoReadPreference routes the store's display/list reads to secondaries.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// MongoClientReadPreference covers every handle WITHOUT an explicit override —
+	// plain collections inherit the client. primaryPreferred keeps authz/dedup/
+	// read-after-write on the primary in steady state, but falls back rather than
+	// failing when there is no primary to read from.
+	MongoClientReadPreference string `env:"MONGO_CLIENT_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
 	// so a burst can't open unbounded connections. Env tags already carry the
 	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
@@ -57,7 +65,7 @@ type config struct {
 	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"`
+	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -190,15 +198,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientReadPref, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo client read preference", "value", cfg.MongoClientReadPreference, "error", err)
+		os.Exit(1)
+	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo client read preference configured", "readPreference", clientReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
-	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
 	if err != nil {
 		slog.Error("open room key store failed", "error", err)
 		os.Exit(1)
