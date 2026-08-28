@@ -176,10 +176,11 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCReadReceiptList,
 		Subject: subject.MessageReadReceipt(message.Author, roomID, r.cfg.SiteID),
+		Account: message.Author, RoomID: roomID,
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Readers)
+		sample.countRows(len(response.Readers))
 	})
 }
 
@@ -194,9 +195,10 @@ func (r *soakRoomReader) ListMembers(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCMemberList,
 		Subject: subject.MemberList(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Members)
+		sample.countRows(len(response.Members))
 	})
 	return response, err
 }
@@ -214,7 +216,7 @@ func (r *soakRoomReader) RoomsInfo(ctx context.Context) error {
 		Body:    soakRoomsInfoRequest{RoomIDs: roomIDs},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Rooms)
+		sample.countRows(len(response.Rooms))
 	})
 }
 
@@ -228,6 +230,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 	return r.call(ctx, soakRPCRequest{
 		Action:  soakRPCSubscriptionList,
 		Subject: subject.UserSubscriptionList(account, r.cfg.SiteID),
+		Account: account,
 		Body: soakSubscriptionListRequest{
 			Type:               soakSubscriptionListType,
 			Limit:              r.cfg.SubscriptionListLimit,
@@ -235,7 +238,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Subscriptions)
+		sample.countRows(len(response.Subscriptions))
 	})
 }
 
@@ -253,9 +256,10 @@ func (r *soakRoomReader) RoomState(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.MemberList(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.Messages = len(response.Members)
+		sample.countRows(len(response.Members))
 	})
 	return response, err
 }
@@ -269,9 +273,12 @@ func (r *soakRoomReader) RoomInfoFor(ctx context.Context, roomID string) (soakRo
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.RoomsInfoBatchSubscribe(r.cfg.SiteID),
+		RoomID:  roomID,
 		Body:    soakRoomsInfoRequest{RoomIDs: []string{roomID}},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
+		// One room in, one room back. Counting it would stand a constant beside
+		// RoomState's member list, which shares this action label.
 		sample.Messages = len(response.Rooms)
 	})
 	if err != nil {
@@ -303,6 +310,7 @@ func (r *soakRoomReader) SubscriptionFor(
 	err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomStateRead,
 		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakUserRoomRequest{RoomID: roomID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
@@ -361,6 +369,7 @@ func (r *soakRoomReader) pickRoomBatch() []string {
 	return batch
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakRoomReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -373,13 +382,14 @@ func (r *soakRoomReader) call(
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
 	sample := soakReadSample{
-		Action: request.Action, Latency: r.now().Sub(startedAt), Retries: result.Retries,
+		Action: request.Action, Latency: r.now().Sub(startedAt),
+		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		r.record(&sample)
-		return fmt.Errorf("issue %s request: %w", request.Action, err)
+		return fmt.Errorf("room read lane: %w", err)
 	}
 	apply(&sample)
 	r.record(&sample)

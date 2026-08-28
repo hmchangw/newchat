@@ -61,6 +61,9 @@ func (m *soakRoomMutator) AddMember(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMemberAdd,
 		Subject: subject.MemberAdd(requester, roomID, m.siteID),
+		// The requester is who the RPC is addressed as; the member being added
+		// is in the body, and naming it here would point at the wrong account.
+		Account: requester, RoomID: roomID,
 		Body:    soakAddMembersRequest{RoomID: roomID, Users: []string{account}},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
@@ -99,6 +102,7 @@ func (m *soakRoomMutator) Rename(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomRename,
 		Subject: subject.RoomRename(requester, roomID, m.siteID),
+		Account: requester, RoomID: roomID,
 		Body:    soakRoomRenameRequest{NewName: newName},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
@@ -118,6 +122,7 @@ func (m *soakRoomMutator) ToggleMute(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMuteToggle,
 		Subject: subject.MuteToggle(account, roomID, m.siteID),
+		Account: account, RoomID: roomID,
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
 		// Mute is applied inline, so a recognised reply is proof of the stored
@@ -142,6 +147,7 @@ func (m *soakRoomMutator) MarkRead(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCMessageRead,
 		Subject: subject.MessageRead(account, roomID, m.siteID),
+		Account: account, RoomID: roomID,
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, roomID, func(outcome *soakRoomMutationOutcome) {
 		outcome.Accepted = reply.Status == soakRoomStatusAccepted
@@ -161,6 +167,7 @@ func (m *soakRoomMutator) CreateRoom(
 	return m.call(ctx, soakRPCRequest{
 		Action:  soakRPCRoomCreate,
 		Subject: subject.RoomCreate(requester, m.siteID),
+		Account: requester,
 		Body:    soakCreateRoomRequest{Name: name, Users: users},
 		Timeout: m.timeout, RetryMode: soakRetryNever,
 	}, &reply, "", func(outcome *soakRoomMutationOutcome) {
@@ -176,6 +183,7 @@ const (
 	soakRoomStatusOK = "ok"
 )
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (m *soakRoomMutator) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -194,7 +202,7 @@ func (m *soakRoomMutator) call(
 	outcome.ErrorClass = result.ErrorClass
 	outcome.ErrorReason = result.ErrorReason
 	if err != nil {
-		return outcome, fmt.Errorf("issue %s request: %w", request.Action, err)
+		return outcome, fmt.Errorf("room mutation lane: %w", err)
 	}
 	apply(&outcome)
 	return outcome, nil

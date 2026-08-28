@@ -238,6 +238,8 @@
         "userReadRate",
         "subscriptionListLimit",
         "subscriptionListIncludeLastMessage",
+        "roomZipfS",
+        "roomZipfV",
         "searchReadRate",
         "searchSettle",
         "roomCreateRate",
@@ -310,6 +312,23 @@
         "userReadRate": {"type": "string", "minLength": 1},
         "subscriptionListLimit": {"type": "string", "pattern": "^([0-9]+)?$"},
         "subscriptionListIncludeLastMessage": {"type": "string", "enum": ["", "true", "false"]},
+        "roomZipfS": {
+          "type": "string",
+          "description": "Zipf exponent. Must be greater than 1; empty leaves the Go default (1.2). math/rand returns a nil generator at or below 1, so a value Helm accepted but the runtime rejects would only surface as a crash-looping pod.",
+          "anyOf": [
+            {"const": ""},
+            {"pattern": "^([2-9][0-9]*|[1-9][0-9]+)(\\.[0-9]+)?$"},
+            {"pattern": "^1\\.[0-9]*[1-9][0-9]*$"}
+          ]
+        },
+        "roomZipfV": {
+          "type": "string",
+          "description": "Zipf offset. Must be at least 1; empty leaves the Go default (1.0). Larger flattens the room distribution.",
+          "anyOf": [
+            {"const": ""},
+            {"pattern": "^[1-9][0-9]*(\\.[0-9]+)?$"}
+          ]
+        },
         "searchReadRate": {"type": "string", "minLength": 1},
         "searchSettle": {"type": "string", "minLength": 1},
         "roomCreateRate": {"type": "string", "minLength": 1},

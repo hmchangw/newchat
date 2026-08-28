@@ -36,3 +36,14 @@ func TestRoundTrip(t *testing.T) {
 	ts := time.Date(2025, 1, 1, 5, 0, 0, 0, loc)
 	require.Equal(t, ts.UnixMilli(), *TimeToMillis(&ts))
 }
+
+func TestCoalesce(t *testing.T) {
+	a := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	b := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+	assert.Same(t, &a, Coalesce(&a, &b), "first non-nil wins")
+	assert.Same(t, &b, Coalesce(nil, &b), "nil first ⇒ second")
+	assert.Nil(t, Coalesce[time.Time](nil, nil), "both nil ⇒ nil")
+
+	ms := int64(42)
+	assert.Same(t, &ms, Coalesce(&ms, nil), "works for the millis shape too")
+}

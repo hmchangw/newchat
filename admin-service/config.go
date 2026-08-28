@@ -33,6 +33,7 @@ type Config struct {
 	MongoDB               string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername         string `env:"MONGO_USERNAME"`
 	MongoPassword         string `env:"MONGO_PASSWORD"`
+	ReadPreference        string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	BcryptCost            int    `env:"BCRYPT_COST" envDefault:"10"`
 	SessionsMaxPerAccount int    `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
 	// NatsURL backs the room-service RPC behind the duty toggle. Required: the

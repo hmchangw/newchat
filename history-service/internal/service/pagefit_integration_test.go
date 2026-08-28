@@ -28,9 +28,9 @@ func TestLoadHistory_TrimmedPagination_Integration(t *testing.T) {
 
 	// A budget that admits only a handful of these rows, so the walk takes
 	// several trimmed pages rather than one.
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil,
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil,
 		&config.Config{MessageHistoryFloorDays: 730, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true},
-		WithPageBudget(pagefit.NewBudget(8<<10, 0)))
+		WithPageBudget(pagefit.NewBudget(8<<10, 0))))
 
 	const (
 		roomID  = "r-pagefit"
@@ -95,9 +95,9 @@ func TestLoadHistory_TrimmedPagination_Integration(t *testing.T) {
 func TestLoadHistory_EqualTimestampsSurviveTrimming_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
-	svc := New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil,
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil,
 		&config.Config{MessageHistoryFloorDays: 730, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true},
-		WithPageBudget(pagefit.NewBudget(6<<10, 0)))
+		WithPageBudget(pagefit.NewBudget(6<<10, 0))))
 
 	const (
 		roomID  = "r-ties"

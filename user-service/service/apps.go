@@ -104,7 +104,7 @@ func (s *UserService) publishAppSubscriptionReactivated(c *natsrouter.Context, a
 		Subscription: subCopy,
 		Action:       "added",
 		RoomName:     roomName,
-		AppInfo:      &model.CounterpartAppInfo{ID: app.ID, Name: app.Name, AssistantName: app.Assistant.Name},
+		AppInfo:      model.AppSubscriptionFromApp(app),
 		Timestamp:    time.Now().UTC().UnixMilli(),
 	}
 	data, _ := json.Marshal(evt) // primitives only; cannot fail

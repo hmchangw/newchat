@@ -25,6 +25,7 @@ type fakeBulkWriter struct {
 func (f *fakeBulkWriter) BulkUpdateRoomLastMessage(_ context.Context, updates map[string]roomLastMsgUpdate) error {
 	f.mu.Lock()
 	cp := make(map[string]roomLastMsgUpdate, len(updates))
+	//nolint:gocritic // rangeValCopy: updates is a map, so indexing buys nothing over the copy
 	for k, v := range updates {
 		cp[k] = v
 	}

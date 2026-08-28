@@ -17,6 +17,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred, not secondaryPreferred: InsertSession then FindSessionByHash
+	// on the next request is a read-after-write; secondary lag breaks auth after login.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	Pool mongoutil.PoolConfig
 	HTTP ginutil.TimeoutConfig

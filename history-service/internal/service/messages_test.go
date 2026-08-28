@@ -89,7 +89,7 @@ func newServiceWithRoomMock(t *testing.T, opts ...service.Option) (*service.Hist
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	return service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...), msgs, subs, rooms, pub, threadRooms, users, apps
+	return closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...)), msgs, subs, rooms, pub, threadRooms, users, apps
 }
 
 // assertInternalErr verifies err collapses to the generic "internal error" envelope at the
@@ -342,7 +342,7 @@ func TestHistoryService_LoadHistory_AccessErrorTakesPrecedence(t *testing.T) {
 		MaxPinnedPerRoom:        10,
 		PinEnabled:              true,
 	}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg))
 	c := testContext()
 
 	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, false, errors.New("access db error"))
@@ -2996,4 +2996,54 @@ func TestHistoryService_GetMessagesByIDs_QuoteRedaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Messages, 1)
 	assert.Equal(t, service.UnavailableQuoteMsg, result.Messages[0].QuotedParentMessage.Msg)
+}
+
+// A legacy members_removed row must come back name-resolved through the real
+// LoadHistory path, with one batched lookup.
+func TestHistoryService_LoadHistory_ResolvesRemovedMemberNames(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, users, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	// newServiceWithRoomMock leaves the read-floor read to the caller.
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	messages := []models.Message{{
+		MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute),
+		Type: "members_removed", Msg: "bob has been removed from the channel.",
+	}}
+	msgs.EXPECT().
+		GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(messages, false), nil)
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+		Return([]model.User{{Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}, nil).
+		Times(1)
+
+	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "Bob 鮑勃 has been removed from the channel.", resp.Messages[0].Msg)
+}
+
+// The ordinary page must not acquire a Mongo round trip: gomock fails the test
+// if FindUsersByAccounts is called without an expectation.
+func TestHistoryService_LoadHistory_OrdinaryPageIssuesNoUserLookup(t *testing.T) {
+	svc, msgs, subs, rooms, _, _, _, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	rooms.EXPECT().GetMinUserLastSeenAt(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(&joinTime, true, nil)
+
+	messages := []models.Message{{
+		MessageID: "m1", RoomID: "r1", CreatedAt: joinTime.Add(time.Minute), Msg: "hello",
+	}}
+	msgs.EXPECT().
+		GetMessagesBetweenDesc(gomock.Any(), "r1", joinTime, gomock.Any(), gomock.Any()).
+		Return(makePage(messages, false), nil)
+
+	resp, err := svc.LoadHistory(c, models.LoadHistoryRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, "hello", resp.Messages[0].Msg)
 }

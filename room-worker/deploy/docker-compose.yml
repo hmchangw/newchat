@@ -19,11 +19,12 @@ services:
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_KEY_READ_PREFERENCE=${MONGO_KEY_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
-      - ROOM_KEY_RETIRED_TTL=${ROOM_KEY_RETIRED_TTL:-20m}
+      - ROOM_KEY_RETIRED_TTL=${ROOM_KEY_RETIRED_TTL:-30m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       - ATREST_ENABLED=${ATREST_ENABLED:-true}
       - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}

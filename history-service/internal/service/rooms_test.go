@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,10 +22,19 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // newRoomsService builds a service with bare mocks; WithPreviewCache exercises the cache.
 func newRoomsService(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
+	return newRoomsServiceWithWarmer(t, 0, 0, opts...)
+}
+
+// newRoomsServiceWithWarmer sizes the background preview writer, for the tests that assert
+// on saturation; non-positive values take the production defaults. Warm-backs are queued,
+// so every caller drains on cleanup — that is what makes the mock's call count
+// deterministic. Registered after gomock's own cleanup so it runs first (LIFO).
+func newRoomsServiceWithWarmer(t *testing.T, warmWorkers, warmQueue int, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -34,9 +44,22 @@ func newRoomsService(t *testing.T, opts ...service.Option) (*service.HistoryServ
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
-	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...)
+	cfg := &config.Config{
+		MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true,
+		PreviewWarmBackWorkers: warmWorkers, PreviewWarmBackQueue: warmQueue,
+	}
+	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...))
 	return svc, msgs, rooms
+}
+
+// closeOnCleanup drains the service's background preview writer when the test ends. New
+// starts those workers, so every construction needs a termination path — and draining is
+// also what makes a queued warm-back's call count deterministic for the mock. Registered
+// after gomock's own cleanup so it runs first (LIFO).
+func closeOnCleanup(t *testing.T, svc *service.HistoryService) *service.HistoryService {
+	t.Helper()
+	t.Cleanup(func() { _ = svc.Close(context.Background()) })
+	return svc
 }
 
 func roomsCtx() *natsrouter.Context {
@@ -107,6 +130,7 @@ func TestHistoryService_RoomsGet_WarmBackIsOrderedByWalkTimeNotMessageAge(t *tes
 
 	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
+	require.NoError(t, svc.Close(context.Background()), "the warm-back is queued; drain before reading what it wrote")
 
 	assert.GreaterOrEqual(t, gotAsOf, before, "the watermark must be the walk's own clock")
 	assert.NotEqual(t, old.CreatedAt.UnixMilli(), gotAsOf, "ordering by the message's age deadlocks against mutation watermarks")
@@ -410,10 +434,11 @@ func TestHistoryService_RoomsGet_TooManyHints_BadRequest(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The warm-back is optional and holds one of the 16 lazy slots while it runs. When the
-// request budget cannot absorb it, serving the preview must beat storing it: a skipped
-// warm-back costs one re-walk on a later read, an overrun costs the whole response.
-func TestHistoryService_RoomsGet_SkipsWarmBackWhenTheRequestBudgetCannotAbsorbIt(t *testing.T) {
+// A spent request budget must not decide whether a room ever heals. The warm-back is
+// queued, not written inline, so the write keeps its own clock: the rooms that most need
+// repair are exactly the ones whose walk left no budget behind, and skipping them there
+// made the miss permanent — the next read re-walks, stays slow, and skips again.
+func TestHistoryService_RoomsGet_WarmsBackEvenWhenTheRequestBudgetIsSpent(t *testing.T) {
 	svc, msgs, rooms := newRoomsService(t)
 	walked := walkedMsg("r1", "m-walked", "resolved lazily")
 
@@ -421,7 +446,11 @@ func TestHistoryService_RoomsGet_SkipsWarmBackWhenTheRequestBudgetCannotAbsorbIt
 		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{walked}, false), nil)
-	// No SetPreviewMessage expectation: a warm-back on this budget fails the test.
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "r1", gomock.Any(), "m-walked", gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) error {
+			assert.NoError(t, ctx.Err(), "the queued write must not inherit the request's exhausted budget")
+			return nil
+		}).Times(1)
 
 	rc := roomsCtx()
 	deadlined, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -430,8 +459,159 @@ func TestHistoryService_RoomsGet_SkipsWarmBackWhenTheRequestBudgetCannotAbsorbIt
 
 	resp, err := svc.RoomsGet(rc, models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
-	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID,
-		"the resolved preview is still served when its warm-back is skipped")
+	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID)
+	require.NoError(t, svc.Close(context.Background()))
+}
+
+// The client hanging up cancels the request, never the repair it already paid for: the
+// walk has run, and dropping its result would make the next reader run it again.
+func TestHistoryService_RoomsGet_WarmBackSurvivesRequestCancellation(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	walked := walkedMsg("r1", "m-walked", "resolved lazily")
+
+	rc := roomsCtx()
+	cancellable, cancel := context.WithCancel(context.Background())
+	rc.SetContext(cancellable)
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walked}, false), nil)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "r1", gomock.Any(), "m-walked", gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) error {
+			assert.NoError(t, ctx.Err(), "a cancelled request must not cancel the queued write")
+			return nil
+		}).Times(1)
+
+	_, err := svc.RoomsGet(rc, models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	cancel()
+	require.NoError(t, svc.Close(context.Background()))
+}
+
+// Detaching from the request must not detach from its logs: the write is still that
+// request's work, and a warm-back failure is only diagnosable if it names the read.
+func TestHistoryService_RoomsGet_WarmBackCarriesTheRequestID(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	walked := walkedMsg("r1", "m-walked", "resolved lazily")
+
+	rc := roomsCtx()
+	rc.SetContext(natsutil.WithRequestID(context.Background(), "01970a4f-8c2d-7c9a-abcd-e0123456789f"))
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walked}, false), nil)
+	var gotID string
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "r1", gomock.Any(), "m-walked", gomock.Any()).
+		DoAndReturn(func(ctx context.Context, _ string, _ model.PreviewMessage, _ string, _ int64) error {
+			gotID = natsutil.RequestIDFromContext(ctx)
+			return nil
+		}).Times(1)
+
+	_, err := svc.RoomsGet(rc, models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.NoError(t, svc.Close(context.Background()))
+	assert.Equal(t, "01970a4f-8c2d-7c9a-abcd-e0123456789f", gotID)
+}
+
+// Saturation drops the write, never the reply. Queueing is what decouples the two, so an
+// unbounded queue would trade the old latency problem for a memory one; a dropped
+// warm-back is self-correcting, since the next read re-walks and re-submits.
+func TestHistoryService_RoomsGet_WarmBackDropsWhenTheWriterIsSaturated(t *testing.T) {
+	svc, msgs, rooms := newRoomsServiceWithWarmer(t, 1, 1)
+	release := make(chan struct{})
+	var writes atomic.Int32
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{
+			"r1": storedRow(nil), "r2": storedRow(nil), "r3": storedRow(nil), "r4": storedRow(nil),
+		}, nil).AnyTimes()
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, roomID string, _, _ time.Time, _ cassrepo.PageRequest) (cassrepo.Page[models.Message], error) {
+			return makePage([]models.Message{walkedMsg(roomID, "m-"+roomID, "resolved lazily")}, false), nil
+		}).AnyTimes()
+	// The single worker parks on the first write, so the queue fills and the rest are shed.
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, string, model.PreviewMessage, string, int64) error {
+			writes.Add(1)
+			<-release
+			return nil
+		}).AnyTimes()
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1", "r2", "r3", "r4"}})
+	require.NoError(t, err)
+	assert.Len(t, resp.Rooms, 4, "every preview is served even when its warm-back is shed")
+
+	close(release)
+	require.NoError(t, svc.Close(context.Background()))
+	assert.LessOrEqual(t, int(writes.Load()), 2, "a saturated writer sheds rather than queues without bound")
+}
+
+// Close is the queue's termination path: shutdown must flush what it accepted, so a
+// warm-back is not silently lost to a deploy.
+func TestHistoryService_Close_DrainsPendingWarmBacks(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+	walked := walkedMsg("r1", "m-walked", "resolved lazily")
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walked}, false), nil)
+	var written atomic.Bool
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), "r1", gomock.Any(), "m-walked", gomock.Any()).
+		DoAndReturn(func(context.Context, string, model.PreviewMessage, string, int64) error {
+			written.Store(true)
+			return nil
+		}).Times(1)
+
+	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.NoError(t, svc.Close(context.Background()))
+	assert.True(t, written.Load(), "Close must flush the queue it accepted work into")
+}
+
+// A read still in flight when shutdown starts must not send on the closed queue: the
+// warm-back is dropped, and the reply it belongs to is served as normal.
+func TestHistoryService_RoomsGet_WarmBackAfterCloseIsDroppedNotFatal(t *testing.T) {
+	svc, msgs, rooms := newRoomsService(t)
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walkedMsg("r1", "m-walked", "resolved lazily")}, false), nil)
+	// No SetPreviewMessage expectation: the writer is shut, so the job is shed.
+
+	require.NoError(t, svc.Close(context.Background()))
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID)
+}
+
+// Close is wired into a shutdown chain that may already be out of budget; it must give up
+// on the optional writes rather than hold the whole shutdown past its deadline.
+func TestHistoryService_Close_AbandonsTheDrainOnAnExpiredBudget(t *testing.T) {
+	svc, msgs, rooms := newRoomsServiceWithWarmer(t, 1, 8)
+	release := make(chan struct{})
+	defer close(release)
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walkedMsg("r1", "m-walked", "resolved lazily")}, false), nil)
+	rooms.EXPECT().SetPreviewMessage(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(context.Context, string, model.PreviewMessage, string, int64) error {
+			<-release
+			return nil
+		}).AnyTimes()
+
+	_, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+
+	expired, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.Error(t, svc.Close(expired), "an over-budget drain reports rather than blocks")
 }
 
 // Cancellation after the last lazy worker launches must not read as "these rooms have no

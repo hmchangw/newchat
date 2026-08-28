@@ -198,6 +198,156 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.WithinDuration(t, hss, *got.HistorySharedSince, time.Second)
 }
 
+// Pins every User field a room-service call site reads, and — above all —
+// that users.services never comes back.
+func TestMongoStore_GetUser_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertUser(t, db, &model.User{
+		ID: "uproj", Account: "alice", SiteID: "site-a",
+		EngName: "Alice", ChineseName: "愛麗絲",
+		Roles: []model.UserRole{model.UserRoleAdmin},
+		// Fields no room-service call site reads — the projection must drop them.
+		SectID: "s1", SectName: "Sect One", DeptID: "d1", DeptName: "Dept One",
+		EmployeeID: "E123", StatusText: "busy", StatusIsShow: true,
+		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: "$2a$10$hash"}},
+	})
+
+	got, err := store.GetUser(ctx, "alice")
+	require.NoError(t, err)
+	assert.Equal(t, "uproj", got.ID, "_id must be in the projection (BuildDMRoomID keys on it)")
+	assert.Equal(t, "alice", got.Account)
+	assert.Equal(t, "Alice", got.EngName, "engName must be in the projection (createRoom rejects a user with both names empty)")
+	assert.Equal(t, "愛麗絲", got.ChineseName)
+	require.NotNil(t, got.Roles, "roles must be in the projection (IsPlatformAdmin gates roomRename/roomRestricted)")
+	assert.True(t, model.IsPlatformAdmin(got))
+
+	assert.Empty(t, got.Services.Password.Bcrypt, "projection must exclude users.services — credential material must never leave Mongo on this path")
+	assert.Empty(t, got.SectName, "projection must exclude fields no room-service call site reads")
+	assert.Empty(t, got.DeptName)
+	assert.Empty(t, got.EmployeeID)
+	assert.Empty(t, got.StatusText)
+	assert.False(t, got.StatusIsShow)
+}
+
+// Pins the narrow app read: both call sites need only Assistant.Enabled.
+func TestMongoStore_GetApp_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	_, err := db.Collection("apps").InsertOne(ctx, model.App{
+		ID: "aproj", Name: "Weather", Description: "forecasts",
+		Version: "1.2.3", ReportURL: "https://example.invalid/report",
+		AppViewURL: map[string]string{"en": "https://example.invalid/view"},
+		Sponsors:   []model.AppSponsor{{}},
+		Assistant:  &model.AppAssistant{Enabled: true, Name: "weather.bot", Username: "weather"},
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetApp(ctx, "weather.bot")
+	require.NoError(t, err)
+	require.NotNil(t, got.Assistant, "assistant must be in the projection (botDM availability gates on Enabled)")
+	assert.True(t, got.Assistant.Enabled)
+	assert.Equal(t, "weather.bot", got.Assistant.Name)
+
+	assert.Empty(t, got.Name, "projection must exclude fields the bot-availability check doesn't use")
+	assert.Empty(t, got.Description)
+	assert.Empty(t, got.Version)
+	assert.Empty(t, got.ReportURL)
+	assert.Nil(t, got.AppViewURL)
+	assert.Nil(t, got.Sponsors)
+}
+
+// Pins the dedup read: both call sites use only RoomID.
+func TestMongoStore_FindDMSubscription_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastSeen := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	mustInsertSub(t, db, &model.Subscription{
+		ID:           "sdm",
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		Name:         "bob",
+		RoomID:       "dm-alice-bob",
+		RoomType:     model.RoomTypeDM,
+		SiteID:       "site-a",
+		Roles:        []model.Role{model.RoleOwner},
+		Alert:        true,
+		ThreadUnread: []string{"t1"},
+		LastSeenAt:   &lastSeen,
+	})
+
+	got, err := store.FindDMSubscription(ctx, "alice", "bob")
+	require.NoError(t, err)
+	assert.Equal(t, "dm-alice-bob", got.RoomID, "roomId must be in the projection (open-or-create returns it)")
+
+	assert.Empty(t, got.Roles, "projection must exclude fields the dedup check doesn't use")
+	assert.Empty(t, got.ThreadUnread)
+	assert.Nil(t, got.LastSeenAt)
+	assert.False(t, got.Alert)
+}
+
+// Pins the narrow thread read: messageThreadRead uses only ThreadRoomID.
+func TestMongoStore_GetThreadSubscriptionByParent_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastSeen := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{
+		ID:              "tsproj",
+		ParentMessageID: "pm1",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		UserID:          "u1",
+		UserAccount:     "alice",
+		SiteID:          "site-a",
+		LastSeenAt:      &lastSeen,
+		HasMention:      true,
+	})
+
+	got, err := store.GetThreadSubscriptionByParent(ctx, "alice", "pm1", "r1")
+	require.NoError(t, err)
+	assert.Equal(t, "tr1", got.ThreadRoomID, "threadRoomId must be in the projection (it is the only field the caller reads)")
+
+	assert.Empty(t, got.UserAccount, "projection must exclude fields the caller doesn't read")
+	assert.Empty(t, got.SiteID)
+	assert.Nil(t, got.LastSeenAt)
+	assert.False(t, got.HasMention)
+}
+
+// Guards the getRoomSubscriptions fallback (no room_members doc): dropping any
+// projected field zeroes it in the RoomMember result.
+func TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	joined := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Millisecond)
+	mustInsertSub(t, db, &model.Subscription{
+		ID:       "smember",
+		User:     model.SubscriptionUser{ID: "u7", Account: "carol"},
+		RoomID:   "rmembers",
+		SiteID:   "site-a",
+		Roles:    []model.Role{model.RoleOwner},
+		JoinedAt: joined,
+	})
+
+	got, err := store.ListRoomMembers(ctx, "rmembers", nil, nil, true)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "smember", got[0].ID, "_id must be in the projection (it is the RoomMember id)")
+	assert.Equal(t, "rmembers", got[0].RoomID)
+	assert.WithinDuration(t, joined, got[0].Ts, time.Second, "joinedAt must be in the projection (it is RoomMember.Ts)")
+	assert.Equal(t, "u7", got[0].Member.ID, "u._id must be in the projection (SubscriptionUser.ID maps to bson _id)")
+	assert.Equal(t, "carol", got[0].Member.Account, "u.account must be in the projection")
+	assert.True(t, got[0].Member.IsOwner, "roles must be in the projection (enrich derives IsOwner from it)")
+}
+
 func TestMongoStore_GetSubscriptionWithMembership_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)

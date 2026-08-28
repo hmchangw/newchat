@@ -330,12 +330,14 @@ func TestOrigin_BSONOnly(t *testing.T) {
 
 func TestRoomJSON(t *testing.T) {
 	lastMsg := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 1, 1, 18, 0, 0, 0, time.UTC)
 	lastMention := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
 	minSeen := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	r := model.Room{
 		ID: "r1", Name: "general", Type: model.RoomTypeChannel,
 		SiteID: "site-a", UserCount: 5,
 		LastMsgAt:         &lastMsg,
+		LastUserMsgAt:     &lastUserMsg,
 		LastMsgID:         "m1",
 		LastMentionAllAt:  &lastMention,
 		MinUserLastSeenAt: &minSeen,
@@ -361,6 +363,9 @@ func TestRoomJSON_NilTimestampsOmitted(t *testing.T) {
 	_, hasMsg := raw["lastMsgAt"]
 	assert.False(t, hasMsg, "nil LastMsgAt must be omitted from JSON")
 
+	_, hasUserMsg := raw["lastUserMsgAt"]
+	assert.False(t, hasUserMsg, "nil LastUserMsgAt must be omitted from JSON")
+
 	_, hasMention := raw["lastMentionAllAt"]
 	assert.False(t, hasMention, "nil LastMentionAllAt must be omitted from JSON")
 
@@ -370,6 +375,7 @@ func TestRoomJSON_NilTimestampsOmitted(t *testing.T) {
 	var dst model.Room
 	require.NoError(t, json.Unmarshal(data, &dst))
 	assert.Nil(t, dst.LastMsgAt, "absent JSON field must unmarshal to nil pointer")
+	assert.Nil(t, dst.LastUserMsgAt, "absent JSON field must unmarshal to nil pointer")
 	assert.Nil(t, dst.LastMentionAllAt, "absent JSON field must unmarshal to nil pointer")
 	assert.Nil(t, dst.MinUserLastSeenAt, "absent JSON field must unmarshal to nil pointer")
 }
@@ -1029,6 +1035,7 @@ func TestRoomEventJSON(t *testing.T) {
 			Mentions:   []model.Participant{{Account: "user-2", ChineseName: "user-2", EngName: "user-2"}, {Account: "user-3", ChineseName: "user-3", EngName: "user-3"}},
 			MentionAll: true,
 			HasMention: true,
+			SystemMsg:  true,
 			Message:    &model.ClientMessage{Message: msg, Sender: &model.Participant{UserID: "user-1", Account: "alice", ChineseName: "愛麗絲", EngName: "Alice Wang"}},
 		}
 
@@ -1043,6 +1050,15 @@ func TestRoomEventJSON(t *testing.T) {
 		if !reflect.DeepEqual(src, dst) {
 			t.Errorf("round-trip mismatch:\n  got  %+v\n  want %+v", dst, src)
 		}
+	})
+
+	t.Run("systemMsg omitted when false", func(t *testing.T) {
+		data, err := json.Marshal(model.RoomEvent{Type: model.RoomEventNewMessage, RoomID: "room-3"})
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, present := raw["systemMsg"]
+		assert.False(t, present, "omitempty must drop systemMsg=false")
 	})
 
 	t.Run("nil message and empty mentions omitted", func(t *testing.T) {
@@ -1358,10 +1374,10 @@ func TestSubscriptionUpdateEventCounterpartJSON(t *testing.T) {
 				Subscription: base,
 				Action:       "added",
 				RoomName:     "Helper",
-				AppInfo:      &model.CounterpartAppInfo{ID: "app-1", Name: "Helper", AssistantName: "helper.bot"},
+				AppInfo:      &model.AppSubscription{AppID: "app-1", Name: "Helper", Assistant: &model.AppAssistant{Name: "helper.bot", Enabled: true}},
 				Timestamp:    1735689600000,
 			},
-			wantKeys: []string{`"appInfo"`, `"id":"app-1"`, `"name":"Helper"`, `"assistantName":"helper.bot"`},
+			wantKeys: []string{`"appInfo"`, `"appId":"app-1"`, `"name":"Helper"`, `"helper.bot"`},
 			absent:   []string{`"hrInfo"`},
 		},
 		{
@@ -1415,16 +1431,6 @@ func TestCounterpartHRInfoJSON(t *testing.T) {
 	data, err := json.Marshal(model.CounterpartHRInfo{Account: "dave"})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"account":"dave"}`, string(data))
-}
-
-func TestCounterpartAppInfoJSON(t *testing.T) {
-	src := model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}
-	roundTrip(t, &src, &model.CounterpartAppInfo{})
-
-	// No field is omitempty, so a nameless app still ships all three keys.
-	data, err := json.Marshal(model.CounterpartAppInfo{ID: "app-2", AssistantName: "solo.bot"})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"id":"app-2","name":"","assistantName":"solo.bot"}`, string(data))
 }
 
 func TestInboxEventJSON(t *testing.T) {
@@ -2338,6 +2344,7 @@ func TestRoomInfoJSON(t *testing.T) {
 		pk := "dGVzdC1wcml2YXRlLWtleS1iYXNlNjQ="
 		kv := 7
 		lastMsg := int64(1735689600000)
+		lastUserMsg := int64(1735686000000)
 		lastMention := int64(1735693200000)
 		src := model.RoomInfo{
 			RoomID:           "r1",
@@ -2347,6 +2354,7 @@ func TestRoomInfoJSON(t *testing.T) {
 			UserCount:        42,
 			AppCount:         3,
 			LastMsgAt:        &lastMsg,
+			LastUserMsgAt:    &lastUserMsg,
 			LastMsgID:        "m-100",
 			LastMentionAllAt: &lastMention,
 			PrivateKey:       &pk,
@@ -5501,6 +5509,21 @@ func TestSubscriptionMentionEvent_RoundTrip(t *testing.T) {
 		Timestamp:   1755820800123,
 	}
 	roundTrip(t, src, &model.SubscriptionMentionEvent{})
+}
+
+// The client sees ONE activity timestamp. lastUserMsgAt is an internal field:
+// the server coalesces it into SubscriptionRoom.LastMsgAt at the wire boundary,
+// so a client never learns the distinction and never writes a fallback rule.
+// Reflection rather than a marshal check, because omitempty would hide a
+// re-introduced field whenever a test happens to leave it nil.
+func TestSubscriptionRoom_NeverExposesLastUserMsgAt(t *testing.T) {
+	rt := reflect.TypeOf(model.SubscriptionRoom{})
+	for i := range rt.NumField() {
+		tag := rt.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		assert.NotEqual(t, "lastUserMsgAt", name,
+			"field %s re-exposes the internal user-activity field; coalesce it into lastMsgAt instead", rt.Field(i).Name)
+	}
 }
 
 func TestUserAccountUpdated_RoundTrip(t *testing.T) {

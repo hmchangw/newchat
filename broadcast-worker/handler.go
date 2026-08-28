@@ -249,6 +249,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 		RoomID:        msg.RoomID,
 		MsgID:         msg.ID,
 		At:            msg.CreatedAt,
+		SystemMsg:     model.IsSystemMessageType(msg.Type),
 		MentionAll:    resolved.MentionAll,
 		Preview:       sealed,
 		PreviewFailed: sealFailed,
@@ -1212,6 +1213,7 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 		UserCount:      meta.UserCount,
 		LastMsgAt:      clientMsg.CreatedAt,
 		LastMsgID:      clientMsg.ID,
+		SystemMsg:      model.IsSystemMessageType(clientMsg.Type),
 		Message:        clientMsg,
 	}
 }
