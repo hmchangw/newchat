@@ -74,16 +74,31 @@ type Handler struct {
 	// ID) so the link is correct even on the outage path.
 	chatBaseURL string
 	metrics     *gatekeeperMetrics
+	// threadParentRecheckDelay spaces the single re-check of a thread parent that
+	// history reports missing. Zero disables the re-check.
+	threadParentRecheckDelay time.Duration
 }
 
 type gatekeeperHandlerOption func(*gatekeeperHandlerOptions)
 
 type gatekeeperHandlerOptions struct {
-	metrics *gatekeeperMetrics
+	metrics                  *gatekeeperMetrics
+	threadParentRecheckDelay *time.Duration
 }
 
 func withGatekeeperMetrics(metrics *gatekeeperMetrics) gatekeeperHandlerOption {
 	return func(opts *gatekeeperHandlerOptions) { opts.metrics = metrics }
+}
+
+// defaultThreadParentRecheckDelay covers the ordinary MESSAGES-CANONICAL lag
+// between a parent's publish and message-worker's Cassandra write. It is spent
+// only on a send already headed for rejection.
+const defaultThreadParentRecheckDelay = 150 * time.Millisecond
+
+// withThreadParentRecheckDelay overrides the re-check spacing; zero disables the
+// re-check, making a single missing-parent fetch decisive.
+func withThreadParentRecheckDelay(d time.Duration) gatekeeperHandlerOption {
+	return func(opts *gatekeeperHandlerOptions) { opts.threadParentRecheckDelay = &d }
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
@@ -97,18 +112,23 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 	if opts.metrics == nil {
 		opts.metrics = newGatekeeperMetrics(otel.Meter("message-gatekeeper"))
 	}
+	recheckDelay := defaultThreadParentRecheckDelay
+	if opts.threadParentRecheckDelay != nil {
+		recheckDelay = *opts.threadParentRecheckDelay
+	}
 	return &Handler{
-		store:              store,
-		users:              users,
-		publish:            publish,
-		reply:              reply,
-		siteID:             siteID,
-		parentFetcher:      parentFetcher,
-		largeRoomThreshold: largeRoomThreshold,
-		maxAttachments:     maxAttachments,
-		maxAttachmentBytes: maxAttachmentBytes,
-		chatBaseURL:        chatBaseURL,
-		metrics:            opts.metrics,
+		store:                    store,
+		users:                    users,
+		publish:                  publish,
+		reply:                    reply,
+		siteID:                   siteID,
+		parentFetcher:            parentFetcher,
+		largeRoomThreshold:       largeRoomThreshold,
+		maxAttachments:           maxAttachments,
+		maxAttachmentBytes:       maxAttachmentBytes,
+		chatBaseURL:              chatBaseURL,
+		metrics:                  opts.metrics,
+		threadParentRecheckDelay: recheckDelay,
 	}
 }
 
@@ -521,6 +541,22 @@ func (h *Handler) resolveThreadParent(
 		return nil, "", nil
 	}
 	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
+	if threadParentMissing(err) && h.threadParentRecheckDelay > 0 {
+		// The parent's Cassandra write belongs to message-worker, a parallel
+		// consumer of MESSAGES-CANONICAL, so a reply sent moments after its parent
+		// can reach here before the parent is readable — a window that widens to
+		// minutes whenever message-worker is backlogged. Re-check once so a send
+		// that is merely racing that write isn't rejected as unresolvable.
+		if werr := waitFor(ctx, h.threadParentRecheckDelay); werr != nil {
+			return nil, "", fmt.Errorf("re-check thread parent %s: %w", req.ThreadParentMessageID, werr)
+		}
+		snap, err = h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
+		if err == nil && snap != nil {
+			slog.InfoContext(ctx, "thread parent resolved on re-check; its write was still in flight",
+				"parent_message_id", req.ThreadParentMessageID,
+				"request_id", req.RequestID)
+		}
+	}
 	if err != nil || snap == nil {
 		// Terminal (not_found, forbidden, …): the parent will not resolve for any
 		// downstream consumer either, so reject here. Publishing it would hand

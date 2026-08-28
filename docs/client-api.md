@@ -6425,7 +6425,7 @@ Delivered on `chat.user.{account}.response.{requestId}`. See [Error envelope](#6
 | `visibleTo exceeds maximum size of 4096 bytes` | `bad_request` | — | `visibleTo` > 4096 bytes. |
 | `not subscribed` | `forbidden` | `not_subscribed` | Sender is not a member of the room. |
 | `posting is restricted to owners and admins in this room` | `forbidden` | `large_room_post_restricted` | Non-owner/admin/bot posting a top-level message in a room above the large-room threshold (thread replies are exempt). |
-| `thread parent message not found` | `not_found` | `thread_parent_not_found` | `threadParentMessageId` does not resolve to a message the sender can read. Rejected at send time: a reply whose parent never resolves cannot be persisted or fanned out by any downstream worker. |
+| `thread parent message not found` | `not_found` | `thread_parent_not_found` | `threadParentMessageId` does not resolve to a message the sender can read, on two lookups spaced `GATEKEEPER_THREAD_PARENT_RECHECK_DELAY` (150ms) apart — the second covers a parent whose own write is still in flight. Rejected at send time so the reply is never published to workers that would each retry and drop it. |
 | `quoted parent {id} not found` | `not_found` | — | The quoted message lookup failed (deleted, cross-room, …). |
 | `quoted parent {id} thread context mismatch: …` | `bad_request` | — | A quoted message must be in the same thread context (main-room or the same thread) as the new message — except a `tshow: true` thread reply, which may also be quoted from its parent channel room. |
 
