@@ -8198,11 +8198,11 @@ name and extension rules live there and are reported back verbatim on a `400`.
 | Status | Condition |
 |---|---|
 | `200 OK` | Both artifacts published. |
-| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the body exceeded `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (distinct message, names the limit), the upload did not finish within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
+| `400 Bad Request` | Body is not `multipart/form-data`, the multipart body was malformed or truncated, the body exceeded `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (distinct message, names the limit), the browser did not finish sending within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or `client-update-service` rejected the artifacts (its message is relayed). |
 | `401 Unauthorized` | Missing or invalid admin session. |
 | `403 Forbidden` | Valid session without the `admin` role, or issued for another site. |
 | `500 Internal Server Error` | This service could not extend its own I/O deadlines for the upload (deployment fault). |
-| `503 Service Unavailable` | `client-update-service` is unreachable, or this service's upload credential is not configured or was rejected. |
+| `503 Service Unavailable` | `client-update-service` is unreachable, did not answer within `CLIENT_UPDATE_UPLOAD_TIMEOUT` (distinct message), or this service's upload credential is not configured or was rejected. |
 
 ##### Success response (`200`)
 
@@ -8245,6 +8245,10 @@ before it dials upstream, because the outbound body is sent with an exact
 `Content-Length` and that length is only known once every part has arrived. Without
 a single budget the upstream call would start a second full timeout on top of the
 inbound one.
+
+Which half the budget ran out in decides the answer, because the two have
+different remedies: still receiving the browser's body is a `400` (the sender was
+too slow), still waiting on `client-update-service` is a `503` (the upstream was).
 
 The rest is ordered around it, so that whichever budget expires first the admin
 still gets an envelope rather than a dropped connection: that value < that value

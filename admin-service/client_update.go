@@ -84,8 +84,7 @@ func (u *httpVersionUploader) Upload(ctx context.Context, body *uploadBody) erro
 
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return errcode.Unavailable("client update service is unavailable",
-			errcode.WithCause(fmt.Errorf("post client update: %w", err)))
+		return uploadPostError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -93,6 +92,22 @@ func (u *httpVersionUploader) Upload(ctx context.Context, body *uploadBody) erro
 	// mapUpstreamStatus treats an unparseable body as no body at all.
 	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBodyReadLen))
 	return mapUpstreamStatus(resp.StatusCode, string(snippet))
+}
+
+// uploadPostError separates "the upstream never answered in time" from "the
+// upstream could not be reached". Both are 503 — neither is the admin's doing —
+// but only one is worth retrying at a larger CLIENT_UPDATE_UPLOAD_TIMEOUT, and
+// the generic message sent an operator looking for a down service instead.
+func uploadPostError(err error) error {
+	// The shared budget only ever surfaces as a context deadline here — resty's
+	// client timeout wraps one too. A transport-level i/o timeout (dial, TLS)
+	// deliberately does NOT match: that upstream is unreachable, not slow.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errcode.Unavailable("client update service did not respond in time",
+			errcode.WithCause(fmt.Errorf("post client update: %w", err)))
+	}
+	return errcode.Unavailable("client update service is unavailable",
+		errcode.WithCause(fmt.Errorf("post client update: %w", err)))
 }
 
 // mapUpstreamStatus turns client-update-service's verdict into this service's.

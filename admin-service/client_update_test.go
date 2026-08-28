@@ -217,6 +217,32 @@ func (zeroReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestHTTPVersionUploader_UpstreamTimeoutSaysSo(t *testing.T) {
+	// An upstream that accepts the body and then never answers: the budget runs
+	// out on the outbound half rather than the inbound one.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	u := newHTTPVersionUploader(srv.URL, "0123456789abcdef", 200*time.Millisecond)
+
+	err := u.Upload(context.Background(), testBody(strings.NewReader("x"), 1))
+
+	var ec *errcode.Error
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+	assert.Contains(t, ec.Message, "time",
+		"a budget that expired waiting on the upstream must not read as an unreachable upstream")
+	assert.NotContains(t, ec.Message, "unavailable")
+}
+
 func TestHTTPVersionUploader_TransportFailureIsUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // closed: every request fails at the transport
