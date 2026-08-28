@@ -43,9 +43,13 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
-	Pool          mongoutil.PoolConfig
-	Atrest        atrest.Config
-	Vault         atrest.VaultConfig `envPrefix:"VAULT_"`
+	// ReadPreference: the at-rest DEK collection is this service's only Mongo read.
+	// primaryPreferred, because a stale DEK read cannot diverge ($setOnInsert plus a
+	// re-read comparison) but a primary-only one blocks encryption outright.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool           mongoutil.PoolConfig
+	Atrest         atrest.Config
+	Vault          atrest.VaultConfig `envPrefix:"VAULT_"`
 
 	HealthAddr   string          `env:"HEALTH_ADDR"   envDefault:":8081"`
 	PProfEnabled bool            `env:"PPROF_ENABLED" envDefault:"false"`
@@ -97,16 +101,26 @@ func run() error {
 
 	bucket := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
 
+	// Validated unconditionally: parsing only inside the ATREST branch would let a
+	// bad value lie dormant and surface as a crash-loop at a later flag flip.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+
 	var cipher atrest.Cipher
 	var vaultWrapper atrest.KeyWrapperCloser
 	if cfg.Atrest.Enabled {
 		if cfg.MongoURI == "" {
 			return fmt.Errorf("ATREST_ENABLED=true requires MONGO_URI for the DEK collection")
 		}
-		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+			mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+			mongoutil.WithReadPreference(readPref))
 		if err != nil {
 			return fmt.Errorf("connect mongo: %w", err)
 		}
+		slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 		defer mongoutil.Disconnect(ctx, mc)
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
 		if err != nil {
