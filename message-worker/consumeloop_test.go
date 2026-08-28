@@ -192,6 +192,13 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	// main.go's consume goroutine — that is the wiring under test.
 	process := canonicalProcessor(h, nil, subject.MsgTeamsCanonicalBatch("site-salvage"))
 	var deliveries atomic.Int32
+	// lastAttempt/attemptVisible record what the handler could actually see, so a
+	// failure reports the observed facts rather than asserting a cause. The salvage
+	// hinges entirely on DeliveryAttemptFromContext returning (>=2, true); if the
+	// loop's Track/Context wiring or the broker's metadata is not what this test
+	// assumes, "attempt visible" goes false and names the real problem.
+	var lastAttempt atomic.Uint64
+	var attemptVisible atomic.Bool
 	go func() {
 		for {
 			msg, err := e.iter.Next()
@@ -202,6 +209,10 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 			msgCtx := context.Background()
 			tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), e.maxDeliver)
 			msgCtx = tracked.Context(msgCtx)
+			if attempt, ok := natsmetrics.DeliveryAttemptFromContext(msgCtx); ok {
+				lastAttempt.Store(attempt)
+				attemptVisible.Store(true)
+			}
 			process(msgCtx, tracked)
 			tracked.Finish(msgCtx)
 		}
@@ -222,8 +233,16 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	require.NoError(t, err)
 
 	// The reply must end up in history rather than being abandoned at MaxDeliver.
-	require.Eventually(t, func() bool { return len(store.savedMessages()) == 1 }, 20*time.Second, 50*time.Millisecond,
-		"the reply was never persisted — it was abandoned at MaxDeliver and is lost, with no dead-letter behind it")
+	if !assert.Eventually(t, func() bool { return len(store.savedMessages()) == 1 }, 20*time.Second, 50*time.Millisecond,
+		"the reply was never persisted — it is being retried to MaxDeliver and abandoned, with no dead-letter behind it") {
+		// Report what was observed instead of leaving the caller to guess. Either
+		// the handler never saw an exhausted budget (attempt never reached
+		// parentResolveAttempts, or was never visible at all — a wiring problem),
+		// or it saw it and still did not persist (a handler problem).
+		t.Fatalf("salvage never happened: deliveries=%d lastAttempt=%d attemptVisible=%t (need attempt >= parentResolveAttempts=%d); "+
+			"if attemptVisible is false the consume loop is not stamping delivery metadata into the handler context",
+			deliveries.Load(), lastAttempt.Load(), attemptVisible.Load(), parentResolveAttempts)
+	}
 
 	saved := store.savedMessages()[0]
 	assert.Equal(t, "orphan-reply", saved.ID)
