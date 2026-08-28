@@ -372,11 +372,15 @@ Rules:
   the durable is gone.
 - **`Stop` is not a barrier; `Closed` is.** `ConsumeContext.Stop` ends delivery and
   drops the buffer, but a handler already executing runs on (`pull.go:769`). So
-  `jsiter.ConsumeContext` requires `Closed() <-chan struct{}`, and the supervisor waits
-  on it (bounded by `releaseWait`) before opening a replacement — otherwise the old
-  callback and the redelivery it never acked run at once, which is exactly what a FIFO
-  lane must not do. `Supervisor.Stop` likewise returns only after every round, including
-  one still being opened, is released; do not call it from inside an `OpenConsume`.
+  `jsiter.ConsumeContext` requires `Closed() <-chan struct{}`, and a replacement round
+  never opens until it fires — otherwise the old callback and the redelivery it never
+  acked run at once, which is exactly what a FIFO lane must not do.
+  **Rounds never overlap, even at the cost of the lane.** If a handler is still running
+  after `releaseWait`, the supervisor ends supervision rather than start a replacement
+  over it: a stopped lane is visible on `/readyz`, while writes landing out of order are
+  not visible anywhere. Shutdown is the one exception — it has its own deadline, so
+  `Stop` reports a handler past the bound and proceeds. Do not call `Stop` from inside an
+  `OpenConsume`.
 - **Recreating a deleted durable re-applies `DeliverPolicy` from scratch**, because the
   server discarded its ack floor with it. `DeliverAll` replays the whole retained
   stream; `DeliverNew` skips whatever was published while the durable was missing. The

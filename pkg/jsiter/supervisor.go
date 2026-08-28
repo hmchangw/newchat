@@ -60,12 +60,15 @@ type Supervisor struct {
 	cancelOpen context.CancelFunc
 
 	failures chan roundFailure
-	// overflow holds one terminal failure when failures is full, so observe
-	// never blocks. Everyone who reads failures reads this too.
-	overflow chan roundFailure
-	done     chan struct{}
-	exited   chan struct{}
-	once     sync.Once
+	// terminal holds the newest terminal failure that found no room in the
+	// queue, and terminalReady wakes a reader for it. A plain slot is not
+	// enough: a superseded round can occupy it, and the live round's error —
+	// reported exactly once — would then be the one dropped.
+	terminal      atomic.Pointer[roundFailure]
+	terminalReady chan struct{}
+	done          chan struct{}
+	exited        chan struct{}
+	once          sync.Once
 
 	// up is written by run alone and read by the health check.
 	up atomic.Bool
@@ -96,13 +99,13 @@ func NewSupervisor(ctx context.Context, name string, open OpenConsume) (*Supervi
 // can be set before run reads them. Everything else goes through NewSupervisor.
 func buildSupervisor(ctx context.Context, name string, open OpenConsume) *Supervisor {
 	s := &Supervisor{
-		name:     name,
-		ctx:      ctx,
-		open:     open,
-		failures: make(chan roundFailure, 16),
-		overflow: make(chan roundFailure, 1),
-		done:     make(chan struct{}),
-		exited:   make(chan struct{}),
+		name:          name,
+		ctx:           ctx,
+		open:          open,
+		failures:      make(chan roundFailure, 16),
+		terminalReady: make(chan struct{}, 1),
+		done:          make(chan struct{}),
+		exited:        make(chan struct{}),
 	}
 	s.openCtx, s.cancelOpen = context.WithCancel(ctx)
 	s.sleepFn = s.sleep
@@ -176,7 +179,7 @@ func (s *Supervisor) run(ready chan<- error) {
 			// A round that died while starting carries its own disposition, and
 			// Stopped means the same here as it does in serve: nothing can be
 			// built against a closed connection, so retrying is a busy loop.
-			if Classify(err) == Stopped {
+			if errors.Is(err, errRoundOverlap) || Classify(err) == Stopped {
 				slog.ErrorContext(s.ctx, "jetstream consumption ended while starting",
 					"consumer", s.name, "error", err)
 				return
@@ -232,14 +235,16 @@ func (s *Supervisor) startRound(gen uint64) (ConsumeContext, error) {
 		return nil, fmt.Errorf("start %s consumption: %w", s.name, err)
 	}
 	if s.stopping() {
-		s.release(cc)
+		s.releaseAtEnd(cc)
 		return nil, ErrStopped
 	}
 	// A failure reported while open was still running outranks the handle it
 	// invalidates: nats.go has already stopped feeding it, and installing it
 	// would leave a dead subscription marked healthy.
 	if failure := s.reportedFailure(gen); failure != nil {
-		s.release(cc)
+		if !s.releaseForRestart(cc) {
+			return nil, errRoundOverlap
+		}
 		return nil, fmt.Errorf("start %s consumption: %w", s.name, failure)
 	}
 	return cc, nil
@@ -253,9 +258,12 @@ func (s *Supervisor) reportedFailure(gen uint64) error {
 		var f roundFailure
 		select {
 		case f = <-s.failures:
-		case f = <-s.overflow:
 		default:
-			return nil
+			held, ok := s.takeTerminal()
+			if !ok {
+				return nil
+			}
+			f = held
 		}
 
 		if f.gen != gen {
@@ -292,9 +300,14 @@ func (s *Supervisor) serve(gen uint64, cc ConsumeContext) bool {
 		var f roundFailure
 		select {
 		case f = <-s.failures:
-		case f = <-s.overflow:
+		case <-s.terminalReady:
+			held, ok := s.takeTerminal()
+			if !ok {
+				continue // already claimed; the wake is spurious
+			}
+			f = held
 		case <-s.done:
-			s.release(cc)
+			s.releaseAtEnd(cc)
 			return false
 		}
 
@@ -302,12 +315,14 @@ func (s *Supervisor) serve(gen uint64, cc ConsumeContext) bool {
 		case keepServing:
 			continue
 		case endRound:
-			s.release(cc)
+			s.releaseAtEnd(cc)
 			slog.ErrorContext(s.ctx, "jetstream consumption ended",
 				"consumer", s.name, "error", f.err)
 			return false
 		default: // restartRound
-			s.release(cc)
+			if !s.releaseForRestart(cc) {
+				return false
+			}
 			slog.ErrorContext(s.ctx, "jetstream consumption stopped, restarting",
 				"consumer", s.name, "error", f.err)
 			return true
@@ -367,27 +382,75 @@ func (s *Supervisor) observe(gen uint64, err error) {
 	if Classify(err) == Transient {
 		return
 	}
-	// A terminal error is reported exactly once, so it must not be dropped. It
-	// waits in a slot that every reader of failures also drains; a second one
-	// needs no room, because either ends the round.
+	// A terminal error is reported exactly once, so it must not be dropped. Keep
+	// the newest round's: an older one is worthless once a replacement exists,
+	// while losing the live one installs a dead subscription as healthy.
+	for {
+		held := s.terminal.Load()
+		if held != nil && held.gen > f.gen {
+			return
+		}
+		if s.terminal.CompareAndSwap(held, &f) {
+			break
+		}
+	}
 	select {
-	case s.overflow <- f:
+	case s.terminalReady <- struct{}{}:
 	default:
 	}
 }
 
-// release ends a round and waits, briefly, for work already inside a handler to
-// finish. Stop only ends delivery, so without this a replacement can be running
-// while the previous callback is still writing — on a FIFO lane that is the
-// same message twice, concurrently, since the stopped round never acked it.
-func (s *Supervisor) release(cc ConsumeContext) {
+// takeTerminal claims the queued terminal failure, if one is still there. The
+// wake and the claim are separate, so a reader can arrive to find it already
+// taken.
+func (s *Supervisor) takeTerminal() (roundFailure, bool) {
+	held := s.terminal.Swap(nil)
+	if held == nil {
+		return roundFailure{}, false
+	}
+	return *held, true
+}
+
+// errRoundOverlap ends supervision when a stopped round's handler is still
+// running. Starting a replacement over it is the one thing a FIFO lane must
+// never do, so the lane stops visibly instead.
+var errRoundOverlap = errors.New("previous round still had work in flight")
+
+// release ends a round and waits for work already inside a handler to finish,
+// reporting whether it did. Stop only ends delivery (nats.go pull.go:769); a
+// callback already executing runs on.
+func (s *Supervisor) release(cc ConsumeContext) bool {
 	cc.Stop()
 
 	timer := time.NewTimer(releaseWait)
 	defer timer.Stop()
 	select {
 	case <-cc.Closed():
+		return true
 	case <-timer.C:
+		return false
+	}
+}
+
+// releaseForRestart ends a round and reports whether a replacement may start.
+// It may not while the old handler is still writing: the durable's ack floor
+// went with it, so the replacement is handed the very message still in flight
+// and the older write can land last. On an ordered lane that is a silent
+// ordering violation, which is strictly worse than a lane that stops — the stop
+// shows up on /readyz, the reordering shows up in the data.
+func (s *Supervisor) releaseForRestart(cc ConsumeContext) bool {
+	if s.release(cc) {
+		return true
+	}
+	slog.ErrorContext(s.ctx, "jetstream consumption still had work in flight; ending supervision rather than overlapping rounds",
+		"consumer", s.name, "waited", releaseWait)
+	return false
+}
+
+// releaseAtEnd ends a round nothing will replace. Shutdown has its own deadline
+// and must finish, so a handler past the bound is reported, not waited out.
+func (s *Supervisor) releaseAtEnd(cc ConsumeContext) {
+	if !s.release(cc) {
 		slog.WarnContext(s.ctx, "jetstream consumption still had work in flight when it was stopped",
 			"consumer", s.name, "waited", releaseWait)
 	}

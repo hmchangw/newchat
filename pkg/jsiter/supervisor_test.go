@@ -762,7 +762,8 @@ func TestSupervisor_ObserveNeitherBlocksNorSpawns(t *testing.T) {
 	// 16 fit in the queue and one waits in the slot, so the failure is still
 	// there to be found rather than dropped on the floor.
 	assert.Len(t, s.failures, 16)
-	assert.Len(t, s.overflow, 1, "a terminal failure must survive a full queue")
+	_, held := s.takeTerminal()
+	assert.True(t, held, "a terminal failure must survive a full queue")
 }
 
 // A recoverable error is safe to drop when the queue is full — a consumer that
@@ -778,7 +779,8 @@ func TestSupervisor_ObserveDropsOverflowingTransients(t *testing.T) {
 
 	assert.Less(t, runtime.NumGoroutine()-before, 8,
 		"a transient flood must not spawn relays")
-	assert.Len(t, s.overflow, 0, "a transient must not take the terminal slot")
+	_, held := s.takeTerminal()
+	assert.False(t, held, "a transient must not take the terminal mailbox")
 }
 
 // settle gives goroutines from earlier tests a chance to exit, so a count taken
@@ -984,11 +986,37 @@ func TestSupervisor_StopCancelsAnOpenInProgress(t *testing.T) {
 	assert.False(t, s.IsUp())
 }
 
-// Stop ends delivery but does not wait for a handler already executing. Opening
-// the replacement before that handler returns puts two consumers on a durable
-// that must stay sequential — and since the stopped round never acked, the
-// replacement is handed the very message still being processed.
-func TestSupervisor_RestartWaitsForInFlightWork(t *testing.T) {
+// A handler still running past the bound must not be joined by a replacement.
+// The durable's ack floor went with the round, so the replacement is handed the
+// very message still in flight and the older write can land last — on a FIFO
+// lane, a silent ordering violation. Ending supervision is worse for
+// availability and better for correctness: a stopped lane shows up on /readyz,
+// reordered writes show up in the data.
+func TestSupervisor_WedgedHandlerEndsSupervisionRatherThanOverlap(t *testing.T) {
+	restore := releaseWait
+	releaseWait = 50 * time.Millisecond
+	t.Cleanup(func() { releaseWait = restore })
+
+	wedged := &stubConsume{hold: true}
+	f := newConsumeFactory([]ConsumeContext{wedged, &stubConsume{}}, nil)
+	s := newTestSupervisor(t, f)
+
+	f.fail(jetstream.ErrConsumerDeleted)
+
+	require.Eventually(t, func() bool { return !s.IsUp() }, 2*time.Second, 10*time.Millisecond,
+		"a lane that cannot restart safely must report down")
+	select {
+	case <-f.started:
+		t.Fatal("a replacement started while the previous handler was still running")
+	case <-time.After(300 * time.Millisecond):
+	}
+	assert.Equal(t, 1, f.callCount(), "supervision must end, not restart")
+	assert.Equal(t, 1, wedged.stopCount())
+}
+
+// A handler that finishes inside the bound restarts as normal — the rule is
+// "do not overlap", not "do not restart".
+func TestSupervisor_RestartWaitsThenProceedsWhenWorkFinishes(t *testing.T) {
 	busy := &stubConsume{hold: true}
 	f := newConsumeFactory([]ConsumeContext{busy, &stubConsume{}}, nil)
 	newTestSupervisor(t, f)
@@ -1003,24 +1031,6 @@ func TestSupervisor_RestartWaitsForInFlightWork(t *testing.T) {
 
 	busy.finish()
 	waitStarts(t, f, 1)
-}
-
-// The wait is a bound, not a promise: a handler that never returns delays the
-// restart rather than blocking it forever, because a lane that stays down is
-// the failure this package exists to prevent.
-func TestSupervisor_RestartProceedsWhenAHandlerWedges(t *testing.T) {
-	restore := releaseWait
-	releaseWait = 50 * time.Millisecond
-	t.Cleanup(func() { releaseWait = restore })
-
-	wedged := &stubConsume{hold: true}
-	f := newConsumeFactory([]ConsumeContext{wedged, &stubConsume{}}, nil)
-	newTestSupervisor(t, f)
-
-	f.fail(jetstream.ErrConsumerDeleted)
-
-	waitStarts(t, f, 1)
-	assert.Equal(t, 1, wedged.stopCount())
 }
 
 // Stop can land while a round is still opening. Without the stopped check that
@@ -1069,11 +1079,69 @@ func TestSupervisor_ServeReadsTheOverflowSlot(t *testing.T) {
 	for range cap(s.failures) {
 		s.failures <- roundFailure{gen: 99, err: jetstream.ErrNoHeartbeat}
 	}
-	s.overflow <- roundFailure{gen: 1, err: jetstream.ErrConsumerDeleted}
+	s.observe(1, jetstream.ErrConsumerDeleted) // no room in the queue: into the mailbox
 
 	cc := &stubConsume{}
 	keepGoing := s.serve(1, cc)
 
 	assert.True(t, keepGoing, "a terminal in the slot must restart the round")
 	assert.Equal(t, 1, cc.stopCount(), "the dead round must be released")
+}
+
+// A superseded round can leave a terminal error in the mailbox. If that stale
+// entry made the live round's error unplaceable, the dead subscription would be
+// installed and marked healthy — the silent stall this package exists to stop.
+// The newest generation therefore wins the mailbox.
+func TestSupervisor_LiveTerminalDisplacesAStaleOne(t *testing.T) {
+	s := buildSupervisor(context.Background(), "ordered", nil)
+	for range cap(s.failures) {
+		s.failures <- roundFailure{gen: 1, err: jetstream.ErrNoHeartbeat}
+	}
+
+	s.observe(1, jetstream.ErrConsumerDeleted) // superseded round claims the mailbox
+	s.observe(2, jetstream.ErrConnectionClosed)
+
+	held, ok := s.takeTerminal()
+	require.True(t, ok)
+	assert.Equal(t, uint64(2), held.gen, "the live round's error must not be crowded out")
+	assert.ErrorIs(t, held.err, jetstream.ErrConnectionClosed)
+}
+
+// An older round reporting after a newer one must not evict the newer error.
+func TestSupervisor_StaleTerminalDoesNotDisplaceALiveOne(t *testing.T) {
+	s := buildSupervisor(context.Background(), "ordered", nil)
+	for range cap(s.failures) {
+		s.failures <- roundFailure{gen: 1, err: jetstream.ErrNoHeartbeat}
+	}
+
+	s.observe(5, jetstream.ErrConnectionClosed)
+	s.observe(2, jetstream.ErrConsumerDeleted) // a straggler from a dead round
+
+	held, ok := s.takeTerminal()
+	require.True(t, ok)
+	assert.Equal(t, uint64(5), held.gen)
+}
+
+// startRound must not install a round whose terminal error only reached the
+// mailbox: that is exactly the path a saturated queue forces it down.
+func TestSupervisor_MailboxFailureDuringStartFailsTheRound(t *testing.T) {
+	handle := &stubConsume{}
+	var s *Supervisor
+	start := func(_ context.Context, _ func(error)) (ConsumeContext, error) {
+		for range cap(s.failures) {
+			s.failures <- roundFailure{gen: 99, err: jetstream.ErrNoHeartbeat}
+		}
+		s.observe(1, jetstream.ErrConnectionClosed)
+		return handle, nil
+	}
+
+	s = buildSupervisor(context.Background(), "ordered", start)
+	s.sleepFn = func(context.Context, time.Duration) bool { return true }
+
+	err := s.launch()
+
+	require.Error(t, err, "a terminal error in the mailbox must fail the start")
+	assert.ErrorIs(t, err, jetstream.ErrConnectionClosed)
+	assert.Equal(t, 1, handle.stopCount())
+	s.Stop()
 }
