@@ -1276,7 +1276,6 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously on val
 - `"channel name is required"` / `"channel name must be at most 100 characters"`
 - `"bots cannot be added to a channel"` / `"bot not available"` (botDM target whose assistant is disabled)
 - `user "<account>": user not found` / `org "<orgId>": invalid org` (each wrapped with the offending account/org ID)
-- `"user is missing required name fields"` — rejected only when BOTH `engName` and `chineseName` are empty (either one alone is sufficient)
 - `"exceeds maximum capacity (N): would create M members"`
 
 ```json
