@@ -93,8 +93,11 @@ disqualifies both — failing closed is the correct behaviour there.
 caveat that a miss is durable turned out to disqualify it rather than merely
 qualify it: `buildTeamsActions` emits an index action with empty author fields
 and `handler.go` Acks the source message once the bulk request succeeds, so
-nothing retries the under-enriched write. Only `tcard-service` takes
-`secondaryPreferred`.
+nothing retries the under-enriched write. `tcard-service` is the only service
+this change *assigns* `secondaryPreferred` to; several already default to it and
+are left alone (§5.6: `teams-user-sync`, `teams-room-creation`,
+`history-service`, `search-service`, `user-presence-service`, `portal-service`,
+`broadcast-worker`).
 
 Reverting it further, to `primary`, would make that outcome *worse*, not safer.
 `resolveTeamsIdentities` (`messages.go:296-310`) swallows a resolver error —
@@ -505,8 +508,17 @@ handles are now read-preference configurable so a restarting pod can serve
 The site is now `slog.Warn`-and-continue, which is not new policy but the
 repo-wide non-fatal index ensure from #333 (`tcard-service/main.go:88` and
 others); `OpenMongo` predates it (#281) and was missed. The only index here is
-the archive's TTL, so a later successful start creates it and it then applies to
-the documents already archived — no unique constraint is at stake.
+the archive's TTL — no unique constraint is at stake.
+
+**Non-fatal is not fire-and-forget.** Continuing past a failed ensure would
+otherwise leave the process writing `retired_room_keys` with nothing expiring
+them for its whole lifetime, since `EnsureIndexes` ran only at startup. So
+`archiveRetired` now repairs it: while the ensure has not succeeded, each
+archive re-attempts it first (`repairIndexes`, bounded at 2s and idempotent,
+stopping for good on the first success). Nothing accumulates unexpiring in the
+meantime either — the archive is a write, so during the outage that blocked the
+index it cannot land at all; the first rotation *after* a primary returns is
+both the first write at risk and the point the index is repaired.
 
 This does **not** reopen §3. Pod restarts mid-incident still depend on the
 startup-ping PR; this only removes a blocker that sits *behind* the ping and is
@@ -564,10 +576,19 @@ at-risk principals is frozen at the moment the primary died and does not grow.
 It closes as soon as replication catches up or a primary returns.
 
 **Why not fail closed.** `primary` does not make the authorization correct; it
-makes it *absent*. Every send, every bot action and every membership read fails
-for every user for the whole incident, to deny a removed member a window
-measured in the replication lag. §11 lists exactly that as what this change
-buys back.
+makes it *absent*. Every authorization read that actually reaches Mongo fails
+for the whole incident, to deny a removed member a window measured in the
+replication lag. §11 lists exactly that as what this change buys back.
+
+One qualifier, because it cuts against the simple story: `message-gatekeeper`
+caches *positive* subscriptions (§5.2), so under `primary` a user whose
+subscription is already cached keeps sending until that entry expires — it is
+cold misses and the uncached paths (`bot-message-handler` has no cache at all,
+`room-service`'s plain handles, every membership read) that fail outright. That
+cuts both ways rather than softening the trade: the cache is exactly what makes
+`primary` *also* serve stale positive membership during an outage, so failing
+closed does not actually close the window it is meant to close — it only
+shortens it to the cache TTL while taking every cold-miss user offline.
 
 **Room keys are the same trade.** A rotation that commits version N+1 before the
 primary dies can leave a secondary reporting N, so `broadcast-worker` keeps
