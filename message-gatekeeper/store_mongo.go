@@ -17,7 +17,6 @@ import (
 )
 
 type MongoStore struct {
-	rooms   *mongo.Collection
 	subTier *subauthcache.Tier // owns the subscription L2 + its own breaker
 	// metaTier is built once, for the same reason its fetch guard always was: a
 	// tier's closures escape to the heap, so constructing one per GetRoomMeta
@@ -32,7 +31,6 @@ type MongoStore struct {
 func NewMongoStore(db *mongo.Database, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, subBreaker, metaBreaker *circuitbreaker.Breaker) *MongoStore {
 	rooms := db.Collection("rooms")
 	return &MongoStore{
-		rooms: rooms,
 		subTier: subauthcache.NewTier(valkey, db.Collection("subscriptions"), subTTL,
 			subBreaker, cachemetrics.For("subauth", "l2")),
 		metaTier: roommetacache.NewL2Tier(valkey, rooms, metaTTL,
