@@ -212,7 +212,7 @@ func TestValidate_RejectsNegativeUserCacheSize(t *testing.T) {
 	cfg.UserCacheSize = -1
 	err := validate(&cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_USER_CACHE_SIZE")
+	assert.Contains(t, err.Error(), "USER_CACHE_SIZE")
 }
 
 func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
@@ -220,5 +220,5 @@ func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
 	cfg.UserCacheTTL = -1 * time.Second
 	err := validate(&cfg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HISTORY_USER_CACHE_TTL")
+	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
 }

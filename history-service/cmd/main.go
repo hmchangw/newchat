@@ -184,9 +184,9 @@ func main() {
 		slog.Info("subscription cache enabled", "size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL)
 	}
 
-	// Names change rarely, so this one carries a generous TTL: it collapses the
-	// repeated account lookups a scroll-back makes while resolving legacy
-	// members_removed rows.
+	// Collapses the repeated account lookups a scroll-back makes while resolving
+	// legacy members_removed rows. Sized and expired like the other services
+	// fronting this store — see the config field for why the TTL is not longer.
 	var userSource service.UserStore = userStore
 	if cfg.UserCacheSize > 0 && cfg.UserCacheTTL > 0 {
 		uc, err := userstore.NewCache(userStore, cfg.UserCacheSize, cfg.UserCacheTTL)
