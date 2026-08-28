@@ -51,19 +51,30 @@ func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetS
 	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
 	// visibly redelivers within the test window. jobguard Acks the poison
 	// message, so it must NOT redeliver.
-	js, iter, _, subj, maxDeliver := startEmbeddedCanonicalConsumerWith(t, siteID, stream.ConsumerSettings{
+	e := startEmbeddedCanonicalConsumerWith(t, siteID, stream.ConsumerSettings{
 		AckWait:       time.Second,
 		MaxDeliver:    10,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
 	})
-	return js, iter, subj, maxDeliver
+	return e.js, e.iter, e.subject, e.maxDeliver
+}
+
+// embeddedConsumer is everything a consumer-behaviour test needs from the
+// embedded server: the connection (for broker advisories), the consumer handle
+// (for server-side state such as NumAckPending), and the publish subject.
+type embeddedConsumer struct {
+	js         jetstream.JetStream
+	nc         *nats.Conn
+	iter       natsmetrics.Iterator
+	cons       jetstream.Consumer
+	subject    string
+	maxDeliver int
 }
 
 // startEmbeddedCanonicalConsumerWith is startEmbeddedCanonicalConsumer with
-// caller-chosen consumer settings, and also returns the consumer handle so a
-// test can read server-side state such as NumAckPending.
-func startEmbeddedCanonicalConsumerWith(t *testing.T, siteID string, settings stream.ConsumerSettings) (jetstream.JetStream, natsmetrics.Iterator, jetstream.Consumer, string, int) {
+// caller-chosen consumer settings.
+func startEmbeddedCanonicalConsumerWith(t *testing.T, siteID string, settings stream.ConsumerSettings) embeddedConsumer {
 	t.Helper()
 	opts := &natsserver.Options{Port: -1, JetStream: true, StoreDir: t.TempDir()}
 	ns, err := natsserver.NewServer(opts)
@@ -91,7 +102,14 @@ func startEmbeddedCanonicalConsumerWith(t *testing.T, siteID string, settings st
 	require.NoError(t, err)
 	t.Cleanup(iter.Stop)
 
-	return js, plainIterAdapter{inner: iter}, cons, "chat.msg.canonical." + siteID + ".created", settings.MaxDeliver
+	return embeddedConsumer{
+		js:         js,
+		nc:         nc,
+		iter:       plainIterAdapter{inner: iter},
+		cons:       cons,
+		subject:    "chat.msg.canonical." + siteID + ".created",
+		maxDeliver: settings.MaxDeliver,
+	}
 }
 
 // TestConsume_PoisonMessageDoesNotBlockStream is the regression test for the
@@ -375,12 +393,13 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 	// AckWait is long on purpose: nothing in this test may redeliver because it
 	// timed out. Every redelivery must come from a NAK, so a stall here proves
 	// the classification and nothing else.
-	js, iter, cons, subj, maxDeliver := startEmbeddedCanonicalConsumerWith(t, "site-ackpending", stream.ConsumerSettings{
+	e := startEmbeddedCanonicalConsumerWith(t, "site-ackpending", stream.ConsumerSettings{
 		AckWait:       30 * time.Second,
 		MaxDeliver:    6,
 		MaxWaiting:    512,
 		MaxAckPending: maxAckPending,
 	})
+	js, iter, cons, subj, maxDeliver := e.js, e.iter, e.cons, e.subject, e.maxDeliver
 
 	h := NewHandler(ackPendingStore{}, ackPendingUsers{}, &mockPublisher{}, nil,
 		perParentFetcher{realParentID: realParentID}, false, subject.RouteGlobal)
@@ -457,4 +476,82 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 
 	assert.Equal(t, int32(burst+1), settled.Load(),
 		"every message is settled exactly once — an unresolvable reply must not be redelivered")
+}
+
+// TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver is the
+// message-loss half of the regression. Exhausting MaxAckPending stalls the
+// consumer; exhausting MaxDeliver silently DESTROYS the message — JetStream
+// stops delivering it, nothing dead-letters it (see tools/observability/
+// METRICS.md), and the pending gauges look recovered afterwards.
+//
+// The assertions are the broker's own counters, not an inference from the
+// handler: an unresolvable reply must be delivered exactly once and settled,
+// consuming 1 of its 3 deliveries and never entering the redelivery cycle at
+// all — which is what makes reaching MaxDeliver impossible.
+//
+// Deliberately NOT asserted: the $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>
+// advisory. The broker publishes it only once the final NAK delay elapses
+// (~4-7s here, and it scales with the backoff schedule), so a "no advisory
+// fired" check inside any reasonable window passes even when the message IS
+// being abandoned — measured: deliveries=3, advisories=0 at the 5s mark. The
+// delivery counters below settle it decisively and immediately instead.
+func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T) {
+	const maxDeliver = 3
+
+	// AckWait far exceeds the test window, so every redelivery here can only come
+	// from a NAK — i.e. from the classification under test.
+	e := startEmbeddedCanonicalConsumerWith(t, "site-maxdeliver", stream.ConsumerSettings{
+		AckWait:       30 * time.Second,
+		MaxDeliver:    maxDeliver,
+		MaxWaiting:    512,
+		MaxAckPending: 1000,
+	})
+
+	h := NewHandler(ackPendingStore{}, ackPendingUsers{}, &mockPublisher{}, nil,
+		perParentFetcher{realParentID: "real-parent"}, false, subject.RouteGlobal)
+
+	var deliveries atomic.Int32
+	process := func(ctx context.Context, msg jetstream.Msg) {
+		deliveries.Add(1)
+		jsretry.Settle(ctx, msg, jsretry.LowLatencyBackoff, h.HandleMessage(ctx, msg.Data()))
+	}
+
+	m, _ := newTestBroadcastMetrics(t)
+	consumer := m.Consumer(natsmetrics.ConsumerConfig{
+		Site:   "site-maxdeliver",
+		Stream: "MESSAGES-CANONICAL-site-maxdeliver", Consumer: "broadcast-worker",
+	})
+	consumer.LoopStarted(context.Background())
+
+	var wg sync.WaitGroup
+	go natsmetrics.Consume(context.Background(), e.iter, consumer, 4, e.maxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		guardedProcessor(process))
+
+	evt := model.MessageEvent{
+		Event: model.EventCreated, SiteID: "site-maxdeliver", Timestamp: time.Now().UTC().UnixMilli(),
+		Message: model.Message{
+			ID: "ghost-reply", RoomID: "room-1", UserID: "u-alice", UserAccount: "alice",
+			Content: "a thread reply", CreatedAt: time.Now().UTC(),
+			ThreadParentMessageID: "ghost-parent",
+			TShow:                 false,
+		},
+	}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+	_, err = e.js.Publish(context.Background(), e.subject, data)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return deliveries.Load() >= 1 }, 10*time.Second, 20*time.Millisecond,
+		"the reply was never delivered")
+
+	// The full LowLatencyBackoff prefix for MaxDeliver=3 is ~1.2s, so 5s covers
+	// every redelivery the pre-fix classification would have produced.
+	require.Never(t, func() bool { return deliveries.Load() > 1 }, 5*time.Second, 100*time.Millisecond,
+		"an unresolvable reply was redelivered — it is burning its MaxDeliver budget instead of being dropped on the first delivery")
+	info, err := e.cons.Info(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, info.NumAckPending, "the reply must be settled, not left pending")
+	assert.Zero(t, info.NumRedelivered, "the reply must not have been redelivered")
+	assert.Equal(t, uint64(1), info.Delivered.Consumer, "exactly one delivery")
 }
