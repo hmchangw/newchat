@@ -94,6 +94,40 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
+func TestConfig_MentionableLimits(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("defaults", func(t *testing.T) {
+		require.NoError(t, os.Unsetenv("MENTIONABLE_DEFAULT_LIMIT"))
+		require.NoError(t, os.Unsetenv("MENTIONABLE_MAX_LIMIT"))
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 3, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 50, cfg.MentionableMaxLimit)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "10")
+		t.Setenv("MENTIONABLE_MAX_LIMIT", "200")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 10, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 200, cfg.MentionableMaxLimit)
+	})
+
+	// The > 0 startup gate (fail-fast in main) rejects a non-positive value; env
+	// parsing itself accepts it, so the guard is what must catch it.
+	t.Run("non-positive rejected by startup guard", func(t *testing.T) {
+		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "0")
+		t.Setenv("MENTIONABLE_MAX_LIMIT", "-1")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.False(t, cfg.MentionableDefaultLimit > 0, "0 must fail the > 0 startup check")
+		assert.False(t, cfg.MentionableMaxLimit > 0, "-1 must fail the > 0 startup check")
+	})
+}
+
 func TestConfig_BadgeCacheTTL(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")

@@ -92,6 +92,11 @@ type config struct {
 	GraphProxyURL        string `env:"GRAPH_PROXY_URL" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
+	// Mentionable @-autocomplete page size. Default applies when the client sends
+	// no limit; Max clamps an explicit over-large limit. Both are validated > 0 at
+	// startup and are independent of a room's denormalized member counts.
+	MentionableDefaultLimit int `env:"MENTIONABLE_DEFAULT_LIMIT" envDefault:"3"`
+	MentionableMaxLimit     int `env:"MENTIONABLE_MAX_LIMIT"     envDefault:"50"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -168,6 +173,14 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
+		os.Exit(1)
+	}
+	if cfg.MentionableDefaultLimit <= 0 {
+		slog.Error("invalid MENTIONABLE_DEFAULT_LIMIT: must be > 0", "value", cfg.MentionableDefaultLimit)
+		os.Exit(1)
+	}
+	if cfg.MentionableMaxLimit <= 0 {
+		slog.Error("invalid MENTIONABLE_MAX_LIMIT: must be > 0", "value", cfg.MentionableMaxLimit)
 		os.Exit(1)
 	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
@@ -362,6 +375,8 @@ func main() {
 	handler.teamsEmailDomain = cfg.TeamsEmailDomain
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
+	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
+	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
 
 	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
 	handler.Register(router)
