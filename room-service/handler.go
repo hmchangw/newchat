@@ -649,7 +649,7 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 	if err != nil {
 		return nil, fmt.Errorf("list mentionable subscriptions: %w", err)
 	}
-	return &model.MentionableSubscriptionsResponse{Subscriptions: subs}, nil
+	return boundedReply(h, &model.MentionableSubscriptionsResponse{Subscriptions: subs})
 }
 
 func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature

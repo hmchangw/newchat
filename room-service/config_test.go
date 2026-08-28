@@ -124,15 +124,16 @@ func TestConfig_MentionableLimits(t *testing.T) {
 		assert.Equal(t, 200, cfg.MentionableMaxLimit)
 	})
 
-	// The > 0 startup gate (fail-fast in main) rejects a non-positive value; env
-	// parsing itself accepts it, so the guard is what must catch it.
-	t.Run("non-positive rejected by startup guard", func(t *testing.T) {
-		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "0")
-		t.Setenv("MENTIONABLE_MAX_LIMIT", "-1")
-		cfg, err := env.ParseAs[config]()
-		require.NoError(t, err)
-		assert.False(t, cfg.MentionableDefaultLimit > 0, "0 must fail the > 0 startup check")
-		assert.False(t, cfg.MentionableMaxLimit > 0, "-1 must fail the > 0 startup check")
+	// The startup guard (fail-fast in main via validateMentionableLimits) is what
+	// rejects bad values — env parsing itself accepts them. Exercise the guard
+	// directly so this test fails if it is removed or inverted.
+	t.Run("validateMentionableLimits", func(t *testing.T) {
+		require.NoError(t, validateMentionableLimits(3, 50))
+		require.NoError(t, validateMentionableLimits(50, 50)) // default == max is allowed
+		assert.Error(t, validateMentionableLimits(0, 50))     // default not positive
+		assert.Error(t, validateMentionableLimits(-1, 50))
+		assert.Error(t, validateMentionableLimits(3, 0))    // max not positive
+		assert.Error(t, validateMentionableLimits(100, 50)) // default exceeds max
 	})
 }
 

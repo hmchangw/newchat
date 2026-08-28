@@ -117,6 +117,22 @@ type config struct {
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
 }
 
+// validateMentionableLimits enforces the mentionable page-size invariants at
+// startup: both bounds positive, and the no-limit default never exceeding the
+// max (otherwise a limit-less request would bypass the configured cap).
+func validateMentionableLimits(defaultLimit, maxLimit int) error {
+	switch {
+	case defaultLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT must be > 0, got %d", defaultLimit)
+	case maxLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_MAX_LIMIT must be > 0, got %d", maxLimit)
+	case defaultLimit > maxLimit:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT (%d) must be <= MENTIONABLE_MAX_LIMIT (%d)", defaultLimit, maxLimit)
+	default:
+		return nil
+	}
+}
+
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
 type legacyRoomOrigin struct {
 	SiteID string `json:"siteID"`
@@ -175,12 +191,8 @@ func main() {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
 		os.Exit(1)
 	}
-	if cfg.MentionableDefaultLimit <= 0 {
-		slog.Error("invalid MENTIONABLE_DEFAULT_LIMIT: must be > 0", "value", cfg.MentionableDefaultLimit)
-		os.Exit(1)
-	}
-	if cfg.MentionableMaxLimit <= 0 {
-		slog.Error("invalid MENTIONABLE_MAX_LIMIT: must be > 0", "value", cfg.MentionableMaxLimit)
+	if err := validateMentionableLimits(cfg.MentionableDefaultLimit, cfg.MentionableMaxLimit); err != nil {
+		slog.Error("invalid mentionable limits", "error", err)
 		os.Exit(1)
 	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
