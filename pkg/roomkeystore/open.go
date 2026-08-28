@@ -3,6 +3,7 @@ package roomkeystore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -10,7 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
-// indexEnsureTimeout makes a hung createIndexes fail startup rather than stall it.
+// indexEnsureTimeout bounds a hung createIndexes rather than letting it stall startup.
 const indexEnsureTimeout = 10 * time.Second
 
 // OpenConfig carries OpenMongo's optional settings.
@@ -70,10 +71,16 @@ func OpenMongo(ctx context.Context, db *mongo.Database, gracePeriod, retiredTTL 
 		WithRetiredKeys(db.Collection(RetiredKeysCollection, pref), retiredTTL),
 	)
 
+	// Best-effort, per the repo-wide non-fatal index ensure (#333): createIndexes
+	// is a write, so a fatal ensure would stop these pods from starting during a
+	// primary-down incident — exactly when the read-preference-configurable key
+	// handles above are meant to keep serving key reads from a secondary. The
+	// only index here is the archive's TTL; a later successful start creates it
+	// and it then applies to the documents already archived.
 	idxCtx, cancel := context.WithTimeout(ctx, indexEnsureTimeout)
 	defer cancel()
 	if err := store.EnsureIndexes(idxCtx); err != nil {
-		return nil, fmt.Errorf("ensure room key indexes: %w", err)
+		slog.Warn("ensure room key indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	return store, nil
 }

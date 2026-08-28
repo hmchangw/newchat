@@ -495,3 +495,20 @@ first 20 minutes after deploying this change.
 silently disabling fallback. Verified against the vendored
 `caarlos0/env v11.4.0`: an empty value falls back to `envDefault`, yielding
 `primaryPreferred`. No change made.
+
+**Room-key index ensure made non-fatal.** `pkg/roomkeystore.OpenMongo` returned
+an error when `EnsureIndexes` failed, so `room-service`, `room-worker` and
+`bot-room-service` could not start while no primary existed — `createIndexes` is
+a write. That would have negated this change for exactly those three: their key
+handles are now read-preference configurable so a restarting pod can serve
+`key.get` from a secondary, and a fatal ensure meant the pod never got that far.
+The site is now `slog.Warn`-and-continue, which is not new policy but the
+repo-wide non-fatal index ensure from #333 (`tcard-service/main.go:88` and
+others); `OpenMongo` predates it (#281) and was missed. The only index here is
+the archive's TTL, so a later successful start creates it and it then applies to
+the documents already archived — no unique constraint is at stake.
+
+This does **not** reopen §3. Pod restarts mid-incident still depend on the
+startup-ping PR; this only removes a blocker that sits *behind* the ping and is
+specific to the three services whose key handles this change makes
+secondary-capable.

@@ -536,3 +536,29 @@ func TestMongoStore_GetByVersion_NoArchiveBehavesAsBefore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got, "without the archive, an evicted version stays unresolvable")
 }
+
+func TestOpenMongo_FailedIndexEnsureDoesNotBlockStartup(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "roomkey_idxconflict")
+
+	// A non-TTL index on the same key makes createIndexes fail with
+	// IndexOptionsConflict. It stands in for the real outage case: createIndexes
+	// is a write, so it cannot run at all while no primary is available.
+	_, err := db.Collection(RetiredKeysCollection).Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "expiresAt", Value: 1}},
+	})
+	require.NoError(t, err)
+
+	store, err := OpenMongo(ctx, db, time.Hour, 30*time.Minute)
+	require.NoError(t, err,
+		"a failed index ensure must not block startup: the key handles are read-preference "+
+			"configurable so a pod can serve key reads from a secondary, which a fatal "+
+			"createIndexes would defeat")
+	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The store must still be usable, which is the whole point of not failing.
+	got, err := store.GetMany(ctx, []string{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
