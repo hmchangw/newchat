@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/histdegrade"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -353,6 +354,9 @@ func main() {
 		opts = append(opts, service.WithPreviewCache(pc))
 		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
 	}
+
+	degradation := histdegrade.NewCachedReader(histdegrade.NewStore(db).Get, 5*time.Second)
+	opts = append(opts, service.WithDegradation(degradation))
 
 	pub := publisher.New(js, publisher.WithMetrics(publishMetrics))
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
