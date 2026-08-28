@@ -656,3 +656,27 @@ func (p *panickingBulkWriter) BulkUpdateRoomPreview(context.Context, map[string]
 	p.firstOnce.Do(func() { close(p.first) })
 	panic("bulk write exploded")
 }
+
+// The replacement map is sized from the batch just drained, so without a clamp
+// one anomalous interval — a burst touching far more rooms than steady traffic —
+// teaches every later flush to reserve that much again for the life of the
+// process. Mirrors roomlist-worker's reuseCap, which bounds the same hazard on
+// the sibling worker's batch maps.
+func TestPreviewReuseCap_BoundsWhatOneFlushReservesForTheNext(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{"steady state passes through", 250, 250},
+		{"zero passes through", 0, 0},
+		{"exactly at the bound passes through", maxPreviewReuseCap, maxPreviewReuseCap},
+		{"one over is clamped", maxPreviewReuseCap + 1, maxPreviewReuseCap},
+		{"a room burst is clamped", 5_000_000, maxPreviewReuseCap},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, previewReuseCap(tt.n))
+		})
+	}
+}

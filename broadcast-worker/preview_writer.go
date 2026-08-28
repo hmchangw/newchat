@@ -51,6 +51,24 @@ const maxPendingPreviews = 5000
 // batch (and the replacement map filling behind it) for the process's lifetime.
 const maxFlushDuration = 30 * time.Second
 
+// maxPreviewReuseCap bounds what one flush may pre-allocate for the next. The
+// replacement map is sized from the batch just drained, which under steady
+// traffic is a good predictor; unclamped, one anomalous interval — a burst
+// touching far more rooms than usual — teaches every later flush to reserve that
+// much again for the life of the process. Comfortably above a steady-state
+// interval, so it never binds in normal traffic. maxPendingPreviews bounds the
+// rooms holding a preview BODY, not the entry count, so this is the only thing
+// standing between a room burst and a permanently oversized reservation.
+//
+// Mirrors roomlist-worker's maxReuseCap, which bounds the identical hazard on
+// the sibling worker's batch maps.
+const maxPreviewReuseCap = 4096
+
+// previewReuseCap clamps a drained batch's size to what the next may reserve.
+func previewReuseCap(n int) int {
+	return min(n, maxPreviewReuseCap)
+}
+
 // bulkRoomPreviewWriter is the flush boundary, kept off Store so the contract stays narrow.
 type bulkRoomPreviewWriter interface {
 	BulkUpdateRoomPreview(ctx context.Context, updates map[string]roomPreviewUpdate) error
@@ -155,7 +173,7 @@ func (w *previewWriter) Flush(ctx context.Context) error {
 		return nil
 	}
 	batch := w.pending
-	w.pending = make(map[string]roomPreviewUpdate, len(batch))
+	w.pending = make(map[string]roomPreviewUpdate, previewReuseCap(len(batch)))
 	w.pendingPreviews = 0
 	w.mu.Unlock()
 	return w.bulk.BulkUpdateRoomPreview(ctx, batch)
