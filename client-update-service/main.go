@@ -66,6 +66,7 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
 	r.Use(o11ygin.Middleware("client-update-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())

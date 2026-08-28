@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 func TestHandleUpload_Success(t *testing.T) {
@@ -325,4 +331,92 @@ func TestHandleDownload_InvalidName_400(t *testing.T) {
 		h.HandleDownload(c)
 		assert.Equal(t, http.StatusBadRequest, w.Code, "name %q must be rejected", name)
 	}
+}
+
+// zeroReader yields an endless run of NUL bytes without allocating, so a large
+// request body can be generated on the fly instead of held on the test's heap.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+// streamingUploadBody builds a two-part upload whose executable is generated as
+// it is read, so constructing it costs no heap.
+func streamingUploadBody(t *testing.T, exeSize int64) (io.Reader, string) {
+	t.Helper()
+	const boundary = "clientupdatestreamboundary"
+	var head bytes.Buffer
+	mw := multipart.NewWriter(&head)
+	require.NoError(t, mw.SetBoundary(boundary))
+
+	fw, err := mw.CreateFormFile("configFile", "app.yaml")
+	require.NoError(t, err)
+	_, err = fw.Write([]byte("version: 1"))
+	require.NoError(t, err)
+
+	_, err = mw.CreateFormFile("executeFile", "app.exe")
+	require.NoError(t, err)
+	// The executable's bytes are appended by the reader chain below, not here.
+
+	var tail bytes.Buffer
+	tailWriter := multipart.NewWriter(&tail)
+	require.NoError(t, tailWriter.SetBoundary(boundary))
+	require.NoError(t, tailWriter.Close())
+
+	return io.MultiReader(
+		bytes.NewReader(head.Bytes()),
+		io.LimitReader(zeroReader{}, exeSize),
+		bytes.NewReader([]byte("\r\n")),
+		bytes.NewReader(tail.Bytes()),
+	), mw.FormDataContentType()
+}
+
+// A large artifact must cost disk, not heap. Gin's default MaxMultipartMemory is
+// 32 MiB, which this service would otherwise retain per concurrent upload for as
+// long as the MinIO Put runs.
+func TestHandleUpload_DoesNotBufferTheArtifactInMemory(t *testing.T) {
+	const artifactSize = 48 << 20
+	const maxPeak = 24 << 20
+
+	ctrl := gomock.NewController(t)
+	store := NewMockversionStore(ctrl)
+	var stored int64
+	store.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, r io.Reader, _ int64, _ string) error {
+			n, err := io.Copy(io.Discard, r)
+			stored += n
+			return err
+		}).Times(2)
+
+	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
+	registerRoutes(r, NewHandler(store, testCache(1024)), testTokens())
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	body, ct := streamingUploadBody(t, artifactSize)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/version", body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef")
+
+	var status int
+	peak := testutil.PeakHeapDuring(func() {
+		resp, doErr := srv.Client().Do(req)
+		require.NoError(t, doErr)
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		status = resp.StatusCode
+	})
+
+	require.Equal(t, http.StatusOK, status)
+	require.Greater(t, stored, int64(artifactSize), "the artifact must reach the store whole")
+	require.LessOrEqualf(t, peak, uint64(maxPeak),
+		"peak heap %d MiB while storing a %d MiB artifact: the body is being buffered",
+		peak>>20, artifactSize>>20)
+	t.Logf("stored %d MiB with a %d MiB peak heap", artifactSize>>20, peak>>20)
 }

@@ -60,6 +60,13 @@ func loadConfig() (config, error) {
 	})
 }
 
+// maxMultipartMemory caps how much of an upload gin keeps on the heap before
+// spilling the rest to a temp file. Gin's default is 32 MiB, which this service
+// would retain per concurrent upload for as long as the MinIO Put runs. The
+// parts are streamed to MinIO from their *multipart.FileHeader either way, so
+// the lower bound costs nothing but temp-file I/O on a large artifact.
+const maxMultipartMemory = 1 << 20
+
 // maxInt64AsFloat is 2^63 — one past math.MaxInt64, which float64 cannot hold
 // exactly. A float at or above it does not fit in an int64.
 const maxInt64AsFloat = float64(1 << 63)
