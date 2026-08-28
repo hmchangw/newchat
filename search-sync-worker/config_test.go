@@ -1,11 +1,15 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // setRequiredConfigEnv sets every `required` env var so env.ParseAs[config]
@@ -48,6 +52,23 @@ func TestConfig_HRJetStreamDomain(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "hr-hub", cfg.HRJetStreamDomain)
 	})
+}
+
+// The resolver already treats a missing user as a normal outcome
+// (teams_user_store.go:31), so secondary lag widens a race this code already
+// accepts rather than opening a new one.
+func TestConfig_ReadPreferenceDefault(t *testing.T) {
+	setRequiredConfigEnv(t)
+	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE")) // the default only applies when unset
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "secondaryPreferred", cfg.ReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.SecondaryPreferredMode, rp.Mode())
 }
 
 func TestConfig_PipelineDepth(t *testing.T) {
