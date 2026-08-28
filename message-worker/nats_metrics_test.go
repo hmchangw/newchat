@@ -75,7 +75,8 @@ func TestHandler_HandleJetStreamMsg_RecordsPersistenceOutcomes(t *testing.T) {
 			stubHistoryAllMembers(threads)
 			users.EXPECT().FindUserByAccount(gomock.Any(), "alice").Return(user, nil)
 			store.EXPECT().SaveMessage(gomock.Any(), &message, &sender, "site-a").Return(tt.storeError)
-			h := NewHandler(store, users, threads, "site-a", func(context.Context, string, []byte, string) error { return nil }, withPersistenceMetrics(metrics))
+			h := NewHandler(store, users, threads, "site-a", func(context.Context, string, []byte, string) error { return nil },
+				nil, testDegradeTracker(), testDropPolicy(), withPersistenceMetrics(metrics))
 			msg := &fakeJSMsg{data: data}
 
 			h.HandleJetStreamMsg(context.Background(), msg)

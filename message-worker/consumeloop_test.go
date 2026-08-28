@@ -178,8 +178,11 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	})
 
 	store := &salvageStore{}
-	h := NewHandler(store, salvageUsers{}, salvageThreads{}, "site-salvage",
-		func(context.Context, string, []byte, string) error { return nil })
+	// historyStore mirrors main.go's wiring: the live handler always sees a store
+	// that tags its own Cassandra errors, so settle can classify them.
+	h := NewHandler(historyStore{store}, salvageUsers{}, salvageThreads{}, "site-salvage",
+		func(context.Context, string, []byte, string) error { return nil },
+		nil, testDegradeTracker(), testDropPolicy())
 
 	reader := sdkmetric.NewManualReader()
 	consumerMetrics := natsmetrics.NewFromProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))).
