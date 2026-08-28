@@ -127,11 +127,11 @@ type Config struct {
 	// its key partway through a Mongo outage. 0 disables the DEK L2 tier.
 	DEKL2 atrest.TTLConfig
 
-	// DEKBreakerFails/DEKBreakerCooldown configure the circuit breaker guarding
-	// the Mongo DEK fetch. Kept separate from the subscription breaker so the
-	// two failure signals never reset each other.
-	DEKBreakerFails    int           `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
-	DEKBreakerCooldown time.Duration `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
+	// DEKBreaker fences the Mongo DEK fetch, kept separate from the subscription
+	// breaker so the two failure signals never reset each other. The knobs live
+	// in pkg/atrest with the tier they configure — message-worker fences the
+	// same collection.
+	DEKBreaker atrest.BreakerConfig
 
 	// RoomTimesL2 is the Valkey L2 retention for a room's last confirmed
 	// createdAt, which floors the Cassandra bucket walk. Unlike the other tiers
@@ -283,11 +283,8 @@ func validate(cfg *Config) error {
 	if cfg.DEKL2.TTL < 0 {
 		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2.TTL)
 	}
-	if cfg.DEKBreakerFails < 0 {
-		return fmt.Errorf("ATREST_DEK_BREAKER_FAILS must be >= 0, got %d", cfg.DEKBreakerFails)
-	}
-	if cfg.DEKBreakerCooldown < 0 {
-		return fmt.Errorf("ATREST_DEK_BREAKER_COOLDOWN must be >= 0, got %s", cfg.DEKBreakerCooldown)
+	if err := cfg.DEKBreaker.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

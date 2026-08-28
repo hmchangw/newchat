@@ -90,7 +90,7 @@ func allStagesIntents(at time.Time) writeIntents {
 func TestFlusher_AcksHeldMessagesAfterSuccessfulWrite(t *testing.T) {
 	at := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	f.add(allStagesIntents(at), held(m))
@@ -104,7 +104,7 @@ func TestFlusher_AcksHeldMessagesAfterSuccessfulWrite(t *testing.T) {
 
 func TestFlusher_NaksHeldMessagesOnTransientWriteFailure(t *testing.T) {
 	store := &stubStore{failWith: map[string]error{"rooms": errors.New("connection refused")}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(m))
@@ -117,7 +117,7 @@ func TestFlusher_NaksHeldMessagesOnTransientWriteFailure(t *testing.T) {
 
 func TestFlusher_AcksHeldMessagesOnServerRejectedWrite(t *testing.T) {
 	store := &stubStore{failWith: map[string]error{"mentions": permanentWriteErr(9)}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"bob"}, MentionAt: time.Now().UTC()}, held(m))
@@ -129,7 +129,7 @@ func TestFlusher_AcksHeldMessagesOnServerRejectedWrite(t *testing.T) {
 
 func TestFlusher_TransientFailureStopsRemainingStages(t *testing.T) {
 	store := &stubStore{failWith: map[string]error{"rooms": errors.New("connection refused")}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 
 	f.add(allStagesIntents(time.Now().UTC()), held(&fakeMsg{}))
 	f.Flush(context.Background())
@@ -140,7 +140,7 @@ func TestFlusher_TransientFailureStopsRemainingStages(t *testing.T) {
 
 func TestFlusher_PermanentFailureInStage1StillRunsRemainingStages(t *testing.T) {
 	store := &stubStore{failWith: map[string]error{"rooms": permanentWriteErr(9)}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	at := time.Now().UTC()
@@ -160,7 +160,7 @@ func TestFlusher_PermanentThenTransientNaksAndSkipsThirdStage(t *testing.T) {
 		"rooms":    permanentWriteErr(9),
 		"lastSeen": errors.New("connection refused"),
 	}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	at := time.Now().UTC()
@@ -178,7 +178,7 @@ func TestFlusher_JoinedPermanentErrorsAcrossStagesStillClassifyPermanent(t *test
 		"rooms":    permanentWriteErr(9),
 		"mentions": permanentWriteErr(11000),
 	}}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	at := time.Now().UTC()
@@ -193,7 +193,7 @@ func TestFlusher_JoinedPermanentErrorsAcrossStagesStillClassifyPermanent(t *test
 
 func TestFlusher_SettlesAllHeldMessagesInBatch(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m1 := &fakeMsg{}
 	m2 := &fakeMsg{}
 
@@ -207,7 +207,7 @@ func TestFlusher_SettlesAllHeldMessagesInBatch(t *testing.T) {
 
 func TestFlusher_AcksNoOpMessagesWithoutWriting(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 
 	f.add(writeIntents{}, held(m))
@@ -221,13 +221,13 @@ func TestFlusher_AcksNoOpMessagesWithoutWriting(t *testing.T) {
 
 func TestFlusher_FlushOnEmptyBatchIsNoOp(t *testing.T) {
 	store := &stubStore{}
-	newFlusher(store).Flush(context.Background())
+	newFlusher(store, 0, 0).Flush(context.Background())
 	assert.Empty(t, store.order)
 }
 
 func TestFlusher_RunFlushesOnCancellation(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(m))
 
@@ -264,7 +264,7 @@ func (panicStore) BulkSetMentions(context.Context, map[subKey]time.Time) error  
 // and with it the whole process, since panics in goroutines are fatal — and
 // with MaxDeliver=-1 the redelivered message would hit the same panic forever.
 func TestFlusher_RunRecoversPanicAndStillReturns(t *testing.T) {
-	f := newFlusher(panicStore{})
+	f := newFlusher(panicStore{}, 0, 0)
 	m := &fakeMsg{}
 	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(m))
 
@@ -356,7 +356,7 @@ func TestClassifyFlushErr(t *testing.T) {
 // one inherited the worker's long-lived context and could wedge forever.
 func TestFlusher_RunBoundsEachPeriodicFlush(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(&fakeMsg{}))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -380,7 +380,7 @@ func TestFlusher_RunBoundsEachPeriodicFlush(t *testing.T) {
 // the flusher is stuck behind them.
 func TestFlusher_RunWedgedFlushGivesUpAndKeepsFlushing(t *testing.T) {
 	store := &blockingStore{released: make(chan struct{})}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	f.add(writeIntents{RoomID: "r1", LastMsgID: "m1", LastMsgAt: time.Now().UTC()}, held(&fakeMsg{}))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -454,7 +454,7 @@ func (s *blockingStore) BulkSetMentions(context.Context, map[subKey]time.Time) e
 // livelock with a green readiness probe. Draining on a budget bounds it without
 // dropping badges, which a per-message cap would do silently.
 func TestFlusher_AddSignalsAnEarlyFlushWhenMentionsCrossTheBudget(t *testing.T) {
-	f := newFlusher(&stubStore{}, withEarlyFlush(3, time.Second))
+	f := newFlusher(&stubStore{}, 3, time.Second)
 	at := time.Now().UTC()
 
 	crossed := f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"a", "b"}, MentionAt: at}, held(&fakeMsg{}))
@@ -467,7 +467,7 @@ func TestFlusher_AddSignalsAnEarlyFlushWhenMentionsCrossTheBudget(t *testing.T) 
 // Coalescing is what makes the budget a memory bound rather than a message
 // count: the same account mentioned repeatedly in one room is one map entry.
 func TestFlusher_AddCountsDistinctMentionsNotMessages(t *testing.T) {
-	f := newFlusher(&stubStore{}, withEarlyFlush(2, time.Second))
+	f := newFlusher(&stubStore{}, 2, time.Second)
 	at := time.Now().UTC()
 
 	for range 5 {
@@ -480,7 +480,7 @@ func TestFlusher_AddCountsDistinctMentionsNotMessages(t *testing.T) {
 // Without a configured budget the ticker stays the only trigger, so every
 // existing construction of a flusher keeps its current behaviour.
 func TestFlusher_AddNeverSignalsWithoutABudget(t *testing.T) {
-	f := newFlusher(&stubStore{})
+	f := newFlusher(&stubStore{}, 0, 0)
 	at := time.Now().UTC()
 
 	crossed := f.add(writeIntents{RoomID: "r1", MentionAccounts: []string{"a", "b", "c"}, MentionAt: at}, held(&fakeMsg{}))

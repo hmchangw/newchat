@@ -91,7 +91,7 @@ func wellFormedEventBytes(t *testing.T) []byte {
 // flusher's batch, where it would sit un-settled until AckWait expires.
 func TestConsumeLoop_MalformedPayloadSettledImmediatelyNeverJoinsBatch(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	bad := &fakeJetstreamMsg{subject: "chat.msg.canonical.site-a.created", data: []byte("not valid json"), headers: nats.Header{}}
 	iter := &fakeIterator{msgs: []jetstream.Msg{bad}}
 
@@ -110,7 +110,7 @@ func TestConsumeLoop_MalformedPayloadSettledImmediatelyNeverJoinsBatch(t *testin
 // actually writes it.
 func TestConsumeLoop_WellFormedPayloadReachesFlusherHeldUntilFlush(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	good := &fakeJetstreamMsg{subject: "chat.msg.canonical.site-a.created", data: wellFormedEventBytes(t), headers: nats.Header{}}
 	iter := &fakeIterator{msgs: []jetstream.Msg{good}}
 
@@ -150,7 +150,7 @@ func (m *panickyHeadersMsg) Headers() nats.Header {
 // every restart forever.
 func TestConsumeLoop_PanicInGuardedPathDoesNotKillLoopOrCrashMessage(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	bad := &panickyHeadersMsg{fakeJetstreamMsg{subject: "chat.msg.canonical.site-a.created", data: wellFormedEventBytes(t)}}
 	good := &fakeJetstreamMsg{subject: "chat.msg.canonical.site-a.created", data: wellFormedEventBytes(t), headers: nats.Header{}}
 	iter := &fakeIterator{msgs: []jetstream.Msg{bad, good}}
@@ -171,7 +171,7 @@ func TestConsumeLoop_PanicInGuardedPathDoesNotKillLoopOrCrashMessage(t *testing.
 // actually returns instead of hanging until the drain timeout.
 func TestConsumeLoop_ReturnsWhenIteratorErrors(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	iter := &fakeIterator{}
 
 	var wg sync.WaitGroup
@@ -202,7 +202,7 @@ func TestConsumeLoop_ExitFailsReadiness(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
 	wg.Wait()
 
 	err := probe(context.Background())
@@ -230,7 +230,7 @@ func TestConsumeLoop_UnexpectedExitRequestsProcessRestart(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
 	wg.Wait()
 
 	select {
@@ -250,7 +250,7 @@ func TestConsumeLoop_ShutdownExitDoesNotRequestRestart(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
 	wg.Wait()
 
 	select {
@@ -324,7 +324,7 @@ func TestConsumeLoop_GracefulStopIsNotLoggedAsAnError(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	consumeLoop(iter, newFlusher(&stubStore{}), &wg, &state)
+	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, &state)
 	wg.Wait()
 
 	lvl, found := logs.levelFor("consume loop stopped")
@@ -341,7 +341,7 @@ func TestConsumeLoop_UnexpectedStopStaysAnError(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	consumeLoop(iter, newFlusher(&stubStore{}), &wg, &state)
+	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, &state)
 	wg.Wait()
 
 	lvl, found := logs.levelFor("consume loop stopped")
@@ -376,7 +376,7 @@ func mentionEventBytes(t *testing.T, id string, mentions ...string) []byte {
 // large they grow.
 func TestConsumeLoop_DrainsEarlyWhenMentionsCrossTheBudget(t *testing.T) {
 	store := &stubStore{}
-	f := newFlusher(store, withEarlyFlush(2, time.Second))
+	f := newFlusher(store, 2, time.Second)
 	iter := &fakeIterator{msgs: []jetstream.Msg{
 		&fakeJetstreamMsg{
 			subject: "chat.msg.canonical.site-a.created",

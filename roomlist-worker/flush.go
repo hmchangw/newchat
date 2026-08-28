@@ -31,40 +31,31 @@ type flusher struct {
 	pending *batch
 }
 
-type flusherOption func(*flusher)
-
-// withEarlyFlush bounds the one write map MaxAckPending does not.
+// newFlusher builds the flusher. mentionBudget and flushTimeout configure the
+// early drain, and zero for either leaves the ticker as the only trigger.
 //
-// held, rooms and lastSeen are all bounded by the un-acked message count.
-// mentions is not: it grows with mentioned accounts per message, and
-// mention.Parse caps neither the token count nor its input beyond the 20KB
-// content limit. One maximum-size message yields thousands of accounts, so a
-// window in which flushes are slow can hold MaxAckPending times that — enough
-// that BulkSetMentions cannot complete inside flushTimeout, and under
-// MaxDeliver=-1 that is a Nak-rebuild-Nak livelock that never exits, with a
-// readiness probe still reporting green.
+// The early drain bounds the one write map MaxAckPending does not. held, rooms
+// and lastSeen are all bounded by the un-acked message count. mentions is not:
+// it grows with mentioned accounts per message, and mention.Parse caps neither
+// the token count nor its input beyond the 20KB content limit. One
+// maximum-size message yields thousands of accounts, so a window in which
+// flushes are slow can hold MaxAckPending times that — enough that
+// BulkSetMentions cannot complete inside flushTimeout, and under MaxDeliver=-1
+// that is a Nak-rebuild-Nak livelock that never exits, with a readiness probe
+// still reporting green.
 //
 // A budget rather than a per-message cap: capping mentions at derive time would
 // silently drop real badges, and a lost badge is invisible to everyone,
 // including whoever is meant to notice. Draining early instead keeps every
 // badge and turns the growth into back-pressure — the consume loop pays for the
 // write inline, which is precisely the desired effect.
-func withEarlyFlush(mentionBudget int, flushTimeout time.Duration) flusherOption {
-	return func(f *flusher) {
-		f.mentionBudget = mentionBudget
-		f.flushTimeout = flushTimeout
+func newFlusher(store Store, mentionBudget int, flushTimeout time.Duration) *flusher {
+	return &flusher{
+		store:         store,
+		mentionBudget: mentionBudget,
+		flushTimeout:  flushTimeout,
+		pending:       newBatch(nil),
 	}
-}
-
-func newFlusher(store Store, opts ...flusherOption) *flusher {
-	f := &flusher{
-		store:   store,
-		pending: newBatch(nil),
-	}
-	for _, opt := range opts {
-		opt(f)
-	}
-	return f
 }
 
 // add merges one message's intents and reports whether the pending batch has

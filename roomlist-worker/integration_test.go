@@ -64,7 +64,7 @@ func readSub(t *testing.T, db *mongo.Database, roomID, account string) bson.M {
 // flushOne runs one event end-to-end through the real flusher and store.
 func flushOne(t *testing.T, store Store, evt eventProjection) *fakeMsg {
 	t.Helper()
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	m := &fakeMsg{}
 	f.add(deriveIntents(&evt), held(m))
 	f.Flush(context.Background())
@@ -329,7 +329,7 @@ func TestIntegration_AllEventsInOneBatchCoalesceToOneRoomWrite(t *testing.T) {
 	seedRoom(t, db, "r1")
 	seedSubscription(t, db, "r1", "alice", nil)
 
-	f := newFlusher(store)
+	f := newFlusher(store, 0, 0)
 	msgs := make([]*fakeMsg, 3)
 	for i := range msgs {
 		msgs[i] = &fakeMsg{}

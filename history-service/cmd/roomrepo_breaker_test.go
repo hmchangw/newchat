@@ -69,7 +69,7 @@ func (s *stubRoomRepo) InvalidatePreviewKey(context.Context, string, string, int
 // return immediately and never touch Mongo.
 func TestBreakerRoomRepo_OpenBreakerFailsFastWithoutCallingMongo(t *testing.T) {
 	inner := &stubRoomRepo{err: errors.New("mongo unreachable")}
-	b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(roomBreakerFailure))
+	b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	repo := newBreakerRoomRepo(inner, b)
 
 	_, _, err := repo.GetRoomTimes(context.Background(), "r1")
@@ -91,7 +91,7 @@ func TestBreakerRoomRepo_OpenBreakerFailsFastWithoutCallingMongo(t *testing.T) {
 // rooms open the breaker and degrade every other room's read.
 func TestBreakerRoomRepo_NotFoundDoesNotTripBreaker(t *testing.T) {
 	inner := &stubRoomRepo{err: mongo.ErrNoDocuments}
-	b := circuitbreaker.New(2, time.Minute, circuitbreaker.WithFailurePredicate(roomBreakerFailure))
+	b := circuitbreaker.New(2, time.Minute, circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	repo := newBreakerRoomRepo(inner, b)
 
 	for range 5 {
@@ -127,7 +127,7 @@ func TestBreakerRoomRepo_PreviewWritesFailFastWhenOpen(t *testing.T) {
 	for name, write := range writes {
 		t.Run(name, func(t *testing.T) {
 			inner := &stubRoomRepo{err: errors.New("mongo unreachable")}
-			b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(roomBreakerFailure))
+			b := circuitbreaker.New(1, time.Minute, circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 			repo := newBreakerRoomRepo(inner, b)
 
 			require.Error(t, write(repo))

@@ -136,7 +136,7 @@ func TestSubL2Source_SubscribedResolvesThroughBaseSource(t *testing.T) {
 // check against a perfectly healthy database.
 func TestSubBreakerFailure_CancelledCallerDoesNotTripBreaker(t *testing.T) {
 	b := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 5 {
 		err := b.Do(func() error { return context.Canceled })
@@ -150,7 +150,7 @@ func TestSubBreakerFailure_CancelledCallerDoesNotTripBreaker(t *testing.T) {
 // server-selection bound, so it must still count or the fence never engages.
 func TestSubBreakerFailure_DeadlineExceededTripsBreaker(t *testing.T) {
 	b := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 2 {
 		require.ErrorIs(t, b.Do(func() error { return context.DeadlineExceeded }), context.DeadlineExceeded)

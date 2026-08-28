@@ -61,8 +61,7 @@ type config struct {
 	Valkey             valkeyutil.Config
 	DEKL2              atrest.TTLConfig
 	Breaker            mongoutil.BreakerConfig
-	DEKBreakerFails    int                     `env:"ATREST_DEK_BREAKER_FAILS"    envDefault:"5"`
-	DEKBreakerCooldown time.Duration           `env:"ATREST_DEK_BREAKER_COOLDOWN" envDefault:"10s"`
+	DEKBreaker         atrest.BreakerConfig
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
@@ -182,8 +181,7 @@ func main() {
 		dekColl := db.Collection(atrest.CollectionName)
 		// message-worker is the sole persister, so its DEK breaker opening is the
 		// difference between messages being written and being parked. Publish it.
-		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
-			circuitbreaker.Tracked(ctx, "atrestdek"))
+		dekBreaker := cfg.DEKBreaker.New(ctx, "atrestdek")
 		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), valkeyClient,
 			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)

@@ -20,7 +20,7 @@ import (
 // or mistyped rooms open the breaker and degrade every other room's meta read.
 func TestMetaBreaker_MissingRoomDoesNotTripBreaker(t *testing.T) {
 	metaBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 5 {
 		err := metaBreaker.Do(func() error {
@@ -35,7 +35,7 @@ func TestMetaBreaker_MissingRoomDoesNotTripBreaker(t *testing.T) {
 // Genuine infrastructure errors must still open the breaker.
 func TestMetaBreaker_InfraErrorTripsBreaker(t *testing.T) {
 	metaBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	boom := errors.New("connection refused")
 	for range 2 {
@@ -102,7 +102,7 @@ func TestNewMongoStore_UsesIndependentBreakers(t *testing.T) {
 // fence a healthy database, and every cold subscription read fails with it.
 func TestSubBreaker_CancelledCallerDoesNotTripBreaker(t *testing.T) {
 	subBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 5 {
 		err := subBreaker.Do(func() error {
@@ -120,7 +120,7 @@ func TestSubBreaker_CancelledCallerDoesNotTripBreaker(t *testing.T) {
 // through exactly the outage it exists for.
 func TestSubBreaker_DeadlineExceededTripsBreaker(t *testing.T) {
 	subBreaker := circuitbreaker.New(2, time.Minute,
-		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 
 	for range 2 {
 		err := subBreaker.Do(func() error {

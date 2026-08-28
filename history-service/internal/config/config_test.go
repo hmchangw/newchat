@@ -218,8 +218,8 @@ func TestValidate_RejectsNegativeValues(t *testing.T) {
 		{"mongo breaker fails", func(c *Config) { c.Breaker.Fails = -1 }, "HISTORY_MONGO_BREAKER_FAILS"},
 		{"mongo breaker cooldown", func(c *Config) { c.Breaker.Cooldown = -time.Second }, "HISTORY_MONGO_BREAKER_COOLDOWN"},
 		{"DEK L2 TTL", func(c *Config) { c.DEKL2.TTL = -time.Second }, "ATREST_DEK_L2_TTL"},
-		{"DEK breaker fails", func(c *Config) { c.DEKBreakerFails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
-		{"DEK breaker cooldown", func(c *Config) { c.DEKBreakerCooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
+		{"DEK breaker fails", func(c *Config) { c.DEKBreaker.Fails = -1 }, "ATREST_DEK_BREAKER_FAILS"},
+		{"DEK breaker cooldown", func(c *Config) { c.DEKBreaker.Cooldown = -time.Second }, "ATREST_DEK_BREAKER_COOLDOWN"},
 		{"room times L2 TTL", func(c *Config) { c.RoomTimesL2.TTL = -time.Second }, "ROOM_TIMES_L2_TTL"},
 	}
 	for _, tt := range tests {

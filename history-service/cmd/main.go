@@ -198,8 +198,7 @@ func main() {
 		// subValkey is the client already connected for the subauth L2; a nil
 		// client disables the tier. The DEK breaker is deliberately separate from
 		// the subscription breaker so the two health signals stay independent.
-		dekBreaker := circuitbreaker.New(cfg.DEKBreakerFails, cfg.DEKBreakerCooldown,
-			circuitbreaker.Tracked(ctx, "atrestdek"))
+		dekBreaker := cfg.DEKBreaker.New(ctx, "atrestdek")
 		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), subValkey,
 			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
 		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
@@ -244,7 +243,7 @@ func main() {
 	subsPrimary := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	subTier := subauthcache.NewTier(subValkey, subsPrimary, cfg.SubL2.TTL,
 		cfg.Breaker.New(ctx, "subscription",
-			circuitbreaker.WithFailurePredicate(subBreakerFailure)),
+			circuitbreaker.WithFailurePredicate(mongoBreakerFailure)),
 		cachemetrics.For("subauth", "l2"))
 	// history-service needs only the access-window bound out of the shared
 	// projection, so this adapts the tier's SubAuth to that narrower shape.
@@ -305,7 +304,7 @@ func main() {
 	// only once they fail FAST (see breakerRoomRepo). Its own breaker, so
 	// room-read health and subscription-read health cannot mask each other.
 	guardedRooms := newBreakerRoomRepo(roomRepo, cfg.Breaker.New(ctx, "roomtimes",
-		circuitbreaker.WithFailurePredicate(roomBreakerFailure)))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure)))
 
 	// Room-times L2. Reuses the client already connected for the subauth tier; a
 	// nil client or a zero TTL leaves the service's no-op in place, so the bucket

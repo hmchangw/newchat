@@ -133,9 +133,9 @@ func main() {
 	// breaker's failure count. Each reports under its own name, so the two health
 	// signals stay distinguishable on the shared gauge.
 	subBreaker := cfg.Breaker.New(ctx, "subscription",
-		circuitbreaker.WithFailurePredicate(subBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
-		circuitbreaker.WithFailurePredicate(metaBreakerFailure))
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
 	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {

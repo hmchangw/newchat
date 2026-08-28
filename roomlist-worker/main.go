@@ -143,7 +143,7 @@ func main() {
 	// that the pathological case drains long before BulkSetMentions grows past
 	// what one flush can write. Derived rather than a separate knob so it cannot
 	// drift from the bound it exists to complement.
-	f := newFlusher(store, withEarlyFlush(4*cfg.Consumer.MaxAckPending, cfg.FlushTimeout))
+	f := newFlusher(store, 4*cfg.Consumer.MaxAckPending, cfg.FlushTimeout)
 	flushCtx, flushCancel := context.WithCancel(context.Background())
 	flushDone := make(chan struct{})
 	go func() { f.Run(flushCtx, cfg.FlushInterval, cfg.FlushTimeout); close(flushDone) }()

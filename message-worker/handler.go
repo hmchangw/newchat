@@ -125,12 +125,7 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 	// keeps a future implementation that returns the looser (nil, nil) from
 	// panicking on the sole message-persistence path.
 	case err == nil && user != nil:
-		sender = &cassParticipant{
-			ID:          user.ID,
-			EngName:     user.EngName,
-			CompanyName: user.ChineseName,
-			Account:     evt.Message.UserAccount,
-		}
+		sender = senderFrom(user, evt.Message.UserAccount)
 	case model.IsSystemMessageType(evt.Message.Type):
 		// System messages may have no real user; proceed with nil sender.
 		// A client type (e.g. important) has a real sender, so a lookup failure
@@ -148,11 +143,6 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			"error", err, "account", evt.Message.UserAccount,
 			"message_id", evt.Message.ID,
 			"request_id", natsutil.RequestIDFromContext(ctx))
-		sender = &cassParticipant{
-			ID:      evt.Message.UserID,
-			EngName: evt.Message.UserDisplayName,
-			Account: evt.Message.UserAccount,
-		}
 		// SiteID is deliberately left zero. It reaches
 		// publishThreadSubInboxIfRemote as ownerSiteID — the subscription
 		// owner's HOME site, not the room's site (evt.SiteID) — and we do not
@@ -164,6 +154,10 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			Account: evt.Message.UserAccount,
 			EngName: evt.Message.UserDisplayName,
 		}
+		// Derived from the projected user, not written out a second time: the
+		// two identities must stay the same identity, and a field added to
+		// cassParticipant must not be able to reach one and miss the other.
+		sender = senderFrom(user, evt.Message.UserAccount)
 	}
 	// debug: which sender the message resolved to (system messages have none).
 	slog.DebugContext(ctx, "message-worker sender resolved",
@@ -806,4 +800,18 @@ func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Messag
 		return fmt.Errorf("marshal thread reply event: %w", err)
 	}
 	return h.publish(ctx, subject.ServerBroadcastThreadTCount(h.siteID), data, "")
+}
+
+// senderFrom renders the Cassandra participant for a resolved user. One mapping
+// for both identities the create path can produce — the one looked up in Mongo
+// and the one projected from the canonical event when that lookup fails — so a
+// field added to cassParticipant cannot reach one and miss the other. account
+// stays a parameter because the event's account is what the row is keyed by.
+func senderFrom(u *model.User, account string) *cassParticipant {
+	return &cassParticipant{
+		ID:          u.ID,
+		EngName:     u.EngName,
+		CompanyName: u.ChineseName,
+		Account:     account,
+	}
 }
