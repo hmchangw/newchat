@@ -24,9 +24,9 @@ package roomsubcache
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
@@ -69,11 +69,14 @@ type Member struct {
 
 // Cache stores and retrieves a room's member list.
 //
-// Get returns valkeyutil.ErrCacheMiss when the room has no cached entry.
-// An empty (non-nil) slice is a valid cache hit and must not be confused
-// with a miss — callers can negative-cache empty rooms by Set-ing nil.
+// Get reports ok=false for anything that is not a servable entry — an absent
+// key, an unreadable one, a foreign or pre-envelope value — and records and
+// logs which it was. It returns no error because the caller has the same move
+// for all of them: go to the source of truth. An empty (non-nil) slice IS a
+// hit and must not be confused with a miss; callers negative-cache empty rooms
+// by Set-ing nil.
 type Cache interface {
-	Get(ctx context.Context, roomID string) (Entry, error)
+	Get(ctx context.Context, roomID string) (Entry, bool)
 	Set(ctx context.Context, roomID string, members []Member, ttl time.Duration) error
 	// Slide re-arms an entry's deadline without rewriting it, so a room stays
 	// resolvable while the source of truth is unreachable. It uses EXPIRE, which
@@ -92,10 +95,12 @@ type Cache interface {
 // confirmed it. CachedAt drives refresh-on-read: it is what lets a reader tell
 // a recently-confirmed entry from one that should be re-validated, and it is
 // why a Mongo outage can extend an entry rather than lose it.
-type Entry struct {
-	Members  []Member `json:"members"`
-	CachedAt int64    `json:"cachedAt"`
-}
+//
+// It is the shared valkeyutil.Box, not a private struct, so this tier cannot
+// drift from the four that go through valkeyutil.Tier — the envelope, the
+// stamp rule and the outcome table are the same ones or they are not shared at
+// all. The member list is therefore Entry.V.
+type Entry = valkeyutil.Box[[]Member]
 
 type valkeyCache struct {
 	client        valkeyutil.Client
@@ -168,39 +173,43 @@ func legacyCacheKey(roomID string) string {
 // errors.Is. An empty cached value is a hit and returns a non-nil empty
 // slice, distinguishable from a miss. Returns an error if roomID is
 // empty or if the cached blob exceeds the configured size cap.
-func (c *valkeyCache) Get(ctx context.Context, roomID string) (Entry, error) {
+func (c *valkeyCache) Get(ctx context.Context, roomID string) (Entry, bool) {
 	if roomID == "" {
-		return Entry{}, errors.New("roomsubcache: empty roomID")
+		return Entry{}, false
 	}
 	raw, err := c.client.Get(ctx, cacheKey(roomID))
+	// The cap is checked on the raw blob, before the decode, because that is the
+	// point of it: a compromised writer of this shared key must not be able to
+	// make every reader of the room allocate an arbitrary member list.
+	if err == nil && c.maxValueBytes > 0 && len(raw) > c.maxValueBytes {
+		c.metrics.Error(ctx)
+		slog.WarnContext(ctx, "roomsubcache L2 entry exceeds the size cap, falling back to the source of truth",
+			"roomId", roomID, "bytes", len(raw), "max", c.maxValueBytes)
+		return Entry{}, false
+	}
 	if err != nil {
-		if errors.Is(err, valkeyutil.ErrCacheMiss) {
-			c.metrics.Miss(ctx)
-		} else {
+		// DecodeCachedJSON reads an empty raw as an absent key, which is the
+		// outcome table's clean-miss branch — the same one GetJSON lands on.
+		raw = ""
+		if !errors.Is(err, valkeyutil.ErrCacheMiss) {
 			c.metrics.Error(ctx)
+			slog.WarnContext(ctx, "roomsubcache L2 read failed, falling back to the source of truth",
+				"roomId", roomID, "error", err)
+			return Entry{}, false
 		}
-		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, err)
 	}
-	if c.maxValueBytes > 0 && len(raw) > c.maxValueBytes {
-		c.metrics.Error(ctx)
-		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: blob exceeds max %d bytes (got %d)", roomID, c.maxValueBytes, len(raw))
+	// A pre-envelope entry (a bare []Member array) fails to decode here, and an
+	// entry with no stamp fails Usable — both reload as a miss rather than being
+	// served as an empty member list, which would silently drop fan-out.
+	entry, ok := valkeyutil.DecodeCachedJSON(ctx, raw, "roomsubcache", c.metrics,
+		func(b *Entry) bool { return b.Usable(nil) }, "roomId", roomID)
+	if !ok {
+		return Entry{}, false
 	}
-	var entry Entry
-	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
-		// Also the path an entry written before the envelope existed takes: a
-		// bare array fails to decode here and is reloaded as a miss.
-		c.metrics.Error(ctx)
-		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: unmarshal: %w", roomID, err)
+	if entry.V == nil {
+		entry.V = []Member{}
 	}
-	if entry.CachedAt == 0 {
-		c.metrics.Miss(ctx)
-		return Entry{}, fmt.Errorf("get cached subscriptions for room %s: %w", roomID, valkeyutil.ErrCacheMiss)
-	}
-	if entry.Members == nil {
-		entry.Members = []Member{}
-	}
-	c.metrics.Hit(ctx)
-	return entry, nil
+	return entry, true
 }
 
 // Slide re-arms the entry's deadline. See Cache.Slide.
@@ -224,7 +233,7 @@ func (c *valkeyCache) Set(ctx context.Context, roomID string, members []Member, 
 	if members == nil {
 		members = []Member{}
 	}
-	entry := Entry{Members: members, CachedAt: c.now().UnixMilli()}
+	entry := Entry{V: members, CachedAt: c.now().UnixMilli()}
 	if err := valkeyutil.SetJSONWithTTL(ctx, c.client, cacheKey(roomID), entry, ttl); err != nil {
 		return fmt.Errorf("set cached subscriptions for room %s: %w", roomID, err)
 	}

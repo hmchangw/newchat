@@ -158,3 +158,20 @@ func WithOutageRetryBudget(s ConsumerSettings, schedule []time.Duration) Consume
 	}
 	return s
 }
+
+// WithUnlimitedRedelivery lifts the delivery cap: the consumer keeps redelivering
+// until the handler acks, so a dependency outage cannot silently drop work. Use
+// it where a poison message is dropped by the handler's own classification (an
+// Ack on a server-rejected write) rather than by a delivery count.
+//
+// It takes and returns settings for a reason. MaxDeliver has to be unlimited
+// BEFORE the schedule is derived: backOffSchedule clamps the steps against the
+// cap and skips that clamp precisely when the cap is unlimited. Set on the
+// jetstream.ConsumerConfig afterwards, the clamp has already fired against a cap
+// that no longer applies, so CONSUMER_BACKOFF_STEPS quietly shortens redelivery
+// spacing while having no effect on the cap it was clamped against. Passing the
+// settings through here makes that ordering the only one available.
+func WithUnlimitedRedelivery(s ConsumerSettings) ConsumerSettings {
+	s.MaxDeliver = -1
+	return s
+}

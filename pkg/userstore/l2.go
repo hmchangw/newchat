@@ -224,28 +224,33 @@ func (l *l2Store) FindUsersByAccounts(ctx context.Context, accounts []string) ([
 	}
 
 	// Whatever is left in stale was not confirmed, and the two reasons are not
-	// interchangeable.
-	//
-	//   - The batch failed (MongoDB unreachable, or the breaker already open).
-	//     Keep serving each cached copy and re-arm its deadline, so a record read
-	//     only through this path outlives an outage longer than its TTL instead of
-	//     lapsing one TTL after its last populate.
-	//   - The batch succeeded and simply did not know the account. That is a
-	//     deletion, not an outage, so the entry goes now rather than at the TTL —
-	//     the same call the single-key path makes on ErrUserNotFound.
-	for a := range stale {
-		u := stale[a]
-		if ferr != nil {
-			l.slide(ctx, accountKey(a))
-			hits = append(hits, u)
-			continue
-		}
-		Bust(ctx, l.client, u.ID, u.Account)
-	}
-
+	// interchangeable. Which one applies is a property of the batch, not of an
+	// individual account, so the choice is made once rather than per entry.
 	if ferr != nil {
+		// MongoDB unreachable, or the breaker already open. Keep serving each
+		// cached copy and re-arm its deadline, so a record read only through this
+		// path outlives an outage longer than its TTL instead of lapsing one TTL
+		// after its last populate.
+		for a := range stale {
+			l.slide(ctx, accountKey(a))
+			hits = append(hits, stale[a])
+		}
 		return append(hits, fresh...), fmt.Errorf("l2 find users by accounts: %w", ferr)
 	}
+
+	// The batch succeeded and simply did not know these accounts. That is a
+	// deletion, not an outage, so the entries go now rather than at the TTL — the
+	// same call the single-key path makes on ErrUserNotFound. Collected into one
+	// BustKeys rather than one Bust per account: it pipelines across slots, so a
+	// batch costs about a round-trip per node instead of one per user.
+	drop := make([]string, 0, 2*len(stale))
+	for a := range stale {
+		if id := stale[a].ID; id != "" {
+			drop = append(drop, idKey(id))
+		}
+		drop = append(drop, accountKey(a))
+	}
+	valkeyutil.BustKeys(ctx, l.client, "user", drop...)
 	return append(hits, fresh...), nil
 }
 

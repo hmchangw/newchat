@@ -32,12 +32,12 @@ func (m *mongoStore) EnsureIndexes(ctx context.Context) error {
 }
 
 type mongoStore struct {
-	roomCol *mongo.Collection
-	// roomBulk is the same collection typed, used only for its BulkWrite, which
-	// supplies the empty-input guard, the unordered execution the preview flush
-	// depends on, and a %w wrap that keeps errors.As(BulkWriteException) working
-	// — the same reason roomlist-worker's store holds typed collections.
-	roomBulk      *mongoutil.Collection[model.Room]
+	// rooms is typed for its BulkWrite, which supplies the empty-input guard,
+	// the unordered execution the preview flush depends on, and a %w wrap that
+	// keeps errors.As(BulkWriteException) working — the same reason
+	// roomlist-worker's store holds typed collections. Raw() serves the one
+	// read that wants the driver handle.
+	rooms         *mongoutil.Collection[model.Room]
 	subCol        *mongo.Collection
 	threadRoomCol *mongo.Collection
 	// metaTier is built once: a tier's closures escape to the heap, so
@@ -62,8 +62,7 @@ func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, va
 		subCache = roomsubcache.NewValkeyCache(valkey)
 	}
 	return &mongoStore{
-		roomCol:       roomCol,
-		roomBulk:      mongoutil.NewCollection[model.Room](roomCol),
+		rooms:         mongoutil.NewCollection[model.Room](roomCol),
 		subCol:        subCol,
 		threadRoomCol: threadRoomCol,
 		metaTier: roommetacache.NewL2Tier(valkey, roomCol, metaTTL,
@@ -89,7 +88,7 @@ func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, e
 	return circuitbreaker.Do1(m.breaker, func() (*model.Room, error) {
 		filter := bson.M{"_id": roomID}
 		var room model.Room
-		if err := m.roomCol.FindOne(ctx, filter, roomWithoutPreview).Decode(&room); err != nil {
+		if err := m.rooms.Raw().FindOne(ctx, filter, roomWithoutPreview).Decode(&room); err != nil {
 			return nil, fmt.Errorf("find room %s: %w", roomID, err)
 		}
 		return &room, nil
@@ -144,7 +143,7 @@ func (m *mongoStore) BulkUpdateRoomPreview(ctx context.Context, updates map[stri
 			SetFilter(bson.M{"_id": roomID}).
 			SetUpdate(previewUpdate(&u)))
 	}
-	if _, err := m.roomBulk.BulkWrite(ctx, models); err != nil {
+	if _, err := m.rooms.BulkWrite(ctx, models); err != nil {
 		return fmt.Errorf("bulk update room preview (%d rooms): %w", len(updates), err)
 	}
 	return nil

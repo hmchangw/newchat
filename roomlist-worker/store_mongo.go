@@ -69,31 +69,30 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(roomLastMsgFilter(roomID, u.msgID, u.at)).
 			SetUpdate(roomPointerUpdate(&u)))
+		// The user position and the @all badge are monotonic dimensions of their
+		// own, NOT part of the room pointer, so they are matched on identity
+		// alone rather than on the pointer's regression filter. Gating them on it
+		// would discard a newer user position — leaving the sidebar ordering the
+		// room by a staler user message than it has — or silently drop the @all
+		// badge, whenever a redelivered batch lost the pointer race to a later
+		// message. user-service derives HasGroupMention from lastMentionAllAt,
+		// and the batch Acks after the retry, so that loss is permanent. $max
+		// supplies the monotonicity the pointer's guard would otherwise have
+		// implied, and still writes when the field is missing.
+		//
+		// One write, not two: they share both the filter and the operator.
+		maxes := bson.M{}
 		if !u.userAt.IsZero() {
-			// A SEPARATE write, matched on identity alone, for the same reason
-			// lastMentionAllAt takes one: the user position is its own monotonic
-			// dimension. Gating it on the pointer's regression filter would
-			// discard a newer user position whenever a redelivered batch lost
-			// the pointer race to a later system message — and the sidebar would
-			// then order the room by a staler user message than it has.
+			maxes["lastUserMsgAt"] = u.userAt
+		}
+		if !u.lastMentionAllAt.IsZero() {
+			maxes["lastMentionAllAt"] = u.lastMentionAllAt
+		}
+		if len(maxes) > 0 {
 			models = append(models, mongo.NewUpdateOneModel().
 				SetFilter(bson.M{"_id": roomID}).
-				SetUpdate(bson.M{"$max": bson.M{"lastUserMsgAt": u.userAt}}))
+				SetUpdate(bson.M{"$max": maxes}))
 		}
-		if u.lastMentionAllAt.IsZero() {
-			continue
-		}
-		// A SEPARATE write, matched on identity alone. lastMentionAllAt is not
-		// part of the room pointer — it is its own monotonic dimension — so
-		// gating it on the pointer's regression filter would silently discard
-		// the @all badge whenever a redelivered batch lost the pointer race to
-		// a later message. user-service derives HasGroupMention from this
-		// field, and the batch Acks after the retry, so that loss is permanent.
-		// $max supplies the monotonicity the dropped guard used to imply, and
-		// still writes when the field is missing.
-		models = append(models, mongo.NewUpdateOneModel().
-			SetFilter(bson.M{"_id": roomID}).
-			SetUpdate(bson.M{"$max": bson.M{"lastMentionAllAt": u.lastMentionAllAt}}))
 	}
 	return models
 }

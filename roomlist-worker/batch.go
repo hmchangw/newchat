@@ -100,8 +100,12 @@ func (b *batch) add(in writeIntents, msg heldMsg) {
 			cur.msgID = in.LastMsgID
 			cur.at = in.LastMsgAt
 		}
-		// Same comparator as the pointer, for the same reason: two writers must
-		// not resolve a same-millisecond tie differently.
+		// Same comparator as the pointer, but NOT for the same reason: this
+		// service is the only writer of lastUserMsgAt, so no cross-service
+		// agreement rides on it. It is here so the two dimensions coalesced in
+		// this one function cannot disagree about which row is newer — and
+		// because lastUserMsgId is the obvious next field to write, at which
+		// point the tie would start to matter.
 		if !in.SystemMsg && msgbucket.NewerRow(in.LastMsgAt, in.LastMsgID, cur.userAt, cur.userMsgID) {
 			cur.userAt = in.LastMsgAt
 			cur.userMsgID = in.LastMsgID

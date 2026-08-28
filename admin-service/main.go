@@ -107,7 +107,7 @@ func run() error {
 	// authenticating from cache until its refresh window elapses.
 	if vk := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "session revocation", valkeyutil.Instrumented(sdk)); vk != nil {
 		h.valkey = vk
-		defer func() { _ = vk.Close() }()
+		defer valkeyutil.Disconnect(vk)
 		slog.Info("session revocation invalidation enabled")
 	}
 

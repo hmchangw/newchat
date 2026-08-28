@@ -37,10 +37,14 @@ type Box[T any] struct {
 	CachedAt int64 `json:"cachedAt"`
 }
 
-// usable reports whether a decoded box is worth serving. A zero stamp means the
+// Usable reports whether a decoded box is worth serving. A zero stamp means the
 // key holds something that is not a Box — an older format, or a foreign value —
 // and valid gives the tier its own say on the payload.
-func (b *Box[T]) usable(valid func(*T) bool) bool {
+//
+// Exported for the tiers that read a Box without going through Tier: they must
+// apply the same stamp rule, and a second spelling of it is how "an entry
+// written before the envelope existed" starts being served as a real one.
+func (b *Box[T]) Usable(valid func(*T) bool) bool {
 	return b.CachedAt != 0 && (valid == nil || valid(&b.V))
 }
 
@@ -139,7 +143,7 @@ func (t *Tier[K, V]) Resolve(ctx context.Context, id K) (V, bool, error) {
 	if t.enabled() {
 		key := t.cfg.Key(id)
 		if box, found := ReadCachedJSON(ctx, t.cfg.Client, key, t.cfg.Label,
-			t.cfg.Rec, func(b *Box[V]) bool { return b.usable(t.cfg.Valid) }); found {
+			t.cfg.Rec, func(b *Box[V]) bool { return b.Usable(t.cfg.Valid) }); found {
 			return t.serveHit(ctx, id, key, box)
 		}
 	}

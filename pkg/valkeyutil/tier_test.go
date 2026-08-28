@@ -273,7 +273,7 @@ func TestSlideTTL_NonPositiveTTLNeverExpiresTheKey(t *testing.T) {
 	}
 }
 
-// setManyClient implements the optional multi-set capability.
+// setManyClient records the bulk write.
 type setManyClient struct {
 	Client
 	calls [][]KV
@@ -285,19 +285,7 @@ func (c *setManyClient) MSet(_ context.Context, entries []KV, _ time.Duration) e
 	return c.err
 }
 
-// plainClient does not, so SetMany must fall back to one Set per key.
-type plainClient struct {
-	Client
-	setKeys []string
-	err     error
-}
-
-func (c *plainClient) Set(_ context.Context, key, _ string, _ time.Duration) error {
-	c.setKeys = append(c.setKeys, key)
-	return c.err
-}
-
-// The point of the capability: a caller writing N entries pays one round trip,
+// The point of the bulk write: a caller writing N entries pays one round trip,
 // not N. Mention lists are attacker-influenced in size and sit on the message
 // hot path, so the difference is not academic.
 func TestSetMany_UsesOneRoundTripWhenTheClientCan(t *testing.T) {
@@ -310,32 +298,13 @@ func TestSetMany_UsesOneRoundTripWhenTheClientCan(t *testing.T) {
 	assert.Equal(t, entries, c.calls[0])
 }
 
-// A client without the capability still has to work — every test fake in this
-// repo is one, and so is any future non-cluster client.
-func TestSetMany_FallsBackToPerKeySet(t *testing.T) {
-	c := &plainClient{}
-
-	SetMany(context.Background(), c, []KV{{"k1", "a"}, {"k2", "b"}}, time.Minute, "user")
-
-	assert.Equal(t, []string{"k1", "k2"}, c.setKeys)
-}
-
-// Failures are swallowed on both paths: a cache write is best-effort and the
-// caller already has the value it was trying to store.
+// A failure is swallowed: a cache write is best-effort and the caller already
+// has the value it was trying to store.
 func TestSetMany_SwallowsFailures(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		client Client
-	}{
-		{"multi-set path", &setManyClient{err: errors.New("valkey down")}},
-		{"fallback path", &plainClient{err: errors.New("valkey down")}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			require.NotPanics(t, func() {
-				SetMany(context.Background(), tt.client, []KV{{"k1", "a"}}, time.Minute, "user")
-			})
-		})
-	}
+	require.NotPanics(t, func() {
+		SetMany(context.Background(), &setManyClient{err: errors.New("valkey down")},
+			[]KV{{"k1", "a"}}, time.Minute, "user")
+	})
 }
 
 func TestSetMany_NilClientAndEmptyEntriesAreNoOps(t *testing.T) {

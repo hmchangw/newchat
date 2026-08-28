@@ -360,3 +360,25 @@ func TestConsumerSettings_EffectiveAckWaitMatchesTheConsumerConfig(t *testing.T)
 		}
 	}
 }
+
+// The unlimited cap must reach backOffSchedule, which skips its clamp precisely
+// when the cap is unlimited. Set on the config after the derivation instead, the
+// clamp has already fired against a cap that no longer applies — the ordering
+// this helper exists to make unexpressible.
+func TestWithUnlimitedRedelivery(t *testing.T) {
+	in := stream.ConsumerSettings{
+		AckWait: 30 * time.Second, MaxDeliver: stream.DefaultMaxDeliver,
+		BackOffSteps: 12, BackOffFactor: 2, BackOffMax: 8 * time.Minute,
+		MaxWaiting: 7, MaxAckPending: 9,
+	}
+
+	got := stream.WithUnlimitedRedelivery(in)
+	assert.Equal(t, -1, got.MaxDeliver)
+	assert.Equal(t, in.AckWait, got.AckWait)
+	assert.Equal(t, in.MaxWaiting, got.MaxWaiting)
+	assert.Equal(t, in.MaxAckPending, got.MaxAckPending)
+
+	// Unclamped: all 12 steps survive, where the default cap of 6 would keep 6.
+	assert.Len(t, stream.DurableConsumerDefaults(got).BackOff, 12)
+	assert.Len(t, stream.DurableConsumerDefaults(in).BackOff, stream.DefaultMaxDeliver)
+}

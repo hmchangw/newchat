@@ -66,6 +66,12 @@ type Client interface {
 	// costs roughly one per node regardless of key count.
 	MGet(ctx context.Context, keys []string) (map[string]string, error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
+	// MSet stores many entries under one TTL in a single round trip. It is on
+	// the interface, not an optional capability, because a client that lacked it
+	// would silently degrade a bulk fill to one serialized round trip per key on
+	// the message hot path — where the key count is the size of a mention list,
+	// which the sender chooses — and nothing would say so at compile time.
+	MSet(ctx context.Context, entries []KV, ttl time.Duration) error
 	// SetNX atomically sets key to value with ttl iff key is absent: (true,nil) acquired,
 	// (false,nil) refused, (false,err) transport failure. ttl must be > 0 — a zero ttl stores without expiry.
 	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)

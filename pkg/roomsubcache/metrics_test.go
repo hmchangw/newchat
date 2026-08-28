@@ -28,8 +28,8 @@ func TestValkeyCache_Get_RecordsHit(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
 	require.NoError(t, cache.Set(ctx, "room1", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
-	_, err := cache.Get(ctx, "room1")
-	require.NoError(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.True(t, ok)
 
 	assert.Equal(t, 1, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -42,8 +42,8 @@ func TestValkeyCache_Get_RecordsMiss(t *testing.T) {
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "absent")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "absent")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 1, rec.misses)
@@ -57,8 +57,8 @@ func TestValkeyCache_Get_RecordsErrorOnTransportFailure(t *testing.T) {
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -73,8 +73,8 @@ func TestValkeyCache_Get_RecordsErrorOnOversizeBlob(t *testing.T) {
 	cache := roomsubcache.NewValkeyCache(client,
 		roomsubcache.WithMaxValueBytes(100), roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)
@@ -88,8 +88,8 @@ func TestValkeyCache_Get_RecordsErrorOnMalformedJSON(t *testing.T) {
 	rec := &fakeRecorder{}
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMetrics(rec))
 
-	_, err := cache.Get(ctx, "room1")
-	require.Error(t, err)
+	_, ok := cache.Get(ctx, "room1")
+	require.False(t, ok)
 
 	assert.Equal(t, 0, rec.hits)
 	assert.Equal(t, 0, rec.misses)

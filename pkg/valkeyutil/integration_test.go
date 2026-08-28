@@ -149,11 +149,6 @@ func TestClusterRedisClient_Integration_MSetCrossSlot(t *testing.T) {
 	client := setupClusterClient(t)
 	ctx := context.Background()
 
-	// Client has no MSet: it is an optional capability (see multiSetter), and
-	// the cluster client is what provides it.
-	ms, ok := client.(multiSetter)
-	require.True(t, ok, "the cluster client must provide the bulk-write capability")
-
 	entries := make([]KV, 0, 32)
 	keys := make([]string, 0, 32)
 	want := make(map[string]string, 32)
@@ -165,7 +160,7 @@ func TestClusterRedisClient_Integration_MSetCrossSlot(t *testing.T) {
 		want[k] = v
 	}
 
-	require.NoError(t, ms.MSet(ctx, entries, time.Hour))
+	require.NoError(t, client.MSet(ctx, entries, time.Hour))
 
 	got, err := client.MGet(ctx, keys)
 	require.NoError(t, err)
@@ -173,9 +168,7 @@ func TestClusterRedisClient_Integration_MSetCrossSlot(t *testing.T) {
 }
 
 func TestClusterRedisClient_Integration_MSetEmptyEntries(t *testing.T) {
-	ms, ok := setupClusterClient(t).(multiSetter)
-	require.True(t, ok)
-	require.NoError(t, ms.MSet(context.Background(), nil, time.Hour))
+	require.NoError(t, setupClusterClient(t).MSet(context.Background(), nil, time.Hour))
 }
 
 func TestClusterRedisClient_Integration_MGetEmptyKeys(t *testing.T) {

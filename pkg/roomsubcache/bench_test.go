@@ -33,8 +33,8 @@ func BenchmarkValkeyCache_Get(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := cache.Get(ctx, "room"); err != nil {
-					b.Fatal(err)
+				if _, ok := cache.Get(ctx, "room"); !ok {
+					b.Fatal("expected a cache hit")
 				}
 			}
 		})

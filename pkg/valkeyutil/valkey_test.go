@@ -34,6 +34,17 @@ func newFake() *fakeClient {
 
 var _ valkeyutil.Client = (*fakeClient)(nil)
 
+func (f *fakeClient) MSet(_ context.Context, entries []valkeyutil.KV, ttl time.Duration) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+	for _, e := range entries {
+		f.store[e.Key] = e.Value
+		f.ttls[e.Key] = ttl
+	}
+	return nil
+}
+
 func (f *fakeClient) Get(_ context.Context, key string) (string, error) {
 	if f.getErr != nil {
 		return "", f.getErr

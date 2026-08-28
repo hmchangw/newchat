@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
-	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type fakeCache struct {
@@ -26,21 +25,18 @@ func newFakeCache() *fakeCache {
 	return &fakeCache{data: map[string]Entry{}, now: time.Now}
 }
 
-func (f *fakeCache) Get(_ context.Context, roomID string) (Entry, error) {
+func (f *fakeCache) Get(_ context.Context, roomID string) (Entry, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.data[roomID]
-	if !ok {
-		return Entry{}, valkeyutil.ErrCacheMiss
-	}
-	return v, nil
+	return v, ok
 }
 func (f *fakeCache) Set(_ context.Context, roomID string, members []Member, _ time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := make([]Member, len(members))
 	copy(cp, members)
-	f.data[roomID] = Entry{Members: cp, CachedAt: f.now().UnixMilli()}
+	f.data[roomID] = Entry{V: cp, CachedAt: f.now().UnixMilli()}
 	return nil
 }
 func (f *fakeCache) Slide(_ context.Context, _ string, _ time.Duration) {
@@ -112,7 +108,7 @@ func TestLookup_MissThenPopulate(t *testing.T) {
 }
 
 func TestLookup_CacheErrorFallsThrough(t *testing.T) {
-	cache := &erroringCache{err: errors.New("valkey down")}
+	cache := &erroringCache{}
 	loader := &fakeLoader{out: []Member{{ID: "u1", Account: "alice"}}}
 	lookup := NewLookup(cache, loader.Load, time.Minute)
 
@@ -158,10 +154,12 @@ func TestLookup_InvalidateClearsValkey(t *testing.T) {
 	assert.Equal(t, loader.out, got, "after Invalidate the next read must reload")
 }
 
-type erroringCache struct{ err error }
+// erroringCache never serves an entry — the shape every unservable L2 read
+// takes now that Get reports one bool for all of them.
+type erroringCache struct{}
 
-func (e *erroringCache) Get(context.Context, string) (Entry, error) {
-	return Entry{}, e.err
+func (e *erroringCache) Get(context.Context, string) (Entry, bool) {
+	return Entry{}, false
 }
 func (e *erroringCache) Set(context.Context, string, []Member, time.Duration) error {
 	return nil

@@ -251,9 +251,8 @@ func TestRoomActivityRefresher_PruneScanIsBounded(t *testing.T) {
 		r.lastRefreshed[fmt.Sprintf("room-%d", i)] = stale
 	}
 
-	complete, _ := r.pruneLocked(now)
-
-	assert.False(t, complete, "a map larger than the budget cannot be swept in one pass")
+	assert.False(t, r.pruneLocked(now),
+		"a partial pass that reclaimed something has a remainder, so it is not done for the interval")
 	assert.Equal(t, pruneScanBudget*3-pruneScanBudget, len(r.lastRefreshed),
 		"exactly the budget is examined, and every examined entry was stale")
 }

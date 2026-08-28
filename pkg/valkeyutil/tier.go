@@ -112,17 +112,7 @@ type KV struct {
 	Value string
 }
 
-// multiSetter is an optional Client capability: storing many keys in one round
-// trip. It is deliberately NOT part of Client — sixteen test doubles implement
-// that interface, and widening it would churn all of them to reach one call
-// site. clusterClient satisfies this; anything that does not still works
-// through SetMany's fallback.
-type multiSetter interface {
-	MSet(ctx context.Context, entries []KV, ttl time.Duration) error
-}
-
-// SetMany stores every entry under one TTL, in a single round trip where the
-// client supports it and a Set loop where it does not.
+// SetMany stores every entry under one TTL, in one round trip (see Client.MSet).
 //
 // The read side has always been one round trip (see Client.MGet); the write
 // side was one per key. That asymmetry is only visible under load: a bulk fill
@@ -138,18 +128,9 @@ func SetMany(ctx context.Context, client Client, entries []KV, ttl time.Duration
 	if client == nil || len(entries) == 0 || ttl <= 0 {
 		return
 	}
-	if ms, ok := client.(multiSetter); ok {
-		if err := ms.MSet(ctx, entries, ttl); err != nil {
-			slog.WarnContext(ctx, label+" L2 bulk write failed (TTL will reconcile)",
-				"count", len(entries), "error", err)
-		}
-		return
-	}
-	for _, e := range entries {
-		if err := client.Set(ctx, e.Key, e.Value, ttl); err != nil {
-			slog.WarnContext(ctx, label+" L2 write failed (TTL will reconcile)",
-				"key", e.Key, "error", err)
-		}
+	if err := client.MSet(ctx, entries, ttl); err != nil {
+		slog.WarnContext(ctx, label+" L2 bulk write failed (TTL will reconcile)",
+			"count", len(entries), "error", err)
 	}
 }
 

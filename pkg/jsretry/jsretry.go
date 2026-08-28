@@ -186,9 +186,17 @@ func MinWindow(schedule []time.Duration, deliveries int) time.Duration {
 	}
 	var window time.Duration
 	for i := range deliveries - 1 {
-		window += minJitter(schedule[min(i, len(schedule)-1)])
+		window += minJitter(delayAt(schedule, i))
 	}
 	return window
+}
+
+// delayAt is the "last entry repeats once attempts run past it" rule, in one
+// place: MinWindow and DeliveriesFor both walk a schedule past its end, and two
+// spellings of the tail rule would let the guaranteed window and the delivery
+// count sized against it disagree about what the tail is.
+func delayAt(schedule []time.Duration, i int) time.Duration {
+	return schedule[min(i, len(schedule)-1)]
 }
 
 // minJitter is the floor jitter can return for a base delay, mirroring jitter's
@@ -219,7 +227,7 @@ func DeliveriesFor(schedule []time.Duration, want time.Duration) int {
 	// Bounded by construction: the last entry repeats, and a schedule whose
 	// entries are all at the minNakDelay floor still advances every iteration.
 	for window < want {
-		window += minJitter(schedule[min(n-1, len(schedule)-1)])
+		window += minJitter(delayAt(schedule, n-1))
 		n++
 	}
 	return n

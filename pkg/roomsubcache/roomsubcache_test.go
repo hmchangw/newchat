@@ -14,7 +14,6 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/valkeyfake"
-	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
@@ -29,9 +28,9 @@ func TestValkeyCache_SetThenGet_RoundTrip(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "room123", members, time.Minute))
 
-	got, err := cache.Get(ctx, "room123")
-	require.NoError(t, err)
-	assert.Equal(t, members, got.Members)
+	got, ok := cache.Get(ctx, "room123")
+	require.True(t, ok)
+	assert.Equal(t, members, got.V)
 }
 
 func TestValkeyCache_Set_UsesExpectedKey(t *testing.T) {
@@ -75,16 +74,16 @@ func TestValkeyCache_Get_PreUpgradeKey_IsMiss(t *testing.T) {
 	client.Seed("room:v3:roomABC:subs", `[{"id":"u1","account":"a","homeSiteId":"site-a"}]`, time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
-	_, err := cache.Get(ctx, "roomABC")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "every pre-envelope key generation must miss, not decode")
+	_, ok := cache.Get(ctx, "roomABC")
+	assert.False(t, ok, "every pre-envelope key generation must miss, not decode")
 }
 
-func TestValkeyCache_Get_Miss_ReturnsErrCacheMiss(t *testing.T) {
+func TestValkeyCache_Get_Miss_IsNotServed(t *testing.T) {
 	ctx := context.Background()
 	cache := roomsubcache.NewValkeyCache(valkeyfake.New())
 
-	_, err := cache.Get(ctx, "missing")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
+	_, ok := cache.Get(ctx, "missing")
+	assert.False(t, ok)
 }
 
 func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
@@ -95,33 +94,34 @@ func TestValkeyCache_Get_EmptyListIsCacheHit(t *testing.T) {
 	// Empty list is a valid cached value (negative cache for empty/deleted rooms).
 	require.NoError(t, cache.Set(ctx, "empty-room", []roomsubcache.Member{}, time.Minute))
 
-	got, err := cache.Get(ctx, "empty-room")
-	require.NoError(t, err)
-	assert.NotNil(t, got.Members, "empty cache hit must return non-nil slice to distinguish from miss")
-	assert.Empty(t, got.Members)
+	got, ok := cache.Get(ctx, "empty-room")
+	require.True(t, ok)
+	assert.NotNil(t, got.V, "empty cache hit must return non-nil slice to distinguish from miss")
+	assert.Empty(t, got.V)
 }
 
-func TestValkeyCache_Get_MalformedJSON_IsNotMiss(t *testing.T) {
+// Malformed JSON is not served. That it is recorded as an Error rather than a
+// Miss — the distinction Get no longer returns — is asserted in metrics_test.go.
+func TestValkeyCache_Get_MalformedJSON_IsNotServed(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
 	client.Seed("room:v4:bad:subs", "{not json", time.Minute)
 	cache := roomsubcache.NewValkeyCache(client)
 
-	_, err := cache.Get(ctx, "bad")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, valkeyutil.ErrCacheMiss)
+	_, ok := cache.Get(ctx, "bad")
+	assert.False(t, ok)
 }
 
-func TestValkeyCache_Get_TransportError_IsWrapped(t *testing.T) {
+// A transport failure is not served, and is recorded as an Error rather than a
+// Miss (see metrics_test.go) so a broken Valkey does not read as a cold cache.
+func TestValkeyCache_Get_TransportError_IsNotServed(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
 	client.FailGet(errors.New("boom"))
 	cache := roomsubcache.NewValkeyCache(client)
 
-	_, err := cache.Get(ctx, "r")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, valkeyutil.ErrCacheMiss)
-	assert.Contains(t, err.Error(), "boom")
+	_, ok := cache.Get(ctx, "r")
+	assert.False(t, ok)
 }
 
 func TestValkeyCache_Set_TransportError_IsWrapped(t *testing.T) {
@@ -151,8 +151,8 @@ func TestValkeyCache_Invalidate_CallsDelOnExpectedKey(t *testing.T) {
 	require.Len(t, client.DelBatches(), 1)
 	assert.Equal(t, []string{"room:v4:r1:subs", "room:v3:r1:subs"}, client.DelBatches()[0])
 
-	_, err := cache.Get(ctx, "r1")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
+	_, ok := cache.Get(ctx, "r1")
+	assert.False(t, ok)
 }
 
 // Invalidation is best-effort: the authoritative write has already committed
@@ -195,7 +195,6 @@ func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{"Get", func() error { _, err := cache.Get(ctx, ""); return err }},
 		{"Set", func() error { return cache.Set(ctx, "", nil, time.Minute) }},
 	}
 	for _, tt := range tests {
@@ -205,9 +204,13 @@ func TestValkeyCache_EmptyRoomID_ReturnsError(t *testing.T) {
 			assert.Contains(t, err.Error(), "empty roomID")
 		})
 	}
+
+	// Get has no error to return, so an empty roomID is simply not a hit.
+	_, ok := cache.Get(ctx, "")
+	assert.False(t, ok)
 }
 
-func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
+func TestValkeyCache_Get_OversizedBlob_IsNotServed(t *testing.T) {
 	ctx := context.Background()
 	client := valkeyfake.New()
 	cache := roomsubcache.NewValkeyCache(client, roomsubcache.WithMaxValueBytes(100))
@@ -216,10 +219,8 @@ func TestValkeyCache_Get_OversizedBlob_ReturnsError(t *testing.T) {
 	// a compromised or misbehaving Valkey writer.
 	client.Seed("room:v4:big:subs", strings.Repeat("x", 101), time.Minute)
 
-	_, err := cache.Get(ctx, "big")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, valkeyutil.ErrCacheMiss)
-	assert.Contains(t, err.Error(), "exceeds")
+	_, ok := cache.Get(ctx, "big")
+	assert.False(t, ok, "a blob past the cap must never be decoded, let alone served")
 }
 
 func TestValkeyCache_Get_BlobAtMaxSize_IsAllowed(t *testing.T) {
@@ -230,9 +231,9 @@ func TestValkeyCache_Get_BlobAtMaxSize_IsAllowed(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "ok", []roomsubcache.Member{{ID: "u1", Account: "a"}}, time.Minute))
 
-	got, err := cache.Get(ctx, "ok")
-	require.NoError(t, err)
-	assert.Len(t, got.Members, 1)
+	got, ok := cache.Get(ctx, "ok")
+	require.True(t, ok)
+	assert.Len(t, got.V, 1)
 }
 
 func TestMember_JSONRoundTrip_NewFields(t *testing.T) {

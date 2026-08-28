@@ -390,15 +390,7 @@ func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject strin
 	// Unlimited redelivery: a MongoDB outage must not exhaust MaxDeliver and
 	// silently drop badges. Poison messages are handled by classifyFlushErr
 	// Ack-dropping server-rejected writes, not by a delivery cap.
-	//
-	// Set on the settings BEFORE deriving the defaults, not on the result after:
-	// DurableConsumerDefaults clamps the BackOff schedule against MaxDeliver, and
-	// skips that clamp precisely when the cap is unlimited. Overriding afterwards
-	// left the clamp fired against a cap that no longer applied, so
-	// CONSUMER_MAX_DELIVER silently shortened redelivery spacing while having no
-	// effect whatsoever on the delivery cap it names.
-	s.MaxDeliver = -1
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = durable
 	cc.FilterSubject = filterSubject
 	// New (not All): these writes are derived from live traffic. Replaying the

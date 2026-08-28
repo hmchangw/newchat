@@ -139,8 +139,7 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 // len(BackOff)<=MaxDeliver rule; MaxAckPending=1 keeps the lane strictly
 // sequential so a quit cannot overtake the upsert before it.
 func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
-	s.MaxDeliver = -1
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = durableName
 	cc.MaxAckPending = 1
 	return cc

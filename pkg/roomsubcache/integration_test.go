@@ -31,14 +31,14 @@ func TestValkeyCache_Integration_SetGetInvalidate(t *testing.T) {
 	}
 	require.NoError(t, cache.Set(ctx, "room-1", members, time.Minute))
 
-	got, err := cache.Get(ctx, "room-1")
-	require.NoError(t, err)
-	assert.Equal(t, members, got.Members)
+	got, ok := cache.Get(ctx, "room-1")
+	require.True(t, ok)
+	assert.Equal(t, members, got.V)
 
 	cache.Invalidate(ctx, "room-1")
 
-	_, err = cache.Get(ctx, "room-1")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
+	_, ok = cache.Get(ctx, "room-1")
+	assert.False(t, ok)
 }
 
 func TestValkeyCache_Integration_MissOnUnsetRoom(t *testing.T) {
@@ -46,8 +46,8 @@ func TestValkeyCache_Integration_MissOnUnsetRoom(t *testing.T) {
 	cache := NewValkeyCache(client)
 	ctx := context.Background()
 
-	_, err := cache.Get(ctx, "never-set")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss)
+	_, ok := cache.Get(ctx, "never-set")
+	assert.False(t, ok)
 }
 
 func TestValkeyCache_Integration_TTLExpires(t *testing.T) {
@@ -60,15 +60,14 @@ func TestValkeyCache_Integration_TTLExpires(t *testing.T) {
 	// Poll for expiry — Valkey honors TTL with sub-second granularity but
 	// asserting on a precise deadline is flaky. Allow up to 5s.
 	deadline := time.Now().Add(5 * time.Second)
-	var lastErr error
+	served := true
 	for time.Now().Before(deadline) {
-		_, lastErr = cache.Get(ctx, "room-ttl")
-		if lastErr != nil {
+		if _, served = cache.Get(ctx, "room-ttl"); !served {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	assert.ErrorIs(t, lastErr, valkeyutil.ErrCacheMiss, "expected key to expire within 5s")
+	assert.False(t, served, "expected key to expire within 5s")
 }
 
 func TestValkeyCache_Integration_EmptyListIsCacheHit(t *testing.T) {
@@ -78,9 +77,9 @@ func TestValkeyCache_Integration_EmptyListIsCacheHit(t *testing.T) {
 
 	require.NoError(t, cache.Set(ctx, "empty-room", []Member{}, time.Minute))
 
-	got, err := cache.Get(ctx, "empty-room")
-	require.NoError(t, err)
-	assert.Empty(t, got.Members, "an empty member list must round-trip as a hit, not a miss")
+	got, ok := cache.Get(ctx, "empty-room")
+	require.True(t, ok)
+	assert.Empty(t, got.V, "an empty member list must round-trip as a hit, not a miss")
 	assert.NotZero(t, got.CachedAt, "a hit must carry a confirmation stamp, or it can never be refreshed")
 }
 
@@ -100,9 +99,9 @@ func TestValkeyCache_Integration_SlideExtendsTheDeadline(t *testing.T) {
 	// Well past the original 2s deadline: without the slide this key is gone.
 	time.Sleep(3 * time.Second)
 
-	got, err := cache.Get(ctx, "room-slide")
-	require.NoError(t, err, "the slid entry must outlive its original TTL")
-	assert.Equal(t, []Member{{ID: "u1", Account: "alice"}}, got.Members)
+	got, ok := cache.Get(ctx, "room-slide")
+	require.True(t, ok, "the slid entry must outlive its original TTL")
+	assert.Equal(t, []Member{{ID: "u1", Account: "alice"}}, got.V)
 }
 
 // The slide must use EXPIRE, not SET. A membership change can bust the entry
@@ -119,6 +118,6 @@ func TestValkeyCache_Integration_SlideCannotResurrectAnInvalidatedEntry(t *testi
 
 	cache.Slide(ctx, "room-busted", time.Hour) // sliding an absent key is a no-op
 
-	_, err := cache.Get(ctx, "room-busted")
-	assert.ErrorIs(t, err, valkeyutil.ErrCacheMiss, "a slide must never resurrect an invalidated entry")
+	_, ok := cache.Get(ctx, "room-busted")
+	assert.False(t, ok, "a slide must never resurrect an invalidated entry")
 }

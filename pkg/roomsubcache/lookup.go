@@ -2,7 +2,6 @@ package roomsubcache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -63,11 +62,11 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 	}
 
 	// Fast path: cache hits skip singleflight to avoid serializing concurrent
-	// readers behind one in-flight caller.
-	if entry, err := c.cache.Get(ctx, roomID); err == nil {
+	// readers behind one in-flight caller. A non-hit needs no branch here: Get
+	// has already recorded and logged which kind it was, and every kind lands on
+	// the same next step.
+	if entry, ok := c.cache.Get(ctx, roomID); ok {
 		return c.serveHit(ctx, roomID, entry)
-	} else if !errors.Is(err, valkeyutil.ErrCacheMiss) {
-		slog.WarnContext(ctx, "roomsubcache get failed, falling back to loader", "error", err, "roomId", roomID)
 	}
 
 	// Miss path: singleflight collapses concurrent loads on the same room.
@@ -75,8 +74,8 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberFetchTimeout)
 		defer cancel()
 		// Re-check inside the flight in case a sibling caller already populated.
-		if entry, err := c.cache.Get(fetchCtx, roomID); err == nil {
-			return entry.Members, nil
+		if entry, ok := c.cache.Get(fetchCtx, roomID); ok {
+			return entry.V, nil
 		}
 		loaded, lerr := c.load(fetchCtx, roomID)
 		if lerr != nil {
@@ -105,7 +104,7 @@ func (c *Lookup) GetMembers(ctx context.Context, roomID string) ([]Member, error
 // it the entry simply expires mid-outage and fan-out starts failing.
 func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Member, error) {
 	if valkeyutil.Fresh(entry.CachedAt, c.now(), c.ttl) {
-		return entry.Members, nil
+		return entry.V, nil
 	}
 	// Collapse concurrent revalidations of the same room. Unlike the other
 	// read-through tiers this one has no process-local cache in front of it and
@@ -121,7 +120,7 @@ func (c *Lookup) serveHit(ctx context.Context, roomID string, entry Entry) ([]Me
 		loaded, err := c.load(fetchCtx, roomID)
 		if err != nil {
 			c.cache.Slide(fetchCtx, roomID, c.ttl)
-			return entry.Members, nil // fail-open by design; see above
+			return entry.V, nil // fail-open by design; see above
 		}
 		c.write(fetchCtx, roomID, loaded)
 		return loaded, nil

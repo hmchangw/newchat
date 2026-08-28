@@ -85,8 +85,8 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 		"r1": {at: at, msgID: "m1", lastMentionAllAt: mentionAll, userAt: at, userMsgID: "m1"},
 	})
 
-	require.Len(t, models, 3,
-		"the pointer, the user position and the badge each need their own filter, so all three are separate writes")
+	require.Len(t, models, 2,
+		"the pointer needs its own regression filter; the user position and the badge share one identity-matched write")
 
 	pointerFilter, pointerUpdate := modelParts(t, models[0])
 	assert.Equal(t, roomLastMsgFilter("r1", "m1", at), pointerFilter)
@@ -94,12 +94,14 @@ func TestRoomLastMsgModels_GroupMentionIsNotGatedOnThePointer(t *testing.T) {
 		"lastMsgAt": at, "lastMsgId": "m1", "updatedAt": at,
 	}}, pointerUpdate, "the badge must not be inside the guarded $set")
 
-	badgeFilter, badgeUpdate := modelParts(t, models[2])
+	badgeFilter, badgeUpdate := modelParts(t, models[1])
 	assert.Equal(t, bson.M{"_id": "r1"}, badgeFilter,
 		"the badge write matches on identity alone — a lost pointer race must not skip it")
 	// $max, not $set: the write is unguarded now, so monotonicity has to come
 	// from the operator or an older replay would drag the badge backwards.
-	assert.Equal(t, bson.M{"$max": bson.M{"lastMentionAllAt": mentionAll}}, badgeUpdate)
+	assert.Equal(t, bson.M{"$max": bson.M{
+		"lastMentionAllAt": mentionAll, "lastUserMsgAt": at,
+	}}, badgeUpdate)
 }
 
 // A plain message carries no badge, and must not emit a write that could
