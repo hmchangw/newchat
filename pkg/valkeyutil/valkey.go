@@ -1,5 +1,46 @@
-// Package valkeyutil provides thin connection + JSON helpers around the Valkey (Redis-compatible)
-// client, modeled on pkg/mongoutil. Uses go-redis/v9 — Valkey is wire-compatible so no separate driver is needed.
+// Package valkeyutil owns the connection and the shared cache policy for every
+// Valkey (Redis-compatible) tier in this repo. Uses go-redis/v9 — Valkey is wire
+// compatible, so no separate driver is needed.
+//
+// Two halves, and callers usually want both:
+//
+//   - Connection (valkey.go, config.go). Config carries VALKEY_ADDRS and
+//     VALKEY_PASSWORD; Connect, ConnectRaw and ConnectOptional are the three dial
+//     styles. ConnectOptional degrades to a nil Client, which every tier accepts,
+//     for a cache that is an optimisation rather than a startup dependency.
+//   - Policy (tier.go, readthrough.go). Tier is the read-through: the refresh
+//     window (Fresh), the TTL slide (SlideTTL), invalidation (BustKeys), and the
+//     Box envelope every tier stores. Tier.serveHit holds the three outcomes a
+//     stale hit can have — source down, confirmed gone, confirmed present — and
+//     is the single place the fail-open behaviour is decided.
+//
+// # Who builds on Tier
+//
+// Four of the repo's L2 tiers are Tier instances, so reading serveHit once
+// explains all four:
+//
+//	pkg/subauthcache    posting permission     SUB_L2_TTL
+//	pkg/roommetacache   room metadata (l2.go)  ROOM_META_L2_TTL
+//	pkg/sessioncache    bot session validation SESSION_CACHE_TTL
+//	pkg/atrest          wrapped DEKs           ATREST_DEK_L2_TTL
+//
+// Three cache Valkey without using Tier, each for a stated reason:
+//
+//	pkg/roomtimescache  NOT a read-through at all — write-on-success /
+//	                    read-on-failure, so a healthy request never consults it.
+//	pkg/userstore       two key spaces per user plus a bulk MGET path; Tier is
+//	                    single-key, single-value.
+//	pkg/roomsubcache    room member lists. Lookup.serveHit reimplements this
+//	                    package's serveHit and adds singleflight, so a change to
+//	                    the policy here does NOT reach it.
+//
+// # Invariants a new tier must keep
+//
+// Every tier declares its TTL once, in the package owning the key (a TTLConfig
+// field), because two services reading one key on different TTLs is the failure
+// no per-service default can prevent. Entries are positive-only where a wrong
+// answer grants access. A slide re-arms the deadline with EXPIRE and never SET,
+// so an entry a write site deleted in between is not resurrected.
 package valkeyutil
 
 import (

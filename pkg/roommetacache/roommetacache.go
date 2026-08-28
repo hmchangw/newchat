@@ -6,7 +6,7 @@
 // load. This package centralizes the cache so message-gatekeeper and
 // broadcast-worker share a uniform shape and behavior.
 //
-// Freshness is TTL-bounded at L1. An L2 (Valkey) tier (see valkey.go:
+// Freshness is TTL-bounded at L1. An L2 (Valkey) tier (see l2.go:
 // ReadThrough / BustMeta) is shared across replicas and survives restarts;
 // room-worker actively busts the L2 entry on writes to name/userCount. The
 // L1 LRU remains TTL-only — Invalidate exists but the cross-process bust is
