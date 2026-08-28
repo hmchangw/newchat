@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -56,6 +54,7 @@ type config struct {
 	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
 	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
+	InvalidationQueueSize  int                     `env:"INVALIDATION_QUEUE_SIZE"   envDefault:"256"`
 	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
 	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
 	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
@@ -345,18 +344,6 @@ func main() {
 		Metrics:            domainMetrics,
 	})
 
-	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
-	invalCtx, invalCancel := context.WithCancel(ctx)
-	invalCh := make(chan string, 256)
-	var invalWG sync.WaitGroup
-	invalWG.Add(1)
-	go func() {
-		defer invalWG.Done()
-		for roomID := range invalCh {
-			memberLookup.Invalidate(invalCtx, roomID)
-		}
-	}()
-
 	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES-CANONICAL sys-messages.
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
@@ -375,28 +362,9 @@ func main() {
 		slog.Error("canonical member event iterator failed", "error", err)
 		os.Exit(1)
 	}
-	go func() {
-		for {
-			_, msg, err := invalIter.Next()
-			if err != nil {
-				return
-			}
-			var evt model.CanonicalMemberEvent
-			if err := sonic.Unmarshal(msg.Data(), &evt); err != nil {
-				slog.Warn("canonical member event decode failed", "error", err)
-				_ = msg.Ack()
-				continue
-			}
-			if evt.RoomID != "" {
-				select {
-				case invalCh <- evt.RoomID:
-				default:
-					slog.Warn("invalidation queue full, dropping (TTL will reconcile)", "roomId", evt.RoomID)
-				}
-			}
-			_ = msg.Ack()
-		}
-	}()
+	// Bounded worker drains the queue so a slow Valkey doesn't block NATS dispatch;
+	// drops above the queue size are safe because roomsubcache TTLs reconcile staleness.
+	invalidator := newRoomInvalidator(ctx, invalIter, memberLookup.Invalidate, cfg.InvalidationQueueSize)
 
 	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	if err != nil {
@@ -486,23 +454,10 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
-		func(_ context.Context) error {
-			invalIter.Stop()
-			return nil
-		},
-		func(stepCtx context.Context) error {
-			close(invalCh) // stop accepting work; worker drains the buffer
-			done := make(chan struct{})
-			go func() { invalWG.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-stepCtx.Done():
-				invalCancel() // unblock an in-flight Valkey DEL so the worker exits
-				<-done
-			}
-			invalCancel() // always release the context (idempotent)
-			return nil
-		},
+		// Stops the iterator, then waits for the reader (which closes the queue) and
+		// the drain worker, in that order. See roomInvalidator.Stop for why the
+		// reader — not this goroutine — owns the close.
+		func(stepCtx context.Context) error { return invalidator.Stop(stepCtx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
