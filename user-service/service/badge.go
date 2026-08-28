@@ -49,7 +49,11 @@ func (s *UserService) BadgeCountBatch(c *natsrouter.Context, req model.BadgeCoun
 		// Once the shared request budget is spent, stop STARTING recomputes: run
 		// against a dead context they would only hit the heavy aggregate, fail at
 		// connection checkout with a misleading pool error, and degrade to absence
-		// anyway. Seeds already in flight finish and still answer.
+		// anyway. Seeds already in flight are left to finish, and how far along
+		// they are decides the outcome: one past the aggregate still answers (a
+		// dead context only marks its cross-site half degraded), while one still
+		// inside the aggregate fails on it and degrades to absence — logging the
+		// same misleading pool error this guard avoids for the unstarted.
 		if c.Err() != nil {
 			break
 		}
