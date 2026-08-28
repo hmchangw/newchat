@@ -512,3 +512,34 @@ This does **not** reopen §3. Pod restarts mid-incident still depend on the
 startup-ping PR; this only removes a blocker that sits *behind* the ping and is
 specific to the three services whose key handles this change makes
 secondary-capable.
+
+**Push after mute: a deliberate outage-time trade, not an oversight.** Three
+review threads asked to keep `notification-worker`'s `users` read on `primary`,
+because a push is an external side effect that cannot be recalled. The read is
+already isolated on its own `MONGO_USER_READ_PREFERENCE`, defaulting to
+`primaryPreferred` — a steady-state no-op against `primary`, so nothing changes
+while a primary exists. The two options differ only during a primary-down
+incident:
+
+| Choice | Outage behaviour |
+|---|---|
+| `primary` | The mute check cannot be served, so **no push is delivered at all** for the duration. §11 lists this as a thing the change unblocks. |
+| `primaryPreferred` | Pushes continue. A mute committed inside the replication window immediately before the primary died may not be honoured. |
+
+The exposure is bounded to that window — mutes set earlier have replicated, and
+mutes set during the outage cannot be written at all, so the user is not muting
+into a void either way. Losing every notification for an entire incident is the
+worse failure for the same user, so this stays `primaryPreferred`; a site that
+would rather fail closed sets `MONGO_USER_READ_PREFERENCE=primary`, which is
+exactly why that read has its own knob.
+
+This is not the same call as the teams-* workers, which stay on `primary`: a
+Graph write is non-idempotent and changes state in another system, where a
+missed push is a lost notification and nothing more.
+
+**Empty read preference resolves to `primary`, deliberately.**
+`mongoutil.ParseReadPreference("")` returns `readpref.Primary()` rather than an
+error. Every caller in this change supplies an `envDefault`, so an unset
+variable never reaches the empty branch (verified against `caarlos0/env
+v11.4.0`, above). The branch is the fail-safe for any future caller that does
+reach it: an empty value can only narrow staleness, never silently widen it.
