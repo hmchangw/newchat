@@ -3,6 +3,10 @@ package obs_test
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -304,12 +308,9 @@ func TestEverySubscriptionSubjectIsBounded(t *testing.T) {
 		if strings.HasPrefix(path, "tools/") {
 			return
 		}
-		for _, m := range subscribeCall.FindAllStringSubmatch(string(src), -1) {
-			if arg := strings.TrimSpace(m[2]); !boundedSubjectArg(arg) {
-				offenders = append(offenders, fmt.Sprintf("%s: %s(%s)", path, m[1], arg))
-			}
-		}
+		offenders = append(offenders, unboundedSubscriptions(path, src)...)
 	}))
+	sort.Strings(offenders)
 
 	assert.Empty(t, offenders, "a subscription subject reaches nats_slow_consumer_events_total as a "+
 		"label value, so it must come from a pkg/subject builder or a stored field, never a string "+
@@ -317,18 +318,94 @@ func TestEverySubscriptionSubjectIsBounded(t *testing.T) {
 		"Unbounded:\n  %s", strings.Join(offenders, "\n  "))
 }
 
-// subscribeCall captures the method name and first argument of a core-NATS
-// subscribe. The o11y wrapper takes a context first, so the subject is the
-// second argument there; both spellings are matched.
+// unboundedSubscriptions reports every subscribe in one file whose subject
+// argument is not provably bounded.
 //
-// Every spelling nats.go offers, not only the ones in use today: Subscribe,
-// SubscribeSync, QueueSubscribe, QueueSubscribeSync, QueueSubscribeSyncWithChan,
-// ChanSubscribe and ChanQueueSubscribe. The channel forms take the subject
-// first as well. A guard that only knew the shapes already in the repo would
-// pass the day someone reached for a different one, which is the day it is
-// supposed to earn its place.
-var subscribeCall = regexp.MustCompile(
-	`\.((?:Chan)?(?:Queue)?Subscribe(?:Sync)?(?:WithChan)?)\((?:[Cc]tx|context\.\w+\(\))?,?\s*([^,)]+)`)
+// This parses rather than pattern-matches, and the reason is a bug that shipped:
+// the regex it replaces captured the subject with `[^,)]+`, which stops at the
+// first `)`. `Subscribe(ctx, subject.RoomEvents(roomID), handler)` was therefore
+// captured as `subject.RoomEvents(roomID` — unbalanced — and builderArgs finds
+// no closing parenthesis in that, returns "no arguments", and the call is
+// accepted. The guard passed while admitting exactly the per-room subscription
+// it exists to reject. A source-level scanner that has to re-derive Go's
+// grammar will keep losing to Go's grammar; the parser already knows it.
+//
+// A file that will not parse is reported rather than skipped. Skipping is how a
+// scanner goes quiet without going green.
+func unboundedSubscriptions(path string, src []byte) []string {
+	file, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+	if err != nil {
+		return []string{fmt.Sprintf("%s: could not parse, so its subscriptions went unchecked: %v", path, err)}
+	}
+
+	var offenders []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !subscribeMethods[sel.Sel.Name] {
+			return true
+		}
+		arg, ok := subjectArg(call)
+		if !ok {
+			return true
+		}
+		if expr := types.ExprString(arg); !boundedSubjectArg(expr) {
+			offenders = append(offenders, fmt.Sprintf("%s: %s(%s)", path, sel.Sel.Name, expr))
+		}
+		return true
+	})
+	return offenders
+}
+
+// subjectArg picks the subject out of a subscribe call. The o11y wrapper takes a
+// context first, so the subject is the second argument there; nats.go's own
+// methods take it first.
+func subjectArg(call *ast.CallExpr) (ast.Expr, bool) {
+	if len(call.Args) == 0 {
+		return nil, false
+	}
+	if isContextArg(call.Args[0]) {
+		if len(call.Args) < 2 {
+			return nil, false
+		}
+		return call.Args[1], true
+	}
+	return call.Args[0], true
+}
+
+// isContextArg recognises the leading context of the o11y wrapper — a `ctx`
+// identifier or a context.Background()/TODO() call.
+func isContextArg(arg ast.Expr) bool {
+	switch e := arg.(type) {
+	case *ast.Ident:
+		return strings.EqualFold(e.Name, "ctx")
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "context"
+	}
+	return false
+}
+
+// subscribeMethods is every spelling nats.go offers, not only the ones in use
+// today. A guard that only knew the shapes already in the repo would pass the
+// day someone reached for a different one, which is the day it is supposed to
+// earn its place.
+var subscribeMethods = map[string]bool{
+	"Subscribe":                  true,
+	"SubscribeSync":              true,
+	"QueueSubscribe":             true,
+	"QueueSubscribeSync":         true,
+	"QueueSubscribeSyncWithChan": true,
+	"ChanSubscribe":              true,
+	"ChanQueueSubscribe":         true,
+}
 
 // boundedSubjectArg accepts only shapes whose boundedness something enforces.
 //
@@ -523,6 +600,56 @@ func TestEntityArg_AllowsBoundedArguments(t *testing.T) {
 				"subject.SomeBuilder(%s) must pass the guard", arg)
 		})
 	}
+}
+
+// TestUnboundedSubscriptions runs real source through the scanner, which is the
+// seam the unit tests below never covered.
+//
+// boundedSubjectArg was tested with hand-written, well-formed strings, so it
+// always saw `subject.RoomEvents(roomID)`. What the scanner actually handed it
+// was `subject.RoomEvents(roomID` — the capture regex stopped at the first `)`
+// — and builderArgs reads an unbalanced expression as having no arguments, so
+// the guard accepted it. Every unit test passed while the gate was open. Only a
+// test that starts from source rather than from a string can catch that.
+func TestUnboundedSubscriptions(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool // want an offender
+	}{
+		{"entity builder argument", `nc.Subscribe(ctx, subject.RoomEvents(roomID), h)`, true},
+		{"entity builder, no ctx", `nc.Subscribe(subject.RoomEvents(roomID), h)`, true},
+		{"entity builder, queue form", `nc.QueueSubscribe(subject.RoomEvents(parentRoomID), "q", h)`, true},
+		{"camel-prefixed entity argument", `nc.ChanSubscribe(subject.SomeBuilder(destinationOrgID), ch)`, true},
+		{"formatted string", `nc.Subscribe(fmt.Sprintf("chat.room.%s", roomID), h)`, true},
+		{"bare identifier", `nc.Subscribe(subj, h)`, true},
+
+		{"bounded builder", `nc.Subscribe(ctx, subject.InboxExternalAll(siteID), h)`, false},
+		{"builder named for a room, bounded argument", `nc.QueueSubscribe(subject.RoomEvents(siteID), "q", h)`, false},
+		{"no arguments", `nc.Subscribe(subject.MessagesCanonicalAll(), h)`, false},
+		{"router stored pattern", `nc.QueueSubscribe(rt.natsSubject, queue, h)`, false},
+		{"context.Background leading arg", `nc.Subscribe(context.Background(), subject.InboxExternalAll(siteID), h)`, false},
+		{"not a subscribe", `nc.Publish(subject.RoomEvents(roomID), data)`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := "package p\n\nfunc f() {\n\t" + tt.body + "\n}\n"
+			got := unboundedSubscriptions("x.go", []byte(src))
+			if tt.want {
+				assert.NotEmpty(t, got, "%s must be reported", tt.body)
+				return
+			}
+			assert.Empty(t, got, "%s must not be reported", tt.body)
+		})
+	}
+}
+
+// A file that cannot be parsed must be reported, not skipped — a scanner that
+// goes quiet on bad input goes green for the wrong reason.
+func TestUnboundedSubscriptions_UnparseableFileIsReported(t *testing.T) {
+	got := unboundedSubscriptions("broken.go", []byte("package p\n\nfunc f( {\n"))
+	assert.Len(t, got, 1)
+	assert.Contains(t, got[0], "could not parse")
 }
 
 // TestBuilderArgs pins the name/argument split, because both gates now depend
