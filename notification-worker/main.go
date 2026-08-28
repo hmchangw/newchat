@@ -12,9 +12,6 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
@@ -72,109 +69,6 @@ type config struct {
 	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-}
-
-// mongoMemberLoader loads a room's member list and stamps each member's HOME
-// site from the users collection (one batch $in per cache fill). Not
-// Subscription.siteId — that is the ROOM's home site, which would misroute
-// badge RPCs. This deliberately revises the "no users-collection lookups"
-// contract (docs/notification-worker-downstream-contracts.md §3), cache-fill
-// time only.
-type mongoMemberLoader struct {
-	col   *mongo.Collection // subscriptions
-	users *mongo.Collection // users — home-site (siteId) lookup
-}
-
-func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
-	projection := bson.M{
-		"u._id":              1,
-		"u.account":          1,
-		"u.isBot":            1,
-		"roomType":           1,
-		"muted":              1,
-		"historySharedSince": 1,
-	}
-	cur, err := m.col.Find(ctx, bson.M{"roomId": roomID}, options.Find().SetProjection(projection))
-	if err != nil {
-		return nil, fmt.Errorf("find subscriptions for room %s: %w", roomID, err)
-	}
-	defer cur.Close(ctx)
-
-	var out []roomsubcache.Member
-	for cur.Next(ctx) {
-		var doc struct {
-			User struct {
-				ID      string `bson:"_id"`
-				Account string `bson:"account"`
-				IsBot   bool   `bson:"isBot"`
-			} `bson:"u"`
-			RoomType           model.RoomType `bson:"roomType"`
-			Muted              bool           `bson:"muted"`
-			HistorySharedSince *time.Time     `bson:"historySharedSince"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("decode subscription: %w", err)
-		}
-		var hssMs *int64
-		if doc.HistorySharedSince != nil {
-			ms := doc.HistorySharedSince.UnixMilli()
-			hssMs = &ms
-		}
-		out = append(out, roomsubcache.Member{
-			ID:                 doc.User.ID,
-			Account:            doc.User.Account,
-			RoomType:           doc.RoomType,
-			IsBot:              doc.User.IsBot,
-			Muted:              doc.Muted,
-			HistorySharedSince: hssMs,
-		})
-	}
-	if err := cur.Err(); err != nil {
-		return nil, fmt.Errorf("iterate subscriptions: %w", err)
-	}
-	if err := m.fillHomeSites(ctx, roomID, out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// fillHomeSites stamps each member's HomeSiteID from the users collection
-// ({account $in members}, projected to {account, siteId}). An account missing
-// from users leaves HomeSiteID empty — that member degrades to no badge count
-// downstream rather than misrouting the RPC.
-func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, members []roomsubcache.Member) error {
-	if len(members) == 0 {
-		return nil
-	}
-	accounts := make([]string, 0, len(members))
-	for i := range members {
-		accounts = append(accounts, members[i].Account)
-	}
-	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}},
-		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "siteId": 1}))
-	if err != nil {
-		return fmt.Errorf("find home sites for room %s members: %w", roomID, err)
-	}
-	defer cur.Close(ctx)
-
-	siteByAccount := make(map[string]string, len(accounts))
-	for cur.Next(ctx) {
-		var doc struct {
-			Account string `bson:"account"`
-			SiteID  string `bson:"siteId"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			return fmt.Errorf("decode user home site: %w", err)
-		}
-		siteByAccount[doc.Account] = doc.SiteID
-	}
-	if err := cur.Err(); err != nil {
-		return fmt.Errorf("iterate user home sites: %w", err)
-	}
-	for i := range members {
-		members[i].HomeSiteID = siteByAccount[members[i].Account]
-	}
-	return nil
 }
 
 func main() {
@@ -246,8 +140,8 @@ func main() {
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
+	memberStore := &mongoMemberStore{col: subCol, users: usersCol}
+	memberLookup := newCachedMemberLookup(cache, memberStore.ListMembers, cfg.RoomSubCacheTTL)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {

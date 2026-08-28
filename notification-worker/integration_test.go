@@ -38,8 +38,8 @@ func TestNotificationWorker_CacheBackedFanOut(t *testing.T) {
 	seedSubscriptions(t, ctx, subCol)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	loader := &mongoMemberStore{col: subCol, users: usersCol}
+	lookup := newCachedMemberLookup(cache, loader.ListMembers, time.Minute)
 
 	nc, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -215,8 +215,8 @@ func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loader := &mongoMemberLoader{col: col, users: db.Collection("users")}
-	got, err := loader.Load(ctx, "rX")
+	loader := &mongoMemberStore{col: col, users: db.Collection("users")}
+	got, err := loader.ListMembers(ctx, "rX")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
@@ -270,8 +270,8 @@ func TestMongoMemberLoader_Load_HomeSiteFromUsers(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	got, err := loader.Load(ctx, "rH")
+	loader := &mongoMemberStore{col: subCol, users: usersCol}
+	got, err := loader.ListMembers(ctx, "rH")
 	require.NoError(t, err)
 	require.Len(t, got, 3)
 
@@ -319,8 +319,8 @@ func TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	loader := &mongoMemberStore{col: subCol, users: usersCol}
+	lookup := newCachedMemberLookup(cache, loader.ListMembers, time.Minute)
 
 	badge := &fakeBadgeClient{resp: map[string]map[string]int{
 		"site-a": {"bob": 2},
