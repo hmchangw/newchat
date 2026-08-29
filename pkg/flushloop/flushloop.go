@@ -31,6 +31,24 @@ import (
 // allows, and far longer than a drain that is going to succeed needs.
 const DefaultFinalTimeout = 5 * time.Second
 
+// MaxReuseCap bounds what one flush may pre-allocate for the next. A buffered
+// writer sizes the next flush's maps from the last one — under steady traffic
+// the last interval predicts the next, and it stops every flush regrowing from
+// zero. Unbounded, a single anomalous batch teaches every later flush to reserve
+// that much again for the life of the process.
+//
+// 4096 sits comfortably above a steady-state interval at the default
+// MaxAckPending of 1000, so it never binds in normal traffic. Like
+// DefaultFinalTimeout it is a constant rather than a knob: the hazard is the
+// same shape in every buffered writer, so there is no reason for one caller to
+// pick a different bound.
+const MaxReuseCap = 4096
+
+// ReuseCap clamps a previous flush's size to what the next may reserve.
+func ReuseCap(n int) int {
+	return min(n, MaxReuseCap)
+}
+
 // Config describes one buffered writer's drain cadence.
 type Config struct {
 	// Name labels the loop in panic and failure logs. It reads as the thing

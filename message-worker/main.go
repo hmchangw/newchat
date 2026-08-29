@@ -376,8 +376,6 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg) {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
-			// ConsumeContext is exactly StampRequestID + Admit + CapturePayload,
-			// in that order — the shared preamble every consumer now uses.
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			// Dispatch by subject: the one-time .teams.batch migration writes
 			// straight to Cassandra; the live .created feed runs the normal pipeline.

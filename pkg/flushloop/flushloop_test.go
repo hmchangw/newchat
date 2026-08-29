@@ -210,3 +210,26 @@ func TestRun_NonPositiveIntervalReturnsWithoutFlushing(t *testing.T) {
 	}
 	assert.Empty(t, r.calls())
 }
+
+// TestReuseCap_BoundsWhatOneFlushReservesForTheNext pins the shared clamp. Both
+// buffered writers size the next flush's maps from the last one, so without a
+// bound a single anomalous batch teaches every later flush to reserve that much
+// again for the life of the process.
+func TestReuseCap_BoundsWhatOneFlushReservesForTheNext(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{name: "empty", n: 0, want: 0},
+		{name: "steady state passes through", n: 100, want: 100},
+		{name: "at the cap", n: MaxReuseCap, want: MaxReuseCap},
+		{name: "one over the cap", n: MaxReuseCap + 1, want: MaxReuseCap},
+		{name: "one anomalous burst cannot set the floor", n: 5_000_000, want: MaxReuseCap},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ReuseCap(tt.n))
+		})
+	}
+}

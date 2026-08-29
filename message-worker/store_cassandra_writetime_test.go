@@ -31,19 +31,22 @@ func (stubCipher) EnsureDEK(context.Context, string) error { return nil }
 
 const createdAtFixture = "2026-03-04T05:06:07.891Z"
 
-// newWriteTimeStore builds a store whose batches are captured instead of executed.
-// The returned pointer holds the last batch the store submitted.
-func newWriteTimeStore(t *testing.T, cipher atrest.Cipher) (*CassandraStore, **gocql.Batch) {
+// newOfflineBatch builds a batch with no live session, which a unit test may not have.
+func newOfflineBatch(ctx context.Context) *gocql.Batch {
+	//nolint:staticcheck // SA1019: session.NewBatch requires the prohibited live Cassandra dependency.
+	return gocql.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
+}
+
+// batchCapture holds the last batch a store submitted instead of executing it.
+type batchCapture struct{ batch *gocql.Batch }
+
+func newWriteTimeStore(t *testing.T, cipher atrest.Cipher) (*CassandraStore, *batchCapture) {
 	t.Helper()
 	store := NewCassandraStore(nil, msgbucket.New(time.Hour), cipher)
-	store.newBatch = func(ctx context.Context) *gocql.Batch {
-		// No live session is allowed in a unit test; this constructor creates an offline batch.
-		//nolint:staticcheck // SA1019: session.NewBatch requires the prohibited live Cassandra dependency.
-		return gocql.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	}
-	captured := new(*gocql.Batch)
+	store.newBatch = newOfflineBatch
+	captured := &batchCapture{}
 	store.executeBatch = func(_ context.Context, batch *gocql.Batch) error {
-		*captured = batch
+		captured.batch = batch
 		return nil
 	}
 	return store, captured
@@ -65,13 +68,17 @@ func writeTimeMessage(t *testing.T, tshow bool) *model.Message {
 	}
 }
 
-// saveCases drives both create entry points, with and without a cipher.
-func saveCases() []struct {
+// saveCase drives one create entry point, with or without a cipher. wantWrites
+// is the number of tables that create writes.
+type saveCase struct {
 	name       string
 	cipher     atrest.Cipher
 	wantWrites int
 	save       func(context.Context, *CassandraStore, *model.Message) error
-} {
+}
+
+// saveCases drives both create entry points, with and without a cipher.
+func saveCases() []saveCase {
 	saveChannel := func(ctx context.Context, s *CassandraStore, m *model.Message) error {
 		return s.SaveMessage(ctx, m, nil, "site-a")
 	}
@@ -79,12 +86,7 @@ func saveCases() []struct {
 		_, err := s.SaveThreadMessage(ctx, m, nil, "site-a", "thread-1")
 		return err
 	}
-	return []struct {
-		name       string
-		cipher     atrest.Cipher
-		wantWrites int
-		save       func(context.Context, *CassandraStore, *model.Message) error
-	}{
+	return []saveCase{
 		{name: "channel message", wantWrites: 2, save: saveChannel},
 		{name: "channel message encrypted", cipher: stubCipher{}, wantWrites: 2, save: saveChannel},
 		{name: "thread reply with tshow mirror", wantWrites: 3, save: saveThread},
@@ -92,12 +94,8 @@ func saveCases() []struct {
 	}
 }
 
-// TestCassandraStore_CreatesPinWriteTimestampToCreatedAt guards the edit-revert
-// race. Cassandra resolves conflicts per cell by write timestamp, so a create
-// stamped at execution time outranks an edit that landed after the create's
-// first attempt — the redelivery silently restores the original body. Pinning
-// every create INSERT to the message's own CreatedAt makes a redelivery
-// re-execute the identical write, which can never outrank a later edit.
+// TestCassandraStore_CreatesPinWriteTimestampToCreatedAt asserts every create
+// INSERT binds CreatedAt as its write timestamp. See writeTS for why.
 func TestCassandraStore_CreatesPinWriteTimestampToCreatedAt(t *testing.T) {
 	for _, tt := range saveCases() {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,9 +104,9 @@ func TestCassandraStore_CreatesPinWriteTimestampToCreatedAt(t *testing.T) {
 
 			require.NoError(t, tt.save(context.Background(), store, msg))
 
-			require.NotNil(t, *captured)
+			require.NotNil(t, captured.batch)
 			inserts := 0
-			for i, entry := range (*captured).Entries {
+			for i, entry := range captured.batch.Entries {
 				if !strings.Contains(entry.Stmt, "INSERT INTO") {
 					continue
 				}
@@ -122,7 +120,7 @@ func TestCassandraStore_CreatesPinWriteTimestampToCreatedAt(t *testing.T) {
 
 			// Cassandra rejects a bind-marker/argument mismatch only at execution,
 			// which no unit test reaches; count them here instead.
-			for i, entry := range (*captured).Entries {
+			for i, entry := range captured.batch.Entries {
 				assert.Equal(t, strings.Count(entry.Stmt, "?"), len(entry.Args),
 					"entry %d binds a different number of arguments than it has markers", i)
 			}
@@ -130,17 +128,10 @@ func TestCassandraStore_CreatesPinWriteTimestampToCreatedAt(t *testing.T) {
 	}
 }
 
-// TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock covers
-// the invariant that pinning would otherwise break. The encrypted path must
-// clear the plaintext body columns of a pre-at-rest row, or the row is left
-// hybrid and ApplyDecryptedFields overwrites those columns with empty values
-// from the bundle on read, silently losing the attachments.
-//
-// Those clears are tombstones, so they only take effect if they outrank the
-// legacy row — which was written at execution time, i.e. after CreatedAt. They
-// therefore must NOT be pinned: they ride the client clock in a separate
-// statement, while the body INSERT beside them stays pinned. Re-running a strip
-// is harmless because an encrypted edit already nulls the same four columns.
+// TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock asserts
+// the counterpart: each encrypted create clears the plaintext body columns in a
+// separate, UNPINNED statement. See stripLegacyPlaintextByRoom for why pinning
+// those clears would make them land before the row they must clear.
 func TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock(t *testing.T) {
 	stripped := []string{"msg = null", "attachments = null", "card = null", "card_action = null"}
 
@@ -153,9 +144,9 @@ func TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock(t *te
 
 			require.NoError(t, tt.save(context.Background(), store, writeTimeMessage(t, true)))
 
-			require.NotNil(t, *captured)
+			require.NotNil(t, captured.batch)
 			strips := 0
-			for i, entry := range (*captured).Entries {
+			for i, entry := range captured.batch.Entries {
 				if !strings.HasPrefix(strings.TrimSpace(entry.Stmt), "UPDATE") {
 					continue
 				}
@@ -175,8 +166,8 @@ func TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock(t *te
 
 		require.NoError(t, store.SaveMessage(context.Background(), writeTimeMessage(t, false), nil, "site-a"))
 
-		require.NotNil(t, *captured)
-		for i, entry := range (*captured).Entries {
+		require.NotNil(t, captured.batch)
+		for i, entry := range captured.batch.Entries {
 			if !strings.Contains(entry.Stmt, "INSERT INTO") {
 				continue
 			}

@@ -301,6 +301,9 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 	atrest.StripEncryptedFields(&cm)
 	encMeta := &cassandra.EncMeta{Nonce: meta.Nonce}
 	mentions := toMentionSet(msg.Mentions)
+	// One expression for the TShow mirror's partition key: the INSERT and the strip
+	// below must address the same row, so they must not derive it separately.
+	b := s.bucket.Of(msg.CreatedAt)
 
 	// Single UnloggedBatch for both encrypted writes (plus the conditional TShow
 	// mirror) — same rationale as SaveThreadMessage. Each INSERT is followed by its
@@ -344,12 +347,12 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 			  quoted_parent_message, sys_msg_data, visible_to,
 			  enc_payload, enc_meta)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
-			msg.RoomID, s.bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt, mentions,
+			msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt, mentions,
 			threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.TShow,
 			cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
 			writeTS(msg.CreatedAt),
 		)
-		batch.Query(stripLegacyPlaintextByRoom, msg.RoomID, s.bucket.Of(msg.CreatedAt), msg.CreatedAt, msg.ID)
+		batch.Query(stripLegacyPlaintextByRoom, msg.RoomID, b, msg.CreatedAt, msg.ID)
 	}
 	if err := s.executeBatch(ctx, batch); err != nil {
 		return nil, fmt.Errorf("save thread message %s: %w", msg.ID, err)

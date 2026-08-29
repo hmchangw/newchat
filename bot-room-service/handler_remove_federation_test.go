@@ -11,19 +11,15 @@ import (
 	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
-// removeFedStore builds a store whose delete reports wasThere and whose user
-// doc puts the member on destSiteID.
-func removeFedStore(wasThere bool, destSiteID string) *fakeStore {
-	account := ""
-	if wasThere {
-		account = "bob"
-	}
+// removeFedStore builds a store whose delete reports the row already gone — the
+// duplicate-remove case every test here drives — with the member on destSiteID.
+func removeFedStore(destSiteID string) *fakeStore {
 	return &fakeStore{
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
 		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
-			return account, wasThere, nil
+			return "", false, nil
 		},
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: destSiteID}, nil
@@ -43,7 +39,7 @@ func removeFedStore(wasThere bool, destSiteID string) *fakeStore {
 // landed and accepts it where it did not.
 func TestHandleRemove_DuplicateRemoveStillFederates(t *testing.T) {
 	out := &captureOutbox{}
-	h := newHandler(removeFedStore(false, "site-b"), "site-a", nil, out.publish, testKeyStore, testKeySender)
+	h := newHandler(removeFedStore("site-b"), "site-a", nil, out.publish, testKeyStore, testKeySender)
 	h.valkey = valkeyfake.New()
 
 	resp, err := h.handleRemove(withIdentity(t, "r1", ident()),
@@ -61,7 +57,7 @@ func TestHandleRemove_DuplicateRemoveStillFederates(t *testing.T) {
 // twice is not. A duplicate remove must not rotate the room key (a fresh version
 // per retry) and must not post a second "members removed" system message.
 func TestHandleRemove_DuplicateRemoveSkipsLocalSideEffects(t *testing.T) {
-	store := removeFedStore(false, "site-b")
+	store := removeFedStore("site-b")
 	rotations := 0
 	store.ListRoomMemberAccountsFn = func(_ context.Context, _ string) ([]string, error) {
 		rotations++
@@ -86,7 +82,7 @@ func TestHandleRemove_DuplicateRemoveSkipsLocalSideEffects(t *testing.T) {
 // member whose home site is this site has no remote to notify, duplicate or not.
 func TestHandleRemove_SameSiteRemoveDoesNotFederate(t *testing.T) {
 	out := &captureOutbox{}
-	h := newHandler(removeFedStore(false, "site-a"), "site-a", nil, out.publish, testKeyStore, testKeySender)
+	h := newHandler(removeFedStore("site-a"), "site-a", nil, out.publish, testKeyStore, testKeySender)
 	h.valkey = valkeyfake.New()
 
 	_, err := h.handleRemove(withIdentity(t, "r1", ident()),

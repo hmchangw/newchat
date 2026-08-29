@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/flushloop"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 )
@@ -50,19 +51,6 @@ type batch struct {
 	held     []heldMsg
 }
 
-// maxReuseCap bounds what one batch may pre-allocate for the next. Comfortably
-// above a steady-state interval at the default MaxAckPending of 1000, so it
-// never binds in normal traffic — it exists for mentions, the one map with no
-// MaxAckPending bound. Without it a single message carrying thousands of
-// @tokens teaches every later batch to reserve that much again, for the life of
-// the process.
-const maxReuseCap = 4096
-
-// reuseCap clamps a previous batch's size to what the next one may reserve.
-func reuseCap(n int) int {
-	return min(n, maxReuseCap)
-}
-
 // newBatch sizes the maps and the held slice from the previous batch: under
 // steady traffic the last interval is a good predictor, and it stops each flush
 // regrowing them from zero. Clamped, so one anomalous batch cannot set the
@@ -73,10 +61,10 @@ func newBatch(prev *batch) *batch {
 		nRooms, nSeen, nMentions, nHeld = len(prev.rooms), len(prev.lastSeen), len(prev.mentions), len(prev.held)
 	}
 	return &batch{
-		rooms:    make(map[string]roomLastMsgUpdate, reuseCap(nRooms)),
-		lastSeen: make(map[subKey]time.Time, reuseCap(nSeen)),
-		mentions: make(map[subKey]time.Time, reuseCap(nMentions)),
-		held:     make([]heldMsg, 0, reuseCap(nHeld)),
+		rooms:    make(map[string]roomLastMsgUpdate, flushloop.ReuseCap(nRooms)),
+		lastSeen: make(map[subKey]time.Time, flushloop.ReuseCap(nSeen)),
+		mentions: make(map[subKey]time.Time, flushloop.ReuseCap(nMentions)),
+		held:     make([]heldMsg, 0, flushloop.ReuseCap(nHeld)),
 	}
 }
 

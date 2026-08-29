@@ -8,6 +8,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/flushloop"
 )
 
 // fakeMsg is a jsretry.Msg that records how it was settled. jsretry.Msg needs
@@ -133,29 +135,6 @@ func TestBatch_EmptyWhenNothingAdded(t *testing.T) {
 	assert.True(t, newBatch(nil).empty())
 }
 
-// Sizing the next batch from the last one is only a good predictor while the
-// last one was typical. mentions has no MaxAckPending bound, so one message
-// carrying thousands of @tokens would otherwise make every later batch reserve
-// that much again for the life of the process.
-func TestReuseCap_BoundsWhatOneBatchCanReserveForTheNext(t *testing.T) {
-	tests := []struct {
-		name string
-		n    int
-		want int
-	}{
-		{"steady state passes through", 250, 250},
-		{"zero passes through", 0, 0},
-		{"exactly at the bound passes through", maxReuseCap, maxReuseCap},
-		{"one over is clamped", maxReuseCap + 1, maxReuseCap},
-		{"a mention flood is clamped", 5_000_000, maxReuseCap},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, reuseCap(tt.n))
-		})
-	}
-}
-
 // The held slice is the one reused capacity Go lets a test observe directly,
 // so it stands in for the clamp being wired into newBatch at all.
 func TestNewBatch_DoesNotInheritAnOutsizedCapacity(t *testing.T) {
@@ -163,12 +142,12 @@ func TestNewBatch_DoesNotInheritAnOutsizedCapacity(t *testing.T) {
 		rooms:    make(map[string]roomLastMsgUpdate),
 		lastSeen: make(map[subKey]time.Time),
 		mentions: make(map[subKey]time.Time),
-		held:     make([]heldMsg, maxReuseCap*3),
+		held:     make([]heldMsg, flushloop.MaxReuseCap*3),
 	}
 
 	got := newBatch(prev)
 
-	assert.Equal(t, maxReuseCap, cap(got.held))
+	assert.Equal(t, flushloop.MaxReuseCap, cap(got.held))
 }
 
 // The room pointer follows the newest message of ANY kind; the user position

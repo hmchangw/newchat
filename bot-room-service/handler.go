@@ -422,7 +422,9 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	// Collected in the loop and published after the rotation below, so a failed
 	// publish cannot skip it. See the rotation comment for why that ordering is
 	// load-bearing rather than cosmetic.
-	var pendingFederations []memberRemoval
+	// Every user in the batch can queue one now that federation no longer waits on
+	// the delete, so the exact bound is known here.
+	pendingFederations := make([]memberRemoval, 0, len(req.UserIDs))
 	// Deferred, not called at the end of the loop: every path out of here from
 	// this point on has already committed subscription deletes, so the cached
 	// positive subauthcache decisions must die on the error paths too. A
@@ -460,7 +462,6 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		// first means a lookup failure aborts before anything is committed, so a
 		// retry re-runs the whole removal; resolving afterwards would delete the
 		// row and only then discover it cannot address the remote site.
-		// Failing before the delete costs a retry and strands nothing.
 		u, err := h.store.FindUser(c, userID)
 		switch {
 		case errors.Is(err, ErrNotFound):
