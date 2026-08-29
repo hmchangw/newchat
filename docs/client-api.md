@@ -1980,7 +1980,7 @@ Used by the message composer's `@…` mention autocomplete. Returns subscription
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | When omitted, the server uses `min(3, room.userCount + room.appCount)` (small rooms cap automatically, empty rooms return an empty list). When supplied, must be `> 0`; a value larger than `room.userCount + room.appCount` is clamped to that cap (not rejected). |
+| `limit` | number | no | When omitted, the server uses a configured default page size (`MENTIONABLE_DEFAULT_LIMIT`, default `3`). When supplied, must be `> 0`; a value above the configured maximum (`MENTIONABLE_MAX_LIMIT`, default `50`) is clamped to that maximum (not rejected). The page size is independent of the room's member counts. |
 | `filter` | string | no | Defaults to `""` (matches everything). Treated as a literal substring; regex metacharacters are escaped server-side. Matched case-insensitively against a dash-joined keyword built from `account`, `engName`, `chineseName`, `app.name`, and `app.assistant.name`. |
 
 ```json
@@ -2037,7 +2037,7 @@ Used by the message composer's `@…` mention autocomplete. Returns subscription
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — caller has no subscription in the room.
-- `"limit must be > 0 and <= room user count + app count"` — limit was `0` or negative. (A positive limit larger than the room's combined user + app population is clamped to that cap, not rejected.)
+- `"limit must be > 0"` — limit was `0` or negative. (A positive limit larger than the configured maximum is clamped to that maximum, not rejected.)
 
 ##### Triggered events — success path
 

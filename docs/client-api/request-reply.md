@@ -567,7 +567,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Default: `min(3, room.userCount + room.appCount)`. Must be > 0 and ≤ combined count. |
+| `limit` | number | no | Default: configured `MENTIONABLE_DEFAULT_LIMIT` (3). Must be > 0; clamped to `MENTIONABLE_MAX_LIMIT` (50). Independent of room member counts. |
 | `filter` | string | no | Literal substring, case-insensitive. Matched against account, names, app name. |
 
 #### Success response
@@ -577,7 +577,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 #### Errors
 
-`"only room members can perform this action"`, `"limit must be > 0 and <= room user count + app count"` (fires only for a non-positive limit; an over-cap positive limit is clamped).
+`"only room members can perform this action"`, `"limit must be > 0"` (fires only for a non-positive limit; an over-max positive limit is clamped).
 
 **Emits:** None — reply only.
 

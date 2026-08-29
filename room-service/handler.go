@@ -83,6 +83,12 @@ type Handler struct {
 	teamsEmailDomain     string
 	roomMembersLimit     int
 	roomMembersCallLimit int
+	// mentionableDefaultLimit / mentionableMaxLimit bound the @-mention
+	// autocomplete page size (MENTIONABLE_DEFAULT_LIMIT / MENTIONABLE_MAX_LIMIT),
+	// resolved independently of the room's denormalized member counts (which can
+	// lag at 0 and would otherwise hide a populated room). Both validated > 0 at startup.
+	mentionableDefaultLimit int
+	mentionableMaxLimit     int
 	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
 	routeMode subject.RoomRouteMode
 }
@@ -500,10 +506,7 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 	}, nil
 }
 
-const (
-	defaultMemberStatusesLimit = 3
-	defaultMentionableLimit    = 3
-)
+const defaultMemberStatusesLimit = 3
 
 // requireMembershipAndGetRoom checks the requester's room membership and
 // loads the room document in parallel — both reads are independent and the
@@ -606,24 +609,25 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 		}
 	}
 
-	room, err := h.requireMembershipAndGetRoom(ctx, requesterAccount, roomID)
-	if err != nil {
-		return nil, err
+	// Membership gate only — the page size comes from config, not the room's
+	// denormalized userCount/appCount (which can be stale/0 and would wrongly
+	// hide a populated room), so GetRoom is not needed here.
+	if err := h.store.CheckMembership(ctx, requesterAccount, roomID); err != nil {
+		if errors.Is(err, model.ErrSubscriptionNotFound) {
+			return nil, errNotRoomMember
+		}
+		return nil, fmt.Errorf("check room membership: %w", err)
 	}
 
-	mentionableCap := room.UserCount + room.AppCount
-	if mentionableCap == 0 {
-		return &model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{}}, nil
-	}
-	var limit int
-	if req.Limit == nil {
-		limit = min(defaultMentionableLimit, mentionableCap)
-	} else {
-		limit = *req.Limit
-		if limit <= 0 {
+	// Startup validation guarantees both bounds are > 0, so the resolved limit is
+	// always >= 1: a nil request-limit yields the default, an explicit one is
+	// rejected when <= 0 and otherwise clamped to the configured max.
+	limit := h.mentionableDefaultLimit
+	if req.Limit != nil {
+		if *req.Limit <= 0 {
 			return nil, errMentionableLimitInvalid
 		}
-		limit = min(limit, mentionableCap) // clamp over-cap instead of rejecting
+		limit = min(*req.Limit, h.mentionableMaxLimit)
 	}
 
 	// Filter is a literal substring. QuoteMeta escapes regex metacharacters
@@ -634,7 +638,7 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 	if err != nil {
 		return nil, fmt.Errorf("list mentionable subscriptions: %w", err)
 	}
-	return &model.MentionableSubscriptionsResponse{Subscriptions: subs}, nil
+	return boundedReply(h, &model.MentionableSubscriptionsResponse{Subscriptions: subs})
 }
 
 func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
