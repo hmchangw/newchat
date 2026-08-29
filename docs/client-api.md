@@ -2906,7 +2906,7 @@ Used by every history-service method that returns messages. Mirrors the Cassandr
 | `createdAt` | string | RFC 3339 timestamp. |
 | `messageId` | string | 17- or 20-char base62. |
 | `sender` | [MessageParticipant](#messageparticipant) | The message author. |
-| `msg` | string | The message body. For legacy `members_removed` system messages, history-service substitutes the removed user's display name for the stored account identifier on read; an account with no matching user is returned unchanged. |
+| `msg` | string | The message body. For legacy `members_removed` system messages (`"{account}" has been removed from the channel.`), history-service substitutes the removed user's display name for the quoted account on read, keeping the quotes; an account with no matching user is returned unchanged. |
 | `mentions` | [MessageParticipant](#messageparticipant)[] | Optional. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Decoded attachment objects (history-service decodes the stored blobs on read). |
 | `card` | [MessageCard](#messagecard) | Optional. |

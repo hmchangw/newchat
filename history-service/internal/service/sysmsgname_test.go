@@ -24,39 +24,69 @@ func TestExtractRemovedAccount(t *testing.T) {
 		wantOK      bool
 	}{
 		{
-			name:        "legacy row yields the account prefix",
+			name:        "legacy row yields the account inside the quotes",
 			msgType:     "members_removed",
-			msg:         "bob has been removed from the channel.",
+			msg:         `"bob" has been removed from the channel.`,
 			wantAccount: "bob",
 			wantOK:      true,
 		},
 		{
 			name:        "account containing spaces is kept whole",
 			msgType:     "members_removed",
-			msg:         "bob smith has been removed from the channel.",
+			msg:         `"bob smith" has been removed from the channel.`,
 			wantAccount: "bob smith",
 			wantOK:      true,
 		},
 		{
+			name:    "unquoted account does not match",
+			msgType: "members_removed",
+			msg:     "bob has been removed from the channel.",
+			wantOK:  false,
+		},
+		{
 			name:    "modern member_removed type is not rewritten",
 			msgType: "member_removed",
-			msg:     "bob has been removed from the channel.",
+			msg:     `"bob" has been removed from the channel.`,
 			wantOK:  false,
 		},
 		{
 			name:    "ordinary user message with no type is never touched",
 			msgType: "",
-			msg:     "bob has been removed from the channel.",
+			msg:     `"bob" has been removed from the channel.`,
 			wantOK:  false,
 		},
 		{
 			name:    "missing trailing period does not match",
 			msgType: "members_removed",
-			msg:     "bob has been removed from the channel",
+			msg:     `"bob" has been removed from the channel`,
 			wantOK:  false,
 		},
 		{
-			name:    "suffix with no account prefix is not a rewrite candidate",
+			name:    "empty quotes carry no account",
+			msgType: "members_removed",
+			msg:     `"" has been removed from the channel.`,
+			wantOK:  false,
+		},
+		{
+			name:    "opening quote only",
+			msgType: "members_removed",
+			msg:     `"bob has been removed from the channel.`,
+			wantOK:  false,
+		},
+		{
+			name:    "closing quote only",
+			msgType: "members_removed",
+			msg:     `bob" has been removed from the channel.`,
+			wantOK:  false,
+		},
+		{
+			name:    "a lone quote is not an empty quoted pair",
+			msgType: "members_removed",
+			msg:     `" has been removed from the channel.`,
+			wantOK:  false,
+		},
+		{
+			name:    "suffix with no prefix at all",
 			msgType: "members_removed",
 			msg:     " has been removed from the channel.",
 			wantOK:  false,
@@ -76,8 +106,15 @@ func TestExtractRemovedAccount(t *testing.T) {
 		{
 			name:    "suffix in the middle rather than at the end",
 			msgType: "members_removed",
-			msg:     "bob has been removed from the channel. and then rejoined",
+			msg:     `"bob" has been removed from the channel. and then rejoined`,
 			wantOK:  false,
+		},
+		{
+			name:        "an account that itself contains a quote keeps its inner quote",
+			msgType:     "members_removed",
+			msg:         `"bo"b" has been removed from the channel.`,
+			wantAccount: `bo"b`,
+			wantOK:      true,
 		},
 	}
 
@@ -110,7 +147,7 @@ func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 
 // legacyRemoved builds a legacy members_removed row for the given account.
 func legacyRemoved(account string) models.Message {
-	return models.Message{Type: "members_removed", Msg: account + " has been removed from the channel."}
+	return models.Message{Type: "members_removed", Msg: `"` + account + `" has been removed from the channel.`}
 }
 
 // The whole point of the pass: many rows, ONE query, accounts deduped.
@@ -137,10 +174,10 @@ func TestResolveRemovedMemberNames_OneBatchedQueryForTheWholePage(t *testing.T) 
 	}
 	s.resolveRemovedMemberNames(context.Background(), msgs)
 
-	assert.Equal(t, "Bob 鮑勃 has been removed from the channel.", msgs[0].Msg)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[0].Msg)
 	assert.Equal(t, "an ordinary message", msgs[1].Msg)
-	assert.Equal(t, "Carol has been removed from the channel.", msgs[2].Msg)
-	assert.Equal(t, "Bob 鮑勃 has been removed from the channel.", msgs[3].Msg)
+	assert.Equal(t, `"Carol" has been removed from the channel.`, msgs[2].Msg)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[3].Msg)
 }
 
 // A page with no legacy rows is the overwhelmingly common case: it must not
@@ -152,12 +189,12 @@ func TestResolveRemovedMemberNames_NoQualifyingRowsIssuesNoQuery(t *testing.T) {
 
 	msgs := []models.Message{
 		{Msg: "hello"},
-		{Type: "member_removed", Msg: "bob has been removed from the channel."},
+		{Type: "member_removed", Msg: `"bob" has been removed from the channel.`},
 	}
 	s.resolveRemovedMemberNames(context.Background(), msgs)
 
 	assert.Equal(t, "hello", msgs[0].Msg)
-	assert.Equal(t, "bob has been removed from the channel.", msgs[1].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[1].Msg)
 }
 
 func TestResolveRemovedMemberNames_EmptySliceIssuesNoQuery(t *testing.T) {
@@ -183,7 +220,7 @@ func TestResolveRemovedMemberNames_StoreErrorLeavesRowsUntouched(t *testing.T) {
 	msgs := []models.Message{legacyRemoved("bob")}
 	s.resolveRemovedMemberNames(context.Background(), msgs)
 
-	assert.Equal(t, "bob has been removed from the channel.", msgs[0].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[0].Msg)
 }
 
 // An account with no user document (deleted, or never migrated) keeps its raw form.
@@ -199,8 +236,8 @@ func TestResolveRemovedMemberNames_UnresolvedAccountKeepsRawText(t *testing.T) {
 	msgs := []models.Message{legacyRemoved("bob"), legacyRemoved("ghost")}
 	s.resolveRemovedMemberNames(context.Background(), msgs)
 
-	assert.Equal(t, "Bob has been removed from the channel.", msgs[0].Msg)
-	assert.Equal(t, "ghost has been removed from the channel.", msgs[1].Msg)
+	assert.Equal(t, `"Bob" has been removed from the channel.`, msgs[0].Msg)
+	assert.Equal(t, `"ghost" has been removed from the channel.`, msgs[1].Msg)
 }
 
 // A user document with no names at all must not blank the sentence.
@@ -216,7 +253,7 @@ func TestResolveRemovedMemberNames_UserWithNoNamesFallsBackToAccount(t *testing.
 	msgs := []models.Message{legacyRemoved("bob")}
 	s.resolveRemovedMemberNames(context.Background(), msgs)
 
-	assert.Equal(t, "bob has been removed from the channel.", msgs[0].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[0].Msg)
 }
 
 // The single-message wrapper serves GetMessageByID and the spliced central row.
@@ -232,7 +269,7 @@ func TestResolveRemovedMemberName_SingleMessage(t *testing.T) {
 	m := legacyRemoved("bob")
 	s.resolveRemovedMemberName(context.Background(), &m)
 
-	assert.Equal(t, "Bob 鮑勃 has been removed from the channel.", m.Msg)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, m.Msg)
 }
 
 func TestResolveRemovedMemberName_NilAndNonQualifyingAreNoOps(t *testing.T) {
@@ -253,5 +290,5 @@ func TestResolveRemovedMemberNames_NilStoreDegrades(t *testing.T) {
 
 	msgs := []models.Message{legacyRemoved("bob")}
 	require.NotPanics(t, func() { s.resolveRemovedMemberNames(context.Background(), msgs) })
-	assert.Equal(t, "bob has been removed from the channel.", msgs[0].Msg)
+	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[0].Msg)
 }
