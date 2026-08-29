@@ -194,3 +194,40 @@ func TestEnrichMessages_NilMongoAndRoomDegrades(t *testing.T) {
 	assert.Equal(t, "rCh", out[0].Room.ID)
 	assert.Equal(t, "alice", out[0].Sender.Account)
 }
+
+// A bot's search hit in its DM with a human must resolve the counterpart through
+// the HR directory, not through a doomed app lookup.
+func TestEnrichMessages_BotViewerHumanCounterpartUsesHRInfo(t *testing.T) {
+	m := &fakeMongo{
+		subs:  map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "alice"}},
+		users: map[string]HRUser{"alice": {Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}},
+	}
+	h := enrichHandler(m, &fakeRoom{})
+
+	out := h.enrichMessages(context.Background(), "weather.bot",
+		[]messageSearchHit{hit("m1", "rBot", "site-a", "alice")})
+
+	require.NotNil(t, out[0].Room)
+	assert.Equal(t, model.RoomTypeDM, out[0].Room.Type)
+	require.NotNil(t, out[0].Room.HRInfo)
+	assert.Equal(t, "alice", out[0].Room.HRInfo.Account)
+	assert.Nil(t, out[0].Room.AppInfo, "a non-app room never carries appInfo")
+	assert.NotContains(t, m.appBots, "alice", "the human counterpart never reaches the app lookup")
+}
+
+// A user's DM with p_admin is stored botDM but enriches like any other DM.
+func TestEnrichMessages_PlatformAdminCounterpartUsesHRInfo(t *testing.T) {
+	m := &fakeMongo{
+		subs:  map[string]SubscriptionMeta{"rAdm": {RoomType: model.RoomTypeBotDM, Name: "p_admin_ops"}},
+		users: map[string]HRUser{"p_admin_ops": {Account: "p_admin_ops", EngName: "Ops"}},
+	}
+	h := enrichHandler(m, &fakeRoom{})
+
+	out := h.enrichMessages(context.Background(), "alice",
+		[]messageSearchHit{hit("m1", "rAdm", "site-a", "p_admin_ops")})
+
+	require.NotNil(t, out[0].Room)
+	assert.Equal(t, model.RoomTypeDM, out[0].Room.Type)
+	require.NotNil(t, out[0].Room.HRInfo)
+	assert.Nil(t, out[0].Room.AppInfo)
+}

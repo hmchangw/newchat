@@ -57,7 +57,10 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 			channelRoomsBySite[roomSite[rid]] = append(channelRoomsBySite[roomSite[rid]], rid)
 			continue
 		}
-		switch meta.RoomType {
+		// The EFFECTIVE type decides which lookup a room joins: a botDM facing a
+		// human or p_admin is an ordinary DM and resolves through the HR
+		// directory, not through an app record it does not have.
+		switch model.EffectiveRoomType(meta.RoomType, meta.Name) {
 		case model.RoomTypeDM:
 			if meta.Name != "" {
 				dmCounterparts[meta.Name] = struct{}{}
@@ -111,8 +114,9 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 	for rid := range roomIDSet {
 		room := &model.MessageRoom{ID: rid}
 		if meta, ok := subs[rid]; ok {
-			room.Type = meta.RoomType
-			switch meta.RoomType {
+			effective := model.EffectiveRoomType(meta.RoomType, meta.Name)
+			room.Type = effective
+			switch effective {
 			case model.RoomTypeDM:
 				if hr, ok := users[meta.Name]; ok {
 					room.HRInfo = hrInfoOf(hr)
