@@ -435,3 +435,31 @@ func boundedCamelKeys(ctx context.Context, c metric.Int64Counter, v string, n in
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("recipientCount", n)))
 }
+
+// The key hoisted into a variable before the attribute is built. The source
+// patterns match a literal key at the constructor call, so lifting the
+// attribute.Key out of the chain leaves nothing to taint from — and the key is
+// still room_id.
+func unboundedViaKeyVariable(ctx context.Context, c metric.Int64Counter, v string) {
+	key := attribute.Key("room_id")
+	kv := key.String(v)
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(kv))
+}
+
+// A generated semantic-convention key constant. There is no string literal at
+// the call site at all, so a rule that only reads literals cannot see it.
+func unboundedViaSemconvKey(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(semconv.UserIDKey.String(v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(semconv.MessagingMessageIDKey.String(v)))
+}
+
+// Bounded semconv keys must stay silent, or the rule forbids the namespace.
+func boundedSemconvKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(semconv.ErrorTypeKey.String(v)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(semconv.HTTPRequestMethodKey.String(v)))
+}

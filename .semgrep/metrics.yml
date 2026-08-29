@@ -112,14 +112,38 @@ rules:
           - pattern: metric.WithAttributes(...)
           - pattern: attribute.NewSet(...)
     pattern-sources:
+      # A generated semantic-convention key constant. There is no string literal
+      # at the call site at all — semconv.UserIDKey.String(v) carries the key in
+      # the identifier — so a rule that only reads literals is blind to the
+      # whole semconv surface, which is exactly where an identity key is most
+      # likely to be reached for.
+      #
+      # The name is matched with the same camel identity shape the key regex
+      # uses, minus the trailing Key. That is what keeps this from forbidding
+      # the namespace: ErrorTypeKey and HTTPRequestMethodKey carry no identity
+      # root in tail position and stay out, and boundedSemconvKeys holds them.
+      - patterns:
+          - pattern: $PKG.$KEYNAME.$CTOR(...)
+          - metavariable-regex:
+              metavariable: $KEYNAME
+              regex: ^[A-Za-z0-9]*(?:Room|Account|User|Message|Msg|Thread|Device|Session|Recipient|Request|Trace|Doc|Span|Tenant|Org|Run|Inbox|Pod)(?:[uU]?[iI][dD])?Key$
       - patterns:
           # $CTOR, not String: an int room id opens exactly as many series as a
           # string one. attribute.Key("k").String(v) is the same attribute built
           # the other way round, and reads as deliberate enough that review waves
           # it past.
+          # attribute.Key("k") is a source on its own, not only when the .String
+          # is chained onto it. Hoisting the key into a variable —
+          #
+          #     key := attribute.Key("room_id")
+          #     kv := key.String(v)
+          #
+          # left nothing for the chained pattern to match, and taint had no
+          # entry point because the Key call itself was not a source. It is now,
+          # and taint carries through the method call on the tainted key.
           - pattern-either:
               - pattern: attribute.$CTOR("$KEY", $V)
-              - pattern: attribute.Key("$KEY").$CTOR(...)
+              - pattern: attribute.Key("$KEY")
           - metavariable-regex:
               metavariable: $KEY
               # Three shapes, all drawn from the contract's forbidden-label list:
