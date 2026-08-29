@@ -2215,6 +2215,10 @@ func (h *Handler) publishSubscriptionAdded(ctx context.Context, subs []*model.Su
 	for _, sub := range subs {
 		subCopy := *sub
 		subCopy.Room = subRoom
+		// The recipient files this row by roomType, so report the type as THEY see
+		// it: a botDM facing a human or p_admin is an ordinary DM. Matches what
+		// subscription.list returns, so the realtime row and a later refetch agree.
+		subCopy.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
 		roomName, hrInfo, appInfo := h.resolveSubUpdateCounterpart(ctx, sub, userByAccount)
 		evt := model.SubscriptionUpdateEvent{
 			UserID:       sub.User.ID,

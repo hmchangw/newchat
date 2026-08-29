@@ -69,7 +69,7 @@ func TestEffectiveRoomType(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `make test SERVICE=model` (or `go test ./pkg/model/ -run TestEffectiveRoomType` if the Makefile has no `model` target — check `make test` first)
+Run: `make test SERVICE=pkg/model`
 Expected: FAIL — `undefined: model.EffectiveRoomType`, `undefined: model.IsAppRoom`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -100,7 +100,7 @@ func EffectiveRoomType(t RoomType, name string) RoomType {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `make test SERVICE=model`
+Run: `make test SERVICE=pkg/model`
 Expected: PASS, all 9 subtests
 
 - [ ] **Step 5: Commit**
@@ -180,7 +180,7 @@ func TestAppRoomFilterRegexMatchesIsBot(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `make test SERVICE=pipelines`
+Run: `make test SERVICE=pkg/pipelines`
 Expected: FAIL — `undefined: AppRoomFilter`, `undefined: NonAppRoomFilter`, `undefined: botSuffixRegex`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -219,7 +219,7 @@ Add `"github.com/hmchangw/chat/pkg/model"` to the file's import block.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `make test SERVICE=pipelines`
+Run: `make test SERVICE=pkg/pipelines`
 Expected: PASS
 
 - [ ] **Step 5: Commit**

@@ -971,7 +971,7 @@ it is absent on every other action.
 | `u` | [SubscriptionUser](#subscriptionuser) | The subscribed user. |
 | `roomId` | string | The room. |
 | `siteId` | string | The room's home site. |
-| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. |
+| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — **as seen by this subscriber** (see [Effective room type](#effective-room-type)). |
 | `name` | string | Display name per room type (see above). |
 | `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
@@ -1073,6 +1073,33 @@ that preview.
 | `visibleTo` | string | Optional. The message's opaque visibility marker, surfaced verbatim; the backend does not filter the preview on it. |
 
 #### AppSubscription
+
+#### Effective room type
+
+`roomType` is the room's type **as seen by the requesting subscriber**, not a raw
+stored value. A `botDM` is reported as `botDM` only when the counterpart account
+ends in `.bot` — a real app. A `botDM` facing any other counterpart is an ordinary
+DM and is reported as `dm`, carrying `hrInfo` instead of `app`.
+
+Two cases produce this, and both are stored `botDM`:
+
+- **A bot's own view.** A bot signed into the client sees its DM with a user as
+  `dm`, because that room is an ordinary conversation from its side. The user's
+  view of the same room stays `botDM` with the app object.
+- **The `p_admin` platform-admin account.** It is human-operated and owns no app
+  record, so its DMs are `dm` for both sides. New `p_admin` DMs are created as
+  `dm` outright; rooms created before that are remapped at read time.
+
+The rule applies wherever a subscriber's own room type is reported —
+`subscription.list`, `subscription.getDM`, `subscription.getByRoomID`,
+`subscription.getChannels`, `thread.list`, and the search response's `room.type`
+— and it matches the `hrInfo` / `appInfo` split already used by the
+[subscription.update](#subscriptionupdate-event) `added` event.
+
+`isSubscribed` follows the same line: it gates only app rooms. A bot's own row in
+a `botDM` is stored `isSubscribed: false`, so gating it would hide the room from
+the bot entirely; a user who unsubscribed from a real `.bot` app still has that
+room hidden.
 
 The nested `app` object carried on **botDM** subscription rows in
 `subscription.list`. The botDM's base `Subscription.name` is the **app's display
@@ -1222,7 +1249,7 @@ This is an **async-job RPC**: the synchronous reply only confirms acceptance. Th
 The room **type is inferred server-side** from the payload shape — the client does not send it:
 
 - `name` set → `channel`
-- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a `.bot` bot or the `p_admin` platform-admin pseudo-account; a QA `p_` account is an ordinary user, so it yields a regular `dm`)
+- `name` empty + exactly one entry in `users` → `dm` (or `botDM` if that user is a `.bot` bot). The `p_admin` platform-admin pseudo-account and QA `p_` accounts are ordinary users here, so both yield a regular `dm`
 - `name` empty + `users` is just the caller (e.g. `[caller]` or empty) → **self-DM** (note-to-self): a single-member `dm` room, created through the same async path as any other room. The subscription is **favorited**, and it is **one-per-user** — a repeat create returns the existing room with `status: "exists"`.
 
 The creator's account and the site come from the subject (`chat.user.{account}.request.room.{siteID}.create`); the client does not pass them in the body.
@@ -1461,7 +1488,7 @@ For a **botDM**, the human member's event carries `appInfo` instead (the bot's o
 | `type` | string | Always `"member_added"`. |
 | `roomId` | string | |
 | `roomName` | string | |
-| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. Omitted when empty. |
+| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — the [effective room type](#effective-room-type) for the recipient, matching what `subscription.list` returns for the same row. Omitted when empty. |
 | `members` | [RoomMemberEntry](#roommemberentry)[] | The requested entities in member.list display shape (the [RoomMemberEntry](#roommemberentry) payload only — no membership `id`/`rid`/`ts` envelope): one org entry per requested org first (`orgName`, `orgCode`, `memberCount`, `orgDescription`), then one individual entry per requested user that was newly subscribed **or** upgraded to an individual membership (`engName`, `chineseName`, `sectName`, `employeeId`). Unlike [List Members](#list-members) (`enrich: true`), individual entries here omit `isOwner` (new members are never owners) and `name` (bot display name). Accounts joined only via org expansion are **not** listed individually — they are represented by their org entry, mirroring `member.list`. |
 | `siteId` | string | The room's home site. |
 | `requesterAccount` | string | The account that initiated the add. Omitted when empty. |
@@ -4254,8 +4281,8 @@ See [Error envelope](#6-error-envelope-reference).
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | roomId |
-| `name` | string | app name (`botDM`) / counterpart display name (`dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
-| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion`. Omitted when the caller has no subscription for the room. |
+| `name` | string | app name (`botDM`) / counterpart display name (`dm`, including a `botDM` remapped to `dm`) / canonical room name (`channel`, `discussion`). Omitted when unresolved. |
+| `type` | string | `channel` \| `dm` \| `botDM` \| `discussion` — the [effective room type](#effective-room-type) for this caller. Omitted when the caller has no subscription for the room. |
 | `hrInfo` | [MessageHRInfo](#messagehrinfo) | present **only for `dm` rooms** |
 | `appInfo` | [MessageAppInfo](#messageappinfo) | present **only for `botDM` rooms**; `isSubscribed` always set here |
 
@@ -5224,7 +5251,7 @@ Returns the user's sidebar subscriptions, optionally filtered by type, age, and 
 
 | Field               | Type    | Required | Notes |
 |---------------------|---------|----------|-------|
-| `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (botDM rooms). |
+| `type`              | string  | yes      | One of `"current"` (active rooms), `"rooms"` (DM and channel subscriptions), `"apps"` (app rooms). Buckets follow the [effective room type](#effective-room-type): a `botDM` facing a non-`.bot` counterpart is a DM and appears under `rooms`, never `apps`. |
 | `favorite`          | boolean | no       | When `true`, filters to favorited subscriptions only **and** moves the self-DM to the front of the list. |
 | `updatedWithinDays` | number  | no       | When set, filters **`rooms`-type** results to rooms **whose last user message (`room.lastMsgAt`) is within the last N days** — user activity, not system bumps or the subscription's update time. Cross-site rooms (no local `lastMsgAt`) fall outside the window. **Ignored for `current`** (always returns the full active set) and for `apps`. Omit for no age filter — the server applies no default; the client supplies any default it wants. Must be non-negative; a negative value is rejected with `bad_request`. |
 | `includeLastMessage` | boolean | no      | Whether to embed each room's [`previewMessage`](#subscriptionroom). Omitted ⇒ include (backward-compatible default); `false` ⇒ skip the per-room last-message resolve (a client that renders no room-list snippet can send `false` to save the server-side work). |
@@ -5255,11 +5282,11 @@ Results are **paginated** by `offset`/`limit` (offset-based): the server returns
 - **Local** rows carry the full room object (metadata + E2E key) from the `$lookup` baseline. **Cross-site** rows are fetched per remote site in parallel; if a site's RPC fails or a room isn't found, those rows are returned with **no `room` object** (the field is omitted) — the subscription still carries its own top-level `siteId`. `alert` and `hasMention` are unaffected (they come from the subscription, not the RPC).
 - **Teams-migrated rooms** (`room.origin == "teams"`, server-side only — not sent on the wire): excluded from `subscription.list`/`subscription.count` when the server's `SHOW_TEAMS_ROOM` env is `false` (the default); included when `true`, **or** when the requesting account is listed in `SHOW_TEAMS_ROOM_ACCOUNTS` (a comma-separated per-account allowlist). Reversible read-time filter, no data change.
 
-**Per-room-type record shape.** The kinds returned by `subscription.list` differ by row schema: `channel` and `dm` rows use the [Subscription](#subscription) schema (§3.0) — `dm` adds a top-level `hrInfo` — while `botDM` rows add a nested `app` object ([AppSubscription](#appsubscription), §3.0). All carry the nested [SubscriptionRoom](#subscriptionroom) (§3.0). Every field except the ones below is identical across the three types (`id`, `u`, `roomId`, `siteId`, `roles`, `joinedAt`, `muted`, `favorite`, `alert`, `hasMention`, `hasUnread`, `hasGroupMention`, the per-attribute `*UpdatedAt` timestamps, and the rest of `room`). `isSubscribed` is a **base [Subscription](#subscription) field** (boolean, optional — omitted unless stored `true`) shared by all three types, not a type-specific field. Type-specific fields:
+**Per-room-type record shape.** Rows are keyed on the [effective room type](#effective-room-type), so a `botDM` facing anything but a `.bot` app appears here as a `dm` row. The kinds returned by `subscription.list` differ by row schema: `channel` and `dm` rows use the [Subscription](#subscription) schema (§3.0) — `dm` adds a top-level `hrInfo` — while `botDM` rows add a nested `app` object ([AppSubscription](#appsubscription), §3.0). All carry the nested [SubscriptionRoom](#subscriptionroom) (§3.0). Every field except the ones below is identical across the three types (`id`, `u`, `roomId`, `siteId`, `roles`, `joinedAt`, `muted`, `favorite`, `alert`, `hasMention`, `hasUnread`, `hasGroupMention`, the per-attribute `*UpdatedAt` timestamps, and the rest of `room`). `isSubscribed` is a **base [Subscription](#subscription) field** (boolean, optional — omitted unless stored `true`) shared by all three types, not a type-specific field. Type-specific fields:
 
 | Field | `channel` | `dm` | `botDM` |
 |---|---|---|---|
-| `name` | Channel name. | Counterpart's account. | App display name (falls back to the bot account when the app record is unavailable). |
+| `name` | Channel name. | Counterpart's account — a user, or the bot itself when the subscriber is a bot. | App display name (falls back to the bot account when the app record is unavailable). |
 | `hrInfo` | absent | Counterpart's HR record ([SubscriptionHRInfo](#subscriptionhrinfo)) — returned in both `subscription.list` and `subscription.getDM`. | absent |
 | `app` | absent | absent | Nested app-metadata object — see [AppSubscription](#appsubscription). |
 | `room.name` | Canonical channel name. | Omitted (DM rooms have no canonical name). | Omitted (botDM rooms have no canonical name; the app name is the top-level `name`). |
@@ -5586,7 +5613,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
 
-**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
+**Active set:** an active subscription is a non-muted, **open** DM or channel, **or** an app room (a `botDM` facing a `.bot` counterpart) that is non-muted, open **and** subscribed (`isSubscribed: true`). A `botDM` that is not an app room counts as a DM — see [Effective room type](#effective-room-type) — so the badge and the list never disagree. Excluded from the count: unsubscribed app rooms, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
 
 ##### Request body
 
@@ -5830,8 +5857,8 @@ Returns the user's thread subscriptions across **all sites** as one globally-ord
 |---|---|---|
 | `siteId` | string | The thread's owning site. |
 | `roomId` | string | The room the thread belongs to. |
-| `roomName` | string | Per-subscriber display label, sourced from the user's subscription: `channel` → room name; `dm` → counterpart account; `botDM` → app name. |
-| `roomType` | string | The owning room's type (`channel`, `dm`, `botDM`, `discussion`). |
+| `roomName` | string | Per-subscriber display label, sourced from the user's subscription: `channel` → room name; `dm` → counterpart account; `botDM` → app name. A `botDM` remapped to `dm` keeps the counterpart account. |
+| `roomType` | string | The owning room's [effective room type](#effective-room-type) for this caller (`channel`, `dm`, `botDM`, `discussion`). |
 | `threadRoomId` | string | The thread room ID. |
 | `parentMessageId` | string | The thread's parent (top-level) message ID. |
 | `lastSeenAt` | number | Optional. UTC ms the user last read the thread; absent if never opened. |

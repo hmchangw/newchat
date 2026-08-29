@@ -2802,13 +2802,13 @@ func TestDetermineRoomTypeFromPayload(t *testing.T) {
 		req  model.CreateRoomRequest
 		want model.RoomType
 	}{
-		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
-		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
+		"single human user → DM":   {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
+		"single .bot user → botDM": {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
 		// p_admin is human-operated and has no app document; mirrors room-service.
 		"single platform-admin pseudo-account → regular DM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeDM},
-		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
-		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
-		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
+		"single QA p_ user → regular DM":                    {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
+		"named → channel":                                   {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
+		"multi-user → channel":                              {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -7598,4 +7598,28 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
 		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
 	})
+}
+
+// The frontend files a sidebar row by Subscription.RoomType, and it gets that
+// from this event as well as from subscription.list. The bot's own copy of a
+// bot<->human DM must therefore report the effective type, or a freshly created
+// DM lands in the App section until the next refresh.
+func TestPublishSubscriptionAdded_ReportsEffectiveRoomType(t *testing.T) {
+	tests := []struct {
+		name     string
+		account  string
+		counter  string
+		wantType model.RoomType
+	}{
+		{"bot's own copy of a human DM", "weather.bot", "alice", model.RoomTypeDM},
+		{"human's copy of the same room", "alice", "weather.bot", model.RoomTypeBotDM},
+		{"a p_admin DM is an ordinary DM", "alice", "p_adminsiteA", model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantType,
+				model.EffectiveRoomType(model.RoomTypeBotDM, tt.counter),
+				"the publish site must stamp this onto the event's subscription copy")
+		})
+	}
 }
