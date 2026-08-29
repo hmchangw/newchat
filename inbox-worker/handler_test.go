@@ -3424,3 +3424,60 @@ func TestSubscriptionRowType(t *testing.T) {
 		})
 	}
 }
+
+// A payload that cannot be parsed cannot be parsed on redelivery either, so every
+// event type must return a permanent error: jsretry Ack-drops the poison instead
+// of holding an ack-pending slot for the full MaxDeliver budget and then dropping
+// it silently anyway.
+func TestHandler_HandleEvent_MalformedPayload_IsPermanent(t *testing.T) {
+	for _, eventType := range []model.InboxEventType{
+		model.InboxMemberAdded,
+		model.InboxMemberRemoved,
+		model.InboxMemberJoinedAtRefreshed,
+		"room_sync", // no model constant; the dispatch switch uses the literal
+		model.InboxRoleUpdated,
+		model.InboxSubscriptionRead,
+		model.InboxSubscriptionMuteToggled,
+		model.InboxSubscriptionFavoriteToggled,
+		model.InboxSubscriptionOpened,
+		model.InboxThreadSubscriptionUpserted,
+		model.InboxThreadRead,
+		model.InboxThreadReadAll,
+		model.InboxThreadUnreadAdded,
+		model.InboxRoomRenamed,
+		model.InboxRoomRestricted,
+		model.InboxUserStatusUpdated,
+		model.InboxUserSettingsUpdated,
+		model.InboxUserPermissionsUpdated,
+		model.InboxUserChatlistUpdated,
+		model.InboxUserAccountUpdated,
+		model.InboxSubscriptionSectionMoved,
+		model.InboxSubscriptionMention,
+	} {
+		t.Run(eventType, func(t *testing.T) {
+			h := NewHandler(&stubInboxStore{})
+			evt := model.InboxEvent{Type: eventType, SiteID: "site-a", DestSiteID: "site-b", Payload: []byte("not-json")}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			err = h.HandleEvent(context.Background(), data)
+
+			require.Error(t, err)
+			ec, perm := errcode.IsPermanent(err)
+			require.True(t, perm, "a malformed %s payload must Ack-drop, not retry to MaxDeliver", eventType)
+			assert.Equal(t, errcode.CodeBadRequest, ec.Code)
+		})
+	}
+}
+
+// The envelope itself is poison on the same argument as its payload.
+func TestHandler_HandleEvent_MalformedEnvelope_IsPermanent(t *testing.T) {
+	h := NewHandler(&stubInboxStore{})
+
+	err := h.HandleEvent(context.Background(), []byte("{not json"))
+
+	require.Error(t, err)
+	ec, perm := errcode.IsPermanent(err)
+	require.True(t, perm, "an unparseable inbox envelope must Ack-drop")
+	assert.Equal(t, errcode.CodeBadRequest, ec.Code)
+}
