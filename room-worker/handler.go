@@ -2157,10 +2157,11 @@ func (h *Handler) resolveSubUpdateCounterpart(ctx context.Context, sub *model.Su
 	switch sub.RoomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
 		cp := sub.Name
-		// For naming, only ".bot" accounts take the app path; every "p_" account
-		// (the p_admin pseudo-account and QA users) has a user record and
-		// resolves via the user map.
-		if model.IsBot(cp) {
+		// Only an app room takes the app path; every "p_" account (the p_admin
+		// pseudo-account and QA users) has a user record and resolves via the
+		// user map. Same predicate that decides the row's effective type, so the
+		// event's roomType and its hrInfo/appInfo can never disagree.
+		if model.IsAppRoom(sub.RoomType, cp) {
 			app, err := h.store.GetApp(ctx, cp)
 			if err != nil {
 				// ErrAppNotFound is discarded silently by decision: the account fallback

@@ -1571,17 +1571,20 @@ func TestBuildListItems_BotCounterpartStaysAppRoom(t *testing.T) {
 	require.NotNil(t, bot.App)
 }
 
-func TestDistinctListNames_SplitsByEffectiveType(t *testing.T) {
+// distinctListNames runs after buildListItems normalizes RoomType, so it reads
+// the effective type directly — the rows below are shaped as it receives them.
+func TestDistinctListNames_SplitsAppRoomsFromDMs(t *testing.T) {
 	subs := []model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "weather.bot"}},
-		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "alice"}},
-		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "p_admin_ops"}},
+		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "alice"}},       // bot's own row, normalized
+		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "p_admin_ops"}}, // p_admin DM, normalized
 		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "bob"}},
 		{Subscription: model.Subscription{RoomType: model.RoomTypeChannel, Name: "general"}},
+		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "weather.bot"}}, // dup
 	}
 
 	bots, dms := distinctListNames(subs)
 
 	assert.Equal(t, []string{"weather.bot"}, bots, "only real apps drive the app lookup")
-	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms, "every effective DM drives the HR lookup")
+	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms, "every DM drives the HR lookup")
 }

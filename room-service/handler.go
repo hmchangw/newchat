@@ -827,9 +827,15 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 // refetch. Returns the marshaled event so callers can reuse it (e.g. as a
 // cross-site inbox payload).
 func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action string, sub *model.Subscription, roomName string, ts time.Time) ([]byte, error) {
+	// The recipient files this row by roomType, so report the type as THEY see
+	// it — a botDM facing a human or p_admin is an ordinary DM. Stamped here
+	// rather than per action so mute/favorite/open/read/section_moved cannot
+	// disagree with what subscription.list returns for the same row.
+	subCopy := *sub
+	subCopy.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
 	subEvt := model.SubscriptionUpdateEvent{
 		UserID:       sub.User.ID,
-		Subscription: *sub,
+		Subscription: subCopy,
 		Action:       action,
 		RoomName:     roomName,
 		Timestamp:    ts.UnixMilli(),

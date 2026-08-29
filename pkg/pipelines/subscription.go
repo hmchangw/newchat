@@ -43,7 +43,7 @@ func SubscribedAccounts(ctx context.Context, subscriptions *mongo.Collection, ro
 // ".bot" account suffix and nothing else. Unlike botOrPseudoAccountRegex it
 // deliberately excludes the platform-admin prefix — a p_admin DM is an ordinary
 // DM, not an app room.
-func botSuffixRegex() string { return `\.bot$` }
+const botSuffixRegex = `\.bot$`
 
 // AppRoomFilter matches subscription rows that are app rooms: a botDM facing a
 // real ".bot" app. It is the wire-side twin of model.IsAppRoom, and the only
@@ -56,17 +56,22 @@ func botSuffixRegex() string { return `\.bot$` }
 func AppRoomFilter() bson.M {
 	return bson.M{
 		"roomType": string(model.RoomTypeBotDM),
-		"name":     bson.M{"$regex": botSuffixRegex()},
+		"name":     bson.Regex{Pattern: botSuffixRegex},
 	}
 }
 
-// NonAppRoomFilter matches botDM rows that are NOT app rooms — the bot's own
-// side of a bot<->human DM, and either side of a p_admin DM. These rows render
-// as dm and are exempt from the isSubscribed gate, which their bot-side writer
-// sets to false by construction.
-func NonAppRoomFilter() bson.M {
-	return bson.M{
-		"roomType": string(model.RoomTypeBotDM),
-		"name":     bson.M{"$not": bson.M{"$regex": botSuffixRegex()}},
-	}
+// UnsubscribedAppFilter matches the one shape any subscriber-facing read must
+// hide: an app room the user has unsubscribed from. Unsubscribing is a soft
+// toggle (isSubscribed=false, row retained) rather than a row delete, so it
+// needs a filter rather than absence.
+//
+// $ne:true rather than false so a legacy row with no isSubscribed field counts
+// as unsubscribed, matching the equality test it replaces. Negate it with $nor
+// to express "still accessible": ¬(app ∧ ¬subscribed) ≡ ¬app ∨ subscribed, which
+// admits every non-app botDM — the bot's own side of a bot<->human DM, and
+// either side of a p_admin DM, both written isSubscribed=false by construction.
+func UnsubscribedAppFilter() bson.M {
+	f := AppRoomFilter()
+	f["isSubscribed"] = bson.M{"$ne": true}
+	return f
 }

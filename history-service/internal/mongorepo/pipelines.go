@@ -8,19 +8,6 @@ import (
 	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
-// threadMembershipGate keeps a thread only when its room subscription still
-// grants access. Unsubscribing from an app is a soft toggle (isSubscribed=false,
-// row retained), unlike a room leave that purges the row — so app rooms are
-// gated on isSubscribed. A botDM facing a human or p_admin is not an app room:
-// its bot-side row carries isSubscribed=false by construction, so gating it
-// would hide every thread a bot has in its own DMs.
-func threadMembershipGate() bson.M {
-	return bson.M{"$or": bson.A{
-		bson.M{"$nor": bson.A{pipelines.AppRoomFilter()}},
-		bson.M{"isSubscribed": true},
-	}}
-}
-
 // accessSince gates to threads whose parent was created at or after the user's join time.
 func buildBaseThreadMatch(roomID string, accessSince *time.Time) bson.M {
 	match := bson.M{"roomId": roomID}
@@ -81,9 +68,10 @@ func userThreadSubscriptionsPipeline(account string, cursorLastMsgAt *time.Time,
 				bson.D{{Key: "$match", Value: bson.M{
 					"u.account": account,
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
-					// Keep everything but an app room the user unsubscribed from
-					// (see threadMembershipGate).
-					"$or": threadMembershipGate()["$or"],
+					// Keep everything but an app room the user unsubscribed from:
+					// a botDM facing a human or p_admin is not an app room, and its
+					// isSubscribed=false is structural, not a user choice.
+					"$nor": bson.A{pipelines.UnsubscribedAppFilter()},
 				}}},
 				bson.D{{Key: "$project", Value: bson.M{"_id": 1, "name": 1, "roomType": 1}}},
 			},

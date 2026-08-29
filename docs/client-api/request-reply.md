@@ -1871,7 +1871,8 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
-botDM rows add `app` (AppSubscription). Rows are keyed on the
+botDM rows add `app` (AppSubscription). `subscription.count` and
+`thread.unread.summary` classify the same way. Rows are keyed on the
 [effective room type](../client-api.md#effective-room-type), so a botDM facing a
 non-`.bot` counterpart — a bot's own view of its DM with a user, or anyone's DM
 with `p_admin` — is reported as `dm` with `hrInfo`. See

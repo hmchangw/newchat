@@ -7600,26 +7600,53 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 	})
 }
 
-// The frontend files a sidebar row by Subscription.RoomType, and it gets that
-// from this event as well as from subscription.list. The bot's own copy of a
-// bot<->human DM must therefore report the effective type, or a freshly created
-// DM lands in the App section until the next refresh.
-func TestPublishSubscriptionAdded_ReportsEffectiveRoomType(t *testing.T) {
+// The frontend files a sidebar row by Subscription.RoomType, taken from this
+// event as well as from subscription.list. The bot's own copy of a bot<->human
+// DM must therefore carry the effective type, or a freshly created DM lands in
+// the App section until the next refetch — and the human's copy of the same
+// room must still say botDM, since the two sides classify independently.
+func TestPublishSubscriptionAdded_StampsEffectiveRoomType(t *testing.T) {
 	tests := []struct {
-		name     string
-		account  string
-		counter  string
-		wantType model.RoomType
+		name        string
+		account     string
+		counterpart string
+		wantType    model.RoomType
 	}{
-		{"bot's own copy of a human DM", "weather.bot", "alice", model.RoomTypeDM},
+		{"bot's own copy of its DM with a human", "weather.bot", "alice", model.RoomTypeDM},
 		{"human's copy of the same room", "alice", "weather.bot", model.RoomTypeBotDM},
-		{"a p_admin DM is an ordinary DM", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"a p_admin DM is an ordinary DM to both sides", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"bot's DM with another bot stays an app room", "weather.bot", "sales.bot", model.RoomTypeBotDM},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.wantType,
-				model.EffectiveRoomType(model.RoomTypeBotDM, tt.counter),
-				"the publish site must stamp this onto the event's subscription copy")
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			// Only an app room reaches the app lookup; a human counterpart must not.
+			if model.IsAppRoom(model.RoomTypeBotDM, tt.counterpart) {
+				store.EXPECT().GetApp(gomock.Any(), tt.counterpart).
+					Return(nil, ErrAppNotFound).AnyTimes()
+			}
+
+			var published []publishedMsg
+			h := NewHandler(store, "site-a", func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, testKeyStore, testKeySender, subject.RouteGlobal)
+
+			sub := &model.Subscription{
+				ID: "s1", RoomID: "r1", SiteID: "site-a", Name: tt.counterpart,
+				RoomType: model.RoomTypeBotDM,
+				User:     model.SubscriptionUser{ID: "u1", Account: tt.account},
+			}
+			h.publishSubscriptionAdded(context.Background(), []*model.Subscription{sub}, nil, nil, 1, "req-1")
+
+			require.Len(t, published, 1)
+			assert.Equal(t, subject.SubscriptionUpdate(tt.account), published[0].subj)
+			var evt model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(published[0].data, &evt))
+			assert.Equal(t, tt.wantType, evt.Subscription.RoomType)
+			assert.Equal(t, tt.counterpart, evt.Subscription.Name,
+				"the stamp must not disturb the raw counterpart account")
 		})
 	}
 }

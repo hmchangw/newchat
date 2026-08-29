@@ -259,7 +259,7 @@ func IsAppRoom(t RoomType, name string) bool {
 // type is returned unchanged. name is the subscription's per-subscriber display
 // name, which holds the counterpart account for dm and botDM rows.
 func EffectiveRoomType(t RoomType, name string) RoomType {
-	if t == RoomTypeBotDM && !IsBot(name) {
+	if t == RoomTypeBotDM && !IsAppRoom(t, name) {
 		return RoomTypeDM
 	}
 	return t

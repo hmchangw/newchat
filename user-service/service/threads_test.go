@@ -360,11 +360,13 @@ func TestEnrichThreadPage_BotCounterpartStaysAppRoom(t *testing.T) {
 	assert.Nil(t, items[0].HRInfo)
 }
 
-func TestDistinctDMAndBotNames_SplitsByEffectiveType(t *testing.T) {
+// distinctDMAndBotNames runs after enrichThreadPage normalizes RoomType, so it
+// reads the effective type directly — the rows below are shaped as it receives them.
+func TestDistinctDMAndBotNames_SplitsAppRoomsFromDMs(t *testing.T) {
 	items := []model.ThreadListItem{
 		{RoomType: model.RoomTypeBotDM, RoomName: "weather.bot"},
-		{RoomType: model.RoomTypeBotDM, RoomName: "alice"},
-		{RoomType: model.RoomTypeBotDM, RoomName: "p_admin_ops"},
+		{RoomType: model.RoomTypeDM, RoomName: "alice"},       // bot's own row, normalized
+		{RoomType: model.RoomTypeDM, RoomName: "p_admin_ops"}, // p_admin DM, normalized
 		{RoomType: model.RoomTypeDM, RoomName: "bob"},
 		{RoomType: model.RoomTypeChannel, RoomName: "general"},
 		{RoomType: model.RoomTypeBotDM, RoomName: ""},

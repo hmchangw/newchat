@@ -16,9 +16,14 @@ import (
 )
 
 // sub builds a subscriptions doc keyed by (account, roomId) with the given type.
-func sub(id, account, roomID string, roomType model.RoomType, subscribed bool) interface{} {
+// name is the per-subscriber display name — the counterpart account on dm/botDM
+// rows, the room name on channels — mirroring what room-worker's newSub persists.
+// It is load-bearing on botDM rows: the join gate reads it to tell an app room (a
+// ".bot" counterpart) from an ordinary DM stored as botDM, so a nameless botDM
+// fixture would exercise a row shape production never writes.
+func sub(id, account, roomID, name string, roomType model.RoomType, subscribed bool) interface{} {
 	return model.Subscription{
-		ID: id, RoomID: roomID, RoomType: roomType, IsSubscribed: subscribed,
+		ID: id, RoomID: roomID, Name: name, RoomType: roomType, IsSubscribed: subscribed,
 		User: model.SubscriptionUser{Account: account},
 	}
 }
@@ -35,9 +40,9 @@ func TestThreadSubscriptionRepo_ListByAccount(t *testing.T) {
 	require.NoError(t, err)
 	// Membership + type source: alice is subscribed to r1 (channel) and r2 (dm).
 	_, err = db.Collection("subscriptions").InsertMany(ctx, []interface{}{
-		sub("s1", "alice", "r1", model.RoomTypeChannel, false),
-		sub("s2", "alice", "r2", model.RoomTypeDM, false),
-		sub("s3", "bob", "r3", model.RoomTypeChannel, false),
+		sub("s1", "alice", "r1", "general", model.RoomTypeChannel, false),
+		sub("s2", "alice", "r2", "bob", model.RoomTypeDM, false),
+		sub("s3", "bob", "r3", "general", model.RoomTypeChannel, false),
 	})
 	require.NoError(t, err)
 
@@ -65,8 +70,10 @@ func TestThreadSubscriptionRepo_ListByAccount(t *testing.T) {
 }
 
 // A thread whose room the account no longer subscribes to (no membership) and an
-// unsubscribed-app thread (botDM, isSubscribed=false) are both dropped by the join
-// gate; a subscribed-app thread survives.
+// unsubscribed-app thread (botDM facing a ".bot" counterpart, isSubscribed=false)
+// are both dropped by the join gate; a subscribed-app thread survives. So does a
+// botDM facing a human — the bot's own side of a bot<->human DM, which carries
+// isSubscribed=false by construction and would otherwise be hidden entirely.
 func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T) {
 	db := testutil.MongoDB(t, "user_service_threadsubs_gate")
 	ctx := context.Background()
@@ -75,12 +82,16 @@ func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T)
 		model.ThreadSubscription{ID: "2", ThreadRoomID: "trGone", RoomID: "rGone", UserAccount: "alice", SiteID: "site-a"}, // no subscription
 		model.ThreadSubscription{ID: "3", ThreadRoomID: "trApp", RoomID: "rApp", UserAccount: "alice", SiteID: "site-a"},   // unsubscribed app
 		model.ThreadSubscription{ID: "4", ThreadRoomID: "trBot", RoomID: "rBot", UserAccount: "alice", SiteID: "site-a"},   // subscribed app
+		model.ThreadSubscription{ID: "5", ThreadRoomID: "trAdm", RoomID: "rAdm", UserAccount: "alice", SiteID: "site-a"},   // p_admin DM stored botDM
 	})
 	require.NoError(t, err)
 	_, err = db.Collection("subscriptions").InsertMany(ctx, []interface{}{
-		sub("s1", "alice", "rChan", model.RoomTypeChannel, false),
-		sub("s3", "alice", "rApp", model.RoomTypeBotDM, false), // unsubscribed → dropped
-		sub("s4", "alice", "rBot", model.RoomTypeBotDM, true),  // subscribed → kept
+		sub("s1", "alice", "rChan", "general", model.RoomTypeChannel, false),
+		sub("s3", "alice", "rApp", "sales.bot", model.RoomTypeBotDM, false), // unsubscribed → dropped
+		sub("s4", "alice", "rBot", "helper.bot", model.RoomTypeBotDM, true), // subscribed → kept
+		// Not an app room (no ".bot" counterpart), so the gate does not apply
+		// even though isSubscribed is false → kept.
+		sub("s5", "alice", "rAdm", "p_adminsiteA", model.RoomTypeBotDM, false),
 		// rGone has no subscription for alice → dropped.
 	})
 	require.NoError(t, err)
@@ -92,9 +103,10 @@ func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T)
 	for _, r := range rows {
 		byThread[r.ThreadRoomID] = r
 	}
-	require.Len(t, rows, 2)
+	require.Len(t, rows, 3)
 	assert.Contains(t, byThread, "trChan")
 	assert.Contains(t, byThread, "trBot")
+	assert.Contains(t, byThread, "trAdm") // non-app botDM survives despite isSubscribed=false
 	assert.Equal(t, model.RoomTypeBotDM, byThread["trBot"].RoomType)
 	assert.NotContains(t, byThread, "trGone") // no membership
 	assert.NotContains(t, byThread, "trApp")  // unsubscribed app
@@ -118,7 +130,7 @@ func TestThreadSubscriptionRepo_ListByAccount_NewestCappedAndOrdered(t *testing.
 			ID: id, ThreadRoomID: id, RoomID: roomID, UserAccount: "carol", SiteID: "site-a",
 			CreatedAt: base.Add(time.Duration(i) * time.Minute),
 		})
-		subs = append(subs, sub("sub-"+id, "carol", roomID, model.RoomTypeChannel, false))
+		subs = append(subs, sub("sub-"+id, "carol", roomID, "general", model.RoomTypeChannel, false))
 	}
 	_, err := db.Collection("thread_subscriptions").InsertMany(ctx, docs)
 	require.NoError(t, err)

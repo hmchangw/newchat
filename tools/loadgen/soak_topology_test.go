@@ -238,18 +238,34 @@ func TestIsActiveSoakSubscription_UsesExistingRoomRowsAsMembership(t *testing.T)
 			},
 		},
 		{
-			name: "unsubscribed bot DM",
+			// Name carries the counterpart account, as room-worker's newSub
+			// persists it; the soft-toggle gate applies only to app rooms, which
+			// this is because the counterpart is a ".bot" account.
+			name: "unsubscribed app DM",
 			sub: &model.Subscription{
 				RoomType: model.RoomTypeBotDM,
+				Name:     "weather.bot",
 				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
 			},
 		},
 		{
-			name: "subscribed bot DM",
+			name: "subscribed app DM",
 			sub: &model.Subscription{
 				RoomType:     model.RoomTypeBotDM,
+				Name:         "weather.bot",
 				IsSubscribed: true,
 				User:         model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			// A bot's own side of a bot<->human DM is stored botDM with
+			// isSubscribed=false by construction — membership, not a soft toggle.
+			name: "bot's own DM with a human is a member row despite isSubscribed=false",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeBotDM,
+				Name:     "alice",
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
 			},
 			want: true,
 		},

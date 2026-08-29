@@ -290,3 +290,40 @@ func TestClearAllThreadUnread_ListError(t *testing.T) {
 	_, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
 	require.Error(t, err)
 }
+
+// The membership gate now admits a bot's threads in its own DMs with humans, so
+// the DM tally must count them. Those rows are stored roomType=botDM with a
+// human counterpart, so tallying on the raw type would report no DM unread.
+func TestGetThreadUnreadSummary_CountsNonAppBotDMsAsDirectMessages(t *testing.T) {
+	tests := []struct {
+		name        string
+		roomType    model.RoomType
+		counterpart string
+		wantDM      bool
+	}{
+		{"bot's own DM with a human", model.RoomTypeBotDM, "alice", true},
+		{"a p_admin DM", model.RoomTypeBotDM, "p_adminsiteA", true},
+		{"a real app is not a direct message", model.RoomTypeBotDM, "weather.bot", false},
+		{"an ordinary dm row is unaffected", model.RoomTypeDM, "bob", true},
+		{"a channel is not a direct message", model.RoomTypeChannel, "general", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+			rc := mocks.NewMockRoomClient(ctrl)
+
+			ts.EXPECT().ListByAccount(gomock.Any(), "weather.bot").Return([]model.ThreadUnreadRow{
+				{ThreadRoomID: "tr1", SiteID: "site-a", RoomType: tt.roomType, Name: tt.counterpart, LastSeenAt: nil},
+			}, nil)
+			rc.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", []string{"tr1"}).
+				Return([]model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 300}}, nil)
+
+			svc := newThreadUnreadService(t, ts, rc)
+			resp, err := svc.GetThreadUnreadSummary(ctx("weather.bot", "site-a"), model.ThreadUnreadSummaryRequest{})
+			require.NoError(t, err)
+			assert.True(t, resp.Unread, "never-seen thread with activity is unread either way")
+			assert.Equal(t, tt.wantDM, resp.UnreadDirectMessage)
+		})
+	}
+}

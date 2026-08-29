@@ -30,12 +30,15 @@ type ThreadSubscription struct {
 // badge fields plus the room type. Only rows the account can still access
 // survive the join; RoomType feeds the DM tally.
 type ThreadUnreadRow struct {
-	ThreadRoomID string     `json:"threadRoomId" bson:"threadRoomId"`
-	RoomID       string     `json:"roomId"       bson:"roomId"`
-	SiteID       string     `json:"siteId"       bson:"siteId"`
-	RoomType     RoomType   `json:"roomType"     bson:"roomType"`
-	LastSeenAt   *time.Time `json:"lastSeenAt"   bson:"lastSeenAt"`
-	HasMention   bool       `json:"hasMention"   bson:"hasMention"`
+	ThreadRoomID string   `json:"threadRoomId" bson:"threadRoomId"`
+	RoomID       string   `json:"roomId"       bson:"roomId"`
+	SiteID       string   `json:"siteId"       bson:"siteId"`
+	RoomType     RoomType `json:"roomType"     bson:"roomType"`
+	// Name is the subscription's per-subscriber display name — the counterpart
+	// account on dm/botDM rows — needed to resolve the effective room type.
+	Name       string     `json:"name"         bson:"name"`
+	LastSeenAt *time.Time `json:"lastSeenAt"   bson:"lastSeenAt"`
+	HasMention bool       `json:"hasMention"   bson:"hasMention"`
 }
 
 // ThreadUnreadSummaryRequest is the client-facing thread-unread badge request. The

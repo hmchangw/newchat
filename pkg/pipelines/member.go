@@ -19,7 +19,7 @@ import (
 // model.IsPlatformAdminAccount: it matches bot (".bot" suffix) and platform-admin
 // (prefix QuoteMeta-escaped) accounts. Plain "p_" QA accounts are NOT matched.
 func botOrPseudoAccountRegex() string {
-	return `(\.bot$|^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix()) + `)`
+	return `(` + botSuffixRegex + `|^` + regexp.QuoteMeta(model.PlatformAdminAccountPrefix()) + `)`
 }
 
 // MatchCandidatesFilter returns the query predicate selecting the users an

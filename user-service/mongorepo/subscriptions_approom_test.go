@@ -4,88 +4,76 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
-// hasNonAppBranch reports whether an $or branch list admits non-app botDM rows
-// (the bot's own side of a human DM, and p_admin DMs) with no isSubscribed gate.
-func hasNonAppBranch(t *testing.T, branches bson.A) bool {
-	t.Helper()
-	for _, b := range branches {
-		m, ok := b.(bson.M)
-		if !ok || m["roomType"] != "botDM" {
-			continue
-		}
-		name, ok := m["name"].(bson.M)
-		if !ok {
-			continue
-		}
-		if _, negated := name["$not"]; negated {
-			_, gated := m["isSubscribed"]
-			assert.False(t, gated, "non-app botDM rows must not be gated on isSubscribed")
-			return true
-		}
+// Whole-map equality, not a structural walk: it proves the predicates are
+// present AND that nothing else narrows the bucket.
+func TestApplyListType(t *testing.T) {
+	anyType := bson.M{"$in": bson.A{"dm", "channel", "botDM"}}
+	tests := []struct {
+		listType string
+		want     bson.M
+		why      string
+	}{
+		{
+			listType: "current",
+			want: bson.M{
+				"u.account": "alice",
+				"roomType":  anyType,
+				"$nor":      bson.A{pipelines.UnsubscribedAppFilter()},
+			},
+			why: "everything but an app room the user unsubscribed from",
+		},
+		{
+			listType: "rooms",
+			want: bson.M{
+				"u.account": "alice",
+				"roomType":  anyType,
+				"$nor":      bson.A{pipelines.AppRoomFilter()},
+			},
+			why: "chats only: a bot's own botDM rows belong here, real apps do not",
+		},
+		{
+			listType: "apps",
+			want: bson.M{
+				"u.account":    "alice",
+				"roomType":     "botDM",
+				"name":         pipelines.AppRoomFilter()["name"],
+				"isSubscribed": true,
+			},
+			why: "the App section holds subscribed .bot apps and nothing else",
+		},
+		{
+			listType: "bogus",
+			want:     bson.M{"u.account": "alice"},
+			why:      "unreachable in production; must not widen the match",
+		},
 	}
-	return false
-}
-
-func TestListTypeMatch_AdmitsNonAppBotDMs(t *testing.T) {
-	for _, listType := range []string{"current", "rooms"} {
-		t.Run(listType, func(t *testing.T) {
-			m := listTypeMatch(listType)
-			branches, ok := m["$or"].(bson.A)
-			require.True(t, ok, "%s must use an $or over room-type branches", listType)
-			assert.True(t, hasNonAppBranch(t, branches),
-				"%s must admit the bot's own botDM rows, which carry isSubscribed=false", listType)
+	for _, tt := range tests {
+		t.Run(tt.listType, func(t *testing.T) {
+			got := bson.M{"u.account": "alice"}
+			applyListType(got, tt.listType)
+			assert.Equal(t, tt.want, got, tt.why)
 		})
 	}
 }
 
-// The App section must keep holding only real apps: an unsubscribed .bot app
-// stays hidden, and a bot's human DM never appears there.
-func TestListTypeMatch_AppsKeepsSubscribedGate(t *testing.T) {
-	m := listTypeMatch("apps")
-	assert.Equal(t, true, m["isSubscribed"], "apps must still require isSubscribed")
-	assert.Equal(t, "botDM", m["roomType"])
-	name, ok := m["name"].(bson.M)
-	require.True(t, ok, "apps must constrain the counterpart name")
-	assert.Equal(t, `\.bot$`, name["$regex"], "apps admit only .bot counterparts")
-}
+// A bot asking for its own DM with a human must resolve the room: that row is
+// stored roomType=botDM, so a hard roomType:"dm" match would 404 it.
+func TestDMMatch(t *testing.T) {
+	assert.Equal(t, bson.M{
+		"u.account": "weather.bot",
+		"name":      "alice",
+		"roomType":  bson.M{"$in": bson.A{"dm", "botDM"}},
+	}, dmMatch("weather.bot", "alice"))
 
-// The badge count and the list must select identical rows, or a client folding
-// its badge from the list can never reconcile with the server's count.
-func TestActiveSubscriptionFilter_MatchesCurrentBucket(t *testing.T) {
-	branches, ok := activeSubscriptionFilter("alice")["$or"].(bson.A)
-	require.True(t, ok)
-	assert.True(t, hasNonAppBranch(t, branches),
-		"the badge filter must admit the same non-app botDM rows the list does")
-}
-
-// A bot calling subscription.getDM on a human target must resolve the room. Its
-// own row is stored roomType=botDM, so a hard roomType:"dm" match 404s it.
-func TestDMMatch_AcceptsNonAppBotDM(t *testing.T) {
-	m := dmMatch("weather.bot", "alice")
-	assert.Equal(t, "weather.bot", m["u.account"])
-	assert.Equal(t, "alice", m["name"])
-
-	branches, ok := m["$or"].(bson.A)
-	require.True(t, ok, "the match must accept dm OR a non-app botDM")
-	var sawDM, sawNonApp bool
-	for _, b := range branches {
-		bm, ok := b.(bson.M)
-		require.True(t, ok)
-		if bm["roomType"] == "dm" {
-			sawDM = true
-		}
-		if bm["roomType"] == "botDM" {
-			name, ok := bm["name"].(bson.M)
-			require.True(t, ok)
-			_, negated := name["$not"]
-			assert.True(t, negated, "only non-app botDMs resolve as DMs")
-			sawNonApp = true
-		}
-	}
-	assert.True(t, sawDM, "a plain dm must still resolve")
-	assert.True(t, sawNonApp, "a non-app botDM must also resolve")
+	assert.Equal(t, bson.M{
+		"u.account": "alice",
+		"name":      "weather.bot",
+		"roomType":  bson.M{"$in": bson.A{"dm"}},
+	}, dmMatch("alice", "weather.bot"),
+		"a .bot target is an app room, never a DM — no regex needed, the name is known here")
 }

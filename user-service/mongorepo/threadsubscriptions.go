@@ -61,10 +61,12 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 				bson.M{"$match": bson.M{
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
 					"u.account": account,
-					// Keep everything but an app room the user unsubscribed from.
-					"$or": threadRoomGate()["$or"],
+					// Keep everything but an app room the user unsubscribed from:
+					// a botDM facing a human or p_admin is not an app room, and its
+					// isSubscribed=false is structural, not a user choice.
+					"$nor": bson.A{pipelines.UnsubscribedAppFilter()},
 				}},
-				bson.M{"$project": bson.M{"_id": 0, "roomType": 1}},
+				bson.M{"$project": bson.M{"_id": 0, "roomType": 1, "name": 1}},
 			},
 			"as": "sub",
 		}},
@@ -79,19 +81,10 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 			"lastSeenAt":   1,
 			"hasMention":   1,
 			"roomType":     bson.M{"$arrayElemAt": bson.A{"$sub.roomType", 0}},
+			// name is the counterpart account on dm/botDM rows; the caller needs
+			// it to resolve the effective room type for the DM unread tally.
+			"name": bson.M{"$arrayElemAt": bson.A{"$sub.name", 0}},
 		}},
 	}
 	return r.threadSubs.Aggregate(ctx, pipeline)
-}
-
-// threadRoomGate keeps a thread only when its room subscription still grants
-// access. Unsubscribing from an app is a soft toggle (isSubscribed=false, row
-// retained), unlike a room leave that purges the row — so app rooms are gated on
-// isSubscribed. Non-app botDM rows (a bot's own side of a human DM, a p_admin
-// DM) carry isSubscribed=false by construction and must NOT be gated.
-func threadRoomGate() bson.M {
-	return bson.M{"$or": bson.A{
-		bson.M{"$nor": bson.A{pipelines.AppRoomFilter()}},
-		bson.M{"isSubscribed": true},
-	}}
 }

@@ -1092,9 +1092,16 @@ Two cases produce this, and both are stored `botDM`:
 
 The rule applies wherever a subscriber's own room type is reported —
 `subscription.list`, `subscription.getDM`, `subscription.getByRoomID`,
-`subscription.getChannels`, `thread.list`, and the search response's `room.type`
-— and it matches the `hrInfo` / `appInfo` split already used by the
-[subscription.update](#subscriptionupdate-event) `added` event.
+`subscription.getChannels`, `subscription.count`, `thread.list`,
+`thread.unread.summary` (its `unreadDirectMessage` tally counts these rooms as
+DMs), every [subscription.update](#subscriptionupdate-event) event, and the
+message-search response's `room.type` — and it matches the `hrInfo` / `appInfo`
+split already used by the `subscription.update` `added` event.
+
+**One exclusion:** `search.rooms` (room typeahead) filters and returns the
+room-level type from its search index, which stores no per-subscriber counterpart
+account and therefore cannot resolve an effective type. A `roomType: "dm"`
+typeahead does not match rooms stored as `botDM`.
 
 `isSubscribed` follows the same line: it gates only app rooms. A bot's own row in
 a `botDM` is stored `isSubscribed: false`, so gating it would hide the room from
