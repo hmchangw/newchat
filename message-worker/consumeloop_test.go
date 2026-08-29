@@ -199,10 +199,15 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 	// assumes, "attempt visible" goes false and names the real problem.
 	var lastAttempt atomic.Uint64
 	var attemptVisible atomic.Bool
+	// A dead iterator must not look like a quiet consumer: without this the
+	// goroutine returns silently and the test reports "never persisted" with no
+	// hint that nothing was ever delivered.
+	var iterErr atomic.Value
 	go func() {
 		for {
 			msg, err := e.iter.Next()
 			if err != nil {
+				iterErr.Store(err.Error())
 				return
 			}
 			deliveries.Add(1)
@@ -239,9 +244,30 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 		// the handler never saw an exhausted budget (attempt never reached
 		// parentResolveAttempts, or was never visible at all — a wiring problem),
 		// or it saw it and still did not persist (a handler problem).
-		t.Fatalf("salvage never happened: deliveries=%d lastAttempt=%d attemptVisible=%t (need attempt >= parentResolveAttempts=%d); "+
-			"if attemptVisible is false the consume loop is not stamping delivery metadata into the handler context",
-			deliveries.Load(), lastAttempt.Load(), attemptVisible.Load(), parentResolveAttempts)
+		// deliveries==0 means the message never reached the handler at all, which is
+		// a delivery/filter problem, not a salvage problem — so report the broker's
+		// own view and the subjects involved before blaming the handler.
+		iterMsg := "<none>"
+		if v, ok := iterErr.Load().(string); ok {
+			iterMsg = v
+		}
+		pending, ackPending, delivered := uint64(0), uint64(0), uint64(0)
+		filters := []string(nil)
+		if info, ierr := e.cons.Info(context.Background()); ierr == nil {
+			pending, ackPending, delivered = info.NumPending, uint64(info.NumAckPending), info.Delivered.Consumer
+			filters = info.Config.FilterSubjects
+			if info.Config.FilterSubject != "" {
+				filters = append(filters, info.Config.FilterSubject)
+			}
+		}
+		t.Fatalf("salvage never happened: deliveries=%d lastAttempt=%d attemptVisible=%t (need attempt >= parentResolveAttempts=%d)\n"+
+			"  iterator error: %s\n"+
+			"  consumer: num_pending=%d num_ack_pending=%d delivered=%d filters=%q\n"+
+			"  published to: %q\n"+
+			"  deliveries=0 with num_pending>0 means the message is in the stream but the consumer never got it "+
+			"(filter mismatch or a dead iterator), NOT a salvage failure",
+			deliveries.Load(), lastAttempt.Load(), attemptVisible.Load(), parentResolveAttempts,
+			iterMsg, pending, ackPending, delivered, filters, e.subject)
 	}
 
 	saved := store.savedMessages()[0]
