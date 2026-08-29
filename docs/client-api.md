@@ -1074,6 +1074,24 @@ that preview.
 
 #### AppSubscription
 
+The nested `app` object carried on **botDM** subscription rows in
+`subscription.list`. The botDM's base `Subscription.name` is the **app's display
+name**; the `app` object also carries its own `name`. All app fields are optional
+(omitted when unset).
+
+| Field | Type | Notes |
+|---|---|---|
+| `appId` | string | The app's ID. |
+| `name` | string | The app's display name. |
+| `description` | string | App description. |
+| `assistant` | [AppAssistant](#appassistant) | The app's assistant subdocument. |
+| `appViewUrl` | map<string, string> | App-view URLs keyed by view name. |
+| `reportUrl` | string | App report URL. |
+| `forumUrl` | string | App forum URL. |
+| `userManualUrl` | string | App user-manual URL. |
+| `version` | string | App version. |
+| `sponsors` | [AppSponsor](#appsponsor)[] | App sponsors. |
+
 #### Effective room type
 
 `roomType` is the room's type **as seen by the requesting subscriber**, not a raw
@@ -1107,24 +1125,6 @@ typeahead does not match rooms stored as `botDM`.
 a `botDM` is stored `isSubscribed: false`, so gating it would hide the room from
 the bot entirely; a user who unsubscribed from a real `.bot` app still has that
 room hidden.
-
-The nested `app` object carried on **botDM** subscription rows in
-`subscription.list`. The botDM's base `Subscription.name` is the **app's display
-name**; the `app` object also carries its own `name`. All app fields are optional
-(omitted when unset).
-
-| Field | Type | Notes |
-|---|---|---|
-| `appId` | string | The app's ID. |
-| `name` | string | The app's display name. |
-| `description` | string | App description. |
-| `assistant` | [AppAssistant](#appassistant) | The app's assistant subdocument. |
-| `appViewUrl` | map<string, string> | App-view URLs keyed by view name. |
-| `reportUrl` | string | App report URL. |
-| `forumUrl` | string | App forum URL. |
-| `userManualUrl` | string | App user-manual URL. |
-| `version` | string | App version. |
-| `sponsors` | [AppSponsor](#appsponsor)[] | App sponsors. |
 
 #### HrInfo
 
