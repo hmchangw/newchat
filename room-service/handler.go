@@ -202,6 +202,9 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 	// second pass.
 	deduped := dedup(req.Users)
 	req.Users = stripAccount(deduped, requesterAccount)
+	// CreateRoomType classifies from both participants, so the requester has to
+	// be on the request before it runs; publishCreateRoom re-asserts it later.
+	req.RequesterAccount = requesterAccount
 
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 {
 		if len(deduped) == 1 && len(req.Users) == 0 {
@@ -212,7 +215,7 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 		}
 	}
 
-	roomType := determineRoomType(req)
+	roomType := model.CreateRoomType(req)
 
 	if roomType == model.RoomTypeChannel {
 		if strings.TrimSpace(req.Name) == "" {
@@ -291,7 +294,9 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		return nil, fmt.Errorf("dm dedup check: %w", err)
 	}
 
-	if roomType == model.RoomTypeBotDM {
+	// The counterpart decides this, not the requester: a bot signed into the
+	// client can subscribe to another app, and a human counterpart owns no app.
+	if roomType == model.RoomTypeBotDM && model.IsBot(other.Account) {
 		app, err := h.store.GetApp(ctx, other.Account)
 		if err != nil {
 			if errors.Is(err, ErrAppNotFound) {
@@ -827,6 +832,9 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 // refetch. Returns the marshaled event so callers can reuse it (e.g. as a
 // cross-site inbox payload).
 func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action string, sub *model.Subscription, roomName string, ts time.Time) ([]byte, error) {
+	// Rows are written per subscriber, so this is an identity on well-formed
+	// data; it corrects a corrupt row before the client files it. Stamped here
+	// rather than per action so no caller can forget.
 	subEvt := model.SubscriptionUpdateEvent{
 		UserID:       sub.User.ID,
 		Subscription: *sub,
@@ -834,6 +842,7 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 		RoomName:     roomName,
 		Timestamp:    ts.UnixMilli(),
 	}
+	subEvt.Subscription.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
 	data, err := json.Marshal(subEvt)
 	if err != nil {
 		return nil, fmt.Errorf("marshal subscription update event: %w", err)

@@ -7977,3 +7977,44 @@ func TestFederateOne_NoopWhenLocalOrEmpty(t *testing.T) {
 	require.NoError(t, h.federateOne(context.Background(), "r1", "site-a", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	assert.False(t, called, "empty or local destination must not publish")
 }
+
+// The app gate keys on the counterpart, not the requester: a bot signed into the
+// client can subscribe to another app, and that app still has to be available.
+func TestHandleCreateRoom_BotRequester_HumanCounterpart_SkipsAppGate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(botUser(), nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(aliceUser(), nil)
+	store.EXPECT().FindDMSubscription(gomock.Any(), "helper.bot", "alice").
+		Return(nil, model.ErrSubscriptionNotFound)
+	// GetApp must NOT run: alice owns no app.
+	h := &Handler{
+		store: store, siteID: "site-a", maxRoomSize: 1000,
+		publishToStream: func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+	}
+
+	resp, err := h.createRoom(ctxParams(map[string]string{"account": "helper.bot"}),
+		model.CreateRoomRequest{Users: []string{"alice"}})
+	require.NoError(t, err)
+	assert.Equal(t, string(model.RoomTypeBotDM), resp.RoomType)
+}
+
+func TestHandleCreateRoom_BotRequester_BotCounterpart_ChecksAppGate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	store.EXPECT().GetUser(gomock.Any(), "weather.bot").
+		Return(&model.User{ID: "u-weather", Account: "weather.bot"}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(botUser(), nil)
+	store.EXPECT().FindDMSubscription(gomock.Any(), "weather.bot", "helper.bot").
+		Return(nil, model.ErrSubscriptionNotFound)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{
+		Name:      "Helper",
+		Assistant: &model.AppAssistant{Enabled: false},
+	}, nil)
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
+
+	_, err := h.createRoom(ctxParams(map[string]string{"account": "weather.bot"}),
+		model.CreateRoomRequest{Users: []string{"helper.bot"}})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errBotNotAvailable))
+}
