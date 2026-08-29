@@ -249,3 +249,57 @@ Metric cardinality is safe — all label values are closed enums with attribute 
 5. `medium` — Presize the bulk buffer (`buf.Grow(len(actions) * ~256)`) and pool it via `sync.Pool`; replace the per-action `map[string]bulkActionMeta` marshal with a typed three-variant struct or a direct `append`.
 6. `medium` — Add jittered backoff to the `Fetch` error path (`main.go:549`) instead of a bare `continue`.
 7. `low` — Adopt `sonic` for the messages collection: it consumes the same MESSAGES-CANONICAL firehose as `message-worker`/`broadcast-worker`, `MessageDoc` and `model.Message` carry no struct-keyed map (no `Reactions`), and nothing hashes or signs the bytes — ES parses them. Safe, and warms via `jsonwarm.Pretouch` like its peers. Also extend `perf_bench_test.go` to benchmark `Handler.AddWithContext` + `searchengine.Bulk` end-to-end, since the current benchmarks miss the redundant parses and the ndjson build.
+
+---
+
+## 7. Prioritized action list
+
+Ordered by severity first, then impact ÷ effort. Items 1-2 are release blockers; 3-5 are the structural core that four independent experts converged on.
+
+### 1. `critical` — Fix the bot-message consumer filter subject
+**Dimension:** Integration · **Where:** `search-sync-worker/messages.go:129` (test at `messages_test.go:621-622`)
+The bot collection binds `BOT-MESSAGES-CANONICAL-{siteID}` but filters `chat.msg.canonical.{siteID}.*`, a subject that stream does not carry (`pkg/stream/stream.go:97`). `CreateOrUpdateConsumer` fails and `main.go:348` exits — the pod crashloops in `default` mode wherever the bot stream exists, and bot messages are never indexed where it does not. Use `subject.BotCanonicalWildcard(siteID)`, matching `bot-message-worker/main.go:208`, and correct the test that currently pins the wrong string. Add an integration test that creates every default-mode consumer against real streams so this class of mismatch fails CI, not rollout. Small diff, complete outage averted.
+
+### 2. `high` — Close the `room_restricted` ACL gap
+**Dimension:** Integration · **Where:** `pkg/subject/subject.go:332-343`, `search-sync-worker/user_room.go:271-274`
+`room_restricted` (produced at `room-service/handler.go:2123`) never reaches the user-room index, so a room restricted after its members joined leaves their docs unrestricted and `search-service/query_messages.go:127` grants full-history message search. This is an access-control regression, not staleness. Publish it on the INBOX internal lane, add it to `InboxMemberEventSubjects`, and handle it in `userRoomCollection`.
+
+### 3. `high` — Add `ctx` to the `Collection` interface and delete both `context.Background()` calls
+**Dimension:** Code quality / Architecture / Maintainability / Integration (all four) · **Where:** `collection.go:42`, `messages.go:220`, `messages.go:304`
+`BuildAction([]byte)` has no context, forcing two network calls to fabricate one — including an **unbounded** Mongo query that no shutdown can cancel and that can block a consumer goroutine indefinitely. Also severs tracing at exactly the two cross-service hops. Thread `AddWithContext`'s context through `BuildAction`/`BuildActionSeq`/`BuildByQuery` and give `ResolveIdentities` an explicit timeout. Highest impact-per-line change in the report.
+
+### 4. `high` — Log, meter and back off the `Fetch` error loop
+**Dimension:** Code quality / Architecture / Performance (three) · **Where:** `main.go:538-550`, `consumer_source.go:38`
+The error is discarded with no log, metric, backoff or comment, so a NATS outage spins all five collection goroutines at 100% CPU with zero operator signal. Wrap the error at `consumer_source.go:38` so it names the consumer, then log at warn + record a metric + apply an equal-jittered backoff. Roughly a dozen lines.
+
+### 5. `high` — Add `bootstrap.go` with a production stream-existence check
+**Dimension:** Architecture / Maintainability · **Where:** `main.go:302-323`
+The only JetStream service in the repo without one; eleven peers have it. Beyond the convention breach, the missing verify-when-disabled branch means a misprovisioned production deploy surfaces as an opaque `create consumer failed` instead of a fail-fast at startup. Mirror `hr-sync-worker/bootstrap.go`, add a `streamManager` seam for testability, and replace the `inboxName`/`hrName` string comparisons with a `Collection.OwnsStream() bool` capability.
+
+### 6. `high` — Set deadlines on every ES call
+**Dimension:** Performance · **Where:** `main.go:172`, `handler.go:239`, `handler.go:112`, `pkg/searchengine/factory.go:33-37`
+A `context.Background()` flows from startup all the way into `store.Bulk`, and the ES client has no HTTP timeout. A hung socket holds a pipeline slot forever; at `PIPELINE_DEPTH=2`, two hangs stall the collection permanently and shutdown blocks to the 25s limit. Per-flush `context.WithTimeout` tied to `AckWait`, a shorter one for `UpdateByQuery`, plus an explicit transport timeout.
+
+### 7. `high` — Raise coverage above the 80% floor by making `main.go` testable
+**Dimension:** Test coverage · **Where:** `main.go:108-160`, `main.go:210-240`, `teams_user_store.go:32`
+66.8% today; ~84.8% excluding `main.go`. Extract the validation cascade into `config.validate() error` and the mode-gated wiring into `buildCollections(...)`, then table-drive both — that alone converts ~50 dead statements. Add the missing `teams_user_store` integration test (`testutil.MongoDB`), the only store implementation in the service with zero tests of any kind, whose failure mode is a *durable* silent Ack with empty author fields.
+
+### 8. `high` — Cache the thread-parent resolver
+**Dimension:** Performance · **Where:** `messages.go:213-223`, `thread_parent_resolver.go:116`
+Every thread reply issues a synchronous `_search` across all monthly message indices on the single sync goroutine, uncached, for an immutable value that repeats across every reply in a thread. A bounded TTL/LRU cache approaches a 100% hit rate on replay. Small change, large throughput effect on backfill.
+
+### 9. `high` — Replace wiring-by-field-mutation with constructor options
+**Dimension:** Architecture / Maintainability · **Where:** `main.go:219,225-226,231-232,361`, `handler.go:63`
+Five post-construction field assignments mean every collection is legally constructible half-wired, and the code nil-guards rather than fails (`messages.go:297` silently returns nil identities). Follow the peer pattern (`inbox-worker/handler.go:158`), and drop the test-only variadic `tracers ...trace.Tracer`. Pairs naturally with action 7, which needs `buildCollections` to be assertable.
+
+### 10. `medium` — Split `main.go` and move the ES doc type into `pkg/searchindex`
+**Dimension:** Maintainability / Code quality · **Where:** `main.go:438-618`, `spotlight_org.go:193-244`
+`main()` is 319 lines and holds the entire consumer runtime; extract `consumer.go`, `store_search.go` and `config.go` to get it under 120. Separately, `SpotlightOrgIndex` is exported from `package main` — unimportable — and hand-mirrored in `search-service/response.go:127`, so a field rename breaks search silently. Move it to `pkg/searchindex/spotlightorgdoc.go` and have the reader import it.
+
+### Also worth scheduling
+
+- `medium` — Add request-ID propagation (`natsutil.StampRequestID`); every error log in the service is currently uncorrelatable to its producing request.
+- `medium` — Confirm `govulncheck` and `semgrep` are green in CI; both gates were unverifiable in this sandbox (proxy 403 / tool absent). `gosec` passed clean.
+- `medium` — Drop or redact `results[i].Error` at `handler.go:295` — ES parse-exception reasons can embed message content into logs.
+- `medium` — Promote `checkBatchAckCoupling` (`main.go:575`) from warning to fail-fast; it already computes the remedy.
+- `medium` — Per-test ES index names with `t.Cleanup` DELETEs, and per-test NATS connections, in the integration suite.
