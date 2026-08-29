@@ -210,3 +210,42 @@ Every subject comes from a `pkg/subject` builder — no `fmt.Sprintf` subjects a
 5. `medium` — Share the message index prefix as a common env var read by both `search-service` and `search-sync-worker`, or derive the reader's pattern via a `searchindex.IndexPattern` helper instead of the literal `"messages-*"`.
 6. `low` — Add `,notEmpty` plus a name-shape check for `USER_ROOM_INDEX`.
 7. `low` — Document the `Fetch`+pipeline consumer pattern as a sanctioned third option in CLAUDE.md §6, or note in `main.go` why it deviates.
+
+---
+
+## 6. Performance — 4 / 5
+
+Genuinely strong bulk-indexing design: a real `_bulk` API (never per-document), a slot-bounded flush pipeline, per-item 429/backpressure classification, precomputed metric attribute sets, an ack-pending/batch-size coupling check, and existing benchmarks. Findings concentrate in missing deadlines, one uncached N+1, and reflection-heavy fan-out marshalling.
+
+### Benchmarks (ran clean, no containers required)
+
+| Benchmark | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| `BuildAction_Message` | 8,556 | 1,690 | 22 |
+| `UserRoom` (accounts=1000) | 11,700,000 | 2.68 MB | **39 allocs + 2.6 KB per account** |
+| `Spotlight` (accounts=1000) | 2,600,000 | — | 7 allocs per account |
+
+### Findings
+
+- `high` — **No context deadline on any ES call.** `main.go:172` creates `ctx := context.Background()`, passes it to `runConsumer` (`main.go:370`), which flows to `pipe.run(ctx, …)` → `h.store.Bulk(bulkCtx, …)` (`handler.go:239`). The ES client is built with no HTTP timeout either (`pkg/searchengine/factory.go:33-37` — only the startup Ping is bounded, `:66`). A hung ES socket holds a pipeline slot forever; at `PIPELINE_DEPTH=2` two hangs stall the collection permanently, and shutdown's `pipe.wait()` (`main.go:508`) blocks until the 25s drain timeout expires. Same for `UpdateByQuery` (`handler.go:112`), which runs a cluster-wide `_update_by_query` inline in the fetch loop. Violates CLAUDE.md §6 "Always set timeouts".
+- `high` — **Uncached, serial N+1 ES lookup per thread reply.** `messages.go:213-223` → `thread_parent_resolver.go:116`: each thread reply lacking `ThreadParentMessageCreatedAt` issues a `_search` across `messages-<prefix>-*` — every monthly index — with a 2s timeout, synchronously, on the single `message-sync` goroutine. Parent `createdAt` is immutable and highly repeatable (every reply in a thread hits the same parent), yet there is no cache. On a `DeliverPolicy=All` rebuild of legacy data this serializes the entire firehose behind ES search latency.
+- `medium` — **Fan-out update bodies built from nested `map[string]any`.** `pkg/searchindex/userroomdoc.go:93-119` allocates three `map[string]any` layers, an empty `[]string{}`, an empty `map[string]int64{}`, and re-runs `time.UnixMilli(ts).UTC().Format(RFC3339Nano)` **per account** — even though `ts` is identical across the whole fan-out. That is the 39-allocs/account measured above. The correct pattern already exists one file over: `spotlight_org.go:176-177` ("Typed rather than nested `map[string]any` so marshalling stays allocation-cheap on the fan-out path").
+- `medium` — **Redundant whole-envelope JSON passes per INBOX message.** Spotlight parses the envelope in `BuildByQuery` (`spotlight.go:233`) for *every* message, returns `ok=false` for member events, then `parseMemberEvent` (`inbox_stream.go:422`) parses it again. User-room does `peekInboxEventType` (`inbox_stream.go:402`, a full scan) then `parseMemberEvent`. Two envelope decodes plus a `RawMessage` payload copy per message. The benchmarks call `BuildAction` directly, so they **under-measure the real handler path** — they also skip `DecodePayload` and the ndjson build.
+- `medium` — **Bulk ndjson buffer never presized or pooled.** `pkg/searchengine/adapter.go:116-150`: a fresh `bytes.Buffer` grows from zero for up to 500 actions (~19 reallocs, ~2× total bytes copied), and each action marshals a one-entry `map[string]bulkActionMeta` by reflection (~3 allocs/action) on the hottest loop in the worker.
+- `medium` — **Busy-spin on `Fetch` error.** `main.go:538-549` `continue`s with no backoff. A fast-failing error (consumer gone, connection closed) spins the loop at 100% CPU per collection. (Third independent sighting of this defect.)
+- `low` — **Unbounded Mongo call in the consumer loop.** `messages.go:304` calls `ResolveIdentities` with `context.Background()` and no timeout (`teams_user_store.go:213,231`). The query is correctly batched with `$in` and precisely projected, but `users.account` is queried without the repo's `mongoutil.WarnMissingIndexes` startup check that `search-service/store_mongo.go:49` and `history-service` both perform.
+- `nitpick` — `fmt.Sprintf("%s_%s", …)` per account in the spotlight fan-out (`spotlight.go:195`); `idSet := make(map[string]struct{})` with no capacity hint (`messages.go:232`); a goroutine plus unbuffered channel per HR `Fetch` (`consumer_source.go:290-299` — correctly terminated, so not a leak).
+
+### No findings
+
+Metric cardinality is safe — all label values are closed enums with attribute sets precomputed per collection (`metrics.go:362-389`) and `bulkStatusLabel` buckets (`metrics.go:435`). No goroutine leaks. No lock held across I/O: `Take()` holds `mu` only for the slice swap (`handler.go:209-219`). MongoDB projection discipline is followed throughout.
+
+### Recommendations
+
+1. `high` — Give every ES call a deadline: derive a per-flush `context.WithTimeout` (e.g. 30s, tied to `AckWait`) in `flushPipeline.run`, a shorter one for `UpdateByQuery`, and set an explicit `http.Client` timeout on the ES transport in `searchengine.New`.
+2. `high` — Put a bounded TTL cache (or an LRU keyed by messageID) in front of `esParentResolver`; parent `createdAt` is immutable, so hit rates on a replay approach 1. Consider moving the resolve off the fetch goroutine entirely.
+3. `medium` — Convert `BuildAddRoomUpdateBody`/`BuildRemoveRoomUpdateBody` to typed structs mirroring `spotlightOrgUpdateBody`, and hoist the `now` format plus invariant params out of the per-account loop. Should cut the 39 allocs/account by roughly 4-5×.
+4. `medium` — Decode the INBOX envelope once in `Handler.AddWithContext` and pass `*model.InboxEvent` to `BuildByQuery`/`BuildAction`, eliminating the double parse.
+5. `medium` — Presize the bulk buffer (`buf.Grow(len(actions) * ~256)`) and pool it via `sync.Pool`; replace the per-action `map[string]bulkActionMeta` marshal with a typed three-variant struct or a direct `append`.
+6. `medium` — Add jittered backoff to the `Fetch` error path (`main.go:549`) instead of a bare `continue`.
+7. `low` — Adopt `sonic` for the messages collection: it consumes the same MESSAGES-CANONICAL firehose as `message-worker`/`broadcast-worker`, `MessageDoc` and `model.Message` carry no struct-keyed map (no `Reactions`), and nothing hashes or signs the bytes — ES parses them. Safe, and warms via `jsonwarm.Pretouch` like its peers. Also extend `perf_bench_test.go` to benchmark `Handler.AddWithContext` + `searchengine.Bulk` end-to-end, since the current benchmarks miss the redundant parses and the ndjson build.
