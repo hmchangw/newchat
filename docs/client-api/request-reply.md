@@ -346,9 +346,9 @@ Room type is inferred server-side from the payload shape (`name` set → channel
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | `channel` only. Source channels whose members are copied in. |
 
 Room type is inferred: `name` set → channel; `name` empty + one `users` entry →
-DM, or botDM when that user is a `.bot` bot (`p_admin` and QA `p_` accounts are
-ordinary users, so both yield `dm`); `name` empty + `users` is just the caller →
-**self-DM**, a single-member `dm` room, one-per-user.
+DM, or botDM when **either** participant is a `.bot` bot (`p_admin` and QA `p_`
+accounts are ordinary users, so both yield `dm`); `name` empty + `users` is just
+the caller → **self-DM**, a single-member `dm` room, one-per-user.
 
 #### Success response
 
@@ -1871,11 +1871,9 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
-botDM rows add `app` (AppSubscription). `subscription.count` and
-`thread.unread.summary` classify the same way. Rows are keyed on the
-[effective room type](../client-api.md#effective-room-type), so a botDM facing a
-non-`.bot` counterpart — a bot's own view of its DM with a user, or anyone's DM
-with `p_admin` — is reported as `dm` with `hrInfo`. See
+botDM rows add `app` (AppSubscription). Each row carries the
+[room type its own subscriber sees](../client-api.md#effective-room-type), stored
+at creation: a bot's own row in its DM with a person is `dm` with `hrInfo`. See
 [../client-api.md §3.4](../client-api.md#subscriptionlist) for the full schema + example.
 
 **Emits:** None.
