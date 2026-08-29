@@ -17,6 +17,8 @@ import (
 
 // ssoTokensCollection stores SSO token pairs (legacy field names kept).
 // Migrated legacy token docs must be loaded into this collection.
+// #nosec G101 -- MongoDB collection name, not a credential
+// nosemgrep: gosec.G101-1
 const ssoTokensCollection = "sso_tokens"
 
 // SSOTokenRepo is the Mongo store for service.SSOTokenRepository, keyed by username.

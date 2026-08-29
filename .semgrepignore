@@ -8,9 +8,9 @@
 # --- Go tests -------------------------------------------------------------
 # Test fixtures are fabricated credentials, URLs and payloads by nature, which
 # the credential/secret rules (e.g. gosec.G101-1, CWE-798) flag as findings.
-# gosec still scans tests (`-tests=true` in GOSEC_FLAGS), so this narrows the
-# semgrep surface only, it does not leave test code unscanned altogether.
-*_test.go
+# They are annotated in place instead: an explicit file path bypasses this
+# file entirely, so ignoring *_test.go here would only blind local scans while
+# the CI gate still reports them.
 testdata/
 
 # --- Dependencies and build output ----------------------------------------
