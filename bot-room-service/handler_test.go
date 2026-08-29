@@ -792,3 +792,35 @@ func isErrcode(err error, out **errcode.Error) bool {
 	*out = e
 	return true
 }
+
+// dm.ensure wrote neither roomType nor name, so the rows matched no list bucket
+// and the DM was invisible to both parties.
+func TestHandleDMEnsure_WritesRoomTypeAndName(t *testing.T) {
+	var upserted []*Subscription
+	store := &fakeStore{
+		InsertRoomFn: func(_ context.Context, _ *Room) error { return nil },
+		UpsertSubscriptionFn: func(_ context.Context, s *Subscription) (bool, error) {
+			upserted = append(upserted, s)
+			return true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutboxPayload{}).publish, testKeyStore, testKeySender)
+
+	_, err := h.handleDMEnsure(withIdentity(t, "", ident()), BotDMEnsureRequest{TargetUserID: "alice-id"})
+	require.NoError(t, err)
+
+	require.Len(t, upserted, 2)
+
+	bot := upserted[0]
+	assert.Equal(t, "myapp.bot", bot.Account)
+	assert.Equal(t, "alice", bot.Name, "the bot's row names the person")
+	assert.Equal(t, model.RoomTypeDM, bot.RoomType, "the bot faces a person")
+
+	target := upserted[1]
+	assert.Equal(t, "alice", target.Account)
+	assert.Equal(t, "myapp.bot", target.Name, "the person's row names the bot")
+	assert.Equal(t, model.RoomTypeBotDM, target.RoomType, "the person faces an app")
+}

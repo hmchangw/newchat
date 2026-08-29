@@ -144,6 +144,7 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 	if _, err := h.store.UpsertSubscription(c, &Subscription{
 		ID: h.newUUIDv7(), RoomID: roomID, UserID: ident.ID, Account: ident.Account,
 		SiteID: h.siteID, CreatedAt: createdAt, IsBot: true,
+		Name: target.Account, RoomType: model.SubscriptionRoomType(target.Account),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert bot dm subscription: %w", err)
 	}
@@ -153,6 +154,7 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 		if _, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: target.ID, Account: target.Account,
 			SiteID: h.siteID, CreatedAt: createdAt,
+			Name: ident.Account, RoomType: model.SubscriptionRoomType(ident.Account),
 		}); err != nil {
 			return nil, fmt.Errorf("upsert target dm subscription: %w", err)
 		}
