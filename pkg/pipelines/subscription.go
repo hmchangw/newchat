@@ -7,6 +7,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // SubscribedAccounts returns the subset of accounts that already have a
@@ -35,4 +37,36 @@ func SubscribedAccounts(ctx context.Context, subscriptions *mongo.Collection, ro
 		set[r.User.Account] = struct{}{}
 	}
 	return set, nil
+}
+
+// botSuffixRegex is the wire-side equivalent of model.IsBot: it matches the
+// ".bot" account suffix and nothing else. Unlike botOrPseudoAccountRegex it
+// deliberately excludes the platform-admin prefix — a p_admin DM is an ordinary
+// DM, not an app room.
+func botSuffixRegex() string { return `\.bot$` }
+
+// AppRoomFilter matches subscription rows that are app rooms: a botDM facing a
+// real ".bot" app. It is the wire-side twin of model.IsAppRoom, and the only
+// shape the isSubscribed soft-unsubscribe gate still applies to.
+//
+// The regex is never the index-driving term — every call site leads with a
+// selective u.account match or an (u.account, roomId) point read — so it is
+// evaluated only over candidate documents. The returned map is freshly built
+// and safe for the caller to mutate.
+func AppRoomFilter() bson.M {
+	return bson.M{
+		"roomType": string(model.RoomTypeBotDM),
+		"name":     bson.M{"$regex": botSuffixRegex()},
+	}
+}
+
+// NonAppRoomFilter matches botDM rows that are NOT app rooms — the bot's own
+// side of a bot<->human DM, and either side of a p_admin DM. These rows render
+// as dm and are exempt from the isSubscribed gate, which their bot-side writer
+// sets to false by construction.
+func NonAppRoomFilter() bson.M {
+	return bson.M{
+		"roomType": string(model.RoomTypeBotDM),
+		"name":     bson.M{"$not": bson.M{"$regex": botSuffixRegex()}},
+	}
 }
