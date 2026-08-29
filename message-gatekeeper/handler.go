@@ -195,12 +195,25 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// account — so decode here. No-op for every non-bot account.
 	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
-		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
+		// Permanent → server-side fault that cannot succeed on redelivery: reply + Ack, counted failed.
+		// Typed *errcode.Error → client-facing validation: reply + Ack, counted rejected.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
 		// errnats.Marshal runs Classify which logs once at category-aware level —
-		// validation branch must NOT also log here. Infra branch owns its log.
+		// the two Ack branches must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
-		if errors.As(err, &ee) {
+		if pe, isPermanent := errcode.IsPermanent(err); isPermanent {
+			// A permanent server-side fault (a value that cannot be marshaled) is
+			// undeliverable work, not a client rejection: Ack, because redelivering
+			// identical bytes can only fail identically, but count it as failed so
+			// the rejected series stays a pure client-error signal.
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			h.metrics.Record(ctx, resultFailed, reasonInternal)
+			debugFlowRejected(ctx, req.RequestID, string(pe.Code))
+			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.ErrorContext(ctx, "failed to ack permanent message", "error", ackErr, "request_id", req.RequestID)
+			}
+		} else if errors.As(err, &ee) {
 			// A validation or policy rejection is an ordinary client error, not
 			// undeliverable work: the sender receives an error reply and the
 			// rejection is already counted by message_gatekeeper_messages_total.
