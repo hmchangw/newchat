@@ -136,7 +136,7 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		// JoinedAt = the chat's creation time, a meaningful historical value, not the
 		// migration run time (acceptedAt). Teams exposes no per-member add time; this is
 		// uniform per room. Not a history boundary — HistorySharedSince caps that (#302).
-		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, chat.CreatedDateTime.UTC())
+		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Type, room.Name, false, chat.CreatedDateTime.UTC())
 		sub.Origin = model.OriginTeams
 		// Land every migrated chat in the built-in "Teams" section by default; the
 		// user re-organizes from there. No section import, no extra write.

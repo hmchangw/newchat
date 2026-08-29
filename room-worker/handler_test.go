@@ -2822,7 +2822,7 @@ func TestNewSubSetsAllFields(t *testing.T) {
 	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeChannel}
 	now := time.Date(2026, 4, 28, 0, 0, 0, 0, time.UTC)
 
-	sub := newSub("s1", user, room, []model.Role{model.RoleOwner},
+	sub := newSub("s1", user, room, []model.Role{model.RoleOwner}, room.Type,
 		"deal team", false, now)
 
 	assert.Equal(t, "s1", sub.ID)
@@ -2840,7 +2840,7 @@ func TestNewSubSetsAllFields(t *testing.T) {
 func TestNewSub_OpenTrue(t *testing.T) {
 	user := &model.User{ID: "u_alice", Account: "alice"}
 	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeChannel}
-	sub := newSub("s1", user, room, nil, "general", false, time.Now())
+	sub := newSub("s1", user, room, nil, room.Type, "general", false, time.Now())
 	assert.True(t, sub.Open, "new subscriptions must be born open")
 }
 
@@ -7568,7 +7568,7 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
 
 	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
-		subs := buildDMSubs(requester, other, room, at)
+		subs := buildDMPairSubs(requester, other, room, at)
 		require.Len(t, subs, 2)
 		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
 		assert.True(t, subs[0].LastSeenAt.Equal(at))
@@ -7576,7 +7576,7 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 	})
 
 	t.Run("botDM: initiator pre-read", func(t *testing.T) {
-		subs := buildBotDMSubs(requester, bot, room, at)
+		subs := buildDMPairSubs(requester, bot, room, at)
 		require.Len(t, subs, 2)
 		require.NotNil(t, subs[0].LastSeenAt)
 		assert.True(t, subs[0].LastSeenAt.Equal(at))
@@ -7649,4 +7649,54 @@ func TestPublishSubscriptionAdded_StampsEffectiveRoomType(t *testing.T) {
 				"the stamp must not disturb the raw counterpart account")
 		})
 	}
+}
+
+// Each row stores the room as ITS OWN subscriber sees it, so the two sides of a
+// bot<->human DM differ. The room doc keeps a single type.
+func TestBuildDMPairSubs_PerSubscriberRoomType(t *testing.T) {
+	tests := []struct {
+		name             string
+		requester, other string
+		roomType         model.RoomType
+		wantRequester    model.RoomType
+		wantOther        model.RoomType
+	}{
+		{"user creates a DM with a bot", "alice", "weather.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeDM},
+		{"bot creates a DM with a user", "weather.bot", "alice", model.RoomTypeBotDM, model.RoomTypeDM, model.RoomTypeBotDM},
+		{"two humans", "alice", "bob", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+		{"two bots", "weather.bot", "sales.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeBotDM},
+		{"platform admin", "alice", "p_adminsiteA", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requester := &model.User{ID: "u_" + tt.requester, Account: tt.requester}
+			other := &model.User{ID: "u_" + tt.other, Account: tt.other}
+			room := &model.Room{ID: "r1", SiteID: "site-A", Type: tt.roomType}
+
+			subs := buildDMPairSubs(requester, other, room, time.Now().UTC())
+
+			require.Len(t, subs, 2)
+			assert.Equal(t, tt.other, subs[0].Name, "requester's row names the counterpart")
+			assert.Equal(t, tt.wantRequester, subs[0].RoomType)
+			assert.Equal(t, tt.requester, subs[1].Name, "counterpart's row names the requester")
+			assert.Equal(t, tt.wantOther, subs[1].RoomType)
+		})
+	}
+}
+
+// Only a row facing a real app is soft-unsubscribable; the bot's own row is not.
+func TestBuildDMPairSubs_IsSubscribed(t *testing.T) {
+	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeBotDM}
+	subs := buildDMPairSubs(
+		&model.User{ID: "u_a", Account: "alice"},
+		&model.User{ID: "u_w", Account: "weather.bot"}, room, time.Now().UTC())
+
+	assert.True(t, subs[0].IsSubscribed, "alice faces an app")
+	assert.False(t, subs[1].IsSubscribed, "the bot faces a person")
+}
+
+func TestDetermineRoomTypeFromPayload_BotRequesterYieldsBotDM(t *testing.T) {
+	req := model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}}
+	assert.Equal(t, model.RoomTypeBotDM, determineRoomTypeFromPayload(&req),
+		"either participant being a bot makes the ROOM a botDM")
 }

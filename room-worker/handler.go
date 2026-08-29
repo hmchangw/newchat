@@ -980,7 +980,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		user := userMap[c.Account]
 		// newSub stamps u.isBot from the account; room is the channel fetched by
 		// req.RoomID so RoomType/SiteID/Name/ID all match the prior inline build.
-		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
+		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Type, room.Name, false, acceptedAt)
 		// Pre-resolved above the candidate debug log; shared pointer is safe —
 		// nothing mutates through it after this point.
 		sub.HistorySharedSince = historySharedSinceAt
@@ -1370,34 +1370,31 @@ func preRead(sub *model.Subscription, t time.Time) *model.Subscription {
 // member sub per invited user, in the order given.
 func buildChannelSubs(requester *model.User, users []model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
 	subs := make([]*model.Subscription, 0, len(users)+1)
-	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Name, false, acceptedAt), acceptedAt))
+	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Type, room.Name, false, acceptedAt), acceptedAt))
 	for i := range users {
 		u := &users[i]
-		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt))
+		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Type, room.Name, false, acceptedAt))
 	}
 	return subs
 }
 
-// buildDMSubs returns the two DM subs (each names the counterpart, IsSubscribed=false).
-
-func buildDMSubs(requester, other *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
+// buildDMPairSubs returns the two rows of a DM pair. Each names its counterpart
+// and stores the type that counterpart implies; only a row facing a real app is
+// soft-unsubscribable.
+func buildDMPairSubs(requester, other *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
+	reqType := model.SubscriptionRoomType(other.Account)
+	otherType := model.SubscriptionRoomType(requester.Account)
 	return []*model.Subscription{
-		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, other.Account, false, acceptedAt), acceptedAt),
-		newSub(idgen.GenerateUUIDv7(), other, room, nil, requester.Account, false, acceptedAt),
-	}
-}
-
-// buildBotDMSubs returns the two botDM subs (human IsSubscribed=true, bot IsSubscribed=false).
-func buildBotDMSubs(requester, bot *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
-	return []*model.Subscription{
-		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, bot.Account, true, acceptedAt), acceptedAt),
-		newSub(idgen.GenerateUUIDv7(), bot, room, nil, requester.Account, false, acceptedAt),
+		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, reqType,
+			other.Account, reqType == model.RoomTypeBotDM, acceptedAt), acceptedAt),
+		newSub(idgen.GenerateUUIDv7(), other, room, nil, otherType,
+			requester.Account, otherType == model.RoomTypeBotDM, acceptedAt),
 	}
 }
 
 // buildSelfDMSub builds the sole self-DM subscription: subscribed, self-named, favorited.
 func buildSelfDMSub(user *model.User, room *model.Room, joinedAt time.Time) *model.Subscription {
-	sub := preRead(newSub(idgen.GenerateUUIDv7(), user, room, nil, user.Account, true, joinedAt), joinedAt)
+	sub := preRead(newSub(idgen.GenerateUUIDv7(), user, room, nil, room.Type, user.Account, true, joinedAt), joinedAt)
 	sub.Favorite = true
 	return sub
 }
@@ -1488,9 +1485,10 @@ func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) 
 	return sr
 }
 
-// newSub constructs a Subscription from its constituent parts.
+// newSub constructs a Subscription. roomType is the room as THIS subscriber sees
+// it, which on a bot<->human DM differs from the room document's type.
 func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
-	name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
+	roomType model.RoomType, name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
 	return &model.Subscription{
 		ID:           id,
 		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: model.IsBot(user.Account) || model.IsPlatformAdminAccount(user.Account)},
@@ -1498,7 +1496,7 @@ func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 		SiteID:       room.SiteID,
 		Roles:        roles,
 		Name:         name,
-		RoomType:     room.Type,
+		RoomType:     roomType,
 		IsSubscribed: isSubscribed,
 		JoinedAt:     joinedAt,
 		Open:         true,
@@ -1640,12 +1638,7 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 
 	switch roomType {
 	case model.RoomTypeDM, model.RoomTypeBotDM:
-		var subs []*model.Subscription
-		if roomType == model.RoomTypeBotDM {
-			subs = buildBotDMSubs(requester, counterpart, room, acceptedAt)
-		} else {
-			subs = buildDMSubs(requester, counterpart, room, acceptedAt)
-		}
+		subs := buildDMPairSubs(requester, counterpart, room, acceptedAt)
 		if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
 			return fmt.Errorf("bulk create subs: %w", err)
 		}
@@ -1690,17 +1683,11 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
 }
 
-// determineRoomTypeFromPayload mirrors room-service's determineRoomType: only a
-// ".bot" counterpart yields a botDM. The "p_admin" platform-admin pseudo-account
-// is human-operated and owns no app document, so its DM is an ordinary DM; it
-// stays bot-like for channel membership and ownership. A QA "p_" counterpart is
-// an ordinary user, so it yields a regular DM too.
+// determineRoomTypeFromPayload mirrors room-service's determineRoomType: a DM is
+// a botDM when either participant is a ".bot" app.
 func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) {
-			return model.RoomTypeBotDM
-		}
-		return model.RoomTypeDM
+		return model.DMRoomType(req.RequesterAccount, req.Users[0])
 	}
 	return model.RoomTypeChannel
 }
@@ -2096,12 +2083,7 @@ func (h *Handler) serverCreateDM(c *natsrouter.Context, req model.SyncCreateDMRe
 	// the same idempotent-insert path: BulkCreateSubscriptions does
 	// $setOnInsert so a JetStream redelivery is a Mongo no-op, and the
 	// subsequent FindDMSubscriptionPair returns the canonical persisted pair.
-	var subs []*model.Subscription
-	if req.RoomType == model.RoomTypeBotDM {
-		subs = buildBotDMSubs(requester, other, room, joinedAt)
-	} else {
-		subs = buildDMSubs(requester, other, room, joinedAt)
-	}
+	subs := buildDMPairSubs(requester, other, room, joinedAt)
 	if err := h.store.BulkCreateSubscriptions(ctx, subs); err != nil {
 		return nil, fmt.Errorf("bulk create subs: %w", err)
 	}

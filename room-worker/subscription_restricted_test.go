@@ -28,7 +28,7 @@ func TestNewSub_InheritsRoomRestriction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeChannel, Restricted: tc.restricted, ExternalAccess: tc.externalAccess}
-			sub := newSub("s1", user, room, nil, "n", false, ts)
+			sub := newSub("s1", user, room, nil, room.Type, "n", false, ts)
 			assert.Equal(t, tc.restricted, sub.Restricted, "sub.Restricted must equal room.Restricted")
 			assert.Equal(t, tc.externalAccess, sub.ExternalAccess, "sub.ExternalAccess must equal room.ExternalAccess")
 		})
