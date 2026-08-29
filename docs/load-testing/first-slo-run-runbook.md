@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | **Produces** | Run-window SLIs for **SLO-4, 5, 7** (measured), an **approximate indicator** for **SLO-1a** (§5), plus the loadgen-vs-production latency gap for 4/5 |
-| **loadgen code changes** | **None** |
+| **loadgen code changes** | **None** — but the warm-up→measurement boundary needs a run protocol, not a code path; see §7 |
 | **Dashboard changes** | **Yes** — the existing dashboard has 22 panels and not one SLO ratio |
 | **Does not produce** | SLO-1b, 2, 3, 6, 8, 9 — see §8 |
 
@@ -169,10 +169,10 @@ New row, five panels:
 
 | Panel | Query | Read as |
 |---|---|---|
-| SLO-1a run-window SLI | §5 query 1 | good / valid, against the drafted 99.9% |
 | SLO-4 run-window SLI | §5 query 2 | against 95% within 500 ms |
-| SLO-5 run-window SLI | §5 query 3 | against 95% within 250 ms (#337 moved the bound) |
+| SLO-5 run-window SLI | §5 query 3 | **see the bound warning below** — this checkout's spec and #337's differ |
 | SLO-7 run-window SLI | §5 query 4 | against 99.5% |
+| SLO-1a approximate indicator | §5 query 1 | **label the panel `approximate · lag-enforced · non-gating`** — it can read over 100% (§5) |
 | SLO-4/5 measurement gap | §5 query 5 | loadgen-side minus server-side p95 — the size of the blind spot |
 
 ---
@@ -187,16 +187,38 @@ refreshes.
 
 **Take counter snapshots at three marked instants and subtract.**
 
-| Mark | When | Snapshot |
-|---|---|---|
-| **t0** | Warm-up stopped **and** every consumer's backlog has drained to its pre-run floor | All counters — this is the baseline every later value is measured from |
-| **t1** | End of the send window | The **upstream denominators** (`message_gatekeeper_messages_total`, the RPC `_count` series) |
-| **t2** | `t1` + the longest SLO deadline in the set + one scrape interval | The **async numerators** (`message_worker_persistence_total`, the RPC `_bucket` series) |
+**Synchronous and asynchronous SLIs need different boundaries — and mixing them
+is the mistake that inflates a ratio past 100%.**
 
-The drain between warm-up and `t0` is not optional: without it a message admitted
-during warm-up can persist after `t0` and land in the measured numerator with no
-matching denominator, which biases the ratio **upward** — the direction that
-makes a bad result look acceptable.
+| Mark | When | Snapshot | Serves |
+|---|---|---|---|
+| **t0** | Measurement starts — see §7 for how to get a clean one | **All** counters: the baseline every later value is measured from | everything |
+| **t1** | Dispatch stopped, **plus** the few seconds for in-flight RPCs to return | `rpc_server_call_duration_seconds` **`_bucket` and `_count` together**, and `search_service_requests_total` (both sides) | SLO-4, 5, 7 |
+| **t2** | message-worker's `num_pending + num_ack_pending` back at its pre-run floor, **capped** — see below | `message_worker_persistence_total` **and** `message_gatekeeper_messages_total` | SLO-1a |
+
+**Why SLO-4/5/7 take both sides at `t1`.** Their numerator and denominator come
+from the *same* observation: `_bucket{le}` and `_count` on one histogram
+increment together when the handler returns. Freezing `_count` at `t1` while
+letting `_bucket` run to `t2` counts every RPC that finished in between in the
+numerator only — the ratio rises, and can exceed 100%. These are synchronous
+SLIs measured inside one process; they have no settle window at all. The only
+wait they need is for in-flight requests to return, which is seconds.
+
+**Why SLO-1a's boundary is a drained backlog, not a deadline.** SLO-1a is an
+availability ratio — persisted / published — and the spec gives it **no latency
+deadline**. Borrowing SLO-4's 500 ms would count as persistence failures every
+message still sitting in the JetStream backlog, in `jsretry` backoff, or being
+recovered, all of which are messages the system has not failed to persist.
+
+So `t2` is *"message-worker has caught up"*, with a cap:
+
+- **Cap the wait at 15 minutes.** That is past `jsretry.DefaultBackoff`'s
+  ~12.6-minute client-side budget against `MaxDeliver=6`, so anything still
+  pending after it is not going to be retried into existence.
+- **If the backlog has not drained by the cap, SLO-1a is INCONCLUSIVE for this
+  window** — and the run has already failed the §6 validity gate, because a
+  backlog that does not drain is not a flat backlog. Do not snapshot anyway at an
+  arbitrary instant to get a number.
 
 Panels are for watching the run; the recorded number comes from the snapshots.
 
@@ -204,22 +226,25 @@ Panels are for watching the run; the recorded number comes from the snapshots.
 # Snapshot form — evaluate each at the marked instant (Prometheus `time=` /
 # `@` modifier / an instant query at the recorded timestamp), then subtract.
 
-# 1 — SLO-1a  (numerator at t2, denominator at t1, both minus their t0 value)
+# 1 — SLO-1a  (BOTH sides at t2 — the backlog-drained mark — minus their t0 value)
 sum(message_worker_persistence_total{
       site="$site", message_kind=~"user|thread_reply", result="success"})   # @t2 − @t0
-sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t1 − @t0
+sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t2 − @t0
 
 # 2 — SLO-4: channel load within 500 ms / eligible
 sum(rpc_server_call_duration_seconds_bucket{
       site="$site", service_name="history-service",
-      rpc_method="channel_history", error_type="", le="0.5"})                # @t2 − @t0
+      rpc_method="channel_history", error_type="", le="0.5"})                # @t1 − @t0
 sum(rpc_server_call_duration_seconds_count{
       site="$site", service_name="history-service", rpc_method="channel_history",
       error_type=~"|internal|unavailable|too_many_requests"})                # @t1 − @t0
+      # both sides at t1: same histogram, same observation instant
 
-# 3 — SLO-5: same shape, rpc_method="thread_open", le="0.25"
+# 3 — SLO-5: same shape, rpc_method="thread_open".
+#     le= and the target depend on which spec this checkout carries — see the
+#     bound warning below before scoring. Do not hardcode 0.25 against a 300 ms spec.
 
-# 4 — SLO-7: search ok / eligible   (synchronous — t1 for both sides)
+# 4 — SLO-7: search ok / eligible   (synchronous — both sides @t1 − @t0)
 sum(search_service_requests_total{site="$site", status="ok"})
 sum(search_service_requests_total{site="$site",
       status=~"ok|internal|unavailable|too_many_requests"})
@@ -245,6 +270,23 @@ Three things the denominators encode, all from `sli-slo.md` §0.1:
   filter the numerator counts messages the denominator never saw.
 - **Group by site** in a multi-site Prometheus, or one healthy site hides
   another's total failure.
+
+### SLO-5's bound depends on whether #337 merged — check before scoring
+
+`common/sli-slo.md` on **this checkout** says SLO-5 is *99% within 300 ms*. #337
+changes it to *95% within 250 ms*, and that change has **not merged**. Score
+against whichever spec the checkout actually carries, and note that the two are
+not interchangeable:
+
+| If the checkout says | Score | Why |
+|---|---|---|
+| **95% / 250 ms** (post-#337) | `le="0.25"`, target 0.95 | 250 ms is a real bucket boundary — an exact read |
+| **99% / 300 ms** (this branch today) | **Cannot be computed exactly** | 300 ms falls between the `0.25` and `0.5` boundaries. Report both readings as a bracket — `le="0.25"` understates the good share, `le="0.5"` overstates it — and mark SLO-5 **INCONCLUSIVE for a verdict**. The gap between the two is precisely where the tail sits, which is why #337 moved the bound |
+
+**Action:** rebase this branch after #337 merges, or carry the SLO change here
+explicitly with its own approval. Do not score 250 ms against a document that
+says 300 ms — the same checkout would then produce a verdict its own spec
+contradicts.
 
 ### SLO-1a is an approximate indicator, not a hard number
 
@@ -280,23 +322,63 @@ already on the shipped dashboard.
 
 ## 7. Run protocol and what to record
 
+### There is no drain barrier at the end of warm-up — pick how to get `t0`
+
+The obvious protocol — "let warm-up finish, wait for the backlog to drain, then
+start measuring" — **is not executable as the workload is built**. At the warm-up
+deadline the soak only flips a boolean: `measured := !w.now().Before(warmupDeadline)`
+(`soak_workload.go:405`), evaluated per dispatch. Every lane keeps dispatching at
+full rate. Nothing pauses, so nothing drains, and in a continuous Deployment there
+is no phase boundary to wait at.
+
+Two ways to get a usable `t0` without changing loadgen:
+
+**Option A — pre-warm, stop, restart with `warmup: 0`** *(recommended)*
+
+1. Run normally until steady state.
+2. Scale the Deployment to 0. `continuous` mode stops gracefully on SIGTERM, and
+   **a replacement process resumes the same run** — the `runId` owns the topology,
+   the PVC owns the ledger. This gap is the drain.
+3. Watch the backlog fall to its pre-run floor. Keep the gap **shorter than
+   `soak.heartbeatStaleAfter`**, and do not run teardown during it.
+4. Scale back to 1 with `soak.warmup: 0`. Mark `t0` at the first dispatch.
+
+One caveat that is not a blocker: the recent-message catalog is in-memory, so
+after the restart the mutation, thread and verification lanes idle until new
+messages age past `soak.persistGrace`. The **send and read lanes carry SLO-1a/4/5/7
+and are unaffected** — but discard the first two minutes if you want the full mix
+represented.
+
+**Option B — one continuous run, bound the contamination instead of removing it**
+
+Mark `t0` at the warm-up deadline and *quantify* the bias rather than eliminating
+it. The only messages that can pollute the measured numerator are those admitted
+before `t0` that persist after it, and that population is bounded by the in-flight
+depth at `t0` — read `loadgen_failure_inflight` plus the consumers' `num_pending`
+at that instant. If it is **under 0.1% of the measured denominator**, the bias sits
+below the SLO's own stated precision; record the number next to the ratio and move
+on. If it is larger, use Option A.
+
+Either way the bias runs **upward** — a warm-up message persisting after `t0`
+lands in the numerator with no matching denominator — which is the direction that
+makes a bad result look acceptable. That is why it has to be bounded, not ignored.
+
+### The sequence
+
 1. Seed (`phase: seed`), confirm the encryption preflight in the log.
-2. Start the soak. Warm-up runs for `soak.warmup`.
-3. **Drain, then mark `t0`.** After warm-up ends, wait until every sampled
-   consumer's `num_pending` is back to its pre-run floor **and**
-   `loadgen_failure_inflight` has stopped climbing. Only then record `t0` and
-   snapshot all counters. The production counters carry no phase label, so this
-   mark is the only thing separating warm-up from measurement;
-   `loadgen_soak_rpc_latency_seconds` beginning to record is a useful secondary
-   marker, but it is loadgen-side and does not prove the backlog drained.
-4. Hold for **at least 30 minutes** at steady state. Longer is better for sample
+2. Reach steady state, then establish `t0` by Option A or B above. Snapshot **all**
+   counters at `t0`.
+3. Hold for **at least 30 minutes** at steady state. Longer is better for sample
    size; this is not an endurance run.
-5. **Mark `t1`** when dispatch stops, and snapshot the upstream denominators.
-6. **Mark `t2`** at `t1` + the longest SLO deadline in the set + one scrape
-   interval, and snapshot the async numerators.
-7. Compute every ratio from the snapshot differences (§5). Record `t0/t1/t2`
-   alongside them.
-8. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
+4. Stop dispatch. Wait a few seconds for in-flight RPCs to return, then **mark
+   `t1`** and snapshot the synchronous families (SLO-4/5/7, both sides).
+5. Watch message-worker's `num_pending + num_ack_pending` fall to its pre-run
+   floor. **Mark `t2`** there and snapshot SLO-1a's two counters. If it has not
+   drained within **15 minutes**, stop — SLO-1a is INCONCLUSIVE for this window
+   and the validity gate has already failed.
+6. Compute every ratio from the snapshot differences (§5).
+7. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
+   which `t0` option was used (and the contamination bound if Option B),
    `t0/t1/t2`, the workload shape label from §2, all six validity checks, and
    the ratios.
 
