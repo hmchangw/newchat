@@ -123,8 +123,24 @@ T3 runs in parallel with both. T4 is the pre-production sweep.
 
 The targets are unvalidated because nothing has ever *measured* them, not because
 nobody looked. Calibration is a measurement problem before it is a judgement
-problem. Order matters here: 1.1 is a code change, 1.2 is observation, 1.3 is the
-decision.
+problem. Order matters here: 1.1 is a code change, 1.0b and 1.2 are the two
+evidence sources, 1.3 is the decision.
+
+**The numbers currently in `sli-slo.md` are drafts, and this programme is what
+settles them.** §0.2 says so — achievable-first starting values, 4–6 weeks of
+observation, then adjust and seek approval — and nothing has been through that
+yet. So no run in this track scores *against* a target; they produce the
+distribution a target is chosen *from*. Two consequences worth stating plainly:
+
+- **A bound must land on a real histogram boundary**
+  (`o11y.DefaultLatencyBuckets()` = `{.005 .01 .025 .05 .1 .25 .5 1 2.5 5 10}`).
+  A bound between two of them is not computable — 300 ms can only be read as 250
+  or 500. This rules out most round numbers before anyone argues about them, and
+  it belongs in `sli-slo.md`'s calibration section.
+- **The load test sets a floor; observation sets the commitment.** A lab number
+  says what is achievable under a chosen shape on chosen hardware. Let it veto a
+  target that is not even reachable, and let the observational window decide where
+  inside the reachable range to sit.
 
 | # | Item | Why it is first | Output |
 |---|---|---|---|
@@ -132,7 +148,7 @@ decision.
 | **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces run-window numbers for **SLO-3/4/5/7**, an approximate indicator for **1a**, and a defensible one-sided bound for **1b/2**, with **no loadgen code change** (SLO-4/5 need #337 merged first): the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`slo-measurement-map.md`](slo-measurement-map.md) §7; operator runbook: [`first-slo-run-runbook.md`](first-slo-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
 | **1.1** | **Land #337, then ship the remaining P2 work** | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
-| **1.3** | **Set targets from 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate. Right now they are round numbers | Approved SLO targets + `Revisit date` filled in |
+| **1.3** | **Set bounds and targets from 1.0b + 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate, and a **bound that a histogram can actually compute**. Right now they are round numbers, and at least one of them (SLO-5's 300 ms) is not computable at all | Approved SLO bounds + targets, `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can hard-gate instead of eyeballing |
 | **1.5** | **Re-run the completed soak + failure round under assertion mode** | The two finished programs produced evidence but no SLO verdict. Replaying them with 1.4 is cheap and converts them into a pass/fail record | First real "we meet our SLOs" statement |
 

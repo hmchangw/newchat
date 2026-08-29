@@ -10,7 +10,8 @@
 
 | | |
 |---|---|
-| **Produces** | Run-window SLIs for **SLO-4, 5, 7** (measured), an **approximate indicator** for **SLO-1a** (§5), plus the loadgen-vs-production latency gap for 4/5 |
+| **Produces** | The **achieved distribution** for **SLO-4, 5, 7** and an approximate indicator for **SLO-1a** — the evidence a target gets chosen *from*, not a verdict against one. Plus the loadgen-vs-production latency gap for 4/5 |
+| **Stance** | **The bounds and targets in `sli-slo.md` are drafts, not acceptance criteria.** This run is one of the two inputs that settle them — §4a |
 | **loadgen code changes** | **None** — but the warm-up→measurement boundary needs a run protocol, not a code path; see §7 |
 | **Dashboard changes** | **Yes** — the existing dashboard has 22 panels and not one SLO ratio |
 | **Does not produce** | SLO-1b, 2, 3, 6, 8, 9 — see §8 |
@@ -165,15 +166,60 @@ Two panels to be aware of:
 - **"Search index evidence" will be empty** — the observer is refused at startup
   by design.
 
-New row, five panels:
+New row, five panels. Note what the latency panels show: **a curve across every
+candidate bound, not a single ratio against a target.**
 
-| Panel | Query | Read as |
+| Panel | Query | Shows |
 |---|---|---|
-| SLO-4 run-window SLI | §5 query 2 | against 95% within 500 ms |
-| SLO-5 run-window SLI | §5 query 3 | **see the bound warning below** — this checkout's spec and #337's differ |
-| SLO-7 run-window SLI | §5 query 4 | against 99.5% |
+| J2 channel-load good-ratio curve | §5 query 2 | good-ratio at **every** bucket boundary — the input to choosing SLO-4's bound and target |
+| J2 thread-open good-ratio curve | §5 query 3 | same, for SLO-5 |
+| J4 search availability | §5 query 4 | ok / eligible — a ratio, no bound to choose |
 | SLO-1a approximate indicator | §5 query 1 | **label the panel `approximate · lag-enforced · non-gating`** — it can read over 100% (§5) |
-| SLO-4/5 measurement gap | §5 query 5 | loadgen-side minus server-side p95 — the size of the blind spot |
+| Measurement gap, J2 | §5 query 5 | loadgen-side minus server-side p95 — the size of the blind spot |
+
+Draw a **reference line** at whatever `sli-slo.md` currently drafts, so the
+distance between draft and achieved is visible. Do not paint the panel red when
+the draft is missed — the draft is what this run exists to revise.
+
+---
+
+## 4a. The targets are an output of this programme, not an input
+
+`sli-slo.md` §0.2 says so itself: *"All targets are achievable-first starting
+values. Run observationally for 4–6 weeks, then adjust and seek approval."*
+Nothing in the current document has been through that. So the first run's job is
+**not** to answer "did we meet SLO-5?" — it is to produce the distribution a
+defensible SLO-5 can be written from.
+
+This dissolves the 300 ms / 250 ms question rather than answering it. The
+disagreement between this checkout and #337 is **two drafts differing**, not a
+spec being violated. Report the good-ratio at every bucket boundary, let the
+calibration choose, and record why.
+
+Three constraints on that choice, all learned the hard way here:
+
+1. **A bound must land on a real bucket boundary.**
+   `o11y.DefaultLatencyBuckets()` is `{.005 .01 .025 .05 .1 .25 .5 1 2.5 5 10}`.
+   A bound between two of them cannot be computed at all — 300 ms can only be read
+   as 250 ms (understating the good share) or 500 ms (overstating it), and the gap
+   between those readings is exactly where the tail sits. **This constraint belongs
+   in `sli-slo.md`'s calibration section**, because it rules out most round numbers
+   before anyone argues about them.
+2. **A load test sets a floor, not a commitment.** It shows what is achievable
+   under a chosen shape on chosen hardware. What users actually experience needs
+   the observational window (Track 1.2) — and for J2 a caller-visible measurement,
+   since the server-side histogram stops timing at `Respond`. Let the load test
+   veto a target that is not even reachable; let observation decide where inside
+   the reachable range to sit.
+3. **Bound and target move together.** A tighter bound with a looser target
+   degrades honestly; a bound nobody can compute does not degrade, it reports
+   nothing. #337's 300/99% → 250/95% is that trade made once, and the shape of the
+   answer is reasonable even if the numbers change again.
+
+**Consequence for #337:** the SLO-5 edit inside it is a draft revision, not an
+approved SLO change, and it need not block this run either way. What the run must
+record is **which draft the checkout carried**, so a later reader knows what the
+reference line meant.
 
 ---
 
@@ -231,18 +277,18 @@ sum(message_worker_persistence_total{
       site="$site", message_kind=~"user|thread_reply", result="success"})   # @t2 − @t0
 sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t2 − @t0
 
-# 2 — SLO-4: channel load within 500 ms / eligible
-sum(rpc_server_call_duration_seconds_bucket{
+# 2 — J2 channel load: good-ratio at EVERY bucket boundary.
+#     Keep `le` as a series dimension instead of pinning one value — the curve is
+#     the deliverable (§4a), and a single le would bake in a draft bound.
+sum by (le) (rpc_server_call_duration_seconds_bucket{
       site="$site", service_name="history-service",
-      rpc_method="channel_history", error_type="", le="0.5"})                # @t1 − @t0
+      rpc_method="channel_history", error_type=""})                          # @t1 − @t0
 sum(rpc_server_call_duration_seconds_count{
       site="$site", service_name="history-service", rpc_method="channel_history",
       error_type=~"|internal|unavailable|too_many_requests"})                # @t1 − @t0
       # both sides at t1: same histogram, same observation instant
 
-# 3 — SLO-5: same shape, rpc_method="thread_open".
-#     le= and the target depend on which spec this checkout carries — see the
-#     bound warning below before scoring. Do not hardcode 0.25 against a 300 ms spec.
+# 3 — J2 thread open: same shape, rpc_method="thread_open".
 
 # 4 — SLO-7: search ok / eligible   (synchronous — both sides @t1 − @t0)
 sum(search_service_requests_total{site="$site", status="ok"})
@@ -270,23 +316,6 @@ Three things the denominators encode, all from `sli-slo.md` §0.1:
   filter the numerator counts messages the denominator never saw.
 - **Group by site** in a multi-site Prometheus, or one healthy site hides
   another's total failure.
-
-### SLO-5's bound depends on whether #337 merged — check before scoring
-
-`common/sli-slo.md` on **this checkout** says SLO-5 is *99% within 300 ms*. #337
-changes it to *95% within 250 ms*, and that change has **not merged**. Score
-against whichever spec the checkout actually carries, and note that the two are
-not interchangeable:
-
-| If the checkout says | Score | Why |
-|---|---|---|
-| **95% / 250 ms** (post-#337) | `le="0.25"`, target 0.95 | 250 ms is a real bucket boundary — an exact read |
-| **99% / 300 ms** (this branch today) | **Cannot be computed exactly** | 300 ms falls between the `0.25` and `0.5` boundaries. Report both readings as a bracket — `le="0.25"` understates the good share, `le="0.5"` overstates it — and mark SLO-5 **INCONCLUSIVE for a verdict**. The gap between the two is precisely where the tail sits, which is why #337 moved the bound |
-
-**Action:** rebase this branch after #337 merges, or carry the SLO change here
-explicitly with its own approval. Do not score 250 ms against a document that
-says 300 ms — the same checkout would then produce a verdict its own spec
-contradicts.
 
 ### SLO-1a is an approximate indicator, not a hard number
 
@@ -382,16 +411,20 @@ makes a bad result look acceptable. That is why it has to be bounded, not ignore
    `t0/t1/t2`, the workload shape label from §2, all six validity checks, and
    the ratios.
 
-**Write it up as a run-window SLI, not as the SLO:**
+**Write it up as evidence for a target, not as a verdict against one:**
 
-> SLO-4 run-window SLI = 96.2% within 500 ms, at 100 msg/s over 30 min
-> (t0 14:32:10 → t1 15:02:10 → t2 15:03:15), isolated site `slo-test-a`,
-> shape `default-zipf / i12=derived`, sampler 0.1, backlog flat, no
-> invalidations.
-> SLO-1a approximate indicator = 99.94% (per-attempt, see §5).
+> J2 channel load, achieved at 100 msg/s over 30 min (t0 14:32:10 → t1 15:02:10
+> → t2 15:03:15), isolated site `slo-test-a`, shape `default-zipf / i12=derived`,
+> sampler 0.1, backlog flat, no invalidations:
+> `≤250 ms 91.4% · ≤500 ms 96.2% · ≤1 s 99.1%`.
+> Draft at run time: 95% within 500 ms — met.
+> J2 thread open: `≤250 ms 97.8% · ≤500 ms 99.3%`. Draft: 99% within 300 ms —
+> not computable at that bound; bracketed 97.8–99.3%.
+> SLO-1a approximate indicator = 99.94% (per-attempt, §5).
 
-Never *"SLO-1a = 99.94%"*. The SLO is a 28-day window over production traffic;
-this is an achievability check at a chosen load.
+Never *"SLO-1a = 99.94%"*, and never *"SLO-5 failed"* — the SLO is a 28-day
+window over production traffic, and its bound is still a draft this run exists to
+inform.
 
 ---
 

@@ -524,8 +524,8 @@ all. SLO-2's bound and SLO-3 each need a short separate run in a different mode.
 
 | It is | It is not |
 |---|---|
-| An **achievability check**: at load X, the system achieved Y | An SLO verdict — that is a 28-day window over production traffic |
-| The **input to calibration** (Track 1.2/1.3): evidence that a drafted target is or is not reachable before anyone commits to it | Proof the target is right |
+| An **achievability check**: at load X, the system achieved Y across the candidate bounds | An SLO verdict — that is a 28-day window over production traffic |
+| **One of the two inputs that set the targets**, alongside the observational window. The bounds in `sli-slo.md` are drafts; this run is part of what replaces them | Proof a target is right on its own — a lab cannot see what users experience |
 | A **regression baseline** for later runs on the same box | Comparable across machines |
 | Box-relative on docker-local; production-representative only on staging | An absolute capacity number |
 
