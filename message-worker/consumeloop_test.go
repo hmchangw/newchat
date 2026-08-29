@@ -188,9 +188,9 @@ func TestConsume_UnresolvableThreadParent_IsSalvagedNotAbandoned(t *testing.T) {
 		})
 	consumerMetrics.LoopStarted(context.Background())
 
-	// The production per-message body. The Track/Context/Finish preamble mirrors
-	// main.go's consume goroutine — that is the wiring under test.
-	process := canonicalProcessor(h, nil, subject.MsgTeamsCanonicalBatch("site-salvage"))
+	// The production per-message body for the live feed. The Track/Context/Finish
+	// preamble mirrors main.go's consume goroutine — that is the wiring under test.
+	process := liveProcessor(h)
 	var deliveries atomic.Int32
 	// lastAttempt/attemptVisible record what the handler could actually see, so a
 	// failure reports the observed facts rather than asserting a cause. The salvage

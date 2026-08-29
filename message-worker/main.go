@@ -334,16 +334,31 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 // rather than inlined in main so the consumer test drives this exact
 // composition, matching broadcast-worker's guardedProcessor.
 func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg) {
+	live := liveProcessor(h)
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		// Dispatch by subject: the one-time .teams.batch migration writes straight
+		// to Cassandra; the live .created feed runs the normal pipeline.
+		if msg.Subject() != teamsBatchSubj {
+			live(msgCtx, msg)
+			return
+		}
+		jobguard.Run(msg, func() {
+			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+			teams.consume(handlerCtx, msg)
+		})
+	}
+}
+
+// liveProcessor returns the per-message body for the live .created feed:
+// request-id and log-context stamping, wrapped by jobguard so a handler panic
+// Acks instead of crash-looping on JetStream redelivery. Separated from the
+// Teams dispatch so a test of the live pipeline needs no migration scaffolding.
+func liveProcessor(h *Handler) func(context.Context, jetstream.Msg) {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-			// Dispatch by subject: the one-time .teams.batch migration writes
-			// straight to Cassandra; the live .created feed runs the normal pipeline.
-			if msg.Subject() == teamsBatchSubj {
-				teams.consume(handlerCtx, msg)
-				return
-			}
 			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 			h.HandleJetStreamMsg(handlerCtx, msg)
 		})
