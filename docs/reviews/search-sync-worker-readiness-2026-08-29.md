@@ -107,3 +107,47 @@ Worth stating plainly, because it is the load-bearing half of this dimension. Ev
 5. `medium` — Convert the post-construction field sets into constructor parameters or functional options (`newMessageCollection(..., withParentResolver(r), withMetrics(m))`, `NewHandler(store, coll, bulkSize, WithMetrics(m), WithTracer(t))`) so no collection or handler can be observed half-wired.
 6. `low` — Rewrite the `Collection.StreamConfig` doc comment to state it returns schema only (`Name` + `Subjects` from `pkg/stream`), or narrow the interface to `StreamName(siteID) string` plus a bootstrap-only schema accessor.
 7. `low` — Document the `Fetch`+pipeline consumer pattern as a sanctioned third option in CLAUDE.md §6 (bulk-sink workers), or record the deviation rationale in a `consumer.go` header comment.
+
+---
+
+## 3. Test coverage — 2 / 5
+
+**Score floored at 2 by the CLAUDE.md §4 coverage rule.** Test *craft* in this service would otherwise merit a 4 — see "Positive signals" below.
+
+### Measurements
+
+| Check | Result |
+|---|---|
+| `make test SERVICE=search-sync-worker` | **PASS** (`go test -race ./search-sync-worker/...`, ok, 2.06s) |
+| `go vet -tags=integration ./search-sync-worker/...` | clean — integration suite compiles |
+| `go tool cover -func` total | **66.8% of statements** |
+| `make generate SERVICE=search-sync-worker` | **no diff** — mocks are current, nothing to revert |
+| Working tree after audit | clean (`git status --porcelain` empty) |
+
+Uncovered statements by file: `main.go` 165/225 · `teams_user_store.go` 24/24 · `thread_parent_resolver.go` 18/24 · everything else ≤10. **Excluding `main.go` the package sits at ~84.8%** — this is one concentrated hole, not a diffuse deficit.
+
+### Findings
+
+- `high` — **coverage below repo minimum 80%, currently 66.8%.**
+- `high` — **`main.go:102` `main` — 0.0%, ~160 untestable statements.** Lines 108-160 are a startup-validation cascade (MODE enum; `FETCH_BATCH_SIZE`/`BULK_BATCH_SIZE`/`BULK_FLUSH_INTERVAL`/`PIPELINE_DEPTH` > 0; `-v<N>` suffix on all three index names; `SYNC_MESSAGES_FROM` parse) written inline with an `os.Exit(1)` at each site, so none of it is reachable from a test. Lines 210-240 carry real logic too — the mode-gated collection set and per-collection resolver/metrics wiring. `config_test.go` exercises only 4 fields via `env.ParseAs`; the validation rules themselves are entirely untested.
+- `high` — **`teams_user_store.go:32` `ResolveIdentities` — 0.0%, no test of any kind.** This is a store implementation (two Mongo `FindMany` calls with projections plus an in-app account→id join) and CLAUDE.md §4 requires integration tests with testcontainers for store implementations. `testutil.MongoDB(t, prefix)` is available and unused anywhere in this service. The consumer path is tested only against `fakeTeamsUserResolver` (`messages_test.go:634`), so an `accountToID` mapping bug or a wrong projection ships silently — and per the comment at `config_test.go:57` a resolver miss is **durable**: the message is Acked with empty author fields and nothing retries.
+- `medium` — **Integration tests use hardcoded static ES index names with zero teardown.** `integration_test.go:254` (`"msgs-inttest-v1"`), `:502` (`"analyzer-test-v1"`), `:635` (`"spotlightorg-site-org-int-v1"`), `inbox_integration_test.go:154,247`. There is not a single `t.Cleanup` or index DELETE across the three integration files, and `testutil.ElasticsearchIndex(t, prefix)` is never called. CLAUDE.md §4 requires "a per-test unique index name and DELETE on cleanup". Isolation currently rests entirely on hand-picked distinct literals against a process-shared ES.
+- `medium` — **Package-level shared NATS connection across all integration tests.** `integration_test.go:34-38` (`testNATSCon`/`testNATSOnce`), closed only in `TestMain`. CLAUDE.md §4 asks for a per-test `*nats.Conn` with a `Drain` cleanup; this is shared mutable state spanning tests.
+- `medium` — **`handler.go:104-110` `BuildByQuery` poison path (Ack + `dispAckedPoison`) is uncovered.** The by-query success and store-error branches are both tested (`handler_test.go:116,128`); only the parse-error branch is not. Same for `handler.go:90-95`, the `natsutil.DecodePayload` failure branch — `TestHandler_Add_MalformedJSON` (`handler_test.go:95`) exercises malformed *JSON*, which fails later in `BuildAction`, not a corrupt-zstd decode.
+- `medium` — **`messages.go:305` `resolveTeamsIdentities` resolver-error branch uncovered** (function at 80.0%). The fake never returns an error, so the "degrade to nil identities" behaviour is unverified.
+- `low` — **`main.go:595,599` `engineAdapter.Bulk`/`UpdateByQuery` at 0.0%**, and `messages.go:104,109` `botMessagesStreamCfg`/`teamsMessagesStreamCfg` at 0.0%. Thin passthroughs — but the two stream configs are wire-facing constants worth pinning, and the bot one is wrong today (see Chapter 6, `critical`).
+- `nitpick` — **`integration_test.go:176` `time.Sleep(2s)`** inside the ES-health poll. It is a poll interval, not goroutine synchronization, so it does not breach the CLAUDE.md §3 rule — but `require.Eventually` would be idiomatic.
+
+### Positive signals (why craft ≠ score)
+
+Unit tests are genuinely strong and should not be rewritten in the course of fixing the above: 100+ test functions, ~130 `t.Run` subtests with descriptive names, table-driven wherever variation exists (`consumer_config_test.go:21`, `spotlight_test.go:312`, `messages_test.go:764`). Error paths are covered deliberately rather than incidentally — 404-on-delete, retry pacing with jitter bounds (`handler_test.go:60` `assertJitteredDelay`), poison-vs-nak dispositions. Metrics are asserted against a real OTel `ManualReader` rather than a mock (`metrics_test.go:20`), fresh per test. Per-subtest `gomock.NewController`; `t.Setenv` throughout, never raw `os.Setenv`; no `t.Parallel` colliding with env; no shared mutable globals in unit tests. `TestMain` (`integration_test.go:44`) correctly uses `testutil.PrewarmFailFast` + `TerminateAll`, with the custom-wrap deviation justified in a comment. **No inline `testcontainers.GenericContainer` anywhere.** `testdata/events.json` follows the fixture convention. Every commit touching the service ships tests alongside implementation.
+
+### Recommendations
+
+1. `high` — Extract the `main.go:108-160` validation cascade into `func (c config) validate() (time.Time, error)` returning a wrapped error, with `main` doing one `slog.Error` + `os.Exit(1)`. Table-drive it in `config_test.go`, one case per rule plus the valid baseline. This alone converts ~50 dead statements into covered ones and makes the rules regression-proof.
+2. `high` — Extract the mode-gated collection assembly (`main.go:210-240`) into `buildCollections(cfg, engine, db, esMetrics) []Collection`. Assert: `teams` mode yields exactly the Teams collection with a non-nil `teamsUsers`; `default` yields the five collections each with a wired `parentResolver` and per-collection metrics. (This pairs naturally with the constructor-options fix in Chapter 2.)
+3. `high` — Add `teams_user_store_integration_test.go` (`//go:build integration`, `testutil.MongoDB(t, "teamsuser")`) covering: empty input; a `teams_user` hit with no matching `users` row (UserID empty); full resolution; blank-account rows skipped; IDs with no `teams_user` row absent from the map.
+4. `medium` — Switch integration tests to `testutil.ElasticsearchIndex(t, prefix)` (or derive from `t.Name()`) and register `t.Cleanup` DELETEs, per CLAUDE.md §4.
+5. `medium` — Give each integration test its own `*nats.Conn` with a `Drain` cleanup instead of the package-level `testNATSCon`.
+6. `medium` — Add two `Handler` subtests: a corrupt-zstd payload (`handler.go:90`) and a `BuildByQuery` returning an error (`handler.go:104`), both asserting Ack + `dispAckedPoison`.
+7. `low` — Extend `fakeTeamsUserResolver` with an error-injection field and assert `resolveTeamsIdentities` degrades to `nil` rather than propagating (`messages.go:305`).
