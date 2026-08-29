@@ -102,7 +102,6 @@ func newSyncMetrics(meter metric.Meter) *syncMetrics {
 // collectionMetrics binds syncMetrics to one collection's bounded label sets.
 type collectionMetrics struct {
 	m             *syncMetrics
-	collection    string
 	actionsOpt    metric.MeasurementOption
 	resolvedOpt   metric.MeasurementOption
 	unresolvedOpt metric.MeasurementOption
@@ -163,7 +162,6 @@ func (m *syncMetrics) forCollection(name string) *collectionMetrics {
 	}
 	return &collectionMetrics{
 		m:          m,
-		collection: name,
 		actionsOpt: metric.WithAttributeSet(attribute.NewSet(attribute.String("collection", name))),
 		resolvedOpt: metric.WithAttributeSet(attribute.NewSet(
 			attribute.String("collection", name), attribute.String("outcome", "resolved"))),
