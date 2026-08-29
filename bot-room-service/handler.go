@@ -457,9 +457,9 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		// The destination is resolved BEFORE the delete, because the user doc is
 		// the only place it lives: the subscription's own siteId is the ROOM's
 		// site, and its u sub-document carries just _id/account/isBot. Resolving
-		// afterwards means a transient failure loses the federation for good —
-		// the row is already gone, so a retry sees wasThere=false and skips the
-		// remote removal, leaving the member subscribed on their home site.
+		// first means a lookup failure aborts before anything is committed, so a
+		// retry re-runs the whole removal; resolving afterwards would delete the
+		// row and only then discover it cannot address the remote site.
 		// Failing before the delete costs a retry and strands nothing.
 		u, err := h.store.FindUser(c, userID)
 		switch {
@@ -475,17 +475,27 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
+
+		// Queued whether or not THIS call did the deleting. A first call that
+		// committed the delete and then failed on its publish leaves the member
+		// still subscribed on their home site, and every retry reports
+		// wasThere=false — so gating the federation here means nothing ever
+		// repairs it. Republishing is safe: the dedup id is derived only from
+		// (roomID, userID, destSiteID), so JetStream drops it where the first
+		// publish landed and accepts it where it did not.
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
+			pendingFederations = append(pendingFederations, memberRemoval{userID: u.ID, account: u.Account, destSiteID: u.SiteID})
+		}
+
 		if !wasThere {
-			// Duplicate remove is a no-op.
+			// Duplicate remove: nothing was de-authorized here, so nothing local
+			// follows — no bust, no rotation, no second system message. Only the
+			// federation above, which is idempotent at the destination.
 			continue
 		}
 		removed = append(removed, userID)
 		if account != "" {
 			removedAccounts = append(removedAccounts, account)
-		}
-
-		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
-			pendingFederations = append(pendingFederations, memberRemoval{userID: u.ID, account: u.Account, destSiteID: u.SiteID})
 		}
 	}
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
