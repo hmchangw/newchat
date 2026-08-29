@@ -5571,3 +5571,51 @@ func TestEffectiveRoomType(t *testing.T) {
 		})
 	}
 }
+
+func TestDMRoomType(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b string
+		want model.RoomType
+	}{
+		{"human pair", "alice", "bob", model.RoomTypeDM},
+		{"bot counterpart", "alice", "weather.bot", model.RoomTypeBotDM},
+		{"bot requester", "weather.bot", "alice", model.RoomTypeBotDM},
+		{"two bots", "weather.bot", "sales.bot", model.RoomTypeBotDM},
+		{"platform admin is an ordinary partner", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"QA p_ account is an ordinary partner", "alice", "p_qa1", model.RoomTypeDM},
+		{"self DM", "alice", "alice", model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.DMRoomType(tt.a, tt.b))
+		})
+	}
+}
+
+func TestSubscriptionRoomType(t *testing.T) {
+	tests := []struct {
+		counterpart string
+		want        model.RoomType
+	}{
+		{"weather.bot", model.RoomTypeBotDM},
+		{"weather.site-a.bot", model.RoomTypeBotDM},
+		{"alice", model.RoomTypeDM},
+		{"p_adminsiteA", model.RoomTypeDM},
+		{"p_qa1", model.RoomTypeDM},
+		{"", model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.counterpart, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.SubscriptionRoomType(tt.counterpart))
+		})
+	}
+}
+
+// The two sides of a bot<->human DM classify differently; that asymmetry is the
+// point. The room doc keeps one type.
+func TestRoomAndSubscriptionTypesDisagreeOnABotDM(t *testing.T) {
+	assert.Equal(t, model.RoomTypeBotDM, model.DMRoomType("alice", "weather.bot"))
+	assert.Equal(t, model.RoomTypeBotDM, model.SubscriptionRoomType("weather.bot")) // alice's row
+	assert.Equal(t, model.RoomTypeDM, model.SubscriptionRoomType("alice"))          // the bot's row
+}

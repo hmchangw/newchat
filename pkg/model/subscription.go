@@ -264,3 +264,21 @@ func EffectiveRoomType(t RoomType, name string) RoomType {
 	}
 	return t
 }
+
+// DMRoomType is the room document's type for a two-party DM: botDM when either
+// participant is a ".bot" app. p_admin owns no app, so its DMs are ordinary.
+func DMRoomType(a, b string) RoomType {
+	if IsBot(a) || IsBot(b) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
+
+// SubscriptionRoomType is one row's type — the room as its own subscriber sees
+// it. The two sides of a bot<->human DM therefore differ.
+func SubscriptionRoomType(counterpart string) RoomType {
+	if IsBot(counterpart) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
