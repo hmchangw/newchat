@@ -104,24 +104,29 @@ func (p *Pump) Next(opts ...jetstream.NextOpt) (context.Context, jetstream.Msg, 
 			return nil, nil, ErrStopped
 		}
 
-		disposition := Classify(err)
-		if disposition == Transient {
+		// Stopped is the only way out; everything else rebuilds, including a run
+		// of recoverable errors that never delivers.
+		switch Classify(err) {
+		case Stopped:
+			p.up.Store(false)
+			slog.ErrorContext(p.ctx, "jetstream iterator ended consumption",
+				"consumer", p.name, "error", err)
+			return nil, nil, fmt.Errorf("consume %s: %w", p.name, err)
+
+		case Transient:
 			transients++
 			if transients < TransientEscalation {
 				slog.WarnContext(p.ctx, "jetstream iterator hit a recoverable error, retrying",
 					"consumer", p.name, "attempt", transients, "error", err)
 				continue
 			}
+			// A run that only ever reports misses is stalled, and retrying it
+			// forever is the silent stall in a new shape.
 			slog.WarnContext(p.ctx, "jetstream iterator kept failing without delivering, rebuilding",
 				"consumer", p.name, "attempts", transients, "error", err)
-			disposition = Fatal
-		}
 
-		if disposition == Stopped {
-			p.up.Store(false)
-			slog.ErrorContext(p.ctx, "jetstream iterator ended consumption",
-				"consumer", p.name, "error", err)
-			return nil, nil, fmt.Errorf("consume %s: %w", p.name, err)
+		case Fatal:
+			// Nothing to weigh: the rebuild below is the whole response.
 		}
 
 		slog.ErrorContext(p.ctx, "jetstream iterator stopped, rebuilding",
@@ -164,8 +169,6 @@ func (p *Pump) rebuild() error {
 	p.lastAttempt = now
 
 	for attempt := first; ; attempt++ {
-		p.attempt = attempt
-
 		if !p.sleepFn(p.ctx, BackoffStep(attempt)) {
 			if p.stopped.Load() {
 				return ErrStopped

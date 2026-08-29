@@ -33,25 +33,23 @@
 //
 // Pump is a plain loop: Next -> Classify -> rebuild -> open -> Next.
 //
-// Supervisor is not, and this is the part worth having written down. run owns
-// every piece of mutable state; nats.go's callback and Stop only hand it
-// events on channels, which is what makes a late error from a superseded round
-// unable to disturb the round that replaced it. One consumer-deleted error
-// travels:
+// Supervisor is one goroutine too, which is the thing to hold on to: run walks
+// the whole lifecycle in order and opens each round inline. The only other
+// thread is nats.go's, calling observe, and observe never blocks — both its
+// sends have a default arm. That single boundary is what makes a late error
+// from a superseded round unable to disturb the round that replaced it. One
+// consumer-deleted error travels:
 //
-//	observe(gen, err)         // on a nats.go goroutine; only queues
-//	  -> s.failures           // buffered; never blocks the caller
-//	     -> serve             // ignores it unless gen is the live round
-//	        -> Classify       // Fatal: stop the handle, return true
-//	           -> run         // up=false, SeedAttempt, sleepFn
-//	              -> openRound(gen+1)   // on its own goroutine, so a
-//	                 -> s.starts        // failure reported from inside
-//	                    -> await        // start still reaches run
-//	                       -> run       // up=true, back to serve
+//	observe(gen, err)      // on a nats.go goroutine; queues, never blocks
+//	  -> s.failures        // or s.terminal, when the queue is full
+//	     -> serve          // judge ignores it unless gen is the live round
+//	        -> run         // up=false, release, SeedAttempt, sleepFn
+//	           -> startRound(gen+1)  // inline: open, then take any failure
+//	              -> run              // already reported against it
+//	                                  // up=true, back to serve
 //
-// Three edges there are channels, so no editor will jump them for you: the
-// callback reaches run only through s.failures, and a new round reaches run
-// only through s.starts.
+// One edge there is a channel, so no editor will jump it for you: the callback
+// reaches run only through s.failures or the s.terminal mailbox beside it.
 //
 // # Reading order
 //

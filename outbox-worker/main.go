@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -142,7 +143,7 @@ func main() {
 		}
 		iters = append(iters, iter)
 		checks = append(checks, iter.HealthCheck())
-		drainPool(ctx, iter, sem, &wg, process)
+		drainPool(ctx, dest, iter, sem, &wg, process)
 
 		openOrdered := jsiter.ConsumeFrom(jsiter.Resolve(js, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest)), process)
 		cc, err := jsiter.NewSupervisor(ctx, orderedLane, openOrdered)
@@ -194,13 +195,23 @@ func main() {
 // too: iter.Stop() returns without waiting for it, so a message taken between
 // Next() and the per-message Add(1) could otherwise slip past shutdown's
 // wg.Wait() and race nc.Drain(). It exits when the iterator is stopped.
-func drainPool(ctx context.Context, iter jsiter.Nexter, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
+//
+// lane names the peer in the terminal log: one of these runs per remote site,
+// and the health check is the only other place that says which one died.
+func drainPool(ctx context.Context, lane string, iter jsiter.Nexter, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
+				// The pump absorbs everything it can recover from, so ErrStopped
+				// (iter.Stop() on shutdown) is the only expected error here. Any
+				// other means consumption died for good — say so, or the lane goes
+				// quiet with no cause anywhere but the readiness probe.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "lane", lane, "error", err)
+				}
 				return
 			}
 			sem <- struct{}{}

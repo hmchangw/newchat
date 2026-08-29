@@ -160,9 +160,16 @@ func (r *recoveringFetcher) Recover(ctx context.Context, err error) bool {
 		return true
 	}
 
-	disposition := jsiter.Classify(err)
+	// Stopped is the only way out; everything else rebuilds, including a run of
+	// recoverable errors that never fetches.
+	switch jsiter.Classify(err) {
+	case jsiter.Stopped:
+		r.up.Store(false)
+		slog.ErrorContext(ctx, "search consumer ended consumption",
+			"consumer", r.name, "error", err)
+		return false
 
-	if disposition == jsiter.Transient {
+	case jsiter.Transient:
 		r.transients++
 		if r.transients < jsiter.TransientEscalation {
 			slog.WarnContext(ctx, "search consumer hit a recoverable fetch error, retrying",
@@ -171,14 +178,9 @@ func (r *recoveringFetcher) Recover(ctx context.Context, err error) bool {
 		}
 		slog.WarnContext(ctx, "search consumer kept failing without fetching, rebuilding",
 			"consumer", r.name, "attempts", r.transients, "error", err)
-		disposition = jsiter.Fatal
-	}
 
-	if disposition == jsiter.Stopped {
-		r.up.Store(false)
-		slog.ErrorContext(ctx, "search consumer ended consumption",
-			"consumer", r.name, "error", err)
-		return false
+	case jsiter.Fatal:
+		// Nothing to weigh: the rebuild below is the whole response.
 	}
 
 	slog.ErrorContext(ctx, "search consumer stopped, rebuilding", "consumer", r.name, "error", err)
@@ -206,8 +208,6 @@ func (r *recoveringFetcher) rebuild(ctx context.Context) bool {
 	r.lastAttempt = now
 
 	for ; ; attempt++ {
-		r.attempt = attempt
-
 		if !r.sleepFn(ctx, jsiter.BackoffStep(attempt)) {
 			return false
 		}

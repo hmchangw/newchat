@@ -31,7 +31,7 @@ func TestDrainPool_WaitCoversPumpGoroutine(t *testing.T) {
 	iter := &stubIter{stopped: make(chan struct{})}
 	sem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
-	drainPool(context.Background(), iter, sem, &wg, func(context.Context, jetstream.Msg) {})
+	drainPool(context.Background(), "site-b", iter, sem, &wg, func(context.Context, jetstream.Msg) {})
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()

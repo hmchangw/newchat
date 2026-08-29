@@ -133,8 +133,8 @@ func (s *Supervisor) HealthCheck() health.Check { return Check(s.name, s.IsUp) }
 // including one still being opened — has been released, so a caller may drain
 // NATS the moment it returns.
 //
-// Do not call it from inside an OpenConsume: Stop waits for the opener, so an
-// opener waiting for Stop deadlocks, exactly as WaitGroup.Wait does.
+// Do not call it from inside an OpenConsume. run opens rounds inline, so an
+// open that waits for Stop is run waiting for itself.
 func (s *Supervisor) Stop() {
 	s.once.Do(func() {
 		close(s.done)
@@ -142,9 +142,9 @@ func (s *Supervisor) Stop() {
 		// consuming after Stop has returned.
 		s.cancelOpen()
 	})
-	// run opens rounds on its own goroutine, so its exit is also the moment the
-	// last one is released: "Stop returned" means no subscription of ours is
-	// still running, and the caller may drain NATS.
+	// Rounds open inline, so run cannot exit holding one: its exit is also the
+	// moment the last was released. "Stop returned" therefore means no
+	// subscription of ours is still running, and the caller may drain NATS.
 	<-s.exited
 }
 
@@ -456,15 +456,11 @@ func (s *Supervisor) releaseAtEnd(cc ConsumeContext) {
 	}
 }
 
-// cleanup runs when run exits. Closing exited releases an attempt still in
-// flight, which then stops its own handle — starts is unbuffered, so there is
-// never one in a buffer for nobody to stop.
+// cleanup runs when run exits, which is also when the last round has been
+// released: rounds open inline, so run cannot exit holding one.
 func (s *Supervisor) cleanup() {
 	s.up.Store(false)
-	// Nothing is left to receive a start, so an open still running can only
-	// produce a handle for its own goroutine to release. Cancelling cuts that
-	// short and releases the context whether or not Stop was the reason run
-	// ended.
+	// Release the context whether or not Stop was the reason run ended.
 	s.cancelOpen()
 	close(s.exited)
 }
