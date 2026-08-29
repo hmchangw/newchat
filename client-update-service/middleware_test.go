@@ -155,6 +155,7 @@ func TestRequireServiceAccount_RejectionsAreIndistinguishable(t *testing.T) {
 }
 
 func TestRequireServiceAccount_NeverEchoesTheToken(t *testing.T) {
+	// #nosec G101 -- fake fixture, not a live credential; the test asserts it never reaches the response. nosemgrep: gosec.G101-1
 	const secret = "0123456789abcdef"
 	r := gin.New()
 	r.Use(requireServiceAccount(map[string]string{"admin-service": secret}))

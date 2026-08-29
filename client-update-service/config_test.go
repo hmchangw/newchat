@@ -99,6 +99,7 @@ func TestValidateUploadTokens(t *testing.T) {
 }
 
 func TestValidateUploadTokens_ErrorNeverLeaksTheToken(t *testing.T) {
+	// #nosec G101 -- fake fixture, not a live credential; the test asserts it never reaches the error. nosemgrep: gosec.G101-1
 	const secret = "supersecrettoken0123"
 	err := validateUploadTokens(map[string]string{"": secret})
 	require.Error(t, err)
@@ -111,6 +112,7 @@ func TestValidateUploadTokens_ErrorNeverLeaksTheToken(t *testing.T) {
 // name both accounts so an operator can find the misconfiguration, but never
 // the token value itself.
 func TestValidateUploadTokens_DuplicateToken_NamesAccountsNotToken(t *testing.T) {
+	// #nosec G101 -- fake fixture, not a live credential; the test asserts it never reaches the error. nosemgrep: gosec.G101-1
 	const secret = "duplicatetoken01234"
 	err := validateUploadTokens(map[string]string{"account-a": secret, "account-b": secret})
 	require.Error(t, err)
