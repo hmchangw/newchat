@@ -2804,7 +2804,8 @@ func TestDetermineRoomTypeFromPayload(t *testing.T) {
 	}{
 		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
 		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
-		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeBotDM},
+		// p_admin is human-operated and has no app document; mirrors room-service.
+		"single platform-admin pseudo-account → regular DM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeDM},
 		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
 		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
 		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},

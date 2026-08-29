@@ -1690,13 +1690,14 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
 }
 
-// determineRoomTypeFromPayload mirrors room-service's determineRoomType: a single
-// counterpart that is a ".bot" bot or the "p_admin" platform-admin
-// pseudo-account is a botDM (consistent with room-service + pkg/pipelines); a QA
-// "p_" counterpart is an ordinary user, so it yields a regular DM.
+// determineRoomTypeFromPayload mirrors room-service's determineRoomType: only a
+// ".bot" counterpart yields a botDM. The "p_admin" platform-admin pseudo-account
+// is human-operated and owns no app document, so its DM is an ordinary DM; it
+// stays bot-like for channel membership and ownership. A QA "p_" counterpart is
+// an ordinary user, so it yields a regular DM too.
 func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
+		if model.IsBot(req.Users[0]) {
 			return model.RoomTypeBotDM
 		}
 		return model.RoomTypeDM

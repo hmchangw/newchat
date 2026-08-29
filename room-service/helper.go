@@ -172,12 +172,15 @@ func dedup(items []string) []string {
 }
 
 // determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM whose counterpart is a bot (".bot") or the "p_admin" platform-admin
-// pseudo-account is a botDM — the same union enforced by the channel-membership guards
-// (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
+// A single-user DM whose counterpart is a bot (".bot") is a botDM. The "p_admin"
+// platform-admin pseudo-account is human-operated and owns no app document, so its
+// DM is an ordinary DM — a botDM would fail the bot-availability check in
+// handleCreateRoomDMOrBotDM. p_admin stays bot-like for channel membership and
+// ownership (filterBots, errBotInChannel, the role guards); only DM classification
+// differs. A QA "p_" counterpart is an ordinary user too.
 func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
+		if model.IsBot(req.Users[0]) {
 			return model.RoomTypeBotDM
 		}
 		return model.RoomTypeDM

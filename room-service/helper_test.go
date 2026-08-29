@@ -214,9 +214,11 @@ func TestDetermineRoomType(t *testing.T) {
 			want: model.RoomTypeBotDM,
 		},
 		{
-			name: "single platform-admin pseudo-account no name → botDM",
+			// p_admin is human-operated and has no app document: a botDM here
+			// would make room.create fail the bot-availability check outright.
+			name: "single platform-admin pseudo-account no name → regular DM",
 			req:  model.CreateRoomRequest{Users: []string{"p_adminsiteA"}},
-			want: model.RoomTypeBotDM,
+			want: model.RoomTypeDM,
 		},
 		{
 			name: "single QA p_ user no name → regular DM",
