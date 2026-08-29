@@ -221,6 +221,16 @@ func TestDetermineRoomType(t *testing.T) {
 			want: model.RoomTypeDM,
 		},
 		{
+			name: "bot requester with a human counterpart → botDM",
+			req:  model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}},
+			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "two bots → botDM",
+			req:  model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"sales.bot"}},
+			want: model.RoomTypeBotDM,
+		},
+		{
 			name: "single QA p_ user no name → regular DM",
 			req:  model.CreateRoomRequest{Users: []string{"p_qa1"}},
 			want: model.RoomTypeDM,

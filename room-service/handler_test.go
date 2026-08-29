@@ -7977,3 +7977,11 @@ func TestFederateOne_NoopWhenLocalOrEmpty(t *testing.T) {
 	require.NoError(t, h.federateOne(context.Background(), "r1", "site-a", model.InboxSubscriptionRead, []byte(`{}`), "seed", 1))
 	assert.False(t, called, "empty or local destination must not publish")
 }
+
+// The gate stops a user opening a DM with a missing or disabled app. A bot
+// initiating is already authenticated and has no app to validate on the far side.
+func TestSkipAppGate(t *testing.T) {
+	assert.True(t, skipAppGate("weather.bot"), "bot requester skips the gate")
+	assert.False(t, skipAppGate("alice"), "a user requester is still gated")
+	assert.False(t, skipAppGate("p_adminsiteA"), "p_admin is not a .bot app")
+}

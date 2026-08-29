@@ -291,7 +291,7 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		return nil, fmt.Errorf("dm dedup check: %w", err)
 	}
 
-	if roomType == model.RoomTypeBotDM {
+	if roomType == model.RoomTypeBotDM && !skipAppGate(requester.Account) {
 		app, err := h.store.GetApp(ctx, other.Account)
 		if err != nil {
 			if errors.Is(err, ErrAppNotFound) {

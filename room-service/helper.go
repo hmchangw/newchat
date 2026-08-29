@@ -171,22 +171,19 @@ func dedup(items []string) []string {
 	return result
 }
 
-// determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM whose counterpart is a bot (".bot") is a botDM. The "p_admin"
-// platform-admin pseudo-account is human-operated and owns no app document, so its
-// DM is an ordinary DM — a botDM would fail the bot-availability check in
-// handleCreateRoomDMOrBotDM. p_admin stays bot-like for channel membership and
-// ownership (filterBots, errBotInChannel, the role guards); only DM classification
-// differs. A QA "p_" counterpart is an ordinary user too.
+// determineRoomType classifies a post-strip request; caller must guarantee
+// non-empty input. A DM is a botDM when either participant is a ".bot" app;
+// p_admin and QA "p_" accounts are ordinary DM partners.
 func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) {
-			return model.RoomTypeBotDM
-		}
-		return model.RoomTypeDM
+		return model.DMRoomType(req.RequesterAccount, req.Users[0])
 	}
 	return model.RoomTypeChannel
 }
+
+// skipAppGate reports whether the bot-availability check should be bypassed: a
+// bot initiating a DM has no app to validate on the counterpart side.
+func skipAppGate(requesterAccount string) bool { return model.IsBot(requesterAccount) }
 
 // contextWithMemberListTimeout returns a derived context bounded by the
 // configured per-ref member-list timeout. When the configured timeout is
