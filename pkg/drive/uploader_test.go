@@ -60,7 +60,7 @@ func TestClient_UploadGroupImages(t *testing.T) {
 	if gotBypass != "true" {
 		t.Fatalf("bypass query param = %q, want %q", gotBypass, "true")
 	}
-	if gotToken != "tok" || gotUserID != "alice" || gotFileName != "a.png" || gotMode != "Normal" {
+	if gotToken != "tok" || gotUserID != "alice" || gotFileName != "a.png" || gotMode != "KeepBoth" {
 		t.Fatalf("token=%q userId=%q fileName=%q mode=%q", gotToken, gotUserID, gotFileName, gotMode)
 	}
 }
