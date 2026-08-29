@@ -13,15 +13,16 @@ import (
 // assert the map in full: equality proves the active-set predicates are present AND
 // that nothing filters on a room name — no endpoint interprets one any more.
 func TestActiveFilter(t *testing.T) {
+	// The $or comes from listTypeMatch("current") rather than being re-spelled
+	// here: the badge count and subscription.list MUST select the same rows, so
+	// this test pins that they share one definition, not that the definition has
+	// any particular shape.
 	base := func() bson.M {
 		return bson.M{
 			"u.account": "alice",
 			"muted":     bson.M{"$ne": true},
 			"open":      bson.M{"$ne": false},
-			"$or": bson.A{
-				bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
-				bson.M{"roomType": "botDM", "isSubscribed": true},
-			},
+			"$or":       listTypeMatch("current")["$or"],
 		}
 	}
 	withOrigin := func() bson.M {
