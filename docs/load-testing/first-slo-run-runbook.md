@@ -25,11 +25,11 @@
 | P1 | **#337 merged** | app | Delivers `rpc.server.call.duration{rpc.method, error.type}` → SLO-4/5 |
 | P2 | **Prometheus scrapes the *services*' o11y SDK endpoint**, not just loadgen's `:9099` | infra | This is the one that gets missed. The Helm chart annotates **loadgen's own** service only (`metrics.serviceAnnotations`, port 9099). Every domain counter this run reads — `message_gatekeeper_messages_total`, `message_worker_persistence_total`, `rpc_server_call_duration_seconds`, `search_service_requests_total` — is emitted through the SDK meter on the services' own endpoint (`:2112` in compose; confirm the port on your service manifests). No service scrape, no SLO numbers |
 | P3 | **A dedicated test `SITE_ID`** | infra | Counters are monotonic and shared. `increase()` excludes history, not concurrent traffic |
-| P4 | **JetStream consumer metrics reachable** | infra | Backlog is the validity gate in §6, and `sli-slo.md` calls it the *primary* enforcement signal for every async SLO |
+| P4 | **A backlog observer that outlives the loadgen pod** | infra | **Not optional, and not satisfiable by loadgen.** `loadgen_consumer_*` comes from a `ConsumerSampler` running *inside* the loadgen binary (`consumerlag.go:17`), so `phase: stopped` deletes the Deployment and the backlog signal with it — exactly when §7 tells you to watch the backlog drain. Both `t0-async` and `t2` need one of: the **P3 JetStream exporter deployed**, or an **operator reading `ConsumerInfo` directly** (NATS monitoring endpoint / `nats consumer info`) at those two marks. The service-side counters are unaffected — they are scraped from the services, which stay up |
 | P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
 | P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
 | P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
-| P8 | **Read the live consumer config and the scrape interval** | infra | `MaxDeliver`, `AckWait` and the backoff schedule set `t2`'s cap (§5); the scrape interval sets how long every mark waits. Both are environment overrides — do not assume the chart defaults |
+| P8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. If `MaxDeliver` is `0`/`-1` (unlimited) there is no finite cap — decide the operational one before the run, not during it |
 
 ### P6 — how to scope a run to a site
 
@@ -265,7 +265,7 @@ SLO-1a **bad**.
 | Mark | When | Snapshot | Serves |
 |---|---|---|---|
 | **t0-async** | Baseline for SLO-1a. Taken while dispatch is stopped and the backlog is at floor — **and scraped before dispatch resumes** (§7) | `message_worker_persistence_total`, `message_gatekeeper_messages_total` | SLO-1a |
-| **t0-sync** | Baseline for the synchronous families. Taken once the **full lane mix is running** — specifically once `thread_open` is producing samples again (§7) | `rpc_server_call_duration_seconds` (both series), `search_service_requests_total` | SLO-4, 5, 7 |
+| **t0-sync** | Baseline for the synchronous families. Taken once the **full lane mix is running** — specifically once the thread-read lane is producing samples again (§7) | `rpc_server_call_duration_seconds` (both series), `search_service_requests_total` | SLO-4, 5, 7 |
 | **t1** | Dispatch stopped → wait until in-flight RPCs reach zero, **or** at least one full `soak` RPC timeout → **then wait one full scrape interval** | the same synchronous families | SLO-4, 5, 7 |
 | **t2** | message-worker's `num_pending + num_ack_pending` at its pre-run floor **and stable there for at least one scrape interval**, capped — see below | the same two counters as `t0-async` | SLO-1a |
 
@@ -283,21 +283,36 @@ deadline**. Borrowing SLO-4's 500 ms would count as persistence failures every
 message still sitting in the JetStream backlog, in `jsretry` backoff, or being
 recovered, all of which are messages the system has not failed to persist.
 
-So `t2` is *"message-worker has caught up"*, with a cap — **derived from the
-deployed consumer config, not assumed**:
+So `t2` is *"message-worker has caught up"*, with a cap. **The cap comes from two
+different schedules, and only one of them lives in the consumer config.**
+
+| Path | When it applies | Where the delays come from |
+|---|---|---|
+| **Handler error** (the normal one) | `processMessage` returns a transient error → `jsretry.Settle` → `NakWithDelay` | `jsretry.DefaultBackoff` — **compiled into the binary** (`message-worker/handler.go:89`), 1s/5s/30s/2m/10m, last entry repeating |
+| **Un-acked / settle failure** | The pod died, hung, or the Nak itself failed, so the message expires by `AckWait` | The **consumer's** `BackOff`, derived as `AckWait × Factor^i` capped at `BackOffMax` (`pkg/stream/consumer.go:22-27,58`) |
+
+An earlier revision said "read the live consumer backoff and compute the cap".
+That is wrong: the delay schedule on the normal path is a constant in the
+binary, and the consumer's `BackOff` governs a *different* failure mode. Only
+`MaxDeliver` is shared.
 
 ```
-cap = Σ over i in [1 .. MaxDeliver-1] of backoff[min(i, len(backoff)-1)]
-      + one AckWait + one scrape interval
+budget(schedule) = Σ over N in [1 .. MaxDeliver-1] of schedule[min(N-1, len-1)]
+cap              = max(budget(jsretry.DefaultBackoff), budget(consumer BackOff))
+                   + one scrape interval
 ```
 
-At the shipped defaults (`MaxDeliver=6`, `DefaultBackoff` = 1s/5s/30s/2m/10m)
-that is ~12.6 min of retry plus margin ≈ **15 minutes**. But `MAX_DELIVER` is an
-environment override (`pkg/stream/consumer.go:18`) and **the last backoff entry
-repeats** for every attempt past the schedule — at `MaxDeliver=10` the budget is
-~52 minutes, and a 15-minute cap would declare messages lost that the system was
-still going to persist. **Read the live consumer config in preflight** and
-compute the cap from it.
+Note the index: the delay after delivery *N* is `schedule[min(N-1, len-1)]`
+(`jsretry.go:132-145`). At `MaxDeliver=6` that gives 1+5+30+120+600 = **756 s ≈
+12.6 min**; at `MaxDeliver=10` the 10 m entry repeats five times for **≈ 52 min**.
+An earlier revision wrote the index one place off and so disagreed with its own
+worked examples.
+
+**`MaxDeliver` of `0` or `-1` means unlimited**, and the server normalizes
+anything `< -1` to `-1` (CLAUDE.md §JetStream Redelivery Backoff). There is then
+**no finite theoretical cap**. If the deployment is configured that way, set an
+*operational* cap by policy — a stated wall-clock limit — and record that
+exceeding it makes SLO-1a **INCONCLUSIVE by rule**, not by arithmetic.
 
 **If the backlog has not drained by the cap, SLO-1a is INCONCLUSIVE for this
 window** — and the run has already failed the §6 validity gate, because a backlog
@@ -418,20 +433,31 @@ are not.
 That is why the baselines are split:
 
 1. **Reach steady state**, then `phase: stopped`.
-2. **Watch the backlog fall to its pre-run floor.** Hold there for at least one
-   scrape interval, then take **`t0-async`** — the SLO-1a baseline — *while
-   dispatch is still stopped*. Taking it at first dispatch races the scrape.
-   Keep the pause shorter than `soak.heartbeatStaleAfter`, and do not run
-   teardown during it.
+2. **Watch the backlog fall to its pre-run floor — using the out-of-band
+   observer from P4, not `loadgen_consumer_*`.** The sampler died with the pod in
+   step 1. Hold at floor for at least one scrape interval, then take
+   **`t0-async`** — the SLO-1a baseline — *while dispatch is still stopped*.
+   Taking it at first dispatch races the scrape. Keep the pause shorter than
+   `soak.heartbeatStaleAfter`, and do not run teardown during it.
 3. **`phase: soak` with `soak.warmup: 0`.** Dispatch resumes immediately.
-4. **Wait for the full mix.** Watch `loadgen_soak_rpc_latency_seconds{action="msg_thread"}`
-   (or the lane's attempt counter) resume at its configured rate — that is the
-   catalog having refilled past `soak.persistGrace`. Then take **`t0-sync`**, the
-   baseline for SLO-4/5/7. Everything between step 3 and here is excluded from
-   the synchronous measurement by construction, which is what "discard the first
-   two minutes" should have meant.
+4. **Wait for the full mix.** Watch
+   `loadgen_soak_rpc_latency_seconds{action="get_thread_messages"}` resume at its
+   configured rate — that is the catalog having refilled past
+   `soak.persistGrace`. Then take **`t0-sync`**, the baseline for SLO-4/5/7.
+   Everything between step 3 and here is excluded from the synchronous
+   measurement by construction, which is what "discard the first two minutes"
+   should have meant.
 
-### Option B — one continuous run — is not an acceptable path
+   Two label facts worth pinning, because an earlier revision got both wrong:
+   the action is **`get_thread_messages`** (`soak_rpc.go:24`), not `msg_thread`;
+   and `loadgen_soak_lane_attempts_total` is **not** an alternative — it is
+   incremented only by the room/member lanes (`soak_roommember.go:843`), never by
+   a read lane. The latency histogram works as the signal precisely because a
+   skipped `thread_open` records no sample at all (`soak_read.go:221-228` returns
+   `skip`, and the collector only observes when `Latency > 0`), so the series
+   goes from absent to at-rate exactly when the catalog refills.
+
+### If the restart is impossible, SLO-1a is INCONCLUSIVE — there is no fallback
 
 An earlier revision offered "keep one continuous run and bound the contamination
 at 0.1% of the denominator". **That threshold is exactly the error budget of a
@@ -442,12 +468,19 @@ operations awaiting *observers*, which is not the broker's redelivery population
 a message whose observer accounting finished but whose Ack failed can still
 increment the attempt-based numerator again.
 
-If a restart is genuinely impossible, the fallback is to report SLO-1a as an
-**interval** — `[measured − bias, measured]` with the bias bounded by
-`num_pending + num_ack_pending` at `t0` — and never as a point estimate. Given
-SLO-1a is already an approximate indicator that can exceed 100%, stacking a
-second unquantified bias on it makes the number not worth reporting. Prefer the
-restart.
+**The interval fallback does not work either, for the same reason one level
+deeper.** `num_pending + num_ack_pending` counts **messages**; the numerator
+counts **delivery attempts**. A single ack-pending message at `t0` can redeliver
+up to `MaxDeliver − NumDelivered` more times and increment `success` on each, so
+the message count is not an upper bound on the attempt-count bias. Turning it
+into a *ratio* bias would also require normalising by the measurement
+denominator, which the earlier text did not do.
+
+A defensible bound would have to sum the **remaining delivery budget per pending
+message** and divide by the denominator — which needs per-message delivery counts
+nothing exports today. So: **if the restart is impossible, SLO-1a is
+`INCONCLUSIVE` for that run.** Report the other three and say why the fourth is
+missing. Do not publish a number, an interval, or a caveat-laden estimate.
 
 ### The sequence
 
