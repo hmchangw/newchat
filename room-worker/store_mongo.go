@@ -238,7 +238,9 @@ func (s *MongoStore) CreateRoom(ctx context.Context, room *model.Room, key *room
 	}
 	var doc bson.M
 	if err := bson.Unmarshal(raw, &doc); err != nil {
-		return false, fmt.Errorf("unmarshal room doc: %w", err)
+		// raw is the bson.Marshal output from the line above: round-tripping our own
+		// bytes cannot fail transiently, so a redelivery can only fail identically.
+		return false, errcode.Permanent(errcode.Internal("unmarshal room doc", errcode.WithCause(err)))
 	}
 	// _id is supplied by the filter; $setOnInsert must not also set it.
 	delete(doc, "_id")
