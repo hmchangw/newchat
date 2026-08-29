@@ -7692,14 +7692,72 @@ func TestBuildDMPairSubs_IsSubscribed(t *testing.T) {
 		&model.User{ID: "u_a", Account: "alice"},
 		&model.User{ID: "u_w", Account: "weather.bot"}, room, time.Now().UTC())
 
-	assert.True(t, subs[0].IsSubscribed, "alice faces an app")
+	assert.True(t, subs[0].IsSubscribed, "alice initiated and faces an app")
 	assert.False(t, subs[1].IsSubscribed, "the bot faces a person")
 
-	// A bot<->bot pair: both rows face an app, so both are subscribed. A botDM
-	// row with isSubscribed=false matches no list bucket at all.
+	// The initiator faces an app here too, so only its own row is subscribed.
 	botPair := buildDMPairSubs(
 		&model.User{ID: "u_w", Account: "weather.bot"},
 		&model.User{ID: "u_s", Account: "sales.bot"}, room, time.Now().UTC())
 	assert.True(t, botPair[0].IsSubscribed)
-	assert.True(t, botPair[1].IsSubscribed)
+	assert.False(t, botPair[1].IsSubscribed)
+
+	// The initiator faces a person: nobody is subscribed, Alice included.
+	botFirst := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_a", Account: "alice"}, room, time.Now().UTC())
+	assert.False(t, botFirst[0].IsSubscribed)
+	assert.False(t, botFirst[1].IsSubscribed, "Alice never asked for this app")
+}
+
+// isSubscribed marks a person's deliberate subscription to an app, so only the
+// initiator's own row can carry it. A bot opening the DM must not subscribe
+// Alice to itself.
+func TestProcessCreateRoom_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
+	h, mockStore, _ := newCreateRoomTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	bot := &model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-A"}
+	alice := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice A", SiteID: "site-A"}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(bot, nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(alice, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+
+	var capturedSubs []*model.Subscription
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, subs []*model.Subscription) error {
+			capturedSubs = subs
+			return nil
+		})
+	mockStore.EXPECT().FindDMSubscriptionPair(gomock.Any(), gomock.Any(), "helper.bot").
+		DoAndReturn(func(_ context.Context, _, _ string) (*model.Subscription, *model.Subscription, error) {
+			return capturedSubs[0], capturedSubs[1], nil
+		})
+	// Alice's row faces the bot, so the update fan-out resolves the app once.
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").
+		Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil).AnyTimes()
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-2").Return(nil)
+
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-bot-2", RequesterAccount: "helper.bot",
+		Users:     []string{"alice"},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	require.Len(t, capturedSubs, 2)
+	byAccount := map[string]*model.Subscription{}
+	for _, s := range capturedSubs {
+		byAccount[s.User.Account] = s
+	}
+
+	// The bot initiated, so its own row faces a person: a plain dm, unsubscribed.
+	assert.Equal(t, model.RoomTypeDM, byAccount["helper.bot"].RoomType)
+	assert.False(t, byAccount["helper.bot"].IsSubscribed)
+
+	// Alice's row still faces an app, but she never asked for it.
+	assert.Equal(t, model.RoomTypeBotDM, byAccount["alice"].RoomType)
+	assert.False(t, byAccount["alice"].IsSubscribed,
+		"only setAppSubscription initiated by Alice may set isSubscribed")
 }

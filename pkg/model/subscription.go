@@ -287,10 +287,6 @@ func SubscriptionRowType(roomType RoomType, counterpart string) RoomType {
 	return roomType
 }
 
-// SubscriptionIsSubscribed reports whether a row is soft-unsubscribable. Only a
-// row facing a real app is; the flag is what an app unsubscribe clears.
-func SubscriptionIsSubscribed(rowType RoomType) bool { return rowType == RoomTypeBotDM }
-
 // CreateRoomType classifies a create-room request: a single counterpart with no
 // name is a DM, and a botDM when either participant is a ".bot" app.
 func CreateRoomType(req *CreateRoomRequest) RoomType {

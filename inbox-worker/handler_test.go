@@ -1876,12 +1876,35 @@ func TestSubscriptionName(t *testing.T) {
 	assert.Equal(t, "", subscriptionName(model.RoomType(""), "ignored", "alice"))
 }
 
-// The flag now follows the row's own type: a row facing an app is subscribable,
-// whoever holds it. A botDM row with isSubscribed=false matches no list bucket.
-func TestSubscriptionIsSubscribed(t *testing.T) {
-	assert.False(t, model.SubscriptionIsSubscribed(model.RoomTypeChannel))
-	assert.False(t, model.SubscriptionIsSubscribed(model.RoomTypeDM))
-	assert.True(t, model.SubscriptionIsSubscribed(model.RoomTypeBotDM))
+// A federated add only ever writes the far side of someone else's create, never
+// the initiator's own row, so it can never confer an app subscription — not even
+// when the recipient's row faces an app.
+func TestHandleMemberAdded_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
+	store := &stubInboxStore{
+		users: []model.User{{ID: "u_alice", Account: "alice", SiteID: "site-B"}},
+	}
+	h := NewHandler(store)
+
+	changeData, _ := json.Marshal(model.MemberAddEvent{
+		Type:             "member_added",
+		RoomID:           "u_weatheru_alice",
+		RoomType:         model.RoomTypeBotDM,
+		Accounts:         []string{"alice"},
+		SiteID:           "site-A",
+		RequesterAccount: "weather.bot",
+		JoinedAt:         1740000000000,
+		Timestamp:        1740000000000,
+	})
+	evtData, _ := json.Marshal(model.InboxEvent{
+		Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
+
+	require.NoError(t, h.HandleEvent(context.Background(), evtData))
+
+	subs := store.bulkSubscriptions
+	require.Len(t, subs, 1)
+	assert.Equal(t, "weather.bot", subs[0].Name)
+	assert.Equal(t, model.RoomTypeBotDM, subs[0].RoomType, "alice faces an app")
+	assert.False(t, subs[0].IsSubscribed, "alice never asked for it")
 }
 
 func TestHandleMemberAdded_DM_BuildsRecipientSubWithCounterpartName(t *testing.T) {

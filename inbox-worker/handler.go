@@ -304,7 +304,6 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			SiteID:             event.SiteID,
 			Roles:              rolesForType(roomType),
 			Name:               name,
-			IsSubscribed:       model.SubscriptionIsSubscribed(subType),
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,

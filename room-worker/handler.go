@@ -1378,19 +1378,19 @@ func buildChannelSubs(requester *model.User, users []model.User, room *model.Roo
 	return subs
 }
 
-// buildDMPairSubs returns the two rows of a DM pair. Each names its counterpart
-// and stores the type that counterpart implies; only a row facing a real app is
-// soft-unsubscribable.
+// buildDMPairSubs returns the two rows of a DM pair, each naming its counterpart
+// and storing the type that counterpart implies. Only the initiator's own row can
+// be subscribed, and only when it faces an app: the flag records a deliberate
+// app subscription, so the far side never acquires one by being DMed.
 func buildDMPairSubs(requester, other *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
-	row := func(u *model.User, counterpart string) *model.Subscription {
-		s := newSub(idgen.GenerateUUIDv7(), u, room, nil, counterpart, false, acceptedAt)
+	row := func(u *model.User, counterpart string, isSubscribed bool) *model.Subscription {
+		s := newSub(idgen.GenerateUUIDv7(), u, room, nil, counterpart, isSubscribed, acceptedAt)
 		s.RoomType = model.SubscriptionRoomType(counterpart)
-		s.IsSubscribed = model.SubscriptionIsSubscribed(s.RoomType)
 		return s
 	}
 	return []*model.Subscription{
-		preRead(row(requester, other.Account), acceptedAt),
-		row(other, requester.Account),
+		preRead(row(requester, other.Account, model.IsBot(other.Account)), acceptedAt),
+		row(other, requester.Account, false),
 	}
 }
 

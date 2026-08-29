@@ -1114,8 +1114,10 @@ A bot signed into the client therefore sees its DMs with people in the common
 chat section, and every [subscription.update](#subscriptionupdate-event) reports
 the same `roomType` the subscription stores.
 
-`isSubscribed` is unaffected: it marks a person's subscription to an app and
-gates only `botDM` rows, so unsubscribing from an app still hides it.
+`isSubscribed` is separate from the type. It records a **deliberate** app
+subscription, so only the account that opened the room carries it, and only when
+its own row faces an app: being DMed by an app never subscribes you to it. It
+gates `botDM` rows alone, so unsubscribing from an app still hides it.
 
 #### HrInfo
 
