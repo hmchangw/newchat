@@ -517,7 +517,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: siteID, Timestamp: now.UnixMilli(), QuotedParentUnverified: quotedUnverified, ThreadParentSenderAccount: threadParentSenderAccount}
 	evtData, err := sonic.Marshal(evt)
 	if err != nil {
-		return nil, fmt.Errorf("marshal message event: %w", err)
+		return nil, errcode.MarshalFailed("message event", err)
 	}
 
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
@@ -529,7 +529,11 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
 		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 
-	return sonic.Marshal(msg)
+	replyData, err := sonic.Marshal(msg)
+	if err != nil {
+		return nil, errcode.MarshalFailed("send message reply", err)
+	}
+	return replyData, nil
 }
 
 // resolveThreadParent resolves the thread parent's createdAt and sender account

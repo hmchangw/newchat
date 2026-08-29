@@ -753,7 +753,7 @@ func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageI
 			RoomID: roomID, ParentMessageID: parentMessageID, Accounts: accs, Timestamp: now,
 		})
 		if err != nil {
-			return fmt.Errorf("marshal thread_unread_added: %w", err)
+			return errcode.MarshalFailed("thread_unread_added event", err)
 		}
 		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, msgID, site)
 		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now); err != nil {
@@ -785,7 +785,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 
 	payload, err := sonic.Marshal(sub)
 	if err != nil {
-		return fmt.Errorf("marshal thread subscription: %w", err)
+		return errcode.MarshalFailed("thread subscription", err)
 	}
 	// Dedup-ID seed (threadRoomID + userID + msg.ID + hasMention + destSiteID):
 	// msg.ID is stable across MESSAGES-CANONICAL redeliveries so the same publish
@@ -822,7 +822,7 @@ func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Messag
 	}
 	data, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal thread reply event: %w", err)
+		return errcode.MarshalFailed("thread reply event", err)
 	}
 	return h.publish(ctx, subject.ServerBroadcastThreadTCount(h.siteID), data, "")
 }

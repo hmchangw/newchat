@@ -41,7 +41,7 @@ func newMobileEmitter(pub publisher, sendSubject string, maxPayloadBytes int) *m
 func (e *mobileEmitter) Emit(ctx context.Context, evt model.PushNotificationEvent) error { //nolint:gocritic // hugeParam: spec requires value semantics for Emitter interface
 	data, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal push batch %s: %w", evt.ID, err)
+		return errcode.MarshalFailed("push batch", err)
 	}
 	if e.maxPayloadBytes > 0 && len(data) > e.maxPayloadBytes {
 		// Deterministic: the handler sorts survivors so batch N carries the same

@@ -4179,3 +4179,21 @@ type deliveryCountMsg struct {
 func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
 }
+
+// A value the encoder rejects fails identically on every redelivery, so the
+// marshal failure must be permanent — jsretry Ack-drops it instead of spending
+// the consumer's whole MaxDeliver budget on a doomed retry.
+func TestHandler_PublishMutation_MarshalFailureIsPermanent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
+		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	room := &model.Room{ID: "room-1", Type: model.RoomTypeChannel}
+
+	// A channel is unrepresentable in JSON: the encoder rejects it every time.
+	err := h.publishMutation(context.Background(), room, model.RoomEventMessageDeleted, "msg-1", make(chan int))
+
+	require.Error(t, err)
+	ec, perm := errcode.IsPermanent(err)
+	require.True(t, perm, "a marshal failure can never succeed on redelivery")
+	assert.Equal(t, errcode.CodeInternal, ec.Code, "a marshal fault is a server fault, not a client error")
+}
