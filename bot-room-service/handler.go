@@ -206,6 +206,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 	if _, err := h.store.UpsertSubscription(c, &Subscription{
 		ID: h.newUUIDv7(), RoomID: roomID, UserID: ident.ID, Account: ident.Account,
 		SiteID: h.siteID, CreatedAt: createdAt, IsBot: true,
+		Name: room.Name, RoomType: model.RoomTypeChannel,
 	}); err != nil {
 		return nil, fmt.Errorf("upsert owner subscription: %w", err)
 	}
@@ -244,6 +245,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 		if _, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: u.ID, Account: u.Account,
 			SiteID: u.SiteID, CreatedAt: createdAt,
+			Name: room.Name, RoomType: model.RoomTypeChannel,
 		}); err != nil {
 			return nil, fmt.Errorf("upsert member subscription: %w", err)
 		}
@@ -309,6 +311,7 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		newlyAdded, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: u.ID, Account: u.Account,
 			SiteID: u.SiteID, CreatedAt: created,
+			Name: room.Name, RoomType: roomTypeToModel(room.Type),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("upsert subscription: %w", err)
