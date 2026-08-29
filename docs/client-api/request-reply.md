@@ -1856,7 +1856,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (app rooms). Buckets follow the [effective room type](../client-api.md#effective-room-type): a botDM facing a non-`.bot` counterpart is a DM and appears under `rooms`, never `apps`. |
+| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (app rooms). Buckets read the stored [room type](../client-api.md#effective-room-type), so a bot's own DM rows appear under `rooms`, never `apps`. |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
 | `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` (the room's user-activity position) is within N days. Non-negative. |
 | `includeLastMessage` | boolean | no | Embed each room's [`previewMessage`](../client-api.md#subscriptionroom). Omitted ⇒ include (default); `false` ⇒ skip the per-room preview resolve. |

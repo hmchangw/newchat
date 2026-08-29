@@ -866,5 +866,7 @@ func TestHandleAdd_RejectsNonChannelRoom(t *testing.T) {
 
 	_, err := h.handleAdd(withIdentity(t, "r1", ident()), BotMembersBatchRequest{UserIDs: []string{"alice-id"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "channel")
+	var ec *errcode.Error
+	require.True(t, errors.As(err, &ec))
+	assert.Equal(t, string(errcode.RoomNonChannelOperation), string(ec.Reason))
 }

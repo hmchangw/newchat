@@ -186,7 +186,7 @@ fields are sent.
 | Field | Type | Notes |
 |---|---|---|
 | `roomId` | string | The room the user lost. |
-| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — the [effective room type](../client-api.md#effective-room-type) for the recipient, matching what `subscription.list` returns for the same row. |
+| `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"`. |
 | `u` | [SubscriptionUser](../client-api.md#subscriptionuser) | The removed user. On org removals only `account` is guaranteed. |
 
 ```json
