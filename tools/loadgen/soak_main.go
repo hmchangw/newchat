@@ -23,6 +23,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
 )
 
 const (
@@ -240,8 +241,8 @@ type soakRuntimeSelector struct {
 	mu      sync.Mutex
 	rooms   []string
 	members map[string][]soakSendTarget
-	picker  *soakRoomPicker
-	sizer   *soakPayloadSizer
+	picker  *distribution.RoomPicker
+	sizer   *distribution.PayloadSizer
 	rng     *rand.Rand
 }
 
@@ -256,11 +257,13 @@ func newSoakRuntimeSelector(
 	if cfg == nil {
 		return nil, fmt.Errorf("soak configuration is required")
 	}
-	picker, err := newSoakRoomPicker(seed, len(topology.Rooms), cfg.RoomZipfS, cfg.RoomZipfV)
+	picker, err := distribution.NewRoomPicker(
+		seed, len(topology.Rooms), cfg.RoomZipfS, cfg.RoomZipfV,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("build soak room distribution: %w", err)
 	}
-	sizer, err := newSoakPayloadSizer(
+	sizer, err := distribution.NewPayloadSizer(
 		seed+1,
 		cfg.PayloadMedianBytes,
 		cfg.PayloadP95Bytes,
@@ -352,7 +355,7 @@ func (s *soakRuntimeSelector) nextSend() (soakSendTarget, string) {
 	roomID := s.rooms[s.picker.Next()]
 	targets := s.members[roomID]
 	target := targets[s.rng.Intn(len(targets))]
-	return target, soakContentOfSize(s.sizer.NextContentBytes())
+	return target, distribution.ContentOfSize(s.sizer.NextContentBytes())
 }
 
 type soakSendObservation struct {
@@ -769,7 +772,7 @@ func runSoakWorkload(
 		cfg.Soak.SoftDeleteRatio,
 		rand.New(rand.NewSource(seed+3)),
 	)
-	threadBudgets := newSoakThreadBudgetSampler(seed + 7)
+	threadBudgets := distribution.NewThreadBudgetSampler(seed + 7)
 	sender := newSoakSender(
 		soakSendConfig{
 			SiteID: cfg.SiteID, ThreadShare: cfg.Soak.ThreadShare,

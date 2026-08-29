@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
 )
 
 func newSoakSearchFixture(
@@ -189,7 +190,7 @@ func TestSoakSearchReader_IndexProbeRejectsIncompleteTargets(t *testing.T) {
 // whitespace, so the "term" is the whole body — which is why the observer is
 // refused at startup until payloads carry a per-message marker.
 func TestSearchProbeTerm_ReflectsTheRealPayloadShape(t *testing.T) {
-	body := soakContentOfSize(64)
+	body := distribution.ContentOfSize(64)
 
 	assert.Equal(t, body, searchProbeTerm(body),
 		"a body with no whitespace yields itself, not a distinguishing term")

@@ -1,4 +1,6 @@
-package main
+// Package distribution owns the deterministic probability models used to
+// choose soak rooms, payload sizes, and thread reply budgets.
+package distribution
 
 import (
 	"encoding/json"
@@ -11,41 +13,44 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 )
 
-// soakDefaultRoomZipfS and soakDefaultRoomZipfV reproduce the constants these
+// DefaultRoomZipfS and DefaultRoomZipfV reproduce the constants these
 // replaced, so a run that sets neither records the same distribution every
 // earlier percentile was measured against.
 const (
-	soakDefaultRoomZipfS = 1.2
-	soakDefaultRoomZipfV = 1.0
+	DefaultRoomZipfS = 1.2
+	DefaultRoomZipfV = 1.0
 )
 
 const (
-	soakGCMTagBytes           = 16
-	soakMaxClientContentBytes = 20 * 1024
-	soakThreadReplyP99        = 50
-	soakThreadReplyHardCap    = 500
-	soakThreadReplyMedian     = 5
-	normalP95                 = 1.6448536269514722
-	normalP99                 = 2.3263478740408408
+	gcmTagBytes           = 16
+	maxClientContentBytes = 20 * 1024
+	threadReplyP99        = 50
+	threadReplyMedian     = 5
+	normalP95             = 1.6448536269514722
+	normalP99             = 2.3263478740408408
 )
 
-var soakEncryptedContentOverhead = func() int {
+// ThreadReplyHardCap bounds both sampled and catalog-recovered thread sizes.
+const ThreadReplyHardCap = 500
+
+var encryptedContentOverhead = func() int {
 	serialized, err := json.Marshal(atrest.EncryptedFields{Msg: "x"})
 	if err != nil {
 		panic("marshal modeled encrypted fields: " + err.Error())
 	}
-	return len(serialized) - 1 + soakGCMTagBytes
+	return len(serialized) - 1 + gcmTagBytes
 }()
 
-type soakRoomPicker struct {
+// RoomPicker samples room indexes from a deterministic Zipf distribution.
+type RoomPicker struct {
 	zipf *rand.Zipf
 }
 
-// newSoakRoomPicker builds the room-popularity distribution: P(rank) is
+// NewRoomPicker builds the room-popularity distribution: P(rank) is
 // proportional to (v+rank)^-s, so s sets how steeply traffic concentrates and
 // v flattens the head. Raising v is the only way to model a site whose busiest
 // room is a few percent of the whole — math/rand cannot express s <= 1.
-func newSoakRoomPicker(seed int64, roomCount int, zipfS, zipfV float64) (*soakRoomPicker, error) {
+func NewRoomPicker(seed int64, roomCount int, zipfS, zipfV float64) (*RoomPicker, error) {
 	if roomCount <= 0 {
 		return nil, fmt.Errorf("room count must be greater than zero")
 	}
@@ -63,27 +68,31 @@ func newSoakRoomPicker(seed int64, roomCount int, zipfS, zipfV float64) (*soakRo
 	if zipf == nil {
 		return nil, fmt.Errorf("room Zipf generator rejected s=%v v=%v", zipfS, zipfV)
 	}
-	return &soakRoomPicker{zipf: zipf}, nil
+	return &RoomPicker{zipf: zipf}, nil
 }
 
-func (p *soakRoomPicker) Next() int {
+// Next returns the next sampled room index.
+func (p *RoomPicker) Next() int {
 	return int(p.zipf.Uint64())
 }
 
-type soakPayloadSizer struct {
+// PayloadSizer samples plaintext content sizes from the configured encrypted
+// payload percentiles.
+type PayloadSizer struct {
 	rng   *rand.Rand
 	mu    float64
 	sigma float64
 	max   int
 }
 
-func newSoakPayloadSizer(
+// NewPayloadSizer constructs a deterministic log-normal payload sampler.
+func NewPayloadSizer(
 	seed int64,
 	medianEncryptedBytes int,
 	p95EncryptedBytes int,
 	maxEncryptedBytes int,
-) (*soakPayloadSizer, error) {
-	if medianEncryptedBytes <= soakEncryptedContentOverhead {
+) (*PayloadSizer, error) {
+	if medianEncryptedBytes <= encryptedContentOverhead {
 		return nil, fmt.Errorf("encrypted payload median must exceed encryption overhead")
 	}
 	if p95EncryptedBytes < medianEncryptedBytes {
@@ -92,16 +101,16 @@ func newSoakPayloadSizer(
 	if maxEncryptedBytes < p95EncryptedBytes {
 		return nil, fmt.Errorf("encrypted payload maximum must be at least p95")
 	}
-	if maxEncryptedBytes-soakEncryptedContentOverhead > soakMaxClientContentBytes {
+	if maxEncryptedBytes-encryptedContentOverhead > maxClientContentBytes {
 		return nil, fmt.Errorf(
 			"encrypted payload maximum produces client content above the gatekeeper limit of %d bytes",
-			soakMaxClientContentBytes,
+			maxClientContentBytes,
 		)
 	}
 
 	mu := math.Log(float64(medianEncryptedBytes))
 	sigma := (math.Log(float64(p95EncryptedBytes)) - mu) / normalP95
-	return &soakPayloadSizer{
+	return &PayloadSizer{
 		rng:   rand.New(rand.NewSource(seed)),
 		mu:    mu,
 		sigma: sigma,
@@ -109,53 +118,59 @@ func newSoakPayloadSizer(
 	}, nil
 }
 
-func (s *soakPayloadSizer) NextContentBytes() int {
+// NextContentBytes returns a plaintext size whose modeled encrypted size
+// follows the configured distribution.
+func (s *PayloadSizer) NextContentBytes() int {
 	target := int(math.Round(math.Exp(s.mu + s.sigma*s.rng.NormFloat64())))
-	target = max(soakEncryptedContentOverhead+1, min(target, s.max))
-	return target - soakEncryptedContentOverhead
+	target = max(encryptedContentOverhead+1, min(target, s.max))
+	return target - encryptedContentOverhead
 }
 
 func modeledEncryptedPayloadBytes(contentBytes int) int {
 	if contentBytes <= 0 {
-		return soakGCMTagBytes + 2 // JSON "{}" when Msg is omitted.
+		return gcmTagBytes + 2 // JSON "{}" when Msg is omitted.
 	}
-	return contentBytes + soakEncryptedContentOverhead
+	return contentBytes + encryptedContentOverhead
 }
 
-func soakContentOfSize(size int) string {
+// ContentOfSize returns the deterministic body used by soak message sends.
+func ContentOfSize(size int) string {
 	return strings.Repeat("x", max(0, size))
 }
 
-type soakThreadBudgetSampler struct {
+// ThreadBudgetSampler samples the number of replies allowed for a thread.
+type ThreadBudgetSampler struct {
 	rng   *rand.Rand
 	mu    float64
 	sigma float64
 }
 
-func newSoakThreadBudgetSampler(seed int64) *soakThreadBudgetSampler {
-	mu := math.Log(soakThreadReplyMedian)
-	return &soakThreadBudgetSampler{
+// NewThreadBudgetSampler constructs a deterministic thread reply sampler.
+func NewThreadBudgetSampler(seed int64) *ThreadBudgetSampler {
+	mu := math.Log(threadReplyMedian)
+	return &ThreadBudgetSampler{
 		rng:   rand.New(rand.NewSource(seed)),
 		mu:    mu,
-		sigma: (math.Log(soakThreadReplyP99) - mu) / normalP99,
+		sigma: (math.Log(threadReplyP99) - mu) / normalP99,
 	}
 }
 
-func (s *soakThreadBudgetSampler) Next() int {
+// Next returns the sampled thread reply budget.
+func (s *ThreadBudgetSampler) Next() int {
 	budget := int(math.Round(math.Exp(s.mu + s.sigma*s.rng.NormFloat64())))
-	return max(1, min(budget, soakThreadReplyHardCap))
+	return max(1, min(budget, ThreadReplyHardCap))
 }
 
-type soakThreadBudget struct {
+type threadBudget struct {
 	limit int64
 	used  atomic.Int64
 }
 
-func newSoakThreadBudget(limit int) *soakThreadBudget {
-	return &soakThreadBudget{limit: int64(max(1, min(limit, soakThreadReplyHardCap)))}
+func newThreadBudget(limit int) *threadBudget {
+	return &threadBudget{limit: int64(max(1, min(limit, ThreadReplyHardCap)))}
 }
 
-func (b *soakThreadBudget) TryConsume() bool {
+func (b *threadBudget) TryConsume() bool {
 	for {
 		used := b.used.Load()
 		if used >= b.limit {
@@ -167,10 +182,10 @@ func (b *soakThreadBudget) TryConsume() bool {
 	}
 }
 
-func (b *soakThreadBudget) Limit() int {
+func (b *threadBudget) Limit() int {
 	return int(b.limit)
 }
 
-func (b *soakThreadBudget) Used() int {
+func (b *threadBudget) Used() int {
 	return int(b.used.Load())
 }
