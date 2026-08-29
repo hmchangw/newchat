@@ -968,6 +968,7 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 	}
 	for _, kind := range []string{"missing", "unexpected", "duplicate", "mismatch"} {
 		path := filepath.Join(o.evidenceDir, ".recipient-"+kind+".raw.jsonl")
+		// #nosec G304 -- evidenceDir is the operator-set SOAK_LEDGER_DIR; the filename comes from a fixed literal kind list, so no request data reaches the path.
 		file, err := os.Open(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -1267,6 +1268,7 @@ func (j *fileFailureRecipientEvidenceJournal) AppendBatch(records []failureRecip
 		} else if err != nil {
 			return fmt.Errorf("stat recipient evidence journal: %w", err)
 		}
+		// #nosec G304 -- j.directory is the operator-set SOAK_LEDGER_DIR, and knownRecipientEvidenceKind rejects any kind outside seven literals before this runs.
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return fmt.Errorf("open recipient evidence journal: %w", err)
