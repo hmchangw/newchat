@@ -83,3 +83,31 @@ func TestHandleMessage_StoreErrorIsTransient(t *testing.T) {
 	var perm *errcode.PermanentError
 	assert.False(t, errors.As(err, &perm), "store failures must Nak-retry, not Ack-drop")
 }
+
+// The errcode message must be a fixed string, never derived from the parse
+// error: the decoder's text is attacker-shaped and unbounded, and this message
+// reaches the server log on every poison drop.
+func TestHandler_HandleMessage_MalformedPayload_MessageIsConstant(t *testing.T) {
+	for _, subj := range []string{
+		"chat.hr.site-a.employees.upsert",
+		"chat.hr.site-a.users.upsert",
+		"chat.hr.site-a.employees.quit",
+	} {
+		t.Run(subj, func(t *testing.T) {
+			h := NewHandler(NewMockStore(gomock.NewController(t)))
+
+			// Two payloads that fail differently: a bad literal names the offending
+			// character, a type mismatch names a Go struct field.
+			err1 := h.HandleMessage(context.Background(), subj, []byte(`[{"account":"a","x":SECRET}]`))
+			err2 := h.HandleMessage(context.Background(), subj, []byte(`"not-an-array-SECRET"`))
+
+			require.Error(t, err1)
+			require.Error(t, err2)
+			assert.Equal(t, err1.Error(), err2.Error(), "the message must not vary with the decoder's error")
+			assert.NotContains(t, err1.Error(), "SECRET")
+			assert.NotContains(t, err2.Error(), "SECRET")
+			_, perm := errcode.IsPermanent(err1)
+			assert.True(t, perm, "a malformed payload stays permanent")
+		})
+	}
+}
