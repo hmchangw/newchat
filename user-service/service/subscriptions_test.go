@@ -1505,74 +1505,8 @@ func TestListSubscriptions_LocalUnread_PrefersLastUserMsgAt(t *testing.T) {
 		"the wire carries ONE activity timestamp: lastMsgAt is the coalesced user-activity value, not the raw ceiling")
 }
 
-// A bot's row in its DM with a person is stored dm, so it renders as an ordinary
-// chat with the counterpart's hrInfo and no app object.
-func TestBuildListItems_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
-	svc, _, users, _ := newThreadSvc(t)
-	users.EXPECT().
-		GetHRInfoByAccounts(gomock.Any(), []string{"alice"}).
-		Return(map[string]*model.SubscriptionHRInfo{
-			"alice": {Account: "alice", Name: "愛麗絲", EngName: "Alice"},
-		}, nil)
-
-	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{
-		ID: "s1", RoomType: model.RoomTypeDM, Name: "alice",
-	}}}
-
-	items := svc.buildListItems(context.Background(), "weather.bot", subs)
-
-	require.Len(t, items, 1)
-	dm, ok := items[0].(*model.DMSubscription)
-	require.True(t, ok, "a botDM facing a human must render as a DMSubscription")
-	assert.Equal(t, model.RoomTypeDM, dm.Base().RoomType, "the wire type must be dm")
-	assert.Equal(t, "alice", dm.Base().Name, "the counterpart account is the display name")
-	require.NotNil(t, dm.HRInfo)
-	assert.Equal(t, "Alice", dm.HRInfo.EngName)
-}
-
-// A user's DM with p_admin is stored dm and renders as an ordinary DM.
-func TestBuildListItems_PlatformAdminCounterpartRendersAsDM(t *testing.T) {
-	svc, _, users, _ := newThreadSvc(t)
-	users.EXPECT().
-		GetHRInfoByAccounts(gomock.Any(), []string{"p_admin_ops"}).
-		Return(map[string]*model.SubscriptionHRInfo{}, nil)
-
-	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{
-		ID: "s1", RoomType: model.RoomTypeDM, Name: "p_admin_ops",
-	}}}
-
-	items := svc.buildListItems(context.Background(), "alice", subs)
-
-	require.Len(t, items, 1)
-	dm, ok := items[0].(*model.DMSubscription)
-	require.True(t, ok)
-	assert.Equal(t, model.RoomTypeDM, dm.Base().RoomType)
-	assert.Nil(t, dm.HRInfo, "a missing HR record degrades to no hrInfo, never an error")
-}
-
-// A real app keeps its app object, its name swap and its botDM type.
-func TestBuildListItems_BotCounterpartStaysAppRoom(t *testing.T) {
-	svc, _, _, apps := newThreadSvc(t)
-	apps.EXPECT().
-		GetAppsByAssistants(gomock.Any(), []string{"weather.bot"}).
-		Return(map[string]*model.App{"weather.bot": {ID: "a1", Name: "Weather"}}, nil)
-
-	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{
-		ID: "s1", RoomType: model.RoomTypeBotDM, Name: "weather.bot",
-	}}}
-
-	items := svc.buildListItems(context.Background(), "alice", subs)
-
-	require.Len(t, items, 1)
-	bot, ok := items[0].(*model.BotDMSubscription)
-	require.True(t, ok, "a botDM facing a .bot app must stay a BotDMSubscription")
-	assert.Equal(t, model.RoomTypeBotDM, bot.Base().RoomType)
-	assert.Equal(t, "Weather", bot.Base().Name, "the app display name still replaces the bot account")
-	require.NotNil(t, bot.App)
-}
-
-// distinctListNames runs after buildListItems normalizes RoomType, so it reads
-// the effective type directly — the rows below are shaped as it receives them.
+// Rows carry the type their own subscriber sees, so the split reads RoomType
+// directly.
 func TestDistinctListNames_SplitsAppRoomsFromDMs(t *testing.T) {
 	subs := []model.EnrichedSubscription{
 		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "weather.bot"}},

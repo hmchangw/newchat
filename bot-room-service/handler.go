@@ -295,6 +295,11 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	if err != nil {
 		return nil, err
 	}
+	// A DM is exactly two participants; mirrors room-service's channel-only guard.
+	if room.Type != roomTypeChannel {
+		return nil, errcode.BadRequest("cannot add members to a non-channel room",
+			errcode.WithReason(errcode.RoomNonChannelOperation))
+	}
 
 	created := h.now()
 	added := []string{}
@@ -311,7 +316,7 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		newlyAdded, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: u.ID, Account: u.Account,
 			SiteID: u.SiteID, CreatedAt: created,
-			Name: room.Name, RoomType: roomTypeToModel(room.Type),
+			Name: room.Name, RoomType: model.RoomTypeChannel,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("upsert subscription: %w", err)

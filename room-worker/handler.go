@@ -980,7 +980,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		user := userMap[c.Account]
 		// newSub stamps u.isBot from the account; room is the channel fetched by
 		// req.RoomID so RoomType/SiteID/Name/ID all match the prior inline build.
-		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Type, room.Name, false, acceptedAt)
+		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
 		// Pre-resolved above the candidate debug log; shared pointer is safe —
 		// nothing mutates through it after this point.
 		sub.HistorySharedSince = historySharedSinceAt
@@ -1370,10 +1370,10 @@ func preRead(sub *model.Subscription, t time.Time) *model.Subscription {
 // member sub per invited user, in the order given.
 func buildChannelSubs(requester *model.User, users []model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
 	subs := make([]*model.Subscription, 0, len(users)+1)
-	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Type, room.Name, false, acceptedAt), acceptedAt))
+	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Name, false, acceptedAt), acceptedAt))
 	for i := range users {
 		u := &users[i]
-		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Type, room.Name, false, acceptedAt))
+		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt))
 	}
 	return subs
 }
@@ -1382,19 +1382,21 @@ func buildChannelSubs(requester *model.User, users []model.User, room *model.Roo
 // and stores the type that counterpart implies; only a row facing a real app is
 // soft-unsubscribable.
 func buildDMPairSubs(requester, other *model.User, room *model.Room, acceptedAt time.Time) []*model.Subscription {
-	reqType := model.SubscriptionRoomType(other.Account)
-	otherType := model.SubscriptionRoomType(requester.Account)
+	row := func(u *model.User, counterpart string) *model.Subscription {
+		s := newSub(idgen.GenerateUUIDv7(), u, room, nil, counterpart, false, acceptedAt)
+		s.RoomType = model.SubscriptionRoomType(counterpart)
+		s.IsSubscribed = model.SubscriptionIsSubscribed(s.RoomType)
+		return s
+	}
 	return []*model.Subscription{
-		preRead(newSub(idgen.GenerateUUIDv7(), requester, room, nil, reqType,
-			other.Account, reqType == model.RoomTypeBotDM, acceptedAt), acceptedAt),
-		newSub(idgen.GenerateUUIDv7(), other, room, nil, otherType,
-			requester.Account, otherType == model.RoomTypeBotDM, acceptedAt),
+		preRead(row(requester, other.Account), acceptedAt),
+		row(other, requester.Account),
 	}
 }
 
 // buildSelfDMSub builds the sole self-DM subscription: subscribed, self-named, favorited.
 func buildSelfDMSub(user *model.User, room *model.Room, joinedAt time.Time) *model.Subscription {
-	sub := preRead(newSub(idgen.GenerateUUIDv7(), user, room, nil, room.Type, user.Account, true, joinedAt), joinedAt)
+	sub := preRead(newSub(idgen.GenerateUUIDv7(), user, room, nil, user.Account, true, joinedAt), joinedAt)
 	sub.Favorite = true
 	return sub
 }
@@ -1485,10 +1487,10 @@ func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) 
 	return sr
 }
 
-// newSub constructs a Subscription. roomType is the room as THIS subscriber sees
-// it, which on a bot<->human DM differs from the room document's type.
+// newSub constructs a Subscription carrying the room's own type. A DM pair
+// overrides RoomType per row — see buildDMPairSubs.
 func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
-	roomType model.RoomType, name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
+	name string, isSubscribed bool, joinedAt time.Time) *model.Subscription {
 	return &model.Subscription{
 		ID:           id,
 		User:         model.SubscriptionUser{ID: user.ID, Account: user.Account, IsBot: model.IsBot(user.Account) || model.IsPlatformAdminAccount(user.Account)},
@@ -1496,7 +1498,7 @@ func newSub(id string, user *model.User, room *model.Room, roles []model.Role,
 		SiteID:       room.SiteID,
 		Roles:        roles,
 		Name:         name,
-		RoomType:     roomType,
+		RoomType:     room.Type,
 		IsSubscribed: isSubscribed,
 		JoinedAt:     joinedAt,
 		Open:         true,
@@ -1538,7 +1540,7 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 		return fmt.Errorf("get requester: %w", err)
 	}
 
-	roomType := determineRoomTypeFromPayload(&req)
+	roomType := model.CreateRoomType(&req)
 	acceptedAt := time.UnixMilli(req.Timestamp).UTC()
 	now := time.Now().UTC()
 	// debug: the classified room type that drives the create path below.
@@ -1681,15 +1683,6 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
-}
-
-// determineRoomTypeFromPayload mirrors room-service's determineRoomType: a DM is
-// a botDM when either participant is a ".bot" app.
-func determineRoomTypeFromPayload(req *model.CreateRoomRequest) model.RoomType {
-	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		return model.DMRoomType(req.RequesterAccount, req.Users[0])
-	}
-	return model.RoomTypeChannel
 }
 
 func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, pair *roomkeystore.VersionedKeyPair, requestID string, acceptedAt, now time.Time) error {
@@ -2198,9 +2191,8 @@ func (h *Handler) publishSubscriptionAdded(ctx context.Context, subs []*model.Su
 	for _, sub := range subs {
 		subCopy := *sub
 		subCopy.Room = subRoom
-		// The recipient files this row by roomType, so report the type as THEY see
-		// it: a botDM facing a human or p_admin is an ordinary DM. Matches what
-		// subscription.list returns, so the realtime row and a later refetch agree.
+		// Rows are written per subscriber, so this is an identity on well-formed
+		// data; it corrects a corrupt row before the client files it.
 		subCopy.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
 		roomName, hrInfo, appInfo := h.resolveSubUpdateCounterpart(ctx, sub, userByAccount)
 		evt := model.SubscriptionUpdateEvent{

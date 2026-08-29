@@ -18,9 +18,6 @@ import (
 // sub builds a subscriptions doc keyed by (account, roomId) with the given type.
 // name is the per-subscriber display name — the counterpart account on dm/botDM
 // rows, the room name on channels — mirroring what room-worker's newSub persists.
-// It is load-bearing on botDM rows: the join gate reads it to tell an app room (a
-// ".bot" counterpart) from an ordinary DM stored as botDM, so a nameless botDM
-// fixture would exercise a row shape production never writes.
 func sub(id, account, roomID, name string, roomType model.RoomType, subscribed bool) interface{} {
 	return model.Subscription{
 		ID: id, RoomID: roomID, Name: name, RoomType: roomType, IsSubscribed: subscribed,

@@ -22,9 +22,7 @@ import (
 // `omitempty` would drop a false isSubscribed — and explicit false is exactly the
 // production state under test.
 //
-// name is load-bearing: the membership gate keys on it to tell an app room (a
-// ".bot" counterpart) from an ordinary DM stored as botDM, so a nameless fixture
-// would exercise a shape production never writes.
+// name is the counterpart account, as production writes it.
 func insertBotDMSubscription(t *testing.T, db *mongo.Database, account, roomID, name string, subscribed bool) {
 	t.Helper()
 	_, err := db.Collection("subscriptions").InsertOne(context.Background(), bson.M{

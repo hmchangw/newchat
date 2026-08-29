@@ -244,23 +244,18 @@ type BadgeCountBatchResponse struct {
 	Counts map[string]int `json:"counts"`
 }
 
-// IsAppRoom reports whether a room of type t whose counterpart account is name
-// is an app room — a botDM facing a real ".bot" app. A botDM facing anything
-// else (a human, or the p_admin platform-admin pseudo-account) is an ordinary
-// DM from the subscriber's point of view: the bot's own side of a bot↔human DM,
-// and every side of a p_admin DM. Only app rooms keep the isSubscribed gate
-// that hides an app the user unsubscribed from.
+// IsAppRoom reports whether a row of type t facing counterpart name is an app
+// room — a botDM facing a real ".bot" app.
 func IsAppRoom(t RoomType, name string) bool {
 	return t == RoomTypeBotDM && IsBot(name)
 }
 
-// EffectiveRoomType is the room type a subscription is presented to its own
-// subscriber as. A botDM that is not an app room renders as dm; every other
-// type is returned unchanged. name is the subscription's per-subscriber display
-// name, which holds the counterpart account for dm and botDM rows.
+// EffectiveRoomType re-derives a row's type from its counterpart. Rows are
+// written per subscriber, so this is an identity on well-formed data; it exists
+// to correct a corrupt row at the publish boundary.
 func EffectiveRoomType(t RoomType, name string) RoomType {
-	if t == RoomTypeBotDM && !IsAppRoom(t, name) {
-		return RoomTypeDM
+	if t == RoomTypeBotDM {
+		return SubscriptionRoomType(name)
 	}
 	return t
 }
@@ -281,4 +276,26 @@ func SubscriptionRoomType(counterpart string) RoomType {
 		return RoomTypeBotDM
 	}
 	return RoomTypeDM
+}
+
+// SubscriptionRowType is SubscriptionRoomType for DM rows; a channel row keeps
+// the room's type.
+func SubscriptionRowType(roomType RoomType, counterpart string) RoomType {
+	if roomType == RoomTypeDM || roomType == RoomTypeBotDM {
+		return SubscriptionRoomType(counterpart)
+	}
+	return roomType
+}
+
+// SubscriptionIsSubscribed reports whether a row is soft-unsubscribable. Only a
+// row facing a real app is; the flag is what an app unsubscribe clears.
+func SubscriptionIsSubscribed(rowType RoomType) bool { return rowType == RoomTypeBotDM }
+
+// CreateRoomType classifies a create-room request: a single counterpart with no
+// name is a DM, and a botDM when either participant is a ".bot" app.
+func CreateRoomType(req *CreateRoomRequest) RoomType {
+	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
+		return DMRoomType(req.RequesterAccount, req.Users[0])
+	}
+	return RoomTypeChannel
 }

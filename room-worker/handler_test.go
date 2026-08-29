@@ -2797,7 +2797,7 @@ func TestResolveRoomName(t *testing.T) {
 	}
 }
 
-func TestDetermineRoomTypeFromPayload(t *testing.T) {
+func TestCreateRoomType(t *testing.T) {
 	tests := map[string]struct {
 		req  model.CreateRoomRequest
 		want model.RoomType
@@ -2806,13 +2806,14 @@ func TestDetermineRoomTypeFromPayload(t *testing.T) {
 		"single .bot user → botDM": {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
 		// p_admin is human-operated and has no app document; mirrors room-service.
 		"single platform-admin pseudo-account → regular DM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeDM},
+		"bot requester with a human counterpart → botDM":    {model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}}, model.RoomTypeBotDM},
 		"single QA p_ user → regular DM":                    {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
 		"named → channel":                                   {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
 		"multi-user → channel":                              {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, determineRoomTypeFromPayload(&tc.req))
+			assert.Equal(t, tc.want, model.CreateRoomType(&tc.req))
 		})
 	}
 }
@@ -2822,7 +2823,7 @@ func TestNewSubSetsAllFields(t *testing.T) {
 	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeChannel}
 	now := time.Date(2026, 4, 28, 0, 0, 0, 0, time.UTC)
 
-	sub := newSub("s1", user, room, []model.Role{model.RoleOwner}, room.Type,
+	sub := newSub("s1", user, room, []model.Role{model.RoleOwner},
 		"deal team", false, now)
 
 	assert.Equal(t, "s1", sub.ID)
@@ -2840,7 +2841,7 @@ func TestNewSubSetsAllFields(t *testing.T) {
 func TestNewSub_OpenTrue(t *testing.T) {
 	user := &model.User{ID: "u_alice", Account: "alice"}
 	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeChannel}
-	sub := newSub("s1", user, room, nil, room.Type, "general", false, time.Now())
+	sub := newSub("s1", user, room, nil, "general", false, time.Now())
 	assert.True(t, sub.Open, "new subscriptions must be born open")
 }
 
@@ -7693,10 +7694,12 @@ func TestBuildDMPairSubs_IsSubscribed(t *testing.T) {
 
 	assert.True(t, subs[0].IsSubscribed, "alice faces an app")
 	assert.False(t, subs[1].IsSubscribed, "the bot faces a person")
-}
 
-func TestDetermineRoomTypeFromPayload_BotRequesterYieldsBotDM(t *testing.T) {
-	req := model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}}
-	assert.Equal(t, model.RoomTypeBotDM, determineRoomTypeFromPayload(&req),
-		"either participant being a bot makes the ROOM a botDM")
+	// A bot<->bot pair: both rows face an app, so both are subscribed. A botDM
+	// row with isSubscribed=false matches no list bucket at all.
+	botPair := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_s", Account: "sales.bot"}, room, time.Now().UTC())
+	assert.True(t, botPair[0].IsSubscribed)
+	assert.True(t, botPair[1].IsSubscribed)
 }

@@ -1876,15 +1876,12 @@ func TestSubscriptionName(t *testing.T) {
 	assert.Equal(t, "", subscriptionName(model.RoomType(""), "ignored", "alice"))
 }
 
+// The flag now follows the row's own type: a row facing an app is subscribable,
+// whoever holds it. A botDM row with isSubscribed=false matches no list bucket.
 func TestSubscriptionIsSubscribed(t *testing.T) {
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeChannel, &model.User{Account: "bob"}))
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeDM, &model.User{Account: "bob"}))
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "weather.bot"}))
-	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "alice"}))
-	// Platform-admin pseudo-account stays bot-like (no client): not subscribed.
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_adminsiteA"}))
-	// QA p_ account is an ordinary user: it holds a real subscription.
-	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_webhook"}))
+	assert.False(t, model.SubscriptionIsSubscribed(model.RoomTypeChannel))
+	assert.False(t, model.SubscriptionIsSubscribed(model.RoomTypeDM))
+	assert.True(t, model.SubscriptionIsSubscribed(model.RoomTypeBotDM))
 }
 
 func TestHandleMemberAdded_DM_BuildsRecipientSubWithCounterpartName(t *testing.T) {
@@ -3255,16 +3252,7 @@ func TestSubscriptionRowType(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			name := subscriptionName(tt.roomType, tt.roomName, tt.requester)
-			assert.Equal(t, tt.want, subscriptionRowType(tt.roomType, name))
+			assert.Equal(t, tt.want, model.SubscriptionRowType(tt.roomType, name))
 		})
 	}
-}
-
-// The flag is written from the row's own type, so a human facing an app is
-// subscribed and a bot facing a person is not.
-func TestSubscriptionIsSubscribed_UsesRowType(t *testing.T) {
-	human := model.User{Account: "alice"}
-	bot := model.User{Account: "weather.bot"}
-	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &human))
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeDM, &bot))
 }

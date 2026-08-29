@@ -171,20 +171,6 @@ func dedup(items []string) []string {
 	return result
 }
 
-// determineRoomType classifies a post-strip request; caller must guarantee
-// non-empty input. A DM is a botDM when either participant is a ".bot" app;
-// p_admin and QA "p_" accounts are ordinary DM partners.
-func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
-	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		return model.DMRoomType(req.RequesterAccount, req.Users[0])
-	}
-	return model.RoomTypeChannel
-}
-
-// skipAppGate reports whether the bot-availability check should be bypassed: a
-// bot initiating a DM has no app to validate on the counterpart side.
-func skipAppGate(requesterAccount string) bool { return model.IsBot(requesterAccount) }
-
 // contextWithMemberListTimeout returns a derived context bounded by the
 // configured per-ref member-list timeout. When the configured timeout is
 // non-positive, the parent ctx is returned unchanged with a no-op cancel.

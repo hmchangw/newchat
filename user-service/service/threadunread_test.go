@@ -292,16 +292,15 @@ func TestClearAllThreadUnread_ListError(t *testing.T) {
 }
 
 // Rows store the room as their own subscriber sees it, so the DM tally reads the
-// stored type directly: a bot's DM with a person is written dm and counts.
+// stored type directly — a bot's DM with a person is written dm and counts.
 func TestGetThreadUnreadSummary_CountsPerSubscriberDMs(t *testing.T) {
 	tests := []struct {
 		name     string
 		roomType model.RoomType
 		wantDM   bool
 	}{
-		{"bot's own DM with a person is stored dm", model.RoomTypeDM, true},
-		{"a p_admin DM is stored dm", model.RoomTypeDM, true},
-		{"a real app room stays botDM", model.RoomTypeBotDM, false},
+		{"a dm row counts", model.RoomTypeDM, true},
+		{"an app room does not", model.RoomTypeBotDM, false},
 		{"a channel is not a direct message", model.RoomTypeChannel, false},
 	}
 	for _, tt := range tests {

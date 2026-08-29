@@ -212,7 +212,7 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 		}
 	}
 
-	roomType := determineRoomType(req)
+	roomType := model.CreateRoomType(req)
 
 	if roomType == model.RoomTypeChannel {
 		if strings.TrimSpace(req.Name) == "" {
@@ -291,7 +291,8 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		return nil, fmt.Errorf("dm dedup check: %w", err)
 	}
 
-	if roomType == model.RoomTypeBotDM && !skipAppGate(requester.Account) {
+	// A bot initiating a DM has no app to validate on the counterpart side.
+	if roomType == model.RoomTypeBotDM && !model.IsBot(requester.Account) {
 		app, err := h.store.GetApp(ctx, other.Account)
 		if err != nil {
 			if errors.Is(err, ErrAppNotFound) {
@@ -827,19 +828,17 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 // refetch. Returns the marshaled event so callers can reuse it (e.g. as a
 // cross-site inbox payload).
 func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action string, sub *model.Subscription, roomName string, ts time.Time) ([]byte, error) {
-	// The recipient files this row by roomType, so report the type as THEY see
-	// it — a botDM facing a human or p_admin is an ordinary DM. Stamped here
-	// rather than per action so mute/favorite/open/read/section_moved cannot
-	// disagree with what subscription.list returns for the same row.
-	subCopy := *sub
-	subCopy.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
+	// Rows are written per subscriber, so this is an identity on well-formed
+	// data; it corrects a corrupt row before the client files it. Stamped here
+	// rather than per action so no caller can forget.
 	subEvt := model.SubscriptionUpdateEvent{
 		UserID:       sub.User.ID,
-		Subscription: subCopy,
+		Subscription: *sub,
 		Action:       action,
 		RoomName:     roomName,
 		Timestamp:    ts.UnixMilli(),
 	}
+	subEvt.Subscription.RoomType = model.EffectiveRoomType(sub.RoomType, sub.Name)
 	data, err := json.Marshal(subEvt)
 	if err != nil {
 		return nil, fmt.Errorf("marshal subscription update event: %w", err)

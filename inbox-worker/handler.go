@@ -295,7 +295,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			continue
 		}
 		name := subscriptionName(roomType, event.RoomName, event.RequesterAccount)
-		subType := subscriptionRowType(roomType, name)
+		subType := model.SubscriptionRowType(roomType, name)
 		sub := &model.Subscription{
 			ID:                 idgen.GenerateUUIDv7(),
 			User:               model.SubscriptionUser{ID: user.ID, Account: user.Account},
@@ -304,7 +304,7 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			SiteID:             event.SiteID,
 			Roles:              rolesForType(roomType),
 			Name:               name,
-			IsSubscribed:       subscriptionIsSubscribed(subType, &user),
+			IsSubscribed:       model.SubscriptionIsSubscribed(subType),
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,
@@ -728,27 +728,4 @@ func subscriptionName(roomType model.RoomType, roomName, requesterAccount string
 		return requesterAccount
 	}
 	return ""
-}
-
-// subscriptionRowType is the room as this row's own subscriber sees it. Only DMs
-// are asymmetric; a channel row keeps the room's type.
-func subscriptionRowType(roomType model.RoomType, name string) model.RoomType {
-	if roomType == model.RoomTypeDM || roomType == model.RoomTypeBotDM {
-		return model.SubscriptionRoomType(name)
-	}
-	return roomType
-}
-
-// isBot reports whether account is bot-like — a real ".bot" bot or the
-// "p_admin" platform-admin pseudo-account — via the model taxonomy. Plain
-// "p_" QA test accounts are ordinary users and return false.
-func isBot(account string) bool {
-	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
-}
-
-func subscriptionIsSubscribed(roomType model.RoomType, u *model.User) bool {
-	if roomType != model.RoomTypeBotDM {
-		return false
-	}
-	return !isBot(u.Account)
 }

@@ -197,7 +197,7 @@ func TestIsURLSafeIDToken(t *testing.T) {
 	}
 }
 
-func TestDetermineRoomType(t *testing.T) {
+func TestCreateRoomType(t *testing.T) {
 	tests := []struct {
 		name string
 		req  model.CreateRoomRequest
@@ -263,7 +263,7 @@ func TestDetermineRoomType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineRoomType(&tt.req)
+			got := model.CreateRoomType(&tt.req)
 			assert.Equal(t, tt.want, got)
 		})
 	}

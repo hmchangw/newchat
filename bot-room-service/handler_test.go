@@ -851,3 +851,20 @@ func TestHandleCreate_WritesRoomTypeAndName(t *testing.T) {
 		assert.Equal(t, "deal team", s.Name, "%s: channel rows carry the room name", s.Account)
 	}
 }
+
+// A DM has exactly two participants, so member.add on one is incoherent — and
+// it used to write a row with the room's type and no name, matching no bucket.
+func TestHandleAdd_RejectsNonChannelRoom(t *testing.T) {
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: roomTypeDM, SiteID: "site-a",
+				CreatedByBot: "bot-1",
+				Owner:        &Participant{UserID: "bot-1", Account: "myapp.bot", IsBot: true}}, nil
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutboxPayload{}).publish, testKeyStore, testKeySender)
+
+	_, err := h.handleAdd(withIdentity(t, "r1", ident()), BotMembersBatchRequest{UserIDs: []string{"alice-id"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "channel")
+}
