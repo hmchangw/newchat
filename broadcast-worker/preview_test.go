@@ -256,12 +256,13 @@ func TestLastMessageUpdate_PlainSetWhenPreviewsOff(t *testing.T) {
 	m := &mongoStore{previews: false}
 	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
-	got := m.lastMessageUpdate(&roomLastMsgUpdate{msgID: "m-1", at: at})
+	got := m.lastMessageUpdate(&roomLastMsgUpdate{msgID: "m-1", at: at, userAt: at, userMsgID: "m-1"})
 
 	set, ok := got.(bson.M)
 	require.True(t, ok, "with previews off the update must stay the plain $set it has always been")
 	fields := set["$set"].(bson.M)
 	assert.Equal(t, "m-1", fields["lastMsgId"])
+	assert.Equal(t, at, fields["lastUserMsgAt"])
 	assert.NotContains(t, fields, "previewForMsgId")
 }
 
@@ -409,17 +410,22 @@ func TestAsBuffered_CarriesEveryFieldToTheDirectPath(t *testing.T) {
 		{
 			name: "a sealed preview with mention-all",
 			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-1", At: at, MentionAll: true, Preview: sealed},
-			want: roomLastMsgUpdate{msgID: "m-1", at: at, lastMentionAllAt: at, pvw: sealed, pvwAt: at},
+			want: roomLastMsgUpdate{msgID: "m-1", at: at, lastMentionAllAt: at, pvw: sealed, pvwAt: at, userAt: at, userMsgID: "m-1"},
 		},
 		{
 			name: "a seal failure",
 			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-2", At: at, PreviewFailed: true},
-			want: roomLastMsgUpdate{msgID: "m-2", at: at, pvwFailed: true, pvwAt: at},
+			want: roomLastMsgUpdate{msgID: "m-2", at: at, pvwFailed: true, pvwAt: at, userAt: at, userMsgID: "m-2"},
 		},
 		{
 			name: "an ineligible message",
 			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-sys", At: at},
-			want: roomLastMsgUpdate{msgID: "m-sys", at: at, pvwAt: at},
+			want: roomLastMsgUpdate{msgID: "m-sys", at: at, pvwAt: at, userAt: at, userMsgID: "m-sys"},
+		},
+		{
+			name: "a system message",
+			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-sys2", At: at, SystemMsg: true},
+			want: roomLastMsgUpdate{msgID: "m-sys2", at: at, pvwAt: at},
 		},
 	}
 	for _, tc := range tests {

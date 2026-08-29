@@ -1,0 +1,31 @@
+.updates-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-xl);
+  max-width: 40rem;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.updates-page-hint {
+  color: var(--text-muted);
+}
+
+.updates-page-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.updates-page-submit {
+  align-self: flex-start;
+}
+
+.updates-page-ok {
+  color: var(--status-success);
+}
+
+.updates-page-error {
+  color: var(--status-error);
+}

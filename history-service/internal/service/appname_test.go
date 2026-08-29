@@ -15,7 +15,7 @@ import (
 func newAppNameService(t *testing.T, apps AppStore) *HistoryService {
 	t.Helper()
 	ctrl := gomock.NewController(t)
-	return New(
+	return closeOnCleanupIn(t, New(
 		mocks.NewMockMessageRepository(ctrl),
 		mocks.NewMockSubscriptionRepository(ctrl),
 		mocks.NewMockRoomRepository(ctrl),
@@ -25,7 +25,7 @@ func newAppNameService(t *testing.T, apps AppStore) *HistoryService {
 		mocks.NewMockUserStore(ctrl),
 		apps,
 		&config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10},
-	)
+	))
 }
 
 // A bot's app name is stable, but a busy room renders the same bot on every reaction.

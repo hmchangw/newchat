@@ -8,6 +8,7 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -93,6 +94,49 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
+func TestConfig_MentionableLimits(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("defaults", func(t *testing.T) {
+		// Unset both and restore the caller's env after the subtest so later
+		// tests don't observe defaults instead of their configured values.
+		for _, k := range []string{"MENTIONABLE_DEFAULT_LIMIT", "MENTIONABLE_MAX_LIMIT"} {
+			if v, ok := os.LookupEnv(k); ok {
+				t.Cleanup(func() { _ = os.Setenv(k, v) })
+			} else {
+				t.Cleanup(func() { _ = os.Unsetenv(k) })
+			}
+			require.NoError(t, os.Unsetenv(k))
+		}
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 3, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 50, cfg.MentionableMaxLimit)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "10")
+		t.Setenv("MENTIONABLE_MAX_LIMIT", "200")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 10, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 200, cfg.MentionableMaxLimit)
+	})
+
+	// The startup guard (fail-fast in main via validateMentionableLimits) is what
+	// rejects bad values — env parsing itself accepts them. Exercise the guard
+	// directly so this test fails if it is removed or inverted.
+	t.Run("validateMentionableLimits", func(t *testing.T) {
+		require.NoError(t, validateMentionableLimits(3, 50))
+		require.NoError(t, validateMentionableLimits(50, 50)) // default == max is allowed
+		assert.Error(t, validateMentionableLimits(0, 50))     // default not positive
+		assert.Error(t, validateMentionableLimits(-1, 50))
+		assert.Error(t, validateMentionableLimits(3, 0))    // max not positive
+		assert.Error(t, validateMentionableLimits(100, 50)) // default exceeds max
+	})
+}
+
 func TestConfig_BadgeCacheTTL(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
@@ -176,4 +220,50 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 			assert.Equal(t, tc.want, mode)
 		})
 	}
+}
+
+// The plain collection handles are created without collection options, so they
+// inherit the CLIENT preference. Only 12 of MongoStore's methods use a
+// *Secondary handle; every other read fails during a primary-down incident
+// unless the client itself falls back.
+func TestConfig_ClientReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_CLIENT_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	t.Setenv("MONGO_READ_PREFERENCE", "")
+	require.NoError(t, os.Unsetenv("MONGO_CLIENT_READ_PREFERENCE"))
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	// The per-collection override keeps its vetted staleness-tolerant setting...
+	assert.Equal(t, "secondaryPreferred", cfg.MongoReadPreference)
+	// ...while every handle without an override now falls back instead of failing.
+	assert.Equal(t, "primaryPreferred", cfg.MongoClientReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// broadcast-worker encrypts against its own room-key handle while key.get is
+// served from here. If the two disagree about falling back, the producer keeps
+// delivering messages whose keys the consumer cannot fetch. Both read
+// MONGO_KEY_READ_PREFERENCE and must default the same way.
+func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

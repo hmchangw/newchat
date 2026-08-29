@@ -94,7 +94,7 @@ func TestHandleUploadFile_StreamsLargeFileWithoutBuffering(t *testing.T) {
 
 	var status string
 	peak := testutil.PeakHeapDuring(func() {
-		resp := postStreamed(t, url, "big.mp4", "video/mp4", &testutil.ZeroReader{N: fileSize})
+		resp := postStreamed(t, url, "big.mp4", "application/octet-stream", &testutil.ZeroReader{N: fileSize})
 		status = resp.Status
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()

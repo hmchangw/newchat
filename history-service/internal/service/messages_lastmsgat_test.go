@@ -30,7 +30,7 @@ func TestLoadHistory_MissingLastMsgAt_ReturnsMessages(t *testing.T) {
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	s := New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	s := closeOnCleanupIn(t, New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg))
 
 	createdAt := time.Now().UTC().Add(-120 * 24 * time.Hour)
 	rooms.EXPECT().GetRoomTimes(gomock.Any(), "r1").Return(time.Time{}, createdAt, nil)

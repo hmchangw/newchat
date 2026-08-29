@@ -82,6 +82,12 @@ type Handler struct {
 	teamsEmailDomain     string
 	roomMembersLimit     int
 	roomMembersCallLimit int
+	// mentionableDefaultLimit / mentionableMaxLimit bound the @-mention
+	// autocomplete page size (MENTIONABLE_DEFAULT_LIMIT / MENTIONABLE_MAX_LIMIT),
+	// resolved independently of the room's denormalized member counts (which can
+	// lag at 0 and would otherwise hide a populated room). Both validated > 0 at startup.
+	mentionableDefaultLimit int
+	mentionableMaxLimit     int
 	// routeMode gates the namespace(s) same-site room .event uses (ROOM_SUBJECT_MODE); cross-site is always global.
 	routeMode subject.RoomRouteMode
 }
@@ -160,10 +166,6 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 		}
 		return nil, fmt.Errorf("get requester: %w", err)
 	}
-	if requester.EngName == "" && requester.ChineseName == "" {
-		return nil, errInvalidUserData
-	}
-
 	// A DM with no post-strip counterpart is a self-DM (classifyAndValidate only
 	// emits RoomTypeDM with empty Users for that case). Handle it before the switch
 	// so each switch case stays single-purpose.
@@ -264,13 +266,6 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		}
 		return nil, fmt.Errorf("get counterpart: %w", err)
 	}
-	if roomType == model.RoomTypeDM && (other.EngName == "" && other.ChineseName == "") {
-		// botDMs counterpart is an app/bot whose users-collection record
-		// typically has empty name fields; the GetApp + Assistant.Enabled
-		// check below is the right validation for that case.
-		return nil, errInvalidUserData
-	}
-
 	req.RoomID = idgen.BuildDMRoomID(requester.ID, other.ID)
 	// DM/BotDM resolved set matches the literal counterpart list — there is no expansion.
 	req.ResolvedUsers = append([]string(nil), req.Users...)
@@ -509,10 +504,7 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 	}, nil
 }
 
-const (
-	defaultMemberStatusesLimit = 3
-	defaultMentionableLimit    = 3
-)
+const defaultMemberStatusesLimit = 3
 
 // requireMembershipAndGetRoom checks the requester's room membership and
 // loads the room document in parallel — both reads are independent and the
@@ -615,24 +607,25 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 		}
 	}
 
-	room, err := h.requireMembershipAndGetRoom(ctx, requesterAccount, roomID)
-	if err != nil {
-		return nil, err
+	// Membership gate only — the page size comes from config, not the room's
+	// denormalized userCount/appCount (which can be stale/0 and would wrongly
+	// hide a populated room), so GetRoom is not needed here.
+	if err := h.store.CheckMembership(ctx, requesterAccount, roomID); err != nil {
+		if errors.Is(err, model.ErrSubscriptionNotFound) {
+			return nil, errNotRoomMember
+		}
+		return nil, fmt.Errorf("check room membership: %w", err)
 	}
 
-	mentionableCap := room.UserCount + room.AppCount
-	if mentionableCap == 0 {
-		return &model.MentionableSubscriptionsResponse{Subscriptions: []model.MentionableSubscription{}}, nil
-	}
-	var limit int
-	if req.Limit == nil {
-		limit = min(defaultMentionableLimit, mentionableCap)
-	} else {
-		limit = *req.Limit
-		if limit <= 0 {
+	// Startup validation guarantees both bounds are > 0, so the resolved limit is
+	// always >= 1: a nil request-limit yields the default, an explicit one is
+	// rejected when <= 0 and otherwise clamped to the configured max.
+	limit := h.mentionableDefaultLimit
+	if req.Limit != nil {
+		if *req.Limit <= 0 {
 			return nil, errMentionableLimitInvalid
 		}
-		limit = min(limit, mentionableCap) // clamp over-cap instead of rejecting
+		limit = min(*req.Limit, h.mentionableMaxLimit)
 	}
 
 	// Filter is a literal substring. QuoteMeta escapes regex metacharacters
@@ -643,7 +636,7 @@ func (h *Handler) listMentionableSubscriptions(c *natsrouter.Context) (*model.Me
 	if err != nil {
 		return nil, fmt.Errorf("list mentionable subscriptions: %w", err)
 	}
-	return &model.MentionableSubscriptionsResponse{Subscriptions: subs}, nil
+	return boundedReply(h, &model.MentionableSubscriptionsResponse{Subscriptions: subs})
 }
 
 func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequest) (*model.StatusReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature
@@ -1302,6 +1295,7 @@ func (h *Handler) aggregateRoomInfo(ids []string, rooms []model.Room, keys map[s
 		entry.AppCount = r.AppCount
 		entry.LastMsgID = r.LastMsgID
 		entry.LastMsgAt = timePtrToMillis(r.LastMsgAt)
+		entry.LastUserMsgAt = timePtrToMillis(r.LastUserMsgAt)
 		entry.LastMentionAllAt = timePtrToMillis(r.LastMentionAllAt)
 		entry.MinUserLastSeenAt = timePtrToMillis(r.MinUserLastSeenAt)
 		entry.CrossSite = r.CrossSite

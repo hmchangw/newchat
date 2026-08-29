@@ -137,7 +137,8 @@ Uploads a single file (image/audio/video/document) and returns a render-ready
 [Attachment](../client-api.md#attachment) for the client to embed in a `msg.send`
 (§4) — pure HTTP, does **not** itself publish a message. `Content-Type:
 multipart/form-data`. `ssoToken` header **or** `x-user-id` + `x-auth-token` required;
-caller must be a room member. See
+caller must be a room member. The returned `fileType` is server-derived — the
+part's declared `Content-Type` is used only when it is specific. See
 [../client-api.md §2.4](../client-api.md#post-apiv1fileroomsroomiduploadfile).
 
 **Emits:** `None — HTTP-only.`
@@ -228,14 +229,15 @@ Full decision logic, limits, and response schemas are in
 
 ### HTTP — Client Update Service
 
-Public HTTP endpoints served by `client-update-service` (no `ssoToken`/auth in v1
-— must be network-restricted). Full request/response schemas and the download
-cache behavior are in
+HTTP endpoints served by `client-update-service`. Uploads require a service-account
+bearer token (only `admin-service` holds one); downloads are unauthenticated and
+must be network-restricted. Full request/response schemas and the download cache
+behavior are in
 [../client-api.md §12](../client-api.md#12-client-update-service).
 
 | Endpoint | Reply | Purpose |
 |---|---|---|
-| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, streamed to MinIO, no size cap). |
+| `POST /api/v1/version` | synchronous HTTP | Upload a `configFile` (.yaml/.yml) + `executeFile` pair (multipart, capped by `UPLOAD_MAX_BYTES` (default 2 GiB); disk-backed — parts over 1 MiB spill to a temp file before the MinIO write). Service-account bearer token required; an unset/empty `UPLOAD_TOKENS` disables uploads entirely (every request `401`). |
 | `GET /api/v1/version/:fileName` | synchronous HTTP (raw bytes) | Download an artifact by name; served from a bounded TTL+size cache, else streamed from MinIO. |
 | `GET /healthz` | synchronous HTTP | Liveness (`{"status":"ok"}`). |
 
@@ -273,9 +275,10 @@ matching `siteId`). Full schemas, examples, and error tables are in
 |---|---|---|
 | `POST /v1/login` | synchronous HTTP | Admin console password login; issues an `authToken` (§9.10). |
 | `GET /v1/admin/users` | synchronous HTTP | List/search users (§9.1). |
-| `POST /v1/admin/users` | synchronous HTTP | Create a user (§9.2). |
+| `POST /v1/admin/users` | synchronous HTTP | Create a user, then fan the account out to every other site and onto the durable HR identity feed (unacknowledged destinations come back as `syncFailures`, a failed HR publish as `hrSyncFailed`) (§9.2). |
 | `GET /v1/admin/users/:account` | synchronous HTTP | Get a user by account (§9.3). |
-| `PATCH /v1/admin/users/:account` | synchronous HTTP | Update a user by account (§9.4). |
+| `PATCH /v1/admin/users/:account` | synchronous HTTP | Update a user by account, then fan the whole account snapshot out to every other site (unacknowledged destinations come back as `syncFailures`) (§9.4). |
+| `POST /v1/admin/users/:account/resync` | synchronous HTTP | Re-deliver the account's current state on both sync lanes (durable HR bootstrap + snapshot to every remote site); re-delivery only, no writes (§9.16). |
 | `POST /v1/admin/users/:account/password` | synchronous HTTP | Admin set/reset a user's password by account (§9.5). |
 | `GET /v1/admin/sessions?account=<account>` | synchronous HTTP | List an account's active sessions (§9.6). |
 | `DELETE /v1/admin/sessions?account=<account>` | synchronous HTTP | Revoke all of an account's sessions (§9.7). |
@@ -286,6 +289,7 @@ matching `siteId`). Full schemas, examples, and error tables are in
 | `POST /v1/admin/permissions` | synchronous HTTP | Grant or revoke a permission for one or more subject accounts; appends to the permission ledger, materializes the new state on each subject's user doc, and fans it out to every other site (unacknowledged destinations come back as `syncFailures`), with one slim audit entry per subject (§9.13). |
 | `GET /v1/admin/permissions` | synchronous HTTP | List the permission ledger newest-first — company-wide by default, with optional independent `subjectAccount` and `permission` query filters; `currentlyGranted` (read from the materialized state) is included only when both filters are set (§9.14). |
 | `POST /v1/admin/permissions/resync` | synchronous HTTP | Re-deliver the current materialized permission state for the given accounts to every other site; writes nothing, idempotent (§9.15). |
+| `POST /v1/admin/client-updates` | synchronous HTTP | Publish a client update artifact pair; relayed on to client-update-service under this service's own credential (streamed, disk-backed — see §9.17). Audited as `client_update.upload` on upstream success, with no details. |
 
 **Emits:** None directly — HTTP-only. `POST /v1/admin/rooms/:roomId/onduty` makes room-service publish [`room_restricted`](events.md#room_restricted-roomrestrictedroomevent) on `chat.room.{roomID}.event`.
 
@@ -563,7 +567,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Default: `min(3, room.userCount + room.appCount)`. Must be > 0 and ≤ combined count. |
+| `limit` | number | no | Default: configured `MENTIONABLE_DEFAULT_LIMIT` (3). Must be > 0; clamped to `MENTIONABLE_MAX_LIMIT` (50). Independent of room member counts. |
 | `filter` | string | no | Literal substring, case-insensitive. Matched against account, names, app name. |
 
 #### Success response
@@ -573,7 +577,7 @@ ordinary, mentionable users). Returns `user` and `app` rows.
 
 #### Errors
 
-`"only room members can perform this action"`, `"limit must be > 0 and <= room user count + app count"` (fires only for a non-positive limit; an over-cap positive limit is clamped).
+`"only room members can perform this action"`, `"limit must be > 0"` (fires only for a non-positive limit; an over-max positive limit is clamped).
 
 **Emits:** None — reply only.
 
@@ -1852,7 +1856,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 |---|---|---|---|
 | `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
-| `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` is within N days. Non-negative. |
+| `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` (the room's user-activity position) is within N days. Non-negative. |
 | `includeLastMessage` | boolean | no | Embed each room's [`previewMessage`](../client-api.md#subscriptionroom). Omitted ⇒ include (default); `false` ⇒ skip the per-room preview resolve. |
 | `offset` | integer | no | Zero-based index of first record. Negative ⇒ `0`. Default `0`. |
 | `limit` | integer | no | Page size. Omitted/≤0 ⇒ `SUBSCRIPTION_DEFAULT_LIMIT` (default `40`); capped at `MAX_SUBSCRIPTION_LIMIT` (default `1000`). |
@@ -1861,7 +1865,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Notes |
 |---|---|---|
-| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc. Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
+| `subscriptions` | Subscription[] | One page of room-info-enriched records, ordered by `lastMsgAt` desc (the room's user-activity position). Ordering freshness is cache-bounded (default 15s) and per server instance — dedupe by `roomId` across a multi-page drain; row fields, `updatedWithinDays`, `favorite` and open/closed membership are always fresh (a row that stops matching the filters before its page is built is dropped, not returned stale). |
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
@@ -2275,7 +2279,7 @@ and quoted message; variant determined by optional fields.
 | `content` | string | yes* | Message body, ≤ 20 KiB. *Required unless `attachments` is present. |
 | `requestId` | string | yes | 36-char hyphenated UUID (v4 or v7). Async reply delivered to `…response.{requestId}`. |
 | `attachments` | string[] | no | Optional. Each entry is base64-encoded JSON of one [Attachment](../client-api.md#attachment) from the upload endpoint. Max 1 entry, ≤ 8 KiB total; returned decoded as `Attachment[]` in message payloads. |
-| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). |
+| `threadParentMessageId` | string | no | Thread reply: the parent's message ID (20-char base62). The parent is resolved server-side; a genuinely missing/forbidden parent is rejected, while a *transient* history outage still accepts the reply. |
 | `tshow` | boolean | no | "Also send to channel". Only meaningful on a thread reply; ignored on non-thread sends. |
 | `quotedParentMessageId` | string | no | Quoted message: the parent's message ID. Server fetches and embeds the authoritative snapshot from message history. On a *transient* history outage the live copy gets a `"Content temporarily unavailable"` placeholder, re-projected to the authoritative snapshot (or dropped) before the durable write — the placeholder never persists. A genuinely missing/forbidden parent is still rejected. |
 | `visibleTo` | string | no | Opaque visibility marker, ≤ 4096 bytes. Stored and surfaced verbatim; the backend never filters on it. Oversize rejected with `bad_request`. |
@@ -2309,6 +2313,7 @@ error table. Key errors:
 - `"visibleTo exceeds maximum size of 4096 bytes"` (`bad_request`)
 - `"not subscribed"` (`forbidden`, `not_subscribed`)
 - `"posting is restricted to owners and admins in this room"` (`forbidden`, `large_room_post_restricted`)
+- `"thread parent message not found"` (`not_found`, `thread_parent_not_found`)
 
 **Emits:** [`new_message`](events.md#new_message-roomevent) `RoomEvent` (channel: `chat.room.{roomID}.event`; DM: `chat.user.{recipient}.event.room` per non-bot member), [`thread_metadata_updated`](events.md#thread_metadata_updated-threadmetadataupdatedevent) (thread replies only) → [events.md](events.md)
 

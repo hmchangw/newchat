@@ -23,3 +23,13 @@ func TimeToMillis(t *time.Time) *int64 {
 	ms := t.UTC().UnixMilli()
 	return &ms
 }
+
+// Coalesce returns a when non-nil, else b. It is the one home of the
+// user-activity fallback rule (lastUserMsgAt ?? lastMsgAt) applied to both
+// nullable timestamp shapes this package converts between.
+func Coalesce[T any](a, b *T) *T {
+	if a != nil {
+		return a
+	}
+	return b
+}

@@ -52,7 +52,6 @@ var (
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
 	// Bots hold plain member roles only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
-	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")
 
@@ -74,7 +73,7 @@ var (
 
 	// Sentinels for member.statuses + subscription.mentionable limit validation.
 	errMemberStatusesLimitInvalid = errcode.BadRequest("limit must be > 0 and <= room user count")
-	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0 and <= room user count + app count")
+	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0")
 
 	// errRoomKeyAbsent is returned when the requested key version is not held
 	// by the key store (either the current key is missing or the historical

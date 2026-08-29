@@ -17,6 +17,7 @@ services:
       - CASSANDRA_NUM_CONNS=4
       - MESSAGE_BUCKET_HOURS=360
       - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=chat
       - MAX_WORKERS=100
       - CONSUMER_MAX_DELIVER=6

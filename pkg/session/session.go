@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // Collection is the Mongo collection name. Constant so a rename can't silently
@@ -48,8 +49,18 @@ type MongoStore struct {
 	coll *mongo.Collection
 }
 
+// sessionReadPreference pins session reads to the primary. Sessions are an
+// authentication artifact: a revoked session that has not yet replicated would
+// authenticate from a lagging secondary (CWE-613). This is deliberately not
+// configurable — no caller should be able to trade it away for availability,
+// so a service may prefer a secondary for its other reads and still resolve
+// sessions authoritatively.
+func sessionReadPreference() *readpref.ReadPref { return readpref.Primary() }
+
 func NewMongoStore(db *mongo.Database) *MongoStore {
-	return &MongoStore{coll: db.Collection(Collection)}
+	return &MongoStore{
+		coll: db.Collection(Collection, options.Collection().SetReadPreference(sessionReadPreference())),
+	}
 }
 
 var projection = bson.M{"_id": 1, "userId": 1, "account": 1, "siteId": 1, "roles": 1, "issuedAt": 1}

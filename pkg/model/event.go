@@ -85,9 +85,11 @@ type SubscriptionUpdateEvent struct {
 	RoomName     string       `json:"roomName,omitempty"`
 	// The DM counterpart, resolved at publish time alongside RoomName. Mutually
 	// exclusive, "added" dm/botDM only, both nil on a lookup miss (best-effort).
-	HRInfo    *CounterpartHRInfo  `json:"hrInfo,omitempty"`
-	AppInfo   *CounterpartAppInfo `json:"appInfo,omitempty"`
-	Timestamp int64               `json:"timestamp" bson:"timestamp"`
+	HRInfo *CounterpartHRInfo `json:"hrInfo,omitempty"`
+	// AppInfo is the full app record on a botDM "added" — same shape subscription.list
+	// nests as its `app` object, so the client needs no follow-up apps.list.
+	AppInfo   *AppSubscription `json:"appInfo,omitempty"`
+	Timestamp int64            `json:"timestamp" bson:"timestamp"`
 }
 
 // CounterpartHRInfo is the DM counterpart's HR record on a subscription.update.
@@ -96,14 +98,6 @@ type CounterpartHRInfo struct {
 	Account     string `json:"account"`
 	ChineseName string `json:"chineseName,omitempty"`
 	EngName     string `json:"engName,omitempty"`
-}
-
-// CounterpartAppInfo is the botDM counterpart's app record on a subscription.update.
-// AssistantName is the bot account the app answers on.
-type CounterpartAppInfo struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	AssistantName string `json:"assistantName"`
 }
 
 // CanonicalMemberEventMuted is the only event type currently published on this stream.
@@ -187,6 +181,7 @@ const (
 	InboxUserStatusUpdated           InboxEventType = "user_status_updated"
 	InboxUserSettingsUpdated         InboxEventType = "user_settings_updated"
 	InboxUserPermissionsUpdated      InboxEventType = "user_permissions_updated"
+	InboxUserAccountUpdated          InboxEventType = "user_account_updated"
 	InboxUserChatlistUpdated         InboxEventType = "user_chatlist_updated"
 	InboxSubscriptionSectionMoved    InboxEventType = "subscription_section_moved"
 	InboxSubscriptionMention         InboxEventType = "subscription_mention"
@@ -209,6 +204,22 @@ type UserPermissionsUpdated struct {
 	Accounts   []string        `json:"accounts"   bson:"accounts"` // ≤ fanoutChunkSize per event
 	State      PermissionState `json:"state"      bson:"state"`
 	Timestamp  int64           `json:"timestamp"  bson:"timestamp"`
+}
+
+// UserAccountUpdated is the InboxEvent.Payload for user_account_updated: the
+// admin-owned account state as a whole snapshot (identity included, so the
+// event alone materializes a complete remote doc). Published by admin-service
+// after createUser / updateUser / DeactivateAndRevoke; inbox-worker upserts it
+// under the accountUpdatedAt watermark.
+type UserAccountUpdated struct {
+	ID          string     `json:"id"          bson:"id"`
+	Account     string     `json:"account"     bson:"account"`
+	SiteID      string     `json:"siteId"      bson:"siteId"` // home site; immutable, $setOnInsert only
+	EngName     string     `json:"engName"     bson:"engName"`
+	ChineseName string     `json:"chineseName" bson:"chineseName"`
+	Roles       []UserRole `json:"roles"       bson:"roles"`     // always an array, never nil
+	Active      bool       `json:"active"      bson:"active"`    // resolved via IsActive()
+	Timestamp   int64      `json:"timestamp"   bson:"timestamp"` // unix ms; doubles as the watermark
 }
 
 // SubscriptionReadEvent is InboxEvent.Payload for "subscription_read": sent room-home→user-home
@@ -379,6 +390,10 @@ type RoomEvent struct {
 	MentionAll bool          `json:"mentionAll,omitempty"`
 
 	HasMention bool `json:"hasMention,omitempty"`
+	// SystemMsg marks a system-message new_message (IsSystemMessageType) in
+	// plaintext, so clients can exclude it from unread/ordering even when the
+	// message itself is sealed inside EncryptedMessage.
+	SystemMsg bool `json:"systemMsg,omitempty"`
 
 	Message          *ClientMessage  `json:"message,omitempty"`
 	EncryptedMessage json.RawMessage `json:"encryptedMessage,omitempty"`
@@ -416,10 +431,13 @@ type EditRoomEvent struct {
 	EncryptedNewContent json.RawMessage `json:"encryptedNewContent,omitempty" bson:"encryptedNewContent,omitempty"`
 	// Mentions are the @-mentions resolved from the edited content, so an edit that
 	// adds a mention renders it the same as a freshly-sent message. Omitted when none.
-	Mentions  []Participant `json:"mentions,omitempty" bson:"mentions,omitempty"`
-	EditedBy  string        `json:"editedBy" bson:"editedBy"`
-	EditedAt  time.Time     `json:"editedAt" bson:"editedAt"`
-	UpdatedAt time.Time     `json:"updatedAt" bson:"updatedAt"`
+	Mentions []Participant `json:"mentions,omitempty" bson:"mentions,omitempty"`
+	// MentionAll reflects the edited content's @all, mirroring the create/new-thread events
+	// so an edit that adds or removes @all conveys it. Omitted when false.
+	MentionAll bool      `json:"mentionAll,omitempty" bson:"mentionAll,omitempty"`
+	EditedBy   string    `json:"editedBy" bson:"editedBy"`
+	EditedAt   time.Time `json:"editedAt" bson:"editedAt"`
+	UpdatedAt  time.Time `json:"updatedAt" bson:"updatedAt"`
 	// ThreadParentMessageID is set when the edited message is a thread reply; its presence lets
 	// clients tell a thread-reply edit from a top-level one. Omitted for top-level messages.
 	ThreadParentMessageID string `json:"threadParentMessageId,omitempty" bson:"threadParentMessageId,omitempty"`

@@ -192,6 +192,35 @@ func TestSyncMetrics_FlushItemFailure(t *testing.T) {
 		"per-item failures nak their own messages but the flush round-trip itself succeeded")
 }
 
+// A 400 is poison: jsretry Acks it rather than retrying, so it must land in the
+// acked/poison series. Counting it as nakked/item_failed like a transient failure
+// would inflate the retry series with messages that were never retried.
+func TestSyncMetrics_FlushPermanentItemFailureAcksAsPoison(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().Bulk(gomock.Any(), gomock.Len(1)).
+		Return([]searchengine.BulkResult{{Status: 400, ErrorType: "mapper_parsing_exception"}}, nil)
+
+	h, reader := metricsTestHandler(t, store)
+	h.Add(makeStubMsg(t, metricsTestEvent()))
+	h.Flush(context.Background())
+
+	rm := collectMetrics(t, reader)
+
+	failures := sumPoints(t, rm, "search_sync_worker_bulk_item_failures")
+	assert.Equal(t, int64(1), sumValue(failures, map[string]string{
+		"collection": "message-sync", "action": "index", "status": "400",
+	}), "a dropped item is still a failed item")
+
+	messages := sumPoints(t, rm, "search_sync_worker_messages")
+	assert.Equal(t, int64(1), sumValue(messages, map[string]string{
+		"collection": "message-sync", "outcome": "acked", "reason": "poison",
+	}))
+	assert.Zero(t, sumValue(messages, map[string]string{
+		"collection": "message-sync", "outcome": "nakked", "reason": "item_failed",
+	}), "poison is dropped, not retried")
+}
+
 func TestSyncMetrics_FlushResultMismatch(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)

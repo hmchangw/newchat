@@ -20,6 +20,9 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
   const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  // Set only when the patch committed here but some replication did not land — swaps the
+  // dialog to a notice the admin has to acknowledge, instead of closing silently.
+  const [syncFailures, setSyncFailures] = useState(null)
   const handleAdminError = useHandleAdminError()
 
   const toggleRole = (role) => {
@@ -42,8 +45,12 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
     setSubmitting(true)
     setError(null)
     try {
-      await updateUser(authToken, user.account, patch)
-      onUpdated()
+      const res = await updateUser(authToken, user.account, patch)
+      if (res.syncFailures.length > 0) {
+        setSyncFailures(res.syncFailures)
+      } else {
+        onUpdated()
+      }
     } catch (err) {
       const message = handleAdminError(err)
       if (message !== null) setError(message)
@@ -64,6 +71,25 @@ export default function EditUserDialog({ authToken, user, onClose, onUpdated }) 
       return
     }
     submitPatch(patch)
+  }
+
+  // The patch landed locally, so every exit from the notice (Close, Esc, backdrop) is onUpdated —
+  // the parent has to refresh its list, not just drop the dialog.
+  if (syncFailures) {
+    return (
+      <Modal onClose={onUpdated} labelledBy="edit-user-title">
+        <h2 id="edit-user-title">Saved on this site</h2>
+        <p className="dialog-error" role="alert">
+          Cross-site sync failed for: {syncFailures.join(', ')}. Use Resync on this user once
+          those sites are reachable.
+        </p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onUpdated}>
+            Close
+          </button>
+        </div>
+      </Modal>
+    )
   }
 
   return (

@@ -32,12 +32,18 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"         envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred: creates rooms and subscriptions, then reads them back.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	// RoomKeyGracePeriod governs how long a rotated-out room key stays readable (roomkeystore.NewMongoStore); matches room-service/room-worker.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"20m"`
+	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"30m"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
 	// handlers — kept at this service's historical 200 default (below the fleet
@@ -86,11 +92,17 @@ func run() error {
 		return fmt.Errorf("init jetstream: %w", err)
 	}
 
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
 	mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := newStoreMongo(mc.Database(cfg.MongoDB))
 	// Bounded timeout so a hung createIndexes surfaces at startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -99,7 +111,13 @@ func run() error {
 		slog.Warn("ensure store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
-	keyStore, err := roomkeystore.OpenMongo(ctx, mc.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo key read preference: %w", err)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, mc.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
 	if err != nil {
 		return fmt.Errorf("open room key store: %w", err)
 	}

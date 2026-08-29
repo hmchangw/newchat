@@ -24,8 +24,11 @@ func baseValid() Config {
 		PreviewKeyEpoch:  1,
 		PreviewCacheSize: 50000,
 		PreviewCacheTTL:  10 * time.Second,
-		Pool:             mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
-		Guard:            natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
+
+		PreviewWarmBackWorkers: 8,
+		PreviewWarmBackQueue:   1024,
+		Pool:                   mongoutil.PoolConfig{MaxPoolSize: 500, MinPoolSize: 0},
+		Guard:                  natsrouter.GuardConfig{MaxConcurrency: 256, RequestTimeout: 10 * time.Second},
 	}
 }
 
@@ -109,6 +112,46 @@ func TestValidate_RejectsNegativePreviewCacheTTL(t *testing.T) {
 	err := validate(&cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HISTORY_PREVIEW_CACHE_TTL")
+}
+
+func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{name: "workers", set: func(c *Config) { c.PreviewWarmBackWorkers = -1 }, want: "PREVIEW_WARMBACK_WORKERS"},
+		{name: "queue", set: func(c *Config) { c.PreviewWarmBackQueue = -1 }, want: "PREVIEW_WARMBACK_QUEUE"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseValid()
+			tc.set(&cfg)
+			err := validate(&cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
+// repeating forever, so the wiring never turns it off.
+func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
+	cfg := baseValid()
+	cfg.PreviewWarmBackWorkers = 0
+	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+}
+
+func TestLoad_WarmBackDefaults(t *testing.T) {
+	setRequiredEnv(t)
+	unsetEnv(t, "PREVIEW_WARMBACK_WORKERS")
+	unsetEnv(t, "PREVIEW_WARMBACK_QUEUE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, 8, cfg.PreviewWarmBackWorkers)
+	assert.Equal(t, 1024, cfg.PreviewWarmBackQueue)
 }
 
 // The epoch is part of the preview DEK id, so a non-positive value mints a
@@ -205,4 +248,56 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("CASSANDRA_HOSTS", "localhost")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
+}
+
+func TestValidate_RejectsNegativeUserCacheSize(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheSize = -1
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_SIZE")
+}
+
+func TestValidate_RejectsNegativeUserCacheTTL(t *testing.T) {
+	cfg := baseValid()
+	cfg.UserCacheTTL = -1 * time.Second
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "USER_CACHE_TTL")
+}
+
+// Without this, encrypted history cannot be read at all when there is no
+// primary: cassrepo/decrypt.go cannot decrypt without the DEK.
+func TestLoad_DefaultsKeyReadPreferenceToPrimaryPreferred(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	unsetEnv(t, "MONGO_KEY_READ_PREFERENCE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.Mongo.KeyReadPreference)
+}
+
+func TestValidate_RejectsInvalidKeyReadPreference(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.KeyReadPreference = "quorum"
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_KEY_READ_PREFERENCE")
+}
+
+// history-service's DEK handles must bind the same wire name as the other
+// key-touching services; its Mongo block carries an envPrefix, so the tag is
+// KEY_READ_PREFERENCE and the wire name is MONGO_KEY_READ_PREFERENCE.
+func TestLoad_KeyReadPreferenceWireName(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "nearest") // a value no default would produce
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "nearest", cfg.Mongo.KeyReadPreference,
+		"the field must bind to MONGO_KEY_READ_PREFERENCE via the MONGO_ envPrefix")
 }

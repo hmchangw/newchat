@@ -223,3 +223,22 @@ describe('RoomList: drag to move', () => {
     expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', 'w1', undefined)
   })
 })
+
+describe('RoomList: read-position unread (hasUnread)', () => {
+  it('bolds a row with hasUnread even when no live message counter accrued', () => {
+    // A newly added member has unread state from her read position, not from
+    // counted live messages — the row must bold without showing a count chip.
+    setup([section('chats', [summary('c1', { name: 'general', hasUnread: true, unreadCount: 0 })])])
+    render(<RoomList onSelectRoom={vi.fn()} />)
+    const row = screen.getByText(/general/).closest('.room-item')
+    expect(row.className).toContain('room-item-unread')
+    expect(row.querySelector('.room-badge-unread')).toBeNull()
+  })
+
+  it('does not bold a read room', () => {
+    setup([section('chats', [summary('c2', { name: 'quiet', hasUnread: false, unreadCount: 0 })])])
+    render(<RoomList onSelectRoom={vi.fn()} />)
+    const row = screen.getByText(/quiet/).closest('.room-item')
+    expect(row.className).not.toContain('room-item-unread')
+  })
+})

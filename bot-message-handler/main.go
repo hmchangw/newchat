@@ -26,6 +26,8 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// primaryPreferred: same authz shape as message-gatekeeper, with no cache in front.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 
 	// Pool caps the Mongo connection pool. MaxConcurrency bounds in-flight
 	// handlers — kept at this service's historical 200 default (below the fleet
@@ -78,11 +80,17 @@ func run() error {
 		return fmt.Errorf("bootstrap streams: %w", err)
 	}
 
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := newStoreMongo(mongoClient.Database(cfg.MongoDB))
 
 	pub := JetStreamPublisher{JS: js}

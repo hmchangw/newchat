@@ -31,7 +31,8 @@ func TestSpotlightOrgCollection_Metadata(t *testing.T) {
 	filters := coll.FilterSubjects("site-a")
 	assert.Equal(t, []string{"chat.hr.site-central.employees.upsert"}, filters)
 
-	assert.Nil(t, coll.StoredScripts())
+	require.Contains(t, coll.StoredScripts(), spotlightOrgUpsertScriptID,
+		"the ordering guard runs as a stored script")
 }
 
 func TestSpotlightOrgTemplateBody(t *testing.T) {
@@ -112,7 +113,7 @@ func TestSpotlightOrg_BuildAction_HappyPath(t *testing.T) {
 		{SectID: "S2", SectName: "Sales", DeptID: "D2", DeptName: "Biz"},
 	})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 77)
 	require.NoError(t, err)
 	require.Len(t, actions, 2)
 
@@ -125,8 +126,10 @@ func TestSpotlightOrg_BuildAction_HappyPath(t *testing.T) {
 
 		var body map[string]any
 		require.NoError(t, json.Unmarshal(a.Doc, &body))
-		assert.Equal(t, true, body["doc_as_upsert"])
-		assert.Contains(t, body, "doc")
+		assert.Equal(t, true, body["scripted_upsert"])
+		params := body["script"].(map[string]any)["params"].(map[string]any)
+		assert.Equal(t, float64(77), params["seq"])
+		assert.Contains(t, params, "doc")
 	}
 	assert.True(t, docIDs["S1"])
 	assert.True(t, docIDs["S2"])
@@ -140,7 +143,7 @@ func TestSpotlightOrg_BuildAction_DedupBySectID(t *testing.T) {
 		{SectID: "S2", SectName: "Sales"},
 	})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 42)
 	require.NoError(t, err)
 	require.Len(t, actions, 2)
 
@@ -151,7 +154,7 @@ func TestSpotlightOrg_BuildAction_DedupBySectID(t *testing.T) {
 		}
 	}
 	require.NotNil(t, s1Body)
-	doc := s1Body["doc"].(map[string]any)
+	doc := s1Body["script"].(map[string]any)["params"].(map[string]any)["doc"].(map[string]any)
 	assert.Equal(t, "Engineering Renamed", doc["sectName"], "last-wins on dedup")
 }
 
@@ -163,7 +166,7 @@ func TestSpotlightOrg_BuildAction_EmptySectIDsSkipped(t *testing.T) {
 		{SectID: "", DeptID: "D9"},
 	})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 42)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 	assert.Equal(t, "S1", actions[0].DocID)
@@ -176,7 +179,7 @@ func TestSpotlightOrg_BuildAction_AllEmptySectIDs(t *testing.T) {
 		{SectName: "no-section-2"},
 	})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 42)
 	require.NoError(t, err)
 	assert.Nil(t, actions)
 }
@@ -185,7 +188,7 @@ func TestSpotlightOrg_BuildAction_EmptyEmployees(t *testing.T) {
 	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
 	data := hrBatchJSON(t, []SpotlightOrgIndex{})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 42)
 	require.NoError(t, err)
 	assert.Nil(t, actions)
 }
@@ -196,13 +199,13 @@ func TestSpotlightOrg_BuildAction_PartialFields(t *testing.T) {
 		{SectID: "S1", SectName: "Engineering"},
 	})
 
-	actions, err := coll.BuildAction(data)
+	actions, err := coll.BuildActionSeq(data, 42)
 	require.NoError(t, err)
 	require.Len(t, actions, 1)
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(actions[0].Doc, &body))
-	doc := body["doc"].(map[string]any)
+	doc := body["script"].(map[string]any)["params"].(map[string]any)["doc"].(map[string]any)
 
 	assert.Equal(t, "S1", doc["sectId"])
 	assert.Equal(t, "Engineering", doc["sectName"])
@@ -229,4 +232,63 @@ func TestSpotlightOrg_MappingUpdate_NoOp(t *testing.T) {
 	pattern, body := newSpotlightOrgCollection("spotlight-org-v1", "site-a", "hr", false).MappingUpdate()
 	assert.Empty(t, pattern)
 	assert.Nil(t, body)
+}
+
+// The HR employees.upsert payload is a bare array with no timestamp of its own, so
+// the guard keys on JetStream's stream sequence — a strict total order assigned
+// server-side at publish. Without it, a redelivered or slow batch would overwrite a
+// newer one, since doc_as_upsert has no ordering semantics at all.
+func TestSpotlightOrgCollection_BuildActionSeq_CarriesOrderingGuard(t *testing.T) {
+	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
+	rows := []model.IEmployeeWithChange{{IEmployee: model.IEmployee{IOrg: model.IOrg{SectID: "S1", SectName: "Platform"}}}}
+	data, err := json.Marshal(rows)
+	require.NoError(t, err)
+
+	actions, err := coll.BuildActionSeq(data, 4242)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+	assert.Equal(t, searchengine.ActionUpdate, actions[0].Action)
+	assert.Equal(t, "S1", actions[0].DocID)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(actions[0].Doc, &body))
+
+	assert.Equal(t, true, body["scripted_upsert"],
+		"the script must run on insert too, so a new doc records its sequence")
+	script := body["script"].(map[string]any)
+	assert.Equal(t, spotlightOrgUpsertScriptID, script["id"])
+
+	params := script["params"].(map[string]any)
+	assert.Equal(t, float64(4242), params["seq"], "the guard compares this against the stored sequence")
+	doc := params["doc"].(map[string]any)
+	assert.Equal(t, "S1", doc["sectId"])
+	assert.Equal(t, "Platform", doc["sectName"])
+	assert.NotContains(t, doc, "deptId", "omitempty keeps absent fields out, preserving stored values on merge")
+}
+
+func TestSpotlightOrgCollection_StoredScripts(t *testing.T) {
+	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
+	scripts := coll.StoredScripts()
+	require.Contains(t, scripts, spotlightOrgUpsertScriptID)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(scripts[spotlightOrgUpsertScriptID], &parsed))
+	src := parsed["script"].(map[string]any)["source"].(string)
+	assert.Contains(t, src, "params.seq", "the guard must compare the incoming sequence")
+	assert.Contains(t, src, "ctx.op = 'none'", "a stale write must be skipped, not applied")
+}
+
+// Without a sequence every write would be discarded by the guard — including the insert
+// of a new sectId — and ES would report each as a successful no-op. Fail loudly instead.
+func TestSpotlightOrgCollection_BuildAction_WithoutSequenceIsAnError(t *testing.T) {
+	coll := newSpotlightOrgCollection("spotlightorg-site-a-v1", "site-a", "site-central", false)
+	rows := []model.IEmployeeWithChange{{IEmployee: model.IEmployee{IOrg: model.IOrg{SectID: "S1"}}}}
+	data, err := json.Marshal(rows)
+	require.NoError(t, err)
+
+	actions, err := coll.BuildAction(data)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "BuildActionSeq")
+	assert.Nil(t, actions)
 }

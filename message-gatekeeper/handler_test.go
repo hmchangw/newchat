@@ -78,6 +78,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 		threshold     int                           // 0 → use 500
 		checkErr      func(t *testing.T, err error) // optional; called on wantErr cases
 		wantNoPublish bool                          // assert published slice is empty on wantErr
+		recheckDelay  time.Duration                 // 0 → thread-parent re-check disabled
 		checkResult   func(t *testing.T, data []byte, published []publishedMsg)
 	}{
 		{
@@ -244,6 +245,260 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				require.Equal(t, threadParentID, msg.ThreadParentMessageID)
 				assert.Nil(t, msg.ThreadParentMessageCreatedAt)
 				require.Len(t, published, 1)
+			},
+		},
+		{
+			// A parent that does not exist can never be resolved by a downstream
+			// worker either, so the send is rejected here rather than published as
+			// an event doomed to burn every consumer's retry budget.
+			// recheckDelay is 0 here: the re-check is off, so one fetch decides.
+			name:    "thread reply to nonexistent parent, re-check disabled — rejected on one fetch",
+			account: validAccount,
+			roomID:  validRoomID,
+			siteID:  validSiteID,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.NotFound("message not found"))
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeNotFound, ee.Code)
+				assert.Equal(t, errcode.MessageThreadParentNotFound, ee.Reason)
+			},
+		},
+		{
+			// The parent's Cassandra write is done by message-worker, a parallel
+			// consumer of MESSAGES-CANONICAL, so a reply sent moments after its
+			// parent can reach the gatekeeper before the parent is readable. One
+			// bounded re-check turns that false rejection into an accepted send.
+			name:         "thread reply whose parent lands between attempts — accepted on re-check",
+			account:      validAccount,
+			roomID:       validRoomID,
+			siteID:       validSiteID,
+			recheckDelay: 20 * time.Millisecond,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				gomock.InOrder(
+					f.EXPECT().
+						FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+						Return(nil, errcode.NotFound("message not found")),
+					f.EXPECT().
+						FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+						Return(&cassandra.QuotedParentMessage{MessageID: threadParentID, CreatedAt: parentTS}, nil),
+				)
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				require.NotNil(t, msg.ThreadParentMessageCreatedAt, "the re-checked parent's coords must be stamped")
+				assert.True(t, msg.ThreadParentMessageCreatedAt.Equal(parentTS))
+				require.Len(t, published, 1)
+			},
+		},
+		{
+			// A parent still missing on the re-check is missing for good: the
+			// rejection stands, so the event never reaches the workers.
+			name:         "thread reply to nonexistent parent — rejected after the re-check",
+			account:      validAccount,
+			roomID:       validRoomID,
+			siteID:       validSiteID,
+			recheckDelay: 20 * time.Millisecond,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.NotFound("message not found")).
+					Times(2)
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeNotFound, ee.Code)
+				assert.Equal(t, errcode.MessageThreadParentNotFound, ee.Reason)
+			},
+		},
+		{
+			// A parent readable on the first fetch must not pay the re-check delay
+			// or a second round-trip — the fast path stays one fetch.
+			name:         "thread reply with a resolvable parent — one fetch, no re-check",
+			account:      validAccount,
+			roomID:       validRoomID,
+			siteID:       validSiteID,
+			recheckDelay: 20 * time.Millisecond,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(&cassandra.QuotedParentMessage{MessageID: threadParentID, CreatedAt: parentTS}, nil).
+					Times(1)
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.Len(t, published, 1)
+			},
+		},
+		{
+			// A transient history failure is already handled by degrading the send;
+			// re-checking it would add latency to an outage path that accepts anyway.
+			name:         "thread reply with a transient parent-fetch failure — no re-check",
+			account:      validAccount,
+			roomID:       validRoomID,
+			siteID:       validSiteID,
+			recheckDelay: 20 * time.Millisecond,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.Unavailable("history down")).
+					Times(1)
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr: false,
+			checkResult: func(t *testing.T, data []byte, published []publishedMsg) {
+				require.NotNil(t, data)
+				var msg model.Message
+				require.NoError(t, json.Unmarshal(data, &msg))
+				assert.Nil(t, msg.ThreadParentMessageCreatedAt)
+				require.Len(t, published, 1)
+			},
+		},
+		{
+			// Forbidden is terminal for the same reason not_found is: retrying
+			// cannot grant access the sender does not have.
+			// recheckDelay is on: a forbidden parent must still cost exactly one fetch.
+			name:         "thread reply to forbidden parent — rejected without a re-check",
+			account:      validAccount,
+			roomID:       validRoomID,
+			siteID:       validSiteID,
+			recheckDelay: 20 * time.Millisecond,
+			buildData: func() []byte {
+				req := model.SendMessageRequest{
+					ID:                    validID,
+					Content:               validContent,
+					RequestID:             validRequestID,
+					ThreadParentMessageID: threadParentID,
+				}
+				data, _ := json.Marshal(req)
+				return data
+			},
+			setupStore: func(s *MockStore) {
+				s.EXPECT().
+					GetSubscription(gomock.Any(), validAccount, validRoomID).
+					Return(sub, nil)
+			},
+			setupFetcher: func(f *MockParentMessageFetcher) {
+				f.EXPECT().
+					FetchQuotedParent(gomock.Any(), validAccount, validRoomID, validSiteID, threadParentID).
+					Return(nil, errcode.Forbidden("not allowed"))
+			},
+			setupPub: func() (publishFunc, *[]publishedMsg) {
+				var published []publishedMsg
+				return makePublishFunc(&published, nil), &published
+			},
+			wantErr:       true,
+			wantNoPublish: true,
+			checkErr: func(t *testing.T, err error) {
+				var ee *errcode.Error
+				require.True(t, errors.As(err, &ee))
+				assert.Equal(t, errcode.CodeForbidden, ee.Code)
 			},
 		},
 		{
@@ -794,11 +1049,12 @@ func TestHandler_ProcessMessage(t *testing.T) {
 				threshold = 500
 			}
 			h := &Handler{
-				store:              store,
-				publish:            pub,
-				siteID:             validSiteID,
-				parentFetcher:      fetcher,
-				largeRoomThreshold: threshold,
+				store:                    store,
+				publish:                  pub,
+				siteID:                   validSiteID,
+				parentFetcher:            fetcher,
+				largeRoomThreshold:       threshold,
+				threadParentRecheckDelay: tc.recheckDelay,
 			}
 
 			var req model.SendMessageRequest
@@ -2554,4 +2810,69 @@ func mustMember(t *testing.T, key, value string) baggage.Member {
 	member, err := baggage.NewMember(key, value)
 	require.NoError(t, err)
 	return member
+}
+
+// A cancelled request must not sit out the re-check delay, and must not report
+// "parent not found" on the strength of a fetch the re-check never got to confirm.
+func TestHandler_processMessage_ThreadParentRecheckHonoursContextCancellation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	fetcher := NewMockParentMessageFetcher(ctrl)
+
+	account, roomID, siteID := "alice", "room-1", "site1"
+	parentID := idgen.GenerateMessageID()
+
+	store.EXPECT().
+		GetSubscription(gomock.Any(), account, roomID).
+		Return(&model.Subscription{
+			User:   model.SubscriptionUser{ID: "u1", Account: account},
+			RoomID: roomID,
+			Roles:  []model.Role{model.RoleMember},
+		}, nil)
+	fetcher.EXPECT().
+		FetchQuotedParent(gomock.Any(), account, roomID, siteID, parentID).
+		Return(nil, errcode.NotFound("message not found")).
+		Times(1)
+
+	var published []publishedMsg
+	h := &Handler{
+		store:                    store,
+		publish:                  makePublishFunc(&published, nil),
+		siteID:                   siteID,
+		parentFetcher:            fetcher,
+		largeRoomThreshold:       500,
+		threadParentRecheckDelay: 30 * time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req := model.SendMessageRequest{
+		ID:                    idgen.GenerateMessageID(),
+		Content:               "hello",
+		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+		ThreadParentMessageID: parentID,
+	}
+
+	start := time.Now()
+	_, err := h.processMessage(ctx, account, roomID, siteID, &req)
+	require.Error(t, err)
+
+	assert.Less(t, time.Since(start), 5*time.Second, "a cancelled request must not wait out the re-check delay")
+	assert.ErrorIs(t, err, context.Canceled)
+	var ee *errcode.Error
+	assert.False(t, errors.As(err, &ee), "an interrupted re-check is infra, not a thread_parent_not_found verdict")
+	assert.Empty(t, published)
+}
+
+func TestNewHandler_ThreadParentRecheckDelay(t *testing.T) {
+	base := func(opts ...gatekeeperHandlerOption) *Handler {
+		return NewHandler(nil, nil, nil, nil, "site-a", nil, 500, 1, 8192, "", opts...)
+	}
+
+	assert.Equal(t, defaultThreadParentRecheckDelay, base().threadParentRecheckDelay,
+		"a handler built without the option still re-checks a missing thread parent")
+	assert.Equal(t, 2*time.Second, base(withThreadParentRecheckDelay(2*time.Second)).threadParentRecheckDelay)
+	assert.Zero(t, base(withThreadParentRecheckDelay(0)).threadParentRecheckDelay,
+		"an explicit zero disables the re-check")
 }

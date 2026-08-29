@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -13,6 +15,11 @@ import (
 // waits count against it: RoomRPCTimeout and FanoutTimeout must stay under it so
 // the handler always wins the race against net/http closing the connection.
 const httpWriteTimeout = 40 * time.Second
+
+// maxMultipartMemory caps how much of an upload Gin keeps in memory before
+// spilling the part to a temp file. Matches upload-service's cap for the same
+// reason: the body is streamed onward, so it never needs to be resident.
+const maxMultipartMemory = 1 << 20
 
 // requestBudget is the absolute per-request deadline the permission handlers pin at
 // entry (withRequestBudget): httpWriteTimeout minus a margin to write the response
@@ -26,6 +33,7 @@ type Config struct {
 	MongoDB               string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername         string `env:"MONGO_USERNAME"`
 	MongoPassword         string `env:"MONGO_PASSWORD"`
+	ReadPreference        string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
 	BcryptCost            int    `env:"BCRYPT_COST" envDefault:"10"`
 	SessionsMaxPerAccount int    `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
 	// NatsURL backs the room-service RPC behind the duty toggle. Required: the
@@ -46,6 +54,30 @@ type Config struct {
 	// AllSiteIDs lists every site in the federation (including this one); empty means
 	// no cross-site fanout — correct for single-site dev.
 	AllSiteIDs []string `env:"ALL_SITE_IDS" envSeparator:"," envDefault:""`
+
+	// ClientUpdateURL is the base URL of the LOCAL site's client-update-service,
+	// whose upload endpoint only this service's account may call.
+	ClientUpdateURL string `env:"CLIENT_UPDATE_URL,required"`
+	// ClientUpdateToken is admin-service's entry in that service's UPLOAD_TOKENS.
+	// Never logged, never returned to a caller.
+	ClientUpdateToken string `env:"CLIENT_UPDATE_TOKEN,required"`
+	// ClientUpdateTimeout bounds one artifact upload end to end. It is
+	// deliberately far ABOVE httpWriteTimeout: the upload handler extends its own
+	// read/write deadlines (client_update.go) rather than raising the server's,
+	// so this value must NOT be passed through checkHandlerTimeout.
+	//
+	// This bounds the WHOLE handler — the inbound read and the outbound call —
+	// because uploadClientVersion pins it on the request context; the two phases
+	// are sequential, not overlapping (see uploadResponseMargin for the whole
+	// ordering). Deployment constraint: client-update-service's own
+	// HTTP_WRITE_TIMEOUT should be at least this value, so a slow upstream is not
+	// cut off mid-write on a request this service is still waiting on.
+	ClientUpdateTimeout time.Duration `env:"CLIENT_UPDATE_UPLOAD_TIMEOUT" envDefault:"10m"`
+	// ClientUpdateMaxUploadBytes caps one upload's request body. A guard rail,
+	// not a policy: the default is far above any real artifact, but without it
+	// c.MultipartForm spools an unbounded body to the pod's ephemeral storage
+	// before maxUploadParts is ever consulted, so one caller could fill the disk.
+	ClientUpdateMaxUploadBytes int64 `env:"CLIENT_UPDATE_MAX_UPLOAD_BYTES" envDefault:"2147483648"`
 
 	// Pool caps the Mongo connection pool. NOTE: admin-service deliberately takes
 	// NO shared HTTP request-timeout (ginutil.TimeoutConfig): its permission
@@ -70,6 +102,9 @@ func loadConfig() (Config, error) {
 	if err := c.Pool.Validate(); err != nil {
 		return Config{}, err
 	}
+	if err := validateClientUpdate(c.ClientUpdateURL, c.ClientUpdateToken, c.ClientUpdateTimeout, c.ClientUpdateMaxUploadBytes); err != nil {
+		return Config{}, err
+	}
 	return c, nil
 }
 
@@ -82,6 +117,47 @@ func checkHandlerTimeout(name string, d time.Duration) error {
 	}
 	if d >= httpWriteTimeout {
 		return fmt.Errorf("invalid %s %s: must be below the %s HTTP write timeout", name, d, httpWriteTimeout)
+	}
+	return nil
+}
+
+// clientUpdateSendsTokenInClear reports whether the upload credential will
+// cross the network unencrypted. http:// stays legal — service-to-service
+// traffic here is plaintext inside the cluster, and rejecting it would break
+// both the local compose stack and production — so main.go warns instead, and
+// the operator decides whether that link needs TLS or a mesh.
+func clientUpdateSendsTokenInClear(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		// Already rejected by validateClientUpdate; nothing useful to warn about.
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "http")
+}
+
+// validateClientUpdate checks the relay's configuration at startup. Error text
+// names the field only — never the token, which would reach the logs.
+func validateClientUpdate(rawURL, token string, timeout time.Duration, maxBytes int64) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL: %w", err)
+	}
+	// Only http/https: the uploader resolves the version path against this base and
+	// sends it through *http.Transport, which rejects any other scheme at request
+	// time. Failing here turns a per-upload 503 into a startup error.
+	// Hostname(), not Host: "http://:8080" has a non-empty Host (":8080") but no
+	// host to dial, and would fail per-request rather than at startup.
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return fmt.Errorf("invalid CLIENT_UPDATE_URL %q: need an absolute http or https URL with a host", rawURL)
+	}
+	if token == "" {
+		return fmt.Errorf("CLIENT_UPDATE_TOKEN must not be empty")
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("invalid CLIENT_UPDATE_UPLOAD_TIMEOUT %s: must be > 0", timeout)
+	}
+	if maxBytes <= 0 {
+		return fmt.Errorf("invalid CLIENT_UPDATE_MAX_UPLOAD_BYTES %d: must be > 0", maxBytes)
 	}
 	return nil
 }

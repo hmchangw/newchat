@@ -90,3 +90,30 @@ func TestCollection_WithReadPreference(t *testing.T) {
 		assert.Same(t, before, base.Raw(), "base handle unchanged after cloning")
 	})
 }
+
+// applyReadPreference is the seam connect() uses to bind cfg.readPref onto the
+// client options. The per-service config tests prove each service picks the
+// right preference; this proves the pick actually reaches the driver.
+func TestConnect_BindsReadPreferenceOntoClientOptions(t *testing.T) {
+	t.Run("explicit preference is bound", func(t *testing.T) {
+		opts := buildClientOptions("mongodb://localhost:27017", "", "")
+		newConnectConfig(WithReadPreference(readpref.PrimaryPreferred())).applyReadPreference(opts)
+		require.NotNil(t, opts.ReadPreference)
+		assert.Equal(t, readpref.PrimaryPreferredMode, opts.ReadPreference.Mode())
+	})
+
+	t.Run("no option leaves the driver default untouched", func(t *testing.T) {
+		opts := buildClientOptions("mongodb://localhost:27017", "", "")
+		newConnectConfig().applyReadPreference(opts)
+		assert.Nil(t, opts.ReadPreference, "an unset option must not clobber a URI-provided value")
+	})
+
+	t.Run("explicit preference overrides ConnectRead's secondaryPreferred", func(t *testing.T) {
+		opts := buildReadClientOptions("mongodb://localhost:27017", "", "")
+		require.Equal(t, readpref.SecondaryPreferredMode, opts.ReadPreference.Mode())
+
+		newConnectConfig(WithReadPreference(readpref.Primary())).applyReadPreference(opts)
+		assert.Equal(t, readpref.PrimaryMode, opts.ReadPreference.Mode(),
+			"WithReadPreference must win over the read-client default")
+	})
+}

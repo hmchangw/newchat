@@ -10,14 +10,18 @@ import (
 )
 
 // roomSortKey holds the room fields that decide where a subscription lands in
-// the list: LastMsgAt for the activity sort and the withinDays window,
-// CreatedAt as the fallback for a room with no messages. Missing means no room
-// document on this site — normal for a room owned by another site, and caching
-// that keeps repeat lists from looking it up again.
+// the list: LastUserMsgAt/LastMsgAt for the activity sort and the withinDays
+// window, CreatedAt as the fallback for a room with no messages. Missing means
+// no room document on this site — normal for a room owned by another site, and
+// caching that keeps repeat lists from looking it up again.
 type roomSortKey struct {
-	LastMsgAt *time.Time
-	CreatedAt *time.Time
-	Missing   bool
+	// LastUserMsgAt is the user-activity position (non-system messages only);
+	// nil on rooms untouched since the field shipped — effectiveUserAt falls
+	// back to LastMsgAt so those keep today's ordering.
+	LastUserMsgAt *time.Time
+	LastMsgAt     *time.Time
+	CreatedAt     *time.Time
+	Missing       bool
 }
 
 // sortKeyCache is an in-process LRU of roomSortKey with a TTL, built like

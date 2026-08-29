@@ -2421,19 +2421,24 @@ func TestMongoStore_GetApp_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Collection("apps").InsertOne(ctx, model.App{
-		ID:        "app1",
-		Name:      "Helper Bot",
-		Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		ID:          "app1",
+		Name:        "Helper Bot",
+		Description: "helps you",
+		Assistant:   &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		AppViewURL:  map[string]string{"default": "https://apps.example.com/helper"},
+		Version:     "1.4.0",
 	})
 	require.NoError(t, err)
 
 	app, err := store.GetApp(ctx, "helper.bot")
 	require.NoError(t, err)
-	assert.Equal(t, "Helper Bot", app.Name)
-	// Both projected fields feed appInfo; dropping _id would ship appInfo.id empty.
 	assert.Equal(t, "app1", app.ID)
-	// Not projected despite being in the document — appInfo.assistantName relies on this.
-	assert.Nil(t, app.Assistant)
+	// The projection carries the full AppSubscription field set that feeds the event's appInfo.
+	assert.Equal(t, "Helper Bot", app.Name)
+	assert.Equal(t, "helps you", app.Description)
+	assert.Equal(t, &model.AppAssistant{Enabled: true, Name: "helper.bot"}, app.Assistant)
+	assert.Equal(t, map[string]string{"default": "https://apps.example.com/helper"}, app.AppViewURL)
+	assert.Equal(t, "1.4.0", app.Version)
 
 	_, err = store.GetApp(ctx, "missing.bot")
 	assert.ErrorIs(t, err, ErrAppNotFound)

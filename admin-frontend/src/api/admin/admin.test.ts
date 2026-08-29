@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AsyncJobError } from '@/api'
 import {
   createPermissions,
@@ -9,10 +9,14 @@ import {
   listSessions,
   listUsers,
   resyncPermissions,
+  resyncUser,
   revokeAllSessions,
   revokeSession,
   setPassword,
   updateUser,
+  uploadClientVersion,
+  UPLOAD_TIMEOUT_MS,
+  UPLOAD_TIMEOUT_MARGIN_MS,
 } from './index'
 
 function mockResponse(status: number, body: unknown): Response {
@@ -149,7 +153,34 @@ describe('createUser', () => {
       password: 'hunter2',
       requirePasswordChange: true,
     })
-    expect(result).toEqual(USER)
+    expect(result.user).toEqual(USER)
+  })
+
+  it('createUser defaults absent fanout fields', async () => {
+    stubFetch(201, { id: 'u1', account: 'a', siteId: 's', roles: ['bot'], active: true })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.user.account).toBe('a')
+    expect(res.syncFailures).toEqual([])
+    expect(res.hrSyncFailed).toBe(false)
+  })
+
+  it('createUser passes through fanout failures', async () => {
+    stubFetch(201, {
+      id: 'u1',
+      account: 'a',
+      siteId: 's',
+      roles: [],
+      active: true,
+      syncFailures: ['site-c'],
+      hrSyncFailed: true,
+    })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.syncFailures).toEqual(['site-c'])
+    expect(res.hrSyncFailed).toBe(true)
   })
 
   it('throws AsyncJobError with reason account_exists on a 409', async () => {
@@ -181,6 +212,14 @@ describe('updateUser', () => {
     expect(init.method).toBe('PATCH')
     expect(init.headers.Authorization).toBe('Bearer tok')
     expect(JSON.parse(init.body)).toEqual({ active: false })
+  })
+
+  it('updateUser returns syncFailures', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'] })
+
+    const res = await updateUser('tok', 'a', { roles: ['admin'] })
+
+    expect(res.syncFailures).toEqual(['site-b'])
   })
 })
 
@@ -496,5 +535,282 @@ describe('listPermissions', () => {
     expect(parsed.searchParams.get('permission')).toBe('external.image.view')
     expect(parsed.searchParams.get('page')).toBe('1')
     expect(parsed.searchParams.get('limit')).toBe('20')
+  })
+})
+
+describe('resyncUser', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POSTs /v1/admin/users/:account/resync with no body', async () => {
+    const fetchMock = stubFetch(200, { status: 'ok' })
+
+    const res = await resyncUser('tok', 'u-1')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/users/u-1/resync')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
+    expect(init.headers.Authorization).toBe('Bearer tok')
+    expect(res).toEqual({ syncFailures: [], hrSyncFailed: false })
+  })
+
+  it('maps syncFailures and hrSyncFailed when present', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'], hrSyncFailed: true })
+
+    const res = await resyncUser('tok', 'a')
+
+    expect(res).toEqual({ syncFailures: ['site-b'], hrSyncFailed: true })
+  })
+})
+
+describe('uploadClientVersion', () => {
+  class MockXHR {
+    static instances: MockXHR[] = []
+    upload = { onprogress: null as ((e: ProgressEvent) => void) | null }
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    onabort: (() => void) | null = null
+    ontimeout: (() => void) | null = null
+    onloadend: (() => void) | null = null
+    timeout = 0
+    aborted = false
+    status = 0
+    responseText = ''
+    method = ''
+    url = ''
+    headers: Record<string, string> = {}
+    body: FormData | null = null
+
+    constructor() {
+      MockXHR.instances.push(this)
+    }
+    open(method: string, url: string) {
+      this.method = method
+      this.url = url
+    }
+    setRequestHeader(k: string, v: string) {
+      this.headers[k] = v
+    }
+    send(body: FormData) {
+      this.body = body
+    }
+    abort() {
+      this.aborted = true
+      this.onabort?.()
+      this.onloadend?.()
+    }
+    // Test helper: settle the request. Success and failure differ only in the
+    // status and body the server would have sent, so one method covers both.
+    respond(status = 200, text = '{"result":"success"}') {
+      this.status = status
+      this.responseText = text
+      this.onload?.()
+      this.onloadend?.()
+    }
+  }
+
+  beforeEach(() => {
+    MockXHR.instances = []
+    vi.stubGlobal('XMLHttpRequest', MockXHR)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const cfgFile = () => new File(['version: 1'], 'app.yaml', { type: 'text/yaml' })
+  const exeFile = () => new File(['MZ'], 'app.exe', { type: 'application/octet-stream' })
+
+  it('posts both files as multipart with the bearer token', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.respond()
+    await promise
+
+    expect(xhr.method).toBe('POST')
+    expect(xhr.url).toContain('/v1/admin/client-updates')
+    expect(xhr.headers.Authorization).toBe('Bearer tok-123')
+    expect(xhr.body?.get('configFile')).toBeInstanceOf(File)
+    expect(xhr.body?.get('executeFile')).toBeInstanceOf(File)
+  })
+
+  // The browser must write its own multipart boundary; setting Content-Type by
+  // hand produces a body the server cannot parse.
+  it('never sets Content-Type by hand', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.respond()
+    await promise
+
+    const keys = Object.keys(xhr.headers).map((k) => k.toLowerCase())
+    expect(keys).not.toContain('content-type')
+  })
+
+  it('reports upload progress as a percentage', async () => {
+    const seen: number[] = []
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile(), (pct) => seen.push(pct))
+    const xhr = MockXHR.instances[0]
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 200 } as ProgressEvent)
+    xhr.upload.onprogress?.({ lengthComputable: true, loaded: 200, total: 200 } as ProgressEvent)
+    xhr.respond()
+    await promise
+
+    expect(seen).toEqual([25, 100])
+  })
+
+  it('ignores progress events whose total is unknown', async () => {
+    const seen: number[] = []
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile(), (pct) => seen.push(pct))
+    const xhr = MockXHR.instances[0]
+    xhr.upload.onprogress?.({ lengthComputable: false, loaded: 50, total: 0 } as ProgressEvent)
+    xhr.respond()
+    await promise
+
+    expect(seen).toEqual([])
+  })
+
+  it('throws AsyncJobError carrying the envelope on a non-2xx response', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+    xhr.respond(400, '{"code":"bad_request","error":"configFile must be a .yaml or .yml file"}')
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'AsyncJobError',
+      code: 'bad_request',
+      message: 'configFile must be a .yaml or .yml file',
+    })
+  })
+
+  it('throws AsyncJobError when the response body is not JSON', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].respond(502, '<html>gateway</html>')
+    await expect(promise).rejects.toBeInstanceOf(Error)
+  })
+
+  it('rejects on a transport error', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].onerror?.()
+    await expect(promise).rejects.toBeInstanceOf(Error)
+  })
+
+  // Without an onabort handler the promise never settles and the console's
+  // submit button stays disabled forever.
+  it('rejects on abort', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].onabort?.()
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // Without an ontimeout handler the promise never settles and the console's
+  // submit button stays disabled forever.
+  it('rejects on timeout', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    MockXHR.instances[0].ontimeout?.()
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // xhr.timeout defaults to 0, which disables timeouts entirely and makes the
+  // ontimeout handler above unreachable. Asserting the configured value is what
+  // proves a stalled upload can actually settle.
+  it('configures a non-zero upload timeout so ontimeout can fire', async () => {
+    const promise = uploadClientVersion('tok-123', cfgFile(), exeFile())
+    const xhr = MockXHR.instances[0]
+
+    expect(xhr.timeout).toBe(UPLOAD_TIMEOUT_MS)
+    expect(xhr.timeout).toBeGreaterThan(0)
+
+    xhr.respond()
+    await promise
+  })
+})
+
+describe('uploadClientVersion cancellation and budget', () => {
+  class AbortableXHR {
+    static instances: AbortableXHR[] = []
+    upload = { onprogress: null as ((e: ProgressEvent) => void) | null }
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    onabort: (() => void) | null = null
+    ontimeout: (() => void) | null = null
+    onloadend: (() => void) | null = null
+    status = 0
+    responseText = ''
+    timeout = 0
+    aborted = false
+    sent = false
+    constructor() {
+      AbortableXHR.instances.push(this)
+    }
+    open() {}
+    setRequestHeader() {}
+    send() {
+      this.sent = true
+    }
+    // Per the XHR spec, abort() fires abort/loadend only for a request that was
+    // actually sent. A mock that fires them unconditionally hides a caller that
+    // relies on the event to settle its promise before send().
+    abort() {
+      this.aborted = true
+      if (!this.sent) return
+      this.onabort?.()
+      this.onloadend?.()
+    }
+    respond(status = 200, text = '{"result":"success"}') {
+      this.status = status
+      this.responseText = text
+      this.onload?.()
+      this.onloadend?.()
+    }
+  }
+
+  beforeEach(() => {
+    AbortableXHR.instances = []
+    vi.stubGlobal('XMLHttpRequest', AbortableXHR)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  const cfg = () => new File(['version: 1'], 'app.yaml', { type: 'text/yaml' })
+  const exe = () => new File(['MZ'], 'app.exe', { type: 'application/octet-stream' })
+
+  // The XHR timer starts before the request reaches admin-service, so an equal
+  // budget lets the browser abort an upload the backend already committed.
+  it('allows a longer budget than the backend relay timeout', () => {
+    expect(UPLOAD_TIMEOUT_MARGIN_MS).toBeGreaterThan(0)
+    expect(UPLOAD_TIMEOUT_MS).toBeGreaterThan(10 * 60 * 1000)
+  })
+
+  it('aborts the request when the signal fires', async () => {
+    const controller = new AbortController()
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    controller.abort()
+
+    expect(AbortableXHR.instances[0].aborted).toBe(true)
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  it('does not send when the signal is already aborted', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    expect(AbortableXHR.instances[0].aborted).toBe(true)
+    // A request that was never sent fires no abort event, so the promise has to
+    // be settled by the caller — otherwise the console stays busy forever.
+    expect(AbortableXHR.instances[0].sent).toBe(false)
+    await expect(promise).rejects.toMatchObject({ name: 'AsyncJobError' })
+  })
+
+  // A long-lived controller must not retain the listener (and the xhr it closes
+  // over) after the request settles.
+  it('detaches the abort listener once the request settles', async () => {
+    const controller = new AbortController()
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener')
+    const promise = uploadClientVersion('tok', cfg(), exe(), undefined, controller.signal)
+
+    AbortableXHR.instances[0].respond()
+    await promise
+
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function))
   })
 })

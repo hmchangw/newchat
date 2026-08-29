@@ -56,7 +56,7 @@ func init() {
 // does not construct one per call. The set is closed: these are the only
 // operations the room-key store exposes.
 var storeOpAttrs = func() map[string]metric.MeasurementOption {
-	ops := []string{"Get", "Set", "SetWithVersion", "Rotate", "SetIfAbsent", "ArchiveRetired"}
+	ops := []string{"Get", "Set", "SetWithVersion", "Rotate", "SetIfAbsent", "ArchiveRetired", "RepairIndexes"}
 	built := make(map[string]metric.MeasurementOption, len(ops))
 	for _, op := range ops {
 		built[op] = metric.WithAttributes(attribute.String("op", op))

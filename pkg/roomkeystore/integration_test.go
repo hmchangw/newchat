@@ -536,3 +536,79 @@ func TestMongoStore_GetByVersion_NoArchiveBehavesAsBefore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, got, "without the archive, an evicted version stays unresolvable")
 }
+
+func TestOpenMongo_FailedIndexEnsureDoesNotBlockStartup(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "roomkey_idxconflict")
+
+	// A non-TTL index on the same key makes createIndexes fail with
+	// IndexOptionsConflict. It stands in for the real outage case: createIndexes
+	// is a write, so it cannot run at all while no primary is available.
+	_, err := db.Collection(RetiredKeysCollection).Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "expiresAt", Value: 1}},
+	})
+	require.NoError(t, err)
+
+	store, err := OpenMongo(ctx, db, time.Hour, 30*time.Minute)
+	require.NoError(t, err,
+		"a failed index ensure must not block startup: the key handles are read-preference "+
+			"configurable so a pod can serve key reads from a secondary, which a fatal "+
+			"createIndexes would defeat")
+	require.NotNil(t, store)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The store must still be usable, which is the whole point of not failing.
+	// A non-empty id: GetMany short-circuits on an empty slice without
+	// touching Mongo, which would make this assertion vacuous.
+	got, err := store.GetMany(ctx, []string{"missing-room"})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+func TestMongoStore_ArchiveRetired_RepairsMissingTTLIndex(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "roomkey_idxrecover")
+	rooms := db.Collection("rooms")
+	retired := db.Collection(RetiredKeysCollection)
+
+	// Block the TTL index the way a primary-down incident does: createIndexes is
+	// a write, so it cannot run at all while no primary is available.
+	_, err := retired.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "expiresAt", Value: 1}},
+	})
+	require.NoError(t, err)
+
+	store, err := OpenMongo(ctx, db, time.Hour, 30*time.Minute)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The blocker clears, as a returning primary clears the real one. Nothing
+	// re-runs EnsureIndexes at this point — the process is already up.
+	require.NoError(t, retired.Indexes().DropOne(ctx, "expiresAt_1"))
+
+	v0 := bytes.Repeat([]byte{0xC0}, 32)
+	_, err = rooms.InsertOne(ctx, bson.M{"_id": "room-idx", "encKey": InitialKeyDoc(RoomKeyPair{PrivateKey: v0})})
+	require.NoError(t, err)
+
+	_, err = store.Rotate(ctx, "room-idx", RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xC1}, 32)})
+	require.NoError(t, err)
+
+	var doc retiredKeyDoc
+	require.NoError(t, retired.FindOne(ctx, bson.M{"_id": "room-idx:0"}).Decode(&doc),
+		"the demoted version must still be archived")
+
+	cur, err := retired.Indexes().List(ctx)
+	require.NoError(t, err)
+	var specs []bson.M
+	require.NoError(t, cur.All(ctx, &specs))
+	var found bool
+	for _, spec := range specs {
+		if spec["name"] == "expiresAt_1" {
+			found = true
+			assert.Contains(t, spec, "expireAfterSeconds",
+				"the repaired index must be the TTL index, not the blocker")
+		}
+	}
+	assert.True(t, found,
+		"archiving must repair the TTL index rather than write into a collection nothing expires")
+}

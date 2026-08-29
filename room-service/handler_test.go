@@ -2652,6 +2652,29 @@ func TestRoomsInfoBatch_CarriesCrossSite(t *testing.T) {
 	assert.Nil(t, resp.Rooms[2].CrossSite, "unclassified room must carry a nil (absent) CrossSite in RoomInfo, never coerced to false")
 }
 
+func TestHandler_handleRoomsInfoBatch_ForwardsLastUserMsgAt(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+	keyStore := NewMockRoomKeyStore(ctrl)
+
+	userAt := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	sysAt := userAt.Add(time.Hour)
+	store.EXPECT().ListRoomsByIDs(gomock.Any(), []string{"r1"}).Return([]model.Room{
+		{ID: "r1", SiteID: "site-a", LastMsgAt: &sysAt, LastUserMsgAt: &userAt},
+	}, nil)
+	keyStore.EXPECT().GetMany(gomock.Any(), []string{"r1"}).Return(map[string]*roomkeystore.VersionedKeyPair{}, nil)
+
+	h := &Handler{store: store, keyStore: keyStore, siteID: "site-a", maxBatchSize: 100}
+
+	resp, err := h.roomsInfoBatch(ctxParams(map[string]string{}), model.RoomsInfoBatchRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Rooms, 1)
+	require.NotNil(t, resp.Rooms[0].LastUserMsgAt)
+	assert.Equal(t, userAt.UnixMilli(), *resp.Rooms[0].LastUserMsgAt)
+	require.NotNil(t, resp.Rooms[0].LastMsgAt)
+	assert.Equal(t, sysAt.UnixMilli(), *resp.Rooms[0].LastMsgAt)
+}
+
 func TestHandler_handleRoomsInfoBatch_chunking(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockRoomStore(ctrl)
@@ -2799,58 +2822,49 @@ func TestHandleCreateRoom_RequesterNotFound(t *testing.T) {
 	assert.True(t, errcode.HasReason(err, errcode.RoomUserNotFound), "want RoomUserNotFound, got %v", err)
 }
 
-// TestHandleCreateRoom_RequesterNameFields covers #244: the creator check
-// rejects only when BOTH EngName and ChineseName are empty; either alone is
-// sufficient. Bot-requester exemption isn't exercised here (bots don't call
-// createRoom as requester); the DM counterpart's bot exemption is covered by
-// TestHandleCreateRoom_BotDM_AppCounterpartNoNameFields (roomType != DM skips
-// this check entirely for botDM).
+// TestHandleCreateRoom_RequesterNameFields covers #421: engName/chineseName are
+// fully optional for the creator — any combination (including both empty) creates
+// a room. Bot-requester exemption isn't exercised here (bots don't call createRoom
+// as requester).
 func TestHandleCreateRoom_RequesterNameFields(t *testing.T) {
 	tests := []struct {
 		name      string
 		requester *model.User
-		wantErr   bool
 	}{
-		{"engName only", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"}, false},
-		{"chineseName only", &model.User{ID: "u-alice", Account: "alice", ChineseName: "愛麗絲"}, false},
-		{"both present", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}, false},
-		{"neither", &model.User{ID: "u-alice", Account: "alice"}, true},
+		{"engName only", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"}},
+		{"chineseName only", &model.User{ID: "u-alice", Account: "alice", ChineseName: "愛麗絲"}},
+		{"both present", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}},
+		{"neither", &model.User{ID: "u-alice", Account: "alice"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockRoomStore(ctrl)
 			store.EXPECT().GetUser(gomock.Any(), "alice").Return(tt.requester, nil)
-			if !tt.wantErr {
-				store.EXPECT().GetUser(gomock.Any(), "bob").Return(bobUser(), nil)
-				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
-					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
-			}
+			store.EXPECT().GetUser(gomock.Any(), "bob").Return(bobUser(), nil)
+			store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+				Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
 			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
 			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.True(t, errors.Is(err, errInvalidUserData))
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 		})
 	}
 }
 
-// TestHandleCreateRoom_DMCounterpartNameFields covers #244 for the DM
-// counterpart check: rejects only when BOTH fields are empty on `other`.
+// TestHandleCreateRoom_DMCounterpartNameFields covers #421 for the DM
+// counterpart: a human counterpart with any name combination (including both
+// empty) can be DMed. BotDM path is unchanged — its app counterpart is validated
+// by GetApp/Assistant.Enabled (see TestHandleCreateRoom_BotDM_AppCounterpartNoNameFields).
 func TestHandleCreateRoom_DMCounterpartNameFields(t *testing.T) {
 	tests := []struct {
-		name    string
-		other   *model.User
-		wantErr bool
+		name  string
+		other *model.User
 	}{
-		{"engName only", &model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}, false},
-		{"chineseName only", &model.User{ID: "u-bob", Account: "bob", ChineseName: "陳博"}, false},
-		{"both present", bobUser(), false},
-		{"neither", &model.User{ID: "u-bob", Account: "bob"}, true},
+		{"engName only", &model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}},
+		{"chineseName only", &model.User{ID: "u-bob", Account: "bob", ChineseName: "陳博"}},
+		{"both present", bobUser()},
+		{"neither", &model.User{ID: "u-bob", Account: "bob"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2858,19 +2872,12 @@ func TestHandleCreateRoom_DMCounterpartNameFields(t *testing.T) {
 			store := NewMockRoomStore(ctrl)
 			store.EXPECT().GetUser(gomock.Any(), "alice").Return(aliceUser(), nil)
 			store.EXPECT().GetUser(gomock.Any(), "bob").Return(tt.other, nil)
-			if !tt.wantErr {
-				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
-					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
-			}
+			store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+				Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
 			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
 			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.True(t, errors.Is(err, errInvalidUserData))
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 		})
 	}
 }
@@ -7488,13 +7495,11 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 		want      want
 	}{
 		{
-			name: "default limit 3, empty filter, happy path",
+			name: "default limit, empty filter, happy path",
 			body: nil,
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
 					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 3).
 					Return(stub, nil)
@@ -7502,33 +7507,20 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			want: want{subs: stub},
 		},
 		{
-			// Nil-Limit clamps to UserCount+AppCount (the cap), not the default 3.
-			// A small room with 1 user + 1 app would otherwise spuriously fail
-			// validation with the default 3 vs cap 2.
-			name: "nil limit clamped to small UserCount+AppCount",
+			// Regression (#419): a populated room whose denormalized userCount/
+			// appCount are stale/0 must still return its members. The handler no
+			// longer reads the counts (GetRoom is not expected here) — it queries
+			// subscriptions directly with the config-resolved default limit.
+			name: "stale zero counts still returns members",
 			body: nil,
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 1, AppCount: 1}, nil)
 				s.EXPECT().
-					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 2).
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 3).
 					Return(stub, nil)
 			},
 			want: want{subs: stub},
-		},
-		{
-			// Empty-room short-circuit: skip the store call, return empty.
-			name: "nil limit + empty room returns empty without store call",
-			body: nil,
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
-					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 0, AppCount: 0}, nil)
-			},
-			want: want{subs: []model.MentionableSubscription{}},
 		},
 		{
 			name: "explicit limit and filter passed through",
@@ -7536,8 +7528,6 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
 					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "bo", 3).
 					Return(stub, nil)
@@ -7550,8 +7540,6 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
 					ListMentionableSubscriptions(gomock.Any(), roomID, requester, `a\.b\(c`, 3).
 					Return([]model.MentionableSubscription{}, nil)
@@ -7559,121 +7547,66 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			want: want{subs: []model.MentionableSubscription{}},
 		},
 		{
-			// GetRoom is dispatched in parallel with GetSubscription; it may
-			// or may not be invoked depending on goroutine timing before
-			// errgroup observes the membership error. AnyTimes() accepts
-			// both racing outcomes.
 			name: "requester not a member",
 			body: nil,
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
 			},
 			want: want{errIs: errNotRoomMember},
 		},
 		{
-			// Precedence regression: when BOTH the membership probe and the
-			// room read fail concurrently, errNotRoomMember must still win.
-			// Plain errgroup.Group (no WithContext) prevents GetRoom's failure
-			// from cancelling GetSubscription mid-flight and surfacing as
-			// context.Canceled, which would mask the not-member signal.
-			name: "not-member takes precedence over GetRoom error",
-			body: nil,
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
-					Return(fmt.Errorf("missing: %w", model.ErrSubscriptionNotFound))
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(nil, fmt.Errorf("mongo exploded"))
-			},
-			want: want{errIs: errNotRoomMember},
-		},
-		{
-			name: "GetSubscription infra error",
+			name: "membership check infra error",
 			body: nil,
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(fmt.Errorf("mongo exploded"))
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil).AnyTimes()
 			},
 			want: want{errContains: "check room membership"},
 		},
 		{
-			name: "limit zero",
+			name: "limit zero rejected before store call",
 			body: []byte(`{"limit":0}`),
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 			},
 			want: want{errIs: errMentionableLimitInvalid},
 		},
 		{
-			name: "limit negative",
+			name: "limit negative rejected before store call",
 			body: []byte(`{"limit":-1}`),
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 			},
 			want: want{errIs: errMentionableLimitInvalid},
 		},
 		{
-			// Regression (#464): an over-cap explicit limit must clamp to the
-			// cap like the nil-limit branch does, not hard-reject.
-			name: "limit exceeds UserCount + AppCount clamps instead of rejecting",
-			body: []byte(`{"limit":8}`),
+			// An explicit over-max limit clamps to MENTIONABLE_MAX_LIMIT (50 here),
+			// never rejected and never passed through unbounded.
+			name: "explicit limit over max clamps to max",
+			body: []byte(`{"limit":100}`),
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
-					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 7).
+					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 50).
 					Return(stub, nil)
 			},
 			want: want{subs: stub},
 		},
 		{
-			// Empty room + explicit over-cap limit must still short-circuit
-			// to empty (no store call), never send $limit:0 to the store.
-			name: "explicit limit with empty room returns empty without store call",
-			body: []byte(`{"limit":5}`),
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
-					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 0, AppCount: 0}, nil)
-			},
-			want: want{subs: []model.MentionableSubscription{}},
-		},
-		{
-			name: "limit at cap is accepted",
+			name: "explicit limit under max passes through",
 			body: []byte(`{"limit":7}`),
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
 					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 7).
 					Return(stub, nil)
 			},
 			want: want{subs: stub},
-		},
-		{
-			name: "GetRoom errors",
-			body: nil,
-			setupMock: func(s *MockRoomStore) {
-				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
-					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).Return(nil, fmt.Errorf("mongo exploded"))
-			},
-			want: want{errContains: "get room"},
 		},
 		{
 			name: "store errors",
@@ -7681,8 +7614,6 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			setupMock: func(s *MockRoomStore) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
-				s.EXPECT().GetRoom(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, UserCount: 5, AppCount: 2}, nil)
 				s.EXPECT().
 					ListMentionableSubscriptions(gomock.Any(), roomID, requester, "", 3).
 					Return(nil, fmt.Errorf("mongo exploded"))
@@ -7690,8 +7621,8 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			want: want{errContains: "list mentionable subscriptions"},
 		},
 		{
-			// Body parse now precedes the parallel store dispatch; a malformed
-			// body short-circuits before any read.
+			// Body parse precedes the membership check; a malformed body
+			// short-circuits before any read.
 			name:      "malformed JSON body",
 			body:      []byte("{not json"),
 			setupMock: func(s *MockRoomStore) {},
@@ -7705,7 +7636,7 @@ func TestHandler_ListMentionableSubscriptions(t *testing.T) {
 			store := NewMockRoomStore(ctrl)
 			tc.setupMock(store)
 
-			h := &Handler{store: store, siteID: siteID}
+			h := &Handler{store: store, siteID: siteID, mentionableDefaultLimit: 3, mentionableMaxLimit: 50}
 			c := ctxParams(map[string]string{"account": requester, "roomID": roomID})
 			c.Msg = &nats.Msg{Data: tc.body}
 			resp, err := h.listMentionableSubscriptions(c)

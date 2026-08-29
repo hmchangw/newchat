@@ -2,46 +2,70 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/pwhash"
 	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // Handler wires the AdminStore, session.Store, Config, room-service RPC
 // client, and cross-site inbox publisher into HTTP handler methods.
 type Handler struct {
-	store        AdminStore
-	sessions     session.Store
-	cfg          Config
-	roomRPC      roomRequester
-	publishInbox func(ctx context.Context, subj string, data []byte) error
+	store    AdminStore
+	sessions session.Store
+	cfg      Config
+	roomRPC  roomRequester
+	// publish sends one cross-site event; encoding is the Nats-Encoding header
+	// value ("" for an uncompressed body).
+	publish func(ctx context.Context, subj string, data []byte, encoding string) error
 	// remoteDests is remoteSites(cfg.AllSiteIDs, cfg.SiteID), computed once — the
 	// config never changes after startup, so no request needs to re-derive it.
 	remoteDests []string
+	// uploader relays client update artifacts to client-update-service. Nil when
+	// unconfigured — the handler answers 503 rather than dereferencing it, the
+	// same tolerance roomRPC and publish already have.
+	uploader versionUploader
 }
 
 // newHandler constructs a Handler with the given stores, config, room RPC, and
 // inbox publisher. A nil rpc is tolerated so tests that never touch a room
 // route need not build one; the duty handler answers 503 rather than
-// dereferencing it. A nil publishInbox is tolerated the same way — fanout
+// dereferencing it. A nil publish is tolerated the same way — fanout
 // no-ops in tests that don't exercise it.
-func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publishInbox func(ctx context.Context, subj string, data []byte) error) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
-	return &Handler{
-		store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publishInbox: publishInbox,
+func newHandler(store AdminStore, sessions session.Store, cfg Config, rpc roomRequester, publish func(ctx context.Context, subj string, data []byte, encoding string) error, opts ...handlerOption) *Handler { //nolint:gocritic // hugeParam: Config is a startup value copied once at construction
+	h := &Handler{
+		store: store, sessions: sessions, cfg: cfg, roomRPC: rpc, publish: publish,
 		remoteDests: remoteSites(cfg.AllSiteIDs, cfg.SiteID),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// handlerOption configures optional Handler dependencies. Variadic, so adding
+// one does not churn newHandler's 50-plus existing call sites.
+type handlerOption func(*Handler)
+
+// withVersionUploader injects the client-update relay.
+func withVersionUploader(u versionUploader) handlerOption {
+	return func(h *Handler) { h.uploader = u }
 }
 
 // nowMillis returns the current UTC time in unix milliseconds. Injected as a
@@ -95,6 +119,121 @@ func toView(u *model.User) userView {
 		RequirePasswordChange: u.RequirePasswordChange,
 		Active:                u.IsActive(),
 	}
+}
+
+// createUserResponse is the 201 body: the projected user plus whichever fanout
+// lane did not land. Both failure fields are omitempty, so a fully replicated
+// create is byte-identical to the pre-fanout response.
+type createUserResponse struct {
+	userView
+	SyncFailures []string `json:"syncFailures,omitempty"`
+	HRSyncFailed bool     `json:"hrSyncFailed,omitempty"`
+}
+
+// updateUserResponse is the 200 body for a patch; SyncFailures names the remote
+// sites whose snapshot publish did not land.
+type updateUserResponse struct {
+	Status       string   `json:"status"`
+	SyncFailures []string `json:"syncFailures,omitempty"`
+}
+
+// resyncUserResponse is the 200 body for a resync — the create pair of failure
+// fields, since resync re-fires both lanes.
+type resyncUserResponse struct {
+	Status       string   `json:"status"`
+	SyncFailures []string `json:"syncFailures,omitempty"`
+	HRSyncFailed bool     `json:"hrSyncFailed,omitempty"`
+}
+
+// fanoutUserAccount replicates the admin-owned account state after a committed
+// local write: the user_account_updated snapshot to every remote INBOX, plus —
+// when withHRBootstrap is set (create and resync) — the durable HR identity
+// bootstrap. Failures never change
+// the HTTP status — they come back as response fields and are WARN-logged once
+// here; heal via the per-user resync endpoint or the next edit (both re-send
+// the whole snapshot).
+// Takes the request ctx and derives its own — see below.
+func (h *Handler) fanoutUserAccount(ctx context.Context, u *model.User, withHRBootstrap bool) (hrFailed bool, syncFailures []string) {
+	if h.publish == nil || u == nil {
+		return false, nil
+	}
+	ctx, cancel := h.fanoutCtx(ctx)
+	defer cancel()
+
+	// The HR bootstrap shares the INBOX lanes' errgroup rather than running ahead of
+	// them: serialized, a stalled local publish would spend the whole budget and every
+	// healthy peer would then be reported as failed. hrLaneFailed is written only in
+	// that goroutine and read after g.Wait().
+	var g errgroup.Group
+	var hrLaneFailed bool
+	if withHRBootstrap {
+		g.Go(func() error {
+			hrLaneFailed = h.publishHRBootstrap(ctx, u)
+			return nil
+		})
+	}
+	now := nowMillis()
+	roles := u.Roles
+	if roles == nil {
+		roles = []model.UserRole{}
+	}
+	// Timestamp doubles as the receiver's watermark, so it rides the payload —
+	// not just the envelope inbox-worker unwraps and drops.
+	payload, err := json.Marshal(model.UserAccountUpdated{
+		ID: u.ID, Account: u.Account, SiteID: u.SiteID,
+		EngName: u.EngName, ChineseName: u.ChineseName,
+		Roles: roles, Active: u.IsActive(), Timestamp: now,
+	})
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal user account snapshot", "error", err, "account", u.Account)
+		_ = g.Wait()
+		return hrLaneFailed, slices.Clone(h.remoteDests)
+	}
+	// One goroutine per destination, results in a position-indexed slice: an
+	// unreachable peer burns only its own lane, and the reported order stays the
+	// configured destination order. Same shape as publishPermissionFanout.
+	dests := h.remoteDests
+	failed := make([]bool, len(dests))
+	for i, dest := range dests {
+		g.Go(func() error {
+			data, err := json.Marshal(model.InboxEvent{
+				Type: model.InboxUserAccountUpdated, SiteID: h.cfg.SiteID,
+				DestSiteID: dest, Payload: payload, Timestamp: now,
+			})
+			if err != nil {
+				slog.ErrorContext(ctx, "marshal user account inbox envelope", "dest", dest, "error", err)
+				failed[i] = true
+				return nil
+			}
+			if err := h.publish(ctx, subject.InboxExternal(dest, model.InboxUserAccountUpdated), data, ""); err != nil {
+				slog.WarnContext(ctx, "publish user account inbox event", "dest", dest, "account", u.Account, "error", err)
+				failed[i] = true
+			}
+			return nil
+		})
+	}
+	_ = g.Wait() // every goroutine returns nil; per-destination outcomes are in failed
+	return hrLaneFailed, failedDests(dests, failed)
+}
+
+// publishHRBootstrap parks the identity-only users.upsert on the local HR
+// stream (zstd, per the feed's current convention) so the create eventually
+// lands at every site even when a peer is unreachable right now.
+func (h *Handler) publishHRBootstrap(ctx context.Context, u *model.User) bool {
+	users := []model.IUserWithChange{{User: model.User{
+		ID: u.ID, Account: u.Account, SiteID: u.SiteID,
+		EngName: u.EngName, ChineseName: u.ChineseName,
+	}}}
+	data, err := json.Marshal(users)
+	if err != nil {
+		slog.ErrorContext(ctx, "marshal hr identity bootstrap", "error", err, "account", u.Account)
+		return true
+	}
+	if err := h.publish(ctx, subject.OrgSyncUsersUpsert(h.cfg.SiteID), natsutil.EncodeZstd(data), natsutil.EncodingZstd); err != nil {
+		slog.WarnContext(ctx, "publish hr identity bootstrap", "error", err, "account", u.Account)
+		return true
+	}
+	return false
 }
 
 // auditEntry builds one audit entry stamped with the request's principal and this
@@ -153,7 +292,7 @@ func (h *Handler) listUsers(c *gin.Context) {
 	q := c.Query("q")
 	page, limit := parsePaging(c, 1, 20)
 
-	users, total, err := h.store.SearchUsers(ctx, h.cfg.SiteID, q, page, limit)
+	users, total, err := h.store.SearchUsers(ctx, q, page, limit)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("search users: %w", err))
 		return
@@ -166,6 +305,34 @@ func (h *Handler) listUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"users": views,
 		"total": total,
+	})
+}
+
+// resyncUser handles POST /users/:account/resync — re-delivers the current
+// home-site account state on both lanes (HR identity bootstrap + snapshot to
+// every remote INBOX). Like permissions resync it is re-delivery, not
+// re-recording: no user write, no audit entry, idempotent on the receivers
+// (the snapshot re-stamps the watermark with the same field values). Foreign
+// replicas 404: only the home site may re-assert an account.
+func (h *Handler) resyncUser(c *gin.Context) {
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
+	account := c.Param("account")
+
+	u, err := h.store.GetUserByAccount(ctx, h.cfg.SiteID, account)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			errhttp.Write(ctx, c, errcode.NotFound("user not found",
+				errcode.WithReason(errcode.AdminUserNotFound)))
+			return
+		}
+		errhttp.Write(ctx, c, fmt.Errorf("get user for resync: %w", err))
+		return
+	}
+
+	hrFailed, syncFailures := h.fanoutUserAccount(ctx, u, true)
+	c.JSON(http.StatusOK, resyncUserResponse{
+		Status: "ok", SyncFailures: syncFailures, HRSyncFailed: hrFailed,
 	})
 }
 
@@ -201,7 +368,10 @@ type createUserRequest struct {
 
 // createUser handles POST /users — creates a new user account.
 func (h *Handler) createUser(c *gin.Context) {
-	ctx := c.Request.Context()
+	// One absolute deadline for the whole request, so the fanout below can only
+	// spend what the local write and audit left of net/http's write window.
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 
 	var req createUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -257,7 +427,8 @@ func (h *Handler) createUser(c *gin.Context) {
 		"account": u.Account,
 	})
 
-	c.JSON(http.StatusCreated, toView(u))
+	hrFailed, failures := h.fanoutUserAccount(ctx, u, true)
+	c.JSON(http.StatusCreated, createUserResponse{userView: toView(u), SyncFailures: failures, HRSyncFailed: hrFailed})
 }
 
 // updateUserRequest is the request body for PATCH /v1/admin/users/:id.
@@ -270,7 +441,9 @@ type updateUserRequest struct {
 
 // updateUser handles PATCH /v1/admin/users/:account — applies partial updates to a user.
 func (h *Handler) updateUser(c *gin.Context) {
-	ctx := c.Request.Context()
+	// One absolute deadline for the whole request — see createUser.
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 	account := c.Param("account")
 
 	var req updateUserRequest
@@ -291,6 +464,9 @@ func (h *Handler) updateUser(c *gin.Context) {
 	// so mixed patches indicate a client bug. Reactivation (active=true)
 	// combined with other fields goes through the normal UpdateUser branch
 	// below — no session revoke needed.
+	// updated is the post-write doc the fanout replicates; nil means the patch was
+	// empty and nothing was written.
+	var updated *model.User
 	if req.Active != nil && !*req.Active {
 		if req.EngName != nil || req.ChineseName != nil || req.Roles != nil {
 			errhttp.Write(ctx, c, errcode.BadRequest(
@@ -298,7 +474,8 @@ func (h *Handler) updateUser(c *gin.Context) {
 				errcode.WithReason(errcode.AdminMixedDeactivatePatch)))
 			return
 		}
-		if err := h.store.DeactivateAndRevoke(ctx, h.cfg.SiteID, account); err != nil {
+		u, err := h.store.DeactivateAndRevoke(ctx, h.cfg.SiteID, account)
+		if err != nil {
 			if errors.Is(err, ErrUserNotFound) {
 				errhttp.Write(ctx, c, errcode.NotFound("user not found",
 					errcode.WithReason(errcode.AdminUserNotFound)))
@@ -307,9 +484,11 @@ func (h *Handler) updateUser(c *gin.Context) {
 			errhttp.Write(ctx, c, fmt.Errorf("deactivate user and revoke sessions: %w", err))
 			return
 		}
+		updated = u
 	} else {
 		// UserUpdate and updateUserRequest share an identical field layout, so the conversion is safe (staticcheck S1016).
-		if err := h.store.UpdateUser(ctx, h.cfg.SiteID, account, UserUpdate(req)); err != nil {
+		u, err := h.store.UpdateUser(ctx, h.cfg.SiteID, account, UserUpdate(req))
+		if err != nil {
 			if errors.Is(err, ErrUserNotFound) {
 				errhttp.Write(ctx, c, errcode.NotFound("user not found",
 					errcode.WithReason(errcode.AdminUserNotFound)))
@@ -318,6 +497,7 @@ func (h *Handler) updateUser(c *gin.Context) {
 			errhttp.Write(ctx, c, fmt.Errorf("update user: %w", err))
 			return
 		}
+		updated = u
 	}
 
 	details := map[string]string{}
@@ -326,7 +506,11 @@ func (h *Handler) updateUser(c *gin.Context) {
 	}
 	h.audit(ctx, c, "user.update", "", account, details)
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	var failures []string
+	if updated != nil {
+		_, failures = h.fanoutUserAccount(ctx, updated, false)
+	}
+	c.JSON(http.StatusOK, updateUserResponse{Status: "ok", SyncFailures: failures})
 }
 
 // setPasswordRequest is the request body for POST /v1/admin/users/:id/password.

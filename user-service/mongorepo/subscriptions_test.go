@@ -926,3 +926,64 @@ func TestGetActiveSubscriptions_ProjectsBadgeFields_Integration(t *testing.T) {
 	assert.ElementsMatch(t, []string{"roomId", "siteId", "lastSeenAt", "threadUnread", "lastMsgAt"}, keys,
 		"the raw $project output for p-room must contain exactly the five projected fields — no encKey or other room baseline field")
 }
+
+// TestFindChannelsByMembers_LastUserMsgAt_Survival verifies that lastUserMsgAt (a new room
+// field) survives the FindChannelsByMembers pipeline's roomMatchStages $lookup and is
+// properly lifted to the top level by $addFields, then preserved by subscriptionProjection.
+func TestFindChannelsByMembers_LastUserMsgAt_Survival(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	lastUser := now.Add(-time.Hour)
+
+	// Seed room with both lastMsgAt (all messages) and lastUserMsgAt (user messages only).
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-1", "name": "Room1", "siteId": "site-a", "userCount": 2,
+			"lastMsgAt": now, "lastUserMsgAt": lastUser, "createdAt": now},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "a-1", "u": bson.M{"_id": "u-alice", "account": "alice"}, "roomId": "r-1",
+			"name": "Room1", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+		bson.M{"_id": "b-1", "u": bson.M{"_id": "u-bob", "account": "bob"}, "roomId": "r-1",
+			"name": "Room1", "roomType": "channel", "siteId": "site-a", "createdAt": now},
+	)
+
+	page, err := r.FindChannelsByMembers(ctx, "alice", []string{"bob"}, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 1)
+
+	enriched := page.Data[0]
+	require.NotNil(t, enriched.LastUserMsgAt, "enriched subscription must have lastUserMsgAt from room")
+	// WithinDuration, not Equal: BSON datetimes are millisecond-precision, so the
+	// round-tripped value loses the seed's sub-millisecond digits.
+	assert.WithinDuration(t, lastUser, *enriched.LastUserMsgAt, time.Millisecond, "lastUserMsgAt must match the room's value")
+}
+
+// TestAggregateSubscriptions_SortsByUserActivityNotSystemBump_Integration proves the
+// list orders by user activity (lastUserMsgAt), not the newer system bump left on
+// lastMsgAt by something like a rename: room A's system-only rename is the newest
+// lastMsgAt in the set, but room B's more recent real message must still sort first.
+func TestAggregateSubscriptions_SortsByUserActivityNotSystemBump_Integration(t *testing.T) {
+	r, db := newTestSubscriptionRepo(t)
+	ctx := context.Background()
+	t1 := time.Now().UTC().Add(-3 * time.Hour) // room A's last user message
+	t2 := time.Now().UTC().Add(-1 * time.Hour) // room B's last user message (and only message)
+	t3 := time.Now().UTC()                     // room A's system-only bump (e.g. a rename)
+
+	seed(t, db, "rooms",
+		bson.M{"_id": "r-a", "name": "A", "siteId": "site-a", "userCount": 1, "lastMsgAt": t3, "lastUserMsgAt": t1},
+		bson.M{"_id": "r-b", "name": "B", "siteId": "site-a", "userCount": 1, "lastMsgAt": t2, "lastUserMsgAt": t2},
+	)
+	seed(t, db, "subscriptions",
+		bson.M{"_id": "s-a", "u": bson.M{"_id": "u-carl", "account": "carl"}, "roomId": "r-a",
+			"name": "A", "roomType": "channel", "siteId": "site-a"},
+		bson.M{"_id": "s-b", "u": bson.M{"_id": "u-carl", "account": "carl"}, "roomId": "r-b",
+			"name": "B", "roomType": "channel", "siteId": "site-a"},
+	)
+
+	page, err := r.AggregateSubscriptions(ctx, "carl", "rooms", false, nil, mongoutil.OffsetPageRequest{Offset: 0, Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, page.Data, 2)
+	assert.Equal(t, "s-b", page.Data[0].ID, "room B's real user message outranks room A's newer system bump")
+	assert.Equal(t, "s-a", page.Data[1].ID)
+}

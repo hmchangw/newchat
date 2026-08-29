@@ -15,7 +15,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/health"
@@ -45,33 +44,38 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: read-only service (fan-out lookups); secondaryPreferred
 	// offloads the primary.
-	MongoReadPreference    string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	Pool                   mongoutil.PoolConfig
-	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
-	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
-	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
-	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
-	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
-	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
-	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
-	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
-	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
-	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
-	UserCacheSize          int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
-	UserCacheTTL           time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
-	MentionNamesEnabled    bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
-	MentionNamesTimeout    time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
-	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	// MongoUserReadPreference covers the settings read that gates push delivery.
+	// Kept off the client-wide preference (the other collections tolerate more
+	// lag), but primaryPreferred rather than primary: a stale mute is recoverable,
+	// a push pipeline that dies with the primary is not.
+	MongoUserReadPreference string `env:"MONGO_USER_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool                    mongoutil.PoolConfig
+	MaxWorkers              int                     `env:"MAX_WORKERS"               envDefault:"100"`
+	LargeRoomThreshold      int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
+	PushRecipientBatchSize  int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
+	RoomMetaCacheSize       int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL        time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomMetaL2TTL           time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
+	ValkeyAddrs             []string                `env:"VALKEY_ADDRS"              envSeparator:","`
+	ValkeyPassword          string                  `env:"VALKEY_PASSWORD"           envDefault:""`
+	RoomSubCacheTTL         time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
+	PresenceBatchSize       int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
+	PresenceRPCTimeout      time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
+	PresenceEnabled         bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled       bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
+	UserSettingsEnabled     bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize   int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsTimeout     time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	UserCacheSize           int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL            time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesEnabled     bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
+	MentionNamesTimeout     time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
+	Mode                    stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	Consumer                stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap               bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr              string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 // mongoMemberLoader loads a room's member list and stamps each member's HOME
@@ -221,10 +225,16 @@ func main() {
 	subCol := db.Collection("subscriptions")
 	threadRoomCol := db.Collection("thread_rooms")
 	roomsCol := db.Collection("rooms")
-	// Settings gate push delivery, so a stale read means a user who just muted
-	// still gets notified; route to primary regardless of the client-wide
-	// preference. The other collections here tolerate replica lag and keep it.
-	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
+	// Settings gate push delivery, so this collection keeps its own preference
+	// rather than the client-wide one. The other collections here tolerate more
+	// replica lag and keep it.
+	userReadPref, err := mongoutil.ParseReadPreference(cfg.MongoUserReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo user read preference", "value", cfg.MongoUserReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo user read preference configured", "readPreference", userReadPref.Mode().String())
+	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), userReadPref)
 
 	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
 		valkeyutil.WithObservability(sdk),

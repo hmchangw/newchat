@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -26,6 +27,13 @@ type mongoStore struct {
 	// retiredCol holds one document per retired key version; nil disables the archive.
 	retiredCol *mongo.Collection
 	retiredTTL time.Duration
+
+	// indexReady is false until EnsureIndexes has succeeded. createIndexes is a
+	// write, so a pod that starts during a primary-down incident cannot create
+	// the TTL index; archiveRetired retries while this is false so the archive
+	// self-heals at the first rotation after recovery, instead of writing into
+	// a collection nothing expires for the life of the process.
+	indexReady atomic.Bool
 }
 
 // RetiredKeysCollection holds retired key versions; every wiring site must name this same one.
@@ -33,6 +41,11 @@ const RetiredKeysCollection = "retired_room_keys"
 
 // archiveWriteTimeout bounds the detached archive write in archiveRetired.
 const archiveWriteTimeout = 5 * time.Second
+
+// indexRepairTimeout bounds archiveRetired's retry of a startup index ensure.
+// Deliberately shorter than archiveWriteTimeout: repairing the index must never
+// cost the archive write itself.
+const indexRepairTimeout = 2 * time.Second
 
 // Option configures a mongoStore.
 type Option func(*mongoStore)
@@ -288,6 +301,7 @@ func (s *mongoStore) Close() error { return nil }
 // EnsureIndexes creates the archive's TTL index. Idempotent; no-op when the archive is off.
 func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 	if s.retiredCol == nil {
+		s.indexReady.Store(true)
 		return nil
 	}
 	// Per-document expiresAt keeps retention tunable by config, no index rebuild.
@@ -297,6 +311,7 @@ func (s *mongoStore) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("ensure retired_room_keys expiresAt TTL index: %w", err)
 	}
+	s.indexReady.Store(true)
 	return nil
 }
 
@@ -322,6 +337,7 @@ func (s *mongoStore) archiveRetired(ctx context.Context, roomID string, version 
 	if s.retiredCol == nil || len(priv) == 0 {
 		return
 	}
+	s.repairIndexes(ctx)
 	// Detached: the rotation is committed, so a caller deadline expiring here must not drop the archive.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), archiveWriteTimeout)
 	defer cancel()
@@ -335,6 +351,26 @@ func (s *mongoStore) archiveRetired(ctx context.Context, roomID string, version 
 		roomkeymetrics.RecordStoreError(ctx, "ArchiveRetired")
 		slog.ErrorContext(ctx, "archive retired room key failed",
 			"room_id", roomID, "version", version, "error", err)
+	}
+}
+
+// repairIndexes re-attempts the TTL index when startup could not create it, so
+// the archive is never written into an unexpiring collection. Idempotent, and
+// it stops attempting once the ensure succeeds.
+func (s *mongoStore) repairIndexes(ctx context.Context) {
+	if s.indexReady.Load() {
+		return
+	}
+	idxCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), indexRepairTimeout)
+	defer cancel()
+	if err := s.EnsureIndexes(idxCtx); err != nil {
+		// Error, not Warn, and metered: a repair that keeps failing is an
+		// operator-actionable condition (an index changed out from under us),
+		// not a transient blip. Alert on this counter rather than on the absence
+		// of expiry, which is invisible until the collection has already grown.
+		roomkeymetrics.RecordStoreError(ctx, "RepairIndexes")
+		slog.ErrorContext(ctx, "retired room key TTL index unavailable; archiving without expiry",
+			"error", err)
 	}
 }
 

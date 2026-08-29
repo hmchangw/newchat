@@ -259,6 +259,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 		RoomID:        msg.RoomID,
 		MsgID:         msg.ID,
 		At:            msg.CreatedAt,
+		SystemMsg:     model.IsSystemMessageType(msg.Type),
 		MentionAll:    resolved.MentionAll,
 		Preview:       sealed,
 		PreviewFailed: sealFailed,
@@ -389,7 +390,8 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt"))
 	}
 
 	if shouldUseThreadFanOut(&msg) {
@@ -413,10 +415,11 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 
 	// Resolve mentionees once: the same participants render on the edit event
 	// and route the cross-site badge, so we avoid a second FindUsersByAccounts.
-	participants := h.resolveEditMentions(ctx, parsed)
+	participants, mentionAll := h.resolveEditMentions(ctx, parsed)
 
 	edit := buildEditRoomEvent(room, evt)
 	edit.Mentions = participants
+	edit.MentionAll = mentionAll
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
@@ -518,23 +521,28 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 // SetSubscriptionMentions and newContent still carries the raw @account, so on a
 // user-lookup error we drop the mentions[] enrichment entirely (return nil)
 // rather than emitting a partial set or failing/retrying the edit. nil when none.
-func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseResult) []model.Participant {
+// Returns the resolved participants and MentionAll. MentionAll is parse-derived and
+// independent of the per-account lookup, so an edit that only adds @all (no individual
+// mentions) — or one whose lookup fails — still carries the flag.
+func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseResult) ([]model.Participant, bool) {
 	if len(parsed.Accounts) == 0 {
-		return nil
+		return nil, parsed.MentionAll
 	}
 	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
 	if err != nil {
 		slog.WarnContext(ctx, "user lookup failed resolving edit mentions, dropping edit mentions",
 			"error", err, "request_id", natsutil.RequestIDFromContext(ctx))
-		return nil
+		return nil, parsed.MentionAll
 	}
-	return mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants
+	resolved := mention.ResolveFromParsed(parsed, usersByAccount(users))
+	return resolved.Participants, resolved.MentionAll
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.EditedAt == nil || msg.UpdatedAt == nil {
-		return fmt.Errorf("updated event missing EditedAt or UpdatedAt for thread reply %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt for thread reply"))
 	}
 	parentMsgID := msg.ThreadParentMessageID
 
@@ -548,7 +556,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 
 	parsed := mention.Parse(msg.Content)
 	edit := buildEditRoomEvent(room, evt)
-	edit.Mentions = h.resolveEditMentions(ctx, parsed)
+	edit.Mentions, edit.MentionAll = h.resolveEditMentions(ctx, parsed)
 
 	switch room.Type {
 	case model.RoomTypeChannel:
@@ -587,7 +595,8 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 	parentMsgID := msg.ThreadParentMessageID
 
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("missing UpdatedAt for thread message %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("missing UpdatedAt for thread message"))
 	}
 
 	// GetRoom first so the routing decision (thread followers vs all DM
@@ -710,7 +719,8 @@ func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, n
 func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.UpdatedAt == nil {
-		return fmt.Errorf("deleted event missing UpdatedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("deleted event missing UpdatedAt"))
 	}
 
 	if shouldUseThreadFanOut(&msg) {
@@ -750,7 +760,8 @@ func (h *Handler) publishThreadBadge(ctx context.Context, room *model.Room, newT
 func (h *Handler) handlePinned(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 	if msg.PinnedAt == nil {
-		return fmt.Errorf("pinned event missing PinnedAt: %s", msg.ID)
+		natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalInvalidPayload)
+		return errcode.Permanent(errcode.BadRequest("pinned event missing PinnedAt"))
 	}
 
 	room, err := h.store.GetRoom(ctx, msg.RoomID)
@@ -1217,6 +1228,7 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 		UserCount:      meta.UserCount,
 		LastMsgAt:      clientMsg.CreatedAt,
 		LastMsgID:      clientMsg.ID,
+		SystemMsg:      model.IsSystemMessageType(clientMsg.Type),
 		Message:        clientMsg,
 	}
 }
@@ -1384,6 +1396,17 @@ func (h *Handler) channelThreadFanOut(ctx context.Context, roomID, siteID, paren
 	} else {
 		fetched, err := h.parentFetcher.FetchParent(ctx, sender, roomID, siteID, parentMsgID)
 		if err != nil {
+			// historyParentFetcher propagates the typed remote error precisely so it
+			// can be classified here. A not_found/forbidden parent is retried once —
+			// a bot can post a parent and reply to it before bot-message-worker has
+			// written the parent to Cassandra — and then dropped: past that the
+			// parent is genuinely absent, and spending the rest of MaxDeliver on it
+			// would hold an ack-pending slot for 66s per message, which is what
+			// fills the consumer's budget and stops it consuming anything at all.
+			if ee, terminal := errcode.Terminal(err); terminal && parentResolveExhausted(ctx) {
+				natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+				return nil, errcode.Permanent(ee)
+			}
 			return nil, fmt.Errorf("fetch thread parent %s: %w", parentMsgID, err)
 		}
 		parent = fetched
@@ -1407,4 +1430,20 @@ func usersByAccount(users []model.User) map[string]model.User {
 		byAccount[users[i].Account] = users[i]
 	}
 	return byAccount
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (a bot replying to its own just-posted parent), so the full
+// MaxDeliver budget buys nothing and costs a lot: on LowLatencyBackoff each
+// waiting reply holds its ack-pending slot for 66s, and ~15 of them per second
+// fills the budget and stalls the whole site's fan-out.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }
