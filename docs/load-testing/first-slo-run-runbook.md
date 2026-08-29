@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | **Produces** | The **achieved distribution** for **SLO-4, 5, 7** and an approximate indicator for **SLO-1a** — the evidence a target gets chosen *from*, not a verdict against one. Plus the loadgen-vs-production latency gap for 4/5 |
-| **Stance** | **The bounds and targets in `sli-slo.md` are drafts, not acceptance criteria.** This run is one of the two inputs that settle them — §4a |
+| **Stance** | **This run is calibration-only and gates nothing.** `common/sli-slo.md` remains the acceptance contract for any gating run until Track 1.3 amends it — §4a |
 | **loadgen code changes** | **None** — but the warm-up→measurement boundary needs a run protocol, not a code path; see §7 |
 | **Dashboard changes** | **Yes** — the existing dashboard has 22 panels and not one SLO ratio |
 | **Does not produce** | SLO-1b, 2, 3, 6, 8, 9 — see §8 |
@@ -29,6 +29,7 @@
 | P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
 | P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
 | P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
+| P8 | **Read the live consumer config and the scrape interval** | infra | `MaxDeliver`, `AckWait` and the backoff schedule set `t2`'s cap (§5); the scrape interval sets how long every mark waits. Both are environment overrides — do not assume the chart defaults |
 
 ### P6 — how to scope a run to a site
 
@@ -183,18 +184,35 @@ the draft is missed — the draft is what this run exists to revise.
 
 ---
 
-## 4a. The targets are an output of this programme, not an input
+## 4a. This run is calibration-only — the contract stays where it is
 
-`sli-slo.md` §0.2 says so itself: *"All targets are achievable-first starting
-values. Run observationally for 4–6 weeks, then adjust and seek approval."*
-Nothing in the current document has been through that. So the first run's job is
-**not** to answer "did we meet SLO-5?" — it is to produce the distribution a
-defensible SLO-5 can be written from.
+Two things that are easy to conflate, and must not be:
 
-This dissolves the 300 ms / 250 ms question rather than answering it. The
-disagreement between this checkout and #337 is **two drafts differing**, not a
-spec being violated. Report the good-ratio at every bucket boundary, let the
-calibration choose, and record why.
+| | |
+|---|---|
+| **`common/sli-slo.md` is the acceptance contract.** §10 is explicit: a hard gate "fails if it can't meet the **actual SLO predicate and target** from this document" | It stays binding for every **gating** run, unchanged, until Track 1.3 approves an amendment |
+| **This run does not gate.** §0.2 asks for achievable-first values, 4–6 weeks of observation, then adjust and seek approval — and nothing has been through that | So 1.0b measures the distribution and **produces no verdict**. It cannot fail, and it cannot ratify |
+
+The programme therefore has an explicit ordering, and this runbook only covers
+the first row:
+
+| Track | What it does | Gates? |
+|---|---|---|
+| **1.0b** (this run) | Calibration. Outputs the achieved distribution across candidate bounds | **No** |
+| **1.2** | Observational window on real traffic | No |
+| **1.3** | Choose bounds and targets from 1.0b + 1.2, get approval, **and update `common/sli-slo.md`** | — |
+| **1.4 / 1.5** | Assertion mode and the re-run, scored against the **approved, updated** criteria | **Yes** |
+
+**SLO-5's divergence is an open item for 1.3, not a licence to ignore either
+number.** This checkout says 99% / 300 ms; #337 proposes 95% / 250 ms. Neither is
+"the draft you may pick" — the source of truth says 300 ms today, and 1.3 must
+either keep it or change it *in the document*. What 1.0b contributes is the
+evidence for that decision, plus one hard fact: **300 ms is not computable**, so
+whichever way the target goes, the bound has to move to a real boundary. Record
+which text the checkout carried so a later reader knows what the reference line
+meant.
+
+Report the good-ratio at every bucket boundary, let 1.3 choose, and record why.
 
 Three constraints on that choice, all learned the hard way here:
 
@@ -236,11 +254,20 @@ refreshes.
 **Synchronous and asynchronous SLIs need different boundaries — and mixing them
 is the mistake that inflates a ratio past 100%.**
 
+**Every mark waits out a full scrape interval.** An instant query at the barrier
+can still read the sample taken *before* it. The soak's RPC timeout is 5 s and the
+scrape interval is 5 s locally (longer on staging — check yours), so a mark taken
+"a few seconds after dispatch stops" misses the slowest, last-finishing RPCs and
+biases the J2 distribution **good**; a `t2` taken the instant the backlog hits
+floor can read a persistence counter that has not been scraped yet and biases
+SLO-1a **bad**.
+
 | Mark | When | Snapshot | Serves |
 |---|---|---|---|
-| **t0** | Measurement starts — see §7 for how to get a clean one | **All** counters: the baseline every later value is measured from | everything |
-| **t1** | Dispatch stopped, **plus** the few seconds for in-flight RPCs to return | `rpc_server_call_duration_seconds` **`_bucket` and `_count` together**, and `search_service_requests_total` (both sides) | SLO-4, 5, 7 |
-| **t2** | message-worker's `num_pending + num_ack_pending` back at its pre-run floor, **capped** — see below | `message_worker_persistence_total` **and** `message_gatekeeper_messages_total` | SLO-1a |
+| **t0-async** | Baseline for SLO-1a. Taken while dispatch is stopped and the backlog is at floor — **and scraped before dispatch resumes** (§7) | `message_worker_persistence_total`, `message_gatekeeper_messages_total` | SLO-1a |
+| **t0-sync** | Baseline for the synchronous families. Taken once the **full lane mix is running** — specifically once `thread_open` is producing samples again (§7) | `rpc_server_call_duration_seconds` (both series), `search_service_requests_total` | SLO-4, 5, 7 |
+| **t1** | Dispatch stopped → wait until in-flight RPCs reach zero, **or** at least one full `soak` RPC timeout → **then wait one full scrape interval** | the same synchronous families | SLO-4, 5, 7 |
+| **t2** | message-worker's `num_pending + num_ack_pending` at its pre-run floor **and stable there for at least one scrape interval**, capped — see below | the same two counters as `t0-async` | SLO-1a |
 
 **Why SLO-4/5/7 take both sides at `t1`.** Their numerator and denominator come
 from the *same* observation: `_bucket{le}` and `_count` on one histogram
@@ -256,15 +283,26 @@ deadline**. Borrowing SLO-4's 500 ms would count as persistence failures every
 message still sitting in the JetStream backlog, in `jsretry` backoff, or being
 recovered, all of which are messages the system has not failed to persist.
 
-So `t2` is *"message-worker has caught up"*, with a cap:
+So `t2` is *"message-worker has caught up"*, with a cap — **derived from the
+deployed consumer config, not assumed**:
 
-- **Cap the wait at 15 minutes.** That is past `jsretry.DefaultBackoff`'s
-  ~12.6-minute client-side budget against `MaxDeliver=6`, so anything still
-  pending after it is not going to be retried into existence.
-- **If the backlog has not drained by the cap, SLO-1a is INCONCLUSIVE for this
-  window** — and the run has already failed the §6 validity gate, because a
-  backlog that does not drain is not a flat backlog. Do not snapshot anyway at an
-  arbitrary instant to get a number.
+```
+cap = Σ over i in [1 .. MaxDeliver-1] of backoff[min(i, len(backoff)-1)]
+      + one AckWait + one scrape interval
+```
+
+At the shipped defaults (`MaxDeliver=6`, `DefaultBackoff` = 1s/5s/30s/2m/10m)
+that is ~12.6 min of retry plus margin ≈ **15 minutes**. But `MAX_DELIVER` is an
+environment override (`pkg/stream/consumer.go:18`) and **the last backoff entry
+repeats** for every attempt past the schedule — at `MaxDeliver=10` the budget is
+~52 minutes, and a 15-minute cap would declare messages lost that the system was
+still going to persist. **Read the live consumer config in preflight** and
+compute the cap from it.
+
+**If the backlog has not drained by the cap, SLO-1a is INCONCLUSIVE for this
+window** — and the run has already failed the §6 validity gate, because a backlog
+that does not drain is not a flat backlog. Do not snapshot anyway at an arbitrary
+instant to get a number.
 
 Panels are for watching the run; the recorded number comes from the snapshots.
 
@@ -272,25 +310,25 @@ Panels are for watching the run; the recorded number comes from the snapshots.
 # Snapshot form — evaluate each at the marked instant (Prometheus `time=` /
 # `@` modifier / an instant query at the recorded timestamp), then subtract.
 
-# 1 — SLO-1a  (BOTH sides at t2 — the backlog-drained mark — minus their t0 value)
+# 1 — SLO-1a  (both sides: @t2 − @t0-async)
 sum(message_worker_persistence_total{
-      site="$site", message_kind=~"user|thread_reply", result="success"})   # @t2 − @t0
-sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t2 − @t0
+      site="$site", message_kind=~"user|thread_reply", result="success"})   # @t2 − @t0-async
+sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t2 − @t0-async
 
 # 2 — J2 channel load: good-ratio at EVERY bucket boundary.
 #     Keep `le` as a series dimension instead of pinning one value — the curve is
 #     the deliverable (§4a), and a single le would bake in a draft bound.
 sum by (le) (rpc_server_call_duration_seconds_bucket{
       site="$site", service_name="history-service",
-      rpc_method="channel_history", error_type=""})                          # @t1 − @t0
+      rpc_method="channel_history", error_type=""})                          # @t1 − @t0-sync
 sum(rpc_server_call_duration_seconds_count{
       site="$site", service_name="history-service", rpc_method="channel_history",
-      error_type=~"|internal|unavailable|too_many_requests"})                # @t1 − @t0
+      error_type=~"|internal|unavailable|too_many_requests"})                # @t1 − @t0-sync
       # both sides at t1: same histogram, same observation instant
 
 # 3 — J2 thread open: same shape, rpc_method="thread_open".
 
-# 4 — SLO-7: search ok / eligible   (synchronous — both sides @t1 − @t0)
+# 4 — SLO-7: search ok / eligible   (synchronous — both sides @t1 − @t0-sync)
 sum(search_service_requests_total{site="$site", status="ok"})
 sum(search_service_requests_total{site="$site",
       status=~"ok|internal|unavailable|too_many_requests"})
@@ -351,7 +389,7 @@ already on the shipped dashboard.
 
 ## 7. Run protocol and what to record
 
-### There is no drain barrier at the end of warm-up — pick how to get `t0`
+### There is no drain barrier at the end of warm-up
 
 The obvious protocol — "let warm-up finish, wait for the backlog to drain, then
 start measuring" — **is not executable as the workload is built**. At the warm-up
@@ -360,71 +398,78 @@ deadline the soak only flips a boolean: `measured := !w.now().Before(warmupDeadl
 full rate. Nothing pauses, so nothing drains, and in a continuous Deployment there
 is no phase boundary to wait at.
 
-Two ways to get a usable `t0` without changing loadgen:
+**Use the chart's own lifecycle, not `kubectl scale`.** The Deployment template is
+rendered only when `.Values.phase == "soak"` and hardcodes `replicas: 1`
+(`soak-deployment.yaml:1,12`). Scaling to zero by hand fights the chart, and under
+Argo CD self-heal will simply put it back. The sanctioned pause is
+`phase: soak → phase: stopped`, then back. If your GitOps controller prunes on
+`stopped`, note that the PVC and the Mongo manifest survive — the `runId` owns the
+topology and a replacement process resumes the same run.
 
-**Option A — pre-warm, stop, restart with `warmup: 0`** *(recommended)*
+**The restart empties the recent-message catalog, and that is not cosmetic.**
+`TestSoakWorkload_RestartBeginsWithEmptyCatalog` pins it — *"manifest lifecycle
+never checkpoints recent messages"* — and `soak_read.go:221-228` **skips
+`thread_open` entirely** when the catalog has no eligible entry. So immediately
+after the restart there is **no SLO-5 traffic at all**, not merely less of it, and
+the mutation, thread and verification lanes are absent from the contention mix.
+An earlier revision of this runbook claimed the read lanes were unaffected. They
+are not.
 
-1. Run normally until steady state.
-2. Scale the Deployment to 0. `continuous` mode stops gracefully on SIGTERM, and
-   **a replacement process resumes the same run** — the `runId` owns the topology,
-   the PVC owns the ledger. This gap is the drain.
-3. Watch the backlog fall to its pre-run floor. Keep the gap **shorter than
-   `soak.heartbeatStaleAfter`**, and do not run teardown during it.
-4. Scale back to 1 with `soak.warmup: 0`. Mark `t0` at the first dispatch.
+That is why the baselines are split:
 
-One caveat that is not a blocker: the recent-message catalog is in-memory, so
-after the restart the mutation, thread and verification lanes idle until new
-messages age past `soak.persistGrace`. The **send and read lanes carry SLO-1a/4/5/7
-and are unaffected** — but discard the first two minutes if you want the full mix
-represented.
+1. **Reach steady state**, then `phase: stopped`.
+2. **Watch the backlog fall to its pre-run floor.** Hold there for at least one
+   scrape interval, then take **`t0-async`** — the SLO-1a baseline — *while
+   dispatch is still stopped*. Taking it at first dispatch races the scrape.
+   Keep the pause shorter than `soak.heartbeatStaleAfter`, and do not run
+   teardown during it.
+3. **`phase: soak` with `soak.warmup: 0`.** Dispatch resumes immediately.
+4. **Wait for the full mix.** Watch `loadgen_soak_rpc_latency_seconds{action="msg_thread"}`
+   (or the lane's attempt counter) resume at its configured rate — that is the
+   catalog having refilled past `soak.persistGrace`. Then take **`t0-sync`**, the
+   baseline for SLO-4/5/7. Everything between step 3 and here is excluded from
+   the synchronous measurement by construction, which is what "discard the first
+   two minutes" should have meant.
 
-**Option B — one continuous run, bound the contamination instead of removing it**
+### Option B — one continuous run — is not an acceptable path
 
-Mark `t0` at the warm-up deadline and *quantify* the bias rather than eliminating
-it. The only messages that can pollute the measured numerator are those admitted
-before `t0` that persist after it, and that population is bounded by the in-flight
-depth at `t0` — read `loadgen_failure_inflight` plus the consumers' `num_pending`
-at that instant. If it is **under 0.1% of the measured denominator**, the bias sits
-below the SLO's own stated precision; record the number next to the ratio and move
-on. If it is larger, use Option A.
+An earlier revision offered "keep one continuous run and bound the contamination
+at 0.1% of the denominator". **That threshold is exactly the error budget of a
+99.9% target**, so a bias inside it can move 99.8% to 99.9% on its own. The bound
+was also not an upper bound: it used `loadgen_failure_inflight` plus
+`num_pending`, omitting `num_ack_pending`, and `loadgen_failure_inflight` counts
+operations awaiting *observers*, which is not the broker's redelivery population —
+a message whose observer accounting finished but whose Ack failed can still
+increment the attempt-based numerator again.
 
-Either way the bias runs **upward** — a warm-up message persisting after `t0`
-lands in the numerator with no matching denominator — which is the direction that
-makes a bad result look acceptable. That is why it has to be bounded, not ignored.
+If a restart is genuinely impossible, the fallback is to report SLO-1a as an
+**interval** — `[measured − bias, measured]` with the bias bounded by
+`num_pending + num_ack_pending` at `t0` — and never as a point estimate. Given
+SLO-1a is already an approximate indicator that can exceed 100%, stacking a
+second unquantified bias on it makes the number not worth reporting. Prefer the
+restart.
 
 ### The sequence
 
 1. Seed (`phase: seed`), confirm the encryption preflight in the log.
-2. Reach steady state, then establish `t0` by Option A or B above. Snapshot **all**
-   counters at `t0`.
-3. Hold for **at least 30 minutes** at steady state. Longer is better for sample
-   size; this is not an endurance run.
-4. Stop dispatch. Wait a few seconds for in-flight RPCs to return, then **mark
-   `t1`** and snapshot the synchronous families (SLO-4/5/7, both sides).
-5. Watch message-worker's `num_pending + num_ack_pending` fall to its pre-run
-   floor. **Mark `t2`** there and snapshot SLO-1a's two counters. If it has not
-   drained within **15 minutes**, stop — SLO-1a is INCONCLUSIVE for this window
-   and the validity gate has already failed.
-6. Compute every ratio from the snapshot differences (§5).
-7. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
-   which `t0` option was used (and the contamination bound if Option B),
-   `t0/t1/t2`, the workload shape label from §2, all six validity checks, and
-   the ratios.
-
-**Write it up as evidence for a target, not as a verdict against one:**
-
-> J2 channel load, achieved at 100 msg/s over 30 min (t0 14:32:10 → t1 15:02:10
-> → t2 15:03:15), isolated site `slo-test-a`, shape `default-zipf / i12=derived`,
-> sampler 0.1, backlog flat, no invalidations:
-> `≤250 ms 91.4% · ≤500 ms 96.2% · ≤1 s 99.1%`.
-> Draft at run time: 95% within 500 ms — met.
-> J2 thread open: `≤250 ms 97.8% · ≤500 ms 99.3%`. Draft: 99% within 300 ms —
-> not computable at that bound; bracketed 97.8–99.3%.
-> SLO-1a approximate indicator = 99.94% (per-attempt, §5).
-
-Never *"SLO-1a = 99.94%"*, and never *"SLO-5 failed"* — the SLO is a 28-day
-window over production traffic, and its bound is still a draft this run exists to
-inform.
+2. Preflight the two run-shaping facts: the **live consumer config**
+   (`MaxDeliver`, `AckWait`, backoff) to derive `t2`'s cap, and the **scrape
+   interval** every mark below waits on.
+3. Establish `t0-async` and `t0-sync` per the restart procedure above.
+4. Hold for **at least 30 minutes** of steady state measured from `t0-sync`.
+   Longer is better for sample size; this is not an endurance run.
+5. Stop dispatch. Wait until in-flight RPCs reach zero (or one full RPC timeout),
+   **then one full scrape interval**, then mark **`t1`** and snapshot the
+   synchronous families — both sides together.
+6. Watch message-worker's `num_pending + num_ack_pending` reach its pre-run floor
+   and **stay there for one scrape interval**. Mark **`t2`** and snapshot
+   SLO-1a's two counters. If the floor is not reached within the derived cap,
+   stop — SLO-1a is INCONCLUSIVE and the validity gate has already failed.
+7. Compute every ratio from the snapshot differences (§5).
+8. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
+   the live `MaxDeliver`/backoff and the derived cap, the scrape interval,
+   `t0-async / t0-sync / t1 / t2`, the workload shape label from §2, all six
+   validity checks, and the ratios.
 
 ---
 
