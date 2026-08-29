@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
@@ -57,6 +60,14 @@ func (h *Handler) HandleEvent(ctx context.Context, subj string, data []byte) err
 	pubCtx, cancel := context.WithTimeout(ctx, federationForwardTimeout)
 	defer cancel()
 	if err := h.publish(pubCtx, subject.InboxExternal(destSiteID, eventType), evt.Envelope, evt.DedupID); err != nil {
+		if errors.Is(err, nats.ErrMaxPayload) {
+			// Rejected client-side before the wire, so every redelivery fails the
+			// same way. This lane is MaxDeliver=-1 with MaxAckPending=1 per peer:
+			// a Nak would park every later event for that peer behind this one
+			// forever, so drop the single oversized event instead.
+			return errcode.Permanent(errcode.Internal(
+				fmt.Sprintf("outbox %s event for %s exceeds broker max_payload", eventType, destSiteID)))
+		}
 		return fmt.Errorf("forward outbox event to %s: %w", destSiteID, err)
 	}
 	return nil

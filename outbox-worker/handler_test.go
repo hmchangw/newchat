@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -91,4 +92,22 @@ func TestHandleEvent_SkipsEventMissingDedupID(t *testing.T) {
 	data, _ := outboxEvent(t, "site-b", model.InboxSubscriptionRead, "")
 	require.NoError(t, h.HandleEvent(context.Background(), subj, data))
 	assert.False(t, published, "event with empty DedupID must be skipped, never forwarded without dedup")
+}
+
+// An oversized envelope is rejected client-side before the wire, so it fails
+// identically on every redelivery. This lane is MaxDeliver=-1/MaxAckPending=1
+// per peer, so a Nak parks every later event for that peer behind it forever —
+// drop the one event instead of wedging the whole federation lane.
+func TestHandleEvent_OversizedPayloadIsPermanent(t *testing.T) {
+	h := NewHandler(func(_ context.Context, _ string, _ []byte, _ string) error {
+		return nats.ErrMaxPayload
+	})
+	subj := subject.Outbox("site-a", "site-b", model.InboxSubscriptionRead)
+	data, _ := outboxEvent(t, "site-b", model.InboxSubscriptionRead, "d")
+
+	err := h.HandleEvent(context.Background(), subj, data)
+
+	require.Error(t, err)
+	_, permanent := errcode.IsPermanent(err)
+	assert.True(t, permanent, "an oversized forward can never succeed — Ack-drop it, don't wedge the lane")
 }

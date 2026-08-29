@@ -523,6 +523,13 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
+		if errors.Is(err, nats.ErrMaxPayload) {
+			// Rejected client-side before the wire. The caps this handler enforces
+			// (content, attachments) are meant to keep a message under max_payload,
+			// so reaching this is a misconfiguration, not a client error — but the
+			// message can never be published, so reply and drop rather than retry.
+			return nil, errcode.Permanent(errcode.Internal("canonical message exceeds broker max_payload"))
+		}
 		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.

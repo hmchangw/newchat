@@ -165,3 +165,33 @@ func TestHandler_HandleJetStreamMsg_PermanentFault_RecordsFailedNotRejected(t *t
 	assert.False(t, msg.naked)
 	assert.Equal(t, map[string]int64{"failed/internal": 1}, gatekeeperCounts(t, reader))
 }
+
+// A canonical publish rejected for exceeding max_payload fails identically on
+// every redelivery: Ack-drop it (with a reply) instead of Nakking to MaxDeliver.
+func TestHandler_HandleJetStreamMsg_OversizedCanonicalPublish_IsPermanent(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metrics := newGatekeeperMetrics(mp.Meter("test"))
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().GetSubscription(gomock.Any(), "weather.bot", "room-1").Return(&model.Subscription{
+		User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
+		Roles: []model.Role{model.RoleMember},
+	}, nil)
+	h := NewHandler(store, nil, makePublishFunc(nil, nats.ErrMaxPayload),
+		func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "",
+		withGatekeeperMetrics(metrics))
+	request := model.SendMessageRequest{
+		ID: idgen.GenerateMessageID(), Content: "hello",
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+	}
+	data, err := json.Marshal(request)
+	require.NoError(t, err)
+	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-a.msg.send", data: data}
+
+	h.HandleJetStreamMsg(context.Background(), msg)
+
+	assert.True(t, msg.acked, "an oversized message can never be published — Ack-drop it")
+	assert.False(t, msg.naked)
+	assert.Equal(t, map[string]int64{"failed/internal": 1}, gatekeeperCounts(t, reader))
+}

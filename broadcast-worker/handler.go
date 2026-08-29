@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -1076,6 +1077,13 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	var pubErr error
 	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {
+			if errors.Is(err, nats.ErrMaxPayload) {
+				// Rejected client-side before the wire: the same payload is oversized
+				// for every remaining target and every redelivery, so stop here rather
+				// than spend the consumer's budget on a publish that cannot land.
+				return errcode.Permanent(errcode.Internal(
+					fmt.Sprintf("%s for room %s exceeds broker max_payload", op, roomID)))
+			}
 			pubErr = fmt.Errorf("publish %s for room %s to %s: %w", op, roomID, subj, err)
 		}
 	}
