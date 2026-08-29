@@ -61,3 +61,31 @@ func TestActiveSubscriptionFilter_MatchesCurrentBucket(t *testing.T) {
 	assert.True(t, hasNonAppBranch(t, branches),
 		"the badge filter must admit the same non-app botDM rows the list does")
 }
+
+// A bot calling subscription.getDM on a human target must resolve the room. Its
+// own row is stored roomType=botDM, so a hard roomType:"dm" match 404s it.
+func TestDMMatch_AcceptsNonAppBotDM(t *testing.T) {
+	m := dmMatch("weather.bot", "alice")
+	assert.Equal(t, "weather.bot", m["u.account"])
+	assert.Equal(t, "alice", m["name"])
+
+	branches, ok := m["$or"].(bson.A)
+	require.True(t, ok, "the match must accept dm OR a non-app botDM")
+	var sawDM, sawNonApp bool
+	for _, b := range branches {
+		bm, ok := b.(bson.M)
+		require.True(t, ok)
+		if bm["roomType"] == "dm" {
+			sawDM = true
+		}
+		if bm["roomType"] == "botDM" {
+			name, ok := bm["name"].(bson.M)
+			require.True(t, ok)
+			_, negated := name["$not"]
+			assert.True(t, negated, "only non-app botDMs resolve as DMs")
+			sawNonApp = true
+		}
+	}
+	assert.True(t, sawDM, "a plain dm must still resolve")
+	assert.True(t, sawNonApp, "a non-app botDM must also resolve")
+}

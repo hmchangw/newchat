@@ -727,11 +727,21 @@ func (r *SubscriptionRepo) FindChannelsByMembers(ctx context.Context, account st
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
 }
 
+// dmMatch selects account's DM subscription with target. A bot's own side of a
+// bot<->human DM is stored roomType=botDM, and a p_admin DM likewise, so a hard
+// roomType:"dm" match would 404 exactly the rooms that render as DMs.
+func dmMatch(account, target string) bson.M {
+	return bson.M{"u.account": account, "name": target,
+		"$or": bson.A{bson.M{"roomType": "dm"}, pipelines.NonAppRoomFilter()}}
+}
+
 // GetDMSubscription returns the requester's room-enriched DM sub with target plus the counterpart's HRInfo (cross-site ⇒ nil), or (nil, nil).
 func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error) {
 	pipeline := bson.A{
-		bson.M{"$match": bson.M{"u.account": account, "name": target, "roomType": "dm"}},
-		bson.M{"$limit": int64(1)}, // (account, name, roomType=dm) is unique — short-circuit defensively
+		bson.M{"$match": dmMatch(account, target)},
+		// (account, name) is unique whatever the stored type — a pair has one DM
+		// room — so the short-circuit stays valid across both $or branches.
+		bson.M{"$limit": int64(1)},
 	}
 	pipeline = append(pipeline, roomsEnrichStages()...)
 	pipeline = append(pipeline,

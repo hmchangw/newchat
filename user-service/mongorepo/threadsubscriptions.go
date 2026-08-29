@@ -9,6 +9,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
 const threadSubscriptionsCollection = "thread_subscriptions"
@@ -60,11 +61,8 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 				bson.M{"$match": bson.M{
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
 					"u.account": account,
-					// Keep dm/channel and subscribed botDMs; drop unsubscribed apps.
-					"$or": bson.A{
-						bson.M{"roomType": bson.M{"$ne": "botDM"}},
-						bson.M{"isSubscribed": true},
-					},
+					// Keep everything but an app room the user unsubscribed from.
+					"$or": threadRoomGate()["$or"],
 				}},
 				bson.M{"$project": bson.M{"_id": 0, "roomType": 1}},
 			},
@@ -84,4 +82,16 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 		}},
 	}
 	return r.threadSubs.Aggregate(ctx, pipeline)
+}
+
+// threadRoomGate keeps a thread only when its room subscription still grants
+// access. Unsubscribing from an app is a soft toggle (isSubscribed=false, row
+// retained), unlike a room leave that purges the row — so app rooms are gated on
+// isSubscribed. Non-app botDM rows (a bot's own side of a human DM, a p_admin
+// DM) carry isSubscribed=false by construction and must NOT be gated.
+func threadRoomGate() bson.M {
+	return bson.M{"$or": bson.A{
+		bson.M{"$nor": bson.A{pipelines.AppRoomFilter()}},
+		bson.M{"isSubscribed": true},
+	}}
 }
