@@ -294,15 +294,17 @@ func (h *Handler) handleMemberAdded(ctx context.Context, evt *model.InboxEvent) 
 			missing = append(missing, account)
 			continue
 		}
+		name := subscriptionName(roomType, event.RoomName, event.RequesterAccount)
+		subType := subscriptionRowType(roomType, name)
 		sub := &model.Subscription{
 			ID:                 idgen.GenerateUUIDv7(),
 			User:               model.SubscriptionUser{ID: user.ID, Account: user.Account},
 			RoomID:             event.RoomID,
-			RoomType:           roomType,
+			RoomType:           subType,
 			SiteID:             event.SiteID,
 			Roles:              rolesForType(roomType),
-			Name:               subscriptionName(roomType, event.RoomName, event.RequesterAccount),
-			IsSubscribed:       subscriptionIsSubscribed(roomType, &user),
+			Name:               name,
+			IsSubscribed:       subscriptionIsSubscribed(subType, &user),
 			HistorySharedSince: historySharedSince,
 			JoinedAt:           joinedAt,
 			Open:               true,
@@ -726,6 +728,15 @@ func subscriptionName(roomType model.RoomType, roomName, requesterAccount string
 		return requesterAccount
 	}
 	return ""
+}
+
+// subscriptionRowType is the room as this row's own subscriber sees it. Only DMs
+// are asymmetric; a channel row keeps the room's type.
+func subscriptionRowType(roomType model.RoomType, name string) model.RoomType {
+	if roomType == model.RoomTypeDM || roomType == model.RoomTypeBotDM {
+		return model.SubscriptionRoomType(name)
+	}
+	return roomType
 }
 
 // isBot reports whether account is bot-like — a real ".bot" bot or the

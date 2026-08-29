@@ -1925,8 +1925,8 @@ func TestHandleMemberAdded_DM_BuildsRecipientSubWithCounterpartName(t *testing.T
 
 func TestHandleMemberAdded_BotDM_BuildsBotSub(t *testing.T) {
 	// Cross-site botDM: human (alice) is the requester on site-A; bot
-	// (weather.bot) lives on site-B. Bot's sub on site-B should have
-	// Name = human's account, IsSubscribed = false (bot side).
+	// (weather.bot) lives on site-B. The bot faces a person, so its row stores
+	// dm, names the human, and is not soft-unsubscribable.
 	store := &stubInboxStore{
 		users: []model.User{
 			{ID: "u_weather", Account: "weather.bot", SiteID: "site-B"},
@@ -1956,7 +1956,7 @@ func TestHandleMemberAdded_BotDM_BuildsBotSub(t *testing.T) {
 	assert.Equal(t, "alice", subs[0].Name)
 	assert.Nil(t, subs[0].Roles)
 	assert.False(t, subs[0].IsSubscribed, "bot account on the bot side never has IsSubscribed=true")
-	assert.Equal(t, model.RoomTypeBotDM, subs[0].RoomType)
+	assert.Equal(t, model.RoomTypeDM, subs[0].RoomType, "the bot's own row is an ordinary DM")
 }
 
 func TestHandleMemberAdded_Channel_BuildsChannelSub(t *testing.T) {
@@ -3233,4 +3233,38 @@ func TestHandleEvent_SubscriptionMention(t *testing.T) {
 			assert.Equal(t, tc.wantBadge, store.getMentionBadges())
 		})
 	}
+}
+
+// A federated DM row stores the room as ITS OWN subscriber sees it, derived from
+// the counterpart the row is named after. Channels are unaffected.
+func TestSubscriptionRowType(t *testing.T) {
+	tests := []struct {
+		name      string
+		roomType  model.RoomType
+		roomName  string
+		requester string
+		want      model.RoomType
+	}{
+		{"human targeted by a bot", model.RoomTypeBotDM, "", "weather.bot", model.RoomTypeBotDM},
+		{"bot targeted by a human", model.RoomTypeBotDM, "", "alice", model.RoomTypeDM},
+		{"human targeted by a human", model.RoomTypeDM, "", "alice", model.RoomTypeDM},
+		{"platform admin counterpart", model.RoomTypeBotDM, "", "p_adminsiteA", model.RoomTypeDM},
+		{"channel keeps the room type", model.RoomTypeChannel, "eng", "alice", model.RoomTypeChannel},
+		{"discussion keeps the room type", model.RoomTypeDiscussion, "eng", "alice", model.RoomTypeDiscussion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := subscriptionName(tt.roomType, tt.roomName, tt.requester)
+			assert.Equal(t, tt.want, subscriptionRowType(tt.roomType, name))
+		})
+	}
+}
+
+// The flag is written from the row's own type, so a human facing an app is
+// subscribed and a bot facing a person is not.
+func TestSubscriptionIsSubscribed_UsesRowType(t *testing.T) {
+	human := model.User{Account: "alice"}
+	bot := model.User{Account: "weather.bot"}
+	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &human))
+	assert.False(t, subscriptionIsSubscribed(model.RoomTypeDM, &bot))
 }
