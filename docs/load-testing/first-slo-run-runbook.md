@@ -10,7 +10,7 @@
 
 | | |
 |---|---|
-| **Produces** | Run-window SLIs for **SLO-1a, 4, 5, 7**, plus the loadgen-vs-production latency gap for 4/5 |
+| **Produces** | Run-window SLIs for **SLO-4, 5, 7** (measured), an **approximate indicator** for **SLO-1a** (§5), plus the loadgen-vs-production latency gap for 4/5 |
 | **loadgen code changes** | **None** |
 | **Dashboard changes** | **Yes** — the existing dashboard has 22 panels and not one SLO ratio |
 | **Does not produce** | SLO-1b, 2, 3, 6, 8, 9 — see §8 |
@@ -26,10 +26,26 @@
 | P3 | **A dedicated test `SITE_ID`** | infra | Counters are monotonic and shared. `increase()` excludes history, not concurrent traffic |
 | P4 | **JetStream consumer metrics reachable** | infra | Backlog is the validity gate in §6, and `sli-slo.md` calls it the *primary* enforcement signal for every async SLO |
 | P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
+| P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
+| P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
+
+### P6 — how to scope a run to a site
+
+Two workable options. **Do not derive a metric label from request baggage** — it
+is per-request data, and the repo's own semgrep cardinality rule blocks exactly
+that class of label.
+
+| Option | How | Cost |
+|---|---|---|
+| **A — static label at scrape time** | Add `site: <id>` as a static relabel on the service scrape job (one Prometheus, many sites) | One config line per site's job; queries then group `by (site)` as written |
+| **B — one Prometheus per site** | Each site's runs land in their own tenant; drop the `site` selector from every query | No label work; needs the tenancy to exist |
+
+Whichever you pick, the §5 queries change accordingly. They are written for
+option A; under option B delete the `site` selector and the `by (site)` grouping.
 
 ---
 
-## 2. loadgen needs no changes — and the defaults are already the plan
+## 2. loadgen needs no changes — but the defaults are a shape, not a baseline
 
 This is worth stating explicitly, because it is easy to assume otherwise. The
 chart's soak defaults **are** the workload model:
@@ -46,8 +62,36 @@ chart's soak defaults **are** the workload model:
 | `soak.maxUsers` / `activeUsers` | `20000 / 2000` | I13 |
 | `soak.largeRoomThreshold` | `500` | matches the services' default |
 
-**Do not change any of them for this run.** The point is a number at the declared
-baseline. Changing the rate changes what the number means.
+**Two of those "defaults" are derived, not confirmed — and the derivation is
+aggressive.** The chart's own startup log says so: `logSoakAssumptions`
+(`soak_config.go:542-558`) emits `"provisional", true` alongside
+`i12MessagesPerActiveUserPerDay` and `i12Derived`, because I12 was never
+confirmed and the value is computed rather than given.
+
+| Derived quantity | Value at the defaults | Why it matters |
+|---|---|---|
+| Messages per active user per day | `100 × 86400 ÷ 2000` = **4 320** | An active user sending a message every 20 seconds, all day. That is not a chat user; that is a bot |
+| Hottest room's share of sends | **20.8%** (Zipf s=1.2, v=1 over 10 000 rooms) | ≈ **20.8 msg/s into a single room**, sustained |
+| Top-10 rooms' share | **51.4%** | Half of all traffic into ten partitions |
+| Top-100 rooms' share | **75.1%** | |
+
+So the defaults are a **deliberate stress shape**, not a production baseline —
+they already run the hot-partition scenario (`extreme-scenarios.md` X6b) by
+accident. A number measured under them is still useful, but it must not be
+reported as "the system meets its SLOs at expected load".
+
+**Therefore: G2 moves ahead of this run**, and the presets split three ways.
+
+| Preset | Purpose | What changes |
+|---|---|---|
+| `realistic` | The number that answers "do we meet the SLOs at expected load" | `activeUsers` raised until messages/user/day is defensible; a flatter room distribution |
+| `hot-room` | The X6b hot-partition probe, deliberately | Today's Zipf, stated as the intent |
+| `stress` | Ramp fodder for Track 2 | Rate raised, shape held |
+
+Until G2 lands, run the first pass on the current defaults **and label the result
+`shape=default-zipf, i12=derived`** so nobody later mistakes it for a baseline.
+Do not silently retune the rate — that changes what the number means without
+saying so.
 
 The read lane already drives the two RPCs SLO-4/5 are defined on —
 `subject.MsgHistory` → `rpc.method="channel_history"`, `subject.MsgThread` →
@@ -133,39 +177,62 @@ New row, five panels:
 
 ---
 
-## 5. The queries
+## 5. The measurement method and the queries
 
-Set `$window` to the hold window explicitly (`[30m]`), not `$__range` — the panel
-must not silently include warm-up.
+**Do not compute these from a rolling range on a Grafana panel.** A moving
+`increase(...[$window])` cannot express what §7 requires — a denominator over the
+send window and an async numerator carried out to the settle boundary — and it
+silently slides warm-up traffic in and measured traffic out as the dashboard
+refreshes.
+
+**Take counter snapshots at three marked instants and subtract.**
+
+| Mark | When | Snapshot |
+|---|---|---|
+| **t0** | Warm-up stopped **and** every consumer's backlog has drained to its pre-run floor | All counters — this is the baseline every later value is measured from |
+| **t1** | End of the send window | The **upstream denominators** (`message_gatekeeper_messages_total`, the RPC `_count` series) |
+| **t2** | `t1` + the longest SLO deadline in the set + one scrape interval | The **async numerators** (`message_worker_persistence_total`, the RPC `_bucket` series) |
+
+The drain between warm-up and `t0` is not optional: without it a message admitted
+during warm-up can persist after `t0` and land in the measured numerator with no
+matching denominator, which biases the ratio **upward** — the direction that
+makes a bad result look acceptable.
+
+Panels are for watching the run; the recorded number comes from the snapshots.
 
 ```promql
-# 1 — SLO-1a: persisted / canonical published
-sum(increase(message_worker_persistence_total{
-      site="$site", message_kind=~"user|thread_reply", result="success"}[$window]))
-/ sum(increase(message_gatekeeper_messages_total{site="$site", result="accepted"}[$window]))
+# Snapshot form — evaluate each at the marked instant (Prometheus `time=` /
+# `@` modifier / an instant query at the recorded timestamp), then subtract.
 
-# 2 — SLO-4: channel load succeeded within 500 ms / eligible
-sum(increase(rpc_server_call_duration_seconds_bucket{
-      service_name="history-service", rpc_method="channel_history",
-      error_type="", le="0.5"}[$window]))
-/ sum(increase(rpc_server_call_duration_seconds_count{
-      service_name="history-service", rpc_method="channel_history",
-      error_type=~"|internal|unavailable|too_many_requests"}[$window]))
+# 1 — SLO-1a  (numerator at t2, denominator at t1, both minus their t0 value)
+sum(message_worker_persistence_total{
+      site="$site", message_kind=~"user|thread_reply", result="success"})   # @t2 − @t0
+sum(message_gatekeeper_messages_total{site="$site", result="accepted"})      # @t1 − @t0
 
-# 3 — SLO-5: thread open within 250 ms / eligible   (le="0.25")
-#     same shape as 2 with rpc_method="thread_open"
+# 2 — SLO-4: channel load within 500 ms / eligible
+sum(rpc_server_call_duration_seconds_bucket{
+      site="$site", service_name="history-service",
+      rpc_method="channel_history", error_type="", le="0.5"})                # @t2 − @t0
+sum(rpc_server_call_duration_seconds_count{
+      site="$site", service_name="history-service", rpc_method="channel_history",
+      error_type=~"|internal|unavailable|too_many_requests"})                # @t1 − @t0
 
-# 4 — SLO-7: search ok / eligible
-sum(increase(search_service_requests_total{status="ok"}[$window]))
-/ sum(increase(search_service_requests_total{
-      status=~"ok|internal|unavailable|too_many_requests"}[$window]))
+# 3 — SLO-5: same shape, rpc_method="thread_open", le="0.25"
 
-# 5 — the measurement gap for SLO-4/5
+# 4 — SLO-7: search ok / eligible   (synchronous — t1 for both sides)
+sum(search_service_requests_total{site="$site", status="ok"})
+sum(search_service_requests_total{site="$site",
+      status=~"ok|internal|unavailable|too_many_requests"})
+
+# 5 — the measurement gap for SLO-4/5 (a rolling quantile is fine here:
+#     it is a diagnostic comparison, not a scored ratio)
 histogram_quantile(0.95, sum by (le) (rate(loadgen_soak_rpc_latency_seconds_bucket{
       action="msg_history"}[$window])))
 - histogram_quantile(0.95, sum by (le) (rate(rpc_server_call_duration_seconds_bucket{
       service_name="history-service", rpc_method="channel_history"}[$window])))
 ```
+
+Drop the `site` selector under P6 option B.
 
 Three things the denominators encode, all from `sli-slo.md` §0.1:
 
@@ -179,7 +246,21 @@ Three things the denominators encode, all from `sli-slo.md` §0.1:
 - **Group by site** in a multi-site Prometheus, or one healthy site hides
   another's total failure.
 
----
+### SLO-1a is an approximate indicator, not a hard number
+
+Both sides count **attempts**, and they do not fail the same way. The gatekeeper
+records `accepted` once, on success. message-worker records `success` once per
+delivery attempt, so a redelivery after a partial batch write increments the
+numerator twice for one logical message. Under a worker crash, an Ack failure or
+a recovery replay the ratio can therefore **exceed 100%**, or split its numerator
+and denominator across two windows.
+
+Report it as **`SLO-1a approximate (lag-enforced) indicator`**, paired with the
+consumer-lag panel, and read a value near or above 100% as evidence of redelivery
+rather than as a good result. A hard gate on SLO-1a needs one of: logical-outcome
+dedup (the P7 outcome ledger), max-delivery advisories, or loadgen's own
+authoritative read-back of run-owned message IDs — which the soak ledger already
+does per message and which is the cheapest of the three to reach for.
 
 ## 6. Read the validity gate *before* the ratios
 
@@ -200,23 +281,32 @@ already on the shipped dashboard.
 ## 7. Run protocol and what to record
 
 1. Seed (`phase: seed`), confirm the encryption preflight in the log.
-2. Start the soak. **Note the wall-clock time when warm-up ends** — the
-   production counters carry no phase label, so the analysis window has to be
-   pinned by hand. `loadgen_soak_rpc_latency_seconds` starts recording at that
-   boundary, so its first sample is a usable marker.
-3. Hold for **at least 30 minutes** at steady state. Longer is better for the
-   ratios' sample size; this is not an endurance run.
-4. Stop dispatch, then **wait out the settle window** before reading: the
-   numerator of an async ratio lands after the sender stops. Denominator over the
-   hold window; numerator to the hold window + the max SLO deadline + one scrape
-   interval.
-5. Record, with every number: `runId`, `siteId`, image digest, sampler ratio, the
-   exact window, all six validity checks, and the five ratios.
+2. Start the soak. Warm-up runs for `soak.warmup`.
+3. **Drain, then mark `t0`.** After warm-up ends, wait until every sampled
+   consumer's `num_pending` is back to its pre-run floor **and**
+   `loadgen_failure_inflight` has stopped climbing. Only then record `t0` and
+   snapshot all counters. The production counters carry no phase label, so this
+   mark is the only thing separating warm-up from measurement;
+   `loadgen_soak_rpc_latency_seconds` beginning to record is a useful secondary
+   marker, but it is loadgen-side and does not prove the backlog drained.
+4. Hold for **at least 30 minutes** at steady state. Longer is better for sample
+   size; this is not an endurance run.
+5. **Mark `t1`** when dispatch stops, and snapshot the upstream denominators.
+6. **Mark `t2`** at `t1` + the longest SLO deadline in the set + one scrape
+   interval, and snapshot the async numerators.
+7. Compute every ratio from the snapshot differences (§5). Record `t0/t1/t2`
+   alongside them.
+8. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
+   `t0/t1/t2`, the workload shape label from §2, all six validity checks, and
+   the ratios.
 
 **Write it up as a run-window SLI, not as the SLO:**
 
-> SLO-1a run-window SLI = 99.94% at 100 msg/s over 30 min, isolated site
-> `slo-test-a`, sampler 0.1, backlog flat, no invalidations.
+> SLO-4 run-window SLI = 96.2% within 500 ms, at 100 msg/s over 30 min
+> (t0 14:32:10 → t1 15:02:10 → t2 15:03:15), isolated site `slo-test-a`,
+> shape `default-zipf / i12=derived`, sampler 0.1, backlog flat, no
+> invalidations.
+> SLO-1a approximate indicator = 99.94% (per-attempt, see §5).
 
 Never *"SLO-1a = 99.94%"*. The SLO is a 28-day window over production traffic;
 this is an achievability check at a chosen load.

@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | **Status** | Draft — for review |
-| **Net change** | **2 instruments to add, 1 label to widen, 2 already exist, 1 to drop.** Only one addition has a measurable hot-path cost, and it is bounded and plumbing-shaped, not per-recipient. **SLO-1a is computable today with no code change at all** — see §1A |
+| **Net change** | **2 instruments to add, 1 label to widen, 2 already exist, 1 to drop.** Only one addition has a measurable hot-path cost, and it is bounded and plumbing-shaped, not per-recipient. **SLO-1a is computable today with no code change** as an *approximate* indicator — see §1A |
 | **Not in scope** | Anything that needs a JetStream advisory consumer — see §6 |
 
 ---

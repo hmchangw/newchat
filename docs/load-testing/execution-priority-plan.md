@@ -76,7 +76,7 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 | loadgen `messages`/`thread`/`history`/`thread-read`/`room-read`/`read-receipt`/`login`/`search` ramps | **Exists** | Track 2 needs no new tooling — only a breach run |
 | loadgen `soak` (Cassandra Run A + room/member/user/search/presence lanes, durable ledger) | **Exists** | Run A is implementation-ready; gated on environment only |
 | loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Track 2; `max-room-size --rooms-per-size=1` also serves 3.6 |
-| P1 — RPC server duration histogram | **Delivered by #337** as `rpc_server_call_duration_seconds{rpc_method, error_type}` (OTel RPC semconv), with `channel_history` / `thread_open` as separate methods | SLO-4/5 become computable on merge — as a **server-side proxy**: the timer stops after `Respond`, so a server→client partition moves the SLI toward green. SLO-5's bound moved 300 ms → 250 ms and its target 99% → 95% to sit on a real bucket boundary |
+| P1 — RPC server duration histogram | **Written, not delivered.** #337 implements `rpc_server_call_duration_seconds{rpc_method, error_type}` (OTel RPC semconv) with `channel_history` / `thread_open` as separate methods, but as of 2026-08-28 the PR is **open**, `mergeable_state: dirty` (conflicts), review required. CI is green; that is not the same as available. **`main` does not carry these series** | SLO-4/5 become computable on merge — as a **server-side proxy**: the timer stops after `Respond`, so a server→client partition moves the SLI toward green. SLO-5's bound moved 300 ms → 250 ms and its target 99% → 95% to sit on a real bucket boundary |
 | P2 — J1 counters | **More present than the roadmap says.** `message_gatekeeper_messages_total{result="accepted"}` is the denominator and `message_worker_persistence_total{message_kind,result}` the SLO-1a numerator — **both on `main` today**. Missing: a `broadcast_path` slice on the denominator, a per-message channel enqueue counter, and the age histogram. #337 does not touch P2 | **SLO-1a is computable now** (with a `message_kind` filter). SLO-1b/2 remain unmeasurable, so a J1 run still gates on loadgen L1 E2E correlation for those two — a *different, downstream* boundary. Never report it as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md); full path coverage: [`slo-measurement-map.md`](slo-measurement-map.md) |
 | `search_service_requests_total{kind,status}` | **Exists** | SLO-7 scorable (partial-failure only) |
 | `search_service_request_duration_seconds` `status` label (P4) | **Still absent after #337** — the PR adds `status` to the *counter*, but `durationOptFor(kind)` keeps the histogram on `kind` alone | SLO-8 client-side only (loadgen `--workload=search` scores it); not enforceable from production recording rules |
@@ -96,8 +96,25 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 
 ## 3. The priority ladder (rev 2)
 
-Four tracks. **T1 and T2 are sequential — you cannot validate an SLO you cannot
-measure, and you cannot report a ceiling against an SLO you have not validated.**
+Four tracks. **Only the *final* capacity verdict waits on Track 1** — exploratory
+capacity work starts immediately, in parallel.
+
+The earlier revision had T1 and T2 strictly sequential, on the reasoning that a
+ceiling is "the load at which an SLO first breaks". That is right for the number
+you put in a go/no-go, and wrong as a schedule: it delays capacity-risk exposure
+by the whole 4–6 week calibration window for no gain, because the signals that
+find the *first* ceiling — error rate, consumer backlog, resource saturation,
+recovery behaviour — need no calibrated SLO at all.
+
+So, two thresholds instead of one gate:
+
+- **Provisional guardrails** (available now): error/timeout rate, monotonically
+  growing backlog, CPU/memory/IO saturation, and whether the system recovers when
+  load returns to baseline. A ramp stopped by any of these is a real finding and
+  a real ceiling — it just is not an *SLO* ceiling.
+- **The SLO ceiling** (after Track 1.3): the same ramp re-scored against the
+  approved predicates. Only this one goes in the release decision.
+
 T3 runs in parallel with both. T4 is the pre-production sweep.
 
 `Env`: **L** = docker-local, **S** = staging.
@@ -112,8 +129,8 @@ decision.
 | # | Item | Why it is first | Output |
 |---|---|---|---|
 | **1.0** | **Write the SLO-1a recording rule against counters that already exist** | A rules change, not a code change: `message_worker_persistence_total` ÷ `message_gatekeeper_messages_total{result="accepted"}`. Puts a third of J1 into the calibration window immediately, weeks ahead of the rest | SLO-1a under observation |
-| **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces a real run-window number for **SLO-1a/3/4/5/7** and a defensible one-sided bound for **1b/2**, with **no code change**: the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`slo-measurement-map.md`](slo-measurement-map.md) §7; operator runbook: [`first-slo-run-runbook.md`](first-slo-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
-| **1.1** | **Ship the remaining P2 work** (G9/P1 is done — #337) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
+| **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces run-window numbers for **SLO-3/4/5/7**, an approximate indicator for **1a**, and a defensible one-sided bound for **1b/2**, with **no loadgen code change** (SLO-4/5 need #337 merged first): the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`slo-measurement-map.md`](slo-measurement-map.md) §7; operator runbook: [`first-slo-run-runbook.md`](first-slo-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
+| **1.1** | **Land #337, then ship the remaining P2 work** | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
 | **1.3** | **Set targets from 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate. Right now they are round numbers | Approved SLO targets + `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can hard-gate instead of eyeballing |
@@ -170,12 +187,13 @@ Answering *"what else before prod"*. These are not capacity questions; they are
 
 | # | Item | Why it belongs before prod |
 |---|---|---|
+| **4.0** ⬆ | **Rolling restart / deploy under load — promoted to P1, run it in Track 2's window** | This document calls a deploy at peak "the most common production event" and then scheduled it last. A consumer-loop terminal error leaves a durable unread behind a green readiness probe, and services **exit** on a failed stream or consumer lookup, so a deploy during any dependency wobble crash-loops. It needs no new tooling: restart one worker at a time during any Track 2 run and watch backlog, terminal outcomes and the ledger |
 | **4.1** | **Deployment-shape validation**: per-service CPU/memory requests and limits, replica counts, HPA behaviour under 2.1's load | Every ceiling measured so far is against *staging* pod sizing. A ceiling is meaningless without the resource envelope it was measured in, and `terminationGracePeriodSeconds` (30 s) vs the 25 s shutdown budget has never been exercised under load |
 | **4.2** | **Rolling-restart / deploy under load** | Consumer-loop terminal errors leave a durable unread behind a green readiness probe (`failure/nats-jetstream.md` §1). A deploy at peak is the most common production event and no test covers it |
 | **4.3** | **Cold-start / crash-loop behaviour** | Services **exit** when the initial NATS connection, JetStream context, stream lookup or consumer creation fails. A restart during a dependency blip crash-loops. Read as its own scenario, never as steady-state degradation |
 | **4.4** | **Data-volume rehearsal**: run reads against a dataset aged to a realistic size, not a fresh one | Every read measured so far hit shallow, dense, run-generated data. Production reads hit a year of history. This is the single largest fidelity gap in all completed work |
 | **4.5** | **Backup / restore and Cassandra disk-growth projection** | Soak plan §5 requires the disk model be projected under the **no-TTL production assumption**, where storage grows unbounded. Confirm the projection and the reclaim path (G5) before prod, not after |
-| **4.6** | **Multi-site federation smoke** (even if not at scale) | SLO-9 is entirely unvalidated and X8 suggests the 30 s bound may be unreachable for bulk membership at realistic RTT. If prod is multi-site, this cannot ship unmeasured |
+| **4.6** ⬆ | **Multi-site federation — P1 if production launches multi-site, P3 if not. Decide which, now** | This is the one item whose priority is a *product* question, and leaving it in the pre-production sweep quietly assumed the answer. SLO-9 is entirely unvalidated, no loadgen traffic drives it, `outbox-worker` and `inbox-worker` carry no consumer or domain metrics at all, and X8's arithmetic suggests the 30 s bound may be unreachable for a bulk membership change at realistic inter-site RTT. If prod is multi-site at launch, federation is a **launch blocker**, not a smoke test, and the two-site topology plus the P4 outbox counters move into Track 1/2 |
 | **4.7** | **o11y overhead A/B at the chosen sampler ratio** | Required once per release (sli-slo §10). Cheap, and it protects every other number |
 | **4.8** | **Alerting dry-run**: burn-rate alerts (sli-slo §7) fired against a real breach | An SLO with no working alert is a dashboard. Validate the 14.4×/6×/1× windows against a deliberately-induced breach from 2.1 |
 | **4.9** | **Capacity headroom statement** | Convert 2.1–2.6 into "we have N× headroom over projected launch load", with the projection written down. This is the artefact a go/no-go actually needs |
@@ -185,22 +203,23 @@ Answering *"what else before prod"*. These are not capacity questions; they are
 ## 4. Gate backlog
 
 Gates are the schedulable unit for everything above that is blocked. Ordered by
-how much they unblock. **⬆ marks the two promoted in rev 2**: G4 and G9 were
-"nice to have for hard-gating" while the programme was exploratory; now that the
-question is *"are our SLO numbers right"*, they are the critical path — Track 1.1
-cannot start without them.
+how much they unblock. **⬆ marks the ones promoted since rev 1.** G4 was "nice to
+have for hard-gating" while the programme was exploratory; now that the question
+is *"are our SLO numbers right"*, it is the critical path. **G2 is promoted in rev
+3** — the soak defaults turn out to be a stress shape, not a baseline (see 1.0b),
+so it now gates the first SLO run rather than following it.
 
 | Gate | Work | Unblocks | Owner |
 |---|---|---|---|
 | **G1** | Isolated staging tenant: dedicated `SITE_ID`, Mongo DB, Cassandra keyspace, NATS account | All of Track 2, every staging item in Track 3 | Infra + us |
-| **G2** | Confirm workload-model inputs: I8 meaning, I10 scope, I12; and S1–S4 (fan-out, concurrent members, notification eligibility, cross-site share) | B1, B3 — and every "is this rate realistic" argument | Product + infra |
+| **G2** ⬆ | Confirm workload-model inputs: I8 meaning, I10 scope, **I12**; and S1–S4 (fan-out, concurrent members, notification eligibility, cross-site share). Then split the soak presets three ways — `realistic`, `hot-room`, `stress` | **Now gates 1.0b**, not just B1/B3. At the chart defaults, I12 derives to **4 320 messages per active user per day** and the Zipf shape puts **20.8% of all sends into one room** (51% into ten). The soak's own `logSoakAssumptions` already logs this as `provisional: true`. A number measured under that shape is not "the system at expected load" | Product + infra |
 | **G3** | Managed pre-run coordination: peak load declared, blast radius recorded, abort thresholds agreed, L3 dashboards confirmed | Every staging run. **Now higher-stakes than before** — Track 2 ramps to a breach, unlike the two completed programs | Us → infra |
 | **G4** ⬆ | **P2 J1 counters — narrowed** (`messages_canonical_published_total{broadcast_path}`, `broadcast_channel_enqueue_total`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`) | Hard-gating SLO-1a/1b/2 in B1. Until then every J1 verdict is loadgen-L1 observational | App |
 | **G5** | Cassandra storage control: pick and verify **one** of — run-scoped disposable keyspace with snapshot clearing, or bounded TTL + storage budget (both over an isolated keyspace) | B4 (repeat runs), D3 | Owner decision + infra |
 | **G6** | JetStream exporter on staging with `{is_consumer_leader="true"}` recording rules; custom oldest-pending-age monitor (P3) | The enforcement backstop for every async SLO in Tracks 1–3 | Infra |
 | **G7** | ES: run-scoped index, named owner, expiry, verified teardown **and** an ES telemetry contract (shards, thread-pool rejection, circuit breaker, merge, watermarks) | D1 | Us |
 | **G8** | Valkey: run-scoped key namespace / ownership marker, expiry, verified post-teardown cleanup | D2 | Us |
-| ~~**G9**~~ | ~~P1 natsrouter metrics middleware~~ — **delivered by #337** as `rpc_server_call_duration_seconds{rpc_method, error_type}` | Server-side SLO-4/5 (proxy); also gives `daily`'s dormant service-error arm a real counter to point at | ✅ App |
+| **G9** | P1 RPC server duration histogram — **implemented in #337, not yet on `main`** (open, conflicts, review required). Closing this gate means *merged*, not *written* | Server-side SLO-4/5 (proxy); also gives `daily`'s dormant service-error arm a real counter to point at | App |
 | **G10** | Storage locality + node affinity answers for Mongo/Cassandra/ES/Valkey | Makes IO-bound ceilings non-provisional (environments §7) | Infra |
 
 ---
@@ -236,6 +255,21 @@ These are not new criteria — they are the ones easiest to get wrong.
    plaintext is a diagnostic A/B only.
 9. **Record `run_id`, sampler ratio, preset, seed and steps** with every result,
    and retain evidence 24–72 h before teardown.
+10. **Repeatability contract — one run is not a result.** The programme had no
+    rule for this, so a single ceiling could be environment noise reported as a
+    finding. Minimum:
+    - **Near the knee, repeat 3 times.** The last passing step and the first
+      failing step each get three runs; a step that passes twice and fails once
+      is **not** a ceiling, it is the knee's width.
+    - **Report the median and the spread**, never a single number. If the spread
+      across three runs exceeds ~10% of the value, the result is INCONCLUSIVE
+      until the variance is explained — that is the same bar
+      `capacity-test-plan.md` already sets for an unexplained ceiling, made
+      countable.
+    - **Compare like with like**: same box, same image digest, same preset, same
+      seed, same sampler ratio, and neighbour activity recorded for each run.
+      Numbers from different hosts are not comparable at all.
+    - **A regression claim needs two runs on each side**, before and after.
 
 ---
 

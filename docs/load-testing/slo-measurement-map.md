@@ -117,8 +117,9 @@ client
 
 ### Where each SLO actually lands
 
-**SLO-1a — persisted / published. Computable today.** This is the correction
-worth flagging: both halves already exist.
+**SLO-1a — persisted / published. Computable today, as an approximate indicator.**
+Both halves already exist — but see the accounting caveat below before treating
+the ratio as a verdict.
 
 ```promql
 sum by (site) (rate(message_worker_persistence_total{
@@ -552,7 +553,7 @@ Steps 1–3 need **no code change**. Step 4 needs none either.
 
 | SLO | Numerator today | Denominator today | Verdict | Missing |
 |---|---|---|---|---|
-| **1a** persist | `message_worker_persistence_total{result="success"}` | `message_gatekeeper_messages_total{result="accepted"}` | ✅ **computable now** with a `message_kind` filter | Exactness only (attempts vs terminal outcomes) |
+| **1a** persist | `message_worker_persistence_total{result="success"}` | `message_gatekeeper_messages_total{result="accepted"}` | ⚠️ **approximate indicator now** — computable, but both sides count attempts, so a redelivery can push it **over 100%**. Not a hard gate | Logical-outcome dedup (P7), advisories, or loadgen read-back |
 | **1b** channel enqueue | per-target, wrong unit | no `broadcast_path` slice | ❌ | `broadcast_path` label + a per-message enqueue counter |
 | **2** enqueue ≤ 1 s | none — processing duration excludes stream wait | as 1b | ❌ | Age histogram from the JetStream metadata timestamp |
 | **3** login | `http.server.request.duration` | same | ✅ one leg of three | Journey join (prober) |
