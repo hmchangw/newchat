@@ -16,7 +16,8 @@ import (
 )
 
 func TestRequireBot(t *testing.T) {
-	// #nosec G101 -- fake fixture, not a live credential; hashed for the test below. nosemgrep: gosec.G101-1
+	// #nosec G101 -- fake fixture, not a live credential; hashed for the test below.
+	// nosemgrep: gosec.G101-1
 	const rawToken = "T3st-bot-tok"
 	hash := sessiontoken.Hash(rawToken)
 

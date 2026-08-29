@@ -799,6 +799,8 @@ func TestTruncatePreviews_DetachesFromTheOriginalBody(t *testing.T) {
 
 	got := m["r1"].Content
 	require.Len(t, got, 50)
+	// #nosec G103 -- test-only pointer identity check; asserts the preview does not alias the body
+	// nosemgrep: go.lang.security.audit.unsafe.use-of-unsafe-block
 	assert.NotSame(t, unsafe.StringData(body), unsafe.StringData(got),
 		"the preview must own its bytes, or the original body is never freed")
 }

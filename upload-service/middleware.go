@@ -25,6 +25,8 @@ const ctxUserKey = "auth_user"
 
 // ssoTokenName is the shared header and cookie key for the SSO token. HandleSetCookie
 // writes this cookie and tokenFromRequest reads it — they must match, so keep one name.
+// #nosec G101 -- HTTP header name, not a credential
+// nosemgrep: gosec.G101-1
 const ssoTokenName = "ssoToken"
 
 // TokenValidator validates a TSSO token and returns OIDC claims.
