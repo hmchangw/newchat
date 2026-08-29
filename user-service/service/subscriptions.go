@@ -117,11 +117,16 @@ func normalizePage(offset, limit, defaultLimit, maxLimit int) mongoutil.OffsetPa
 	return mongoutil.OffsetPageRequest{Offset: int64(offset), Limit: int64(limit)}
 }
 
-// buildListItems wraps each enriched subscription into a heterogeneous list row:
+// buildListItems wraps each enriched subscription into a heterogeneous list row,
+// keyed on the row's EFFECTIVE room type (model.EffectiveRoomType) rather than
+// its stored one:
 //   - channel → base only
 //   - botDM   → base + the nested app object; the base name is also swapped to
-//     the app's display name (preserving the prior botDM-name behavior)
-//   - dm      → base + the counterpart's hrInfo
+//     the app's display name (preserving the prior botDM-name behavior). Only a
+//     botDM facing a real ".bot" app reaches this branch.
+//   - dm      → base + the counterpart's hrInfo. A botDM facing a human or the
+//     p_admin pseudo-account lands here and has its wire RoomType rewritten to
+//     dm, so the client files it under the chat section, not the App list.
 //
 // App and HR lookups degrade independently: a failed/missing lookup keeps the base
 // name and omits the app object — it never fails the request.
@@ -133,7 +138,7 @@ func (s *UserService) buildListItems(ctx context.Context, account string, subs [
 	items := make([]model.SubscriptionItem, len(subs))
 	for i := range subs {
 		base := &subs[i].Subscription
-		switch subs[i].RoomType {
+		switch model.EffectiveRoomType(subs[i].RoomType, subs[i].Name) {
 		case model.RoomTypeBotDM:
 			botDM := &model.BotDMSubscription{Subscription: base}
 			if app, ok := apps[subs[i].Name]; ok && app != nil {
@@ -144,6 +149,9 @@ func (s *UserService) buildListItems(ctx context.Context, account string, subs [
 			}
 			items[i] = botDM
 		case model.RoomTypeDM:
+			// A stored botDM facing a human or p_admin reaches here; stamp the
+			// effective type so the wire row matches the branch that built it.
+			base.RoomType = model.RoomTypeDM
 			dm := &model.DMSubscription{Subscription: base}
 			if hr, ok := hrInfo[subs[i].Name]; ok {
 				dm.HRInfo = hr
@@ -192,7 +200,7 @@ func distinctListNames(subs []model.EnrichedSubscription) (bots, dmCounterparts 
 	seenBot := map[string]struct{}{}
 	seenDM := map[string]struct{}{}
 	for i := range subs {
-		switch subs[i].RoomType {
+		switch model.EffectiveRoomType(subs[i].RoomType, subs[i].Name) {
 		case model.RoomTypeBotDM:
 			if _, dup := seenBot[subs[i].Name]; !dup {
 				seenBot[subs[i].Name] = struct{}{}
@@ -702,6 +710,9 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	// remote site cannot resolve simply arrives without a room object.
 	one := []model.EnrichedSubscription{dm.EnrichedSubscription}
 	s.enrichWithRoomInfoAndLastMsg(c, account, one, false)
+	// A bot's own side of a bot<->human DM, and either side of a p_admin DM, are
+	// stored botDM but answer this RPC as the DMs they are.
+	one[0].RoomType = model.EffectiveRoomType(one[0].RoomType, one[0].Name)
 	return &models.DMResponse{Subscription: model.DMSubscription{
 		Subscription: &one[0].Subscription,
 		HRInfo:       dm.HRInfo,

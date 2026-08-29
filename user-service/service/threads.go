@@ -259,8 +259,11 @@ func (s *UserService) enrichThreadPage(c *natsrouter.Context, items []model.Thre
 	hr := s.lookupThreadHRInfo(c, dmAccounts)
 	apps := s.lookupThreadApps(c, botAccounts)
 	for i := range items {
-		switch items[i].RoomType {
+		switch model.EffectiveRoomType(items[i].RoomType, items[i].RoomName) {
 		case model.RoomTypeDM:
+			// A stored botDM facing a human or p_admin reaches here; stamp the
+			// effective type so the row files under the chat section like any DM.
+			items[i].RoomType = model.RoomTypeDM
 			if info, ok := hr[items[i].RoomName]; ok {
 				items[i].HRInfo = info
 			}
@@ -313,7 +316,7 @@ func distinctDMAndBotNames(items []model.ThreadListItem) (dmAccounts, botAccount
 		if name == "" {
 			continue
 		}
-		switch items[i].RoomType {
+		switch model.EffectiveRoomType(items[i].RoomType, name) {
 		case model.RoomTypeDM:
 			if _, dup := dmSeen[name]; dup {
 				continue

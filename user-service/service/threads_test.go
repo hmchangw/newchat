@@ -323,3 +323,55 @@ func ids(items []model.ThreadListItem) []string {
 	}
 	return out
 }
+
+// A bot's thread in its DM with a human is an ordinary DM thread: dm type,
+// counterpart hrInfo, and the room name left as the human account.
+func TestEnrichThreadPage_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
+	svc, _, users, _ := newThreadSvc(t)
+	users.EXPECT().
+		GetHRInfoByAccounts(gomock.Any(), []string{"alice"}).
+		Return(map[string]*model.SubscriptionHRInfo{
+			"alice": {Account: "alice", Name: "愛麗絲", EngName: "Alice"},
+		}, nil)
+
+	items := []model.ThreadListItem{{RoomType: model.RoomTypeBotDM, RoomName: "alice"}}
+
+	svc.enrichThreadPage(ctx("weather.bot", "site-a"), items)
+
+	assert.Equal(t, model.RoomTypeDM, items[0].RoomType)
+	assert.Equal(t, "alice", items[0].RoomName)
+	require.NotNil(t, items[0].HRInfo)
+	assert.Equal(t, "Alice", items[0].HRInfo.EngName)
+}
+
+// A real app's thread keeps the app display-name swap and the botDM type.
+func TestEnrichThreadPage_BotCounterpartStaysAppRoom(t *testing.T) {
+	svc, _, _, apps := newThreadSvc(t)
+	apps.EXPECT().
+		GetAppsByAssistants(gomock.Any(), []string{"weather.bot"}).
+		Return(map[string]*model.App{"weather.bot": {ID: "a1", Name: "Weather"}}, nil)
+
+	items := []model.ThreadListItem{{RoomType: model.RoomTypeBotDM, RoomName: "weather.bot"}}
+
+	svc.enrichThreadPage(ctx("alice", "site-a"), items)
+
+	assert.Equal(t, model.RoomTypeBotDM, items[0].RoomType)
+	assert.Equal(t, "Weather", items[0].RoomName)
+	assert.Nil(t, items[0].HRInfo)
+}
+
+func TestDistinctDMAndBotNames_SplitsByEffectiveType(t *testing.T) {
+	items := []model.ThreadListItem{
+		{RoomType: model.RoomTypeBotDM, RoomName: "weather.bot"},
+		{RoomType: model.RoomTypeBotDM, RoomName: "alice"},
+		{RoomType: model.RoomTypeBotDM, RoomName: "p_admin_ops"},
+		{RoomType: model.RoomTypeDM, RoomName: "bob"},
+		{RoomType: model.RoomTypeChannel, RoomName: "general"},
+		{RoomType: model.RoomTypeBotDM, RoomName: ""},
+	}
+
+	dms, bots := distinctDMAndBotNames(items)
+
+	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms)
+	assert.Equal(t, []string{"weather.bot"}, bots)
+}
