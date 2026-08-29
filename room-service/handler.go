@@ -161,10 +161,6 @@ func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest)
 		}
 		return nil, fmt.Errorf("get requester: %w", err)
 	}
-	if requester.EngName == "" && requester.ChineseName == "" {
-		return nil, errInvalidUserData
-	}
-
 	// A DM with no post-strip counterpart is a self-DM (classifyAndValidate only
 	// emits RoomTypeDM with empty Users for that case). Handle it before the switch
 	// so each switch case stays single-purpose.
@@ -265,13 +261,6 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		}
 		return nil, fmt.Errorf("get counterpart: %w", err)
 	}
-	if roomType == model.RoomTypeDM && (other.EngName == "" && other.ChineseName == "") {
-		// botDMs counterpart is an app/bot whose users-collection record
-		// typically has empty name fields; the GetApp + Assistant.Enabled
-		// check below is the right validation for that case.
-		return nil, errInvalidUserData
-	}
-
 	req.RoomID = idgen.BuildDMRoomID(requester.ID, other.ID)
 	// DM/BotDM resolved set matches the literal counterpart list — there is no expansion.
 	req.ResolvedUsers = append([]string(nil), req.Users...)

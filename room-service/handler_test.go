@@ -2822,58 +2822,49 @@ func TestHandleCreateRoom_RequesterNotFound(t *testing.T) {
 	assert.True(t, errcode.HasReason(err, errcode.RoomUserNotFound), "want RoomUserNotFound, got %v", err)
 }
 
-// TestHandleCreateRoom_RequesterNameFields covers #244: the creator check
-// rejects only when BOTH EngName and ChineseName are empty; either alone is
-// sufficient. Bot-requester exemption isn't exercised here (bots don't call
-// createRoom as requester); the DM counterpart's bot exemption is covered by
-// TestHandleCreateRoom_BotDM_AppCounterpartNoNameFields (roomType != DM skips
-// this check entirely for botDM).
+// TestHandleCreateRoom_RequesterNameFields covers #421: engName/chineseName are
+// fully optional for the creator — any combination (including both empty) creates
+// a room. Bot-requester exemption isn't exercised here (bots don't call createRoom
+// as requester).
 func TestHandleCreateRoom_RequesterNameFields(t *testing.T) {
 	tests := []struct {
 		name      string
 		requester *model.User
-		wantErr   bool
 	}{
-		{"engName only", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"}, false},
-		{"chineseName only", &model.User{ID: "u-alice", Account: "alice", ChineseName: "愛麗絲"}, false},
-		{"both present", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}, false},
-		{"neither", &model.User{ID: "u-alice", Account: "alice"}, true},
+		{"engName only", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice"}},
+		{"chineseName only", &model.User{ID: "u-alice", Account: "alice", ChineseName: "愛麗絲"}},
+		{"both present", &model.User{ID: "u-alice", Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}},
+		{"neither", &model.User{ID: "u-alice", Account: "alice"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockRoomStore(ctrl)
 			store.EXPECT().GetUser(gomock.Any(), "alice").Return(tt.requester, nil)
-			if !tt.wantErr {
-				store.EXPECT().GetUser(gomock.Any(), "bob").Return(bobUser(), nil)
-				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
-					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
-			}
+			store.EXPECT().GetUser(gomock.Any(), "bob").Return(bobUser(), nil)
+			store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+				Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
 			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
 			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.True(t, errors.Is(err, errInvalidUserData))
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 		})
 	}
 }
 
-// TestHandleCreateRoom_DMCounterpartNameFields covers #244 for the DM
-// counterpart check: rejects only when BOTH fields are empty on `other`.
+// TestHandleCreateRoom_DMCounterpartNameFields covers #421 for the DM
+// counterpart: a human counterpart with any name combination (including both
+// empty) can be DMed. BotDM path is unchanged — its app counterpart is validated
+// by GetApp/Assistant.Enabled (see TestHandleCreateRoom_BotDM_AppCounterpartNoNameFields).
 func TestHandleCreateRoom_DMCounterpartNameFields(t *testing.T) {
 	tests := []struct {
-		name    string
-		other   *model.User
-		wantErr bool
+		name  string
+		other *model.User
 	}{
-		{"engName only", &model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}, false},
-		{"chineseName only", &model.User{ID: "u-bob", Account: "bob", ChineseName: "陳博"}, false},
-		{"both present", bobUser(), false},
-		{"neither", &model.User{ID: "u-bob", Account: "bob"}, true},
+		{"engName only", &model.User{ID: "u-bob", Account: "bob", EngName: "Bob"}},
+		{"chineseName only", &model.User{ID: "u-bob", Account: "bob", ChineseName: "陳博"}},
+		{"both present", bobUser()},
+		{"neither", &model.User{ID: "u-bob", Account: "bob"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2881,19 +2872,12 @@ func TestHandleCreateRoom_DMCounterpartNameFields(t *testing.T) {
 			store := NewMockRoomStore(ctrl)
 			store.EXPECT().GetUser(gomock.Any(), "alice").Return(aliceUser(), nil)
 			store.EXPECT().GetUser(gomock.Any(), "bob").Return(tt.other, nil)
-			if !tt.wantErr {
-				store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
-					Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
-			}
+			store.EXPECT().FindDMSubscription(gomock.Any(), "alice", "bob").
+				Return(&model.Subscription{RoomID: "existing-dm-room"}, nil)
 			h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000}
 
 			_, err := h.createRoom(ctxParams(map[string]string{"account": "alice"}), model.CreateRoomRequest{Users: []string{"bob"}})
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.True(t, errors.Is(err, errInvalidUserData))
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 		})
 	}
 }

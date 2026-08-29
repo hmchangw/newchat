@@ -52,7 +52,6 @@ var (
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
 	// Bots hold plain member roles only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
-	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")
 
