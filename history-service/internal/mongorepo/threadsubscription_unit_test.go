@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -46,4 +47,31 @@ func TestUserThreadSubscriptionsPipeline_NextPageAddsCursorMatch(t *testing.T) {
 	p := userThreadSubscriptionsPipeline("alice", &ts, "thr-9", 20)
 	// Next page: userAccount $match + value-cursor $match + membership $match.
 	assert.Equal(t, 3, countStages(t, p, "$match"))
+}
+
+// A bot's own subscription row carries isSubscribed=false, so gating every
+// botDM on it hides the bot's threads in its DMs with humans. Only real apps —
+// botDM rows facing a ".bot" counterpart — keep the soft-unsubscribe gate.
+func TestThreadMembershipGate_KeepsNonAppBotDMs(t *testing.T) {
+	branches, ok := threadMembershipGate()["$or"].(bson.A)
+	require.True(t, ok, "the gate must be an $or")
+	require.Len(t, branches, 2)
+
+	notApp, ok := branches[0].(bson.M)
+	require.True(t, ok)
+	nor, ok := notApp["$nor"].(bson.A)
+	require.True(t, ok, "the first branch must exclude app rooms via $nor")
+	require.Len(t, nor, 1)
+
+	app, ok := nor[0].(bson.M)
+	require.True(t, ok)
+	assert.Equal(t, "botDM", app["roomType"])
+	name, ok := app["name"].(bson.M)
+	require.True(t, ok)
+	assert.Equal(t, `\.bot$`, name["$regex"])
+
+	subscribed, ok := branches[1].(bson.M)
+	require.True(t, ok)
+	assert.Equal(t, true, subscribed["isSubscribed"],
+		"an app room still has to be subscribed to contribute threads")
 }

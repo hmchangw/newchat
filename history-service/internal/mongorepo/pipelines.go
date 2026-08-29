@@ -4,7 +4,22 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+
+	"github.com/hmchangw/chat/pkg/pipelines"
 )
+
+// threadMembershipGate keeps a thread only when its room subscription still
+// grants access. Unsubscribing from an app is a soft toggle (isSubscribed=false,
+// row retained), unlike a room leave that purges the row — so app rooms are
+// gated on isSubscribed. A botDM facing a human or p_admin is not an app room:
+// its bot-side row carries isSubscribed=false by construction, so gating it
+// would hide every thread a bot has in its own DMs.
+func threadMembershipGate() bson.M {
+	return bson.M{"$or": bson.A{
+		bson.M{"$nor": bson.A{pipelines.AppRoomFilter()}},
+		bson.M{"isSubscribed": true},
+	}}
+}
 
 // accessSince gates to threads whose parent was created at or after the user's join time.
 func buildBaseThreadMatch(roomID string, accessSince *time.Time) bson.M {
@@ -40,9 +55,10 @@ func followingThreadsPipeline(roomID, account string, accessSince *time.Time) bs
 //  1. subscriptions (membership) runs FIRST, on the thread_subscription's own
 //     roomId — the room subscription, not the thread subscription, is the source
 //     of truth for whether the user still belongs to the room (purged on leave;
-//     thread_subscriptions rows are not). For botDM rooms, where unsubscribe is a
-//     soft toggle that retains the row, the same join also gates on isSubscribed so
-//     an unsubscribed app's threads drop out. Filtering here, before $limit, keeps
+//     thread_subscriptions rows are not). For APP rooms — a botDM facing a
+//     ".bot" counterpart, where unsubscribe is a soft toggle that retains the
+//     row — the same join also gates on isSubscribed so an unsubscribed app's
+//     threads drop out. Filtering here, before $limit, keeps
 //     the page exact; doing it before the thread_rooms join means that join runs
 //     only for accessible threads. Indexed point read on (u.account, roomId). This
 //     join also carries roomName and roomType: the subscription holds the
@@ -65,14 +81,9 @@ func userThreadSubscriptionsPipeline(account string, cursorLastMsgAt *time.Time,
 				bson.D{{Key: "$match", Value: bson.M{
 					"u.account": account,
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
-					// botDM unsubscribe is a soft toggle (isSubscribed=false, row
-					// retained), unlike a room leave that purges the row. Gate botDM
-					// rooms on isSubscribed so an unsubscribed app's threads drop out
-					// of the inbox; channel/dm/discussion rooms pass through untouched.
-					"$or": bson.A{
-						bson.M{"roomType": bson.M{"$ne": "botDM"}},
-						bson.M{"isSubscribed": true},
-					},
+					// Keep everything but an app room the user unsubscribed from
+					// (see threadMembershipGate).
+					"$or": threadMembershipGate()["$or"],
 				}}},
 				bson.D{{Key: "$project", Value: bson.M{"_id": 1, "name": 1, "roomType": 1}}},
 			},
