@@ -1,0 +1,33 @@
+# Semgrep ignore list.
+#
+# NOTE: the presence of this file REPLACES semgrep's built-in defaults, so the
+# usual excludes (vendor, node_modules, minified JS, VCS dirs) are restated here
+# rather than inherited. Adding a pattern below removes it from every semgrep
+# scan, including the SAST gate.
+
+# --- Go tests -------------------------------------------------------------
+# Test fixtures are fabricated credentials, URLs and payloads by nature, which
+# the credential/secret rules (e.g. gosec.G101-1, CWE-798) flag as findings.
+# gosec still scans tests (`-tests=true` in GOSEC_FLAGS), so this narrows the
+# semgrep surface only, it does not leave test code unscanned altogether.
+*_test.go
+testdata/
+
+# --- Dependencies and build output ----------------------------------------
+vendor/
+node_modules/
+build/
+dist/
+*.min.js
+
+# --- Virtualenvs ----------------------------------------------------------
+.venv/
+venv/
+.env/
+
+# --- VCS and tooling ------------------------------------------------------
+.git/
+.svn/
+.hg/
+.semgrep/
+.semgrep_logs/
