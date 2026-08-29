@@ -243,3 +243,24 @@ type BadgeCountBatchRequest struct {
 type BadgeCountBatchResponse struct {
 	Counts map[string]int `json:"counts"`
 }
+
+// IsAppRoom reports whether a room of type t whose counterpart account is name
+// is an app room — a botDM facing a real ".bot" app. A botDM facing anything
+// else (a human, or the p_admin platform-admin pseudo-account) is an ordinary
+// DM from the subscriber's point of view: the bot's own side of a bot↔human DM,
+// and every side of a p_admin DM. Only app rooms keep the isSubscribed gate
+// that hides an app the user unsubscribed from.
+func IsAppRoom(t RoomType, name string) bool {
+	return t == RoomTypeBotDM && IsBot(name)
+}
+
+// EffectiveRoomType is the room type a subscription is presented to its own
+// subscriber as. A botDM that is not an app room renders as dm; every other
+// type is returned unchanged. name is the subscription's per-subscriber display
+// name, which holds the counterpart account for dm and botDM rows.
+func EffectiveRoomType(t RoomType, name string) RoomType {
+	if t == RoomTypeBotDM && !IsBot(name) {
+		return RoomTypeDM
+	}
+	return t
+}

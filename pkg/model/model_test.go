@@ -5545,3 +5545,29 @@ func TestUserAccountUpdated_RoundTrip_EmptyRoles(t *testing.T) {
 		t.Fatal("empty roles must round-trip as [], not null")
 	}
 }
+
+func TestEffectiveRoomType(t *testing.T) {
+	tests := []struct {
+		name      string
+		roomType  model.RoomType
+		counter   string
+		wantType  model.RoomType
+		wantIsApp bool
+	}{
+		{"botDM with bot counterpart is an app room", model.RoomTypeBotDM, "weather.bot", model.RoomTypeBotDM, true},
+		{"botDM with human counterpart renders as dm", model.RoomTypeBotDM, "alice", model.RoomTypeDM, false},
+		{"botDM with p_admin counterpart renders as dm", model.RoomTypeBotDM, "p_admin_ops", model.RoomTypeDM, false},
+		{"botDM with QA p_ counterpart renders as dm", model.RoomTypeBotDM, "p_qa_bob", model.RoomTypeDM, false},
+		{"botDM with empty counterpart renders as dm", model.RoomTypeBotDM, "", model.RoomTypeDM, false},
+		{"dm is unchanged", model.RoomTypeDM, "alice", model.RoomTypeDM, false},
+		{"channel is unchanged", model.RoomTypeChannel, "", model.RoomTypeChannel, false},
+		{"discussion is unchanged", model.RoomTypeDiscussion, "", model.RoomTypeDiscussion, false},
+		{"a bot-named channel is still a channel", model.RoomTypeChannel, "weather.bot", model.RoomTypeChannel, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantType, model.EffectiveRoomType(tt.roomType, tt.counter))
+			assert.Equal(t, tt.wantIsApp, model.IsAppRoom(tt.roomType, tt.counter))
+		})
+	}
+}
