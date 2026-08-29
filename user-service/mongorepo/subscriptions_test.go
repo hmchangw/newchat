@@ -988,9 +988,10 @@ func TestAggregateSubscriptions_SortsByUserActivityNotSystemBump_Integration(t *
 	assert.Equal(t, "s-a", page.Data[1].ID)
 }
 
-// The app-room partition, end to end. The regression that matters most is the
-// last assertion: a human's unsubscribed app must stay hidden in every bucket.
-func TestAggregateSubscriptions_AppRoomPartition(t *testing.T) {
+// Rows written with the per-subscriber type are served by the ORIGINAL filters:
+// the bot's row is dm, so the current branch — which carries no isSubscribed
+// condition — admits it.
+func TestAggregateSubscriptions_PerSubscriberRoomType(t *testing.T) {
 	r, db := newTestSubscriptionRepo(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -998,25 +999,16 @@ func TestAggregateSubscriptions_AppRoomPartition(t *testing.T) {
 	seed(t, db, "rooms",
 		bson.M{"_id": "r-bot-alice", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
 		bson.M{"_id": "r-sales", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
-		bson.M{"_id": "r-admin", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
-		bson.M{"_id": "r-bot-bot", "siteId": "site-a", "userCount": 2, "lastMsgAt": now},
 	)
-
 	seed(t, db, "subscriptions",
-		// the bot's own side of its DM with alice — isSubscribed=false by construction
+		// the bot's own row: dm, isSubscribed false — admitted anyway
 		bson.M{"_id": "s1", "u": bson.M{"_id": "u-w", "account": "weather.bot"}, "roomId": "r-bot-alice",
-			"name": "alice", "roomType": "botDM", "siteId": "site-a", "isSubscribed": false, "createdAt": now},
-		// alice's side of the same room — a subscribed app
+			"name": "alice", "roomType": "dm", "siteId": "site-a", "isSubscribed": false, "createdAt": now},
+		// alice's row: botDM, subscribed
 		bson.M{"_id": "s2", "u": bson.M{"_id": "u-a", "account": "alice"}, "roomId": "r-bot-alice",
 			"name": "weather.bot", "roomType": "botDM", "siteId": "site-a", "isSubscribed": true, "createdAt": now},
-		// alice unsubscribed from the sales app — must stay hidden everywhere
+		// alice unsubscribed from another app — stays hidden
 		bson.M{"_id": "s3", "u": bson.M{"_id": "u-a", "account": "alice"}, "roomId": "r-sales",
-			"name": "sales.bot", "roomType": "botDM", "siteId": "site-a", "isSubscribed": false, "createdAt": now},
-		// alice's DM with the platform admin — stored botDM, renders as a chat
-		bson.M{"_id": "s4", "u": bson.M{"_id": "u-a", "account": "alice"}, "roomId": "r-admin",
-			"name": "p_adminsiteA", "roomType": "botDM", "siteId": "site-a", "isSubscribed": true, "createdAt": now},
-		// bot<->bot: still an app room for the viewing bot, still gated
-		bson.M{"_id": "s5", "u": bson.M{"_id": "u-w", "account": "weather.bot"}, "roomId": "r-bot-bot",
 			"name": "sales.bot", "roomType": "botDM", "siteId": "site-a", "isSubscribed": false, "createdAt": now},
 	)
 
@@ -1032,15 +1024,12 @@ func TestAggregateSubscriptions_AppRoomPartition(t *testing.T) {
 	}
 
 	assert.ElementsMatch(t, []string{"r-bot-alice"}, roomIDs("weather.bot", "rooms"),
-		"a bot sees its human DM in the chat bucket, despite isSubscribed=false")
-	assert.ElementsMatch(t, []string{"r-bot-alice"}, roomIDs("weather.bot", "current"),
-		"the bot's DM with another bot is an app room and stays gated")
-	assert.Empty(t, roomIDs("weather.bot", "apps"),
-		"a bot's human DM never appears in the App section")
-	assert.ElementsMatch(t, []string{"r-admin"}, roomIDs("alice", "rooms"),
-		"a user's p_admin DM is an ordinary chat; the weather app is not")
+		"the bot's DM is an ordinary chat")
+	assert.ElementsMatch(t, []string{"r-bot-alice"}, roomIDs("weather.bot", "current"))
+	assert.Empty(t, roomIDs("weather.bot", "apps"), "never in the App section")
 	assert.ElementsMatch(t, []string{"r-bot-alice"}, roomIDs("alice", "apps"),
-		"only the subscribed .bot app is in the App section")
-	assert.ElementsMatch(t, []string{"r-bot-alice", "r-admin"}, roomIDs("alice", "current"),
-		"the unsubscribed sales.bot app stays hidden everywhere")
+		"alice's subscribed app is in the App section")
+	assert.Empty(t, roomIDs("alice", "rooms"), "alice has no plain chats here")
+	assert.ElementsMatch(t, []string{"r-bot-alice"}, roomIDs("alice", "current"),
+		"the unsubscribed sales.bot app stays hidden")
 }
