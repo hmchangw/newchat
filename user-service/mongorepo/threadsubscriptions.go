@@ -9,7 +9,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
 const threadSubscriptionsCollection = "thread_subscriptions"
@@ -61,12 +60,13 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 				bson.M{"$match": bson.M{
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
 					"u.account": account,
-					// Keep everything but an app room the user unsubscribed from:
-					// a botDM facing a human or p_admin is not an app room, and its
-					// isSubscribed=false is structural, not a user choice.
-					"$nor": bson.A{pipelines.UnsubscribedAppFilter()},
+					// Keep dm/channel and subscribed botDMs; drop unsubscribed apps.
+					"$or": bson.A{
+						bson.M{"roomType": bson.M{"$ne": "botDM"}},
+						bson.M{"isSubscribed": true},
+					},
 				}},
-				bson.M{"$project": bson.M{"_id": 0, "roomType": 1, "name": 1}},
+				bson.M{"$project": bson.M{"_id": 0, "roomType": 1}},
 			},
 			"as": "sub",
 		}},
@@ -81,9 +81,6 @@ func (r *ThreadSubscriptionRepo) ListByAccount(ctx context.Context, account stri
 			"lastSeenAt":   1,
 			"hasMention":   1,
 			"roomType":     bson.M{"$arrayElemAt": bson.A{"$sub.roomType", 0}},
-			// name is the counterpart account on dm/botDM rows; the caller needs
-			// it to resolve the effective room type for the DM unread tally.
-			"name": bson.M{"$arrayElemAt": bson.A{"$sub.name", 0}},
 		}},
 	}
 	return r.threadSubs.Aggregate(ctx, pipeline)

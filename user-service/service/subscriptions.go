@@ -117,26 +117,15 @@ func normalizePage(offset, limit, defaultLimit, maxLimit int) mongoutil.OffsetPa
 	return mongoutil.OffsetPageRequest{Offset: int64(offset), Limit: int64(limit)}
 }
 
-// buildListItems wraps each enriched subscription into a heterogeneous list row,
-// keyed on the row's EFFECTIVE room type (model.EffectiveRoomType) rather than
-// its stored one:
+// buildListItems wraps each enriched subscription into a heterogeneous list row:
 //   - channel → base only
 //   - botDM   → base + the nested app object; the base name is also swapped to
-//     the app's display name (preserving the prior botDM-name behavior). Only a
-//     botDM facing a real ".bot" app reaches this branch.
-//   - dm      → base + the counterpart's hrInfo. A botDM facing a human or the
-//     p_admin pseudo-account lands here and has its wire RoomType rewritten to
-//     dm, so the client files it under the chat section, not the App list.
+//     the app's display name (preserving the prior botDM-name behavior)
+//   - dm      → base + the counterpart's hrInfo
 //
 // App and HR lookups degrade independently: a failed/missing lookup keeps the base
 // name and omits the app object — it never fails the request.
 func (s *UserService) buildListItems(ctx context.Context, account string, subs []model.EnrichedSubscription) []model.SubscriptionItem {
-	// Normalize the room type once, before anything reads it: the app branch
-	// below swaps Name to the app's display name, so a later re-derivation from
-	// (RoomType, Name) would misread its own output.
-	for i := range subs {
-		subs[i].RoomType = model.EffectiveRoomType(subs[i].RoomType, subs[i].Name)
-	}
 	// One pass over subs yields both name sets the lookups need.
 	bots, dmCounterparts := distinctListNames(subs)
 	apps := s.lookupApps(ctx, account, bots)
@@ -713,9 +702,6 @@ func (s *UserService) GetDM(c *natsrouter.Context, req models.GetDMRequest) (*mo
 	// remote site cannot resolve simply arrives without a room object.
 	one := []model.EnrichedSubscription{dm.EnrichedSubscription}
 	s.enrichWithRoomInfoAndLastMsg(c, account, one, false)
-	// A bot's own side of a bot<->human DM, and either side of a p_admin DM, are
-	// stored botDM but answer this RPC as the DMs they are.
-	one[0].RoomType = model.EffectiveRoomType(one[0].RoomType, one[0].Name)
 	return &models.DMResponse{Subscription: model.DMSubscription{
 		Subscription: &one[0].Subscription,
 		HRInfo:       dm.HRInfo,

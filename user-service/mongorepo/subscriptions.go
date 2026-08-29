@@ -3,7 +3,6 @@ package mongorepo
 import (
 	"context"
 	"fmt"
-	"maps"
 	"sort"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
-	"github.com/hmchangw/chat/pkg/pipelines"
 	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/user-service/models"
 )
@@ -249,37 +247,6 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// applyListType adds the room-type half of the subscription-list filter to
-// match. activeSubscriptionFilter applies the same "current" shape, so the badge
-// count and the list can never select different rows.
-//
-// A botDM is an app room only when its counterpart carries a ".bot" suffix, and
-// only those rows keep the isSubscribed gate that hides an app the user
-// unsubscribed from. Every other botDM — the bot's own side of a bot<->human DM,
-// and either side of a p_admin DM — is an ordinary DM and rides the dm/channel
-// lane, which is what files it under the sidebar's chat section.
-//
-// Each bucket is one roomType range plus at most one negation, rather than an
-// $or whose branches would bind the same (u.account, roomType) botDM bounds
-// twice: a bot's every DM is a botDM row, so that duplication would fall on the
-// dominant term of both its sidebar and its badge count.
-func applyListType(match bson.M, listType string) {
-	switch listType {
-	case "current":
-		match["roomType"] = bson.M{"$in": bson.A{"dm", "channel", "botDM"}}
-		match["$nor"] = bson.A{pipelines.UnsubscribedAppFilter()}
-	case "rooms":
-		match["roomType"] = bson.M{"$in": bson.A{"dm", "channel", "botDM"}}
-		match["$nor"] = bson.A{pipelines.AppRoomFilter()}
-	case "apps":
-		maps.Copy(match, pipelines.AppRoomFilter())
-		match["isSubscribed"] = true
-	default:
-		// Unreachable: the service validates listType against validListTypes
-		// before calling. Left total so a new bucket cannot silently match all.
-	}
-}
-
 // AggregateSubscriptions returns one page of account's subscriptions for
 // listType (rooms = dm+channel, apps = subscribed botDMs, current = both),
 // newest activity first — the room's lastMsgAt, or its createdAt when the room
@@ -304,7 +271,18 @@ func applyListType(match bson.M, listType string) {
 func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
 	var zero mongoutil.OffsetPageHasMore[model.EnrichedSubscription]
 	match := bson.M{"u.account": account}
-	applyListType(match, listType)
+	switch listType {
+	case "current":
+		match["$or"] = bson.A{
+			bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
+			bson.M{"roomType": "botDM", "isSubscribed": true},
+		}
+	case "rooms":
+		match["roomType"] = bson.M{"$in": bson.A{"dm", "channel"}}
+	case "apps":
+		match["roomType"] = "botDM"
+		match["isSubscribed"] = true
+	}
 	if favorite {
 		match["favorite"] = true
 	}
@@ -734,28 +712,11 @@ func (r *SubscriptionRepo) FindChannelsByMembers(ctx context.Context, account st
 	return r.enriched.AggregatePagedHasMore(ctx, pipeline, page)
 }
 
-// dmMatch selects account's DM subscription with target. A bot's own side of a
-// bot<->human DM is stored roomType=botDM, and a p_admin DM likewise, so a hard
-// roomType:"dm" match would 404 exactly the rooms that render as DMs.
-//
-// target is known here, so the app-room test is a Go string compare rather than
-// a server-side regex on what is otherwise an indexed point read: a ".bot"
-// target is an app room and never a DM, anything else may be stored botDM.
-func dmMatch(account, target string) bson.M {
-	types := bson.A{"dm", "botDM"}
-	if model.IsBot(target) {
-		types = bson.A{"dm"}
-	}
-	return bson.M{"u.account": account, "name": target, "roomType": bson.M{"$in": types}}
-}
-
 // GetDMSubscription returns the requester's room-enriched DM sub with target plus the counterpart's HRInfo (cross-site ⇒ nil), or (nil, nil).
 func (r *SubscriptionRepo) GetDMSubscription(ctx context.Context, account, target string) (*model.EnrichedDMSubscription, error) {
 	pipeline := bson.A{
-		bson.M{"$match": dmMatch(account, target)},
-		// (account, name) is unique whatever the stored type — a pair has one DM
-		// room — so the short-circuit stays valid across both $or branches.
-		bson.M{"$limit": int64(1)},
+		bson.M{"$match": bson.M{"u.account": account, "name": target, "roomType": "dm"}},
+		bson.M{"$limit": int64(1)}, // (account, name, roomType=dm) is unique — short-circuit defensively
 	}
 	pipeline = append(pipeline, roomsEnrichStages()...)
 	pipeline = append(pipeline,
@@ -807,14 +768,16 @@ func (r *SubscriptionRepo) GetSubscriptionByRoomID(ctx context.Context, account,
 // endpoints' notion of active). Unlike the list endpoints, the count EXCLUDES muted subs — mute
 // keeps a room visible in lists but out of the active/badge count.
 func activeSubscriptionFilter(account string) bson.M {
-	filter := bson.M{"u.account": account, "muted": bson.M{"$ne": true},
+	return bson.M{"u.account": account, "muted": bson.M{"$ne": true},
 		// Rooms the user closed are hidden from subscription.list, so counting
 		// them here would put the two endpoints permanently out of step — and
 		// a client folding its badge from the list could never reconcile.
 		// Missing field (legacy docs) and open:true both pass, as in the list.
-		"open": bson.M{"$ne": false}}
-	applyListType(filter, "current")
-	return filter
+		"open": bson.M{"$ne": false},
+		"$or": bson.A{
+			bson.M{"roomType": bson.M{"$in": bson.A{"dm", "channel"}}},
+			bson.M{"roomType": "botDM", "isSubscribed": true},
+		}}
 }
 
 // activeFilter is the active set plus the Teams-origin exclusion as one flat filter.

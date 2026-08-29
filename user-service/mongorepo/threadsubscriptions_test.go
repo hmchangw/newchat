@@ -70,10 +70,8 @@ func TestThreadSubscriptionRepo_ListByAccount(t *testing.T) {
 }
 
 // A thread whose room the account no longer subscribes to (no membership) and an
-// unsubscribed-app thread (botDM facing a ".bot" counterpart, isSubscribed=false)
-// are both dropped by the join gate; a subscribed-app thread survives. So does a
-// botDM facing a human — the bot's own side of a bot<->human DM, which carries
-// isSubscribed=false by construction and would otherwise be hidden entirely.
+// unsubscribed-app thread (botDM, isSubscribed=false) are both dropped by the
+// join gate; a subscribed-app thread survives, as does an ordinary dm row.
 func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T) {
 	db := testutil.MongoDB(t, "user_service_threadsubs_gate")
 	ctx := context.Background()
@@ -89,9 +87,8 @@ func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T)
 		sub("s1", "alice", "rChan", "general", model.RoomTypeChannel, false),
 		sub("s3", "alice", "rApp", "sales.bot", model.RoomTypeBotDM, false), // unsubscribed → dropped
 		sub("s4", "alice", "rBot", "helper.bot", model.RoomTypeBotDM, true), // subscribed → kept
-		// Not an app room (no ".bot" counterpart), so the gate does not apply
-		// even though isSubscribed is false → kept.
-		sub("s5", "alice", "rAdm", "p_adminsiteA", model.RoomTypeBotDM, false),
+		// Stored dm (p_admin is an ordinary DM partner), so the app gate never applies.
+		sub("s5", "alice", "rAdm", "p_adminsiteA", model.RoomTypeDM, false),
 		// rGone has no subscription for alice → dropped.
 	})
 	require.NoError(t, err)
@@ -106,7 +103,7 @@ func TestThreadSubscriptionRepo_ListByAccount_MembershipAndAppGate(t *testing.T)
 	require.Len(t, rows, 3)
 	assert.Contains(t, byThread, "trChan")
 	assert.Contains(t, byThread, "trBot")
-	assert.Contains(t, byThread, "trAdm") // non-app botDM survives despite isSubscribed=false
+	assert.Contains(t, byThread, "trAdm") // a dm row is never gated
 	assert.Equal(t, model.RoomTypeBotDM, byThread["trBot"].RoomType)
 	assert.NotContains(t, byThread, "trGone") // no membership
 	assert.NotContains(t, byThread, "trApp")  // unsubscribed app

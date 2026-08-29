@@ -1505,8 +1505,8 @@ func TestListSubscriptions_LocalUnread_PrefersLastUserMsgAt(t *testing.T) {
 		"the wire carries ONE activity timestamp: lastMsgAt is the coalesced user-activity value, not the raw ceiling")
 }
 
-// A bot logging into the frontend must see its DM with a human as an ordinary
-// chat: roomType dm, the counterpart's hrInfo, and no app object.
+// A bot's row in its DM with a person is stored dm, so it renders as an ordinary
+// chat with the counterpart's hrInfo and no app object.
 func TestBuildListItems_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
 	svc, _, users, _ := newThreadSvc(t)
 	users.EXPECT().
@@ -1516,7 +1516,7 @@ func TestBuildListItems_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
 		}, nil)
 
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{
-		ID: "s1", RoomType: model.RoomTypeBotDM, Name: "alice",
+		ID: "s1", RoomType: model.RoomTypeDM, Name: "alice",
 	}}}
 
 	items := svc.buildListItems(context.Background(), "weather.bot", subs)
@@ -1530,7 +1530,7 @@ func TestBuildListItems_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
 	assert.Equal(t, "Alice", dm.HRInfo.EngName)
 }
 
-// A user's DM with p_admin is stored botDM but must render as an ordinary DM.
+// A user's DM with p_admin is stored dm and renders as an ordinary DM.
 func TestBuildListItems_PlatformAdminCounterpartRendersAsDM(t *testing.T) {
 	svc, _, users, _ := newThreadSvc(t)
 	users.EXPECT().
@@ -1538,7 +1538,7 @@ func TestBuildListItems_PlatformAdminCounterpartRendersAsDM(t *testing.T) {
 		Return(map[string]*model.SubscriptionHRInfo{}, nil)
 
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{
-		ID: "s1", RoomType: model.RoomTypeBotDM, Name: "p_admin_ops",
+		ID: "s1", RoomType: model.RoomTypeDM, Name: "p_admin_ops",
 	}}}
 
 	items := svc.buildListItems(context.Background(), "alice", subs)

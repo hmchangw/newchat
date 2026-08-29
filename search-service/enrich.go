@@ -46,13 +46,6 @@ func (h *handler) enrichMessages(ctx context.Context, account string, hits []mes
 			subs = s
 		}
 	}
-	// Normalize each room's type once: a botDM facing a human or p_admin is an
-	// ordinary DM to this caller and must resolve through the HR directory, not
-	// through an app record it does not have.
-	for rid, meta := range subs {
-		meta.RoomType = model.EffectiveRoomType(meta.RoomType, meta.Name)
-		subs[rid] = meta
-	}
 
 	// Partition rooms and collect the join keys for the batch lookups.
 	dmCounterparts := map[string]struct{}{}

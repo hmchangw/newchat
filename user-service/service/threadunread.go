@@ -42,13 +42,7 @@ func (s *UserService) GetThreadUnreadSummary(c *natsrouter.Context, _ model.Thre
 	for i := range rows {
 		r := &rows[i] // index to avoid copying the full row each iteration
 		idsBySite[r.SiteID] = append(idsBySite[r.SiteID], r.ThreadRoomID)
-		// Effective type, not stored: a bot's DM with a human is stored botDM, and
-		// the unreadDirectMessage tally below must count it as the DM it is.
-		stateByThread[r.ThreadRoomID] = subState{
-			lastSeenAt: r.LastSeenAt,
-			hasMention: r.HasMention,
-			roomType:   model.EffectiveRoomType(r.RoomType, r.Name),
-		}
+		stateByThread[r.ThreadRoomID] = subState{lastSeenAt: r.LastSeenAt, hasMention: r.HasMention, roomType: r.RoomType}
 	}
 
 	type siteResult struct {

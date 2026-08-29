@@ -255,12 +255,6 @@ func (s *UserService) enrichCrossSiteThreads(c *natsrouter.Context, sites []stri
 // and degrades independently — a failed/missing lookup leaves that row's base data
 // and never fails the request. Mirrors buildListItems on the subscription path.
 func (s *UserService) enrichThreadPage(c *natsrouter.Context, items []model.ThreadListItem) {
-	// Normalize the room type once, before anything reads it: the botDM branch
-	// below swaps RoomName to the app's display name, so a later re-derivation
-	// from (RoomType, RoomName) would misread its own output.
-	for i := range items {
-		items[i].RoomType = model.EffectiveRoomType(items[i].RoomType, items[i].RoomName)
-	}
 	dmAccounts, botAccounts := distinctDMAndBotNames(items)
 	hr := s.lookupThreadHRInfo(c, dmAccounts)
 	apps := s.lookupThreadApps(c, botAccounts)

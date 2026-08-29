@@ -4,8 +4,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
-
-	"github.com/hmchangw/chat/pkg/pipelines"
 )
 
 // accessSince gates to threads whose parent was created at or after the user's join time.
@@ -42,10 +40,9 @@ func followingThreadsPipeline(roomID, account string, accessSince *time.Time) bs
 //  1. subscriptions (membership) runs FIRST, on the thread_subscription's own
 //     roomId — the room subscription, not the thread subscription, is the source
 //     of truth for whether the user still belongs to the room (purged on leave;
-//     thread_subscriptions rows are not). For APP rooms — a botDM facing a
-//     ".bot" counterpart, where unsubscribe is a soft toggle that retains the
-//     row — the same join also gates on isSubscribed so an unsubscribed app's
-//     threads drop out. Filtering here, before $limit, keeps
+//     thread_subscriptions rows are not). For botDM rooms, where unsubscribe is a
+//     soft toggle that retains the row, the same join also gates on isSubscribed so
+//     an unsubscribed app's threads drop out. Filtering here, before $limit, keeps
 //     the page exact; doing it before the thread_rooms join means that join runs
 //     only for accessible threads. Indexed point read on (u.account, roomId). This
 //     join also carries roomName and roomType: the subscription holds the
@@ -68,10 +65,14 @@ func userThreadSubscriptionsPipeline(account string, cursorLastMsgAt *time.Time,
 				bson.D{{Key: "$match", Value: bson.M{
 					"u.account": account,
 					"$expr":     bson.M{"$eq": bson.A{"$roomId", "$$rid"}},
-					// Keep everything but an app room the user unsubscribed from:
-					// a botDM facing a human or p_admin is not an app room, and its
-					// isSubscribed=false is structural, not a user choice.
-					"$nor": bson.A{pipelines.UnsubscribedAppFilter()},
+					// botDM unsubscribe is a soft toggle (isSubscribed=false, row
+					// retained), unlike a room leave that purges the row. Gate botDM
+					// rooms on isSubscribed so an unsubscribed app's threads drop out
+					// of the inbox; channel/dm/discussion rooms pass through untouched.
+					"$or": bson.A{
+						bson.M{"roomType": bson.M{"$ne": "botDM"}},
+						bson.M{"isSubscribed": true},
+					},
 				}}},
 				bson.D{{Key: "$project", Value: bson.M{"_id": 1, "name": 1, "roomType": 1}}},
 			},

@@ -195,11 +195,11 @@ func TestEnrichMessages_NilMongoAndRoomDegrades(t *testing.T) {
 	assert.Equal(t, "alice", out[0].Sender.Account)
 }
 
-// A bot's search hit in its DM with a human must resolve the counterpart through
-// the HR directory, not through a doomed app lookup.
+// The bot's row in its DM with a person is stored dm, so the hit resolves through
+// the HR directory rather than a doomed app lookup.
 func TestEnrichMessages_BotViewerHumanCounterpartUsesHRInfo(t *testing.T) {
 	m := &fakeMongo{
-		subs:  map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeBotDM, Name: "alice"}},
+		subs:  map[string]SubscriptionMeta{"rBot": {RoomType: model.RoomTypeDM, Name: "alice"}},
 		users: map[string]HRUser{"alice": {Account: "alice", EngName: "Alice", ChineseName: "愛麗絲"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})
@@ -215,10 +215,10 @@ func TestEnrichMessages_BotViewerHumanCounterpartUsesHRInfo(t *testing.T) {
 	assert.NotContains(t, m.appBots, "alice", "the human counterpart never reaches the app lookup")
 }
 
-// A user's DM with p_admin is stored botDM but enriches like any other DM.
+// A user's DM with p_admin is stored dm and enriches like any other DM.
 func TestEnrichMessages_PlatformAdminCounterpartUsesHRInfo(t *testing.T) {
 	m := &fakeMongo{
-		subs:  map[string]SubscriptionMeta{"rAdm": {RoomType: model.RoomTypeBotDM, Name: "p_admin_ops"}},
+		subs:  map[string]SubscriptionMeta{"rAdm": {RoomType: model.RoomTypeDM, Name: "p_admin_ops"}},
 		users: map[string]HRUser{"p_admin_ops": {Account: "p_admin_ops", EngName: "Ops"}},
 	}
 	h := enrichHandler(m, &fakeRoom{})

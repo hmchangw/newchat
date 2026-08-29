@@ -324,8 +324,8 @@ func ids(items []model.ThreadListItem) []string {
 	return out
 }
 
-// A bot's thread in its DM with a human is an ordinary DM thread: dm type,
-// counterpart hrInfo, and the room name left as the human account.
+// A bot's thread row in its DM with a person is stored dm, so it enriches as an
+// ordinary DM thread and keeps the person's account as the room name.
 func TestEnrichThreadPage_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
 	svc, _, users, _ := newThreadSvc(t)
 	users.EXPECT().
@@ -334,7 +334,7 @@ func TestEnrichThreadPage_BotViewerHumanCounterpartRendersAsDM(t *testing.T) {
 			"alice": {Account: "alice", Name: "愛麗絲", EngName: "Alice"},
 		}, nil)
 
-	items := []model.ThreadListItem{{RoomType: model.RoomTypeBotDM, RoomName: "alice"}}
+	items := []model.ThreadListItem{{RoomType: model.RoomTypeDM, RoomName: "alice"}}
 
 	svc.enrichThreadPage(ctx("weather.bot", "site-a"), items)
 
