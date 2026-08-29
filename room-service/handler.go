@@ -202,6 +202,9 @@ func classifyAndValidate(req *model.CreateRoomRequest, requesterAccount string) 
 	// second pass.
 	deduped := dedup(req.Users)
 	req.Users = stripAccount(deduped, requesterAccount)
+	// CreateRoomType classifies from both participants, so the requester has to
+	// be on the request before it runs; publishCreateRoom re-asserts it later.
+	req.RequesterAccount = requesterAccount
 
 	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 {
 		if len(deduped) == 1 && len(req.Users) == 0 {
@@ -291,8 +294,9 @@ func (h *Handler) handleCreateRoomDMOrBotDM(ctx context.Context, req *model.Crea
 		return nil, fmt.Errorf("dm dedup check: %w", err)
 	}
 
-	// A bot initiating a DM has no app to validate on the counterpart side.
-	if roomType == model.RoomTypeBotDM && !model.IsBot(requester.Account) {
+	// The counterpart decides this, not the requester: a bot signed into the
+	// client can subscribe to another app, and a human counterpart owns no app.
+	if roomType == model.RoomTypeBotDM && model.IsBot(other.Account) {
 		app, err := h.store.GetApp(ctx, other.Account)
 		if err != nil {
 			if errors.Is(err, ErrAppNotFound) {
