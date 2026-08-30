@@ -141,6 +141,8 @@ func (m *mongoStore) BulkUpdateRoomPreview(ctx context.Context, updates map[stri
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			SetUpdate(previewUpdate(&u)))
 	}
 	if _, err := m.rooms.BulkWrite(ctx, models); err != nil {

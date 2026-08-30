@@ -43,6 +43,8 @@ func renderCapacityConsole(w io.Writer, results []capacityStepResult) {
 }
 
 func writeCapacityCSV(path string, results []capacityStepResult) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)

@@ -5,7 +5,9 @@ const (
 	UserAppNotFound          Reason = "app_not_found"
 	UserAppDisabled          Reason = "app_disabled"
 	UserSubscriptionNotFound Reason = "subscription_not_found"
-	UserSSOTokenNotFound     Reason = "sso_token_not_found"
+	// #nosec G101 -- wire-format reason code, not a credential
+	// nosemgrep: gosec.G101-1
+	UserSSOTokenNotFound Reason = "sso_token_not_found"
 
 	// Chatlist section reasons — the client branches on each.
 	UserChatlistInvalidName      Reason = "chatlist_invalid_name"

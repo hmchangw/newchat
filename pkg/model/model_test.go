@@ -2043,7 +2043,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -2062,26 +2062,26 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
 }
 
-func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
-	t.Run("bot member name round-trips via JSON", func(t *testing.T) {
+func TestRoomMemberEntry_AppName_RoundTrip(t *testing.T) {
+	t.Run("bot member appName round-trips via JSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := json.Marshal(&entry)
 		require.NoError(t, err)
 
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
-		assert.Equal(t, "Weather App", raw["name"])
+		assert.Equal(t, "Weather App", raw["appName"])
 		_, hasEngName := raw["engName"]
 		assert.False(t, hasEngName, "engName must be absent for bot entry")
 		_, hasChineseName := raw["chineseName"]
@@ -2092,19 +2092,19 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 		assert.Equal(t, entry, dst)
 	})
 
-	t.Run("name not persisted to BSON", func(t *testing.T) {
+	t.Run("appName not persisted to BSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := bson.Marshal(&entry)
 		require.NoError(t, err)
 		var got bson.M
 		require.NoError(t, bson.Unmarshal(data, &got))
-		_, hasName := got["name"]
-		assert.False(t, hasName, "name must not be persisted to BSON")
+		_, hasAppName := got["appName"]
+		assert.False(t, hasAppName, "appName must not be persisted to BSON")
 	})
 
 	t.Run("orgName and orgDescription round-trip via JSON", func(t *testing.T) {

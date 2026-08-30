@@ -53,6 +53,8 @@ func (*fakeDMEnsurer) Ensure(_ context.Context, _ *session.Session, _ string) (s
 func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// #nosec G101 -- fabricated test fixture, not a live credential
+	// nosemgrep: gosec.G101-1
 	const rawToken = "wire-test-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),
@@ -120,6 +122,8 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 func TestRegisterBotRoutes_NoValkey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// #nosec G101 -- fabricated test fixture, not a live credential
+	// nosemgrep: gosec.G101-1
 	const rawToken = "no-valkey-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),

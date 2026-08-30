@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -137,13 +138,24 @@ func TestDemoHarness(t *testing.T) {
 	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
-	ln, err := net.Listen("tcp", ":8091")
+	// Loopback only: this harness serves an unauthenticated handler for 30
+	// minutes, so it must not be reachable from off-host.
+	ln, err := net.Listen("tcp", "127.0.0.1:8091")
 	if err != nil {
-		t.Fatalf("bind :8091: %v", err)
+		t.Fatalf("bind 127.0.0.1:8091: %v", err)
 	}
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	fmt.Println("demo harness serving on :8091")
-	time.Sleep(1800 * time.Second)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	fmt.Println("demo harness serving on 127.0.0.1:8091")
+	// Without this select a Serve failure is silent: the harness would print
+	// that it is serving, sleep out the full window and report success.
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("demo harness serve: %v", err)
+		}
+	case <-time.After(1800 * time.Second):
+	}
 	_ = srv.Close()
 }

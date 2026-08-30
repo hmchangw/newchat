@@ -739,6 +739,8 @@ func runMembersSustained(ctx context.Context, cfg *config, args []string) int {
 }
 
 func writeMembersCSV(path string, c *MemberCollector) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)
@@ -1286,6 +1288,8 @@ func lastToken(subj string) string {
 }
 
 func writeCSVFile(path string, c *Collector) error {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create csv: %w", err)

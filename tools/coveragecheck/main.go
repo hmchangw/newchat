@@ -139,6 +139,8 @@ func run(args []string, stdout io.Writer) error {
 		return fmt.Errorf("minimum coverage must be between 0 and 100")
 	}
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	file, err := os.Open(*profilePath)
 	if err != nil {
 		return fmt.Errorf("open coverage profile: %w", err)

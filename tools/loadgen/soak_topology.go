@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"time"
 
 	"github.com/hmchangw/chat/pkg/idgen"
