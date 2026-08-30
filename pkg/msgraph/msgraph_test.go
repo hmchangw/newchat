@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1336,4 +1338,164 @@ func TestApplyProxy_NoWarnWithoutCredentials(t *testing.T) {
 	_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"})
 	require.NoError(t, err)
 	assert.Empty(t, buf.String(), "no credentials means no exposure to warn about")
+}
+
+// newConnectProxy starts a proxy that serves only CONNECT, recording the
+// Proxy-Authorization header per tunnelled host before splicing the two
+// connections together. Production reaches both the token endpoint and Graph
+// over https, so the credentials ride CONNECT rather than an ordinary proxied
+// request — a different code path in net/http than the one an http:// target
+// exercises.
+func newConnectProxy(t *testing.T, targets ...string) (*httptest.Server, func(host string) string) {
+	t.Helper()
+	// The tunnel is only ever opened to the test servers, so the address dialed
+	// comes from this set rather than from the request.
+	allowed := map[string]string{}
+	for _, target := range targets {
+		allowed[target] = target
+	}
+	var mu sync.Mutex
+	authByHost := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "this proxy serves CONNECT only", http.StatusMethodNotAllowed)
+			return
+		}
+		mu.Lock()
+		authByHost[r.Host] = r.Header.Get("Proxy-Authorization")
+		mu.Unlock()
+
+		target, ok := allowed[r.Host]
+		if !ok {
+			http.Error(w, "host is not a declared test target", http.StatusForbidden)
+			return
+		}
+		upstream, err := net.Dial("tcp", target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		hijacker, hijackable := w.(http.Hijacker)
+		if !hijackable {
+			_ = upstream.Close()
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		downstream, _, err := hijacker.Hijack()
+		if err != nil {
+			_ = upstream.Close()
+			return
+		}
+		if _, err := downstream.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+			_ = upstream.Close()
+			_ = downstream.Close()
+			return
+		}
+		// Both copies end when either side closes, so the handler returns
+		// rather than outliving the test.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(upstream, downstream)
+			_ = upstream.Close()
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(downstream, upstream)
+			_ = downstream.Close()
+		}()
+		wg.Wait()
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func(host string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return authByHost[host]
+	}
+}
+
+// TestProxyCredentials_SentOnConnectTunnel is the https counterpart of
+// TestProxyCredentials_SentAsBasicAuth: that one proxies plain http, where the
+// header rides the request itself. Real deployments talk to
+// login.microsoftonline.com and graph.microsoft.com over https, so the only
+// hop that carries the credentials is CONNECT.
+func TestProxyCredentials_SentOnConnectTunnel(t *testing.T) {
+	token := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "ptok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer token.Close()
+	graph := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": []GraphUser{{ID: "u1", UserPrincipalName: "u1@corp.com"}},
+		})
+	}))
+	defer graph.Close()
+
+	proxy, authFor := newConnectProxy(t, hostOf(t, token.URL), hostOf(t, graph.URL))
+
+	lister, err := NewUserListerClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			// The httptest certs are self-signed; the hop under test is the
+			// CONNECT to the proxy, not the TLS inside the tunnel.
+			TLSInsecureSkipVerify: true,
+			ProxyURL:              proxy.URL,
+			ProxyUsername:         "proxyuser",
+			ProxyPassword:         "proxypass",
+		},
+		WithTokenURL(token.URL+"/token"),
+		WithBaseURL(graph.URL),
+	)
+	require.NoError(t, err)
+
+	// Idle tunnels keep the proxy handler running, so drop them before the
+	// server's own cleanup waits on it.
+	tr, ok := lister.(*graphClient).httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	t.Cleanup(tr.CloseIdleConnections)
+
+	require.NoError(t, lister.ListUsers(context.Background(), 10, func([]GraphUser) error { return nil }))
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:proxypass"))
+	assert.Equal(t, want, authFor(hostOf(t, token.URL)), "token CONNECT must authenticate to the proxy")
+	assert.Equal(t, want, authFor(hostOf(t, graph.URL)), "graph CONNECT must authenticate to the proxy")
+}
+
+func hostOf(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	return u.Host
+}
+
+// TestApplyProxy_RejectsOutOfRangePort keeps the fail-fast contract honest:
+// url.Parse only checks that a port is digits, so an out-of-range one would
+// otherwise surface as a dial failure on the first Graph call instead of at
+// construction.
+func TestApplyProxy_RejectsOutOfRangePort(t *testing.T) {
+	tests := []struct {
+		name    string
+		proxy   string
+		wantErr bool
+	}{
+		{name: "above the range", proxy: "http://proxy.corp:99999", wantErr: true},
+		{name: "just above the range", proxy: "http://proxy.corp:65536", wantErr: true},
+		{name: "port zero", proxy: "http://proxy.corp:0", wantErr: true},
+		{name: "socks5 out of range", proxy: "socks5://proxy.corp:70000", wantErr: true},
+		{name: "highest valid port", proxy: "http://proxy.corp:65535"},
+		{name: "lowest valid port", proxy: "http://proxy.corp:1"},
+		{name: "no port at all", proxy: "http://proxy.corp"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "port")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

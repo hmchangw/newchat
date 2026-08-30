@@ -401,6 +401,16 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	if proxyURL.Scheme == "" || proxyURL.Hostname() == "" {
 		return errors.New("invalid graph proxy url: GRAPH_PROXY_URL needs a scheme and host")
 	}
+	// url.Parse only checks that a port is digits, so ":99999" would survive to
+	// become a dial failure on the first Graph call — the thing constructing
+	// eagerly is meant to prevent. The number is not a credential, but the
+	// message stays static anyway.
+	if port := proxyURL.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("invalid graph proxy url: GRAPH_PROXY_URL has a port outside 1-65535")
+		}
+	}
 	if !supportedProxySchemes[proxyURL.Scheme] {
 		// net/http would accept this here and fail on the first request instead.
 		return fmt.Errorf("unsupported graph proxy scheme %q: want http, https, socks5 or socks5h", proxyURL.Scheme)

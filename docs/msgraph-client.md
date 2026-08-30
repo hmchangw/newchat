@@ -106,6 +106,7 @@ rather than silently egressing unauthenticated or breaking on the first request:
   (`http://:secret@proxy:8080`), since Basic would send `:secret` and draw a 407;
 - a malformed URL, or one missing a scheme or hostname (`http://:8080` has a
   port but no host to dial);
+- a port outside 1-65535 (`url.Parse` only checks that a port is digits);
 - a scheme `net/http` cannot proxy through — only `http`, `https`, `socks5` and
   `socks5h` work;
 - a `:` in the username of an `http`/`https` proxy. Basic sends `user:password`,
