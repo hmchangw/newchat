@@ -3466,6 +3466,7 @@ func TestHandler_HandleEvent_MalformedPayload_IsPermanent(t *testing.T) {
 			ec, perm := errcode.IsPermanent(err)
 			require.True(t, perm, "a malformed %s payload must Ack-drop, not retry to MaxDeliver", eventType)
 			assert.Equal(t, errcode.CodeBadRequest, ec.Code)
+			assert.NotNil(t, errors.Unwrap(ec), "the decoder error must ride as the cause for the server-side log")
 		})
 	}
 }
