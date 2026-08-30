@@ -29,7 +29,7 @@
 | P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
 | P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
 | P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
-| P8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. If `MaxDeliver` is `0`/`-1` (unlimited) there is no finite cap — decide the operational one before the run, not during it |
+| P8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
 
 ### P6 — how to scope a run to a site
 
@@ -296,17 +296,43 @@ That is wrong: the delay schedule on the normal path is a constant in the
 binary, and the consumer's `BackOff` governs a *different* failure mode. Only
 `MaxDeliver` is shared.
 
+**The two paths mix within one message's life**, so the bound is *not* the larger
+of the two totals. Delivery 1 can be Nak'd on the application schedule while
+delivery 2 expires by `AckWait` on the consumer schedule. The safe upper bound
+takes the larger delay **per delivery** and sums that:
+
 ```
-budget(schedule) = Σ over N in [1 .. MaxDeliver-1] of schedule[min(N-1, len-1)]
-cap              = max(budget(jsretry.DefaultBackoff), budget(consumer BackOff))
-                   + one scrape interval
+app[k]      = jsretry.DefaultBackoff[min(k, len(app)-1)]
+consumer[k] = BackOff[min(k, len(BackOff)-1)]   if BackOff is non-empty
+            = AckWait                            if BackOff is empty (steps <= 0)
+
+cap = Σ over N in [1 .. MaxDeliver-1] of max(app[N-1], consumer[N-1])
+      + one scrape interval
 ```
 
-Note the index: the delay after delivery *N* is `schedule[min(N-1, len-1)]`
-(`jsretry.go:132-145`). At `MaxDeliver=6` that gives 1+5+30+120+600 = **756 s ≈
-12.6 min**; at `MaxDeliver=10` the 10 m entry repeats five times for **≈ 52 min**.
-An earlier revision wrote the index one place off and so disagreed with its own
-worked examples.
+The delay after delivery *N* is `schedule[min(N-1, len-1)]` (`jsretry.go:132-145`).
+Worked at the shipped defaults — app `1, 5, 30, 120, 600`; consumer, derived as
+`AckWait × 2^i` capped at 8 m, `30, 60, 120, 240, 480`:
+
+| | sum |
+|---|---|
+| application schedule alone | 756 s |
+| consumer schedule alone | 930 s |
+| **larger of the two totals** (an earlier revision's answer) | 930 s |
+| **per-delivery max** — `30+60+120+240+600` | **1 050 s ≈ 17.5 min** |
+
+The earlier formula undercounted by 120 s. **The two are different mechanisms**
+in JetStream — an acknowledgement-timeout `BackOff` and a delayed NAK — not two
+spellings of one, which is why neither dominates the other at every step.
+
+**The empty-schedule case has to be spelled out.** `CONSUMER_BACKOFF_STEPS=0`
+makes `backOffSchedule()` return `nil` (`pkg/stream/consumer.go:75-77`), which
+switches the consumer off *as a schedule* but not as a path: redelivery then
+falls back to plain `AckWait`, so `consumer[k] = AckWait` for every `k`. The
+earlier formula was undefined here.
+
+At `MaxDeliver=10` the 10 m application entry repeats and dominates from delivery
+5 onward, giving **≈ 55 min**.
 
 **`MaxDeliver` of `0` or `-1` means unlimited**, and the server normalizes
 anything `< -1` to `-1` (CLAUDE.md §JetStream Redelivery Backoff). There is then
@@ -351,7 +377,7 @@ sum(search_service_requests_total{site="$site",
 # 5 — the measurement gap for SLO-4/5 (a rolling quantile is fine here:
 #     it is a diagnostic comparison, not a scored ratio)
 histogram_quantile(0.95, sum by (le) (rate(loadgen_soak_rpc_latency_seconds_bucket{
-      action="msg_history"}[$window])))
+      action="load_history"}[$window])))    # the action is load_history, not msg_history
 - histogram_quantile(0.95, sum by (le) (rate(rpc_server_call_duration_seconds_bucket{
       service_name="history-service", rpc_method="channel_history"}[$window])))
 ```
@@ -441,9 +467,25 @@ That is why the baselines are split:
    `soak.heartbeatStaleAfter`, and do not run teardown during it.
 3. **`phase: soak` with `soak.warmup: 0`.** Dispatch resumes immediately.
 4. **Wait for the full mix.** Watch
-   `loadgen_soak_rpc_latency_seconds{action="get_thread_messages"}` resume at its
-   configured rate — that is the catalog having refilled past
-   `soak.persistGrace`. Then take **`t0-sync`**, the baseline for SLO-4/5/7.
+
+   ```promql
+   rate(loadgen_soak_rpc_latency_seconds_count{action="get_thread_messages"}[1m])
+   ```
+
+   climb back to its expected rate — that is the catalog having refilled past
+   `soak.persistGrace`. **Query the `_count` series, not the bare metric name:** a
+   Prometheus histogram exposes only `_count`, `_sum` and `_bucket`, so a selector
+   on the base name returns nothing and `t0-sync` would never be markable. An
+   earlier revision made exactly that mistake.
+
+   **"Expected rate" is derived, not configured.** The read lane rolls its action
+   from a fixed mix — 75% history, **15% thread**, 10% point lookup
+   (`soak_read.go:22-32`) — so the target is `SOAK_READ_RATE × 0.15`, i.e. **105/s**
+   at the default 700. Treat it as ready when the rate is within ~10% of that and
+   stable over two consecutive scrapes; it is a sampled share, so it will not sit
+   exactly on the number.
+
+   Then take **`t0-sync`**, the baseline for SLO-4/5/7.
    Everything between step 3 and here is excluded from the synchronous
    measurement by construction, which is what "discard the first two minutes"
    should have meant.
