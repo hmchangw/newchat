@@ -2046,6 +2046,7 @@ func openFailureWAL(path string) (*fileFailureWAL, error) {
 			}
 		}
 	}
+	// #nosec G304 -- failureWALPath builds this from SOAK_LEDGER_DIR, SOAK_RUN_ID and SOAK_LEDGER_EPOCH, all operator-set config, never request data.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open failure WAL %q: %w", path, err)
@@ -2383,6 +2384,7 @@ func (w *fileFailureWAL) Compact(events []failureLedgerEvent) error {
 	}
 	temporaryPath := w.path + ".compact"
 	backupPath := w.path + ".bak"
+	// #nosec G304 -- temporaryPath is w.path, already validated by openFailureWAL, plus a constant suffix.
 	temporary, err := os.OpenFile(
 		temporaryPath,
 		os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
@@ -2490,6 +2492,7 @@ func syncFailureWALDirectory(directory string) error {
 		// production PVC runs on Linux, where the sync below makes rename durable.
 		return nil
 	}
+	// #nosec G304 -- callers pass only filepath.Dir of the validated WAL path or the journal's own directory.
 	directoryFile, err := os.Open(directory)
 	if err != nil {
 		return fmt.Errorf("open directory: %w", err)
