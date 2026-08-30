@@ -95,6 +95,19 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 // SETs keep the client clock, so each stays strictly above the create it
 // supersedes.
 //
+// The pin is sound for the message body, which is fixed by the canonical event.
+// It is NOT sound for the enrichment columns: the handler re-resolves sender and
+// mentions on every delivery, and both fail open, so a degraded attempt and a
+// healthy retry bind different values under one timestamp. Cassandra then breaks
+// that tie per cell by comparing values rather than by attempt order, so the
+// healthy retry does not reliably replace the degraded one, and sender may be
+// taken from one attempt while mentions come from the other. Unlike the encrypted
+// case this always yields a readable row -- the cost is degraded or mixed
+// enrichment, not an unrecoverable one -- so the pin stays, because unpinning
+// would trade it for the create-outranks-edit hazard the pin exists to prevent.
+// Closing it properly means making the bound values deterministic from the
+// canonical event, or writing enrichment as its own unpinned mutation.
+//
 // The encrypted create paths deliberately do NOT pin, because their bound values
 // are not identical across attempts: atrest.Encrypt draws a fresh random nonce
 // per call, so enc_payload and enc_meta differ on every redelivery. They are
