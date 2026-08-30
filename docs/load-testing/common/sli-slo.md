@@ -119,8 +119,8 @@ material; read receipts / unread badges → dashboard, v2 candidate (§8 P7).
 | SLO-1b | J1 | **channel** room-subject broadcast **enqueue-accepted** (local core-NATS, single publish) / **canonical messages routed to the room-subject path** (`broadcast_path=room_subject`) | 99.9% | 🔧 P2 · approximate · enqueue-only (see §2) |
 | SLO-2 | J1 | room-subject broadcast **enqueue-accepted within 1 s** of canonical acceptance (late = bad) / canonical messages on the room-subject path (`broadcast_path=room_subject`) | 99% | 🔧 P2 · approximate · enqueue-only |
 | SLO-3 | J2 | successful login **within 1 s** / eligible login attempts | 99% | ✅ (auth leg — proxy) |
-| SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 |
-| SLO-5 | J2 | thread open succeeds **within 300 ms** / eligible thread opens | 99% | 🔧 P1 |
+| SLO-4 | J2 | channel load succeeds **within 500 ms** / eligible channel loads | 95% | 🔧 P1 · **server-side proxy** (see §2) |
+| SLO-5 | J2 | thread open succeeds **within 250 ms** / eligible thread opens | 95% | 🔧 P1 · **server-side proxy** · target provisional — no baseline yet |
 | SLO-6 | J3 | **recipients** accepted into `PUSH_NOTIFICATION` / notifiable recipients | 99.9% | 🔧 P4 · approximate · handoff only (see §4) |
 | SLO-7 | J4 | search returns ok / **eligible** search requests | 99.5% | ✅ partial-failure · outage needs backstop (§5) |
 | SLO-8 | J4 | **successful** search returns **within 1 s** / successful searches | 95% | 🔧 P4 (needs status label) |
@@ -331,9 +331,93 @@ partition slice). Targets: §1.
   initial data); the connect + initial-data legs are added via prober/spanmetrics
   (v2). Labelled proxy until then.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
-  `rpc_server_duration_seconds{subject_pattern, errcode_category}`; the
-  `subject_pattern` label slices both workflows from one middleware. Eligibility
-  per the §0.1 errcode table.
+  `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
+  label slices both workflows from one middleware — `channel_history` for SLO-4,
+  `thread_open` for SLO-5. Names follow the OTel RPC semantic conventions rather
+  than the spelling this document first proposed.
+
+  **The denominator is not the family total.** `error_type` is absent on success,
+  so it is tempting to write good/valid as `{error_type=""}` over `_count` — but
+  `_count` includes the 4xx classes §0.1 removes from *valid events entirely*,
+  which would burn budget for user errors this SLO does not own. Valid is success
+  plus the eligible failures only:
+
+  ```promql
+  # good  — succeeded within the bound
+  sum by (site) (rate(rpc_server_call_duration_seconds_bucket{
+        service_name="history-service", rpc_method="thread_open",
+        error_type="", le="0.25"}[28d]))
+  /
+  # valid — success + budget-burning failures, never the 4xx classes
+  sum by (site) (rate(rpc_server_call_duration_seconds_count{
+        service_name="history-service", rpc_method="thread_open",
+        error_type=~"|internal|unavailable|too_many_requests"}[28d]))
+  ```
+
+  **`by (site)` is not decoration.** §0.1 scopes every SLO to a site, and a bare
+  `sum()` collapses them: one site failing every thread open reads as a small dip
+  once the other sites' healthy traffic is added underneath it, and the busier the
+  fleet the smaller the dip. Grouping makes the recording rule emit one series per
+  site, which is what the error budget is defined against.
+  `service_name="history-service"` pins the emitter for the same reason — the
+  label is resource-derived, so it is present on every series, and without it any
+  other `natsrouter` service that ever registers a `.msg.thread` route joins this
+  SLO silently.
+
+  The empty alternative in that regex is the success series. `requestResultFromError`
+  emits exactly nine `error_type` values: `bad_request`, `unauthenticated`,
+  `forbidden`, `not_found` and `conflict` are excluded here per §0.1;
+  `too_many_requests`, `unavailable` and `internal` are eligible; and a
+  server-side timeout carries no `errcode` so it falls to the default branch and
+  arrives as `internal`. SLO-4 is the same expression with
+  `rpc_method="channel_history"` and `le="0.5"`. Pin this label set in the
+  recording rule's test — adding a tenth `RequestResult` without revisiting the
+  regex silently moves it into or out of the denominator.
+
+  **These two are a server-side proxy, and the row says so.** The histogram's
+  timer stops in a `defer` that runs after the handler returns — which is after
+  `Respond`, and `Respond` on Core NATS returns as soon as the reply enters the
+  client's write or reconnect buffer. So the interval measured is *request
+  received → reply handed to the local NATS client*, not *caller got the answer*.
+
+  The gap is not symmetric, which is what makes it worth labelling. If the
+  connection drops after the handler returns, the server records a sub-bound
+  success and the caller times out — and the caller's timeout is not any
+  server-side `error_type`, so it enters neither the numerator nor the
+  denominator. A server→client partition therefore moves this SLI *toward* green
+  during exactly the incident it should catch. §0.1's own outage-safe-denominator
+  rule is the same principle: do not let the measured component be its own
+  scorekeeper.
+
+  Pair it with the client connection metrics (`chat_nats_client_connected`,
+  `chat_nats_client_connection_events_total`) so "the SLI is green while the
+  connection lane is flapping" is visible. history-service emits them.
+
+  A true caller-visible SLI needs a synthetic prober running continuously in
+  production, or client RUM — the P6 last-mile item already declared below, not
+  the load generator, which does not run in the 28-day window this SLO is
+  measured over. **Whether to move SLO-4/5 onto that measurement point is open
+  with this document's owner**; until then the proxy label is what keeps the row
+  from over-claiming.
+
+  **Both bounds sit exactly on a histogram bucket boundary, and that is why they
+  are the numbers they are.** `le="0.5"` and `le="0.25"` above are real
+  boundaries, so the numerator is an exact bucket read rather than an
+  interpolation. A bound between boundaries cannot be computed at all: the draft's
+  earlier 300 ms fell between `0.25` and `0.5`, so it could only be read as 250 ms
+  (understating the good share) or 500 ms (overstating it), and the gap between
+  those two readings — all traffic in 250–500 ms, which for a 300 ms threshold is
+  exactly where the distribution's tail sits — is far wider than the error budget
+  it would be judged against. §0.1's 50 ms rounding rule leaves plenty of legal
+  bounds; pick one the histogram can measure.
+
+  SLO-5's 250 ms is tighter than the 300 ms first drafted, deliberately.
+  `.msg.thread` slices a single partition with no bucket walk (§3), so the bound
+  expresses what a user should experience from the cheapest interaction in J2.
+  §0.2's achievable-first slack is taken in the **target** instead — 95% to start,
+  no baseline yet — because that knob has no measurability constraint and can be
+  tightened on evidence. A tight bound with a loose target degrades honestly; a
+  bound nobody can compute does not degrade, it reports nothing.
 - 🔧 Client-side v1.5: spanmetrics.
 
 ### Caveats
@@ -489,7 +573,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 
 | P | Work | Unlocks |
 |---|---|---|
-| P1 | `natsrouter` metrics middleware (`rpc_server_duration_seconds{subject_pattern, errcode_category}`) | SLO-4/5 + dashboards for all non-named RPCs |
+| P1 | ✅ `natsrouter` metrics middleware (`rpc_server_call_duration_seconds{rpc_method, error_type}`, OTel RPC semconv) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |

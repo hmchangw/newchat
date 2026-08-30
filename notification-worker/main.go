@@ -106,7 +106,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 

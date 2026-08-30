@@ -103,7 +103,7 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newGatekeeperMetrics(sdk.MeterProvider().Meter("message-gatekeeper"))
 
@@ -180,7 +180,7 @@ func main() {
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)
-		publishMetrics.Attempt(ctx, natsmetrics.DestinationCanonical, natsmetrics.OperationCanonicalPublish, err)
+		publishMetrics.Failure(ctx, natsmetrics.DestinationCanonical, natsmetrics.OperationCanonicalPublish, err)
 		if err != nil {
 			return nil, fmt.Errorf("publish to %q: %w", msg.Subject, err)
 		}
@@ -188,7 +188,7 @@ func main() {
 	}
 	reply := func(ctx context.Context, msg *nats.Msg) error {
 		err := nc.PublishMsg(ctx, msg)
-		publishMetrics.Attempt(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
+		publishMetrics.Failure(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
 		if err != nil {
 			return fmt.Errorf("reply to %q: %w", msg.Subject, err)
 		}

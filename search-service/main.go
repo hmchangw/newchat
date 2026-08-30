@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -188,7 +189,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -238,7 +239,9 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "search-service",
+		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

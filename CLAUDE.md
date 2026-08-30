@@ -56,8 +56,9 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 | `make generate SERVICE=<name>` | Regenerate mocks for a single service |
 | `make build SERVICE=<name>` | Build a single service binary |
 | `make tools` | Install pinned dev/SAST tooling (`golangci-lint`, `gosec`, `govulncheck`, `semgrep`) |
-| `make sast` | Run all SAST scans (`gosec`, `govulncheck`, `semgrep`); fails on medium+ |
+| `make sast` | Run all SAST scans (`gosec`, `govulncheck`, `semgrep`) plus the repo-owned semgrep rule tests; fails on medium+ |
 | `make sast-gosec` / `make sast-vuln` / `make sast-semgrep` | Run a single SAST scan |
+| `make sast-semgrep-test` | Run the repo-owned semgrep rules against their fixtures. A rule file `.semgrep/X.yml` is tested when `.semgrep/X.go` exists beside it; annotate lines a rule must flag with `// ruleid: <id>[, <id>]`, and leave lines it must not flag unannotated. Add fixtures when adding or editing a rule — an unverified rule can be disabled by a pattern edit without any scan failing |
 
 ## Section 3: Coding Rules
 

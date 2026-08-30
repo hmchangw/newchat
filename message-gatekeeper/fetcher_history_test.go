@@ -76,7 +76,7 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.NoError(t, err)
 		require.NotNil(t, got)
-		assert.Equal(t, int64(1), requests("success"), "a served history request must be counted as success")
+		assert.Equal(t, uint64(1), requests(requestSucceeded), "a served history request must be counted as a success")
 		assert.Equal(t, messageID, got.MessageID)
 		assert.Equal(t, roomID, got.RoomID)
 		assert.Equal(t, "a reply inside thread T", got.Msg)
@@ -128,7 +128,7 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
-		assert.Equal(t, int64(1), requests("success"),
+		assert.Equal(t, uint64(1), requests(requestSucceeded),
 			"a replied-to request is a transport success even when the payload is an error envelope")
 		var ec *errcode.Error
 		require.ErrorAs(t, err, &ec, "the history error envelope must survive as a typed errcode")
@@ -144,48 +144,53 @@ func TestHistoryParentFetcher_FetchQuotedParent(t *testing.T) {
 		got, err := fetcher.FetchQuotedParent(context.Background(), account, roomID, siteID, messageID)
 		require.Error(t, err)
 		assert.Nil(t, got)
-		assert.Equal(t, int64(1), requests("no_responders"), "an unanswered history request must be counted as no_responders")
+		assert.Equal(t, uint64(1), requests("no_responders"), "an unanswered history request must be counted as no_responders")
 	})
 }
+
+// requestSucceeded is the error.type a successful call carries: none. The RPC
+// semantic conventions make the label conditional on failure, so absence is how
+// a query tells success from failure.
+const requestSucceeded = ""
 
 // requestMetricFor builds a Publisher backed by a manual reader so a test can
 // assert the history request outcome the fetcher records. Injecting a zero
 // natsmetrics.Publisher makes Request a no-op, which proves nothing.
-func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(outcome string) int64) {
+func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(errorType string) uint64) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	pub := natsmetrics.NewFromProvider(mp).Publisher("s1")
-	return pub, func(outcome string) int64 {
+	return pub, func(errorType string) uint64 {
 		t.Helper()
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(context.Background(), &rm))
-		// operationTotal guards the assertion itself: summing only the requested
-		// outcome would still pass if one request were recorded under two.
-		var total, operationTotal int64
+		// methodTotal guards the assertion itself: summing only the requested
+		// error class would still pass if one request were recorded under two.
+		var total, methodTotal uint64
 		for _, scope := range rm.ScopeMetrics {
 			for _, m := range scope.Metrics {
-				if m.Name != "chat.nats.requests" {
+				if m.Name != "rpc.client.call.duration" {
 					continue
 				}
-				sum, ok := m.Data.(metricdata.Sum[int64])
-				require.True(t, ok, "chat.nats.requests must be a counter")
-				for _, dp := range sum.DataPoints {
+				histogram, ok := m.Data.(metricdata.Histogram[float64])
+				require.True(t, ok, "rpc.client.call.duration must be a histogram")
+				for _, dp := range histogram.DataPoints {
 					got := map[string]string{}
 					for _, kv := range dp.Attributes.ToSlice() {
-						got[string(kv.Key)] = kv.Value.AsString()
+						got[string(kv.Key)] = kv.Value.String()
 					}
-					if got["operation"] != string(natsmetrics.OperationHistoryGetMessage) {
+					if got["rpc.method"] != string(natsmetrics.OperationHistoryGetMessage) {
 						continue
 					}
-					operationTotal += dp.Value
-					if got["outcome"] == outcome {
-						total += dp.Value
+					methodTotal += dp.Count
+					if got["error.type"] == errorType {
+						total += dp.Count
 					}
 				}
 			}
 		}
-		require.Equal(t, int64(1), operationTotal, "one history request must record exactly one outcome")
+		require.Equal(t, uint64(1), methodTotal, "one history request must record exactly one outcome")
 		return total
 	}
 }

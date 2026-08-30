@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -86,7 +87,7 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
@@ -143,7 +144,9 @@ func run() error {
 	// LOCAL sysmsg emission on create/add/remove; never federated cross-site.
 	h.sysmsgPub = jsPublishAdapter{js: js}
 
-	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.DefaultGuarded(nc, "bot-room-service", guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	h.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,

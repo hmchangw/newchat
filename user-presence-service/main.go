@@ -10,6 +10,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -144,7 +145,7 @@ func main() {
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -162,7 +163,9 @@ func main() {
 	// silently dropped (no reply, no redelivery) — a reconnect storm would lose
 	// presence updates and strand users online/offline. Only the per-request
 	// timeout is applied.
-	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.Default(nc, "user-presence-service",
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	if cfg.RequestTimeout > 0 {
 		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
 	}

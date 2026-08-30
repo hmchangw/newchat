@@ -140,7 +140,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
@@ -239,20 +239,23 @@ func main() {
 	}
 	handler := NewHandler(store, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		msg := natsutil.NewMsg(ctx, subj, data)
-		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		// Classify only when a publish fails: this closure runs on every room
+		// event and PublishLabelsFromSubject allocates.
+		recordFailure := func(err error) {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Failure(ctx, destination, operation, err)
+		}
 		if msgID == "" {
 			// Ephemeral client-delivery — core NATS, not persisted.
-			err := nc.PublishMsg(ctx, msg)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if err := nc.PublishMsg(ctx, msg); err != nil {
+				recordFailure(err)
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		}
 		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
-		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-		publishMetrics.Attempt(ctx, destination, operation, err)
-		if err != nil {
+		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+			recordFailure(err)
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
 		return nil
@@ -266,10 +269,9 @@ func main() {
 			return fmt.Errorf("marshal user identity fanout: %w", err)
 		}
 		subj := subject.OrgSyncUsersUpsert(cfg.SiteID)
-		_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
-		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-		publishMetrics.Attempt(ctx, destination, operation, err)
-		if err != nil {
+		if _, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Failure(ctx, destination, operation, err)
 			return fmt.Errorf("publish user identity fanout: %w", err)
 		}
 		return nil
@@ -278,7 +280,8 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
