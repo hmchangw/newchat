@@ -37,7 +37,7 @@ func TestHandleRemove_DiffNonEmpty_RotatesThenFansOutToSurvivors(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -92,7 +92,7 @@ func TestHandleRemove_DiffEmpty_NoRotation(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "", false, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "", "", false, nil },
 		// Reached before the delete now: the removal destination is resolved
 		// while the subscription row that identifies it still exists.
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
@@ -127,7 +127,7 @@ func removeKeyStore() *fakeStore {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -258,7 +258,7 @@ func TestHandleRemove_RotateOtherError_FailsHandler(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -293,7 +293,7 @@ func TestHandleRemove_KeySendFailureDoesNotFailOp(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -357,7 +357,7 @@ func TestHandleRemove_RotatesWhenFederationFails(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			// A remote home site, so the removal federates and hits the failure.
 			return &model.User{ID: id, Account: "bob", SiteID: "site-b"}, nil
@@ -401,8 +401,8 @@ func TestHandleRemove_RotatesWhenTheBatchFailsPartWayThrough(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
-			return "alice", true, nil
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			return "sub-1", "alice", true, nil
 		},
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			if id == "bob-id" {
@@ -451,8 +451,8 @@ func TestHandleRemove_RetriesRotationWhenTheFirstAttemptFails(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
-			return "alice", true, nil
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			return "sub-1", "alice", true, nil
 		},
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil

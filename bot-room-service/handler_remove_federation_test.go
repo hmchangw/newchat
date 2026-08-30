@@ -18,8 +18,8 @@ func removeFedStore(destSiteID string) *fakeStore {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
-			return "", false, nil
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			return "", "", false, nil
 		},
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: destSiteID}, nil
@@ -47,8 +47,22 @@ func TestHandleRemove_DuplicateRemoveStillFederates(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, out.calls, 1, "a duplicate remove must still re-federate: only this repairs a destination that missed the first publish")
-	assert.Equal(t, "bot-remove:r1:bob-id:site-b", out.calls[0].MsgID,
-		"the dedup id must stay deterministic so the republish is a no-op where the first one landed")
+	// User-keyed, not subscription-keyed: this call deleted nothing, so the row
+	// whose id the original publish used is already gone. The "u:" prefix keeps
+	// that id in a space a real subscription id can never reach.
+	//
+	// It is deterministic, so repeated repairs of one removal still collapse to a
+	// single delivery. What it can no longer do is match the original publish and
+	// be suppressed where that one landed — the original is keyed on the deleted
+	// subscription, which a repair cannot reconstruct. So a repair republishes
+	// even when the first attempt succeeded, and correctness rests on the
+	// destination treating a removal as idempotent, which inbox-worker does:
+	// deleting an already-deleted subscription is a no-op. That is the cost of
+	// keying live removals on the membership incarnation, and it is the cheap
+	// direction — a duplicate removal is harmless, a dropped one is a permanent
+	// split-brain between the two sites.
+	assert.Equal(t, "bot-remove:r1:u:bob-id:site-b", out.calls[0].MsgID,
+		"a repair must use the deterministic user-keyed id so repeated repairs collapse to one delivery")
 	assert.Empty(t, resp.Removed.UserIDs, "this call deleted nothing, so it reports nothing removed")
 }
 

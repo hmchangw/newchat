@@ -387,6 +387,10 @@ func roomTypeToModel(t string) model.RoomType {
 // memberRemoval is one removal awaiting its cross-site publish, held between the
 // delete loop and the federation pass so the room-key rotation can run between them.
 type memberRemoval struct {
+	// subID is the deleted subscription's id, empty when this call deleted
+	// nothing (the repair path below). federateMemberRemoved keys the dedup id
+	// on it.
+	subID      string
 	userID     string
 	account    string
 	destSiteID string
@@ -472,7 +476,7 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 			return nil, fmt.Errorf("resolve removal destination for user %s: %w", userID, err)
 		}
 
-		account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		subID, account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
@@ -481,11 +485,12 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		// committed the delete and then failed on its publish leaves the member
 		// still subscribed on their home site, and every retry reports
 		// wasThere=false — so gating the federation here means nothing ever
-		// repairs it. Republishing is safe: the dedup id is derived only from
-		// (roomID, userID, destSiteID), so JetStream drops it where the first
-		// publish landed and accepts it where it did not.
+		// repairs it. subID is empty on those repair retries, because the row
+		// they would have named is already gone; federateMemberRemoved falls
+		// back to a user-keyed id there, and says what that costs.
 		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
-			pendingFederations = append(pendingFederations, memberRemoval{userID: u.ID, account: u.Account, destSiteID: u.SiteID})
+			pendingFederations = append(pendingFederations,
+				memberRemoval{subID: subID, userID: u.ID, account: u.Account, destSiteID: u.SiteID})
 		}
 
 		if !wasThere {
@@ -526,7 +531,7 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 		rotated = true
 	}
 	for _, f := range pendingFederations {
-		if err := h.federateMemberRemoved(c, roomID, f.userID, f.account, f.destSiteID); err != nil {
+		if err := h.federateMemberRemoved(c, roomID, f); err != nil {
 			return nil, err
 		}
 	}
@@ -651,17 +656,39 @@ func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, accou
 		model.InboxMemberAdded, payload, dedupID, at.UnixMilli())
 }
 
-func (h *handler) federateMemberRemoved(ctx context.Context, roomID, userID, account, destSiteID string) error {
+// federateMemberRemoved publishes one removal to the member's home site.
+//
+// The dedup id names the deleted subscription, not the (room, user, site) triple. JetStream drops
+// a publish whose Nats-Msg-Id it has already seen inside the stream's duplicate window, so a
+// triple-only id makes remove -> re-add -> remove inside that window send the first removal and
+// silently swallow the second, leaving the member subscribed on their home site with nothing to
+// repair it. A subscription id is fresh per add, so it separates those two removals while staying
+// stable for any retry of one of them.
+//
+// A repair retry has no subscription to name: the delete it is repairing already committed, so
+// this call reported wasThere=false and r.subID is empty. Those fall back to a user-keyed id,
+// distinguished by the "u:" prefix so it can never collide with a real subscription id. That keeps
+// repeated repairs of one removal deduped against each other, and keeps them distinct from the
+// original subscription-keyed publish so the repair actually lands. What it does not separate is
+// two DIFFERENT removals of the same member whose first publish both failed inside one duplicate
+// window — those share the user-keyed id and the second repair is dropped. That is the original
+// triple-collision, now confined to the repair path; closing it needs a durable per-operation id,
+// which is the same gap that leaves key rotation unrecoverable.
+func (h *handler) federateMemberRemoved(ctx context.Context, roomID string, r memberRemoval) error {
 	atMs := h.now().UnixMilli()
 	payload, err := json.Marshal(model.MemberRemoveEvent{
 		Type: "member_removed", RoomID: roomID, SiteID: h.siteID,
-		Accounts: []string{account}, Timestamp: atMs,
+		Accounts: []string{r.account}, Timestamp: atMs,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal member_removed payload: %w", err)
 	}
-	dedupID := fmt.Sprintf("bot-remove:%s:%s:%s", roomID, userID, destSiteID)
-	return outbox.Publish(ctx, h.publishFn, h.siteID, roomID, destSiteID,
+	key := r.subID
+	if key == "" {
+		key = "u:" + r.userID
+	}
+	dedupID := fmt.Sprintf("bot-remove:%s:%s:%s", roomID, key, r.destSiteID)
+	return outbox.Publish(ctx, h.publishFn, h.siteID, roomID, r.destSiteID,
 		model.InboxMemberRemoved, payload, dedupID, atMs)
 }
 

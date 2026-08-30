@@ -20,12 +20,21 @@ type RoomStore interface {
 	// UpsertSubscription returns created=true on fresh insert (used to compute newlyAdded diff).
 	UpsertSubscription(ctx context.Context, sub *Subscription) (created bool, err error)
 
-	// DeleteSubscription returns deleted=true when a doc was removed (used for
-	// the remove diff), along with the deleted row's u.account. The account
-	// comes from the delete itself rather than a follow-up user lookup because
-	// it is what keys the subauthcache entry that must be busted: sourcing it
-	// here means the bust cannot be skipped by a lookup that fails afterwards.
-	DeleteSubscription(ctx context.Context, roomID, userID string) (account string, deleted bool, err error)
+	// DeleteSubscription returns deleted=true when a doc was removed (used for the
+	// remove diff), plus two values that exist only at the instant of the delete:
+	//
+	//   subID   - the deleted row's id, which names the membership incarnation the
+	//             removal ends. Each add writes a fresh subscription id, so it is
+	//             what distinguishes two removals of the same (room, user) pair
+	//             across a re-add. See federateMemberRemoved.
+	//   account - the deleted row's u.account, which keys the subauthcache entry
+	//             that must be busted. Sourcing it from the delete rather than a
+	//             follow-up user lookup means the bust cannot be skipped by a
+	//             lookup that fails afterwards.
+	//
+	// Both are returned by the same FindOneAndDelete because a second read cannot
+	// recover either one: the row is gone.
+	DeleteSubscription(ctx context.Context, roomID, userID string) (subID, account string, deleted bool, err error)
 
 	// FindUser enriches the owner Participant on create-room.
 	FindUser(ctx context.Context, userID string) (*model.User, error)

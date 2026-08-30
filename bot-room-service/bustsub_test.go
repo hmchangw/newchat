@@ -26,7 +26,7 @@ func TestHandleRemove_BustsSubL2(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -50,7 +50,7 @@ func TestHandleRemove_NoBustOnDuplicateRemove(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "", false, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "", "", false, nil },
 		// Reached before the delete now: the removal destination is resolved
 		// while the row that identifies it still exists.
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
@@ -77,8 +77,8 @@ func TestHandleRemove_BustsWhenTheUserDocIsGone(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
-			return "bob", true, nil
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
+			return "sub-1", "bob", true, nil
 		},
 		FindUserFn: func(_ context.Context, _ string) (*model.User, error) { return nil, ErrNotFound },
 	}
@@ -102,9 +102,9 @@ func TestHandleRemove_TransientLookupFailureDeletesAndBustsNothing(t *testing.T)
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
 			t.Fatal("the delete must not run once the destination lookup has failed")
-			return "", false, nil
+			return "", "", false, nil
 		},
 		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
 			return nil, errors.New("mongo down")
@@ -128,8 +128,8 @@ func TestHandleRemove_BustsWhenFederationFails(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, userID string) (string, bool, error) {
-			return strings.TrimSuffix(userID, "-id"), true, nil
+		DeleteSubscriptionFn: func(_ context.Context, _, userID string) (string, string, bool, error) {
+			return "sub-" + userID, strings.TrimSuffix(userID, "-id"), true, nil
 		},
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			// A remote home site, so the removal federates and hits the failure.
