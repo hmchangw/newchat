@@ -341,6 +341,8 @@ func TestPreviewUpdate_TouchesOnlyThePreviewFields(t *testing.T) {
 	}
 	for name, u := range updates {
 		t.Run(name, func(t *testing.T) {
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			fields := previewUpdate(&u)[0][0].Value.(bson.M)
 			for _, owned := range []string{"lastMsgAt", "lastMsgId", "lastMentionAllAt", "updatedAt"} {
 				assert.NotContains(t, fields, owned, "%s belongs to roomlist-worker", owned)

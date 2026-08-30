@@ -68,6 +68,8 @@ func roomLastMsgModels(updates map[string]roomLastMsgUpdate) []mongo.WriteModel 
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(roomLastMsgFilter(roomID, u.msgID, u.at)).
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			SetUpdate(roomPointerUpdate(&u)))
 		// The user position and the @all badge are monotonic dimensions of their
 		// own, NOT part of the room pointer, so they are matched on identity
