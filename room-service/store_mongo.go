@@ -604,7 +604,7 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 
 // attachOrgDisplay resolves org-member display names and member counts for the
 // org rows in members, then fills SectName (dept-first tiebreak) and MemberCount
-// in place. It mirrors attachUserDisplayNames but for the org dimension: a
+// in place. It mirrors attachHumanDisplayNames but for the org dimension: a
 // single index-backed batch query feeds a Go-side rollup, replacing the prior
 // per-row correlated $lookup whose $expr $or could not use an index.
 func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, members []model.RoomMember, orgIDs []string) error {
@@ -746,6 +746,10 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 
 	members := make([]model.RoomMember, 0, len(subs))
 	var humanAccounts, botAccounts []string
+	if enrich {
+		// Nearly every subscription is human; bots are a handful, so those stay nil-append.
+		humanAccounts = make([]string, 0, len(subs))
+	}
 	for i := range subs {
 		sub := &subs[i]
 		entry := model.RoomMemberEntry{
@@ -772,43 +776,41 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 		})
 	}
 
-	if enrich && len(members) > 0 {
-		if err := s.attachUserDisplayNames(ctx, roomID, members, humanAccounts, botAccounts); err != nil {
-			return nil, err
-		}
+	if err := s.attachHumanDisplayNames(ctx, roomID, members, humanAccounts); err != nil {
+		return nil, err
+	}
+	if err := s.attachAppNames(ctx, roomID, members, botAccounts); err != nil {
+		return nil, err
 	}
 	return members, nil
 }
 
-// attachUserDisplayNames batch-loads display fields for the individual members
-// in the slice and copies them on in place. Humans resolve from users, bots
-// from apps; each query fires only when its partition is non-empty. Callers
-// partition the accounts because the two ListRoomMembers paths detect bots
-// differently.
-func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, members []model.RoomMember, humanAccounts, botAccounts []string) error {
-	if len(humanAccounts) > 0 {
-		userByAccount, err := s.findUsersForDisplay(ctx, humanAccounts)
-		if err != nil {
-			return fmt.Errorf("find users for room %q: %w", roomID, err)
+// attachHumanDisplayNames fills the users-sourced display fields in place,
+// keyed on the caller's human-account partition (index-backed $in).
+func (s *MongoStore) attachHumanDisplayNames(ctx context.Context, roomID string, members []model.RoomMember, humanAccounts []string) error {
+	if len(humanAccounts) == 0 {
+		return nil
+	}
+	userByAccount, err := s.findUsersForDisplay(ctx, humanAccounts)
+	if err != nil {
+		return fmt.Errorf("find users for room %q: %w", roomID, err)
+	}
+	for i := range members {
+		if members[i].Member.Type != model.RoomMemberIndividual {
+			continue
 		}
-		for i := range members {
-			if members[i].Member.Type != model.RoomMemberIndividual {
-				continue
-			}
-			if u, ok := userByAccount[members[i].Member.Account]; ok {
-				members[i].Member.EngName = u.EngName
-				members[i].Member.ChineseName = u.ChineseName
-				members[i].Member.SectName = u.SectName
-				members[i].Member.EmployeeID = u.EmployeeID
-			}
+		if u, ok := userByAccount[members[i].Member.Account]; ok {
+			members[i].Member.EngName = u.EngName
+			members[i].Member.ChineseName = u.ChineseName
+			members[i].Member.SectName = u.SectName
+			members[i].Member.EmployeeID = u.EmployeeID
 		}
 	}
-	return s.attachAppNames(ctx, roomID, members, botAccounts)
+	return nil
 }
 
-// attachAppNames resolves bot members' app display names in one indexed batch
-// and fills AppName in place. Org members carry no account, so they never key
-// into the result.
+// attachAppNames fills bot members' AppName in place from one index-backed $in
+// on apps.assistant.name.
 func (s *MongoStore) attachAppNames(ctx context.Context, roomID string, members []model.RoomMember, botAccounts []string) error {
 	if len(botAccounts) == 0 {
 		return nil
@@ -818,6 +820,9 @@ func (s *MongoStore) attachAppNames(ctx context.Context, roomID string, members 
 		return fmt.Errorf("find apps for room %q: %w", roomID, err)
 	}
 	for i := range members {
+		if members[i].Member.Type != model.RoomMemberIndividual {
+			continue
+		}
 		if name, ok := appByAssistant[members[i].Member.Account]; ok {
 			members[i].Member.AppName = name
 		}

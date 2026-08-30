@@ -1070,7 +1070,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 }
 
 // TestMongoStore_ListRoomMembers_BotEnrichment_Integration verifies that the
-// subscriptions-fallback path (Path 2 / attachUserDisplayNames) correctly
+// subscriptions-fallback path (Path 2) correctly
 // partitions bot vs human accounts: bot accounts are looked up in apps for
 // Name, human accounts are looked up in users for EngName/ChineseName.
 func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {

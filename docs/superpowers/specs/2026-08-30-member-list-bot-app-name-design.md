@@ -111,8 +111,11 @@ scheme.
 | Page containing bot members, either path | 1 |
 
 The added query is a single indexed `$in` bounded by the page size, not by room
-size, and duplicate accounts are collapsed before it is issued. Nothing on the
-human path changes: same pipeline, same projections, same index use.
+size. Accounts are not de-duplicated before the `$in`: the unique
+`subscriptions (roomId, u.account)` index makes repeats impossible on the
+fallback path, and a repeat on the room_members path would cost one extra index
+bound — cheaper than the staging map that would prevent it. Nothing on the human
+path changes: same pipeline, same projections, same index use.
 
 ## Compatibility
 
