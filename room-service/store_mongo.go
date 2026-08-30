@@ -715,6 +715,7 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 // The nested path is u._id, not u.id — SubscriptionUser.ID is bson "_id".
 var roomMemberSubProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u._id", Value: 1}, {Key: "u.account", Value: 1},
+	{Key: "u.isBot", Value: 1},
 	{Key: "roles", Value: 1}, {Key: "joinedAt", Value: 1},
 }
 
@@ -755,7 +756,8 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 		if enrich {
 			entry.IsOwner = hasRole(sub.Roles, model.RoleOwner)
 			if acct := sub.User.Account; acct != "" {
-				if model.IsBot(acct) {
+				// The flag is the authority; the suffix covers subs written before it existed.
+				if sub.User.IsBot || model.IsBot(acct) {
 					botAccounts = append(botAccounts, acct)
 				} else {
 					humanAccounts = append(humanAccounts, acct)

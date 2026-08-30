@@ -1258,6 +1258,32 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		assert.Equal(t, "Alice Wang", byAccount["alice"].EngName, "human enrichment must be unaffected")
 		assert.Empty(t, byAccount["alice"].AppName, "human must not get AppName")
 	})
+
+	t.Run("subscriptions path: isBot flag enriches a non-suffix bot account", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-legacy", "name": "Legacy Assistant",
+			"assistant": bson.M{"enabled": true, "name": "legacy-assistant"},
+		})
+		// No ".bot" suffix, so only the isBot flag can classify this account.
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-legacy",
+			User:     model.SubscriptionUser{ID: "u-legacy", Account: "legacy-assistant", IsBot: true},
+			RoomID:   "botdm-2",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: base,
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Legacy Assistant", got[0].Member.AppName, "isBot=true must route the account to apps")
+		assert.Empty(t, got[0].Member.EngName)
+	})
 }
 
 func TestMongoStore_ListOrgMembers_Integration(t *testing.T) {
