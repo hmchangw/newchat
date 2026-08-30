@@ -737,37 +737,13 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 	assert.False(t, catalog.ReserveThreadReply("room-1", "message-1"))
 }
 
-func TestSoakTopology_RejectsInvalidLimitsAndIdentitySources(t *testing.T) {
+func TestSoakTopology_RejectsInvalidIdentitySources(t *testing.T) {
 	users := makeSoakUsers(4, "site-a")
-	tests := []struct {
-		name        string
-		maxUsers    int
-		activeUsers int
-	}{
-		{name: "zero max", activeUsers: 1},
-		{name: "over max", maxUsers: maxBorrowedSoakUsers + 1, activeUsers: 1},
-		{name: "zero active", maxUsers: 4},
-		{name: "active over max", maxUsers: 2, activeUsers: 3},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := selectSoakUsers(
-				users, "site-a", tt.maxUsers, tt.activeUsers, 1,
-			)
-			require.Error(t, err)
-		})
-	}
-
 	cfg := validSoakConfig(t)
 	_, err := buildSoakTopology(users, &cfg, "site-a", 1, nil)
 	require.Error(t, err)
 	_, err = buildSoakTopology(users, &cfg, "site-a", 1, &soakIDs{})
 	require.Error(t, err)
-
-	used := make(map[string]struct{})
-	assert.False(t, reserveSoakPair(&users[0], &users[0], used))
-	assert.True(t, reserveSoakPair(&users[0], &users[1], used))
-	assert.False(t, reserveSoakPair(&users[1], &users[0], used))
 }
 
 func modelParticipant(account string) cassandra.Participant {

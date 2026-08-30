@@ -6,10 +6,12 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
 const (
-	maxBorrowedSoakUsers             = 20000
+	maxBorrowedSoakUsers             = soaktopology.MaxBorrowedUsers
 	maxFailureRecipientObserverQueue = 65536
 )
 
