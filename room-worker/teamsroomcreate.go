@@ -129,9 +129,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		memberSite[member.Account] = user.SiteID
 		// Human members get owner+member so they can admin the migrated room; bot
 		// and platform-admin accounts stay member-only.
-		roles := []model.Role{model.RoleOwner, model.RoleMember}
+		roles := []model.Role{model.RoleOwner, model.RoleUser}
 		if model.IsBot(member.Account) || model.IsPlatformAdminAccount(member.Account) {
-			roles = []model.Role{model.RoleMember}
+			roles = []model.Role{model.RoleUser}
 		}
 		// JoinedAt = the chat's creation time, a meaningful historical value, not the
 		// migration run time (acceptedAt). Teams exposes no per-member add time; this is

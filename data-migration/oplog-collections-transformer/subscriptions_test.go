@@ -414,7 +414,7 @@ func TestHandleSubscription_RolesCleared_EmitsRoleUpdated(t *testing.T) {
 	// Cleared source roles must land as [member], never empty: inbox-worker permanently drops a
 	// role_updated with no roles (malformed-event guard), and the new-stack floor is [member]
 	// (room-service writes ["member"] after a live demotion — the migration must match).
-	assert.Equal(t, []model.Role{model.RoleMember}, su.Subscription.Roles,
+	assert.Equal(t, []model.Role{model.RoleUser}, su.Subscription.Roles,
 		"a demotion (cleared roles) must map to the [member] floor so it survives inbox-worker")
 }
 

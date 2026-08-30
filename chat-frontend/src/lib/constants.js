@@ -5,7 +5,10 @@
 //   pkg/model/event.go        (CreateRoomStatusExists)
 
 export const ROLE_OWNER = 'owner'
+// Legacy spelling of the plain-user role; the server normalizes it to 'user' on
+// read and still accepts it as a role-update input.
 export const ROLE_MEMBER = 'member'
+export const ROLE_USER = 'user'
 
 export const HISTORY_MODE_ALL = 'all'
 export const HISTORY_MODE_NONE = 'none'

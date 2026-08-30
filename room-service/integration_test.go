@@ -3351,7 +3351,7 @@ func TestMongoStore_ApplySubscriptionRestriction_NamedOwnerRewritesRoles(t *test
 	for _, account := range []string{"alice", "carol", "dave"} {
 		got, err := store.GetSubscription(ctx, account, "r1")
 		require.NoError(t, err)
-		assert.Equal(t, []model.Role{model.RoleMember}, got.Roles, "%s: flattened to member by the rewrite", account)
+		assert.Equal(t, []model.Role{model.RoleUser}, got.Roles, "%s: flattened to user by the rewrite", account)
 	}
 }
 
@@ -3400,16 +3400,17 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 	}
 	mustInsertSub(t, db, sub)
 
-	// Promote: owner appended, member retained, order preserved.
+	// Promote: owner appended, the legacy "member" already on the doc rewritten to
+	// "user", order preserved.
 	roleTs := time.Now().UTC()
 	got, err := store.SetOwnerRole(ctx, "r1", "alice", true, roleTs)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, got.Roles)
 
 	persisted, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, persisted.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, persisted.Roles)
 	// rolesUpdatedAt is stamped at the supplied instant (BSON ms precision) so the
 	// origin doc shares the federated event's high-water mark.
 	assert.Equal(t, roleTs.UnixMilli(), subTimeField(t, db, "r1", "alice", "rolesUpdatedAt").UnixMilli())
@@ -3417,20 +3418,20 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 	// Promote again is idempotent — no duplicate owner.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", true, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, got.Roles)
 
-	// Demote: owner removed, member retained.
+	// Demote: owner removed, user retained.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles)
 
 	// Demote again is idempotent.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles)
 
-	// Channel-creator parity: an owner seeded WITHOUT member (roles ["owner"], as
-	// processCreateRoom assigns the creator) must demote to ["member"], never [].
+	// Channel-creator parity: an owner seeded WITHOUT a second role (roles ["owner"],
+	// as processCreateRoom assigns the creator) must demote to ["user"], never [].
 	creator := &model.Subscription{
 		ID:       idgen.GenerateUUIDv7(),
 		User:     model.SubscriptionUser{ID: "u2", Account: "carol"},
@@ -3444,7 +3445,7 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 
 	got, err = store.SetOwnerRole(ctx, "r1", "carol", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles, "demoting an owner-only creator must yield [member], never []")
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles, "demoting an owner-only creator must yield [user], never []")
 
 	// Missing subscription → ErrSubscriptionNotFound (wrapped).
 	gotNil, err := store.SetOwnerRole(ctx, "missing", "alice", true, time.Now().UTC())

@@ -94,7 +94,7 @@ func TestProcessTeamsRoomCreate_AddOnly(t *testing.T) {
 			for _, s := range subs {
 				assert.Equal(t, idgen.DeterministicID([]byte("chat1")), s.RoomID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
-				assert.Equal(t, []model.Role{model.RoleOwner, model.RoleMember}, s.Roles)
+				assert.Equal(t, []model.Role{model.RoleOwner, model.RoleUser}, s.Roles)
 				assert.Equal(t, model.OriginTeams, s.Origin)
 			}
 			return nil
@@ -138,7 +138,7 @@ func TestProcessTeamsRoomCreate_BotMemberStaysMemberOnly(t *testing.T) {
 	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, subs []*model.Subscription) error {
 			require.Len(t, subs, 1)
-			assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+			assert.Equal(t, []model.Role{model.RoleUser}, subs[0].Roles)
 			return nil
 		})
 	store.EXPECT().ReconcileMemberCounts(gomock.Any(), gomock.Any()).Return(nil)

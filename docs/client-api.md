@@ -973,7 +973,7 @@ it is absent on every other action.
 | `siteId` | string | The room's home site. |
 | `roomType` | string | `"channel"`, `"dm"`, `"botDM"`, or `"discussion"` — **as seen by this subscriber** (see [Effective room type](#effective-room-type)). |
 | `name` | string | Display name per room type (see above). |
-| `roles` | string[] | The user's roles in the room (e.g. `["member"]`, `["owner"]`). |
+| `roles` | string[] | The user's roles in the room (e.g. `["user"]`, `["owner"]`). Subscriptions written before the role cutover store the legacy value `"member"`; the server normalizes it to `"user"` on every response, so clients never see `"member"`. |
 | `joinedAt` | RFC3339 timestamp | When the user joined. |
 | `hasMention` | boolean | Whether the user has an unread mention. Authoritative subscription state maintained by the write path (set when the user is @-mentioned, cleared on read); **not** modified by read enrichment. For a mentionee homed on another site, `broadcast-worker` also relays a cross-site `subscription_mention` event so the badge lands on the site that serves their `subscription.list`. |
 | `hasUnread` | boolean | Whether the room has unread messages — computed at read time by comparing the room's `lastMsgAt` to the subscription's `lastSeenAt` (not persisted). System messages (member added/removed, rename, …) never set it; a member who has never opened the room sees it true whenever the room has any activity to compare against. **Deployment note:** while the `broadcast-worker` fleet is mixed, a room can briefly read as caught-up when it is not (and, before any writer is upgraded, a system message still marks it unread — the pre-change behavior). Drain the old writers before deploying the readers. |
@@ -1423,7 +1423,7 @@ On `added` / `role_updated` / `mute_toggled` / `favorite_toggled` / `opened` the
     "roomId": "01970a4f8c2d7c9aQ",
     "roomType": "channel",
     "siteId": "siteA",
-    "roles": ["member"],
+    "roles": ["user"],
     "joinedAt": "2026-05-06T08:01:23Z",
     "room": {
       "siteId": "siteA",
@@ -1643,7 +1643,7 @@ Platform admins (`model.UserRoleAdmin`, same site) bypass the room owner/member 
 |---|---|---|---|
 | `roomId` | string | no | Server derives from subject; non-matching values are rejected. |
 | `account` | string | yes | The account of the user whose role is being changed. |
-| `newRole` | string | yes | Either `"owner"` (promote) or `"member"` (demote). |
+| `newRole` | string | yes | Either `"owner"` (promote) or `"user"` (demote). The legacy spelling `"member"` is still accepted and treated as `"user"`. |
 
 The `timestamp` field on the Go `UpdateRoleRequest` is server-set — the client should omit it.
 
@@ -1667,7 +1667,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 
 - Requester is not an owner of the room.
 - Target account is not a member of the room.
-- `newRole` is neither `"owner"` nor `"member"`.
+- `newRole` is neither `"owner"` nor `"user"` (nor the legacy alias `"member"`).
 - Promote attempt when the target is already an owner.
 - Demote attempt when the target is not an owner.
 - Last-owner guard: an owner cannot demote themselves if they are the only owner.
@@ -1693,7 +1693,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
     "roomId": "01970a4f8c2d7c9aQ",
     "roomType": "channel",
     "siteId": "siteA",
-    "roles": ["member", "owner"],
+    "roles": ["user", "owner"],
     "joinedAt": "2026-05-06T08:01:23Z"
   },
   "action": "role_updated",
@@ -1809,7 +1809,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 > - `account` — the admin caller; carried as `byAccount` on the room event and recorded in room-service's log line
 > - `restricted` — whether the room is members-only
 > - `externalAccess` — whether the room is reachable from outside the company network (e.g. internet-side / off-VPN clients). This is a network-access gate, NOT a cross-site federation flag
-> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to plain member, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
+> - `ownerAccount` — **required** on the `false → true` transition. Whenever it is supplied together with `restricted: true` — transition or not — that account is promoted to **sole** owner and every other member is reset to the plain `user` role, so an already-restricted room can have its owner rotated. Omit it to change the flags without touching anyone's roles
 >
 > room-service does the Mongo writes, emits one `OutboxEvent` on the OUTBOX stream per remote federated site, and replies `{"status":"ok","requestId":"…"}` once the work is committed. `outbox-worker` forwards the cross-site `room_restricted` event (at-least-once) to each remote site's `chat.inbox.{remoteSiteID}.external.room_restricted`. No `AsyncJobResult` is emitted — the reply *is* the result.
 >
@@ -5305,7 +5305,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,
@@ -5344,7 +5344,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "alice_bob",
       "siteId": "siteA",
       "roomType": "dm",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "bob",
       "joinedAt": "2026-04-01T09:00:00Z",
       "hasMention": false,
@@ -5365,7 +5365,7 @@ The example below shows one record of each type in order (`channel`, `dm`, `botD
       "roomId": "alice_helper.bot",
       "siteId": "siteA",
       "roomType": "botDM",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "Helper",
       "isSubscribed": true,
       "joinedAt": "2026-03-15T11:00:00Z",
@@ -5444,7 +5444,7 @@ Same paginated shape as `subscription.list` — `{ "subscriptions": [...], "hasM
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,
@@ -5516,7 +5516,7 @@ Returns the calling user's DM subscription with the named counterpart. The reply
     "roomId": "alice_bob",
     "siteId": "siteA",
     "roomType": "dm",
-    "roles": ["member"],
+    "roles": ["user"],
     "name": "bob",
     "joinedAt": "2026-04-01T09:00:00Z",
     "alert": false,
@@ -5579,7 +5579,7 @@ Same shape as `subscription.list` — a (here, at most one) list:
       "roomId": "alice_bob",
       "siteId": "siteA",
       "roomType": "dm",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "bob",
       "joinedAt": "2026-04-01T09:00:00Z",
       "alert": false,
@@ -7778,7 +7778,7 @@ Toggles a channel room's on-duty state. On-duty staff work off the company netwo
 
 **Nothing is displayed.** A restriction change publishes no system message, so no chat entry appears in the room and no notification is sent. Clients are still told: a flat `room_restricted` **room event** carries the new flags on the room's event subject, so open sessions refresh their state without a re-fetch and without rendering anything. No audit row is written — room-service's `processing room.restricted` log line, carrying actor, room, both flags and the designated owner, is the only durable server-side record.
 
-Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to plain member. Turning duty **off** sends no owner, so roles are left exactly as they are.
+Turning duty **on** designates `ownerAccount` as the room's owner: that account becomes the sole owner and every other member is reset to the plain `user` role. Turning duty **off** sends no owner, so roles are left exactly as they are.
 
 Channel rooms only. The caller must also hold the platform `admin` user role, which room-service verifies independently of the session check.
 
@@ -8946,7 +8946,7 @@ Identical to the NATS reply — see [`subscription.list`](#subscriptionlist) for
       "roomId": "01970a4f8c2d7c9aQ",
       "siteId": "siteA",
       "roomType": "channel",
-      "roles": ["member"],
+      "roles": ["user"],
       "name": "engineering-general",
       "joinedAt": "2026-05-06T08:01:23Z",
       "hasMention": false,

@@ -664,7 +664,7 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
-					"else": bson.A{string(model.RoleMember)},
+					"else": bson.A{string(model.RoleUser)},
 				}},
 			}}},
 		}

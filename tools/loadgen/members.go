@@ -118,7 +118,7 @@ func BuildMembersFixtures(p *MembersPreset, seed int64, siteID string) (Fixtures
 		candidateSlice := chosen[p.BaselineSize:need]
 
 		for j, idx := range memberSlice {
-			roles := []model.Role{model.RoleMember}
+			roles := []model.Role{model.RoleUser}
 			if j == 0 {
 				roles = []model.Role{model.RoleOwner}
 			}

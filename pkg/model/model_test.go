@@ -813,7 +813,7 @@ func TestSubscriptionJSON(t *testing.T) {
 			RoomID:   "r1",
 			RoomType: model.RoomTypeChannel,
 			SiteID:   "site-a",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		}
 
@@ -842,7 +842,7 @@ func TestSubscriptionJSON_AlertAlwaysPresent(t *testing.T) {
 		RoomID:   "r1",
 		RoomType: model.RoomTypeChannel,
 		SiteID:   "site-a",
-		Roles:    []model.Role{model.RoleMember},
+		Roles:    []model.Role{model.RoleUser},
 		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
@@ -882,7 +882,7 @@ func TestDMSubscriptionJSON_EmbeddedFlattensWithHRInfo(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
 			RoomID:   "r-dm-1",
 			SiteID:   "site-A",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			Name:     "bob-dm",
 			RoomType: model.RoomTypeDM,
 			JoinedAt: time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
@@ -921,7 +921,7 @@ func TestDMSubscriptionJSON_HRInfoOmittedWhenNil(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
 			RoomID:   "r-c-1",
 			SiteID:   "site-A",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			RoomType: model.RoomTypeChannel,
 			JoinedAt: time.Date(2026, 5, 14, 0, 0, 0, 0, time.UTC),
 		},
@@ -1008,6 +1008,9 @@ func TestRoleValues(t *testing.T) {
 	}
 	if model.RoleAdmin != "admin" {
 		t.Errorf("RoleAdmin = %q", model.RoleAdmin)
+	}
+	if model.RoleUser != "user" {
+		t.Errorf("RoleUser = %q", model.RoleUser)
 	}
 	if model.RoleMember != "member" {
 		t.Errorf("RoleMember = %q", model.RoleMember)
@@ -1324,7 +1327,7 @@ func TestSubscriptionUpdateEventJSON(t *testing.T) {
 			User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
 			RoomID:   "r1",
 			SiteID:   "site-a",
-			Roles:    []model.Role{model.RoleMember},
+			Roles:    []model.Role{model.RoleUser},
 			JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		},
 		Action:    "added",
@@ -4223,7 +4226,7 @@ func TestSubscriptionJSON_RestrictedAndExternalAccess(t *testing.T) {
 	s := model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", SiteID: "site-a",
-		Roles: []model.Role{model.RoleMember}, Name: "x", RoomType: model.RoomTypeChannel,
+		Roles: []model.Role{model.RoleUser}, Name: "x", RoomType: model.RoomTypeChannel,
 		JoinedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Restricted: true, ExternalAccess: true,
 	}
@@ -4867,7 +4870,7 @@ func TestSubscriptionEnrichmentFields_RoundTrip(t *testing.T) {
 		User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID:   "r1",
 		SiteID:   "site-a",
-		Roles:    []model.Role{model.RoleMember},
+		Roles:    []model.Role{model.RoleUser},
 		JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Room: &model.SubscriptionRoom{
 			SiteID:    "site-a",
@@ -4891,7 +4894,7 @@ func TestSubscriptionBaseMetadata_RoundTrip(t *testing.T) {
 		User:              model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID:            "r1",
 		SiteID:            "site-a",
-		Roles:             []model.Role{model.RoleMember},
+		Roles:             []model.Role{model.RoleUser},
 		RoomType:          model.RoomTypeChannel,
 		JoinedAt:          time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		HasUnread:         true,
@@ -5367,7 +5370,7 @@ func TestSubscriptionJSON_ThreadUnreadRoundTrip(t *testing.T) {
 	s := model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
 		RoomID: "r1", RoomType: model.RoomTypeChannel, SiteID: "site-a",
-		Roles: []model.Role{model.RoleMember}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Roles: []model.Role{model.RoleUser}, JoinedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		ThreadUnread: []string{"p1", "p2"},
 	}
 	roundTrip(t, &s, &model.Subscription{})
@@ -5643,4 +5646,105 @@ func TestRoomAndSubscriptionTypesDisagreeOnABotDM(t *testing.T) {
 	assert.Equal(t, model.RoomTypeBotDM, model.DMRoomType("alice", "weather.bot"))
 	assert.Equal(t, model.RoomTypeBotDM, model.SubscriptionRoomType("weather.bot")) // alice's row
 	assert.Equal(t, model.RoomTypeDM, model.SubscriptionRoomType("alice"))          // the bot's row
+}
+
+func TestNormalizeRole(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.Role
+		want model.Role
+	}{
+		{"legacy member becomes user", model.RoleMember, model.RoleUser},
+		{"user passes through", model.RoleUser, model.RoleUser},
+		{"owner passes through", model.RoleOwner, model.RoleOwner},
+		{"admin passes through", model.RoleAdmin, model.RoleAdmin},
+		{"unknown role passes through", model.Role("auditor"), model.Role("auditor")},
+		{"empty passes through", model.Role(""), model.Role("")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.NormalizeRole(tt.in))
+		})
+	}
+}
+
+func TestNormalizeRoles(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []model.Role
+		want []model.Role
+	}{
+		{"nil stays nil", nil, nil},
+		{"empty stays empty", []model.Role{}, []model.Role{}},
+		{"legacy member rewritten", []model.Role{model.RoleMember}, []model.Role{model.RoleUser}},
+		{
+			"mixed slice keeps order",
+			[]model.Role{model.RoleOwner, model.RoleMember, model.RoleAdmin},
+			[]model.Role{model.RoleOwner, model.RoleUser, model.RoleAdmin},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.NormalizeRoles(tt.in))
+		})
+	}
+}
+
+func TestNormalizeRoles_DoesNotMutateInput(t *testing.T) {
+	in := []model.Role{model.RoleMember}
+	_ = model.NormalizeRoles(in)
+	assert.Equal(t, []model.Role{model.RoleMember}, in)
+}
+
+func TestRoleJSON_LegacyMemberMarshalsAsUser(t *testing.T) {
+	b, err := json.Marshal(model.RoleMember)
+	require.NoError(t, err)
+	assert.JSONEq(t, `"user"`, string(b))
+}
+
+func TestRoleJSON_LegacyMemberUnmarshalsAsUser(t *testing.T) {
+	var r model.Role
+	require.NoError(t, json.Unmarshal([]byte(`"member"`), &r))
+	assert.Equal(t, model.RoleUser, r)
+}
+
+func TestRoleJSON_RejectsNonString(t *testing.T) {
+	var r model.Role
+	err := json.Unmarshal([]byte(`{"role":"owner"}`), &r)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode role")
+}
+
+func TestRoleJSON_OtherRolesRoundTrip(t *testing.T) {
+	for _, role := range []model.Role{model.RoleOwner, model.RoleAdmin, model.RoleUser} {
+		b, err := json.Marshal(role)
+		require.NoError(t, err)
+		var got model.Role
+		require.NoError(t, json.Unmarshal(b, &got))
+		assert.Equal(t, role, got)
+	}
+}
+
+func TestSubscriptionJSON_LegacyRolesSerializeAsUser(t *testing.T) {
+	sub := model.Subscription{
+		ID:     "s1",
+		RoomID: "r1",
+		Roles:  []model.Role{model.RoleMember, model.RoleOwner},
+	}
+	b, err := json.Marshal(sub)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(b, &got))
+	assert.Equal(t, []any{"user", "owner"}, got["roles"])
+}
+
+func TestSubscriptionBSON_LegacyRolesStoredVerbatim(t *testing.T) {
+	sub := model.Subscription{ID: "s1", RoomID: "r1", Roles: []model.Role{model.RoleMember}}
+	b, err := bson.Marshal(sub)
+	require.NoError(t, err)
+	var got struct {
+		Roles []string `bson:"roles"`
+	}
+	require.NoError(t, bson.Unmarshal(b, &got))
+	assert.Equal(t, []string{"member"}, got.Roles, "storage must not be rewritten by the JSON normalizer")
 }

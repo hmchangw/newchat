@@ -95,7 +95,7 @@ type InboxStore interface {
 	// in the room, each guarded by its own restrictUpdatedAt so an out-of-order
 	// visibility change cannot regress the flags/roles. When restricted=true and
 	// ownerAccount is non-empty, a $cond pipeline demotes all accounts except
-	// ownerAccount to RoleMember.
+	// ownerAccount to RoleUser.
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
 	// UpdateUserStatus replicates a cross-site status change onto the local users doc keyed by
 	// account, guarded by statusUpdatedAt (the event publish time): an older/equal high-water
@@ -714,7 +714,7 @@ func (h *Handler) handleSubscriptionSectionMoved(ctx context.Context, evt *model
 
 func rolesForType(t model.RoomType) []model.Role {
 	if t == model.RoomTypeChannel {
-		return []model.Role{model.RoleMember}
+		return []model.Role{model.RoleUser}
 	}
 	return nil
 }

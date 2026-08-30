@@ -744,10 +744,13 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, errRoomIDMismatch
 	}
 	req.RoomID = roomID
-	if req.NewRole != model.RoleOwner && req.NewRole != model.RoleMember {
+	// Clients may still send the legacy "member" spelling; normalize once so the
+	// rest of the handler compares against RoleUser only.
+	req.NewRole = model.NormalizeRole(req.NewRole)
+	if req.NewRole != model.RoleOwner && req.NewRole != model.RoleUser {
 		return nil, errInvalidRole
 	}
-	// Promote-only guard: demoting a legacy bot-owner back to member stays
+	// Promote-only guard: demoting a legacy bot-owner back to a plain user stays
 	// allowed so operators can repair such rooms.
 	if req.NewRole == model.RoleOwner && (model.IsBot(req.Account) || model.IsPlatformAdminAccount(req.Account)) {
 		return nil, errBotCannotBeOwner
@@ -778,7 +781,7 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 	if req.NewRole == model.RoleOwner && hasRole(target.Subscription.Roles, model.RoleOwner) {
 		return nil, errAlreadyOwner
 	}
-	if req.NewRole == model.RoleMember && !hasRole(target.Subscription.Roles, model.RoleOwner) {
+	if req.NewRole == model.RoleUser && !hasRole(target.Subscription.Roles, model.RoleOwner) {
 		return nil, errNotOwner
 	}
 	// Reject only provably org-only members; subscription-only members (both flags false) are promotable.
@@ -786,7 +789,7 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 		return nil, errPromoteRequiresIndividual
 	}
 	// Last-owner guard only needed on self-demotion; rule #5 ensures requester is an owner.
-	if req.NewRole == model.RoleMember && req.Account == requester {
+	if req.NewRole == model.RoleUser && req.Account == requester {
 		count, err := h.store.CountOwners(ctx, roomID)
 		if err != nil {
 			return nil, fmt.Errorf("count owners: %w", err)
