@@ -1058,6 +1058,8 @@ func runSoakWorkload(
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			for _, result := range sender.ExpireResults() {
 				if err := collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
@@ -1065,8 +1067,6 @@ func runSoakWorkload(
 				}); err != nil {
 					slog.Error("record expired Cassandra soak send timeout", "error", err)
 				}
-				// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-				// nosemgrep: gosec.G601-1
 				if err := failureTracker.ObserveReply(&result); err != nil {
 					slog.Error("record expired Cassandra soak send", "error", err)
 				}
