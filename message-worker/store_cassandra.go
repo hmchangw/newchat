@@ -192,10 +192,9 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 		   (room_id, bucket, created_at, message_id, sender, site_id, updated_at,
 		    mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt,
 		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
-		writeTS(msg.CreatedAt),
 	)
 	batch.Query(stripLegacyPlaintextByRoom, msg.RoomID, b, msg.CreatedAt, msg.ID)
 	batch.Query(
@@ -203,10 +202,9 @@ func (s *CassandraStore) saveMessageEncrypted(ctx context.Context, msg *model.Me
 		   (message_id, created_at, room_id, sender, site_id, updated_at,
 		    mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		    enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt,
 		mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
-		writeTS(msg.CreatedAt),
 	)
 	batch.Query(stripLegacyPlaintextByID, msg.ID)
 	if err := s.executeBatch(ctx, batch); err != nil {
@@ -316,11 +314,10 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 		  thread_room_id, thread_parent_id, thread_parent_created_at, type, tshow,
 		  quoted_parent_message, sys_msg_data, visible_to,
 		  enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.CreatedAt, msg.RoomID, sender, siteID, msg.CreatedAt, mentions,
 		threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.TShow,
 		cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
-		writeTS(msg.CreatedAt),
 	)
 	batch.Query(stripLegacyPlaintextByID, msg.ID)
 	batch.Query(
@@ -328,11 +325,10 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 		 (thread_room_id, created_at, message_id, room_id, thread_parent_id,
 		  sender, site_id, updated_at, mentions, type, tshow, quoted_parent_message, sys_msg_data, visible_to,
 		  enc_payload, enc_meta)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		threadRoomID, msg.CreatedAt, msg.ID, msg.RoomID, msg.ThreadParentMessageID,
 		sender, siteID, msg.CreatedAt, mentions, msg.Type, msg.TShow, cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo,
 		payload, encMeta,
-		writeTS(msg.CreatedAt),
 	)
 	batch.Query(stripLegacyPlaintextThread, threadRoomID, msg.CreatedAt, msg.ID)
 	// TShow dual-write into messages_by_room — see SaveThreadMessage for the
@@ -346,11 +342,10 @@ func (s *CassandraStore) saveThreadMessageEncrypted(ctx context.Context, msg *mo
 			  thread_room_id, thread_parent_id, thread_parent_created_at, type, tshow,
 			  quoted_parent_message, sys_msg_data, visible_to,
 			  enc_payload, enc_meta)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TIMESTAMP ?`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			msg.RoomID, b, msg.CreatedAt, msg.ID, sender, siteID, msg.CreatedAt, mentions,
 			threadRoomID, msg.ThreadParentMessageID, msg.ThreadParentMessageCreatedAt, msg.Type, msg.TShow,
 			cm.QuotedParentMessage, msg.SysMsgData, msg.VisibleTo, payload, encMeta,
-			writeTS(msg.CreatedAt),
 		)
 		batch.Query(stripLegacyPlaintextByRoom, msg.RoomID, b, msg.CreatedAt, msg.ID)
 	}

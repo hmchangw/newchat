@@ -96,8 +96,24 @@ func saveCases() []saveCase {
 
 // TestCassandraStore_CreatesPinWriteTimestampToCreatedAt asserts every create
 // INSERT binds CreatedAt as its write timestamp. See writeTS for why.
-func TestCassandraStore_CreatesPinWriteTimestampToCreatedAt(t *testing.T) {
+// A create INSERT pins its write timestamp only when the bytes it writes are the
+// same on every attempt. Plaintext creates are: a redelivery re-binds identical
+// values, so the pinned replay is a no-op and cannot outrank a later edit.
+//
+// Encrypted creates are NOT, and must not pin. cipher.Encrypt draws a fresh
+// random nonce per call (pkg/atrest/cipher.go), so a redelivery produces a
+// different ciphertext AND a different nonce. enc_payload and enc_meta are
+// separate cells, and Cassandra breaks a same-timestamp conflict per cell by
+// comparing values — independently. Two attempts pinned to one timestamp can
+// therefore leave the payload from one paired with the nonce from the other,
+// which AES-GCM cannot open: the message is undecryptable for good. Letting
+// those ride the client clock keeps each redelivery strictly newer, so one
+// attempt wins both cells and the pair stays coherent.
+func TestCassandraStore_PlaintextCreatesPinWriteTimestampToCreatedAt(t *testing.T) {
 	for _, tt := range saveCases() {
+		if tt.cipher != nil {
+			continue // encrypted creates deliberately do not pin; see the test below.
+		}
 		t.Run(tt.name, func(t *testing.T) {
 			store, captured := newWriteTimeStore(t, tt.cipher)
 			msg := writeTimeMessage(t, true)
@@ -177,4 +193,39 @@ func TestCassandraStore_EncryptedCreatesStripLegacyColumnsOnTheClientClock(t *te
 				"insert %d must leave the plaintext clears to the unpinned strip", i)
 		}
 	})
+}
+
+// The inverse invariant, and the load-bearing one: an encrypted create must
+// NEVER pin. Pinning it pairs a ciphertext with a nonce drawn on a different
+// attempt once a redelivery writes the same key at the same timestamp, and the
+// row stops decrypting permanently. See the comment on the plaintext test for
+// why the two cells can diverge.
+func TestCassandraStore_EncryptedCreatesDoNotPinWriteTimestamp(t *testing.T) {
+	for _, tt := range saveCases() {
+		if tt.cipher == nil {
+			continue // plaintext creates pin; that is the test above.
+		}
+		t.Run(tt.name, func(t *testing.T) {
+			store, captured := newWriteTimeStore(t, tt.cipher)
+
+			require.NoError(t, tt.save(context.Background(), store, writeTimeMessage(t, true)))
+
+			require.NotNil(t, captured.batch)
+			inserts := 0
+			for i, entry := range captured.batch.Entries {
+				if !strings.Contains(entry.Stmt, "INSERT INTO") {
+					continue
+				}
+				inserts++
+				assert.NotContains(t, entry.Stmt, "USING TIMESTAMP",
+					"entry %d pins an encrypted create; a redelivery would write a different nonce at the same timestamp", i)
+			}
+			assert.Equal(t, tt.wantWrites, inserts)
+
+			for i, entry := range captured.batch.Entries {
+				assert.Equal(t, strings.Count(entry.Stmt, "?"), len(entry.Args),
+					"entry %d binds a different number of arguments than it has markers", i)
+			}
+		})
+	}
 }
