@@ -283,62 +283,64 @@ deadline**. Borrowing SLO-4's 500 ms would count as persistence failures every
 message still sitting in the JetStream backlog, in `jsretry` backoff, or being
 recovered, all of which are messages the system has not failed to persist.
 
-So `t2` is *"message-worker has caught up"*, with a cap. **The cap comes from two
-different schedules, and only one of them lives in the consumer config.**
+So `t2` is *"message-worker has caught up"*, with a cap.
 
-| Path | When it applies | Where the delays come from |
-|---|---|---|
-| **Handler error** (the normal one) | `processMessage` returns a transient error → `jsretry.Settle` → `NakWithDelay` | `jsretry.DefaultBackoff` — **compiled into the binary** (`message-worker/handler.go:89`), 1s/5s/30s/2m/10m, last entry repeating |
-| **Un-acked / settle failure** | The pod died, hung, or the Nak itself failed, so the message expires by `AckWait` | The **consumer's** `BackOff`, derived as `AckWait × Factor^i` capped at `BackOffMax` (`pkg/stream/consumer.go:22-27,58`) |
+**There is no theoretical safe upper bound here, and three revisions of this
+document pretending otherwise is the finding.** Each attempt patched the formula
+— max of the two totals, then per-delivery max — and each was still short,
+because the retry *delays* are only part of the interval between deliveries. The
+handler runs first: `jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.processMessage(...))`
+(`message-worker/handler.go:89`) evaluates `processMessage` — Mongo reads,
+Cassandra writes, a thread-count scan — *before* `Settle` is called, so the
+application backoff starts only once that returns. Nothing bounds that execution
+time per attempt, so nothing bounds the sum.
 
-An earlier revision said "read the live consumer backoff and compute the cap".
-That is wrong: the delay schedule on the normal path is a constant in the
-binary, and the consumer's `BackOff` governs a *different* failure mode. Only
-`MaxDeliver` is shared.
+**So treat the number below as an operational cap, chosen and recorded, not
+derived and guaranteed.** Exceeding it makes SLO-1a `INCONCLUSIVE` **by rule**,
+which is the same stance the unlimited-`MaxDeliver` case already takes.
 
-**The two paths mix within one message's life**, so the bound is *not* the larger
-of the two totals. Delivery 1 can be Nak'd on the application schedule while
-delivery 2 expires by `AckWait` on the consumer schedule. The safe upper bound
-takes the larger delay **per delivery** and sums that:
+Compute the delay floor, then add margin for execution:
 
 ```
 app[k]      = jsretry.DefaultBackoff[min(k, len(app)-1)]
 consumer[k] = BackOff[min(k, len(BackOff)-1)]   if BackOff is non-empty
             = AckWait                            if BackOff is empty (steps <= 0)
 
-cap = Σ over N in [1 .. MaxDeliver-1] of max(app[N-1], consumer[N-1])
-      + one scrape interval
+delay_floor = Σ over N in [1 .. MaxDeliver-1] of max(app[N-1], consumer[N-1])
+cap         = delay_floor + (MaxDeliver-1) x AckWait + one scrape interval
 ```
 
-The delay after delivery *N* is `schedule[min(N-1, len-1)]` (`jsretry.go:132-145`).
-Worked at the shipped defaults — app `1, 5, 30, 120, 600`; consumer, derived as
-`AckWait × 2^i` capped at 8 m, `30, 60, 120, 240, 480`:
+The `(MaxDeliver-1) × AckWait` term is the execution margin: a handler that runs
+past `AckWait` has already triggered a server redelivery, so `AckWait` is the
+longest execution that can still precede an application-scheduled nak.
 
-| | sum |
-|---|---|
-| application schedule alone | 756 s |
-| consumer schedule alone | 930 s |
-| **larger of the two totals** (an earlier revision's answer) | 930 s |
-| **per-delivery max** — `30+60+120+240+600` | **1 050 s ≈ 17.5 min** |
+Two paths, mixing within one message's life — delivery 1 can be Nak'd on the
+application schedule while delivery 2 expires by `AckWait` on the consumer
+schedule, which is why the max is taken **per delivery** rather than over the
+totals:
 
-The earlier formula undercounted by 120 s. **The two are different mechanisms**
-in JetStream — an acknowledgement-timeout `BackOff` and a delayed NAK — not two
-spellings of one, which is why neither dominates the other at every step.
+| Path | When it applies | Delays from |
+|---|---|---|
+| **Handler error** (the normal one) | `processMessage` returns a transient error → `jsretry.Settle` → `NakWithDelay` | `jsretry.DefaultBackoff` — compiled into the binary, 1s/5s/30s/2m/10m, last entry repeating |
+| **Un-acked / settle failure** | The pod died, hung, or the Nak itself failed, so the message expires by `AckWait` | The **consumer's** `BackOff`, derived as `AckWait × Factor^i` capped at `BackOffMax` (`pkg/stream/consumer.go:22-27,58`) |
 
-**The empty-schedule case has to be spelled out.** `CONSUMER_BACKOFF_STEPS=0`
-makes `backOffSchedule()` return `nil` (`pkg/stream/consumer.go:75-77`), which
-switches the consumer off *as a schedule* but not as a path: redelivery then
-falls back to plain `AckWait`, so `consumer[k] = AckWait` for every `k`. The
-earlier formula was undefined here.
+These are distinct JetStream mechanisms — an acknowledgement-timeout `BackOff`
+and a delayed NAK — so neither dominates the other at every step.
 
-At `MaxDeliver=10` the 10 m application entry repeats and dominates from delivery
-5 onward, giving **≈ 55 min**.
+At the shipped defaults (app `1, 5, 30, 120, 600`; consumer `30, 60, 120, 240,
+480`; `AckWait` 30 s):
 
-**`MaxDeliver` of `0` or `-1` means unlimited**, and the server normalizes
-anything `< -1` to `-1` (CLAUDE.md §JetStream Redelivery Backoff). There is then
-**no finite theoretical cap**. If the deployment is configured that way, set an
-*operational* cap by policy — a stated wall-clock limit — and record that
-exceeding it makes SLO-1a **INCONCLUSIVE by rule**, not by arithmetic.
+| `MaxDeliver` | delay floor | execution margin | **operational cap** |
+|---:|---:|---:|---:|
+| 6 | 1 050 s (17.5 min) | 150 s | **≈ 20 min** |
+| 10 | 3 450 s (57.5 min) | 270 s | **≈ 62 min** |
+
+`BACKOFF_STEPS=0` makes `backOffSchedule()` return `nil`
+(`pkg/stream/consumer.go:75-77`) — that switches the consumer *schedule* off, not
+the *path*: redelivery falls back to plain `AckWait`, so `consumer[k] = AckWait`
+for every `k`. **`MaxDeliver` of `0` or `-1` is unlimited** (the server normalizes
+anything `< -1` to `-1`), so no arithmetic applies at all and the cap is purely a
+policy number.
 
 **If the backlog has not drained by the cap, SLO-1a is INCONCLUSIVE for this
 window** — and the run has already failed the §6 validity gate, because a backlog
@@ -469,14 +471,29 @@ That is why the baselines are split:
 4. **Wait for the full mix.** Watch
 
    ```promql
-   rate(loadgen_soak_rpc_latency_seconds_count{action="get_thread_messages"}[1m])
+   rate(loadgen_soak_rpc_latency_seconds_count{
+         action="get_thread_messages", pod="<the NEW pod>"}[1m])
    ```
 
    climb back to its expected rate — that is the catalog having refilled past
-   `soak.persistGrace`. **Query the `_count` series, not the bare metric name:** a
-   Prometheus histogram exposes only `_count`, `_sum` and `_bucket`, so a selector
-   on the base name returns nothing and `t0-sync` would never be markable. An
-   earlier revision made exactly that mistake.
+   `soak.persistGrace`. Three things this query has to get right, each of which an
+   earlier revision got wrong:
+
+   - **Query the `_count` series, not the bare metric name.** A Prometheus
+     histogram exposes only `_count`, `_sum` and `_bucket`; a selector on the base
+     name returns nothing, and `t0-sync` would never be markable.
+   - **Pin the new pod, and wait out the window.** A bare `[1m]` immediately after
+     the restart still covers the minute *before* it. Depending on whether the
+     `instance`/`pod` label changed, you either sum the old and new series
+     together or read one series across a counter reset — `rate()` compensates for
+     resets rather than isolating processes, so both readings can sit near the
+     expected rate while the new catalog is still empty, and `t0-sync` gets marked
+     early. Bind the selector to the new pod, **and** wait a full range window past
+     the restart so no pre-restart sample remains, **then** require two consecutive
+     confirming scrapes.
+   - **Take a post-restart baseline** for the same counter, and judge readiness on
+     the fresh delta rather than on an absolute rate that could be carrying
+     history.
 
    **"Expected rate" is derived, not configured.** The read lane rolls its action
    from a fixed mix — 75% history, **15% thread**, 10% point lookup
@@ -538,8 +555,9 @@ missing. Do not publish a number, an interval, or a caveat-laden estimate.
    synchronous families — both sides together.
 6. Watch message-worker's `num_pending + num_ack_pending` reach its pre-run floor
    and **stay there for one scrape interval**. Mark **`t2`** and snapshot
-   SLO-1a's two counters. If the floor is not reached within the derived cap,
-   stop — SLO-1a is INCONCLUSIVE and the validity gate has already failed.
+   SLO-1a's two counters. If the floor is not reached within the **operational
+   cap recorded in preflight** (§5), stop — SLO-1a is INCONCLUSIVE by rule and
+   the validity gate has already failed.
 7. Compute every ratio from the snapshot differences (§5).
 8. Record, with every number: `runId`, `siteId`, image digest, sampler ratio,
    the live `MaxDeliver`/backoff and the derived cap, the scrape interval,
