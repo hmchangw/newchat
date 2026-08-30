@@ -1070,7 +1070,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 }
 
 // TestMongoStore_ListRoomMembers_BotEnrichment_Integration verifies that the
-// subscriptions-fallback path (Path 2 / attachUserDisplayNames) correctly
+// subscriptions-fallback path (Path 2) correctly
 // partitions bot vs human accounts: bot accounts are looked up in apps for
 // Name, human accounts are looked up in users for EngName/ChineseName.
 func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
@@ -1144,10 +1144,10 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		human := byAccount["alice"]
 		assert.Equal(t, "Alice Wang", human.EngName, "human member must have EngName from users")
 		assert.Equal(t, "愛麗絲", human.ChineseName, "human member must have ChineseName from users")
-		assert.Empty(t, human.Name, "human member must NOT have Name set")
+		assert.Empty(t, human.AppName, "human member must NOT have AppName set")
 
 		bot := byAccount["weather.bot"]
-		assert.Equal(t, "Weather App", bot.Name, "bot member must have Name from apps")
+		assert.Equal(t, "Weather App", bot.AppName, "bot member must have AppName from apps")
 		assert.Empty(t, bot.SectName, "bot has no user doc → no sectName")
 		assert.Empty(t, bot.EngName, "bot member must NOT have EngName")
 		assert.Empty(t, bot.ChineseName, "bot member must NOT have ChineseName")
@@ -1193,7 +1193,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 
 		for _, m := range got {
 			assert.NotEmpty(t, m.Member.EngName, "all human members must have EngName")
-			assert.Empty(t, m.Member.Name, "no Name on a human member")
+			assert.Empty(t, m.Member.AppName, "no AppName on a human member")
 		}
 	})
 
@@ -1222,7 +1222,140 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Eve", got[0].Member.EngName)
-		assert.Empty(t, got[0].Member.Name)
+		assert.Empty(t, got[0].Member.AppName)
+	})
+
+	t.Run("room_members path: bot member gets AppName from apps", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+
+		insertUser(t, db, model.User{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲"})
+		insertApp(t, db, bson.M{
+			"_id": "app-weather", "name": "Weather App",
+			"assistant": bson.M{"enabled": true, "name": "weather.bot"},
+		})
+
+		// A room_members doc exists, so ListRoomMembers takes the aggregation path.
+		_, err := db.Collection("room_members").InsertMany(ctx, []any{
+			model.RoomMember{ID: "rm-alice", RoomID: "chan-1", Ts: base,
+				Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"}},
+			model.RoomMember{ID: "rm-bot", RoomID: "chan-1", Ts: base.Add(time.Second),
+				Member: model.RoomMemberEntry{ID: "u-bot", Type: model.RoomMemberIndividual, Account: "weather.bot"}},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, "chan-1", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+
+		byAccount := make(map[string]model.RoomMemberEntry)
+		for _, m := range got {
+			byAccount[m.Member.Account] = m.Member
+		}
+		assert.Equal(t, "Weather App", byAccount["weather.bot"].AppName, "bot on room_members path must get AppName")
+		assert.Empty(t, byAccount["weather.bot"].EngName, "bot has no users doc")
+		assert.Equal(t, "Alice Wang", byAccount["alice"].EngName, "human enrichment must be unaffected")
+		assert.Empty(t, byAccount["alice"].AppName, "human must not get AppName")
+	})
+
+	t.Run("room_members path: a bot with a stray users doc gets AppName only", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+
+		// A users doc for the bot account must not leak human display fields:
+		// appName and engName/chineseName are documented as mutually exclusive.
+		insertUser(t, db, model.User{
+			ID: "u-stray", Account: "stray.bot",
+			EngName: "Stray", ChineseName: "流浪", SectName: "Ops", EmployeeID: "E999",
+		})
+		insertApp(t, db, bson.M{
+			"_id": "app-stray", "name": "Stray App",
+			"assistant": bson.M{"enabled": true, "name": "stray.bot"},
+		})
+		_, err := db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: "rm-stray", RoomID: "chan-2", Ts: base,
+			Member: model.RoomMemberEntry{ID: "u-stray", Type: model.RoomMemberIndividual, Account: "stray.bot"},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, "chan-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Stray App", got[0].Member.AppName)
+		assert.Empty(t, got[0].Member.EngName, "a bot must not carry human display fields")
+		assert.Empty(t, got[0].Member.ChineseName)
+		assert.Empty(t, got[0].Member.SectName)
+		assert.Empty(t, got[0].Member.EmployeeID)
+	})
+
+	t.Run("subscriptions path: isBot flag enriches a non-suffix bot account", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-legacy", "name": "Legacy Assistant",
+			"assistant": bson.M{"enabled": true, "name": "legacy-assistant"},
+		})
+		// No ".bot" suffix, so only the isBot flag can classify this account.
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-legacy",
+			User:     model.SubscriptionUser{ID: "u-legacy", Account: "legacy-assistant", IsBot: true},
+			RoomID:   "botdm-2",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: base,
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Legacy Assistant", got[0].Member.AppName, "isBot=true must route the account to apps")
+		assert.Empty(t, got[0].Member.EngName)
+	})
+
+	t.Run("bot with no apps document leaves AppName empty without error", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-ghost",
+			User:     model.SubscriptionUser{ID: "u-ghost", Account: "ghost.bot"},
+			RoomID:   "botdm-3",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-3", nil, nil, true)
+		require.NoError(t, err, "a bot with no apps doc must not fail the whole listing")
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName)
+	})
+
+	t.Run("enrich=false skips app enrichment entirely", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-quiet", "name": "Quiet App",
+			"assistant": bson.M{"enabled": true, "name": "quiet.bot"},
+		})
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-quiet",
+			User:     model.SubscriptionUser{ID: "u-quiet", Account: "quiet.bot"},
+			RoomID:   "botdm-4",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-4", nil, nil, false)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName, "lean listing must carry no display fields")
 	})
 }
 
