@@ -53,14 +53,24 @@ docker run --rm \
     # Scoped signing key that auth-service uses to sign user JWTs. The role
     # template mirrors the grants auth-service used to inline per JWT, keyed
     # off the account:<account> tag every user JWT now carries.
+    #
+    # There is no _INBOX grant: clients set their request/reply inbox prefix to
+    # chat.user.{account}, so replies ride the user namespace already granted
+    # below. No user can read or forge replies belonging to another user, since
+    # neither grant reaches a different account namespace. A client can publish
+    # to its own inbox - self-spoofing only, and the bare prefix leaves no
+    # distinct segment to hang a deny rule on.
+    #
+    # NOTE: this whole block is the single-quoted argument to `sh -c`. An
+    # apostrophe here terminates that argument and silently truncates the
+    # script - bash -n still passes whenever the apostrophes happen to pair up.
+    # Keep the text apostrophe-free.
     nsc edit signing-key --account chatapp --sk generate --role scoped_user \
       --allow-sub "chat.user.{{tag(account)}}.>" \
       --allow-sub "chat.room.>" \
       --allow-sub "chat.local.room.>" \
-      --allow-sub "_INBOX.>" \
       --allow-sub "chat.user.presence.state.*" \
       --allow-pub "chat.user.{{tag(account)}}.>" \
-      --allow-pub "_INBOX.>" \
       --allow-pub "chat.user.presence.*.query.batch" \
       --allow-pub-response \
       > /output/sk_edit.log 2>&1

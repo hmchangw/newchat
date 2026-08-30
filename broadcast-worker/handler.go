@@ -249,6 +249,7 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 		RoomID:        msg.RoomID,
 		MsgID:         msg.ID,
 		At:            msg.CreatedAt,
+		SystemMsg:     model.IsSystemMessageType(msg.Type),
 		MentionAll:    resolved.MentionAll,
 		Preview:       sealed,
 		PreviewFailed: sealFailed,
@@ -403,10 +404,11 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 
 	// Resolve mentionees once: the same participants render on the edit event
 	// and route the cross-site badge, so we avoid a second FindUsersByAccounts.
-	participants := h.resolveEditMentions(ctx, parsed)
+	participants, mentionAll := h.resolveEditMentions(ctx, parsed)
 
 	edit := buildEditRoomEvent(room, evt)
 	edit.Mentions = participants
+	edit.MentionAll = mentionAll
 	if room.Type == model.RoomTypeChannel && h.encrypt {
 		if err := h.encryptEditedContent(ctx, room.ID, &edit); err != nil {
 			return fmt.Errorf("encrypt edit content for room %s: %w", room.ID, err)
@@ -508,17 +510,21 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 // SetSubscriptionMentions and newContent still carries the raw @account, so on a
 // user-lookup error we drop the mentions[] enrichment entirely (return nil)
 // rather than emitting a partial set or failing/retrying the edit. nil when none.
-func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseResult) []model.Participant {
+// Returns the resolved participants and MentionAll. MentionAll is parse-derived and
+// independent of the per-account lookup, so an edit that only adds @all (no individual
+// mentions) — or one whose lookup fails — still carries the flag.
+func (h *Handler) resolveEditMentions(ctx context.Context, parsed mention.ParseResult) ([]model.Participant, bool) {
 	if len(parsed.Accounts) == 0 {
-		return nil
+		return nil, parsed.MentionAll
 	}
 	users, err := h.userStore.FindUsersByAccounts(ctx, parsed.Accounts)
 	if err != nil {
 		slog.WarnContext(ctx, "user lookup failed resolving edit mentions, dropping edit mentions",
 			"error", err, "request_id", natsutil.RequestIDFromContext(ctx))
-		return nil
+		return nil, parsed.MentionAll
 	}
-	return mention.ResolveFromParsed(parsed, usersByAccount(users)).Participants
+	resolved := mention.ResolveFromParsed(parsed, usersByAccount(users))
+	return resolved.Participants, resolved.MentionAll
 }
 
 func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEvent) error {
@@ -538,7 +544,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 
 	parsed := mention.Parse(msg.Content)
 	edit := buildEditRoomEvent(room, evt)
-	edit.Mentions = h.resolveEditMentions(ctx, parsed)
+	edit.Mentions, edit.MentionAll = h.resolveEditMentions(ctx, parsed)
 
 	switch room.Type {
 	case model.RoomTypeChannel:
@@ -1207,6 +1213,7 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 		UserCount:      meta.UserCount,
 		LastMsgAt:      clientMsg.CreatedAt,
 		LastMsgID:      clientMsg.ID,
+		SystemMsg:      model.IsSystemMessageType(clientMsg.Type),
 		Message:        clientMsg,
 	}
 }

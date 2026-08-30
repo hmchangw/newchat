@@ -111,7 +111,7 @@ Two shapes exist — discriminated by `action`:
 | `action` | string | `"added"`, `"role_updated"`, `"mute_toggled"`, `"favorite_toggled"`, `"section_moved"`, `"opened"`, or `"read"`. |
 | `roomName` | string | Per-subscriber display label. On `added`: channel name / DM counterpart's display name / bot app name. On `role_updated`: the channel name. Omitted on `mute_toggled` / `favorite_toggled` / `section_moved` / `opened` / `read`. |
 | `hrInfo` | [CounterpartHRInfo](../client-api.md#counterparthrinfo) | `{account, chineseName, engName}` — the DM counterpart's HR record, so a newly created DM renders from this event alone. Sent on `added` `dm` / `botDM` when the counterpart account does **not** end in `.bot`; on a self-DM it carries the recipient's own record. Both name fields are `omitempty`. Omitted on `channel` / `discussion` rooms and on a lookup miss. |
-| `appInfo` | [CounterpartAppInfo](../client-api.md#counterpartappinfo) | `{id, name, assistantName}` — the counterpart's app record, sent on `added` `botDM` when the counterpart account ends in `.bot`. `name` is empty when the app document has none, and `roomName` then falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
+| `appInfo` | [AppSubscription](../client-api.md#appsubscription) | The counterpart's **full app record** — the same shape `subscription.list` nests as a botDM row's `app` object (`appId`, `name`, `description`, `assistant`, `appViewUrl`, `reportUrl`, `forumUrl`, `userManualUrl`, `version`, `sponsors`; all `omitempty`). Sent on `added` `botDM` when the counterpart account ends in `.bot`. When the app has no name, `roomName` falls back to the bot account. Mutually exclusive with `hrInfo`; omitted on a lookup miss. |
 | `timestamp` | number | Epoch ms (UTC). |
 
 ```json
@@ -386,11 +386,12 @@ messages through a separate backend path.
 | `roomType` | string | `"channel"`, `"dm"`, etc. |
 | `siteId` | string | |
 | `userCount` | number | |
-| `lastMsgAt` | string | RFC 3339. |
+| `lastMsgAt` | string | RFC 3339. **This message's own time** — not the room object's `lastMsgAt`, which is the room's user-activity position. A system message carries its own timestamp here, so folding this into a room summary unconditionally would let a rename or a member change reorder the sidebar. Gate on `systemMsg` first. |
 | `lastMsgId` | string | The new message's ID. |
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. |
 | `mentionAll` | boolean | Optional. `true` if `@all` or `@here` was used. |
 | `hasMention` | boolean | Optional. Per-recipient flag — present only on DM events. |
+| `systemMsg` | boolean | Optional. `true` when the message is a server-generated system message (`room_created`, `members_added`, …). Clients must not advance unread state or sidebar ordering from a flagged event — present in plaintext even when the body is sealed in `encryptedMessage`. |
 | `message` | [ClientMessage](#clientmessage) | Optional. Set for unencrypted rooms. |
 | `encryptedMessage` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. Set for encrypted channel rooms. Decrypt with room key for `version`. |
 
@@ -613,6 +614,7 @@ Flat event — no zero-valued `RoomEvent` base fields. Triggered by
 | `newContent` | string | Optional. New plaintext content. Present for DMs and unencrypted channels. |
 | `encryptedNewContent` | [EncryptedMessage](../client-api.md#encryptedmessage) | Optional. For encrypted channel rooms. Decrypt with the room key to obtain the new content string. |
 | `mentions` | [Participant](../client-api.md#participant)[] | Optional. `@`-mentions resolved from the edited content, so an edit that adds a mention renders like a fresh message. Omitted when none. |
+| `mentionAll` | boolean | Optional. `true` when the edited content mentions `@all`, mirroring the new-message / new-thread events so an edit that adds or removes `@all` conveys it. Omitted when `false`. |
 | `editedBy` | string | The sender's account. |
 | `editedAt` | string | RFC 3339 timestamp. Domain time of the edit. |
 | `updatedAt` | string | RFC 3339 timestamp. |

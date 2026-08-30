@@ -9,6 +9,7 @@ import {
   listSessions,
   listUsers,
   resyncPermissions,
+  resyncUser,
   revokeAllSessions,
   revokeSession,
   setPassword,
@@ -149,7 +150,34 @@ describe('createUser', () => {
       password: 'hunter2',
       requirePasswordChange: true,
     })
-    expect(result).toEqual(USER)
+    expect(result.user).toEqual(USER)
+  })
+
+  it('createUser defaults absent fanout fields', async () => {
+    stubFetch(201, { id: 'u1', account: 'a', siteId: 's', roles: ['bot'], active: true })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.user.account).toBe('a')
+    expect(res.syncFailures).toEqual([])
+    expect(res.hrSyncFailed).toBe(false)
+  })
+
+  it('createUser passes through fanout failures', async () => {
+    stubFetch(201, {
+      id: 'u1',
+      account: 'a',
+      siteId: 's',
+      roles: [],
+      active: true,
+      syncFailures: ['site-c'],
+      hrSyncFailed: true,
+    })
+
+    const res = await createUser('tok', { account: 'a', roles: ['bot'], password: 'x' })
+
+    expect(res.syncFailures).toEqual(['site-c'])
+    expect(res.hrSyncFailed).toBe(true)
   })
 
   it('throws AsyncJobError with reason account_exists on a 409', async () => {
@@ -181,6 +209,14 @@ describe('updateUser', () => {
     expect(init.method).toBe('PATCH')
     expect(init.headers.Authorization).toBe('Bearer tok')
     expect(JSON.parse(init.body)).toEqual({ active: false })
+  })
+
+  it('updateUser returns syncFailures', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'] })
+
+    const res = await updateUser('tok', 'a', { roles: ['admin'] })
+
+    expect(res.syncFailures).toEqual(['site-b'])
   })
 })
 
@@ -496,5 +532,30 @@ describe('listPermissions', () => {
     expect(parsed.searchParams.get('permission')).toBe('external.image.view')
     expect(parsed.searchParams.get('page')).toBe('1')
     expect(parsed.searchParams.get('limit')).toBe('20')
+  })
+})
+
+describe('resyncUser', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POSTs /v1/admin/users/:account/resync with no body', async () => {
+    const fetchMock = stubFetch(200, { status: 'ok' })
+
+    const res = await resyncUser('tok', 'u-1')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('http://localhost:8082/v1/admin/users/u-1/resync')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
+    expect(init.headers.Authorization).toBe('Bearer tok')
+    expect(res).toEqual({ syncFailures: [], hrSyncFailed: false })
+  })
+
+  it('maps syncFailures and hrSyncFailed when present', async () => {
+    stubFetch(200, { status: 'ok', syncFailures: ['site-b'], hrSyncFailed: true })
+
+    const res = await resyncUser('tok', 'a')
+
+    expect(res).toEqual({ syncFailures: ['site-b'], hrSyncFailed: true })
   })
 })

@@ -8,6 +8,7 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -176,6 +177,52 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 			assert.Equal(t, tc.want, mode)
 		})
 	}
+}
+
+// The plain collection handles are created without collection options, so they
+// inherit the CLIENT preference. Only 12 of MongoStore's methods use a
+// *Secondary handle; every other read fails during a primary-down incident
+// unless the client itself falls back.
+func TestConfig_ClientReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_CLIENT_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	t.Setenv("MONGO_READ_PREFERENCE", "")
+	require.NoError(t, os.Unsetenv("MONGO_CLIENT_READ_PREFERENCE"))
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+
+	// The per-collection override keeps its vetted staleness-tolerant setting...
+	assert.Equal(t, "secondaryPreferred", cfg.MongoReadPreference)
+	// ...while every handle without an override now falls back instead of failing.
+	assert.Equal(t, "primaryPreferred", cfg.MongoClientReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// broadcast-worker encrypts against its own room-key handle while key.get is
+// served from here. If the two disagree about falling back, the producer keeps
+// delivering messages whose keys the consumer cannot fetch. Both read
+// MONGO_KEY_READ_PREFERENCE and must default the same way.
+func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }
 
 // TestConfig_GraphProxyCredentials covers the authenticating-proxy settings for

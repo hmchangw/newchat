@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from 'react'
 import { useAuth } from '@/context/AuthContext'
+import { permissionsEnabled } from '@/lib/runtimeConfig'
 import LazyFallback from '@/components/shared/LazyFallback'
 import './style.css'
 
@@ -22,13 +23,16 @@ export default function AppShell() {
     logout()
   }
 
-  const { Component } = SECTIONS.find((s) => s.key === section) ?? SECTIONS[0]
+  // Permissions is deploy-gated: the section exists only where the runtime
+  // config enables it (PERMISSIONS_ENABLED, rendered by nginx from env).
+  const sections = SECTIONS.filter((s) => s.key !== 'permissions' || permissionsEnabled())
+  const { Component } = sections.find((s) => s.key === section) ?? sections[0]
 
   return (
     <div className="app-shell">
       <nav className="app-shell-nav">
         <div className="app-shell-nav-links">
-          {SECTIONS.map((s) => (
+          {sections.map((s) => (
             <button
               key={s.key}
               type="button"

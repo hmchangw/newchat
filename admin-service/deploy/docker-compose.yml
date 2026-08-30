@@ -15,6 +15,7 @@ services:
       - SITE_ID=${SITE_ID:-site-local}
       - ALL_SITE_IDS=${ALL_SITE_IDS:-${SITE_ID:-site-local}}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}

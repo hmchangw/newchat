@@ -213,6 +213,7 @@ func (m *soakMutator) Edit(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body: soakEditMessageRequest{
 				MessageID: message.ID,
 				NewMsg:    content,
@@ -259,6 +260,7 @@ func (m *soakMutator) Delete(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakDeleteMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -333,6 +335,7 @@ func (m *soakMutator) pin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakPinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -371,6 +374,7 @@ func (m *soakMutator) unpin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakUnpinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -413,6 +417,7 @@ func (m *soakMutator) React(
 	request := soakRPCRequest{
 		Action:  soakRPCReact,
 		Subject: subject.MsgReact(actor.Account, roomID, m.cfg.SiteID),
+		Account: actor.Account, RoomID: roomID,
 		Body: soakReactMessageRequest{
 			MessageID: message.ID,
 			Shortcode: soakReactionShortcode,
@@ -582,6 +587,7 @@ func (m *soakMutator) readReactionState(
 			roomID,
 			m.cfg.SiteID,
 		),
+		Account: account, RoomID: roomID,
 		Body:      soakGetMessageByIDRequest{MessageID: messageID},
 		Timeout:   m.cfg.RequestTimeout,
 		RetryMode: soakRetrySafe,
@@ -602,6 +608,7 @@ func (m *soakMutator) readReactionState(
 	return false, nil
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (m *soakMutator) callMutation(
 	ctx context.Context,
 	request soakRPCRequest,

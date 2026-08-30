@@ -1274,3 +1274,127 @@ func TestHandler_HandleSetCookie_NoToken(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Set-Cookie"), "ssoToken=;")
 }
+
+// The reported bug: a client that declares application/octet-stream (every
+// browser does, for any file the OS cannot type by extension) used to get that
+// value echoed back as fileType, and lost the image fields with it.
+func TestHandleUploadFile_OctetStreamResolvesFromBytes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+
+	body, ct := multipartTyped(t, "file", "photo.png", png64x48, "application/octet-stream", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, okFileDrive()).HandleUploadFile(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Attachments []model.Attachment `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Attachments, 1)
+	att := resp.Attachments[0]
+	assert.Equal(t, "image/png", att.FileType)
+	assert.Equal(t, "image/png", att.ImageType)
+	assert.NotEmpty(t, att.ImageURL)
+	require.NotNil(t, att.ImageDimensions, "the image branch must run on the resolved type")
+	assert.Equal(t, 64, att.ImageDimensions.Width)
+	assert.Equal(t, 48, att.ImageDimensions.Height)
+}
+
+// A docx sniffs as application/zip, so only the extension can name it.
+func TestHandleUploadFile_OctetStreamResolvesFromExtension(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+
+	body, ct := multipartTyped(t, "file", "report.docx", zipBytes, "application/octet-stream", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, okFileDrive()).HandleUploadFile(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Attachments []model.Attachment `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Attachments, 1)
+	assert.Equal(t, "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		resp.Attachments[0].FileType)
+	assert.Empty(t, resp.Attachments[0].ImageURL, "a document carries no image fields")
+}
+
+// Filtering the resolved type closes the bypass: declaring octet-stream no
+// longer smuggles a blacklisted SVG past FILE_UPLOAD_MEDIA_TYPE_BLACKLIST.
+func TestHandleUploadFile_BlockedAfterResolution(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	fd := okFileDrive()
+
+	body, ct := multipartTyped(t, "file", "logo.svg", svgBytes, "application/octet-stream", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, fd).HandleUploadFile(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Zero(t, fd.uploadGot.n, "a rejected file must never reach Drive")
+}
+
+// A client that names a specific type is still taken at its word.
+func TestHandleUploadFile_SpecificDeclaredTypeIsKept(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+
+	body, ct := multipartTyped(t, "file", "data.bin", []byte("a,b\n1,2"), "text/csv", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, okFileDrive()).HandleUploadFile(c)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Attachments []model.Attachment `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Attachments, 1)
+	assert.Equal(t, "text/csv", resp.Attachments[0].FileType)
+}
+
+// roomId is read before any store call, so an empty path param short-circuits
+// with no expectations set on the mock.
+func TestHandleUploadFile_RoomIDRequired(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
+	c, w := newUploadCtx(t, "", body, ct, okUser())
+	fileHandler(store, okFileDrive()).HandleUploadFile(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// A generic GetRoomSiteID failure (not ErrRoomNotFound) is infra, not a 404.
+func TestHandleUploadFile_GetRoomSiteIDError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("", errors.New("mongo boom"))
+	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, okFileDrive()).HandleUploadFile(c)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// Drive returning zero responses (distinct from a non-success status) is its own branch.
+func TestHandleUploadFile_DriveNoResponses(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
+	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	fd := &fakeDrive{baseURL: "http://drive", uploadResp: []drive.UploadGroupImageResponse{}}
+	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
+	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
+	fileHandler(store, fd).HandleUploadFile(c)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "unavailable", decodeErr(t, w).Code)
+}

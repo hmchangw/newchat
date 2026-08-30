@@ -12,7 +12,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
@@ -53,10 +52,16 @@ type config struct {
 	MongoPassword string   `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: reads only; writes always hit the primary. secondaryPreferred
 	// offloads reads (a just-joined member is recovered via history).
-	MongoReadPreference  string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	Pool                 mongoutil.PoolConfig
-	MaxWorkers           int           `env:"MAX_WORKERS"               envDefault:"100"`
-	LastMsgFlushInterval time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	// MongoKeyReadPreference covers room keys and preview DEKs. Separate from the
+	// client-wide preference because key freshness matters more than room meta, but
+	// primaryPreferred rather than primary: a stale DEK read cannot diverge
+	// ($setOnInsert plus a re-read comparison) and a missing room key is already a
+	// retryable error, so failing outright only costs encrypted delivery.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool                   mongoutil.PoolConfig
+	MaxWorkers             int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LastMsgFlushInterval   time.Duration `env:"LAST_MSG_FLUSH_INTERVAL"   envDefault:"250ms"`
 	// RoomActivityRefreshInterval caps how often one room's position is announced
 	// cross-site, independently of the Mongo flush above. Generous by design: the
 	// subscription list serves ordering from a cache with a far longer TTL, so a
@@ -70,7 +75,7 @@ type config struct {
 	RoomKeyGracePeriod          time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	RoomKeyCacheTTL             time.Duration   `env:"ROOM_KEY_CACHE_TTL"        envDefault:"10m"`
 	RoomKeyCacheSize            int             `env:"ROOM_KEY_CACHE_SIZE"       envDefault:"50000"`
-	RoomKeyRetiredTTL           time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"20m"` // read only, to fail fast when too short for this cache's TTL
+	RoomKeyRetiredTTL           time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"` // read only, to fail fast when too short for this cache's TTL
 	RoomMetaL2TTL               time.Duration   `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
 	ValkeyAddrs                 []string        `env:"VALKEY_ADDRS"              envSeparator:","`
 	ValkeyPassword              string          `env:"VALKEY_PASSWORD"           envDefault:""`
@@ -154,6 +159,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 	var metaValkey valkeyutil.Client
 	if len(cfg.ValkeyAddrs) > 0 {
@@ -191,7 +202,7 @@ func main() {
 			vaultWrapper = w
 			// The preview DEK lives in its own collection, and is written here on first
 			// use; pin to primary so a just-minted key isn't missed on a lagging secondary.
-			dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(readpref.Primary()))
+			dekColl := db.Collection(preview.DEKCollection, options.Collection().SetReadPreference(keyReadPref))
 			previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 			slog.Info("room-preview persistence enabled", "site_id", cfg.SiteID, "key_epoch", cfg.PreviewKeyEpoch)
 		}
@@ -230,8 +241,8 @@ func main() {
 		}
 		// Room keys are written by other services; pin to primary so a fresh/rotated
 		// key isn't missed on a lagging secondary.
-		roomsPrimary := db.Collection("rooms", options.Collection().SetReadPreference(readpref.Primary()))
-		keyStore = roomkeystore.NewMongoStore(roomsPrimary, cfg.RoomKeyGracePeriod)
+		roomsForKeys := db.Collection("rooms", options.Collection().SetReadPreference(keyReadPref))
+		keyStore = roomkeystore.NewMongoStore(roomsForKeys, cfg.RoomKeyGracePeriod)
 	}
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())

@@ -16,6 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
@@ -28,6 +29,7 @@ var (
 	mongoRSOnce      sync.Once
 	mongoRSClient    *mongo.Client
 	mongoRSContainer testcontainers.Container
+	mongoRSURI       string
 	mongoRSInitErr   error
 )
 
@@ -64,6 +66,7 @@ func ensureMongoRSClient() (*mongo.Client, error) {
 		}
 		mongoRSClient = c
 		mongoRSContainer = container
+		mongoRSURI = directURI
 	})
 	return mongoRSClient, mongoRSInitErr
 }
@@ -99,6 +102,31 @@ func TerminateMongoReplicaSet() {
 		}
 		mongoRSContainer = nil
 	}
+}
+
+// MongoDBReplicaSetWithReadPreference is MongoDBReplicaSet with a per-test
+// client bound to rp. A session inherits its CLIENT's read preference, so code
+// under test that starts transactions can only be exercised against a
+// non-primary preference through a client that actually carries one.
+func MongoDBReplicaSetWithReadPreference(t *testing.T, prefix string, rp *readpref.ReadPref) *mongo.Database {
+	t.Helper()
+	if _, err := ensureMongoRSClient(); err != nil {
+		t.Fatalf("testutil.MongoDBReplicaSetWithReadPreference: %v", err)
+	}
+	c, err := mongo.Connect(options.Client().ApplyURI(mongoRSURI).SetReadPreference(rp))
+	if err != nil {
+		t.Fatalf("testutil.MongoDBReplicaSetWithReadPreference: connect: %v", err)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(t.Name())) // hash.Hash.Write never returns an error.
+	db := c.Database(fmt.Sprintf("%s_%x", prefix, h.Sum64()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = db.Drop(ctx)      // best-effort: the per-test DB is ephemeral
+		_ = c.Disconnect(ctx) // this client is owned by the test, not the package
+	})
+	return db
 }
 
 // EnsureMongoReplicaSet starts the replica-set container if not already up.

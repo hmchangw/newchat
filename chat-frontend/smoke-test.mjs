@@ -34,6 +34,10 @@ async function connectNats(auth) {
   const nc = await connect({
     servers: NATS_URL,
     authenticator: jwtAuthenticator(auth.jwt, auth.nkey.getSeed()),
+    // Replies ride the client's own user namespace, already granted as
+    // `chat.user.{{tag(account)}}.>`. Used verbatim: auth-service returns the
+    // JWT tag value itself, so there is nothing to normalise here.
+    inboxPrefix: `chat.user.${auth.user.account}`,
   })
   return nc
 }

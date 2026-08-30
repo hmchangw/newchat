@@ -108,8 +108,8 @@ is built by a `pkg/subject` builder (named in parentheses).
 
 ### 2.3 Request/Reply endpoints
 
-Synchronous NATS request/reply (client publishes to `…request.…`, awaits an `_INBOX.>`
-reply). Surveyed from the service registrations (`pkg/natsrouter` `Register`/`RegisterNoBody`
+Synchronous NATS request/reply (client publishes to `…request.…`, awaits an
+`chat.user.{account}.>` reply). Surveyed from the service registrations (`pkg/natsrouter` `Register`/`RegisterNoBody`
 + replying `QueueSubscribe`); mirrors `docs/client-api/request-reply.md`. **Bold** responses
 are the heavy ones (return arrays/lists). The presence connection-lifecycle ops
 (hello/ping/activity/bye) are `RegisterVoid` **publishes** (no reply); they're grouped into

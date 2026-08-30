@@ -39,13 +39,28 @@ type soakReadConfig struct {
 }
 
 type soakReadSample struct {
-	Action      soakRPCAction
-	Latency     time.Duration
+	Action  soakRPCAction
+	Latency time.Duration
+	// Messages is what the read came back with; ReplyBytes is what it weighed
+	// on the wire. Latency alone cannot tell a slow page from a large one.
+	//
+	// RowsCounted separates a real row count from the two things that share
+	// this field but are not one: a constant (get_message_by_id always returns
+	// one) and a server-side total (subscription.count reports the user's whole
+	// count, not rows in the reply). Set it through countRows, never by hand.
 	Messages    int
+	RowsCounted bool
+	ReplyBytes  int
 	ErrorClass  soakErrorClass
 	ErrorReason soakErrorReason
 	Retries     int
 	Skipped     bool
+}
+
+// countRows records how many rows the reply carried and marks the sample as
+// one loadgen_soak_rows may observe.
+func (s *soakReadSample) countRows(n int) {
+	s.Messages, s.RowsCounted = n, true
 }
 
 type soakReadSampleRecorder interface {
@@ -164,6 +179,7 @@ func (r *soakReader) LoadHistory(
 				roomID,
 				r.cfg.SiteID,
 			),
+			Account: account, RoomID: roomID,
 			Body: request, Timeout: r.cfg.RequestTimeout,
 			RetryMode: soakRetrySafe,
 		}, &response)
@@ -180,7 +196,8 @@ func (r *soakReader) LoadHistory(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCLoadHistory, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if len(response.Messages) == 0 {
 			r.record(&sample)
@@ -234,6 +251,7 @@ func (r *soakReader) GetThreadMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCGetThread,
 			Subject: subject.MsgThread(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakGetThreadMessagesRequest{
 				ThreadMessageID: parent.ID,
 				Cursor:          cursor,
@@ -253,7 +271,8 @@ func (r *soakReader) GetThreadMessages(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCGetThread, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
 			r.record(&sample)
@@ -295,6 +314,7 @@ func (r *soakReader) GetMessageByID(
 	result, latency, err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCGetMessage,
 		Subject: subject.MsgGet(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakGetMessageByIDRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response)
@@ -308,7 +328,7 @@ func (r *soakReader) GetMessageByID(
 	}
 	sample := soakReadSample{
 		Action: soakRPCGetMessage, Latency: latency,
-		Messages: 1, Retries: result.Retries,
+		Messages: 1, ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if response.MessageID != message.ID {
 		sample.ErrorClass = soakErrorAssertion
@@ -341,6 +361,7 @@ func (r *soakReader) ListPinnedMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCPinnedList,
 			Subject: subject.MsgPinnedList(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakListPinnedMessagesRequest{
 				Cursor: cursor,
 				Limit:  r.cfg.PageLimit,
@@ -364,7 +385,8 @@ func (r *soakReader) ListPinnedMessages(
 		}
 		sample := soakReadSample{
 			Action: soakRPCPinnedList, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
 			r.record(&sample)
@@ -384,6 +406,7 @@ func (r *soakReader) ListPinnedMessages(
 	return outcome, nil
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakReader) call(
 	ctx context.Context,
 	request soakRPCRequest,

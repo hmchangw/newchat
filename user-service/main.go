@@ -124,19 +124,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientReadPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ClientReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo client read preference", "value", cfg.Mongo.ClientReadPreference, "error", err)
+		os.Exit(1)
+	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 
 	// A pool of its own for HTTP, so a large page cannot exhaust the connections the
-	// NATS handlers share. Same Connect as above, not ConnectRead: the read
-	// preference must stay the one MONGO_READ_PREFERENCE names, or the two
-	// transports could return differently-stale data with no signal.
+	// NATS handlers share. Same Connect and same preference as above, not
+	// ConnectRead: the two transports must not return differently-stale data with
+	// no signal.
 	httpMongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
 		mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref),
 		mongoutil.WithMaxPoolSize(cfg.HTTP.MongoMaxPoolSize),
 		mongoutil.WithMinPoolSize(cfg.HTTP.MongoMinPoolSize),
 		mongoutil.WithMaxIdleTime(cfg.HTTP.MongoMaxIdleTime),
@@ -146,8 +153,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Client stays on primary; each repo opts into secondary reads via
-	// WithReadPreference (already validated in config).
+	// Each repo additionally opts its staleness-tolerant reads into
+	// MONGO_READ_PREFERENCE; handles without that override use the client's
+	// preference (both already validated in config).
 	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
 	if err != nil {
 		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)

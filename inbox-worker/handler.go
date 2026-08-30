@@ -116,6 +116,15 @@ type InboxStore interface {
 	// chatlistUpdatedAt (mongorepo/users.go), unlike the other Update* methods here
 	// which take time.Time.
 	UpdateUserChatlist(ctx context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error
+	// UpsertUserAccount applies the admin-owned account snapshot under the
+	// accountUpdatedAt ($lte) watermark, upserting by account with
+	// $setOnInsert {_id, siteId}. Unlike the other user_* appliers this one
+	// CREATES the doc: the snapshot carries full identity, and materializing
+	// it is what unblocks handleMemberAdded's sequential lane when the HR
+	// bootstrap lags. E11000 is retried once without upsert to distinguish a
+	// stale event (no match → no-op) from the HR lane's insert racing ours
+	// (doc without watermark → $set applies).
+	UpsertUserAccount(ctx context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error
 	// UpdateSubscriptionSection sets sectionId+sectionOrder (or clears both when
 	// sectionID==nil) on (roomID, account), guarded by sectionUpdatedAt so an
 	// out-of-order or duplicate move can't regress. A missing sub NAKs for retry.
@@ -238,6 +247,8 @@ func (h *Handler) HandleEvent(ctx context.Context, data []byte) error {
 		return h.handleUserPermissionsUpdated(ctx, &evt)
 	case model.InboxUserChatlistUpdated:
 		return h.handleUserChatlistUpdated(ctx, &evt)
+	case model.InboxUserAccountUpdated:
+		return h.handleUserAccountUpdated(ctx, &evt)
 	case model.InboxSubscriptionSectionMoved:
 		return h.handleSubscriptionSectionMoved(ctx, &evt)
 	case model.InboxSubscriptionMention:
@@ -670,6 +681,19 @@ func (h *Handler) handleUserChatlistUpdated(ctx context.Context, evt *model.Inbo
 	}
 	if err := h.store.UpdateUserChatlist(ctx, e.Account, &e.Chatlist, e.Timestamp); err != nil {
 		return fmt.Errorf("update user chatlist for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
+// handleUserAccountUpdated applies the admin-owned account snapshot; the store
+// upserts, so this also materializes admin-created accounts on this site.
+func (h *Handler) handleUserAccountUpdated(ctx context.Context, evt *model.InboxEvent) error {
+	var e model.UserAccountUpdated
+	if err := json.Unmarshal(evt.Payload, &e); err != nil {
+		return fmt.Errorf("unmarshal user_account_updated payload: %w", err)
+	}
+	if err := h.store.UpsertUserAccount(ctx, &e, time.UnixMilli(e.Timestamp).UTC()); err != nil {
+		return fmt.Errorf("upsert user account for %q: %w", e.Account, err)
 	}
 	return nil
 }

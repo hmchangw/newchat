@@ -49,6 +49,12 @@ data:
   {{- if .Values.soak.subscriptionListIncludeLastMessage }}
   SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE: {{ .Values.soak.subscriptionListIncludeLastMessage | quote }}
   {{- end }}
+  {{- if .Values.soak.roomZipfS }}
+  SOAK_ROOM_ZIPF_S: {{ .Values.soak.roomZipfS | quote }}
+  {{- end }}
+  {{- if .Values.soak.roomZipfV }}
+  SOAK_ROOM_ZIPF_V: {{ .Values.soak.roomZipfV | quote }}
+  {{- end }}
   SOAK_SEARCH_READ_RATE: {{ .Values.soak.searchReadRate | quote }}
   SOAK_SEARCH_SETTLE: {{ .Values.soak.searchSettle | quote }}
   SOAK_SEARCH_OBSERVER_ENABLED: {{ .Values.searchObserver.enabled | quote }}

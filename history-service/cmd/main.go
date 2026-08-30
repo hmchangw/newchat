@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/config"
@@ -53,6 +52,10 @@ func checkConfig(cfg *config.Config) {
 		}
 	}
 }
+
+// previewDrainTimeout caps the preview warm-back drain at shutdown, well inside the 25s
+// total so the closers after it keep their share.
+const previewDrainTimeout = 3 * time.Second
 
 func main() {
 	logctx.SetupDefault(os.Stdout)
@@ -118,6 +121,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.Mongo.KeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
@@ -146,13 +155,13 @@ func main() {
 		// DEKs are written by other services; pin to primary so a fresh key isn't
 		// missed on a lagging secondary.
 		dekColl := mongoClient.Database(cfg.Mongo.DB).Collection(atrest.CollectionName,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 		// Preview DEKs live in their own collection (written by broadcast-worker), so
 		// they need their own cipher over the same wrapper. Sharing one cipher would
 		// also share its DEK cache across two id spaces for no benefit.
 		previewDEKColl := mongoClient.Database(cfg.Mongo.DB).Collection(preview.DEKCollection,
-			options.Collection().SetReadPreference(readpref.Primary()))
+			options.Collection().SetReadPreference(keyReadPref))
 		previewCipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(previewDEKColl), cfg.Atrest)
 	}
 
@@ -182,6 +191,20 @@ func main() {
 		}
 		subSource = sc
 		slog.Info("subscription cache enabled", "size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL)
+	}
+
+	// Collapses the repeated account lookups a scroll-back makes while resolving
+	// legacy members_removed rows. Sized and expired like the other services
+	// fronting this store — see the config field for why the TTL is not longer.
+	var userSource service.UserStore = userStore
+	if cfg.UserCacheSize > 0 && cfg.UserCacheTTL > 0 {
+		uc, err := userstore.NewCache(userStore, cfg.UserCacheSize, cfg.UserCacheTTL)
+		if err != nil {
+			slog.Error("init user cache failed", "error", err)
+			os.Exit(1)
+		}
+		userSource = uc
+		slog.Info("user cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 	}
 
 	var roomSource service.RoomRepository = roomRepo
@@ -217,7 +240,7 @@ func main() {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
 	opts = append(opts, service.WithPageBudget(pageBudget))
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userStore, appRepo, &cfg, opts...)
+	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
 	// per-site + metrics router options and the guard's admission cap; the
@@ -244,6 +267,15 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second,
 		func(ctx context.Context) error { return router.Shutdown(ctx) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		// After the router stops (no new warm-backs queued), before Mongo closes under them.
+		// On its own sub-budget: the drain is optional work, and letting a deep queue on a
+		// slow Mongo spend the shared window would starve the steps below it — Mongo,
+		// Cassandra, Vault, and the telemetry flush that reports this shutdown at all.
+		func(ctx context.Context) error {
+			ctx, cancel := context.WithTimeout(ctx, previewDrainTimeout)
+			defer cancel()
+			return svc.Close(ctx)
+		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },
 		func(ctx context.Context) error {
