@@ -85,6 +85,8 @@ func TestWriteCSVFile_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.csv")
 	require.NoError(t, writeCSVFile(path, c))
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	out := string(data)
@@ -102,6 +104,8 @@ func TestWriteCSVFile_EmptyCollector(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "empty.csv")
 	require.NoError(t, writeCSVFile(path, c))
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	out := string(data)

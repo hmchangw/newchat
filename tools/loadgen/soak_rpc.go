@@ -494,6 +494,8 @@ func (c *soakRPCClient) Call(
 			return result, carry(fmt.Errorf("%s request failed: %w", request.Action, requestErr))
 		}
 		if attempt == c.retry.MaxAttempts {
+			// wraps plain sentinels in loadgen internals, not *errcode.Error; the one-per-chain invariant does not apply
+			// nosemgrep: errcode-no-multi-wrap-errcode
 			return result, carry(fmt.Errorf(
 				"%w: %s: %w",
 				errSoakRetryExhausted,
@@ -544,6 +546,8 @@ func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error 
 	if lastErr == nil {
 		return fmt.Errorf("%s interrupted: %w", action, cancelErr)
 	}
+	// wraps plain sentinels in loadgen internals, not *errcode.Error; the one-per-chain invariant does not apply
+	// nosemgrep: errcode-no-multi-wrap-errcode
 	return fmt.Errorf("%s retry interrupted: %w: last attempt: %w",
 		action, cancelErr, lastErr)
 }

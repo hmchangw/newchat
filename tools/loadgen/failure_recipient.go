@@ -968,6 +968,8 @@ func (o *failureRecipientObserver) replayObservedEvidence() error {
 	}
 	for _, kind := range []string{"missing", "unexpected", "duplicate", "mismatch"} {
 		path := filepath.Join(o.evidenceDir, ".recipient-"+kind+".raw.jsonl")
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		file, err := os.Open(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -1267,6 +1269,8 @@ func (j *fileFailureRecipientEvidenceJournal) AppendBatch(records []failureRecip
 		} else if err != nil {
 			return fmt.Errorf("stat recipient evidence journal: %w", err)
 		}
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return fmt.Errorf("open recipient evidence journal: %w", err)

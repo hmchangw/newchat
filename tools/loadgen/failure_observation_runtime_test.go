@@ -59,6 +59,8 @@ func TestFailureObservationRuntime_LegacyWALAdoptsCompatibleContract(t *testing.
 	require.NoError(t, err)
 	require.NoError(t, ledger.Close())
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	encoded, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), `"observerContract"`)

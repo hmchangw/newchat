@@ -35,6 +35,8 @@ func TestWritePresenceCSV(t *testing.T) {
 	require.NoError(t, writePresenceCSV(path, []presenceStepResult{
 		{N: 1000, EffectiveN: 1000, P50Ms: 10, P95Ms: 40, P99Ms: 90, ErrorRate: 0, Attempted: 500, Kind: verdictPass},
 	}))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
@@ -61,6 +63,8 @@ func TestWriteStormCSV(t *testing.T) {
 	require.NoError(t, writeStormCSV(path, []stormStepResult{
 		{Fraction: 0.5, StormUsers: 500, RecoveryComplete: true, RecoveryMs: 3000, P99Ms: 200, ErrorRate: 0, Kind: verdictPass},
 	}))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")

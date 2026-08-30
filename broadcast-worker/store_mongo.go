@@ -132,6 +132,8 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			SetUpdate(m.lastMessageUpdate(&u)))
 	}
 	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {

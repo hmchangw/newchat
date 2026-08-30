@@ -209,6 +209,8 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 	require.NoError(t, ledger.Start(testFailureOperation("new", now)))
 	require.NoError(t, ledger.Close())
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(contents), `"recordType":"header"`)
@@ -746,6 +748,8 @@ func TestFailureRecipientObserver_ReplaysDurableMismatchAfterRestart(t *testing.
 	})
 	require.NoError(t, err)
 	first.process(recipientDelivery{recipient: "alice", payload: payload})
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	raw, err := os.ReadFile(filepath.Join(directory, ".recipient-mismatch.raw.jsonl"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(raw), "\n"))

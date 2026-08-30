@@ -165,6 +165,8 @@ func (p *soakHeapProfiler) WriteProfile() error {
 	path := filepath.Join(p.dir, fmt.Sprintf("heap-%06d.pprof", p.sequence))
 	// #nosec G304 -- the path is built from an operator-configured directory
 	// and a counter, never from request data.
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create soak heap profile %s: %w", path, err)
