@@ -228,7 +228,18 @@ func (c *collectionMetrics) recordItemFailure(ctx context.Context, action string
 	// blind the 429 signal for any action added to searchengine but not to
 	// allBulkActions, which is exactly when you would want to see it. The
 	// fallback sets are precomputed like every other recorder here.
-	c.m.itemFailures.Add(ctx, 1, c.statusOnlyOpts[label])
+	if opt, ok := c.statusOnlyOpts[label]; ok {
+		c.m.itemFailures.Add(ctx, 1, opt)
+		return
+	}
+	// Degrade one more dimension rather than index blind. allBulkStatusLabels
+	// and bulkStatusLabel are two hand-maintained halves of one set, and a miss
+	// here yields a nil MeasurementOption that the SDK dereferences — a panic on
+	// a telemetry path, which must never be able to take the bulk flush it only
+	// measures down with it. TestBulkStatusLabel_OnlyReturnsRegisteredLabels is
+	// what keeps this unreachable; this is what keeps it survivable. The sibling
+	// recorder in search-service guards the same way.
+	c.m.itemFailures.Add(ctx, 1, c.actionsOpt)
 }
 
 // bulkStatusLabel maps an ES bulk item status to a bounded label value: the

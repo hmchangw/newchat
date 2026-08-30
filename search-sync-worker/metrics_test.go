@@ -436,3 +436,62 @@ func TestRecordItemFailure_UnknownActionDoesNotAllocateMore(t *testing.T) {
 
 	assert.Equal(t, known, unknown, "the fallback must not cost more than the precomputed hit")
 }
+
+// allBulkStatusLabels and bulkStatusLabel are two hand-maintained halves of one
+// closed set, and recordItemFailure indexes the precomputed maps with what the
+// classifier returns. A status case added to the classifier without a matching
+// entry here is a map miss, and a map miss yields a nil MeasurementOption that
+// the SDK dereferences — a panic on the telemetry path, taking down the bulk
+// flush it was only supposed to measure. Sweep the whole HTTP-status range so
+// the drift fails here instead.
+func TestBulkStatusLabel_OnlyReturnsRegisteredLabels(t *testing.T) {
+	registered := make(map[string]struct{}, len(allBulkStatusLabels))
+	for _, label := range allBulkStatusLabels {
+		registered[label] = struct{}{}
+	}
+	for status := range 1000 {
+		label := bulkStatusLabel(status)
+		assert.Contains(t, registered, label,
+			"bulkStatusLabel(%d) returned %q, which allBulkStatusLabels does not carry — "+
+				"add it there so the attribute sets are precomputed for it", status, label)
+	}
+}
+
+// And the recorder must survive that drift rather than panic on it, the way
+// search-service's durationOptFor already does. A metrics path must never be
+// able to take a request down: dropping a label loses a dimension, a nil option
+// loses the process.
+func TestRecordItemFailure_UnregisteredStatusLabelDoesNotPanic(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := newSyncMetrics(mp.Meter("search-sync-test")).forCollection("messages")
+
+	// Stand in for a classifier that gained a status label nobody registered.
+	label := bulkStatusLabel(429)
+	delete(c.statusOnlyOpts, label)
+	for _, action := range allBulkActions {
+		delete(c.itemFailureOpts, itemFailureKey{action, label})
+	}
+
+	require.NotPanics(t, func() { c.recordItemFailure(context.Background(), "index", 429) })
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var got map[string]string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "search_sync_worker_bulk_item_failures" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			require.Len(t, sum.DataPoints, 1)
+			got = map[string]string{}
+			for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+				got[string(kv.Key)] = kv.Value.String()
+			}
+		}
+	}
+	require.NotNil(t, got, "the failure must still be counted, even unlabelled")
+	assert.Equal(t, "messages", got["collection"], "the collection survives; it is not the drifting half")
+}
