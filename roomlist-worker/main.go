@@ -54,7 +54,6 @@ type config struct {
 	// deadline and the batch redelivers underneath it; main validates that.
 	FlushTimeout time.Duration `env:"FLUSH_TIMEOUT"  envDefault:"10s"`
 	HealthAddr   string        `env:"HEALTH_ADDR"    envDefault:":8081"`
-	MetricsAddr  string        `env:"METRICS_ADDR"   envDefault:":9090"`
 	PProfEnabled bool          `env:"PPROF_ENABLED"  envDefault:"false"`
 	// Mode selects the canonical stream/subject wiring via pkg/stream.Resolve.
 	Mode      stream.Pipeline         `env:"MODE,required"`
