@@ -1,0 +1,41 @@
+# Parity rules for the eslint-derived checks the internal SAST gate reports on
+# the frontends. eslint is not configured in this repo, so without these the
+# repo gate cannot see findings that block merges.
+rules:
+  - id: eslint.detect-non-literal-regexp
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      RegExp built from a non-literal (CWE-185). Interpolated text is not
+      regex-escaped, so metacharacters change the pattern. If the input is a
+      trusted fixture, suppress with `// nosemgrep: eslint.detect-non-literal-regexp`.
+    patterns:
+      - pattern: new RegExp($X, ...)
+      - pattern-not: new RegExp("...", ...)
+      - pattern-not: new RegExp($X)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: "'...'"
+
+  - id: eslint.detect-possible-timing-attack
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >
+      Comparison against a secret-shaped identifier (CWE-208). Use a
+      constant-time compare for real secrets; if the operand is not a secret,
+      suppress with `// nosemgrep: eslint.detect-possible-timing-attack`.
+    patterns:
+      - pattern-either:
+          - pattern: $A === $SECRET
+          - pattern: $SECRET === $A
+          - pattern: $A == $SECRET
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: '(?i).*(password|secret|token|api_?key|hash|credential).*'
+      # Only identifiers are secret-shaped; a string literal like
+      # `reason === 'invalid_token'` is a wire-format code, not a secret.
+      - metavariable-pattern:
+          metavariable: $SECRET
+          patterns:
+            - pattern-not: '"..."'

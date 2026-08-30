@@ -43,6 +43,8 @@ func TestWriteCapacityCSV_RoundTrip(t *testing.T) {
 		{N: 10000, EffectiveN: 10000, StartedAt: time.Now(), ConnectP95Ms: 40, FalseOfflines: 0, PingSustain: 1.0, Kind: verdictPass},
 	}
 	require.NoError(t, writeCapacityCSV(path, results))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	out := string(b)

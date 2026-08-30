@@ -157,6 +157,8 @@ func (m *Mapping) TargetPairs() []TargetPair {
 }
 
 func loadMapping(path string) (*Mapping, error) {
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read mapping file: %w", err)

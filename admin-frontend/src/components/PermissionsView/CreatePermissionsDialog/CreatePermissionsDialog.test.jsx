@@ -34,6 +34,7 @@ async function pick(labelRegex, user) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(300)
   })
+  // nosemgrep: eslint.detect-non-literal-regexp
   fireEvent.click(await screen.findByRole('option', { name: new RegExp(`^${user.account}`, 'i') }))
 }
 

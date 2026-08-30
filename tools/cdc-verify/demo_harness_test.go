@@ -137,11 +137,13 @@ func TestDemoHarness(t *testing.T) {
 	h := newHandler(hub, results, demoStats{}, 200, demoPairs(), demoInspector{}, &conn, rawMapping)
 	mux := http.NewServeMux()
 	h.registerRoutes(mux)
+	// local demo harness binds a fixed dev port
+	// nosemgrep: avoid-bind-to-all-interfaces
 	ln, err := net.Listen("tcp", ":8091")
 	if err != nil {
 		t.Fatalf("bind :8091: %v", err)
 	}
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	fmt.Println("demo harness serving on :8091")
 	time.Sleep(1800 * time.Second)

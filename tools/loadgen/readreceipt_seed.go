@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"

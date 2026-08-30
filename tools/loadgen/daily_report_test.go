@@ -56,6 +56,7 @@ func TestWriteDailyCSV_MissingBroadcastColumns(t *testing.T) {
 	}}
 	require.NoError(t, writeDailyCSV(path, results))
 
+	// nosemgrep: gosec.G304-1
 	data, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
 	require.NoError(t, err)
 	out := string(data)
@@ -81,6 +82,8 @@ func TestWriteCSV_OneRowPerStep(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "out.csv")
 	require.NoError(t, writeDailyCSV(path, results))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, 3, strings.Count(string(body), "\n")) // header + 2 rows
@@ -117,6 +120,8 @@ func TestWriteDailyCSV_PresenceColumns(t *testing.T) {
 			Presence: &PresenceObsStats{P50Ms: 5, P95Ms: 40, P99Ms: 90, Attempted: 800, Failed: 4, ErrorRate: 0.005}},
 	}
 	require.NoError(t, writeDailyCSV(path, results))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	out := string(b)
@@ -129,6 +134,8 @@ func TestWriteDailyCSV_PresenceColumnsZeroWhenDisabled(t *testing.T) {
 	path := filepath.Join(dir, "daily.csv")
 	results := []StepResult{{N: 1000, EffectiveN: 1000, StartedAt: time.Now()}}
 	require.NoError(t, writeDailyCSV(path, results))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	// Header still has presence columns even when no step had presence data.

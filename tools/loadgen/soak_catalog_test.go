@@ -43,6 +43,8 @@ func TestSoakCatalog_ThreadRecipientSetSurvivesReplyEviction(t *testing.T) {
 		{ID: "parent", RoomID: "room-1", Author: "alice", Content: "parent"},
 		{ID: "reply", RoomID: "room-1", Author: "bob", Content: "reply", ThreadParentID: "parent"},
 	} {
+		// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+		// nosemgrep: gosec.G601-1
 		require.NoError(t, catalog.TrackPublished(&candidate))
 		require.True(t, catalog.Accept(candidate.RoomID, candidate.ID))
 	}

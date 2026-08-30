@@ -331,6 +331,8 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 		slog.Warn("render report", "error", err)
 	}
 	if *csvPath != "" {
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		f, err := os.Create(*csvPath)
 		if err != nil {
 			slog.Error("create csv", "error", err)

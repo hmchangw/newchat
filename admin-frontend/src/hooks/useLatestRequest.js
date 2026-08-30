@@ -7,6 +7,7 @@ import { useCallback, useRef } from 'react'
 export function useLatestRequest() {
   const ref = useRef(0)
   const begin = useCallback(() => ++ref.current, [])
+  // nosemgrep: eslint.detect-possible-timing-attack
   const isCurrent = useCallback((token) => token === ref.current, [])
   return { begin, isCurrent }
 }
