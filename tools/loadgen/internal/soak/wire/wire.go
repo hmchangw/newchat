@@ -1,4 +1,4 @@
-package main
+package wire
 
 import (
 	"time"
@@ -355,3 +355,71 @@ type soakUserThreadUnreadResponse struct {
 	Unread           bool     `json:"unread"`
 	UnavailableSites []string `json:"unavailableSites,omitempty"`
 }
+
+// Exported aliases define the DTO surface consumed by the soak runtime while
+// preserving the exact field tags and type identity of the pre-split carriers.
+type RoomMeta = soakRoomMeta
+type LoadHistoryRequest = soakLoadHistoryRequest
+type LoadHistoryResponse = soakLoadHistoryResponse
+type LoadNextMessagesRequest = soakLoadNextMessagesRequest
+type LoadNextMessagesResponse = soakLoadNextMessagesResponse
+type GetMessageByIDRequest = soakGetMessageByIDRequest
+type Message = soakWireMessage
+type EditMessageRequest = soakEditMessageRequest
+type EditMessageResponse = soakEditMessageResponse
+type DeleteMessageRequest = soakDeleteMessageRequest
+type DeleteMessageResponse = soakDeleteMessageResponse
+type PinMessageRequest = soakPinMessageRequest
+type PinMessageResponse = soakPinMessageResponse
+type UnpinMessageRequest = soakUnpinMessageRequest
+type UnpinMessageResponse = soakUnpinMessageResponse
+type ListPinnedMessagesRequest = soakListPinnedMessagesRequest
+type ListPinnedMessagesResponse = soakListPinnedMessagesResponse
+type ReactMessageRequest = soakReactMessageRequest
+type ReactMessageResponse = soakReactMessageResponse
+type GetThreadMessagesRequest = soakGetThreadMessagesRequest
+type GetThreadMessagesResponse = soakGetThreadMessagesResponse
+type AddMembersRequest = soakAddMembersRequest
+type RemoveMemberRequest = soakRemoveMemberRequest
+type RoomRenameRequest = soakRoomRenameRequest
+type CreateRoomRequest = soakCreateRoomRequest
+type StatusReply = soakStatusReply
+type CreateRoomReply = soakCreateRoomReply
+type MuteToggleReply = soakMuteToggleReply
+type RoomMemberEntry = soakRoomMemberEntry
+type RoomMember = soakRoomMember
+type ListMembersResponse = soakListMembersResponse
+type RoomsInfoRequest = soakRoomsInfoRequest
+type RoomInfo = soakRoomInfo
+type RoomsInfoResponse = soakRoomsInfoResponse
+type SubscriptionRow = soakSubscriptionRow
+type ReadReceiptRequest = soakReadReceiptRequest
+type ReadReceiptReader = soakReadReceiptReader
+type ReadReceiptResponse = soakReadReceiptResponse
+type SubscriptionListResponse = soakSubscriptionListResponse
+type SubscriptionListRequest = soakSubscriptionListRequest
+type UserNameRequest = soakUserNameRequest
+type UserAccountNameRequest = soakUserAccountNameRequest
+type UserRoomRequest = soakUserRoomRequest
+type UserPageRequest = soakUserPageRequest
+type UserChannelsRequest = soakUserChannelsRequest
+type UserCountRequest = soakUserCountRequest
+type UserEmptyRequest = soakUserEmptyRequest
+type UserMeResponse = soakUserMeResponse
+type UserStatusResponse = soakUserStatusResponse
+type UserSettingsResponse = soakUserSettingsResponse
+type UserChatlistSection = soakUserChatlistSection
+type UserChatlistResponse = soakUserChatlistResponse
+type UserPriorityContactsResponse = soakUserPriorityContactsResponse
+type UserContact = soakUserContact
+type UserApp = soakUserApp
+type UserAppsResponse = soakUserAppsResponse
+type UserAppCategory = soakUserAppCategory
+type UserAppCategoriesResponse = soakUserAppCategoriesResponse
+type UserCountResponse = soakUserCountResponse
+type UserDMResponse = soakUserDMResponse
+type UserThread = soakUserThread
+type UserThreadListResponse = soakUserThreadListResponse
+type UserThreadUnreadResponse = soakUserThreadUnreadResponse
+
+const SubscriptionListType = soakSubscriptionListType
