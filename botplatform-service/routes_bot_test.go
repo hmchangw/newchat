@@ -195,6 +195,8 @@ func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 func TestRegisterBotRoutes_AuthUsesTheCachedStore(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// #nosec G101 -- fabricated test fixture, not a live credential
+	// nosemgrep: gosec.G101-1
 	const rawToken = "cached-path-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),
