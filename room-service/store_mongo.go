@@ -817,7 +817,7 @@ func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, 
 			continue
 		}
 		if name, ok := appByAssistant[acct]; ok {
-			members[i].Member.Name = name
+			members[i].Member.AppName = name
 		}
 	}
 	return nil

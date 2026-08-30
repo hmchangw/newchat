@@ -1144,10 +1144,10 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		human := byAccount["alice"]
 		assert.Equal(t, "Alice Wang", human.EngName, "human member must have EngName from users")
 		assert.Equal(t, "愛麗絲", human.ChineseName, "human member must have ChineseName from users")
-		assert.Empty(t, human.Name, "human member must NOT have Name set")
+		assert.Empty(t, human.AppName, "human member must NOT have AppName set")
 
 		bot := byAccount["weather.bot"]
-		assert.Equal(t, "Weather App", bot.Name, "bot member must have Name from apps")
+		assert.Equal(t, "Weather App", bot.AppName, "bot member must have AppName from apps")
 		assert.Empty(t, bot.SectName, "bot has no user doc → no sectName")
 		assert.Empty(t, bot.EngName, "bot member must NOT have EngName")
 		assert.Empty(t, bot.ChineseName, "bot member must NOT have ChineseName")
@@ -1193,7 +1193,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 
 		for _, m := range got {
 			assert.NotEmpty(t, m.Member.EngName, "all human members must have EngName")
-			assert.Empty(t, m.Member.Name, "no Name on a human member")
+			assert.Empty(t, m.Member.AppName, "no AppName on a human member")
 		}
 	})
 
@@ -1222,7 +1222,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Eve", got[0].Member.EngName)
-		assert.Empty(t, got[0].Member.Name)
+		assert.Empty(t, got[0].Member.AppName)
 	})
 }
 
