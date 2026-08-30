@@ -294,6 +294,15 @@ return fmt.Errorf("%w and %w", errcodeA, errcodeB)                 // Classify p
 | `errcode-no-multi-wrap-errcode`            | ERROR    | `fmt.Errorf("%w … %w")` mixing typed errors |
 | `errcode-prefer-named-constructor`         | WARNING  | `errcode.New(errcode.CodeX, msg)` literal |
 
+`.semgrep/jsnak.yml` enforces the JetStream settle rules (see §9a):
+
+| Rule                                          | Severity | What it catches |
+|-----------------------------------------------|----------|-----------------|
+| `jsretry-no-bare-nak`                         | ERROR    | `msg.Nak()` — instant redelivery, ignores `BackOff` |
+| `jsretry-no-zero-nak-delay`                   | ERROR    | `NakWithDelay(0)` — the same thing on the wire |
+| `jsretry-no-hardcoded-consumer-backoff`       | ERROR    | Assigning `ConsumerConfig.BackOff` directly |
+| `jsretry-marshal-failure-must-be-permanent`   | ERROR    | A marshal error returned as a bare wrapped error on a settle path |
+
 CI runs `make sast` on every PR.
 
 ---
@@ -338,15 +347,16 @@ if err := h.store.Save(ctx, &row); err != nil {
 }
 ```
 
-The consume loop in `main.go` reads the marker:
+The consume loop hands the error to `pkg/jsretry`, which reads the marker:
 
 ```go
-if _, ok := errcode.IsPermanent(err); ok {
-    msg.Ack() // poison-pill drop; client already got the AsyncJobResult.
-    return
-}
-msg.Nak() // transient — retry.
+// Ack on nil, Ack-drop on Permanent, NakWithDelay(backoff) otherwise.
+jsretry.Settle(ctx, msg, jsretry.DefaultBackoff, h.HandleMessage(ctx, msg.Data()))
 ```
+
+Never call `msg.Nak()` or `NakWithDelay(0)` directly: a bare Nak redelivers
+instantly and ignores the consumer's `BackOff`, so a sub-second blip burns
+`MaxDeliver` in milliseconds. `.semgrep/jsnak.yml` fails CI on both.
 
 `Permanent` wraps an `*errcode.Error` so `fillAsyncError` can still extract
 `Code` / `Reason` for the `AsyncJobResult` envelope; the wrapper is invisible
@@ -356,6 +366,102 @@ the sentinel-style match if you don't need the wrapped `*Error`.
 **Don't** infer permanence from `Code`: an `Internal` can be either a poison-
 pill (bad payload classified to internal by Classify) or a retryable
 infra-down condition. Wrap explicitly at the call site.
+
+---
+
+## 9a. Which errors are permanent — classification reference
+
+### The test
+
+An error is **permanent** if its outcome depends only on the **message bytes
+and the code**. It is **transient** if it depends on the **state of the world**,
+because that state can differ on the next delivery.
+
+Everything below follows from that one question. When a case is not listed,
+ask it rather than pattern-matching on a similar-looking entry.
+
+### Permanent — Ack-drop
+
+| Class | Examples | Construct with |
+|---|---|---|
+| Serialization out | `Marshal` of a fixed struct | `errcode.MarshalFailed("<what>", err)` |
+| Serialization in | Unmarshal/decode of the inbound envelope or payload | `Permanent(BadRequest("unmarshal X", WithCause(err)))` |
+| Round-trip of our own bytes | `bson.Unmarshal` of this function's own `bson.Marshal` output | `Permanent(Internal(…, WithCause(err)))` |
+| Payload validation | Missing required field, unknown event type, malformed subject, invalid ID format | `Permanent(BadRequest("…"))` |
+| Oversized publish | `nats.ErrMaxPayload` — rejected client-side before the wire (`nats.go:4345`) | `Permanent(Internal("… exceeds broker max_payload"))` |
+| Remote terminal reply | `not_found`, `forbidden`, `bad_request`, `conflict` from an RPC — a fact about *this* message | `errcode.Terminal` → `Permanent(ee)` |
+| Backend rejected the document | Elasticsearch bulk item `400` | `searchengine.IsBulkItemPermanent` |
+
+Attaching the decoder error via `WithCause` is right for `encoding/json`, whose
+errors name the offending character and Go type/field names. It is **not** safe
+for `sonic`, which embeds a window of the input — see §2's cause rules.
+
+### Transient — Nak with backoff
+
+| Class | Examples |
+|---|---|
+| Datastore unavailability | Timeouts, no reachable hosts, primary election/failover, write-concern failures |
+| Publish failures other than oversize | `ErrConnectionClosed`, `ErrConnectionDraining` (normal at shutdown), no stream response |
+| Remote non-terminal reply | `unavailable`, `internal`, `too_many_requests`, `unauthenticated` — `errcode.Terminal` excludes these deliberately |
+| Ordering races | A thread parent not yet persisted; `member_added` before the user replicates; subscription-state before `member_added` |
+| Backpressure | ES `429`, `es_rejected_execution`, `circuit_breaking` — pair with `jsretry.BackpressureBackoff` |
+| Key and secret fetches | Room-key store reads |
+
+`unauthenticated` is transient on purpose: a credential problem hits every
+message at once, so dropping is mass data loss rather than poison rejection.
+
+Bound a race that has a known short window rather than spending the whole
+budget on it — see `parentResolveExhausted` in broadcast-worker and
+notification-worker, which retries twice and then drops with a terminal metric.
+
+### Do not classify these
+
+| Case | Why not |
+|---|---|
+| Mongo duplicate key (`E11000`) | A domain signal, not a failure. Every site has its own right answer — swallow as idempotent, retry without upsert, or translate to a sentinel. A blanket "permanent" is wrong at all of them. |
+| Mongo cursor decode (`cursor.All`) | Fails from either a BSON decode error (deterministic) or a network error mid-cursor (transient), and the error does not distinguish them. Splitting needs `errors.As` on the driver type. |
+| `jetstream.ErrNoStreamResponse` | A destination stream that does not exist and a peer that is briefly unreachable produce the identical error. |
+| Best-effort paths | A handler that logs and continues has no ack decision to get wrong. Leave the bare error and say so in a comment. |
+
+### The asymmetry — why transient is the default
+
+The two mistakes do not cost the same:
+
+- **Wrong-transient** burns `MaxDeliver`, holds an ack-pending slot, then drops
+  silently. Wasteful, but bounded.
+- **Wrong-permanent** drops a message immediately that a retry would have
+  delivered. Unbounded data loss during any real outage.
+
+So a bare `fmt.Errorf` — transient — is the correct default to fail toward.
+Reach for `Permanent` when you can name the reason the outcome cannot change,
+not because a retry looks unlikely to help.
+
+### Where the decision lives
+
+At the **leaf**, where the error is first constructed. `%w` wrappers propagate
+permanence untouched, so a wrapper must not re-decide:
+
+```go
+// leaf — decides
+return errcode.Permanent(errcode.BadRequest("unmarshal member_added payload", errcode.WithCause(err)))
+
+// wrapper — propagates, decides nothing
+return fmt.Errorf("handle thread room and subscriptions: %w", err)
+```
+
+Before classifying a site, read its caller. An error that the caller discards
+is not a classification decision at all.
+
+### Lanes without a retry budget change the calculus
+
+`hr-sync-worker` and `outbox-worker`'s per-peer lanes run `MaxDeliver=-1` with
+`MaxAckPending=1`. There a non-resolving error never drops — it blocks the lane
+forever, and every later message behind it.
+
+Classification cannot rescue an unclassifiable error on such a lane. The policy
+is to keep blocking (losing an HR row or a federated event is worse than a
+stalled lane) and to **alert on the stall**, so a parked lane is distinguishable
+from a healthy idle one.
 
 ---
 
