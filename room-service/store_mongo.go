@@ -1319,11 +1319,20 @@ func (s *MongoStore) OpenSubscription(ctx context.Context, roomID, account strin
 
 // SetOwnerRole atomically grants or revokes the owner role, returning the updated
 // subscription. Promote appends "owner" only when absent; demote filters "owner"
-// out. Any other roles (e.g. "member") are preserved and array order stays stable.
+// out. Any other roles are preserved and array order stays stable — except the
+// legacy "member" spelling, which both branches rewrite to "user" so the write
+// heals the doc instead of leaving a mix behind.
 // rolesUpdatedAt is stamped from the same instant the caller publishes as the event
 // timestamp, keeping the origin doc and every federated replica on one high-water mark.
 func (s *MongoStore) SetOwnerRole(ctx context.Context, roomID, account string, makeOwner bool, rolesUpdatedAt time.Time) (*model.Subscription, error) {
-	currentRoles := bson.M{"$ifNull": bson.A{"$roles", bson.A{}}}
+	currentRoles := bson.M{"$map": bson.M{
+		"input": bson.M{"$ifNull": bson.A{"$roles", bson.A{}}},
+		"in": bson.M{"$cond": bson.M{
+			"if":   bson.M{"$eq": bson.A{"$$this", string(model.RoleMember)}},
+			"then": string(model.RoleUser),
+			"else": "$$this",
+		}},
+	}}
 	var rolesExpr bson.M
 	if makeOwner {
 		rolesExpr = bson.M{"$cond": bson.M{
@@ -1332,17 +1341,17 @@ func (s *MongoStore) SetOwnerRole(ctx context.Context, roomID, account string, m
 			"else": bson.M{"$concatArrays": bson.A{currentRoles, bson.A{model.RoleOwner}}},
 		}}
 	} else {
-		// Remove owner, then ensure member is still present. Mirrors the worker's
-		// old "AddRole(member) before RemoveRole(owner)" guard so a channel creator
-		// (seeded roles ["owner"] only) demotes to ["member"], never an empty array.
+		// Remove owner, then ensure user is still present. Mirrors the worker's
+		// old "AddRole before RemoveRole(owner)" guard so a channel creator
+		// (seeded roles ["owner"] only) demotes to ["user"], never an empty array.
 		withoutOwner := bson.M{"$filter": bson.M{
 			"input": currentRoles,
 			"cond":  bson.M{"$ne": bson.A{"$$this", model.RoleOwner}},
 		}}
 		rolesExpr = bson.M{"$cond": bson.M{
-			"if":   bson.M{"$in": bson.A{model.RoleMember, withoutOwner}},
+			"if":   bson.M{"$in": bson.A{model.RoleUser, withoutOwner}},
 			"then": withoutOwner,
-			"else": bson.M{"$concatArrays": bson.A{withoutOwner, bson.A{model.RoleMember}}},
+			"else": bson.M{"$concatArrays": bson.A{withoutOwner, bson.A{model.RoleUser}}},
 		}}
 	}
 	return s.findOneAndUpdateSub(ctx, roomID, account, "set owner role", bson.M{
@@ -1956,7 +1965,7 @@ func (s *MongoStore) ApplySubscriptionRestriction(ctx context.Context, roomID st
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
-					"else": bson.A{string(model.RoleMember)},
+					"else": bson.A{string(model.RoleUser)},
 				}},
 			}}},
 		}

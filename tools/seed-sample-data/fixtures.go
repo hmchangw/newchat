@@ -440,7 +440,7 @@ var roomOwners = map[string]string{
 // is a member of. DM subscriptions are emitted as plain Subscription rows
 // with Name set to the counterpart's account (matches how dm rooms are
 // labeled on the client). Roles are ["owner"] for the seeded owner of
-// each channel and ["member"] otherwise; DM members get ["member"].
+// each channel and ["user"] otherwise; DM members get ["user"].
 func BuildSubscriptions() []model.Subscription {
 	users := usersByAccount()
 	rooms := BuildRooms()
@@ -449,7 +449,7 @@ func BuildSubscriptions() []model.Subscription {
 		r := &rooms[ri]
 		for i, account := range r.Accounts {
 			u := users[account]
-			roles := []model.Role{model.RoleMember}
+			roles := []model.Role{model.RoleUser}
 			if owner, ok := roomOwners[r.ID]; ok && owner == account {
 				roles = []model.Role{model.RoleOwner}
 			}

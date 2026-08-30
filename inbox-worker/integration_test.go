@@ -97,8 +97,8 @@ func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscription not found: %v", err)
 	}
-	if len(sub.Roles) == 0 || sub.Roles[0] != model.RoleMember {
-		t.Errorf("Roles = %v, want [member]", sub.Roles)
+	if len(sub.Roles) == 0 || sub.Roles[0] != model.RoleUser {
+		t.Errorf("Roles = %v, want [user]", sub.Roles)
 	}
 
 	// handleMemberAdded does not publish SubscriptionUpdateEvent — room-worker
@@ -1031,8 +1031,8 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 		subs := loadSubs(t, db)
 		roles := rolesByAccount(subs)
 		assert.Equal(t, []model.Role{model.RoleOwner}, roles["bob"], "bob should be owner")
-		assert.Equal(t, []model.Role{model.RoleMember}, roles["alice"], "alice should be member")
-		assert.Equal(t, []model.Role{model.RoleMember}, roles["carol"], "carol should be member")
+		assert.Equal(t, []model.Role{model.RoleUser}, roles["alice"], "alice should be demoted to user")
+		assert.Equal(t, []model.Role{model.RoleUser}, roles["carol"], "carol should be demoted to user")
 		for _, sub := range subs {
 			assert.True(t, sub.Restricted, "sub %s Restricted should be true", sub.ID)
 			assert.False(t, sub.ExternalAccess, "sub %s ExternalAccess should be false", sub.ID)
@@ -1190,10 +1190,10 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 		assert.False(t, sub.ExternalAccess, "sub %s ExternalAccess should be false", sub.ID)
 	}
 
-	// bob promoted to owner, alice demoted to member, carol stays member.
+	// bob promoted to owner, alice and carol reset to the plain user role.
 	assert.Equal(t, []model.Role{model.RoleOwner}, rolesByAccount["bob"], "bob should be owner")
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["alice"], "alice should be member")
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["carol"], "carol should be member")
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesByAccount["alice"], "alice should be user")
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesByAccount["carol"], "carol should be user")
 }
 
 // Regression: a federated upsert for an existing (threadRoomId, userAccount)
@@ -1491,7 +1491,7 @@ func TestInbox_ApplySubscriptionRestriction_NewerApplies(t *testing.T) {
 	assert.True(t, alice.Restricted)
 	assert.True(t, bob.Restricted)
 	assert.Equal(t, []model.Role{model.RoleOwner}, bob.Roles)
-	assert.Equal(t, []model.Role{model.RoleMember}, alice.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, alice.Roles)
 }
 
 func TestInbox_UpsertRoom_OlderUpdatedAtSkipped(t *testing.T) {

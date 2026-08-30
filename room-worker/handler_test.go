@@ -221,7 +221,7 @@ func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 			ChineseName: "愛",
 		},
 		HasOrgMembership: true,
-		Roles:            []model.Role{model.RoleMember},
+		Roles:            []model.Role{model.RoleUser},
 	}
 
 	// Only DeleteRoomMember(individual) called — no subscription delete, no events,
@@ -342,7 +342,7 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 			userResult := &UserWithMembership{
 				User:             model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛"},
 				HasOrgMembership: true,
-				Roles:            []model.Role{model.RoleOwner, model.RoleMember},
+				Roles:            []model.Role{model.RoleOwner, model.RoleUser},
 			}
 
 			gomock.InOrder(
@@ -502,7 +502,7 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 			for _, s := range subs {
 				assert.Equal(t, "site-a", s.SiteID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
-				assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+				assert.Equal(t, []model.Role{model.RoleUser}, s.Roles)
 				require.NotNil(t, s.HistorySharedSince)
 				assert.Equal(t, s.JoinedAt, *s.HistorySharedSince)
 			}
@@ -1845,7 +1845,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteRoomMemberError(t *testing.T) {
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1868,7 +1868,7 @@ func TestHandler_ProcessRemoveIndividual_DualDemoteError(t *testing.T) {
 		Return(&UserWithMembership{
 			User:             model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
 			HasOrgMembership: true,
-			Roles:            []model.Role{model.RoleOwner, model.RoleMember},
+			Roles:            []model.Role{model.RoleOwner, model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1893,7 +1893,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1919,7 +1919,7 @@ func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -3505,7 +3505,7 @@ func TestProcessCreateRoom_Channel_BuildsSubsAndMembers(t *testing.T) {
 	assert.Equal(t, "Deal Team", ownerSub.Name)
 
 	memberSub := capturedSubs[1]
-	assert.Equal(t, []model.Role{model.RoleMember}, memberSub.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, memberSub.Roles)
 
 	// 4 room_members: 2 individuals (bob+carol) + 1 org + 1 owner (alice)
 	require.Len(t, capturedMembers, 4)
@@ -5929,7 +5929,7 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 		Return(&UserWithMembership{
 			User:             model.User{ID: "u_b", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑"},
 			HasOrgMembership: false,
-			Roles:            []model.Role{model.RoleMember},
+			Roles:            []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_b").Return(nil)
 	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), nil)
@@ -7688,7 +7688,7 @@ func TestActorSubscriptionIsPreRead(t *testing.T) {
 		assert.True(t, subs[0].LastSeenAt.Equal(at))
 		assert.Equal(t, []model.Role{model.RoleOwner}, subs[0].Roles)
 		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
-		assert.Equal(t, []model.Role{model.RoleMember}, subs[1].Roles)
+		assert.Equal(t, []model.Role{model.RoleUser}, subs[1].Roles)
 	})
 }
 

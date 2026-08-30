@@ -155,3 +155,18 @@ func TestSonic_EncryptedRawMessageEmbedding(t *testing.T) {
 	require.NoError(t, stdjson.Unmarshal(son, &viaStd))
 	assert.JSONEq(t, string(ev.EncryptedMessage), string(viaStd.EncryptedMessage))
 }
+
+// Role carries a custom MarshalJSON that rewrites the legacy "member" spelling
+// to "user". sonic must honor it, or a subscription forwarded through a
+// sonic-encoded event would leak the pre-cutover value to clients.
+func TestSonic_RoleNormalizationHonored(t *testing.T) {
+	sub := model.Subscription{ID: "s1", RoomID: "r1", Roles: []model.Role{model.RoleMember, model.RoleOwner}}
+
+	sonicOut, err := sonic.Marshal(sub)
+	require.NoError(t, err)
+	stdOut, err := stdjson.Marshal(sub)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(sonicOut), `"roles":["user","owner"]`)
+	assert.Contains(t, string(stdOut), `"roles":["user","owner"]`)
+}

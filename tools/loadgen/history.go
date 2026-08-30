@@ -157,7 +157,7 @@ func BuildHistoryFixtures(p *HistoryPreset, seed int64, siteID string, now time.
 		members := make([]model.User, size)
 		for j, idx := range perm {
 			members[j] = users[idx]
-			roles := []model.Role{model.RoleMember}
+			roles := []model.Role{model.RoleUser}
 			if j == 0 {
 				roles = []model.Role{model.RoleOwner}
 			}

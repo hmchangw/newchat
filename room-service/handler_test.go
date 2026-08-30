@@ -129,7 +129,7 @@ func TestHandler_UpdateRole_Success(t *testing.T) {
 	var evt model.SubscriptionUpdateEvent
 	require.NoError(t, json.Unmarshal(coreData, &evt))
 	assert.Equal(t, "role_updated", evt.Action)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, evt.Subscription.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, evt.Subscription.Roles)
 	assert.Equal(t, "general", evt.RoomName, "role_updated carries the channel name")
 }
 
@@ -331,7 +331,53 @@ func TestHandler_UpdateRole_Demote_Success(t *testing.T) {
 	var evt model.SubscriptionUpdateEvent
 	require.NoError(t, json.Unmarshal(coreData, &evt))
 	assert.Equal(t, "role_updated", evt.Action)
-	assert.Equal(t, []model.Role{model.RoleMember}, evt.Subscription.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, evt.Subscription.Roles)
+}
+
+// TestHandler_UpdateRole_DemoteToUser is the canonical demote: newRole "user".
+// The legacy "member" spelling is covered by TestHandler_UpdateRole_Demote_Success.
+func TestHandler_UpdateRole_DemoteToUser(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Roles: []model.Role{model.RoleUser, model.RoleOwner}}, nil)
+	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "bob").
+		Return(&SubscriptionWithMembership{
+			Subscription:            &model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleUser, model.RoleOwner}},
+			HasIndividualMembership: true,
+		}, nil)
+	store.EXPECT().SetOwnerRole(gomock.Any(), "r1", "bob", false, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleUser}}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "bob").Return("site-a", nil)
+
+	var coreData []byte
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000,
+		publishCore: func(_ context.Context, _ string, data []byte) error { coreData = data; return nil },
+	}
+
+	req := model.UpdateRoleRequest{Account: "bob", NewRole: model.RoleUser}
+
+	resp, err := h.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
+	require.NotNil(t, coreData)
+	var evt model.SubscriptionUpdateEvent
+	require.NoError(t, json.Unmarshal(coreData, &evt))
+	assert.Equal(t, []model.Role{model.RoleUser}, evt.Subscription.Roles)
+}
+
+func TestHandler_UpdateRole_RejectsUnknownRole(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	h := &Handler{store: NewMockRoomStore(ctrl), siteID: "site-a", maxRoomSize: 1000}
+
+	for _, role := range []model.Role{"admin", "moderator", ""} {
+		req := model.UpdateRoleRequest{Account: "bob", NewRole: role}
+		_, err := h.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+		require.ErrorIs(t, err, errInvalidRole, "role %q must be rejected", role)
+	}
 }
 
 func TestHandler_UpdateRole_CrossSiteInbox(t *testing.T) {
@@ -384,7 +430,7 @@ func TestHandler_UpdateRole_CrossSiteInbox(t *testing.T) {
 	assert.Equal(t, "site-b", inboxEnv.DestSiteID)
 	var evt model.SubscriptionUpdateEvent
 	require.NoError(t, json.Unmarshal(inboxEnv.Payload, &evt))
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, evt.Subscription.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, evt.Subscription.Roles)
 	// The origin doc's rolesUpdatedAt and the published event timestamp must be the
 	// same instant so remote replicas guard against one high-water mark.
 	assert.False(t, roleTs.IsZero())

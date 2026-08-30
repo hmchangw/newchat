@@ -817,8 +817,8 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 	if sub.SiteID != "site-b" {
 		t.Errorf("subscription SiteID = %q, want %q", sub.SiteID, "site-b")
 	}
-	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleMember)
+	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleUser)
 	}
 	if sub.RoomType != model.RoomTypeChannel {
 		t.Errorf("subscription RoomType = %q, want %q", sub.RoomType, model.RoomTypeChannel)
@@ -1220,8 +1220,8 @@ func TestHandleEvent_MemberAdded_EventSourcedFields(t *testing.T) {
 		if !sub.HistorySharedSince.Equal(historyShared) {
 			t.Errorf("sub[%d] HistorySharedSince = %v, want %v", i, *sub.HistorySharedSince, historyShared)
 		}
-		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleMember)
+		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleUser)
 		}
 	}
 
@@ -1485,7 +1485,7 @@ func TestHandleEvent_MemberRemoved(t *testing.T) {
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
-		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleMember},
+		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleUser},
 	})
 	store.mu.Unlock()
 
@@ -1560,8 +1560,8 @@ func TestHandleEvent_MemberRemoved_MultipleAccounts(t *testing.T) {
 	// Pre-populate subscriptions for both accounts
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions,
-		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
-		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
 	)
 	store.mu.Unlock()
 
@@ -1980,7 +1980,7 @@ func TestHandleEvent_MemberAdded_PartialUsers_CreatesPresentAndErrors(t *testing
 }
 
 func TestRolesForType(t *testing.T) {
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesForType(model.RoomTypeChannel))
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesForType(model.RoomTypeChannel))
 	assert.Nil(t, rolesForType(model.RoomTypeDM))
 	assert.Nil(t, rolesForType(model.RoomTypeBotDM))
 }
@@ -2125,7 +2125,7 @@ func TestHandleMemberAdded_Channel_BuildsChannelSub(t *testing.T) {
 	require.Len(t, subs, 2)
 	for _, s := range subs {
 		assert.Equal(t, "deal team", s.Name)
-		assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+		assert.Equal(t, []model.Role{model.RoleUser}, s.Roles)
 		assert.Equal(t, model.RoomTypeChannel, s.RoomType)
 		assert.Equal(t, "site-A", s.SiteID)
 	}
@@ -2158,7 +2158,7 @@ func TestHandleMemberAdded_EmptyRoomType_DefaultsToChannel(t *testing.T) {
 	subs := store.bulkSubscriptions
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType, "empty RoomType must default to channel")
-	assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, subs[0].Roles)
 }
 
 func TestHandleMemberAdded_DuplicateKey_IsIdempotent(t *testing.T) {

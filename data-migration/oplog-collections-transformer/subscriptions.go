@@ -306,20 +306,20 @@ func (h *handler) readEvent(ss *sourceSubscription, siteID string) model.InboxEv
 }
 
 // mapSubscriptionRoles maps RocketChat role strings to model.Role: "owner" → RoleOwner; everything
-// else (RC "moderator"/"leader"/"user", which the new model lacks) → RoleMember. Empty source roles
-// (a RocketChat demotion clears the array) map to the [member] floor — the new stack's invariant is
-// roles are never empty (room-service writes ["member"] after a live demotion), and inbox-worker
+// else (RC "moderator"/"leader"/"user", which the new model lacks) → RoleUser. Empty source roles
+// (a RocketChat demotion clears the array) map to the [user] floor — the new stack's invariant is
+// roles are never empty (room-service writes ["user"] after a live demotion), and inbox-worker
 // permanently drops a role_updated with no roles, so an empty mapping would silently lose demotions.
 func mapSubscriptionRoles(roles []string) []model.Role {
 	if len(roles) == 0 {
-		return []model.Role{model.RoleMember}
+		return []model.Role{model.RoleUser}
 	}
 	out := make([]model.Role, 0, len(roles))
 	for _, r := range roles {
 		if r == string(model.RoleOwner) {
 			out = append(out, model.RoleOwner)
 		} else {
-			out = append(out, model.RoleMember)
+			out = append(out, model.RoleUser)
 		}
 	}
 	return out

@@ -37,7 +37,7 @@ func soakRoomStateTestTopology(candidates int) *soakTopology {
 			},
 			{
 				RoomID: "room-1", User: model.SubscriptionUser{ID: users[1].ID, Account: users[1].Account},
-				Roles: []model.Role{model.RoleMember}, RoomType: model.RoomTypeChannel,
+				Roles: []model.Role{model.RoleUser}, RoomType: model.RoomTypeChannel,
 			},
 		},
 	}
@@ -390,7 +390,7 @@ func TestSoakRoomStatePool_RejectsInvalidConstruction(t *testing.T) {
 
 func TestSoakRoomStatePool_SkipsRoomsWithoutOwner(t *testing.T) {
 	topology := soakRoomStateTestTopology(3)
-	topology.Subscriptions[0].Roles = []model.Role{model.RoleMember}
+	topology.Subscriptions[0].Roles = []model.Role{model.RoleUser}
 
 	_, err := newSoakRoomStatePool(topology, 8, NewMetrics(), rand.New(rand.NewSource(5)))
 
