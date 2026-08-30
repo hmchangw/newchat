@@ -54,27 +54,34 @@ interface HttpErrorEnvelope {
   metadata?: Record<string, string>
 }
 
+/** Builds an `AsyncJobError` from an already-parsed body; uses `fallback` when the body isn't envelope-shaped.
+ * The single owner of the envelope shape — `fetch` and `XMLHttpRequest` callers both route through here. */
+export function envelopeErrorFromBody(body: unknown, fallback: string): AsyncJobError {
+  const env = body as HttpErrorEnvelope | undefined
+
+  const isEnvelope =
+    env !== null &&
+    env !== undefined &&
+    typeof env === 'object' &&
+    (typeof env.error === 'string' || typeof env.code === 'string')
+
+  if (!isEnvelope) return new AsyncJobError(fallback)
+
+  return new AsyncJobError(env.error || fallback, {
+    code: env.code,
+    reason: env.reason,
+    metadata: env.metadata,
+  })
+}
+
 /** Throws an `AsyncJobError` parsed from the non-2xx envelope body; uses `fallback` when the body isn't that shape. */
 export async function parseHttpEnvelopeError(resp: Response, fallback: string): Promise<never> {
-  let body: HttpErrorEnvelope | undefined
+  let body: unknown
   try {
-    body = (await resp.json()) as HttpErrorEnvelope
+    body = await resp.json()
   } catch {
     body = undefined
   }
 
-  const isEnvelope =
-    body !== null &&
-    typeof body === 'object' &&
-    (typeof body.error === 'string' || typeof body.code === 'string')
-
-  if (isEnvelope && body) {
-    throw new AsyncJobError(body.error || fallback, {
-      code: body.code,
-      reason: body.reason,
-      metadata: body.metadata,
-    })
-  }
-
-  throw new AsyncJobError(fallback)
+  throw envelopeErrorFromBody(body, fallback)
 }

@@ -16,17 +16,21 @@ import (
 )
 
 // insertBotDMSubscription seeds a botDM room subscription with an explicit
-// isSubscribed flag, mirroring how user-service's SetAppSubscribed persists the
-// soft-unsubscribe toggle ($set isSubscribed:false, row retained). Raw bson, not
-// model.Subscription, because the struct's `omitempty` would drop a false
-// isSubscribed — and explicit false is exactly the production state under test.
-func insertBotDMSubscription(t *testing.T, db *mongo.Database, account, roomID string, subscribed bool) {
+// counterpart name and isSubscribed flag, mirroring how user-service's
+// SetAppSubscribed persists the soft-unsubscribe toggle ($set isSubscribed:false,
+// row retained). Raw bson, not model.Subscription, because the struct's
+// `omitempty` would drop a false isSubscribed — and explicit false is exactly the
+// production state under test.
+//
+// name is the counterpart account, as production writes it.
+func insertBotDMSubscription(t *testing.T, db *mongo.Database, account, roomID, name string, subscribed bool) {
 	t.Helper()
 	_, err := db.Collection("subscriptions").InsertOne(context.Background(), bson.M{
 		"_id":          account + ":" + roomID,
 		"u":            bson.M{"account": account},
 		"roomId":       roomID,
 		"siteId":       "site-a",
+		"name":         name,
 		"roomType":     string(model.RoomTypeBotDM),
 		"isSubscribed": subscribed,
 	})
@@ -92,8 +96,8 @@ func TestThreadSubscriptionRepo_ListUserThreadSubscriptions_UnsubscribedApp(t *t
 	insertThreadSubscription(t, db, model.ThreadSubscription{ID: "ts-off", ThreadRoomID: "tr-off", RoomID: "bot-off", ParentMessageID: "p-off", UserAccount: "alice", SiteID: "site-a", CreatedAt: base, UpdatedAt: base})
 
 	// alice still subscribes to bot-on; she has unsubscribed from bot-off.
-	insertBotDMSubscription(t, db, "alice", "bot-on", true)
-	insertBotDMSubscription(t, db, "alice", "bot-off", false)
+	insertBotDMSubscription(t, db, "alice", "bot-on", "helper.bot", true)
+	insertBotDMSubscription(t, db, "alice", "bot-off", "sales.bot", false)
 
 	rows, hasMore, err := repo.ListUserThreadSubscriptions(ctx, "alice", nil, "", 10)
 	require.NoError(t, err)
@@ -208,4 +212,23 @@ func TestThreadSubscriptionRepo_ListUserThreadSubscriptions_Tiebreak(t *testing.
 	assert.False(t, hasMore2)
 	require.Len(t, rows2, 1)
 	assert.Equal(t, "tr-a", rows2[0].ThreadRoomID)
+}
+
+// A bot's own row in its DM with a person is stored dm, so the app gate — which
+// only ever applied to botDM rows — never touches it.
+func TestThreadSubscriptionRepo_ListUserThreadSubscriptions_BotOwnDMSurvives(t *testing.T) {
+	db := setupMongo(t)
+	repo := NewThreadSubscriptionRepo(db)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	insertThreadRoom(t, db, model.ThreadRoom{ID: "tr-human", RoomID: "r-human", ParentMessageID: "p1", LastMsgID: "m1", SiteID: "site-a", LastMsgAt: base.Add(time.Hour), CreatedAt: base, UpdatedAt: base})
+	insertThreadSubscription(t, db, model.ThreadSubscription{ID: "ts-human", ThreadRoomID: "tr-human", RoomID: "r-human", ParentMessageID: "p1", UserAccount: "weather.bot", SiteID: "site-a", CreatedAt: base, UpdatedAt: base})
+	insertNamedSubscription(t, db, "weather.bot", "r-human", "alice", model.RoomTypeDM)
+
+	rows, _, err := repo.ListUserThreadSubscriptions(ctx, "weather.bot", nil, "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "tr-human", rows[0].ThreadRoomID)
+	assert.Equal(t, "alice", rows[0].RoomName)
 }

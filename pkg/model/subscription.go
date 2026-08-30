@@ -243,3 +243,55 @@ type BadgeCountBatchRequest struct {
 type BadgeCountBatchResponse struct {
 	Counts map[string]int `json:"counts"`
 }
+
+// IsAppRoom reports whether a row of type t facing counterpart name is an app
+// room — a botDM facing a real ".bot" app.
+func IsAppRoom(t RoomType, name string) bool {
+	return t == RoomTypeBotDM && IsBot(name)
+}
+
+// EffectiveRoomType re-derives a row's type from its counterpart. Rows are
+// written per subscriber, so this is an identity on well-formed data; it exists
+// to correct a corrupt row at the publish boundary.
+func EffectiveRoomType(t RoomType, name string) RoomType {
+	if t == RoomTypeBotDM {
+		return SubscriptionRoomType(name)
+	}
+	return t
+}
+
+// DMRoomType is the room document's type for a two-party DM: botDM when either
+// participant is a ".bot" app. p_admin owns no app, so its DMs are ordinary.
+func DMRoomType(a, b string) RoomType {
+	if IsBot(a) || IsBot(b) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
+
+// SubscriptionRoomType is one row's type — the room as its own subscriber sees
+// it. The two sides of a bot<->human DM therefore differ.
+func SubscriptionRoomType(counterpart string) RoomType {
+	if IsBot(counterpart) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
+
+// SubscriptionRowType is SubscriptionRoomType for DM rows; a channel row keeps
+// the room's type.
+func SubscriptionRowType(roomType RoomType, counterpart string) RoomType {
+	if roomType == RoomTypeDM || roomType == RoomTypeBotDM {
+		return SubscriptionRoomType(counterpart)
+	}
+	return roomType
+}
+
+// CreateRoomType classifies a create-room request: a single counterpart with no
+// name is a DM, and a botDM when either participant is a ".bot" app.
+func CreateRoomType(req *CreateRoomRequest) RoomType {
+	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
+		return DMRoomType(req.RequesterAccount, req.Users[0])
+	}
+	return RoomTypeChannel
+}

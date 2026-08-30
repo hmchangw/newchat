@@ -65,6 +65,7 @@ func readQuota(v2Path, v1Path string) (int64, error) {
 // v1 and v2 layouts are mutually exclusive, so the caller tries both.
 func readLimitFile(path string) (int64, error) {
 	// An empty path yields ENOENT, handled as "absent" below like any missing file.
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path) // #nosec G304 -- paths are package constants, never caller input
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

@@ -12,6 +12,11 @@ const SECTIONS = [
     label: 'Permissions',
     Component: lazy(() => import('@/components/PermissionsView')),
   },
+  {
+    key: 'updates',
+    label: 'Updates',
+    Component: lazy(() => import('@/components/UpdatesConsole')),
+  },
 ]
 
 // Top-level authed layout: nav to switch Users/Audit, header with signed-in account + logout.

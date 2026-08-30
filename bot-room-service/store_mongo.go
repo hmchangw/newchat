@@ -105,6 +105,8 @@ func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) 
 			"roomId":    sub.RoomID,
 			"u":         bson.M{"_id": sub.UserID, "account": sub.Account, "isBot": sub.IsBot},
 			"siteId":    sub.SiteID,
+			"name":      sub.Name,
+			"roomType":  string(sub.RoomType),
 			"createdAt": sub.CreatedAt,
 		},
 	}

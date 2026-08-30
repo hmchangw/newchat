@@ -32,9 +32,11 @@ import (
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 const (
-	seededRooms  = 250
-	testSiteID   = "site-a"
-	testAccount  = "alice"
+	seededRooms = 250
+	testSiteID  = "site-a"
+	testAccount = "alice"
+	// #nosec G101 -- fabricated test fixture, not a live credential
+	// nosemgrep: gosec.G101-1
 	testSSOToken = "tok-integration"
 )
 

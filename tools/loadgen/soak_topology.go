@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"time"
 
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -298,12 +298,13 @@ func isActiveSoakSubscription(
 
 // isSoakRoomMember follows the production subscription model: channel and DM
 // membership is represented by row existence because leave deletes the row.
-// Only botDM keeps the row and uses IsSubscribed as a soft toggle.
+// Only an app room (a botDM facing a ".bot" counterpart) keeps the row and uses
+// IsSubscribed as a soft toggle.
 func isSoakRoomMember(subscription *model.Subscription) bool {
 	if subscription == nil {
 		return false
 	}
-	return subscription.RoomType != model.RoomTypeBotDM || subscription.IsSubscribed
+	return !model.IsAppRoom(subscription.RoomType, subscription.Name) || subscription.IsSubscribed
 }
 
 func reserveSoakPair(a, b *model.User, used map[string]struct{}) bool {

@@ -99,6 +99,11 @@ type config struct {
 	GraphProxyPassword   string `env:"GRAPH_PROXY_PASSWORD" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
+	// Mentionable @-autocomplete page size. Default applies when the client sends
+	// no limit; Max clamps an explicit over-large limit. Both are validated > 0 at
+	// startup and are independent of a room's denormalized member counts.
+	MentionableDefaultLimit int `env:"MENTIONABLE_DEFAULT_LIMIT" envDefault:"3"`
+	MentionableMaxLimit     int `env:"MENTIONABLE_MAX_LIMIT"     envDefault:"50"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -117,6 +122,22 @@ type config struct {
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
+}
+
+// validateMentionableLimits enforces the mentionable page-size invariants at
+// startup: both bounds positive, and the no-limit default never exceeding the
+// max (otherwise a limit-less request would bypass the configured cap).
+func validateMentionableLimits(defaultLimit, maxLimit int) error {
+	switch {
+	case defaultLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT must be > 0, got %d", defaultLimit)
+	case maxLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_MAX_LIMIT must be > 0, got %d", maxLimit)
+	case defaultLimit > maxLimit:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT (%d) must be <= MENTIONABLE_MAX_LIMIT (%d)", defaultLimit, maxLimit)
+	default:
+		return nil
+	}
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -175,6 +196,10 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
+		os.Exit(1)
+	}
+	if err := validateMentionableLimits(cfg.MentionableDefaultLimit, cfg.MentionableMaxLimit); err != nil {
+		slog.Error("invalid mentionable limits", "error", err)
 		os.Exit(1)
 	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
@@ -371,6 +396,8 @@ func main() {
 	handler.teamsEmailDomain = cfg.TeamsEmailDomain
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
+	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
+	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
 
 	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
 	handler.Register(router)

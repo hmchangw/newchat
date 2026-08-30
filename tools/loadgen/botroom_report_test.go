@@ -40,6 +40,8 @@ func TestWriteBotRoomCSV(t *testing.T) {
 		{Size: 100, Rooms: 4, TargetRate: 200, AchievedRate: 199, E2P95Ms: 20, Tripped: false},
 	}
 	require.NoError(t, writeBotRoomCSV(path, results))
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")

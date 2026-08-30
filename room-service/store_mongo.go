@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
+	"math"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -22,8 +22,6 @@ import (
 // botAccountRegex matches bot/app accounts by the ".bot" suffix only — all "p_"
 // accounts have user records and resolve as users here.
 const botAccountRegex = `\.bot$`
-
-var botAccountPattern = regexp.MustCompile(botAccountRegex)
 
 type MongoStore struct {
 	rooms               *mongo.Collection
@@ -501,12 +499,12 @@ func (s *MongoStore) CountNewMembers(ctx context.Context, orgIDs, directAccounts
 	return len(accounts) - len(subbed), nil
 }
 
-// ListRoomMembers returns the members of a room. It prefers the room_members
-// collection. When no room_members document exists for roomID, it falls back
-// to synthesizing RoomMember entries from the subscriptions collection so
-// callers always see the same response shape. Sort: orgs first, then
-// individuals, each group by ts ascending with _id tiebreaker.
-func (s *MongoStore) ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error) {
+// ListRoomMembers returns one page of a room's members plus a hasMore flag. It
+// prefers the room_members collection. When no room_members document exists for
+// roomID, it falls back to synthesizing RoomMember entries from the
+// subscriptions collection so callers always see the same response shape. Sort:
+// orgs first, then individuals, each group by ts ascending with _id tiebreaker.
+func (s *MongoStore) ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error) {
 	// Lightweight existence probe — project only _id to minimize payload.
 	err := s.roomMembers.FindOne(ctx, bson.M{"rid": roomID},
 		options.FindOne().SetProjection(bson.M{"_id": 1})).Err()
@@ -516,11 +514,32 @@ func (s *MongoStore) ListRoomMembers(ctx context.Context, roomID string, limit, 
 	case errors.Is(err, mongo.ErrNoDocuments):
 		return s.getRoomSubscriptions(ctx, roomID, limit, offset, enrich)
 	default:
-		return nil, fmt.Errorf("probe room_members for %q: %w", roomID, err)
+		return nil, false, fmt.Errorf("probe room_members for %q: %w", roomID, err)
 	}
 }
 
-func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error) {
+// pagedLimit is the row count to ask the database for: one more than the
+// caller's limit, so the extra row answers hasMore without a second count
+// query. Returns ok=false when the caller asked for an unbounded read — which
+// a limit of math.MaxInt effectively is, and where +1 would wrap negative and
+// make the database reject the query.
+func pagedLimit(limit *int) (int64, bool) {
+	if limit == nil || *limit <= 0 || *limit == math.MaxInt {
+		return 0, false
+	}
+	return int64(*limit) + 1, true
+}
+
+// trimOverFetch drops the over-fetched probe row from rows and reports whether
+// it was there — i.e. whether a further page follows.
+func trimOverFetch[T any](rows []T, limit *int) ([]T, bool) {
+	if limit == nil || *limit <= 0 || len(rows) <= *limit {
+		return rows, false
+	}
+	return rows[:*limit], true
+}
+
+func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error) {
 	pipeline := mongo.Pipeline{
 		bson.D{{Key: "$match", Value: bson.M{"rid": roomID}}},
 		bson.D{{Key: "$addFields", Value: bson.M{
@@ -539,8 +558,8 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 	}
 	// Mongo rejects {$limit: 0}; the handler guards against <=0 but we
 	// defend here too so the store is robust to direct internal callers.
-	if limit != nil && *limit > 0 {
-		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: int64(*limit)}})
+	if n, ok := pagedLimit(limit); ok {
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: n}})
 	}
 
 	if enrich {
@@ -552,16 +571,17 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 
 	cursor, err := s.roomMembers.Aggregate(ctx, pipeline)
 	if err != nil {
-		return nil, fmt.Errorf("aggregate room_members for %q: %w", roomID, err)
+		return nil, false, fmt.Errorf("aggregate room_members for %q: %w", roomID, err)
 	}
 	defer cursor.Close(ctx)
 
 	if !enrich {
 		members := []model.RoomMember{}
 		if err := cursor.All(ctx, &members); err != nil {
-			return nil, fmt.Errorf("decode room_members for %q: %w", roomID, err)
+			return nil, false, fmt.Errorf("decode room_members for %q: %w", roomID, err)
 		}
-		return members, nil
+		members, hasMore := trimOverFetch(members, limit)
+		return members, hasMore, nil
 	}
 
 	// Enriched path: decode into a hybrid row type that carries a parallel
@@ -572,19 +592,26 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 	// per-row correlated $lookup that would force a users collection scan per row.
 	var rows []roomMemberEnrichedRow
 	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("decode enriched room_members for %q: %w", roomID, err)
+		return nil, false, fmt.Errorf("decode enriched room_members for %q: %w", roomID, err)
 	}
+	// Trim before the display resolution below so the probe row costs no lookup.
+	rows, hasMore := trimOverFetch(rows, limit)
 	members := make([]model.RoomMember, len(rows))
-	var orgIDs []string
+	var orgIDs, botAccounts []string
 	for i := range rows {
 		rm := rows[i].RoomMember
 		d := rows[i].Display
-		rm.Member.EngName = d.EngName
-		rm.Member.ChineseName = d.ChineseName
 		rm.Member.IsOwner = d.IsOwner
-		if rm.Member.Type == model.RoomMemberOrg {
+		switch {
+		case rm.Member.Type == model.RoomMemberOrg:
 			orgIDs = append(orgIDs, rm.Member.ID)
-		} else {
+		case model.IsBot(rm.Member.Account):
+			// Suffix is the only signal here — room_members rows carry no isBot flag.
+			// The users join is discarded so appName and engName stay exclusive.
+			botAccounts = append(botAccounts, rm.Member.Account)
+		default:
+			rm.Member.EngName = d.EngName
+			rm.Member.ChineseName = d.ChineseName
 			rm.Member.SectName = d.SectName
 			rm.Member.EmployeeID = d.EmployeeID
 		}
@@ -592,15 +619,18 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 	}
 	if len(orgIDs) > 0 {
 		if err := s.attachOrgDisplay(ctx, roomID, members, orgIDs); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return members, nil
+	if err := s.attachAppNames(ctx, roomID, members, botAccounts); err != nil {
+		return nil, false, err
+	}
+	return members, hasMore, nil
 }
 
 // attachOrgDisplay resolves org-member display names and member counts for the
 // org rows in members, then fills SectName (dept-first tiebreak) and MemberCount
-// in place. It mirrors attachUserDisplayNames but for the org dimension: a
+// in place. It mirrors attachHumanDisplayNames but for the org dimension: a
 // single index-backed batch query feeds a Go-side rollup, replacing the prior
 // per-row correlated $lookup whose $expr $or could not use an index.
 func (s *MongoStore) attachOrgDisplay(ctx context.Context, roomID string, members []model.RoomMember, orgIDs []string) error {
@@ -711,10 +741,11 @@ func enrichRoomMembersStages(roomID string) []bson.D {
 // The nested path is u._id, not u.id — SubscriptionUser.ID is bson "_id".
 var roomMemberSubProjection = bson.D{
 	{Key: "_id", Value: 1}, {Key: "u._id", Value: 1}, {Key: "u.account", Value: 1},
+	{Key: "u.isBot", Value: 1},
 	{Key: "roles", Value: 1}, {Key: "joinedAt", Value: 1},
 }
 
-func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error) {
+func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error) {
 	opts := options.Find().SetSort(bson.D{
 		{Key: "joinedAt", Value: 1},
 		{Key: "_id", Value: 1},
@@ -724,22 +755,29 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 	}
 	// SetLimit(0) means "no limit" in the driver, which would silently return
 	// unbounded results. Only set when >0 so it matches the aggregation path.
-	if limit != nil && *limit > 0 {
-		opts.SetLimit(int64(*limit))
+	if n, ok := pagedLimit(limit); ok {
+		opts.SetLimit(n)
 	}
 	opts.SetProjection(roomMemberSubProjection)
 	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID}, opts)
 	if err != nil {
-		return nil, fmt.Errorf("find subscriptions for %q: %w", roomID, err)
+		return nil, false, fmt.Errorf("find subscriptions for %q: %w", roomID, err)
 	}
 	defer cursor.Close(ctx)
 
 	var subs []model.Subscription
 	if err := cursor.All(ctx, &subs); err != nil {
-		return nil, fmt.Errorf("decode subscriptions for %q: %w", roomID, err)
+		return nil, false, fmt.Errorf("decode subscriptions for %q: %w", roomID, err)
 	}
+	// Trim before the display resolution below so the probe row costs no lookup.
+	subs, hasMore := trimOverFetch(subs, limit)
 
 	members := make([]model.RoomMember, 0, len(subs))
+	var humanAccounts, botAccounts []string
+	if enrich {
+		// Nearly every subscription is human; bots are a handful, so those stay nil-append.
+		humanAccounts = make([]string, 0, len(subs))
+	}
 	for i := range subs {
 		sub := &subs[i]
 		entry := model.RoomMemberEntry{
@@ -749,6 +787,14 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 		}
 		if enrich {
 			entry.IsOwner = hasRole(sub.Roles, model.RoleOwner)
+			if acct := sub.User.Account; acct != "" {
+				// The flag is the authority; the suffix covers subs written before it existed.
+				if sub.User.IsBot || model.IsBot(acct) {
+					botAccounts = append(botAccounts, acct)
+				} else {
+					humanAccounts = append(humanAccounts, acct)
+				}
+			}
 		}
 		members = append(members, model.RoomMember{
 			ID:     sub.ID,
@@ -758,66 +804,55 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 		})
 	}
 
-	if enrich && len(members) > 0 {
-		if err := s.attachUserDisplayNames(ctx, roomID, members); err != nil {
-			return nil, fmt.Errorf("attach user display names for %q: %w", roomID, err)
-		}
+	if err := s.attachHumanDisplayNames(ctx, roomID, members, humanAccounts); err != nil {
+		return nil, false, err
 	}
-	return members, nil
+	if err := s.attachAppNames(ctx, roomID, members, botAccounts); err != nil {
+		return nil, false, err
+	}
+	return members, hasMore, nil
 }
 
-// attachUserDisplayNames batch-loads display fields for all individual
-// members in the slice and copies them onto each member entry in place.
-// Used on the subscriptions-fallback + enrichment path. Accounts are
-// partitioned by the ".bot$" pattern: human accounts are looked up in
-// users for EngName/ChineseName; bot accounts are looked up in apps
-// for Name. Each partition is queried only when non-empty.
-func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, members []model.RoomMember) error {
-	var humanAccounts, botAccounts []string
-	for i := range members {
-		if members[i].Member.Type != model.RoomMemberIndividual || members[i].Member.Account == "" {
-			continue
-		}
-		if botAccountPattern.MatchString(members[i].Member.Account) {
-			botAccounts = append(botAccounts, members[i].Member.Account)
-		} else {
-			humanAccounts = append(humanAccounts, members[i].Member.Account)
-		}
+// attachHumanDisplayNames fills the users-sourced display fields in place,
+// keyed on the caller's human-account partition (index-backed $in).
+func (s *MongoStore) attachHumanDisplayNames(ctx context.Context, roomID string, members []model.RoomMember, humanAccounts []string) error {
+	if len(humanAccounts) == 0 {
+		return nil
 	}
-
-	var (
-		userByAccount  map[string]*model.User
-		appByAssistant map[string]string // assistant.name → app.name
-	)
-	if len(humanAccounts) > 0 {
-		u, err := s.findUsersForDisplay(ctx, humanAccounts)
-		if err != nil {
-			return fmt.Errorf("find users for room %q: %w", roomID, err)
-		}
-		userByAccount = u
+	userByAccount, err := s.findUsersForDisplay(ctx, humanAccounts)
+	if err != nil {
+		return fmt.Errorf("find users for room %q: %w", roomID, err)
 	}
-	if len(botAccounts) > 0 {
-		a, err := s.findAppsForDisplay(ctx, botAccounts)
-		if err != nil {
-			return fmt.Errorf("find apps for room %q: %w", roomID, err)
-		}
-		appByAssistant = a
-	}
-
 	for i := range members {
 		if members[i].Member.Type != model.RoomMemberIndividual {
 			continue
 		}
-		acct := members[i].Member.Account
-		if u, ok := userByAccount[acct]; ok {
+		if u, ok := userByAccount[members[i].Member.Account]; ok {
 			members[i].Member.EngName = u.EngName
 			members[i].Member.ChineseName = u.ChineseName
 			members[i].Member.SectName = u.SectName
 			members[i].Member.EmployeeID = u.EmployeeID
+		}
+	}
+	return nil
+}
+
+// attachAppNames fills bot members' AppName in place from one index-backed $in
+// on apps.assistant.name.
+func (s *MongoStore) attachAppNames(ctx context.Context, roomID string, members []model.RoomMember, botAccounts []string) error {
+	if len(botAccounts) == 0 {
+		return nil
+	}
+	appByAssistant, err := s.findAppsForDisplay(ctx, botAccounts)
+	if err != nil {
+		return fmt.Errorf("find apps for room %q: %w", roomID, err)
+	}
+	for i := range members {
+		if members[i].Member.Type != model.RoomMemberIndividual {
 			continue
 		}
-		if name, ok := appByAssistant[acct]; ok {
-			members[i].Member.Name = name
+		if name, ok := appByAssistant[members[i].Member.Account]; ok {
+			members[i].Member.AppName = name
 		}
 	}
 	return nil

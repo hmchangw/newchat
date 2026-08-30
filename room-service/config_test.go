@@ -94,6 +94,49 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
 }
 
+func TestConfig_MentionableLimits(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("defaults", func(t *testing.T) {
+		// Unset both and restore the caller's env after the subtest so later
+		// tests don't observe defaults instead of their configured values.
+		for _, k := range []string{"MENTIONABLE_DEFAULT_LIMIT", "MENTIONABLE_MAX_LIMIT"} {
+			if v, ok := os.LookupEnv(k); ok {
+				t.Cleanup(func() { _ = os.Setenv(k, v) })
+			} else {
+				t.Cleanup(func() { _ = os.Unsetenv(k) })
+			}
+			require.NoError(t, os.Unsetenv(k))
+		}
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 3, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 50, cfg.MentionableMaxLimit)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "10")
+		t.Setenv("MENTIONABLE_MAX_LIMIT", "200")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 10, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 200, cfg.MentionableMaxLimit)
+	})
+
+	// The startup guard (fail-fast in main via validateMentionableLimits) is what
+	// rejects bad values — env parsing itself accepts them. Exercise the guard
+	// directly so this test fails if it is removed or inverted.
+	t.Run("validateMentionableLimits", func(t *testing.T) {
+		require.NoError(t, validateMentionableLimits(3, 50))
+		require.NoError(t, validateMentionableLimits(50, 50)) // default == max is allowed
+		assert.Error(t, validateMentionableLimits(0, 50))     // default not positive
+		assert.Error(t, validateMentionableLimits(-1, 50))
+		assert.Error(t, validateMentionableLimits(3, 0))    // max not positive
+		assert.Error(t, validateMentionableLimits(100, 50)) // default exceeds max
+	})
+}
+
 func TestConfig_BadgeCacheTTL(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")

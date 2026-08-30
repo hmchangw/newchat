@@ -79,12 +79,12 @@ GOVULNCHECK := $(GOBIN_DIR)/govulncheck
 # (loadgen, nats-debug) that are not deployed services; chat-frontend is
 # JS. -tests=true scans *_test.go so PR gating catches issues in test code
 # too (mocks are filtered by -exclude-generated). Gate: medium+ severity.
-GOSEC_FLAGS := -quiet -severity medium -confidence medium -tests=true \
+GOSEC_FLAGS := -quiet -severity medium -confidence low -tests=true \
                -exclude-generated -exclude-dir=tools -exclude-dir=testdata
 
 # semgrep: fail on medium+ (WARNING/ERROR; INFO is informational/low).
 SEMGREP_FLAGS := --error --severity=WARNING --severity=ERROR --metrics=off \
-                 --exclude=tools --exclude=chat-frontend --exclude=testdata \
+                 --exclude=chat-frontend --exclude=testdata \
                  --exclude=docs --config=p/golang --config=p/security-audit \
                  --config=.semgrep/
 

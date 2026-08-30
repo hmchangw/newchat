@@ -98,11 +98,14 @@ type RoomStore interface {
 	// Resolves candidates via pkg/pipelines.MatchCandidatesFilter, then (for a
 	// non-empty roomID) subtracts already-subscribed accounts via an indexed read.
 	CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID, excludeAccount string) (int, error)
-	// ListRoomMembers returns the members of roomID. When enrich=true, the
-	// returned RoomMember.Member entries carry display fields populated via
-	// $lookup stages against users and subscriptions. When enrich=false,
-	// display fields are left zero.
-	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error)
+	// ListRoomMembers returns one page of the members of roomID plus a hasMore
+	// flag: true when at least one row follows the page. A non-nil limit makes
+	// the query over-fetch one row to decide it, trimmed off before returning;
+	// an unlimited request returns everything and hasMore=false. When
+	// enrich=true, the returned RoomMember.Member entries carry display fields
+	// populated via $lookup stages against users and subscriptions. When
+	// enrich=false, display fields are left zero.
+	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error)
 	// ListOrgMembers returns all users whose sectId OR deptId equals orgID,
 	// projected as OrgMember rows sorted by account ascending. Returns a
 	// RoomInvalidOrg-reason errcode when no users match (treated as "orgId is

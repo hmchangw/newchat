@@ -23,6 +23,14 @@ services:
       - FANOUT_TIMEOUT=${FANOUT_TIMEOUT:-30s}
       - BCRYPT_COST=${BCRYPT_COST:-10}
       - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
+      - CLIENT_UPDATE_URL=${CLIENT_UPDATE_URL:-http://client-update-service:8080}
+      # Dev-only credential. Shares the CLIENT_UPDATE_TOKEN override variable
+      # with client-update-service/deploy/docker-compose.yml (there it becomes
+      # the token half of an account:token UPLOAD_TOKENS entry), so setting it
+      # once (e.g. in docker-local/.env) configures both sides.
+      - CLIENT_UPDATE_TOKEN=${CLIENT_UPDATE_TOKEN:-local-dev-token-0123456789}
+      - CLIENT_UPDATE_UPLOAD_TIMEOUT=10m
+      - CLIENT_UPDATE_MAX_UPLOAD_BYTES=${CLIENT_UPDATE_MAX_UPLOAD_BYTES:-2147483648}
     volumes:
       - ../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro
     networks:

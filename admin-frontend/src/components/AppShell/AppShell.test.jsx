@@ -82,6 +82,17 @@ describe('AppShell', () => {
     )
     expect(screen.getByRole('button', { name: /^create$/i })).toBeInTheDocument()
   })
+
+  it('switches from Users to Updates via nav and mounts UpdatesConsole', async () => {
+    render(<AppShell />)
+    await waitFor(() => expect(listUsers).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Updates' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { name: /client updates/i })).toBeInTheDocument(),
+    )
+  })
 })
 
 describe('AppShell permissions gating', () => {

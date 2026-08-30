@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
 	o11ygin "github.com/flywindy/o11y/gin"
@@ -26,9 +25,13 @@ func main() {
 }
 
 func run() error {
-	cfg, err := env.ParseAs[config]()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := validateUploadTokens(cfg.UploadTokens); err != nil {
+		return fmt.Errorf("validate upload tokens: %w", err)
 	}
 
 	ctx := context.Background()
@@ -36,6 +39,13 @@ func run() error {
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		return fmt.Errorf("init observability: %w", err)
+	}
+
+	// Logged after obs.Init so it lands in the JSON handler. An operator who sees
+	// uploads 401 needs to know the table is empty rather than their token wrong.
+	if len(cfg.UploadTokens) == 0 {
+		slog.Warn("UPLOAD_TOKENS is empty — POST /api/v1/version will reject every upload; downloads are unaffected",
+			"site", cfg.SiteID)
 	}
 
 	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
@@ -56,11 +66,12 @@ func run() error {
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.MaxMultipartMemory = maxMultipartMemory
 	r.Use(o11ygin.Middleware("client-update-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	registerRoutes(r, handler)
+	registerRoutes(r, handler, cfg.UploadTokens, cfg.UploadMaxBytes)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{

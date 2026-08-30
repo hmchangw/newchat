@@ -16,6 +16,8 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	cfg, err := loadConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "8082", cfg.Port)
@@ -43,6 +45,8 @@ func TestLoadConfig_TimeoutOverrides(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	t.Setenv("ROOM_RPC_TIMEOUT", "12s")
 	t.Setenv("FANOUT_TIMEOUT", "20s")
 	cfg, err := loadConfig()
@@ -72,6 +76,8 @@ func TestLoadConfig_RejectsUnusableHandlerTimeouts(t *testing.T) {
 				t.Setenv("SITE_ID", "site-local")
 				t.Setenv("MONGO_URI", "mongodb://x")
 				t.Setenv("NATS_URL", "nats://x:4222")
+				t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+				t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 				t.Setenv(envName, tc.value)
 				_, err := loadConfig()
 				require.Error(t, err)
@@ -85,15 +91,107 @@ func TestLoadConfig_ZeroMaxPoolSizeFails(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "test-token")
 	t.Setenv("MONGO_MAX_POOL_SIZE", "0")
 	_, err := loadConfig()
 	assert.Error(t, err)
+}
+
+func TestValidateClientUpdate(t *testing.T) {
+	base := func() Config {
+		return Config{
+			ClientUpdateURL:            "http://client-update-service:8080",
+			ClientUpdateToken:          "0123456789abcdef",
+			ClientUpdateTimeout:        10 * time.Minute,
+			ClientUpdateMaxUploadBytes: 2 << 30,
+		}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"valid", func(*Config) {}, false},
+		{"unparseable url", func(c *Config) { c.ClientUpdateURL = "://nope" }, true},
+		{"url without scheme", func(c *Config) { c.ClientUpdateURL = "client-update-service:8080" }, true},
+		{"https url", func(c *Config) { c.ClientUpdateURL = "https://client-update-service" }, false},
+		// *http.Transport rejects any other scheme at request time, so every upload
+		// would 503. Fail at startup instead.
+		{"ftp scheme", func(c *Config) { c.ClientUpdateURL = "ftp://client-update-service" }, true},
+		// url.Parse gives this a non-empty Host (":8080") but no Hostname, so a
+		// Host-only check lets it start and then fail every upload at dial time.
+		{"port-only authority", func(c *Config) { c.ClientUpdateURL = "http://:8080" }, true},
+		{"file scheme", func(c *Config) { c.ClientUpdateURL = "file:///etc/passwd" }, true},
+		{"empty token", func(c *Config) { c.ClientUpdateToken = "" }, true},
+		{"zero timeout", func(c *Config) { c.ClientUpdateTimeout = 0 }, true},
+		{"negative timeout", func(c *Config) { c.ClientUpdateTimeout = -time.Second }, true},
+		// Without a positive cap MaxBytesReader would admit an unbounded body,
+		// which c.MultipartForm spools to the pod's disk.
+		{"zero max upload bytes", func(c *Config) { c.ClientUpdateMaxUploadBytes = 0 }, true},
+		{"negative max upload bytes", func(c *Config) { c.ClientUpdateMaxUploadBytes = -1 }, true},
+		// Deliberately ABOVE httpWriteTimeout — that is the whole point of the
+		// per-route deadline extension. checkHandlerTimeout must not be applied.
+		{"timeout far above httpWriteTimeout", func(c *Config) { c.ClientUpdateTimeout = 30 * time.Minute }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(&cfg)
+			err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout, cfg.ClientUpdateMaxUploadBytes)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateClientUpdate_ErrorNeverLeaksTheToken(t *testing.T) {
+	cfg := Config{
+		ClientUpdateURL:     "://nope",
+		ClientUpdateToken:   "supersecrettoken0123",
+		ClientUpdateTimeout: time.Minute,
+	}
+	err := validateClientUpdate(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout, cfg.ClientUpdateMaxUploadBytes)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecrettoken0123")
+}
+
+// The service-account token rides every upload. http:// is still allowed —
+// in-cluster service-to-service traffic is plaintext in this deployment, and
+// rejecting it would break both the local compose stack and production — but
+// the choice must be visible to whoever deploys it rather than silent.
+func TestClientUpdateSendsTokenInClear(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "http", url: "http://client-update-service:8080", want: true},
+		{name: "https", url: "https://client-update-service", want: false},
+		{name: "uppercase scheme", url: "HTTP://client-update-service:8080", want: true},
+		// Unparseable or non-http URLs never reach this: validateClientUpdate
+		// rejects them at startup first. Report false rather than warning about
+		// a URL that already failed.
+		{name: "unparseable", url: "://nope", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, clientUpdateSendsTokenInClear(tt.url))
+		})
+	}
 }
 
 func TestLoadConfig_ReadPreferenceDefault(t *testing.T) {
 	t.Setenv("SITE_ID", "site-local")
 	t.Setenv("MONGO_URI", "mongodb://x")
 	t.Setenv("NATS_URL", "nats://x:4222")
+	// Required since this branch added the client-update relay: loadConfig fails
+	// without them, so every test that calls it must supply the pair.
+	t.Setenv("CLIENT_UPDATE_URL", "http://client-update-service:8080")
+	t.Setenv("CLIENT_UPDATE_TOKEN", "0123456789abcdef")
 	t.Setenv("MONGO_READ_PREFERENCE", "")                    // pin cleanup so the host value is restored
 	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE")) // the default only applies when unset
 
