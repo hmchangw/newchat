@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -270,11 +271,7 @@ func main() {
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := js.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
+	open := jsiter.PullFrom(jsiter.Resolve(js, wiring.CanonicalStream.Name, consumerCfg), jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 
 	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// Coalesce per-message rooms.lastMsgAt writes into periodic BulkWrites — the handler still calls
@@ -351,7 +348,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	iter, err := jsiter.NewPump(ctx, consumerCfg.Durable, open)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -365,6 +362,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

@@ -303,6 +303,9 @@ func main() {
 	// track which streams have already been created to avoid redundant CreateOrUpdateStream calls.
 	createdStreams := make(map[string]struct{}, len(collections))
 
+	checks := make([]health.Check, 0, len(collections)+1)
+	checks = append(checks, natsutil.HealthCheck(nc))
+
 	// INBOX is owned by inbox-worker; HR is owned by hr-syncer. search-sync-worker is a pure consumer of both and must not create their schemas.
 	inboxName := stream.Inbox(cfg.SiteID).Name
 	hrName := stream.OrgSyncStream(cfg.HRCentralSiteID).Name
@@ -324,37 +327,40 @@ func main() {
 
 		consumerCfg := buildConsumerConfig(cfg.Consumer, coll, cfg.SiteID)
 
-		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is configured,
-		// create its consumer against the domain-scoped context — every other collection uses the shared js.
-		var fetcher msgFetcher
-		if streamCfg.Name == hrName && hrJS != nil {
-			cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"domain", cfg.HRJetStreamDomain,
-					"error", err,
-				)
-				os.Exit(1)
+		// The HR (spotlight-org) collection reads OrgSyncStream; when a remote HR domain is
+		// configured its consumer is created there — every other collection uses the shared js.
+		useHRDomain := streamCfg.Name == hrName && hrJS != nil
+		open := func(ctx context.Context) (msgFetcher, error) {
+			if useHRDomain {
+				cons, err := hrJS.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+				if err != nil {
+					return nil, fmt.Errorf("create %s consumer on domain %s: %w", streamCfg.Name, cfg.HRJetStreamDomain, err)
+				}
+				return rawConsumerAdapter{cons}, nil
 			}
-			fetcher = rawConsumerAdapter{cons}
+			cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
+			if err != nil {
+				return nil, fmt.Errorf("create %s consumer: %w", streamCfg.Name, err)
+			}
+			return o11yConsumerAdapter{cons}, nil
+		}
+
+		fetcher, err := newRecoveringFetcher(ctx, coll.ConsumerName(), open, stopCh)
+		if err != nil {
+			slog.Error("create consumer failed",
+				"stream", streamCfg.Name,
+				"consumer", coll.ConsumerName(),
+				"error", err,
+			)
+			os.Exit(1)
+		}
+		checks = append(checks, fetcher.HealthCheck())
+		if useHRDomain {
 			slog.Info("HR consumer bound to remote JetStream domain",
 				"domain", cfg.HRJetStreamDomain,
 				"stream", streamCfg.Name,
 				"consumer", coll.ConsumerName(),
 			)
-		} else {
-			cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consumerCfg)
-			if err != nil {
-				slog.Error("create consumer failed",
-					"stream", streamCfg.Name,
-					"consumer", coll.ConsumerName(),
-					"error", err,
-				)
-				os.Exit(1)
-			}
-			fetcher = o11yConsumerAdapter{cons}
 		}
 
 		handler := NewHandler(&engineAdapter{engine: engine}, coll, cfg.BulkBatchSize)
@@ -375,9 +381,7 @@ func main() {
 		}, stopCh, doneCh)
 	}
 
-	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
-		natsutil.HealthCheck(nc),
-	)
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -497,7 +501,7 @@ type consumerTuning struct {
 // loop only stalls once every slot is busy, which is the backpressure we want.
 func runConsumer(
 	ctx context.Context,
-	cons msgFetcher,
+	cons fetchSource,
 	handler *Handler,
 	tune consumerTuning,
 	stopCh <-chan struct{},
@@ -522,6 +526,15 @@ func runConsumer(
 	add := func(msgCtx context.Context, m jetstream.Msg) {
 		jobguard.Guard("search-sync add: "+m.Subject(), func() { handler.AddWithContext(msgCtx, m) })
 	}
+	// Flush before recovering, not on the usual interval: Recover can park for a whole
+	// outage while it rebuilds, leaving built actions unindexed that long. It drains
+	// rather than flushes, because a rebuild can easily outlast the in-flight bulk
+	// requests the pipeline is still holding.
+	flushBeforeRecover := func() {
+		if handler.ActionCount() > 0 {
+			drain()
+		}
+	}
 
 	for {
 		select {
@@ -543,8 +556,12 @@ func runConsumer(
 				return
 			default:
 			}
-			if handler.ActionCount() > 0 && time.Since(lastFlush) >= tune.bulkFlushInterval {
-				flushNow()
+			flushBeforeRecover()
+			// Recover backs off and rebuilds; swallowing the error instead would
+			// spin this loop against a consumer that will never answer again.
+			if !cons.Recover(ctx, err) {
+				drain()
+				return
 			}
 			continue
 		}
@@ -564,6 +581,19 @@ func runConsumer(
 		// Interval trigger: the size trigger above already fired for anything at the cap.
 		if handler.ActionCount() > 0 && time.Since(lastFlush) >= tune.bulkFlushInterval {
 			flushNow()
+		}
+
+		// Read only now that Messages is drained. This is the sole channel by
+		// which a Fetch loop learns its consumer was deleted or its leader moved
+		// — Fetch itself keeps returning empty batches and a nil error — so
+		// skipping it turns a dead consumer into an indefinitely quiet one.
+		batchErr := batch.Error()
+		if batchErr != nil {
+			flushBeforeRecover()
+		}
+		if !cons.Recover(ctx, batchErr) {
+			drain()
+			return
 		}
 	}
 }

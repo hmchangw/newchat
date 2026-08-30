@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -72,7 +73,9 @@ func main() {
 
 	handler := NewHandler(newMongoStore(mongoClient.Database(cfg.MongoWriteDB)))
 
-	consumeCtxs := make([]o11ynats.ConsumeContext, 0, len(cfg.SiteIDs))
+	consumeCtxs := make([]*jsiter.Supervisor, 0, len(cfg.SiteIDs))
+	checks := make([]health.Check, 0, len(cfg.SiteIDs)+1)
+	checks = append(checks, natsutil.HealthCheck(nc))
 	for _, siteID := range cfg.SiteIDs {
 		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID, cfg.Consumer)
 		if err != nil {
@@ -80,11 +83,10 @@ func main() {
 			os.Exit(1)
 		}
 		consumeCtxs = append(consumeCtxs, cc)
+		checks = append(checks, cc.HealthCheck())
 	}
 
-	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, false,
-		natsutil.HealthCheck(nc),
-	)
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, false, checks...)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -112,13 +114,9 @@ func main() {
 // startSiteConsumer wires one durable, strictly-sequential consumer on the
 // site's HR stream. MaxAckPending=1 so a quit can never overtake the upsert
 // that precedes it (low volume — one publish burst per sync run).
-func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (o11ynats.ConsumeContext, error) {
+func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (*jsiter.Supervisor, error) {
 	streamCfg := stream.OrgSyncStream(siteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(s))
-	if err != nil {
-		return nil, err
-	}
-	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+	process := func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
 			data, err := natsutil.DecodePayload(msg)
@@ -129,7 +127,10 @@ func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Hand
 			}
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
 		})
-	})
+	}
+
+	open := jsiter.ConsumeFrom(jsiter.Resolve(js, streamCfg.Name, buildConsumerConfig(s)), process)
+	return jsiter.NewSupervisor(ctx, "hr-sync-"+siteID, open)
 }
 
 // buildConsumerConfig adds the durable name and this worker's two overrides;

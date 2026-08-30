@@ -21,6 +21,7 @@ import (
 	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -829,13 +830,11 @@ func main() {
 	}
 
 	inboxCfg := stream.Inbox(cfg.SiteID)
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.SiteID)
 
 	// Internal lane is reserved for search-sync-worker; scope to external.> only.
-	cons, err := js.CreateOrUpdateConsumer(ctx, inboxCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
+	//
+	open := jsiter.PullFrom(jsiter.Resolve(js, inboxCfg.Name, consumerCfg), jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 
 	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
 	// no-ops (nil-checked in handler.go).
@@ -902,7 +901,7 @@ func main() {
 	// Membership traffic is a tiny fraction of the lane, so serializing it
 	// costs negligible throughput while the read-receipt path keeps its full
 	// MaxWorkers concurrency.
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	iter, err := jsiter.NewPump(ctx, "inbox", open)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -960,6 +959,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

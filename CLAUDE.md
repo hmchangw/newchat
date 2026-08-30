@@ -339,6 +339,65 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
 
+### JetStream Consumer Recovery (`pkg/jsiter`)
+
+`Next` (and `Consume`'s error handler) report two very different things through one
+error, and conflating them is how a consumer silently stops forever:
+
+- **Recoverable.** `jetstream.ErrNoHeartbeat` — surfaced by default, since `Messages`
+  sets `ReportMissingHeartbeats`. The iterator is still live and nats.go has already
+  re-issued the pull request (`pull.go:394-413`, `:679-686`); the caller must call
+  `Next` again.
+- **Fatal.** `ErrConsumerDeleted` / `ErrBadRequest` stop the iterator outright
+  (`pull.go:718-722`); `Consume` stops its subscription with no notice at all
+  (`:285`). A new iterator/subscription is the only way back.
+
+A loop that returns on any error treats the first as the second: one hiccup on the
+inter-site link exceeds two heartbeat intervals, the pump goroutine exits, and the
+service consumes nothing more while `/readyz` — which probed only the NATS
+connection — stays green. Cross-site consumers hit this first: their heartbeats and pull expiries
+cross a supercluster gateway.
+
+Rules:
+
+- **Never drive a raw iterator.** Wrap it: `jsiter.NewPump(ctx, name, open)` returns a
+  `*Pump` with the same `Next` signature, so an error out of `Next` means consumption
+  is genuinely over (`jsiter.ErrStopped` on shutdown).
+- **Never call `Consume` without an error handler.** Use
+  `jsiter.NewSupervisor(ctx, name, open)` and pass its `onError` to
+  `jetstream.ConsumeErrHandler` — `jsiter.ConsumeFrom` builds an `open` that does. Ordered consumers (`js.OrderedConsumer`) are the
+  one carve-out — nats.go resets and re-delivers them itself, so they need no
+  supervisor (see `tools/cdc-verify/watcher.go`).
+- **The build closure must re-resolve the consumer** (`CreateOrUpdateConsumer` then
+  `Messages`/`Consume`), never close over a handle — a stopped iterator usually means
+  the durable is gone.
+- **`Stop` is not a barrier; `Closed` is.** `ConsumeContext.Stop` ends delivery and
+  drops the buffer, but a handler already executing runs on (`pull.go:769`). So
+  `jsiter.ConsumeContext` requires `Closed() <-chan struct{}`, and a replacement round
+  never opens until it fires — otherwise the old callback and the redelivery it never
+  acked run at once, which is exactly what a FIFO lane must not do.
+  **Rounds never overlap, even at the cost of the lane.** If a handler is still running
+  after `releaseWait`, the supervisor ends supervision rather than start a replacement
+  over it: a stopped lane is visible on `/readyz`, while writes landing out of order are
+  not visible anywhere. Shutdown is the one exception — it has its own deadline, so
+  `Stop` reports a handler past the bound and proceeds. Do not call `Stop` from inside an
+  `OpenConsume`.
+- **Recreating a deleted durable re-applies `DeliverPolicy` from scratch**, because the
+  server discarded its ack floor with it. `DeliverAll` replays the whole retained
+  stream; `DeliverNew` skips whatever was published while the durable was missing. The
+  alternative — treating a missing durable as terminal — is the silent stall itself, so
+  recovery recreates. Pick a `DeliverPolicy` whose replay-or-skip behaviour your handler
+  tolerates, and say so where it is set.
+- **A `Fetch` loop MUST read `batch.Error()` after draining `Messages()`.** A deleted
+  consumer reaches only that method; `Fetch` itself keeps returning empty batches and
+  a nil error. See `search-sync-worker`'s `recoveringFetcher`.
+- **Probe the consumer, not just the connection**: add `pump.HealthCheck()` beside
+  `natsutil.HealthCheck(nc)`. Checks passed to `health.Serve`/`ServeWithPprof` run on
+  `/readyz`; `/healthz` is liveness only and always returns 200, so a dead consumer
+  shows up as not-ready, never as a restart. It reports whether a live iterator is
+  held — deliberately not "time since the last message", which would restart
+  merely-idle workers.
+
 ### JetStream Redelivery Backoff
 
 Two levers space redeliveries, and they fire on **disjoint** failure modes. Set both.

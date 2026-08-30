@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,6 +18,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -48,7 +50,11 @@ func main() {
 
 	// Bind synchronously so a port conflict fails startup loudly. Metrics are
 	// owned by the o11y SDK's Prometheus endpoint; this is health-only.
-	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second)
+	// Readiness follows the consumer once it exists; liveness stays 200 the
+	// whole time, so a slow stream bootstrap cannot trigger a restart.
+	var consumer atomic.Pointer[jsiter.Supervisor]
+	healthStop, err := health.Serve(cfg.HealthAddr, 5*time.Second,
+		jsiter.Check("oplog-direct-transfer", func() bool { c := consumer.Load(); return c != nil && c.IsUp() }))
 	if err != nil {
 		slog.Error("health server failed to start", "addr", cfg.HealthAddr, "error", err)
 		os.Exit(1)
@@ -115,24 +121,23 @@ func main() {
 	}
 
 	streamName := stream.MigrationOplog(cfg.SiteID).Name
-	cons, err := createConsumerWithRetry(ctx, js, streamName, jetstream.ConsumerConfig{
+	consumerCfg := jetstream.ConsumerConfig{
 		Durable:        cfg.ConsumerDurable,
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		DeliverPolicy:  jetstream.DeliverAllPolicy,
 		MaxDeliver:     cfg.MaxDeliver,
 		FilterSubjects: filterSubjects,
-	})
-	if err != nil {
-		slog.Error("create consumer failed", "stream", streamName, "error", err)
-		_ = nc.Drain()
-		mongoutil.Disconnect(ctx, targetClient)
-		mongoutil.Disconnect(ctx, source)
-		os.Exit(1)
 	}
 
-	cc, err := cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
+	process := func(msgCtx context.Context, msg jetstream.Msg) {
 		processOne(msgCtx, h, msg, m, cfg.MaxDeliver)
-	})
+	}
+	// createConsumerWithRetry, not CreateOrUpdateConsumer: the connector may
+	// bootstrap the stream slightly after we start.
+	resolve := func(ctx context.Context) (o11ynats.Consumer, error) {
+		return createConsumerWithRetry(ctx, js, streamName, consumerCfg)
+	}
+	cc, err := jsiter.NewSupervisor(ctx, "oplog-direct-transfer", jsiter.ConsumeFrom(resolve, process))
 	if err != nil {
 		slog.Error("consume failed", "stream", streamName, "error", err)
 		_ = nc.Drain()
@@ -140,6 +145,7 @@ func main() {
 		mongoutil.Disconnect(ctx, source)
 		os.Exit(1)
 	}
+	consumer.Store(cc)
 
 	slog.Info("oplog-direct-transfer started", "site", cfg.SiteID, "stream", streamName, "collections", cfg.DirectCollections)
 
@@ -207,12 +213,12 @@ func createConsumerWithRetry(ctx context.Context, js o11ynats.JetStream, streamN
 			return cons, nil
 		}
 		if !errors.Is(err, jetstream.ErrStreamNotFound) || time.Now().After(deadline) {
-			return nil, err
+			return nil, fmt.Errorf("create %s consumer %s: %w", streamName, cfg.Durable, err)
 		}
 		slog.Warn("waiting for stream to be created by the connector", "stream", streamName)
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("wait for stream %s: %w", streamName, ctx.Err())
 		case <-time.After(2 * time.Second):
 		}
 	}

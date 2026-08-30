@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -124,38 +124,38 @@ func main() {
 		slog.Warn("no remote peers in ALL_SITE_IDS — federation events published to OUTBOX would sit unconsumed",
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
-	iters := make([]o11ynats.MessagesContext, 0, len(peers))
-	orderedCtxs := make([]o11ynats.ConsumeContext, 0, len(peers))
+	iters := make([]*jsiter.Pump, 0, len(peers))
+	orderedCtxs := make([]*jsiter.Supervisor, 0, len(peers))
+	checks := []health.Check{natsutil.HealthCheck(nc)}
 	for _, dest := range peers {
-		ccons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create concurrent consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		concurrentLane, orderedLane := "outbox-concurrent-"+dest, "outbox-ordered-"+dest
+
+		// Both lanes re-resolve their consumer on every rebuild rather than
+		// capturing it: a stopped lane usually means the durable is gone, so
+		// rebuilding onto a stale handle would just stop again.
+		openConcurrent := jsiter.PullFrom(
+			jsiter.Resolve(js, outboxCfg.Name, buildConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest)),
+			jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		iter, err := jsiter.NewPump(ctx, concurrentLane, openConcurrent)
 		if err != nil {
 			slog.Error("concurrent messages failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
 		iters = append(iters, iter)
-		drainPool(ctx, iter, sem, &wg, process)
+		checks = append(checks, iter.HealthCheck())
+		drainPool(ctx, dest, iter, sem, &wg, process)
 
-		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
-		if err != nil {
-			slog.Error("create ordered consumer failed", "dest_site_id", dest, "error", err)
-			os.Exit(1)
-		}
-		cc, err := ocons.Consume(ctx, process)
+		openOrdered := jsiter.ConsumeFrom(jsiter.Resolve(js, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest)), process)
+		cc, err := jsiter.NewSupervisor(ctx, orderedLane, openOrdered)
 		if err != nil {
 			slog.Error("ordered consume failed", "dest_site_id", dest, "error", err)
 			os.Exit(1)
 		}
 		orderedCtxs = append(orderedCtxs, cc)
+		checks = append(checks, cc.HealthCheck())
 	}
 
-	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
-		natsutil.HealthCheck(nc),
-	)
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -190,26 +190,27 @@ func main() {
 	)
 }
 
-// drainPool pumps one per-destination concurrent consumer's messages into the
-// shared worker pool, spawning a goroutine per message bounded by sem. Each
-// concurrent lane has its own iterator (and its own server-side ack-pending
-// budget), so a down peer's iterator stalls alone; the pool caps total
-// concurrency across all lanes. The pump goroutine is itself counted in wg —
-// iter.Stop() returns without waiting for it, so shutdown's wg.Wait() must
-// also cover the pump, or a message received between Next() and the
-// per-message Add(1) could slip past the wait and race nc.Drain(). The pump
-// exits when the iterator is Stop()'d on shutdown.
-func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
+// drainPool pumps one lane's messages into the shared worker pool, one
+// goroutine per message bounded by sem. The pump goroutine is counted in wg
+// too: iter.Stop() returns without waiting for it, so a message taken between
+// Next() and the per-message Add(1) could otherwise slip past shutdown's
+// wg.Wait() and race nc.Drain(). It exits when the iterator is stopped.
+//
+// lane names the peer in the terminal log: one of these runs per remote site,
+// and the health check is the only other place that says which one died.
+func drainPool(ctx context.Context, lane string, iter jsiter.Nexter, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
-				// ErrMsgIteratorClosed is the normal stop (iter.Stop() on shutdown);
-				// any other error means consumption died unexpectedly — surface it.
-				if !errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "error", err)
+				// The pump absorbs everything it can recover from, so ErrStopped
+				// (iter.Stop() on shutdown) is the only expected error here. Any
+				// other means consumption died for good — say so, or the lane goes
+				// quiet with no cause anywhere but the readiness probe.
+				if !errors.Is(err, jsiter.ErrStopped) {
+					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "lane", lane, "error", err)
 				}
 				return
 			}

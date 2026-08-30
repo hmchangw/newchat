@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -286,11 +287,7 @@ func main() {
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
-	cons, err := otelJS.CreateOrUpdateConsumer(ctx, wiring.CanonicalStream.Name, consumerCfg)
-	if err != nil {
-		slog.Error("create consumer failed", "error", err)
-		os.Exit(1)
-	}
+	open := jsiter.PullFrom(jsiter.Resolve(otelJS, wiring.CanonicalStream.Name, consumerCfg), jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	// The broker advertises max_payload in its INFO on connect, so this is
 	// always in step with the server. An env var was a second source of truth
 	// that silently dropped batches whenever it drifted below the real limit.
@@ -370,17 +367,15 @@ func main() {
 	// Mute is the only canonical member event still on this stream; add/remove invalidation rides on MESSAGES-CANONICAL sys-messages.
 	// DeliverNewPolicy: skip history on restart; roomsubcache TTL reconciles any boundary staleness.
 	roomsCfg := stream.Rooms(cfg.SiteID)
-	invalCons, err := otelJS.CreateOrUpdateConsumer(ctx, roomsCfg.Name, jetstream.ConsumerConfig{
+	invalCfg := jetstream.ConsumerConfig{
 		Durable:       cfg.Mode.ConsumerName("notification-worker-room-event-invalidate"),
 		FilterSubject: subject.RoomCanonicalMemberEvent(cfg.SiteID, model.CanonicalMemberEventMuted),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverNewPolicy,
-	})
-	if err != nil {
-		slog.Error("create canonical member event consumer failed", "error", err)
-		os.Exit(1)
 	}
-	invalIter, err := invalCons.Messages(ctx, jetstream.PullMaxMessages(64))
+	openInval := jsiter.PullFrom(jsiter.Resolve(otelJS, roomsCfg.Name, invalCfg), jetstream.PullMaxMessages(64))
+
+	invalIter, err := jsiter.NewPump(ctx, invalCfg.Durable, openInval)
 	if err != nil {
 		slog.Error("canonical member event iterator failed", "error", err)
 		os.Exit(1)
@@ -408,7 +403,7 @@ func main() {
 		}
 	}()
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	iter, err := jsiter.NewPump(ctx, consumerCfg.Durable, open)
 	if err != nil {
 		slog.Error("messages failed", "error", err)
 		os.Exit(1)
@@ -464,6 +459,8 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
+		invalIter.HealthCheck(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)

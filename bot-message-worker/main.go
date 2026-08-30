@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/jsiter"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -139,12 +140,10 @@ func run() error {
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
-	if err != nil {
-		return fmt.Errorf("create consumer: %w", err)
-	}
+	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.SiteID)
+	open := jsiter.PullFrom(jsiter.Resolve(js, streamCfg.Name, consumerCfg), jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 
-	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+	iter, err := jsiter.NewPump(ctx, consumerCfg.Durable, open)
 	if err != nil {
 		return fmt.Errorf("messages iter: %w", err)
 	}
@@ -168,6 +167,7 @@ func run() error {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		iter.HealthCheck(),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)

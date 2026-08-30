@@ -111,6 +111,13 @@ func pipelineMsgData(t *testing.T) []byte {
 	return data
 }
 
+// alwaysRecovering lets these tests drive runConsumer with a plain fetcher.
+// They are about flush pipelining, not consumer recovery, so every outcome
+// keeps the loop going — which is what a nil batch error means anyway.
+type alwaysRecovering struct{ msgFetcher }
+
+func (alwaysRecovering) Recover(context.Context, error) bool { return true }
+
 // startPipelineConsumer runs a consumer with bulkBatchSize 1 so every message
 // triggers a flush, reaching the first bulk request after a single fetch.
 func startPipelineConsumer(t *testing.T, store Store, fetcher msgFetcher, depth int) (stopCh chan struct{}, doneCh chan struct{}) {
@@ -118,7 +125,7 @@ func startPipelineConsumer(t *testing.T, store Store, fetcher msgFetcher, depth 
 	handler := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 1)
 	stopCh = make(chan struct{})
 	doneCh = make(chan struct{})
-	go runConsumer(context.Background(), fetcher, handler, consumerTuning{
+	go runConsumer(context.Background(), alwaysRecovering{fetcher}, handler, consumerTuning{
 		fetchBatchSize: 1, bulkFlushInterval: time.Hour, pipelineDepth: depth,
 	}, stopCh, doneCh)
 	return stopCh, doneCh
@@ -221,7 +228,7 @@ func TestRunConsumer_FlushesBufferedWorkOnShutdownAfterFetchErrors(t *testing.T)
 	handler := NewHandler(store, newMessageCollection("msgs-v1", "site-a", time.Time{}, false), 10)
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
-	go runConsumer(context.Background(), fetcher, handler, consumerTuning{
+	go runConsumer(context.Background(), alwaysRecovering{fetcher}, handler, consumerTuning{
 		fetchBatchSize: 10, bulkFlushInterval: time.Hour, pipelineDepth: 1,
 	}, stopCh, doneCh)
 
