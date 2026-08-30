@@ -48,11 +48,13 @@ type Config struct {
 	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
 	// proxy env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
-	// GraphProxyUsername and GraphProxyPassword authenticate to GRAPH_PROXY_URL
-	// with HTTP Basic. Kept separate from the URL so a password carrying URL
-	// metacharacters needs no percent-encoding; they override any userinfo
-	// embedded in the URL. GRAPH_PROXY_PASSWORD is a secret — never log it.
-	// Setting either without GRAPH_PROXY_URL fails at client construction.
+	// GraphProxyUsername and GraphProxyPassword authenticate to GRAPH_PROXY_URL:
+	// HTTP Basic for an http/https proxy, the RFC 1929 username/password
+	// sub-negotiation for socks5/socks5h. Kept separate from the URL so a
+	// password carrying URL metacharacters needs no percent-encoding; they
+	// override any userinfo embedded in the URL. GRAPH_PROXY_PASSWORD is a
+	// secret — never log it. Setting either without GRAPH_PROXY_URL fails at
+	// client construction.
 	GraphProxyUsername string `env:"GRAPH_PROXY_USERNAME" envDefault:""`
 	GraphProxyPassword string `env:"GRAPH_PROXY_PASSWORD" envDefault:""`
 

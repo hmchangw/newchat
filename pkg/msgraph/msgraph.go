@@ -370,7 +370,9 @@ var basicAuthProxySchemes = map[string]bool{"http": true, "https": true}
 // scheme and host; an invalid value — or credentials that cannot apply to any
 // proxy — is reported so the caller fails fast at construction rather than
 // surfacing an opaque per-request error. No-op when the proxy settings are all
-// empty. No error message carries the password.
+// empty — an ambient HTTPS_PROXY/HTTP_PROXY is then left to the transport
+// untouched and unexamined, so its own userinfo raises no warning here. No
+// error message carries the password.
 func applyProxy(hc *http.Client, cfg *Config) error {
 	if cfg.ProxyURL == "" {
 		// Credentials with nowhere to go: the ambient HTTPS_PROXY carries its own
@@ -426,6 +428,8 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 		// anyone on the path to the proxy. Warned rather than rejected — corporate
 		// proxies are overwhelmingly plain http, and refusing them here would break
 		// the deployments this setting exists for. Never name the credentials.
+		// Only the configured proxy is warned about: userinfo in an ambient
+		// HTTPS_PROXY reaches the transport without passing through here.
 		if proxyURL.Scheme != "https" {
 			slog.Warn("graph proxy credentials are sent unencrypted to the proxy; only an https proxy encrypts that hop",
 				"scheme", proxyURL.Scheme, "proxyHost", proxyURL.Hostname())

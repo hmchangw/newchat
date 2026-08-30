@@ -84,6 +84,10 @@ to authenticate to the proxy. How they travel depends on the scheme:
 > deployments this setting is for. Treat it as a decision for whoever runs the
 > proxy: an `https://` proxy URL closes it; a trusted network segment is the
 > usual reason to accept it. The warning names the scheme and proxy host only.
+>
+> It covers `GRAPH_PROXY_URL` only. Userinfo carried in an ambient
+> `HTTPS_PROXY`/`HTTP_PROXY` reaches the transport without passing through
+> this client, so it crosses the same unencrypted hop unwarned.
 
 Credentials embedded in the URL (`http://user:pass@proxy:8080`) still work and
 stay supported, but the separate vars are preferred:
