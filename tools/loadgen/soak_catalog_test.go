@@ -39,12 +39,12 @@ func TestSoakCatalog_PublishDoesNotAdmitUntilGatekeeperAccepts(t *testing.T) {
 
 func TestSoakCatalog_ThreadRecipientSetSurvivesReplyEviction(t *testing.T) {
 	catalog := newSoakCatalog(2, 100, 0, nil)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, candidate := range []soakCatalogCandidate{
 		{ID: "parent", RoomID: "room-1", Author: "alice", Content: "parent"},
 		{ID: "reply", RoomID: "room-1", Author: "bob", Content: "reply", ThreadParentID: "parent"},
 	} {
-		// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-		// nosemgrep: gosec.G601-1
 		require.NoError(t, catalog.TrackPublished(&candidate))
 		require.True(t, catalog.Accept(candidate.RoomID, candidate.ID))
 	}

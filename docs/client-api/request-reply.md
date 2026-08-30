@@ -513,14 +513,16 @@ platform admin. Channel rooms only.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Caps returned members; must be > 0 if set. |
-| `offset` | number | no | Pagination; must be ≥ 0 if set. |
+| `limit` | number | no | Caps returned members; must be > 0 if set. Omitted returns every member. |
+| `offset` | number | no | Pagination; must be ≥ 0 if set. Advance by the `limit` you sent. |
 | `enrich` | boolean | no | When `true`, populates display fields on each entry. |
 
 #### Success response
 
-`{ "members": RoomMember[] }` — see `RoomMember` / `RoomMemberEntry` schemas in
-[../client-api.md §3.1](../client-api.md#list-members).
+`{ "members": RoomMember[], "hasMore": boolean }` — `hasMore` is `true` when
+another page follows (offset-based; the server over-fetches `limit + 1` to
+decide), and always `false` for a request with no `limit`. See `RoomMember` /
+`RoomMemberEntry` schemas in [../client-api.md §3.1](../client-api.md#list-members).
 
 #### Errors
 

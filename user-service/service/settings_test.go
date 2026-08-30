@@ -158,10 +158,10 @@ func TestSetSettings_EmptyRequest(t *testing.T) {
 
 func TestSetSettings_InvalidTranslateTag(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, tag := range []string{"en_US", "-en", "en-", "1en", "en US"} {
 		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
-			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-			// nosemgrep: gosec.G601-1
 			UserSettings: model.UserSettings{TranslateMessageInto: &tag},
 		})
 		requireCode(t, err, errcode.CodeBadRequest)
@@ -171,15 +171,13 @@ func TestSetSettings_InvalidTranslateTag(t *testing.T) {
 func TestSetSettings_ValidTranslateTags(t *testing.T) {
 	svc, _, users, _, _, _, pub := newSvc(t)
 	expectInbox(pub)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, tag := range []string{"en", "en-US", "zh-Hant-TW", "ja", ""} { // "" = translation off
 		users.EXPECT().UpdateUserSettings(gomock.Any(), "alice", gomock.Any(), gomock.Any()).
-			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-			// nosemgrep: gosec.G601-1
 			Return(&model.User{Settings: &model.UserSettings{TranslateMessageInto: &tag}}, nil)
 		pub.EXPECT().Publish(gomock.Any(), subject.SettingsUpdate("alice"), gomock.Any()).Return(nil)
 		_, err := svc.SetSettings(ctx("alice", "site-a"), models.SettingsSetRequest{
-			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-			// nosemgrep: gosec.G601-1
 			UserSettings: model.UserSettings{TranslateMessageInto: &tag},
 		})
 		require.NoError(t, err, "tag %q must be accepted", tag)

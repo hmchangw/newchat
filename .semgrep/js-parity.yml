@@ -17,13 +17,13 @@ rules:
           patterns:
             - pattern-not: "'...'"
 
-  - id: eslint.detect-possible-timing-attack
+  - id: eslint.detect-possible-timing-attacks
     languages: [javascript, typescript]
     severity: WARNING
     message: >
       Comparison against a secret-shaped identifier (CWE-208). Use a
       constant-time compare for real secrets; if the operand is not a secret,
-      suppress with `// nosemgrep: eslint.detect-possible-timing-attack`.
+      suppress with `// nosemgrep: eslint.detect-possible-timing-attacks`.
     patterns:
       - pattern-either:
           - pattern: $A === $SECRET

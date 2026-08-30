@@ -132,8 +132,12 @@ type ListRoomMembersRequest struct {
 	Enrich bool `json:"enrich,omitempty"`
 }
 
+// ListRoomMembersResponse is one page of a room's members. HasMore reports
+// whether at least one further row follows the page (the store over-fetches
+// limit+1 to decide); it is always false when the request carried no limit.
 type ListRoomMembersResponse struct {
 	Members []RoomMember `json:"members"`
+	HasMore bool         `json:"hasMore"`
 }
 
 // OrgMember is the wire projection returned by the list-org-members endpoint.

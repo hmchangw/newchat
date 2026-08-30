@@ -47,9 +47,9 @@ func validateSource(src *SourceMapping) error {
 			}
 		}
 	}
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for alias, t := range src.Targets {
-		// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
-		// nosemgrep: gosec.G601-1
 		if err := validateTarget(alias, &t, src.Resolvers); err != nil {
 			return err
 		}

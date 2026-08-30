@@ -1532,7 +1532,7 @@ func TestHandler_AddMembers_SilentlyFiltersBotsFromChannelRefs(t *testing.T) {
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r_src", gomock.Any(), nil, false).Return([]model.RoomMember{
 		{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "bob"}},
 		{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "weather.bot"}},
-	}, nil)
+	}, false, nil)
 
 	// The bot is filtered before publishing. The capacity short-circuit (no orgs,
 	// UserCount 1 + 1 candidate ≤ 1000) skips CountNewMembers, so the filtering
@@ -1805,7 +1805,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "bob"}},
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "carol"}},
-		}, nil)
+		}, false, nil)
 
 		h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, memberListClient: mc}
 		orgs, accs, err := h.expandChannelRefs(context.Background(), "alice", []model.ChannelRef{ch})
@@ -1825,7 +1825,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{ID: "org1", Type: model.RoomMemberOrg}},
 			{Member: model.RoomMemberEntry{ID: "org2", Type: model.RoomMemberOrg}},
-		}, nil)
+		}, false, nil)
 
 		h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, memberListClient: mc}
 		orgs, accs, err := h.expandChannelRefs(context.Background(), "alice", []model.ChannelRef{ch})
@@ -1845,7 +1845,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{ID: "org1", Type: model.RoomMemberOrg}},
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "bob"}},
-		}, nil)
+		}, false, nil)
 
 		h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, memberListClient: mc}
 		orgs, accs, err := h.expandChannelRefs(context.Background(), "alice", []model.ChannelRef{ch})
@@ -1886,7 +1886,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 		store.EXPECT().CheckMembership(gomock.Any(), "alice", "ch-local").Return(nil)
 		store.EXPECT().ListRoomMembers(gomock.Any(), "ch-local", gomock.Any(), nil, false).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "local-user"}},
-		}, nil)
+		}, false, nil)
 		mc.EXPECT().ListMembers(gomock.Any(), "alice", remote, gomock.Any()).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "remote-user"}},
 		}, nil)
@@ -1975,7 +1975,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 
 		ch := model.ChannelRef{RoomID: "ch1", SiteID: "site-a"}
 		store.EXPECT().CheckMembership(gomock.Any(), "alice", "ch1").Return(nil)
-		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return(nil, errors.New("mongo timeout"))
+		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return(nil, false, errors.New("mongo timeout"))
 
 		h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, memberListClient: mc}
 		_, _, err := h.expandChannelRefs(context.Background(), "alice", []model.ChannelRef{ch})
@@ -2078,7 +2078,7 @@ func TestHandler_AddMembers_ChannelExpansion(t *testing.T) {
 		store.EXPECT().ListRoomMembers(gomock.Any(), "ch1", gomock.Any(), nil, false).Return([]model.RoomMember{
 			{Member: model.RoomMemberEntry{ID: "unknown", Type: ""}},
 			{Member: model.RoomMemberEntry{Type: model.RoomMemberIndividual, Account: "bob"}},
-		}, nil)
+		}, false, nil)
 
 		h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, memberListClient: mc}
 		_, accs, err := h.expandChannelRefs(context.Background(), "alice", []model.ChannelRef{ch})
@@ -2106,6 +2106,7 @@ func TestHandler_ListMembers(t *testing.T) {
 		errContains string
 		errIs       error
 		members     []model.RoomMember
+		hasMore     bool
 	}
 	tests := []struct {
 		name      string
@@ -2120,7 +2121,7 @@ func TestHandler_ListMembers(t *testing.T) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
 				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, (*int)(nil), (*int)(nil), false).
-					Return([]model.RoomMember{orgMember, existingMember}, nil)
+					Return([]model.RoomMember{orgMember, existingMember}, false, nil)
 			},
 			want: want{members: []model.RoomMember{orgMember, existingMember}},
 		},
@@ -2135,7 +2136,7 @@ func TestHandler_ListMembers(t *testing.T) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
 				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, (*int)(nil), (*int)(nil), false).
-					Return([]model.RoomMember{synth}, nil)
+					Return([]model.RoomMember{synth}, false, nil)
 			},
 			want: want{members: []model.RoomMember{{
 				ID: "sub-xyz", RoomID: roomID, Ts: time.Unix(3, 0).UTC(),
@@ -2194,15 +2195,37 @@ func TestHandler_ListMembers(t *testing.T) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
 				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, gomock.Any(), gomock.Any(), false).
-					DoAndReturn(func(_ context.Context, _ string, limit, offset *int, _ bool) ([]model.RoomMember, error) {
+					DoAndReturn(func(_ context.Context, _ string, limit, offset *int, _ bool) ([]model.RoomMember, bool, error) {
 						require.NotNil(t, limit)
 						require.NotNil(t, offset)
 						assert.Equal(t, 10, *limit)
 						assert.Equal(t, 5, *offset)
-						return []model.RoomMember{}, nil
+						return []model.RoomMember{}, false, nil
 					})
 			},
 			want: want{members: []model.RoomMember{}},
+		},
+		{
+			name: "hasMore from the store rides through to the response",
+			body: []byte(`{"limit":1}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
+					Return(nil)
+				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, gomock.Any(), (*int)(nil), false).
+					Return([]model.RoomMember{orgMember}, true, nil)
+			},
+			want: want{members: []model.RoomMember{orgMember}, hasMore: true},
+		},
+		{
+			name: "last page reports hasMore false",
+			body: []byte(`{"limit":10,"offset":1}`),
+			setupMock: func(s *MockRoomStore) {
+				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
+					Return(nil)
+				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, gomock.Any(), gomock.Any(), false).
+					Return([]model.RoomMember{existingMember}, false, nil)
+			},
+			want: want{members: []model.RoomMember{existingMember}, hasMore: false},
 		},
 		{
 			name: "auth probe infra error",
@@ -2220,7 +2243,7 @@ func TestHandler_ListMembers(t *testing.T) {
 				s.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 					Return(nil)
 				s.EXPECT().ListRoomMembers(gomock.Any(), roomID, (*int)(nil), (*int)(nil), false).
-					Return(nil, fmt.Errorf("mongo exploded"))
+					Return(nil, false, fmt.Errorf("mongo exploded"))
 			},
 			want: want{errContains: "get room members"},
 		},
@@ -2247,7 +2270,7 @@ func TestHandler_ListMembers(t *testing.T) {
 								OrgName: "Cardiology Department", OrgDescription: "Inpatient care", MemberCount: 42,
 							},
 						},
-					}, nil)
+					}, false, nil)
 			},
 			want: want{members: []model.RoomMember{
 				{
@@ -2293,6 +2316,7 @@ func TestHandler_ListMembers(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.want.members, resp.Members)
+			assert.Equal(t, tc.want.hasMore, resp.HasMore)
 		})
 	}
 }
@@ -2310,7 +2334,7 @@ func TestHandler_ListMembers_EmptyBody(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), requester, roomID).
 		Return(nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), roomID, (*int)(nil), (*int)(nil), false).
-		Return([]model.RoomMember{{ID: "rm1", RoomID: roomID, Member: model.RoomMemberEntry{ID: "alice", Type: model.RoomMemberIndividual, Account: "alice"}}}, nil)
+		Return([]model.RoomMember{{ID: "rm1", RoomID: roomID, Member: model.RoomMemberEntry{ID: "alice", Type: model.RoomMemberIndividual, Account: "alice"}}}, false, nil)
 
 	h := &Handler{store: store, siteID: siteID}
 	c := ctxParams(map[string]string{"account": requester, "roomID": roomID})

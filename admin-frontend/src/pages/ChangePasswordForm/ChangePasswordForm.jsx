@@ -17,12 +17,12 @@ export default function ChangePasswordForm({ onSubmit, error, loading }) {
     }
     // Both operands are values the user just typed into this form, so there
     // is no secret to leak by timing.
-    // nosemgrep: eslint.detect-possible-timing-attack
+    // nosemgrep: eslint.detect-possible-timing-attacks
     if (newPassword !== confirmPassword) {
       setLocalError('New passwords do not match')
       return
     }
-    // nosemgrep: eslint.detect-possible-timing-attack
+    // nosemgrep: eslint.detect-possible-timing-attacks
     if (newPassword === oldPassword) {
       setLocalError('New password must differ from the current password')
       return
