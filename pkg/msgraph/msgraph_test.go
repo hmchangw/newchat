@@ -916,6 +916,7 @@ func TestProxyCredentials_SentAsBasicAuth(t *testing.T) {
 // GRAPH_PROXY_URL: a password containing URL metacharacters would corrupt the
 // parsed host if it were inlined, so it must survive verbatim here.
 func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
+	// #nosec G101 -- fixture password for a local httptest proxy, not a real credential
 	const password = "p@ss:w/rd?#%"
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
@@ -938,6 +939,7 @@ func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
 // credentials win over anything already inlined in the URL, so rotating the
 // password means changing one secret rather than two settings that can drift.
 func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
+	// #nosec G101 -- fixture userinfo; the test exists to prove it is overridden
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
 		ProxyURL:      "http://olduser:oldpass@proxy.corp:8080",
@@ -957,6 +959,7 @@ func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
 // guard: deployments already authenticating via userinfo in GRAPH_PROXY_URL
 // keep working when the new vars are unset.
 func TestProxyCredentials_EmbeddedUserinfoPreserved(t *testing.T) {
+	// #nosec G101 -- fixture userinfo; the test exists to prove it is preserved
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
 		ProxyURL: "http://embedded:secret@proxy.corp:8080",
@@ -1160,6 +1163,8 @@ func TestApplyProxy_AcceptsEverySupportedScheme(t *testing.T) {
 // (`invalid URL escape "%zz"`). A password beginning with a bad escape would
 // still reach the log, so no parse failure may carry any part of the value.
 func TestProxyCredentials_MalformedEscapeNeverLeaksPassword(t *testing.T) {
+	// #nosec G101 -- deliberately malformed fixture URLs; the test asserts none of
+	// them reaches an error message
 	tests := []struct {
 		name   string
 		proxy  string
