@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -22,8 +21,6 @@ import (
 // botAccountRegex matches bot/app accounts by the ".bot" suffix only — all "p_"
 // accounts have user records and resolve as users here.
 const botAccountRegex = `\.bot$`
-
-var botAccountPattern = regexp.MustCompile(botAccountRegex)
 
 type MongoStore struct {
 	rooms               *mongo.Collection
@@ -740,6 +737,7 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 	}
 
 	members := make([]model.RoomMember, 0, len(subs))
+	var humanAccounts, botAccounts []string
 	for i := range subs {
 		sub := &subs[i]
 		entry := model.RoomMemberEntry{
@@ -749,6 +747,13 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 		}
 		if enrich {
 			entry.IsOwner = hasRole(sub.Roles, model.RoleOwner)
+			if acct := sub.User.Account; acct != "" {
+				if model.IsBot(acct) {
+					botAccounts = append(botAccounts, acct)
+				} else {
+					humanAccounts = append(humanAccounts, acct)
+				}
+			}
 		}
 		members = append(members, model.RoomMember{
 			ID:     sub.ID,
@@ -759,64 +764,52 @@ func (s *MongoStore) getRoomSubscriptions(ctx context.Context, roomID string, li
 	}
 
 	if enrich && len(members) > 0 {
-		if err := s.attachUserDisplayNames(ctx, roomID, members); err != nil {
-			return nil, fmt.Errorf("attach user display names for %q: %w", roomID, err)
+		if err := s.attachUserDisplayNames(ctx, roomID, members, humanAccounts, botAccounts); err != nil {
+			return nil, err
 		}
 	}
 	return members, nil
 }
 
-// attachUserDisplayNames batch-loads display fields for all individual
-// members in the slice and copies them onto each member entry in place.
-// Used on the subscriptions-fallback + enrichment path. Accounts are
-// partitioned by the ".bot$" pattern: human accounts are looked up in
-// users for EngName/ChineseName; bot accounts are looked up in apps
-// for Name. Each partition is queried only when non-empty.
-func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, members []model.RoomMember) error {
-	var humanAccounts, botAccounts []string
-	for i := range members {
-		if members[i].Member.Type != model.RoomMemberIndividual || members[i].Member.Account == "" {
-			continue
-		}
-		if botAccountPattern.MatchString(members[i].Member.Account) {
-			botAccounts = append(botAccounts, members[i].Member.Account)
-		} else {
-			humanAccounts = append(humanAccounts, members[i].Member.Account)
-		}
-	}
-
-	var (
-		userByAccount  map[string]*model.User
-		appByAssistant map[string]string // assistant.name → app.name
-	)
+// attachUserDisplayNames batch-loads display fields for the individual members
+// in the slice and copies them on in place. Humans resolve from users, bots
+// from apps; each query fires only when its partition is non-empty. Callers
+// partition the accounts because the two ListRoomMembers paths detect bots
+// differently.
+func (s *MongoStore) attachUserDisplayNames(ctx context.Context, roomID string, members []model.RoomMember, humanAccounts, botAccounts []string) error {
 	if len(humanAccounts) > 0 {
-		u, err := s.findUsersForDisplay(ctx, humanAccounts)
+		userByAccount, err := s.findUsersForDisplay(ctx, humanAccounts)
 		if err != nil {
 			return fmt.Errorf("find users for room %q: %w", roomID, err)
 		}
-		userByAccount = u
-	}
-	if len(botAccounts) > 0 {
-		a, err := s.findAppsForDisplay(ctx, botAccounts)
-		if err != nil {
-			return fmt.Errorf("find apps for room %q: %w", roomID, err)
+		for i := range members {
+			if members[i].Member.Type != model.RoomMemberIndividual {
+				continue
+			}
+			if u, ok := userByAccount[members[i].Member.Account]; ok {
+				members[i].Member.EngName = u.EngName
+				members[i].Member.ChineseName = u.ChineseName
+				members[i].Member.SectName = u.SectName
+				members[i].Member.EmployeeID = u.EmployeeID
+			}
 		}
-		appByAssistant = a
 	}
+	return s.attachAppNames(ctx, roomID, members, botAccounts)
+}
 
+// attachAppNames resolves bot members' app display names in one indexed batch
+// and fills AppName in place. Org members carry no account, so they never key
+// into the result.
+func (s *MongoStore) attachAppNames(ctx context.Context, roomID string, members []model.RoomMember, botAccounts []string) error {
+	if len(botAccounts) == 0 {
+		return nil
+	}
+	appByAssistant, err := s.findAppsForDisplay(ctx, botAccounts)
+	if err != nil {
+		return fmt.Errorf("find apps for room %q: %w", roomID, err)
+	}
 	for i := range members {
-		if members[i].Member.Type != model.RoomMemberIndividual {
-			continue
-		}
-		acct := members[i].Member.Account
-		if u, ok := userByAccount[acct]; ok {
-			members[i].Member.EngName = u.EngName
-			members[i].Member.ChineseName = u.ChineseName
-			members[i].Member.SectName = u.SectName
-			members[i].Member.EmployeeID = u.EmployeeID
-			continue
-		}
-		if name, ok := appByAssistant[acct]; ok {
+		if name, ok := appByAssistant[members[i].Member.Account]; ok {
 			members[i].Member.AppName = name
 		}
 	}
