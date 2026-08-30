@@ -572,7 +572,7 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 		return nil, fmt.Errorf("decode enriched room_members for %q: %w", roomID, err)
 	}
 	members := make([]model.RoomMember, len(rows))
-	var orgIDs []string
+	var orgIDs, botAccounts []string
 	for i := range rows {
 		rm := rows[i].RoomMember
 		d := rows[i].Display
@@ -584,6 +584,10 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 		} else {
 			rm.Member.SectName = d.SectName
 			rm.Member.EmployeeID = d.EmployeeID
+			// room_members rows carry no isBot flag, so the suffix is the only signal.
+			if model.IsBot(rm.Member.Account) {
+				botAccounts = append(botAccounts, rm.Member.Account)
+			}
 		}
 		members[i] = rm
 	}
@@ -591,6 +595,9 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 		if err := s.attachOrgDisplay(ctx, roomID, members, orgIDs); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.attachAppNames(ctx, roomID, members, botAccounts); err != nil {
+		return nil, err
 	}
 	return members, nil
 }

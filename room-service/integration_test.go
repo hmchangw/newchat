@@ -1224,6 +1224,40 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		assert.Equal(t, "Eve", got[0].Member.EngName)
 		assert.Empty(t, got[0].Member.AppName)
 	})
+
+	t.Run("room_members path: bot member gets AppName from apps", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+
+		insertUser(t, db, model.User{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲"})
+		insertApp(t, db, bson.M{
+			"_id": "app-weather", "name": "Weather App",
+			"assistant": bson.M{"enabled": true, "name": "weather.bot"},
+		})
+
+		// A room_members doc exists, so ListRoomMembers takes the aggregation path.
+		_, err := db.Collection("room_members").InsertMany(ctx, []any{
+			model.RoomMember{ID: "rm-alice", RoomID: "chan-1", Ts: base,
+				Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"}},
+			model.RoomMember{ID: "rm-bot", RoomID: "chan-1", Ts: base.Add(time.Second),
+				Member: model.RoomMemberEntry{ID: "u-bot", Type: model.RoomMemberIndividual, Account: "weather.bot"}},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, "chan-1", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+
+		byAccount := make(map[string]model.RoomMemberEntry)
+		for _, m := range got {
+			byAccount[m.Member.Account] = m.Member
+		}
+		assert.Equal(t, "Weather App", byAccount["weather.bot"].AppName, "bot on room_members path must get AppName")
+		assert.Empty(t, byAccount["weather.bot"].EngName, "bot has no users doc")
+		assert.Equal(t, "Alice Wang", byAccount["alice"].EngName, "human enrichment must be unaffected")
+		assert.Empty(t, byAccount["alice"].AppName, "human must not get AppName")
+	})
 }
 
 func TestMongoStore_ListOrgMembers_Integration(t *testing.T) {
