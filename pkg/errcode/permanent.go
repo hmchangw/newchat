@@ -32,6 +32,13 @@ func (p *PermanentError) Is(target error) bool { return target == ErrPermanent }
 
 // IsPermanent reports whether err's chain carries a *PermanentError, returning
 // the wrapped *Error. Returns (nil, false) for any non-permanent error.
+//
+// "Chain" includes every branch of an errors.Join: errors.As walks multi-error
+// trees, so a join holding one permanent error and one transient error reports
+// permanent. A caller that joins errors from several operations and settles a
+// JetStream message on the result must therefore guarantee it never builds such
+// a mixture, or the transient failures are Ack-dropped along with the permanent
+// one — silently, since an Ack looks exactly like success.
 func IsPermanent(err error) (*Error, bool) {
 	var p *PermanentError
 	if errors.As(err, &p) {

@@ -9,6 +9,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // httpWriteTimeout bounds a response write measured from the request, so in-handler
@@ -27,15 +28,20 @@ const maxMultipartMemory = 1 << 20
 const requestBudget = httpWriteTimeout - 2*time.Second
 
 type Config struct {
-	Port                  string `env:"PORT" envDefault:"8082"`
-	SiteID                string `env:"SITE_ID,required"`
-	MongoURI              string `env:"MONGO_URI,required"`
-	MongoDB               string `env:"MONGO_DB" envDefault:"chat"`
-	MongoUsername         string `env:"MONGO_USERNAME"`
-	MongoPassword         string `env:"MONGO_PASSWORD"`
-	ReadPreference        string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
-	BcryptCost            int    `env:"BCRYPT_COST" envDefault:"10"`
-	SessionsMaxPerAccount int    `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
+	Port           string `env:"PORT" envDefault:"8082"`
+	SiteID         string `env:"SITE_ID,required"`
+	MongoURI       string `env:"MONGO_URI,required"`
+	MongoDB        string `env:"MONGO_DB" envDefault:"chat"`
+	MongoUsername  string `env:"MONGO_USERNAME"`
+	MongoPassword  string `env:"MONGO_PASSWORD"`
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	BcryptCost     int    `env:"BCRYPT_COST" envDefault:"10"`
+	// Valkey enables session-cache invalidation on revoke. Empty disables it:
+	// this service only ever BUSTS the cache, never reads it, so a missing
+	// client degrades to the pre-cache behaviour (revocation lands when the
+	// entry's refresh window elapses) rather than breaking anything.
+	Valkey                valkeyutil.Config
+	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
 	// NatsURL backs the room-service RPC behind the duty toggle. Required: the
 	// toggle has no fallback transport, so a missing value must fail at startup.
 	NatsURL       string `env:"NATS_URL,required"`

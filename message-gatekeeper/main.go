@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -19,8 +20,10 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/roommetacache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -45,14 +48,16 @@ type config struct {
 	// ThreadParentRecheckDelay spaces the one re-check of a thread parent history
 	// reports missing, covering the lag between the parent's publish and
 	// message-worker's write. Zero rejects on the first miss.
-	ThreadParentRecheckDelay time.Duration           `env:"GATEKEEPER_THREAD_PARENT_RECHECK_DELAY" envDefault:"150ms"`
-	RoomMetaCacheSize        int                     `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
-	RoomMetaCacheTTL         time.Duration           `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
-	ValkeyAddrs              []string                `env:"VALKEY_ADDRS"               envSeparator:","`
-	ValkeyPassword           string                  `env:"VALKEY_PASSWORD"            envDefault:""`
-	RoomMetaL2TTL            time.Duration           `env:"ROOM_META_L2_TTL"           envDefault:"15m"`
+	ThreadParentRecheckDelay time.Duration `env:"GATEKEEPER_THREAD_PARENT_RECHECK_DELAY" envDefault:"150ms"`
+	RoomMetaCacheSize        int           `env:"ROOM_META_CACHE_SIZE"       envDefault:"10000"`
+	RoomMetaCacheTTL         time.Duration `env:"ROOM_META_CACHE_TTL"        envDefault:"2m"`
+	Valkey                   valkeyutil.Config
+	RoomMetaL2               roommetacache.TTLConfig
+	SubL2                    subauthcache.TTLConfig  `envPrefix:"GATEKEEPER_"`
+	Breaker                  mongoutil.BreakerConfig `envPrefix:"GATEKEEPER_"`
 	UserCacheSize            int                     `env:"USER_CACHE_SIZE"            envDefault:"10000"`
 	UserCacheTTL             time.Duration           `env:"USER_CACHE_TTL"             envDefault:"5m"`
+	UserL2                   userstore.TTLConfig
 	HealthAddr               string                  `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled             bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr              string                  `env:"METRICS_ADDR"               envDefault:":9090"`
@@ -78,6 +83,10 @@ func main() {
 	logctx.Configure(cfg.DebugLog)
 
 	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Breaker.Validate("GATEKEEPER_"); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
@@ -125,20 +134,23 @@ func main() {
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
-	var metaValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			slog.Error("valkey connect (room-meta L2) failed", "error", err)
-			os.Exit(1)
-		}
-		slog.Info("room-meta L2 cache enabled", "ttl", cfg.RoomMetaL2TTL)
+	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
+		slog.Info("valkey L2 tiers enabled", "room_meta_ttl", cfg.RoomMetaL2.TTL, "user_ttl", cfg.UserL2.TTL)
 	}
 
-	mongoStore := NewMongoStore(db, metaValkey, cfg.RoomMetaL2TTL)
+	// Separate instances so a warm room-meta L2 hit can't reset the subscription
+	// breaker's failure count. Each reports under its own name, so the two health
+	// signals stay distinguishable on the shared gauge.
+	subBreaker := cfg.Breaker.New(ctx, "subscription",
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	metaBreaker := cfg.Breaker.New(ctx, "roommeta",
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	mongoStore := NewMongoStore(db, valkeyClient, cfg.RoomMetaL2.TTL, cfg.SubL2.TTL, subBreaker, metaBreaker)
 	withMeta, err := newCachedMetaStore(mongoStore, cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL)
 	if err != nil {
 		slog.Error("init room meta cache failed", "error", err)
@@ -149,8 +161,13 @@ func main() {
 		slog.Error("init subscription cache failed", "error", err)
 		os.Exit(1)
 	}
-	users, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	// Fenced inside the cache, not outside it: an open breaker must still serve
+	// warm entries. Unfenced, the display-name lookup pays a server-selection
+	// timeout on every send for as long as Mongo is down.
+	userBreaker := cfg.Breaker.New(ctx, "user",
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	users, err := userstore.Resilient(db.Collection("users"), userBreaker,
+		valkeyClient, cfg.UserL2.TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user meta cache failed", "error", err)
 		os.Exit(1)
@@ -159,6 +176,7 @@ func main() {
 		"sub_cache_size", cfg.SubCacheSize, "sub_cache_ttl", cfg.SubCacheTTL,
 		"room_meta_cache_size", cfg.RoomMetaCacheSize, "room_meta_cache_ttl", cfg.RoomMetaCacheTTL,
 		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
+		"sub_l2_ttl", cfg.SubL2.TTL,
 	)
 	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 		ack, err := js.PublishMsg(ctx, msg, opts...)
@@ -210,9 +228,7 @@ func main() {
 	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		func(msgCtx context.Context, msg *natsmetrics.Message) {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
-			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			handler.HandleJetStreamMsg(handlerCtx, msg)
 		})
 
@@ -245,7 +261,7 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
-		func(_ context.Context) error { valkeyutil.Disconnect(metaValkey); return nil },
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 }

@@ -27,11 +27,7 @@ func TestCassandraStore_SaveMessage_InstrumentedBatchOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := NewCassandraStore(nil, msgbucket.New(time.Hour), nil)
-			store.newBatch = func(ctx context.Context) *gocql.Batch {
-				// No live session is allowed in a unit test; this constructor creates an offline batch.
-				//nolint:staticcheck // SA1019: session.NewBatch requires the prohibited live Cassandra dependency.
-				return gocql.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-			}
+			store.newBatch = newOfflineBatch
 			calls := 0
 			store.executeBatch = func(_ context.Context, batch *gocql.Batch) error {
 				calls++

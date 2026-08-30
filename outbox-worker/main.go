@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -101,7 +102,7 @@ func main() {
 	// permanent errors and Naks transient ones with backoff.
 	process := func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Subject(), msg.Data()))
 		})
 	}
@@ -239,14 +240,17 @@ func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan stru
 // One consumer per peer gives each its own budget, so a down peer stalls only
 // its own lane.
 func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane string, eventTypes []model.InboxEventType) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	// Unlimited redelivery: a peer that is down for an hour must not exhaust
+	// MaxDeliver and drop the federated event. Applied to the settings, not to
+	// the config afterwards, so the derived BackOff is not clamped against a cap
+	// that no longer applies — see stream.WithUnlimitedRedelivery.
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = "outbox-worker-" + lane + "-" + destSiteID
 	filters := make([]string, 0, len(eventTypes))
 	for _, et := range eventTypes {
 		filters = append(filters, subject.Outbox(siteID, destSiteID, et))
 	}
 	cc.FilterSubjects = filters
-	cc.MaxDeliver = -1
 	return cc
 }
 

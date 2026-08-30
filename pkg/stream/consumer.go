@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/hmchangw/chat/pkg/jsretry"
 )
 
 // ConsumerSettings holds the env-driven knobs for durable JetStream
@@ -110,4 +112,66 @@ func (s ConsumerSettings) backOffSchedule() []time.Duration {
 		d = next
 	}
 	return out
+}
+
+// EffectiveAckWait is the ack deadline the server will actually enforce: the
+// head of the backoff schedule when one is derived, else AckWait. The server
+// overwrites AckWait with BackOff[0] (server/consumer.go:677-682), so a service
+// that sizes its own work against the deadline — roomlist-worker's flush budget —
+// must read this rather than the configured field. The two agree today by
+// construction; reading the derived value keeps that from drifting silently.
+func (s ConsumerSettings) EffectiveAckWait() time.Duration {
+	if schedule := s.backOffSchedule(); len(schedule) > 0 {
+		return schedule[0]
+	}
+	return s.AckWait
+}
+
+// DefaultMaxDeliver mirrors the MaxDeliver struct tag. A consumer left at this
+// value drops a message after roughly 12.6 minutes of jsretry backoff, which is
+// the right answer for work that is cheap to lose and wrong for work that must
+// survive a dependency outage.
+const DefaultMaxDeliver = 6
+
+// OutageRetryWindow is how long a consumer opted into the outage budget must
+// keep retrying before it gives up on a message. Sized to ride out the
+// one-hour MongoDB outage the outage-survival work targets.
+const OutageRetryWindow = time.Hour
+
+// The budget is DERIVED from schedule — the backoff the caller settles with,
+// not an assumed one — and from its jittered minimum rather than its nominal
+// entries. Both halves were learned the hard way: a hardcoded budget sized
+// against DefaultBackoff was applied to a consumer settling with
+// LowLatencyBackoff, whose repeating tail was 20x shorter, so the real window
+// was about four minutes instead of the intended hour; and equal jitter can
+// halve every wait, so nominal arithmetic overstates any window by 2x.
+//
+// Pass the same schedule the service hands to jsretry.Settle. A schedule whose
+// tail is too short to cover OutageRetryWindow will produce a large delivery
+// count; that is the honest answer, and the signal to lengthen the tail.
+func WithOutageRetryBudget(s ConsumerSettings, schedule []time.Duration) ConsumerSettings {
+	if s.MaxDeliver != DefaultMaxDeliver {
+		return s
+	}
+	if n := jsretry.DeliveriesFor(schedule, OutageRetryWindow); n > s.MaxDeliver {
+		s.MaxDeliver = n
+	}
+	return s
+}
+
+// WithUnlimitedRedelivery lifts the delivery cap: the consumer keeps redelivering
+// until the handler acks, so a dependency outage cannot silently drop work. Use
+// it where a poison message is dropped by the handler's own classification (an
+// Ack on a server-rejected write) rather than by a delivery count.
+//
+// It takes and returns settings for a reason. MaxDeliver has to be unlimited
+// BEFORE the schedule is derived: backOffSchedule clamps the steps against the
+// cap and skips that clamp precisely when the cap is unlimited. Set on the
+// jetstream.ConsumerConfig afterwards, the clamp has already fired against a cap
+// that no longer applies, so CONSUMER_BACKOFF_STEPS quietly shortens redelivery
+// spacing while having no effect on the cap it was clamped against. Passing the
+// settings through here makes that ordering the only one available.
+func WithUnlimitedRedelivery(s ConsumerSettings) ConsumerSettings {
+	s.MaxDeliver = -1
+	return s
 }

@@ -21,7 +21,7 @@ services:
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-5m}
+      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-90m}
       - LARGE_ROOM_THRESHOLD=${LARGE_ROOM_THRESHOLD:-500}
       # Recipients per PUSH-NOTIFICATION event. Default 100; well under FCM's 500-token
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
