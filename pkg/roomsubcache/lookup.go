@@ -47,6 +47,21 @@ func NewLookup(cache Cache, load Loader, ttl time.Duration) *Lookup {
 }
 
 func newLookupWithClock(cache Cache, load Loader, ttl time.Duration, now func() time.Time) *Lookup {
+	// TTLConfig documents zero as disabling this tier, and nothing below would
+	// honour that: write passes the ttl straight to Cache.Set, which reaches
+	// valkeyutil.SetJSONWithTTL and then client.Set, where a zero expiry means
+	// NO expiry. A tier "disabled" that way would instead store membership
+	// entries that never lapse and are never re-validated — indefinitely stale
+	// input to the fan-out authorization this cache serves, which is the
+	// opposite of switching it off. Dropping the cache here takes the nil-cache
+	// paths GetMembers and Invalidate already have.
+	//
+	// The sibling tiers guard the same way: userstore's L2 on
+	// `client == nil || ttl <= 0`, and valkeyutil's shared Tier and SlideTTL
+	// likewise. This Lookup owns its own write path and so bypassed all three.
+	if ttl <= 0 {
+		cache = nil
+	}
 	return &Lookup{cache: cache, load: load, ttl: ttl, now: now}
 }
 

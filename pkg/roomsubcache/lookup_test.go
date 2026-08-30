@@ -406,3 +406,36 @@ func TestLookup_SingleFlightCollapsesRefreshes(t *testing.T) {
 	assert.Equal(t, int32(2), loader.calls.Load(),
 		"ten concurrent stale reads must trigger one revalidation, not ten")
 }
+
+// TTLConfig documents a zero TTL as disabling this tier. Nothing downstream
+// enforced that: write hands the ttl to Cache.Set, which reaches
+// valkeyutil.SetJSONWithTTL and then client.Set, where a zero expiry means NO
+// expiry — so "disabled" would have produced permanent, never-revalidated
+// membership entries feeding fan-out authorization.
+func TestNewLookup_NonPositiveTTLDisablesTheCache(t *testing.T) {
+	for _, ttl := range []time.Duration{0, -time.Second} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			cache := newFakeCache()
+			loads := 0
+			load := func(_ context.Context, _ string) ([]Member, error) {
+				loads++
+				return []Member{{Account: "alice"}}, nil
+			}
+
+			got, err := NewLookup(cache, load, ttl).GetMembers(context.Background(), "r1")
+			require.NoError(t, err)
+			assert.Equal(t, []Member{{Account: "alice"}}, got)
+
+			assert.Empty(t, cache.data, "a disabled tier must not write an entry that would never expire")
+			assert.Equal(t, 1, loads, "a disabled tier must serve from the loader")
+		})
+	}
+}
+
+// Invalidate must stay a no-op rather than panic once the cache is dropped.
+func TestNewLookup_DisabledTierInvalidateIsANoOp(t *testing.T) {
+	assert.NotPanics(t, func() {
+		NewLookup(newFakeCache(), func(_ context.Context, _ string) ([]Member, error) { return nil, nil }, 0).
+			Invalidate(context.Background(), "r1")
+	})
+}
