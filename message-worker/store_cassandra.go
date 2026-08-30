@@ -79,8 +79,8 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 	}
 }
 
-// writeTS is the write timestamp every create INSERT binds via USING TIMESTAMP.
-// Cassandra takes microseconds since the epoch.
+// writeTS is the write timestamp every *plaintext* create INSERT binds via
+// USING TIMESTAMP. Cassandra takes microseconds since the epoch.
 //
 // Pinning it to the message's own CreatedAt is what makes a redelivery re-execute
 // the *identical* write rather than a newer one. Cassandra resolves conflicts per
@@ -91,8 +91,18 @@ func NewCassandraStore(session *gocql.Session, bucket msgbucket.Sizer, cipher at
 // original body. message-worker's outage retry budget spreads redeliveries over
 // roughly an hour, which is exactly when someone fixes a typo.
 //
-// Only creates are pinned. Edits, deletes and the derived tcount/tlm SETs keep
-// the client clock, so each stays strictly above the create it supersedes.
+// Only plaintext creates are pinned. Edits, deletes and the derived tcount/tlm
+// SETs keep the client clock, so each stays strictly above the create it
+// supersedes.
+//
+// The encrypted create paths deliberately do NOT pin, because their bound values
+// are not identical across attempts: atrest.Encrypt draws a fresh random nonce
+// per call, so enc_payload and enc_meta differ on every redelivery. They are
+// separate cells, and Cassandra breaks a same-timestamp tie per cell by comparing
+// values — independently — so two attempts sharing one timestamp can leave the
+// ciphertext of one beside the nonce of the other, which AES-GCM can never open.
+// On the client clock each redelivery is strictly newer, so one attempt wins both
+// cells and the pair stays coherent. See store_cassandra_writetime_test.go.
 func writeTS(createdAt time.Time) int64 { return createdAt.UnixMicro() }
 
 // The encrypted create paths clear the plaintext body columns of any row already
@@ -102,13 +112,17 @@ func writeTS(createdAt time.Time) int64 { return createdAt.UnixMicro() }
 // attachments/card beside the new enc_payload is overwritten with empty fields
 // from the bundle by ApplyDecryptedFields on read — silently losing them.
 //
-// These clears are deliberately NOT pinned, which is why they are separate
-// statements rather than NULLs bound into the INSERT. They are tombstones, so
-// they only take effect if they outrank the row they clear, and a legacy row was
-// written by the pre-pinning code at execution time — after CreatedAt. Pinned,
-// they would land before it and clear nothing. On the client clock they always
-// win, and re-running one is harmless: an encrypted edit already nulls these same
-// four columns, so a redelivered strip only re-nulls already-null cells.
+// These clears are deliberately NOT pinned. They are tombstones, so they only
+// take effect if they outrank the row they clear, and a legacy row was written at
+// execution time — after CreatedAt. Pinned, they would land before it and clear
+// nothing. On the client clock they always win, and re-running one is harmless:
+// an encrypted edit already nulls these same four columns, so a redelivered strip
+// only re-nulls already-null cells.
+//
+// The encrypted INSERT beside them is unpinned too, so binding these NULLs into it
+// would carry the same timestamp and would also clear. They stay separate
+// statements to keep the requirement local: this clear must ride the client clock
+// whatever the INSERT does, so it cannot be silently re-pinned along with it.
 //
 // Mixed timestamps inside one batch are legal as long as no batch-level timestamp
 // is set; gocql's protocol default timestamp applies to whichever statements carry
