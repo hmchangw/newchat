@@ -76,6 +76,8 @@ func TestStartSoakPProfServer_ServesTheHeapProfile(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 	require.NotEmpty(t, server.Addr, "the listener must be bound before Serve starts")
 
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	response, err := http.Get("http://" + server.Addr + "/debug/pprof/heap?debug=1")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, response.Body.Close()) })

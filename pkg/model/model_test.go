@@ -2014,6 +2014,31 @@ func TestListRoomMembersResponseJSON(t *testing.T) {
 	assert.Equal(t, resp, dst)
 }
 
+func TestListRoomMembersResponseJSON_HasMore(t *testing.T) {
+	t.Run("hasMore rides the wire", func(t *testing.T) {
+		resp := model.ListRoomMembersResponse{
+			Members: []model.RoomMember{{
+				ID:     "rm1",
+				RoomID: "r1",
+				Member: model.RoomMemberEntry{ID: "alice", Type: model.RoomMemberIndividual, Account: "alice"},
+			}},
+			HasMore: true,
+		}
+		data, err := json.Marshal(&resp)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"hasMore":true`)
+		var dst model.ListRoomMembersResponse
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, resp, dst)
+	})
+
+	t.Run("hasMore is always present when false", func(t *testing.T) {
+		data, err := json.Marshal(&model.ListRoomMembersResponse{Members: []model.RoomMember{}})
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"members":[],"hasMore":false}`, string(data))
+	})
+}
+
 func TestRoomMemberEntry_DisplayFields_JSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "u1", Type: model.RoomMemberIndividual, Account: "alice",
@@ -2043,7 +2068,7 @@ func TestRoomMemberEntry_DisplayFields_OmittedWhenZero(t *testing.T) {
 	require.NoError(t, err)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(data, &got))
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q should be omitted when zero", k)
 	}
@@ -2062,26 +2087,26 @@ func TestRoomMemberEntry_DisplayFields_NotPersistedToBSON(t *testing.T) {
 	require.NoError(t, bson.Unmarshal(data, &got))
 	assert.Equal(t, "org-1", got["id"])
 	assert.Equal(t, "org", got["type"])
-	for _, k := range []string{"engName", "chineseName", "name", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
+	for _, k := range []string{"engName", "chineseName", "appName", "isOwner", "orgName", "orgCode", "memberCount", "sectName", "employeeId", "orgDescription"} {
 		_, present := got[k]
 		assert.False(t, present, "display field %q must not be persisted to BSON", k)
 	}
 }
 
-func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
-	t.Run("bot member name round-trips via JSON", func(t *testing.T) {
+func TestRoomMemberEntry_AppName_RoundTrip(t *testing.T) {
+	t.Run("bot member appName round-trips via JSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := json.Marshal(&entry)
 		require.NoError(t, err)
 
 		var raw map[string]any
 		require.NoError(t, json.Unmarshal(data, &raw))
-		assert.Equal(t, "Weather App", raw["name"])
+		assert.Equal(t, "Weather App", raw["appName"])
 		_, hasEngName := raw["engName"]
 		assert.False(t, hasEngName, "engName must be absent for bot entry")
 		_, hasChineseName := raw["chineseName"]
@@ -2092,19 +2117,19 @@ func TestRoomMemberEntry_BotName_RoundTrip(t *testing.T) {
 		assert.Equal(t, entry, dst)
 	})
 
-	t.Run("name not persisted to BSON", func(t *testing.T) {
+	t.Run("appName not persisted to BSON", func(t *testing.T) {
 		entry := model.RoomMemberEntry{
 			ID:      "u-bot",
 			Type:    model.RoomMemberIndividual,
 			Account: "weather.bot",
-			Name:    "Weather App",
+			AppName: "Weather App",
 		}
 		data, err := bson.Marshal(&entry)
 		require.NoError(t, err)
 		var got bson.M
 		require.NoError(t, bson.Unmarshal(data, &got))
-		_, hasName := got["name"]
-		assert.False(t, hasName, "name must not be persisted to BSON")
+		_, hasAppName := got["appName"]
+		assert.False(t, hasAppName, "appName must not be persisted to BSON")
 	})
 
 	t.Run("orgName and orgDescription round-trip via JSON", func(t *testing.T) {
@@ -5544,4 +5569,78 @@ func TestUserAccountUpdated_RoundTrip_EmptyRoles(t *testing.T) {
 	if dst.Roles == nil {
 		t.Fatal("empty roles must round-trip as [], not null")
 	}
+}
+
+func TestEffectiveRoomType(t *testing.T) {
+	tests := []struct {
+		name      string
+		roomType  model.RoomType
+		counter   string
+		wantType  model.RoomType
+		wantIsApp bool
+	}{
+		{"botDM with bot counterpart is an app room", model.RoomTypeBotDM, "weather.bot", model.RoomTypeBotDM, true},
+		{"botDM with human counterpart renders as dm", model.RoomTypeBotDM, "alice", model.RoomTypeDM, false},
+		{"botDM with p_admin counterpart renders as dm", model.RoomTypeBotDM, "p_admin_ops", model.RoomTypeDM, false},
+		{"botDM with QA p_ counterpart renders as dm", model.RoomTypeBotDM, "p_qa_bob", model.RoomTypeDM, false},
+		{"botDM with empty counterpart renders as dm", model.RoomTypeBotDM, "", model.RoomTypeDM, false},
+		{"dm is unchanged", model.RoomTypeDM, "alice", model.RoomTypeDM, false},
+		{"channel is unchanged", model.RoomTypeChannel, "", model.RoomTypeChannel, false},
+		{"discussion is unchanged", model.RoomTypeDiscussion, "", model.RoomTypeDiscussion, false},
+		{"a bot-named channel is still a channel", model.RoomTypeChannel, "weather.bot", model.RoomTypeChannel, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantType, model.EffectiveRoomType(tt.roomType, tt.counter))
+			assert.Equal(t, tt.wantIsApp, model.IsAppRoom(tt.roomType, tt.counter))
+		})
+	}
+}
+
+func TestDMRoomType(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b string
+		want model.RoomType
+	}{
+		{"human pair", "alice", "bob", model.RoomTypeDM},
+		{"bot counterpart", "alice", "weather.bot", model.RoomTypeBotDM},
+		{"bot requester", "weather.bot", "alice", model.RoomTypeBotDM},
+		{"two bots", "weather.bot", "sales.bot", model.RoomTypeBotDM},
+		{"platform admin is an ordinary partner", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"QA p_ account is an ordinary partner", "alice", "p_qa1", model.RoomTypeDM},
+		{"self DM", "alice", "alice", model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.DMRoomType(tt.a, tt.b))
+		})
+	}
+}
+
+func TestSubscriptionRoomType(t *testing.T) {
+	tests := []struct {
+		counterpart string
+		want        model.RoomType
+	}{
+		{"weather.bot", model.RoomTypeBotDM},
+		{"weather.site-a.bot", model.RoomTypeBotDM},
+		{"alice", model.RoomTypeDM},
+		{"p_adminsiteA", model.RoomTypeDM},
+		{"p_qa1", model.RoomTypeDM},
+		{"", model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.counterpart, func(t *testing.T) {
+			assert.Equal(t, tt.want, model.SubscriptionRoomType(tt.counterpart))
+		})
+	}
+}
+
+// The two sides of a bot<->human DM classify differently; that asymmetry is the
+// point. The room doc keeps one type.
+func TestRoomAndSubscriptionTypesDisagreeOnABotDM(t *testing.T) {
+	assert.Equal(t, model.RoomTypeBotDM, model.DMRoomType("alice", "weather.bot"))
+	assert.Equal(t, model.RoomTypeBotDM, model.SubscriptionRoomType("weather.bot")) // alice's row
+	assert.Equal(t, model.RoomTypeDM, model.SubscriptionRoomType("alice"))          // the bot's row
 }

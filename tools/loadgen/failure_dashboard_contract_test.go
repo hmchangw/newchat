@@ -127,6 +127,8 @@ func TestFailureObservationScope_FormalCampaignArtifactsAreAbsent(t *testing.T) 
 		"README.md",
 	}
 	for _, path := range paths {
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		encoded, err := os.ReadFile(path)
 		require.NoError(t, err)
 		for _, removed := range []string{

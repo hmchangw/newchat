@@ -323,3 +323,21 @@ func ids(items []model.ThreadListItem) []string {
 	}
 	return out
 }
+
+// Rows carry the type their own subscriber sees, so the split reads RoomType
+// directly.
+func TestDistinctDMAndBotNames_SplitsAppRoomsFromDMs(t *testing.T) {
+	items := []model.ThreadListItem{
+		{RoomType: model.RoomTypeBotDM, RoomName: "weather.bot"},
+		{RoomType: model.RoomTypeDM, RoomName: "alice"},       // bot's own row, normalized
+		{RoomType: model.RoomTypeDM, RoomName: "p_admin_ops"}, // p_admin DM, normalized
+		{RoomType: model.RoomTypeDM, RoomName: "bob"},
+		{RoomType: model.RoomTypeChannel, RoomName: "general"},
+		{RoomType: model.RoomTypeBotDM, RoomName: ""},
+	}
+
+	dms, bots := distinctDMAndBotNames(items)
+
+	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms)
+	assert.Equal(t, []string{"weather.bot"}, bots)
+}

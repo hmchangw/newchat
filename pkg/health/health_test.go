@@ -128,6 +128,8 @@ func TestNewServer_ServesBothEndpoints(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	for _, path := range []string{"/healthz", "/readyz"} {
+		// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+		// nosemgrep: gosec.G107-1
 		resp, err := http.Get(ts.URL + path)
 		require.NoError(t, err, "path %s", path)
 		assert.Equal(t, http.StatusOK, resp.StatusCode, "path %s", path)
@@ -153,6 +155,7 @@ func TestServeListener_ServesThenStops(t *testing.T) {
 		Check{Name: "dep", Probe: func(context.Context) error { return nil }},
 	)
 
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(url) // #nosec G107 -- test requests its own in-process httptest listener URL, not attacker-controlled
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -161,6 +164,7 @@ func TestServeListener_ServesThenStops(t *testing.T) {
 	require.NoError(t, stop(context.Background()))
 
 	// After shutdown the listener is closed, so the request must fail.
+	// nosemgrep: gosec.G107-1
 	resp, err = http.Get(url) // #nosec G107 -- test requests its own in-process httptest listener URL, not attacker-controlled
 	if resp != nil {
 		require.NoError(t, resp.Body.Close())
@@ -189,6 +193,8 @@ func TestRegister_MountsOnExistingMux(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Get(ts.URL + "/healthz")
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)

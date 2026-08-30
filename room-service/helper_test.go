@@ -197,7 +197,7 @@ func TestIsURLSafeIDToken(t *testing.T) {
 	}
 }
 
-func TestDetermineRoomType(t *testing.T) {
+func TestCreateRoomType(t *testing.T) {
 	tests := []struct {
 		name string
 		req  model.CreateRoomRequest
@@ -214,8 +214,20 @@ func TestDetermineRoomType(t *testing.T) {
 			want: model.RoomTypeBotDM,
 		},
 		{
-			name: "single platform-admin pseudo-account no name → botDM",
+			// p_admin is human-operated and has no app document: a botDM here
+			// would make room.create fail the bot-availability check outright.
+			name: "single platform-admin pseudo-account no name → regular DM",
 			req:  model.CreateRoomRequest{Users: []string{"p_adminsiteA"}},
+			want: model.RoomTypeDM,
+		},
+		{
+			name: "bot requester with a human counterpart → botDM",
+			req:  model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}},
+			want: model.RoomTypeBotDM,
+		},
+		{
+			name: "two bots → botDM",
+			req:  model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"sales.bot"}},
 			want: model.RoomTypeBotDM,
 		},
 		{
@@ -251,7 +263,7 @@ func TestDetermineRoomType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineRoomType(&tt.req)
+			got := model.CreateRoomType(&tt.req)
 			assert.Equal(t, tt.want, got)
 		})
 	}

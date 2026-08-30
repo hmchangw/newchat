@@ -22,7 +22,9 @@ import (
 // Headers carrying the bot credential, matching the casing bot SDKs already
 // send to botplatform-service. Header lookup is case-insensitive.
 const (
-	HeaderUserID    = "x-user-id"
+	HeaderUserID = "x-user-id"
+	// #nosec G101 -- HTTP header name, not a credential
+	// nosemgrep: gosec.G101-1
 	HeaderAuthToken = "x-auth-token"
 )
 

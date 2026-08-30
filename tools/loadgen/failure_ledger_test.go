@@ -217,6 +217,8 @@ func TestFailureWAL_ReplayIgnoresTornFinalRecord(t *testing.T) {
 		At:        time.Now().UTC(),
 	}))
 	require.NoError(t, wal.Close())
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
 	_, err = file.WriteString(`{"type":"observed","operationId":"message-1"`)

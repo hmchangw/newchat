@@ -346,8 +346,9 @@ Room type is inferred server-side from the payload shape (`name` set → channel
 | `channels` | [ChannelRef](../client-api.md#channelref)[] | no | `channel` only. Source channels whose members are copied in. |
 
 Room type is inferred: `name` set → channel; `name` empty + one `users` entry →
-DM/botDM; `name` empty + `users` is just the caller → **self-DM**, a
-single-member `dm` room, one-per-user.
+DM, or botDM when **either** participant is a `.bot` bot (`p_admin` and QA `p_`
+accounts are ordinary users, so both yield `dm`); `name` empty + `users` is just
+the caller → **self-DM**, a single-member `dm` room, one-per-user.
 
 #### Success response
 
@@ -512,14 +513,16 @@ platform admin. Channel rooms only.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | Caps returned members; must be > 0 if set. |
-| `offset` | number | no | Pagination; must be ≥ 0 if set. |
+| `limit` | number | no | Caps returned members; must be > 0 if set. Omitted returns every member. |
+| `offset` | number | no | Pagination; must be ≥ 0 if set. Advance by the `limit` you sent. |
 | `enrich` | boolean | no | When `true`, populates display fields on each entry. |
 
 #### Success response
 
-`{ "members": RoomMember[] }` — see `RoomMember` / `RoomMemberEntry` schemas in
-[../client-api.md §3.1](../client-api.md#list-members).
+`{ "members": RoomMember[], "hasMore": boolean }` — `hasMore` is `true` when
+another page follows (offset-based; the server over-fetches `limit + 1` to
+decide), and always `false` for a request with no `limit`. See `RoomMember` /
+`RoomMemberEntry` schemas in [../client-api.md §3.1](../client-api.md#list-members).
 
 #### Errors
 
@@ -1402,9 +1405,10 @@ with `AND`) — terms split across e.g. message text and a filename match nothin
 `tshow` (boolean, omitted when false),
 `sender` (`{account, hr?, appInfo?}` — `hr` `{account, chineseName, engName}` for
 human senders, `appInfo` `{id, name, assistantName}` for bot senders),
-`room` (`{id, name, type, hrInfo?, appInfo?}` — `hrInfo` `{account, chineseName,
-engName}` only for `dm`, `appInfo` `{id, name, assistantName, isSubscribed}` only
-for `botDM`).
+`room` (`{id, name, type, hrInfo?, appInfo?}` — `type` is the
+[effective room type](../client-api.md#effective-room-type); `hrInfo` `{account,
+chineseName, engName}` only for `dm`, `appInfo` `{id, name, assistantName,
+isSubscribed}` only for `botDM`).
 Base fields are sourced from ES; `room`/`sender` are resolved server-side (best-effort,
 individual fields omitted when unresolved). `attachments`/`card` mirror the message
 payloads as-is (same wire shape as history reads) so hits render without a follow-up
@@ -1854,7 +1858,7 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (botDM). |
+| `type` | string | yes | `"current"` (active rooms), `"rooms"` (DM+channel), `"apps"` (app rooms). Buckets read the stored [room type](../client-api.md#effective-room-type), so a bot's own DM rows appear under `rooms`, never `apps`. |
 | `favorite` | boolean | no | Filter to favorited only; also pins the self-DM first. |
 | `updatedWithinDays` | number | no | `rooms`-type only. Filters to rooms whose `lastMsgAt` (the room's user-activity position) is within N days. Non-negative. |
 | `includeLastMessage` | boolean | no | Embed each room's [`previewMessage`](../client-api.md#subscriptionroom). Omitted ⇒ include (default); `false` ⇒ skip the per-room preview resolve. |
@@ -1869,7 +1873,9 @@ Returns the user's sidebar subscriptions. **Room-info-enriched** — see
 | `hasMore` | boolean | `true` when another page follows. Advance `offset` by your `limit` for the next page. |
 
 Per-room-type fields: channel rows add `name` (channel name); DM rows add `hrInfo`;
-botDM rows add `app` (AppSubscription). See
+botDM rows add `app` (AppSubscription). Each row carries the
+[room type its own subscriber sees](../client-api.md#effective-room-type), stored
+at creation: a bot's own row in its DM with a person is `dm` with `hrInfo`. See
 [../client-api.md §3.4](../client-api.md#subscriptionlist) for the full schema + example.
 
 **Emits:** None.

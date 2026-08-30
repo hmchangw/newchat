@@ -128,7 +128,9 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 		return nil
 	}
 	models := make([]mongo.WriteModel, 0, len(updates))
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
 	//nolint:gocritic // rangeValCopy: updates is a map, so indexing buys nothing over the copy
+	// nosemgrep: gosec.G601-1
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).

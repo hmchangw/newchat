@@ -792,3 +792,81 @@ func isErrcode(err error, out **errcode.Error) bool {
 	*out = e
 	return true
 }
+
+// dm.ensure wrote neither roomType nor name, so the rows matched no list bucket
+// and the DM was invisible to both parties.
+func TestHandleDMEnsure_WritesRoomTypeAndName(t *testing.T) {
+	var upserted []*Subscription
+	store := &fakeStore{
+		InsertRoomFn: func(_ context.Context, _ *Room) error { return nil },
+		UpsertSubscriptionFn: func(_ context.Context, s *Subscription) (bool, error) {
+			upserted = append(upserted, s)
+			return true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutboxPayload{}).publish, testKeyStore, testKeySender)
+
+	_, err := h.handleDMEnsure(withIdentity(t, "", ident()), BotDMEnsureRequest{TargetUserID: "alice-id"})
+	require.NoError(t, err)
+
+	require.Len(t, upserted, 2)
+
+	bot := upserted[0]
+	assert.Equal(t, "myapp.bot", bot.Account)
+	assert.Equal(t, "alice", bot.Name, "the bot's row names the person")
+	assert.Equal(t, model.RoomTypeDM, bot.RoomType, "the bot faces a person")
+
+	target := upserted[1]
+	assert.Equal(t, "alice", target.Account)
+	assert.Equal(t, "myapp.bot", target.Name, "the person's row names the bot")
+	assert.Equal(t, model.RoomTypeBotDM, target.RoomType, "the person faces an app")
+}
+
+// Channel rows had the same gap as dm.ensure: no roomType and no name, so a
+// bot-created channel matched no list bucket for any member.
+func TestHandleCreate_WritesRoomTypeAndName(t *testing.T) {
+	var upserted []*Subscription
+	store := &fakeStore{
+		InsertRoomFn: func(_ context.Context, _ *Room) error { return nil },
+		UpsertSubscriptionFn: func(_ context.Context, s *Subscription) (bool, error) {
+			upserted = append(upserted, s)
+			return true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutboxPayload{}).publish, testKeyStore, testKeySender)
+
+	_, err := h.handleCreate(withIdentity(t, "", ident()),
+		BotCreateRoomRequest{Name: "deal team", Members: []string{"alice-id"}})
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, len(upserted), 2)
+	for _, s := range upserted {
+		assert.Equal(t, model.RoomTypeChannel, s.RoomType, "%s: channel row", s.Account)
+		assert.Equal(t, "deal team", s.Name, "%s: channel rows carry the room name", s.Account)
+	}
+}
+
+// A DM has exactly two participants, so member.add on one is incoherent — and
+// it used to write a row with the room's type and no name, matching no bucket.
+func TestHandleAdd_RejectsNonChannelRoom(t *testing.T) {
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: roomTypeDM, SiteID: "site-a",
+				CreatedByBot: "bot-1",
+				Owner:        &Participant{UserID: "bot-1", Account: "myapp.bot", IsBot: true}}, nil
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutboxPayload{}).publish, testKeyStore, testKeySender)
+
+	_, err := h.handleAdd(withIdentity(t, "r1", ident()), BotMembersBatchRequest{UserIDs: []string{"alice-id"}})
+	require.Error(t, err)
+	var ec *errcode.Error
+	require.True(t, errors.As(err, &ec))
+	assert.Equal(t, string(errcode.RoomNonChannelOperation), string(ec.Reason))
+}

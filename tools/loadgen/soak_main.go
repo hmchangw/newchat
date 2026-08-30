@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"net/http"
 	"os"
 	"slices"
@@ -1058,6 +1058,8 @@ func runSoakWorkload(
 	var verificationSequence atomic.Uint64
 	actions := soakWorkloadActions{
 		Send: func(actionCtx context.Context, _ bool) error {
+			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+			// nosemgrep: gosec.G601-1
 			for _, result := range sender.ExpireResults() {
 				if err := collector.Record(&soakOperationSample{
 					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
