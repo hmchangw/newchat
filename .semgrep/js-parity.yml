@@ -12,7 +12,6 @@ rules:
     patterns:
       - pattern: new RegExp($X, ...)
       - pattern-not: new RegExp("...", ...)
-      - pattern-not: new RegExp($X)
       - metavariable-pattern:
           metavariable: $X
           patterns:
@@ -29,7 +28,12 @@ rules:
       - pattern-either:
           - pattern: $A === $SECRET
           - pattern: $SECRET === $A
+          - pattern: $A !== $SECRET
+          - pattern: $SECRET !== $A
           - pattern: $A == $SECRET
+          - pattern: $SECRET == $A
+          - pattern: $A != $SECRET
+          - pattern: $SECRET != $A
       - metavariable-regex:
           metavariable: $SECRET
           regex: '(?i).*(password|secret|token|api_?key|hash|credential).*'

@@ -40,6 +40,9 @@ services:
       - "8090:8090"
     environment:
       PORT: "8090"
+      # Container-internal; the "8090:8090" port mapping above is the
+      # exposure boundary. Direct `go run` keeps the loopback default.
+      BIND_ADDR: "0.0.0.0"
       # Uncomment to authenticate against creds-protected NATS servers. The
       # mounted file is applied to all three connections (source/dest/request).
       # NATS_CREDS_FILE: /etc/nats/backend.creds

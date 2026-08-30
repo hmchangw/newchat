@@ -15,6 +15,9 @@ export default function ChangePasswordForm({ onSubmit, error, loading }) {
       setLocalError('All fields are required')
       return
     }
+    // Both operands are values the user just typed into this form, so there
+    // is no secret to leak by timing.
+    // nosemgrep: eslint.detect-possible-timing-attack
     if (newPassword !== confirmPassword) {
       setLocalError('New passwords do not match')
       return

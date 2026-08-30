@@ -15,6 +15,11 @@ import (
 
 type config struct {
 	Port int `env:"PORT" envDefault:"8090"`
+	// BindAddr is the interface to listen on. Defaults to loopback: the UI is
+	// unauthenticated and its session cookie rides plain HTTP, so it must not
+	// be reachable off-host by default. The container image sets 0.0.0.0,
+	// where the port mapping is the exposure boundary.
+	BindAddr string `env:"BIND_ADDR" envDefault:"127.0.0.1"`
 	// CredsFile is an optional NATS user credentials file (JWT + NKey). When
 	// set, it authenticates every NATS connection the tool opens. Empty means
 	// connect without credentials.
@@ -48,14 +53,14 @@ func main() {
 	h.registerRoutes(mux)
 
 	srv := &http.Server{
-		Addr:        fmt.Sprintf(":%d", cfg.Port),
+		Addr:        fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port),
 		Handler:     mux,
 		ReadTimeout: 30 * time.Second,
 		// WriteTimeout deliberately omitted — SSE connections are long-lived.
 		IdleTimeout: 60 * time.Second,
 	}
 
-	slog.Info("nats-debug starting", "port", cfg.Port)
+	slog.Info("nats-debug starting", "bind_addr", cfg.BindAddr, "port", cfg.Port)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
