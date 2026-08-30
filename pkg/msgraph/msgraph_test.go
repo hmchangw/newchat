@@ -1499,3 +1499,43 @@ func TestApplyProxy_RejectsOutOfRangePort(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyProxy_RejectsUnencodableSocksCredentials pins the RFC 1929 wire
+// limits. Go's SOCKS dialer refuses to encode an empty or over-long field, but
+// only when it authenticates — on the first Graph request, long after the
+// constructor said the config was fine. The equivalent Basic credential has no
+// such limit, so the check is scoped to the SOCKS schemes.
+func TestApplyProxy_RejectsUnencodableSocksCredentials(t *testing.T) {
+	long := strings.Repeat("a", 256)
+	max := strings.Repeat("a", 255)
+	tests := []struct {
+		name     string
+		proxy    string
+		username string
+		password string
+		wantErr  bool
+	}{
+		{name: "socks username over the limit", proxy: "socks5://proxy.corp:1080", username: long, password: "pw", wantErr: true},
+		{name: "socks password over the limit", proxy: "socks5://proxy.corp:1080", username: "user", password: long, wantErr: true},
+		{name: "socks5h username over the limit", proxy: "socks5h://proxy.corp:1080", username: long, password: "pw", wantErr: true},
+		{name: "embedded socks username over the limit", proxy: "socks5://" + long + ":pw@proxy.corp:1080", wantErr: true},
+		{name: "embedded socks password over the limit", proxy: "socks5://user:" + long + "@proxy.corp:1080", wantErr: true},
+		{name: "embedded empty socks username", proxy: "socks5://:@proxy.corp:1080", wantErr: true},
+		{name: "socks username at the limit", proxy: "socks5://proxy.corp:1080", username: max, password: max},
+		{name: "http username over the limit", proxy: "http://proxy.corp:8080", username: long, password: long},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL: tc.proxy, ProxyUsername: tc.username, ProxyPassword: tc.password,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), long, "the rejection must not echo the credential")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

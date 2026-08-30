@@ -109,6 +109,9 @@ rather than silently egressing unauthenticated or breaking on the first request:
 - a port outside 1-65535 (`url.Parse` only checks that a port is digits);
 - a scheme `net/http` cannot proxy through — only `http`, `https`, `socks5` and
   `socks5h` work;
+- a `socks5`/`socks5h` username that is empty or over 255 bytes, or a password
+  over 255 bytes. RFC 1929 length-prefixes each field with a single byte, so
+  Go's SOCKS dialer cannot encode more — it would fail on the first request;
 - a `:` in the username of an `http`/`https` proxy. Basic sends `user:password`,
   so the proxy would split at the wrong colon and answer 407 on the first
   request; RFC 7617 forbids it. SOCKS5 fields are length-prefixed, so a colon is

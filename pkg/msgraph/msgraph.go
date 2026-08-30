@@ -364,6 +364,13 @@ var supportedProxySchemes = map[string]bool{
 // apply to them.
 var basicAuthProxySchemes = map[string]bool{"http": true, "https": true}
 
+// socksProxySchemes are the schemes whose credentials travel as the RFC 1929
+// sub-negotiation, whose one-byte length prefixes cap each field.
+var socksProxySchemes = map[string]bool{"socks5": true, "socks5h": true}
+
+// socksCredentialMaxBytes is what a one-byte RFC 1929 length field can address.
+const socksCredentialMaxBytes = 255
+
 // applyProxy points hc's transport at cfg.ProxyURL (overriding
 // HTTPS_PROXY/HTTP_PROXY) when it is non-empty, authenticating with
 // cfg.ProxyUsername/ProxyPassword when they are set. The URL must include a
@@ -422,9 +429,22 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	// or from the URL — the checks above only saw the explicit ones.
 	if proxyURL.User != nil {
 		username := proxyURL.User.Username()
-		if password, ok := proxyURL.User.Password(); ok && password != "" && username == "" {
+		password, _ := proxyURL.User.Password()
+		if password != "" && username == "" {
 			// Basic would send ":password"; the proxy answers 407 on the first request.
 			return errors.New("graph proxy password set without a username")
+		}
+		// RFC 1929 prefixes each field with a one-byte length, so Go's SOCKS
+		// dialer refuses to encode an empty or over-long one — but only when it
+		// authenticates, on the first Graph request. Basic has no such limit,
+		// hence the scheme test. Neither message names the credential.
+		if socksProxySchemes[proxyURL.Scheme] {
+			if n := len(username); n == 0 || n > socksCredentialMaxBytes {
+				return errors.New("invalid graph proxy username for a socks5 proxy: must be 1-255 bytes")
+			}
+			if len(password) > socksCredentialMaxBytes {
+				return errors.New("invalid graph proxy password for a socks5 proxy: must be at most 255 bytes")
+			}
 		}
 		// Basic sends "user:password", so an HTTP(S) proxy splits a colon-bearing
 		// username at the wrong place and answers 407 — RFC 7617 forbids the colon
