@@ -446,11 +446,11 @@ func (h *Handler) listMembers(c *natsrouter.Context) (*model.ListRoomMembersResp
 		return nil, errListOffsetInvalid
 	}
 
-	members, err := h.store.ListRoomMembers(ctx, roomID, req.Limit, req.Offset, req.Enrich)
+	members, hasMore, err := h.store.ListRoomMembers(ctx, roomID, req.Limit, req.Offset, req.Enrich)
 	if err != nil {
 		return nil, fmt.Errorf("get room members: %w", err)
 	}
-	return &model.ListRoomMembersResponse{Members: members}, nil
+	return &model.ListRoomMembersResponse{Members: members, HasMore: hasMore}, nil
 }
 
 func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, error) {
@@ -1122,7 +1122,7 @@ func (h *Handler) expandChannelRefs(ctx context.Context, requester string, refs 
 				}
 				return nil, nil, fmt.Errorf("subscription check %s: %w", ref.RoomID, subErr)
 			}
-			members, err = h.store.ListRoomMembers(refCtx, ref.RoomID, &listLimit, nil, false)
+			members, _, err = h.store.ListRoomMembers(refCtx, ref.RoomID, &listLimit, nil, false)
 			cancel()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {

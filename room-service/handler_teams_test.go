@@ -172,7 +172,7 @@ func TestTeamsRoomCall_Success_ExcludesSelf(t *testing.T) {
 	store.EXPECT().GetRoom(gomock.Any(), "r1").
 		Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob"), orgMember("orgX"), indMember("carol")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob"), orgMember("orgX"), indMember("carol")}, false, nil)
 
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersCallLimit: 20}
 
@@ -216,7 +216,7 @@ func TestTeamsRoomCall_NoOtherMembers(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice")}, nil)
+		Return([]model.RoomMember{indMember("alice")}, false, nil)
 
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersCallLimit: 20}
 	_, err := h.teamsRoomCall(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), model.TeamsRoomCallRequest{})
@@ -234,7 +234,7 @@ func TestTeamsRoomCall_TooManyMembers(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		members = append(members, indMember(string(rune('a'+i))+"x"))
 	}
-	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).Return(members, nil)
+	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).Return(members, false, nil)
 
 	// CallLimit=2, but 3 other members → over the limit.
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersCallLimit: 2}
@@ -274,7 +274,7 @@ func TestTeamsMeeting_CreatesAndPublishes(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, false, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://teams.example/join/1"}}
@@ -380,7 +380,7 @@ func TestTeamsMeeting_DuplicateKey_ReturnsExisting(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice")}, nil)
+		Return([]model.RoomMember{indMember("alice")}, false, nil)
 
 	// createOrGet returns the SAME meeting the concurrent winner got (Graph is
 	// the source of truth on a true race).
@@ -436,7 +436,7 @@ func TestTeamsMeeting_Concurrent_SingleCreateSingleMessage(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil).AnyTimes()
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil).AnyTimes()
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice")}, nil).AnyTimes()
+		Return([]model.RoomMember{indMember("alice")}, false, nil).AnyTimes()
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil).AnyTimes()
 
 	graph := newCreateOrGetGraphStub()
@@ -529,7 +529,7 @@ func TestTeamsMeeting_TooManyMembers(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob"), indMember("carol")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob"), indMember("carol")}, false, nil)
 
 	graph := &fakeGraphClient{}
 	h := &Handler{store: store, siteID: "site-a", teamsEmailDomain: "corp.com", roomMembersLimit: 2,
@@ -546,7 +546,7 @@ func TestTeamsMeeting_GraphCreateFails(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice")}, nil)
+		Return([]model.RoomMember{indMember("alice")}, false, nil)
 
 	graph := &fakeGraphClient{err: errors.New("graph 500")}
 	var published bool
@@ -614,7 +614,7 @@ func TestTeamsMeeting_ResolvesObjectIDs(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, false, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}
@@ -639,7 +639,7 @@ func TestTeamsMeeting_OrganizerUnresolvedFails(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob")}, false, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "should-not-be-used"}}
 	dir := &fakeDirectory{ids: map[string]string{"bob": "oid-bob"}} // organizer alice missing
@@ -660,7 +660,7 @@ func TestTeamsMeeting_AttendeeUnresolvedDropped(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice"), indMember("bob"), indMember("carol")}, nil)
+		Return([]model.RoomMember{indMember("alice"), indMember("bob"), indMember("carol")}, false, nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}
@@ -693,7 +693,7 @@ func TestTeamsMeeting_DirectoryErrorFails(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("alice")}, nil)
+		Return([]model.RoomMember{indMember("alice")}, false, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "x"}}
 	dir := &fakeDirectory{err: errors.New("graph 503")}
@@ -717,7 +717,7 @@ func TestTeamsMeeting_OrganizerNotInIndividualMembers(t *testing.T) {
 	store.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
 	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel}, nil)
 	store.EXPECT().ListRoomMembers(gomock.Any(), "r1", nil, nil, false).
-		Return([]model.RoomMember{indMember("bob")}, nil) // alice absent from individual members
+		Return([]model.RoomMember{indMember("bob")}, false, nil) // alice absent from individual members
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice", EngName: "Alice"}, nil)
 
 	graph := &fakeGraphClient{meeting: &msgraph.OnlineMeeting{ID: "mtg-1", JoinURL: "https://join/1"}}

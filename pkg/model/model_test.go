@@ -2014,6 +2014,31 @@ func TestListRoomMembersResponseJSON(t *testing.T) {
 	assert.Equal(t, resp, dst)
 }
 
+func TestListRoomMembersResponseJSON_HasMore(t *testing.T) {
+	t.Run("hasMore rides the wire", func(t *testing.T) {
+		resp := model.ListRoomMembersResponse{
+			Members: []model.RoomMember{{
+				ID:     "rm1",
+				RoomID: "r1",
+				Member: model.RoomMemberEntry{ID: "alice", Type: model.RoomMemberIndividual, Account: "alice"},
+			}},
+			HasMore: true,
+		}
+		data, err := json.Marshal(&resp)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"hasMore":true`)
+		var dst model.ListRoomMembersResponse
+		require.NoError(t, json.Unmarshal(data, &dst))
+		assert.Equal(t, resp, dst)
+	})
+
+	t.Run("hasMore is always present when false", func(t *testing.T) {
+		data, err := json.Marshal(&model.ListRoomMembersResponse{Members: []model.RoomMember{}})
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"members":[],"hasMore":false}`, string(data))
+	})
+}
+
 func TestRoomMemberEntry_DisplayFields_JSON(t *testing.T) {
 	entry := model.RoomMemberEntry{
 		ID: "u1", Type: model.RoomMemberIndividual, Account: "alice",

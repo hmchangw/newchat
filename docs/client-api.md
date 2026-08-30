@@ -1840,8 +1840,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. |
-| `offset` | number | no | If set, must be `>= 0`. For pagination. |
+| `limit` | number | no | If set, must be `> 0`. Caps the number of members returned. Omitting it returns every member and always yields `hasMore: false`. |
+| `offset` | number | no | If set, must be `>= 0`. For pagination — advance it by the `limit` you sent to fetch the next page. |
 | `enrich` | boolean | no | When `true`, populates the display fields (`engName`, `chineseName`, `name`, `isOwner`, `sectName`, `employeeId`, `orgName`, `orgCode`, `memberCount`, `orgDescription`) on each entry. Omitted-or-`false` returns the lean record only. |
 
 ```json
@@ -1852,7 +1852,8 @@ When the synchronous reply is an error envelope, the request was rejected before
 
 | Field | Type | Notes |
 |---|---|---|
-| `members` | [RoomMember](#roommember)[] | One entry per individual or org membership. |
+| `members` | [RoomMember](#roommember)[] | One page of memberships, one entry per individual or org membership. |
+| `hasMore` | boolean | `true` when at least one more member follows this page (the server over-fetches `limit + 1` to decide). Always `false` when the request carried no `limit`. Request the next page by advancing `offset` by the `limit` you sent. |
 
 ###### RoomMember
 
@@ -1912,7 +1913,8 @@ When the synchronous reply is an error envelope, the request was rejected before
         "memberCount": 42
       }
     }
-  ]
+  ],
+  "hasMore": false
 }
 ```
 

@@ -337,7 +337,7 @@ func TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration(t *testin
 		JoinedAt: joined,
 	})
 
-	got, err := store.ListRoomMembers(ctx, "rmembers", nil, nil, true)
+	got, _, err := store.ListRoomMembers(ctx, "rmembers", nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "smember", got[0].ID, "_id must be in the projection (it is the RoomMember id)")
@@ -631,7 +631,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-org-1", RoomID: "r1", Ts: base.Add(30 * time.Second),
 			Member: model.RoomMemberEntry{ID: "org-1", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		// orgs first, then individuals by ts asc
@@ -654,7 +654,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			RoomID: "r1", SiteID: "site-a", JoinedAt: base.Add(20 * time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		for _, m := range got {
@@ -678,7 +678,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		assert.Equal(t, "acct0", got[0].Member.Account)
@@ -696,7 +696,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, ptr(2), false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, ptr(2), false)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		assert.Equal(t, "acct2", got[0].Member.Account)
@@ -714,7 +714,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(1), false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(1), false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		assert.Equal(t, "acct1", got[0].Member.Account)
@@ -724,7 +724,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 	t.Run("empty room returns empty slice", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
-		got, err := store.ListRoomMembers(ctx, "r-empty", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r-empty", nil, nil, false)
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})
@@ -743,12 +743,90 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			RoomID: "r1", SiteID: "site-a", JoinedAt: base,
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		for _, m := range got {
 			assert.Equal(t, model.RoomMemberOrg, m.Member.Type)
 		}
+	})
+
+	t.Run("hasMore is true while rows remain beyond the page", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 5; i++ {
+			insertRM(t, db, model.RoomMember{
+				ID: fmt.Sprintf("rm-%d", i), RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: fmt.Sprintf("u%d", i), Type: model.RoomMemberIndividual, Account: fmt.Sprintf("acct%d", i)},
+			})
+		}
+
+		// First page: 2 of 5 — the over-fetched row must be trimmed off, not returned.
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		require.NoError(t, err)
+		require.Len(t, page, 2)
+		assert.True(t, hasMore)
+		assert.Equal(t, "acct1", page[1].Member.Account)
+
+		// Last page: offset 4 leaves exactly one row and nothing after it.
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(4), false)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
+
+		// A limit that exactly covers the remaining rows is still the last page.
+		exact, exactHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(5), nil, false)
+		require.NoError(t, err)
+		require.Len(t, exact, 5)
+		assert.False(t, exactHasMore)
+
+		// Offset past the end: empty page, nothing more.
+		beyond, beyondHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(9), false)
+		require.NoError(t, err)
+		assert.Empty(t, beyond)
+		assert.False(t, beyondHasMore)
+	})
+
+	t.Run("unlimited request never reports hasMore", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 3; i++ {
+			insertRM(t, db, model.RoomMember{
+				ID: fmt.Sprintf("rm-%d", i), RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: fmt.Sprintf("u%d", i), Type: model.RoomMemberIndividual, Account: fmt.Sprintf("acct%d", i)},
+			})
+		}
+
+		got, hasMore, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+		assert.False(t, hasMore)
+	})
+
+	t.Run("hasMore on the subscriptions fallback path", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 3; i++ {
+			insertSub(t, db, model.Subscription{
+				ID: fmt.Sprintf("sub-%d", i), User: model.SubscriptionUser{ID: fmt.Sprintf("u-%d", i), Account: fmt.Sprintf("acct%d", i)},
+				RoomID: "r1", SiteID: "site-a", JoinedAt: base.Add(time.Duration(i) * time.Second),
+			})
+		}
+
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		require.NoError(t, err)
+		require.Len(t, page, 2)
+		assert.True(t, hasMore)
+		assert.Equal(t, "acct0", page[0].Member.Account)
+		assert.Equal(t, "acct1", page[1].Member.Account)
+
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(2), false)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
 	})
 
 	t.Run("stable pagination with identical ts", func(t *testing.T) {
@@ -762,7 +840,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 
 		seen := map[string]bool{}
 		for offset := 0; offset < 3; offset++ {
-			page, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(offset), false)
+			page, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(offset), false)
 			require.NoError(t, err)
 			require.Len(t, page, 1)
 			id := page[0].ID
@@ -812,7 +890,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -840,7 +918,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-bob", Type: model.RoomMemberIndividual, Account: "bob"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.False(t, got[0].Member.IsOwner)
@@ -863,7 +941,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "sect-eng", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -892,7 +970,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		})
 
 		// NO room_members docs inserted — exercises the subscriptions fallback path.
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
@@ -906,6 +984,35 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		assert.Equal(t, "Bob", bob.EngName)
 		assert.False(t, bob.IsOwner)
 		assert.Empty(t, bob.SectName)
+	})
+
+	t.Run("enrich=true trims the over-fetched row and reports hasMore", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC)
+
+		insertUser(t, db, model.User{ID: "u-a", Account: "a", EngName: "A"})
+		insertUser(t, db, model.User{ID: "u-b", Account: "b", EngName: "B"})
+		insertUser(t, db, model.User{ID: "u-c", Account: "c", EngName: "C"})
+		for i, acct := range []string{"a", "b", "c"} {
+			insertRM(t, db, model.RoomMember{
+				ID: "rm-" + acct, RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: "u-" + acct, Type: model.RoomMemberIndividual, Account: acct},
+			})
+		}
+
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, true)
+		require.NoError(t, err)
+		require.Len(t, page, 2, "the over-fetched row must not reach the caller")
+		assert.True(t, hasMore)
+		assert.Equal(t, "A", page[0].Member.EngName)
+		assert.Equal(t, "B", page[1].Member.EngName)
+
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(2), true)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
+		assert.Equal(t, "C", last[0].Member.EngName)
 	})
 
 	t.Run("enrich=false leaves display fields zero on same seed data", func(t *testing.T) {
@@ -923,7 +1030,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -953,7 +1060,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-org", RoomID: "r1", Ts: base.Add(30 * time.Second),
 			Member: model.RoomMemberEntry{ID: "sect-c", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		// Orgs first, then individuals by ts ascending.
@@ -963,9 +1070,9 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 
 		// Pagination is applied before enrichment — paging to the same slice
 		// with enrich=true and enrich=false must yield the same members (by ID).
-		bare, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), false)
+		bare, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), false)
 		require.NoError(t, err)
-		enriched, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), true)
+		enriched, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), true)
 		require.NoError(t, err)
 		require.Len(t, bare, 1)
 		require.Len(t, enriched, 1)
@@ -997,7 +1104,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "X", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Engineering", got[0].Member.OrgName,
@@ -1018,7 +1125,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "X", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Frontend", got[0].Member.OrgName)
@@ -1035,7 +1142,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "ghost-org", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "ghost-org", got[0].Member.OrgName)
@@ -1055,7 +1162,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-ops", RoomID: "r1", Ts: base.Add(2 * time.Second),
 			Member: model.RoomMemberEntry{ID: "dept-ops", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		byID := map[string]model.RoomMemberEntry{
@@ -1131,7 +1238,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 			JoinedAt: base.Add(time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "botdm-1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "botdm-1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
@@ -1187,7 +1294,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 			JoinedAt: base.Add(time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "dm-2", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "dm-2", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
@@ -1218,7 +1325,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		})
 
 		// No apps collection data at all — verifies no panic/error on empty botAccounts.
-		got, err := store.ListRoomMembers(ctx, "dm-3", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "dm-3", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Eve", got[0].Member.EngName)
@@ -3243,7 +3350,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_DeptFirst_Integration(t *testing.
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+	got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Engineering 工程部", got[0].Member.OrgName, "dept wins on overlap; name+tcName combined")
@@ -3271,7 +3378,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+	got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
@@ -3303,7 +3410,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Dept desc", got[0].Member.OrgDescription)
@@ -3326,7 +3433,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Sect desc", got[0].Member.OrgDescription)
@@ -3349,7 +3456,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Member.OrgDescription)
