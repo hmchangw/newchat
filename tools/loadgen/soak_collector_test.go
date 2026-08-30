@@ -23,6 +23,8 @@ func TestSoakCollector_CountsOutcomesRetriesAndDistinctRPCs(t *testing.T) {
 		{Action: soakRPCUnpin, Outcome: soakOutcomeSucceeded, At: at, Latency: 40 * time.Millisecond},
 		{Action: soakRPCPinnedList, Outcome: soakOutcomeSucceeded, At: at, Latency: 50 * time.Millisecond},
 	} {
+		// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+		// nosemgrep: gosec.G601-1
 		require.NoError(t, collector.Record(&sample))
 	}
 

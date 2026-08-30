@@ -34,7 +34,11 @@ async function pick(labelRegex, user) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(300)
   })
-  fireEvent.click(await screen.findByRole('option', { name: new RegExp(`^${user.account}`, 'i') }))
+  // A function matcher rather than an interpolated RegExp: the interpolated
+  // value is not regex-escaped, so any metacharacter in it would change the
+  // pattern instead of being matched literally.
+  const matchesAccount = (name) => name.toLowerCase().startsWith(user.account.toLowerCase())
+  fireEvent.click(await screen.findByRole('option', { name: matchesAccount }))
 }
 
 // Everything the form needs except the subject accounts — lets the paste-mode tests supply
