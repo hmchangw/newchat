@@ -576,18 +576,19 @@ func (s *MongoStore) getRoomMembers(ctx context.Context, roomID string, limit, o
 	for i := range rows {
 		rm := rows[i].RoomMember
 		d := rows[i].Display
-		rm.Member.EngName = d.EngName
-		rm.Member.ChineseName = d.ChineseName
 		rm.Member.IsOwner = d.IsOwner
-		if rm.Member.Type == model.RoomMemberOrg {
+		switch {
+		case rm.Member.Type == model.RoomMemberOrg:
 			orgIDs = append(orgIDs, rm.Member.ID)
-		} else {
+		case model.IsBot(rm.Member.Account):
+			// Suffix is the only signal here — room_members rows carry no isBot flag.
+			// The users join is discarded so appName and engName stay exclusive.
+			botAccounts = append(botAccounts, rm.Member.Account)
+		default:
+			rm.Member.EngName = d.EngName
+			rm.Member.ChineseName = d.ChineseName
 			rm.Member.SectName = d.SectName
 			rm.Member.EmployeeID = d.EmployeeID
-			// room_members rows carry no isBot flag, so the suffix is the only signal.
-			if model.IsBot(rm.Member.Account) {
-				botAccounts = append(botAccounts, rm.Member.Account)
-			}
 		}
 		members[i] = rm
 	}

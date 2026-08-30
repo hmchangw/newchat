@@ -1259,6 +1259,37 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		assert.Empty(t, byAccount["alice"].AppName, "human must not get AppName")
 	})
 
+	t.Run("room_members path: a bot with a stray users doc gets AppName only", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+
+		// A users doc for the bot account must not leak human display fields:
+		// appName and engName/chineseName are documented as mutually exclusive.
+		insertUser(t, db, model.User{
+			ID: "u-stray", Account: "stray.bot",
+			EngName: "Stray", ChineseName: "流浪", SectName: "Ops", EmployeeID: "E999",
+		})
+		insertApp(t, db, bson.M{
+			"_id": "app-stray", "name": "Stray App",
+			"assistant": bson.M{"enabled": true, "name": "stray.bot"},
+		})
+		_, err := db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: "rm-stray", RoomID: "chan-2", Ts: base,
+			Member: model.RoomMemberEntry{ID: "u-stray", Type: model.RoomMemberIndividual, Account: "stray.bot"},
+		})
+		require.NoError(t, err)
+
+		got, err := store.ListRoomMembers(ctx, "chan-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Stray App", got[0].Member.AppName)
+		assert.Empty(t, got[0].Member.EngName, "a bot must not carry human display fields")
+		assert.Empty(t, got[0].Member.ChineseName)
+		assert.Empty(t, got[0].Member.SectName)
+		assert.Empty(t, got[0].Member.EmployeeID)
+	})
+
 	t.Run("subscriptions path: isBot flag enriches a non-suffix bot account", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
