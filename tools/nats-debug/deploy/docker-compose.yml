@@ -37,10 +37,12 @@ services:
       context: ../../..
       dockerfile: nats-debug/deploy/Dockerfile
     ports:
-      - "8090:8090"
+      # Host side pinned to loopback: the UI is unauthenticated plain HTTP,
+      # so publishing on every host interface would undo the loopback default.
+      - "127.0.0.1:8090:8090"
     environment:
       PORT: "8090"
-      # Container-internal; the "8090:8090" port mapping above is the
+      # Container-internal only; the loopback-pinned mapping above is the
       # exposure boundary. Direct `go run` keeps the loopback default.
       BIND_ADDR: "0.0.0.0"
       # Uncomment to authenticate against creds-protected NATS servers. The

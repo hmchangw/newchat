@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -53,7 +54,7 @@ func main() {
 	h.registerRoutes(mux)
 
 	srv := &http.Server{
-		Addr:        fmt.Sprintf("%s:%d", cfg.BindAddr, cfg.Port),
+		Addr:        net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.Port)),
 		Handler:     mux,
 		ReadTimeout: 30 * time.Second,
 		// WriteTimeout deliberately omitted — SSE connections are long-lived.

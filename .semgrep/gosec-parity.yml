@@ -34,9 +34,12 @@ rules:
       http.Server without ReadHeaderTimeout (gosec G112, CWE-400 slowloris).
       Prefer setting ReadHeaderTimeout over suppressing.
     patterns:
-      - pattern: "$S := &http.Server{...}"
-      - pattern-not: "$S := &http.Server{..., ReadHeaderTimeout: ..., ...}"
-      - pattern-not: "$S := &http.Server{..., ReadTimeout: ..., ...}"
+      # Match the literal itself, so `var`, plain assignment, a return
+      # expression, a struct field and non-pointer values are all covered --
+      # each is just as exposed to slowloris as the `:=` form.
+      - pattern: "http.Server{...}"
+      - pattern-not: "http.Server{..., ReadHeaderTimeout: ..., ...}"
+      - pattern-not: "http.Server{..., ReadTimeout: ..., ...}"
 
   - id: gosec.G304-1
     languages: [go]

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -144,8 +145,17 @@ func TestDemoHarness(t *testing.T) {
 		t.Fatalf("bind 127.0.0.1:8091: %v", err)
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(ln) }()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
 	fmt.Println("demo harness serving on 127.0.0.1:8091")
-	time.Sleep(1800 * time.Second)
+	// Without this select a Serve failure is silent: the harness would print
+	// that it is serving, sleep out the full window and report success.
+	select {
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("demo harness serve: %v", err)
+		}
+	case <-time.After(1800 * time.Second):
+	}
 	_ = srv.Close()
 }
