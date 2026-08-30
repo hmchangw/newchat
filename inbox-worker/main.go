@@ -10,10 +10,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -22,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -29,6 +28,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -53,9 +53,12 @@ type config struct {
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
-	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
+	// federated role_updated/member_removed write; empty disables both (clear
+	// hooks and busts become no-ops, and the subauthcache TTL reconciles). A
+	// connect failure logs and continues rather than exiting — both are
+	// optional cache tiers, not hard dependencies.
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
 	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
@@ -681,6 +684,34 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 	return nil
 }
 
+// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID on
+// this site's local replica. Callers only read the subscriber account, so
+// project just that field — mirrors room-service's ListSubscriptionsByRoom.
+func (s *mongoInboxStore) ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error) {
+	cursor, err := s.subCol.Find(ctx,
+		bson.M{"roomId": roomID},
+		options.Find().SetProjection(bson.M{"_id": 0, "u.account": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: find: %w", roomID, err)
+	}
+	var docs []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: decode: %w", roomID, err)
+	}
+	accounts := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if d.User.Account != "" {
+			accounts = append(accounts, d.User.Account)
+		}
+	}
+	return accounts, nil
+}
+
 // threadReadGuard adds the order-safety clause to a thread-subscription filter:
 // only docs whose lastSeenAt is unset or older than the event's may advance, so
 // out-of-order delivery can never regress a read position.
@@ -837,36 +868,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
-	// no-ops (nil-checked in handler.go).
+	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
+	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap adds tracing+metrics in place, mirroring
-		// pkg/valkeyutil's instrumentCluster.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	var subValkey valkeyutil.Client
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+		// The same connection backs best-effort subauthcache L2 invalidation
+		// after a federated role_updated/member_removed write. One pool serves
+		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
+		// the bust a no-op that the L2 TTL reconciles.
+		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
-		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
 	handler := NewHandler(store, WithRoomSubCache(cfg.RoomSubCacheSize, cfg.RoomSubCacheTTL))
 	handler.badge = badge
+	handler.valkey = subValkey
 	slog.Info("room-sub cache configured", "size", cfg.RoomSubCacheSize, "ttl", cfg.RoomSubCacheTTL)
 
 	// Core-NATS queue subscriber for the cross-site room-activity refresh. Not on
@@ -876,7 +901,7 @@ func main() {
 	// both. Fire-and-forget — a failure self-heals on the room's next message.
 	activitySub, err := nc.QueueSubscribe(ctx, subject.RoomActivity(cfg.SiteID), "inbox-worker",
 		func(msgCtx context.Context, msg *nats.Msg) {
-			actCtx, _ := natsutil.StampRequestID(msgCtx, msg.Header, msg.Subject)
+			actCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
 			if err := handler.HandleRoomActivity(actCtx, msg.Data); err != nil {
 				slog.WarnContext(actCtx, "apply room activity refresh failed", "error", err)
 			}
@@ -919,7 +944,7 @@ func main() {
 		// redelivery. On panic it Acks (poison drop).
 		jobguard.Run(m.msg, func() {
 			msg := m.msg
-			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
+			handlerCtx, _ := logctx.ConsumeContext(m.ctx, msg.Headers(), msg.Subject(), msg.Data())
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
@@ -987,6 +1012,7 @@ func main() {
 		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil

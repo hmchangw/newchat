@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -156,4 +157,24 @@ func (r *appNameRepo) lookup(ctx context.Context, botAccount string) (string, er
 		return "", nil
 	}
 	return app.Name, nil
+}
+
+// guardedAppNameLookup fences the app-name read behind the service's Mongo breaker.
+//
+// It is the odd one out among this service's Mongo reads: the others gate delivery and
+// are fenced in mongoStore, while this one only decorates a preview. That makes it the
+// easiest to miss and the cheapest to lose — a bot's app name falling back to its
+// composed name for the duration of an outage is invisible to correctness, whereas a 2s
+// stall per cold bot account on the fan-out path is not.
+//
+// It shares the one breaker for the same reason every other call site does: the breaker
+// tracks whether Mongo is reachable, and this read is evidence about that like any other.
+// A nil breaker passes through, which is what the tests and a breaker-less config get.
+func guardedAppNameLookup(inner preview.AppNameLookup, b *circuitbreaker.Breaker) preview.AppNameLookup {
+	if inner == nil {
+		return nil
+	}
+	return func(ctx context.Context, botAccount string) (string, error) {
+		return circuitbreaker.Do1(b, func() (string, error) { return inner(ctx, botAccount) })
+	}
 }

@@ -91,8 +91,12 @@ type Handler struct {
 	siteID            string
 	// publish relays onto the OUTBOX; nil disables the cross-site mention fan-out.
 	publish PublishFunc
+	// activity announces a room's position to remote sites; nil disables it.
+	activity *roomActivityRefresher
 	// sealer seals the room-doc preview; nil means previews are not persisted.
 	sealer *previewSealer
+	// previews buffers sealed previews for the room doc; nil disables the write.
+	previews *previewWriter
 }
 
 type handlerOption func(*handlerOptions)
@@ -102,7 +106,9 @@ type handlerOptions struct {
 	threadViewSubject bool
 	siteID            string
 	publish           PublishFunc
+	activity          *roomActivityRefresher
 	sealer            *previewSealer
+	previews          *previewWriter
 }
 
 func withBroadcastMetrics(metrics *broadcastMetrics) handlerOption {
@@ -121,10 +127,16 @@ func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
 	}
 }
 
-// withPreviewSealer supplies the room-preview sealer; absent (or nil) disables
-// preview persistence, which is what ATREST_ENABLED=false yields.
-func withPreviewSealer(sealer *previewSealer) handlerOption {
-	return func(opts *handlerOptions) { opts.sealer = sealer }
+// withRoomActivityRefresh enables the cross-site room-position announce.
+func withRoomActivityRefresh(r *roomActivityRefresher) handlerOption {
+	return func(opts *handlerOptions) { opts.activity = r }
+}
+
+// withPreviewSealer supplies the room-preview sealer and the buffered writer that
+// stores what it seals; absent (or nil) disables preview persistence, which is what
+// ATREST_ENABLED=false yields.
+func withPreviewSealer(sealer *previewSealer, w *previewWriter) handlerOption {
+	return func(opts *handlerOptions) { opts.sealer, opts.previews = sealer, w }
 }
 
 func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
@@ -148,7 +160,9 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		threadViewSubject: opts.threadViewSubject,
 		siteID:            opts.siteID,
 		publish:           opts.publish,
+		activity:          opts.activity,
 		sealer:            opts.sealer,
+		previews:          opts.previews,
 	}
 }
 
@@ -213,18 +227,10 @@ func (h *Handler) HandleServerBroadcast(ctx context.Context, data []byte) {
 	}
 }
 
-// shouldUseThreadFanOut reports whether a message should be routed through the
-// thread fan-out path (thread subscribers + @-mentions) rather than the room
-// broadcast path. True when the message is a thread reply hidden from the main
-// channel (TShow=false).
-func shouldUseThreadFanOut(msg *model.Message) bool {
-	return msg.ThreadParentMessageID != "" && !msg.TShow
-}
-
 func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) error {
 	msg := evt.Message
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadCreated(ctx, evt)
 	}
 
@@ -244,35 +250,25 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 
 	resolved := mention.ResolveFromParsed(parsed, userByAccount)
 
+	// The room's own pointer (lastMsgAt/lastMsgId/lastMentionAllAt), the sender's
+	// lastSeenAt and the mention badges are roomlist-worker's and are off this path
+	// entirely. The preview stays here because sealing one needs the users, mention
+	// participants and attachments the fan-out below has already resolved — see
+	// previewWriter for why the two halves of the room document can be written apart.
+	//
+	// Buffered, never awaited, and it cannot fail the handler: the message is going
+	// out to the room whatever the room list ends up showing.
 	sealed, sealFailed := h.previewForInserted(ctx, &msg, userByAccount, resolved.Participants)
-	if err := h.store.UpdateRoomLastMessage(ctx, roomLastMessage{
+	h.previews.buffer(roomPreview{
 		RoomID:        msg.RoomID,
 		MsgID:         msg.ID,
 		At:            msg.CreatedAt,
-		SystemMsg:     model.IsSystemMessageType(msg.Type),
-		MentionAll:    resolved.MentionAll,
 		Preview:       sealed,
 		PreviewFailed: sealFailed,
-	}); err != nil {
-		return fmt.Errorf("update room last message %s: %w", msg.RoomID, err)
-	}
-	// Sending implies the sender has read up to their own message: advance the
-	// sender's lastSeenAt so the room read-floor (minUserLastSeenAt) doesn't count
-	// the sender against their own message (#396). Best-effort.
-	if err := h.store.AdvanceSubscriptionLastSeen(ctx, msg.RoomID, msg.UserAccount, msg.CreatedAt); err != nil {
-		slog.WarnContext(ctx, "advance sender lastSeenAt failed",
-			"error", err, "room_id", msg.RoomID, "account", msg.UserAccount,
-			"request_id", natsutil.RequestIDFromContext(ctx))
-	}
+	})
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
-	}
-
-	if len(resolved.Accounts) > 0 {
-		if err := h.store.SetSubscriptionMentions(ctx, meta.ID, resolved.Accounts, msg.CreatedAt); err != nil {
-			return fmt.Errorf("set subscription mentions: %w", err)
-		}
 	}
 
 	clientMsg := buildClientMessage(&msg, userByAccount)
@@ -298,6 +294,10 @@ func (h *Handler) handleCreated(ctx context.Context, evt *model.MessageEvent) er
 		return nil
 	}
 	h.federateMentions(ctx, meta.ID, msg.ID, resolved.Participants, msg.CreatedAt)
+	// Announce the room's new position to remote sites. Fires from the same
+	// place the rooms.lastMsgAt write used to, so coverage is unchanged by that
+	// write moving to roomlist-worker.
+	h.activity.refresh(ctx, meta.ID, meta.CrossSite, msg.CreatedAt)
 	return nil
 }
 
@@ -308,7 +308,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 	parsed := mention.Parse(msg.Content)
 
 	// Fetch room type first so DM/BotDM rooms skip the thread-subscription query
-	// entirely — their fan-out uses ListSubscriptions, not thread subscribers.
+	// entirely — their fan-out uses ListRoomMembers, not thread subscribers.
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
@@ -341,8 +341,9 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 
 	switch meta.Type {
 	case model.RoomTypeChannel:
-		// Do NOT call SetSubscriptionMentions here: TShow=false replies are invisible
-		// in the main channel, so a room-level mention badge would appear with no
+		// roomlist-worker (not broadcast-worker) owns the room-level mention badge
+		// derived from MESSAGES-CANONICAL, and correctly skips it here: TShow=false
+		// replies are invisible in the main channel, so a badge would appear with no
 		// visible message to explain it.
 		roomEvt := buildRoomEvent(&meta, clientMsg, evt.Timestamp)
 		roomEvt.Type = model.RoomEventNewThreadMessage
@@ -384,7 +385,7 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return errcode.Permanent(errcode.BadRequest("updated event missing EditedAt or UpdatedAt"))
 	}
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadUpdated(ctx, evt)
 	}
 
@@ -393,15 +394,11 @@ func (h *Handler) handleUpdated(ctx context.Context, evt *model.MessageEvent) er
 		return fmt.Errorf("fetch room %s: %w", msg.RoomID, err)
 	}
 
-	// Additive only: SetSubscriptionMentions' filter skips non-subscribers and
-	// accounts that already read past the edit, so a removed mention is never
-	// cleared and an already-read one is never re-flagged.
+	// Routing input for the cross-site relay only. The local badge write this
+	// used to perform is roomlist-worker's now — broadcast-worker makes no
+	// MongoDB writes, so a badge failure can no longer suppress the edit
+	// reaching clients.
 	parsed := mention.Parse(msg.Content)
-	if len(parsed.Accounts) > 0 {
-		if err := h.store.SetSubscriptionMentions(ctx, room.ID, parsed.Accounts, *msg.EditedAt); err != nil {
-			return fmt.Errorf("badge new mentions on edit %s: %w", room.ID, err)
-		}
-	}
 
 	// Resolve mentionees once: the same participants render on the edit event
 	// and route the cross-site badge, so we avoid a second FindUsersByAccounts.
@@ -508,7 +505,8 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 // display info) for the edit event, mirroring the create path so an edit-added
 // mention renders like a fresh one. The event's mentions[] is best-effort
 // enrichment, NOT the durable signal: the unread badge is set separately by
-// SetSubscriptionMentions and newContent still carries the raw @account, so on a
+// roomlist-worker (deriveIntents, EventUpdated) and newContent still carries the
+// raw @account, so on a
 // user-lookup error we drop the mentions[] enrichment entirely (return nil)
 // rather than emitting a partial set or failing/retrying the edit. nil when none.
 // Returns the resolved participants and MentionAll. MentionAll is parse-derived and
@@ -713,7 +711,7 @@ func (h *Handler) handleDeleted(ctx context.Context, evt *model.MessageEvent) er
 		return errcode.Permanent(errcode.BadRequest("deleted event missing UpdatedAt"))
 	}
 
-	if shouldUseThreadFanOut(&msg) {
+	if msg.IsHiddenThreadReply() {
 		return h.handleThreadDeleted(ctx, evt)
 	}
 
@@ -1152,9 +1150,12 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
 	labels := broadcastLabels(ctx)
 	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
-	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
+	// Cache-fronted: a DM's membership is fixed at its two participants for the
+	// room's lifetime, so TTL staleness cannot misroute here — and a warm entry
+	// keeps DMs flowing when Mongo is down.
+	subs, err := h.store.ListRoomMembers(ctx, meta.ID)
 	if err != nil {
-		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
+		return fmt.Errorf("list members for DM room %s: %w", meta.ID, err)
 	}
 
 	mentionSet := make(map[string]struct{}, len(mentionedAccounts))
@@ -1164,7 +1165,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 
 	recipients, failed := 0, 0
 	for i := range subs {
-		account := subs[i].User.Account
+		account := subs[i].Account
 		// Skip bots: live UI events go to human clients only, consistent with
 		// publishMutation and publishThreadMetadata. Bots receive messages via
 		// their own server-side integration, not the websocket event channel.
@@ -1218,7 +1219,6 @@ func buildRoomEvent(meta *roommetacache.Meta, clientMsg *model.ClientMessage, ev
 		UserCount:      meta.UserCount,
 		LastMsgAt:      clientMsg.CreatedAt,
 		LastMsgID:      clientMsg.ID,
-		SystemMsg:      model.IsSystemMessageType(clientMsg.Type),
 		Message:        clientMsg,
 	}
 }

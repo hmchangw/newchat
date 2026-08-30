@@ -14,9 +14,7 @@ import (
 
 	o11y "github.com/flywindy/o11y"
 	o11ygin "github.com/flywindy/o11y/gin"
-	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
@@ -33,6 +31,7 @@ import (
 	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/historyclient"
 	"github.com/hmchangw/chat/user-service/mongorepo"
@@ -198,26 +197,12 @@ func main() {
 	// Empty VALKEY_ADDRS disables the badge cache: badge.count.batch and
 	// subscription.count still work, just uncached (dev-safe Phase A default).
 	var badge badgeCache = noopBadgeCache{}
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap mutates valkeyClient in place to add tracing+metrics —
-		// mirrors pkg/valkeyutil's instrumentCluster so the badge cache's Valkey
-		// calls are observable like every other instrumented client in the repo.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, cfg.BadgeCountCap, badgecache.WithMarkerTTL(cfg.BadgeMarkerTTL))
 		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL, "marker_ttl", cfg.BadgeMarkerTTL, "count_cap", cfg.BadgeCountCap)
 	} else {

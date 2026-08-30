@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -244,6 +245,15 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 		t.Fatal("transient message never redelivered")
 	}
 
+	// Both signals above are sent from inside the handler, but the outcome is
+	// recorded after it: Nak() tells the server first and calls finish second
+	// (metrics.go), and a bare Nak redelivers instantly — so the redelivery can
+	// be handled and signalled while the naked message's goroutine has not yet
+	// reached its finish. Waiting on the handler WaitGroup is what makes the
+	// counters readable; without it the nak assertion below reads 0 whenever a
+	// loaded scheduler wins that race.
+	wg.Wait()
+
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 
@@ -333,18 +343,15 @@ func (ackPendingStore) GetThreadFollowers(context.Context, string) (map[string]s
 }
 
 func (ackPendingStore) GetRoom(context.Context, string) (*model.Room, error) { return nil, nil }
-func (ackPendingStore) ListSubscriptions(context.Context, string) ([]model.Subscription, error) {
+
+// No members, matching the nil subscription list this fake carried before the
+// room-level writes moved to roomlist-worker: this test is about ack-pending on
+// an unretryable failure, not about fan-out reaching anyone.
+func (ackPendingStore) ListRoomMembers(context.Context, string) ([]roomsubcache.Member, error) {
 	return nil, nil
-}
-func (ackPendingStore) UpdateRoomLastMessage(context.Context, roomLastMessage) error { return nil }
-func (ackPendingStore) SetSubscriptionMentions(context.Context, string, []string, time.Time) error {
-	return nil
 }
 func (ackPendingStore) GetHistorySharedSince(context.Context, string, []string) (map[string]*time.Time, error) {
 	return map[string]*time.Time{}, nil
-}
-func (ackPendingStore) AdvanceSubscriptionLastSeen(context.Context, string, string, time.Time) error {
-	return nil
 }
 
 type ackPendingUsers struct{}

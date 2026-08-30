@@ -14,8 +14,10 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -27,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -50,11 +53,16 @@ type config struct {
 	MongoPassword      string `env:"MONGO_PASSWORD"       envDefault:""`
 	ReadPreference     string `env:"MONGO_READ_PREFERENCE"      envDefault:"primaryPreferred"`
 	Pool               mongoutil.PoolConfig
-	UserCacheSize      int                     `env:"USER_CACHE_SIZE"      envDefault:"10000"`
-	UserCacheTTL       time.Duration           `env:"USER_CACHE_TTL"       envDefault:"5m"`
-	HealthAddr         string                  `env:"HEALTH_ADDR"          envDefault:":8081"`
-	PProfEnabled       bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-	MetricsAddr        string                  `env:"METRICS_ADDR"         envDefault:":9090"`
+	UserCacheSize      int           `env:"USER_CACHE_SIZE"      envDefault:"10000"`
+	UserCacheTTL       time.Duration `env:"USER_CACHE_TTL"       envDefault:"5m"`
+	UserL2             userstore.TTLConfig
+	HealthAddr         string `env:"HEALTH_ADDR"          envDefault:":8081"`
+	PProfEnabled       bool   `env:"PPROF_ENABLED" envDefault:"false"`
+	MetricsAddr        string `env:"METRICS_ADDR"         envDefault:":9090"`
+	Valkey             valkeyutil.Config
+	DEKL2              atrest.TTLConfig
+	Breaker            mongoutil.BreakerConfig
+	DEKBreaker         atrest.BreakerConfig
 	Consumer           stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 	Bootstrap          bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	Atrest             atrest.Config
@@ -79,6 +87,10 @@ func main() {
 	}
 
 	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Breaker.Validate(""); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
@@ -140,13 +152,30 @@ func main() {
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
-	us, err := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
-		cfg.UserCacheSize, cfg.UserCacheTTL)
+	// One Valkey client for every L2 tier in this service (at-rest DEK, users).
+	// Empty VALKEY_ADDRS disables all of them; each tier falls straight through
+	// to Mongo, as before.
+	//
+	// A connect failure must NOT be fatal. This worker is the sole persister of
+	// message history to Cassandra; exiting here would crash-loop the pod over a
+	// fail-open cache tier and stop every write — strictly worse than the outage
+	// the L2 exists to survive. A nil client is the documented "L2 off" contract
+	// (NewL2DEKStore and valkeyutil.Disconnect both accept it).
+	valkeyClient := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "DEK and user L2", valkeyutil.Instrumented(sdk))
+	if cfg.Valkey.Enabled() {
+		slog.Info("valkey L2 tiers configured", "dek_enabled", valkeyClient != nil && cfg.DEKL2.TTL > 0, "dek_ttl", cfg.DEKL2.TTL)
+	}
+
+	userBreaker := cfg.Breaker.New(ctx, "user",
+		circuitbreaker.WithFailurePredicate(userstore.BreakerFailure))
+	us, err := userstore.Resilient(db.Collection("users"), userBreaker,
+		valkeyClient, cfg.UserL2.TTL, cfg.UserCacheSize, cfg.UserCacheTTL)
 	if err != nil {
 		slog.Error("init user cache failed", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
+	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL,
+		"l2_enabled", valkeyClient != nil && cfg.UserL2.TTL > 0, "l2_ttl", cfg.UserL2.TTL)
 
 	var (
 		cipher       atrest.Cipher
@@ -160,7 +189,12 @@ func main() {
 		}
 		vaultWrapper = w
 		dekColl := db.Collection(atrest.CollectionName)
-		cipher = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
+		// message-worker is the sole persister, so its DEK breaker opening is the
+		// difference between messages being written and being parked. Publish it.
+		dekBreaker := cfg.DEKBreaker.New(ctx, "atrestdek")
+		dekStore := atrest.NewL2DEKStore(atrest.NewMongoDEKStore(dekColl), valkeyClient,
+			cfg.DEKL2.TTL, dekBreaker, atrest.DefaultL2Recorder())
+		cipher = atrest.NewCipher(w, dekStore, cfg.Atrest)
 	}
 
 	store := NewCassandraStore(cassSession, bucketSizer, cipher)
@@ -306,6 +340,7 @@ func main() {
 			}
 			return nil
 		},
+		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
@@ -316,8 +351,13 @@ func main() {
 // .deleted are excluded — history-service already wrote Cassandra synchronously for
 // those, so re-processing would duplicate writes). teams mode binds only the Teams
 // migration batch subject on MESSAGES-TEAMS, its own durable.
+// buildConsumerConfig applies the outage retry budget: a thread reply whose
+// thread-room write cannot reach MongoDB is NAKed, and at the package default
+// it would be dropped after ~2.6 minutes — after the gatekeeper already told the
+// sender the message was accepted. The longer budget holds it in the stream
+// until MongoDB returns.
 func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstream.ConsumerConfig {
-	cc := stream.DurableConsumerDefaults(s)
+	cc := stream.DurableConsumerDefaults(stream.WithOutageRetryBudget(s, jsretry.DefaultBackoff))
 	if mode == "teams" {
 		cc.Durable = "message-worker-teams"
 		cc.FilterSubjects = []string{subject.MsgTeamsCanonicalBatch(siteID)}
@@ -336,15 +376,13 @@ func buildConsumerConfig(s stream.ConsumerSettings, mode, siteID string) jetstre
 func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj string) func(context.Context, jetstream.Msg) {
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
-			handlerCtx = logctx.Admit(handlerCtx, msg.Headers())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			// Dispatch by subject: the one-time .teams.batch migration writes
 			// straight to Cassandra; the live .created feed runs the normal pipeline.
 			if msg.Subject() == teamsBatchSubj {
 				teams.consume(handlerCtx, msg)
 				return
 			}
-			logctx.CapturePayload(handlerCtx, "consumed", msg.Subject(), msg.Data())
 			h.HandleJetStreamMsg(handlerCtx, msg)
 		})
 	}

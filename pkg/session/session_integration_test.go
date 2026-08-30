@@ -58,7 +58,9 @@ func TestDeleteBeyondCap_EvictsOldest(t *testing.T) {
 
 	deleted, err := s.DeleteBeyondCap(ctx, "alice", 2)
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), deleted)
+	// The evicted ids come back so the caller can bust their cache entries;
+	// a session _id IS its token hash.
+	assert.Len(t, deleted, 3)
 
 	// Only the two newest survive.
 	for _, id := range []string{"a", "b", "c"} {
@@ -79,7 +81,7 @@ func TestDeleteBeyondCap_NoOp_UnderCap(t *testing.T) {
 	}))
 	deleted, err := s.DeleteBeyondCap(ctx, "alice", 5)
 	require.NoError(t, err)
-	assert.Zero(t, deleted)
+	assert.Empty(t, deleted)
 }
 
 // TestDeleteBeyondCap_ConcurrentLogins locks in the "keep newest N" invariant
@@ -136,7 +138,7 @@ func TestDeleteForAccountExcept(t *testing.T) {
 
 	deleted, err := s.DeleteForAccountExcept(ctx, "site-a", "alice", "keep")
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), deleted)
+	assert.ElementsMatch(t, []string{"kill-1", "kill-2"}, deleted)
 
 	_, err = s.FindByHash(ctx, "keep")
 	require.NoError(t, err)

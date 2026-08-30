@@ -23,7 +23,9 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // ptrBool returns a pointer to b, for constructing tri-state *bool fields
@@ -45,6 +47,42 @@ func ptrInt64(v int64) *int64 { return &v }
 func expectAllAccountsExist(store *MockRoomStore) *gomock.Call {
 	return store.EXPECT().FindExistingAccounts(gomock.Any(), gomock.Any()).
 		DoAndReturn(func(_ context.Context, accs []string) ([]string, error) { return accs, nil })
+}
+
+// --- bustSubs (batched) tests ---
+
+// TestHandler_UpdateRole_BustsSubL2 covers the role-change case: a promoted or
+// demoted account's cached Roles (drives canBypassLargeRoomCap in the
+// gatekeeper) must not keep serving the pre-change decision.
+func TestHandler_UpdateRole_BustsSubL2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetRoom(gomock.Any(), "r1").
+		Return(&model.Room{ID: "r1", Name: "general", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1", Roles: []model.Role{model.RoleOwner}}, nil)
+	store.EXPECT().GetSubscriptionWithMembership(gomock.Any(), "r1", "bob").
+		Return(&SubscriptionWithMembership{
+			Subscription:            &model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
+			HasIndividualMembership: true,
+		}, nil)
+	store.EXPECT().SetOwnerRole(gomock.Any(), "r1", "bob", true, gomock.Any()).
+		Return(&model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleMember, model.RoleOwner}}, nil)
+	store.EXPECT().GetUserSiteID(gomock.Any(), "bob").Return("site-a", nil)
+
+	fake := valkeyfake.New()
+	h := &Handler{store: store, siteID: "site-a", maxRoomSize: 1000, valkey: fake,
+		publishCore:     func(context.Context, string, []byte) error { return nil },
+		publishToStream: func(context.Context, string, []byte, string) error { return nil },
+	}
+
+	req := model.UpdateRoleRequest{Account: "bob", NewRole: model.RoleOwner}
+	_, err := h.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}), req)
+	require.NoError(t, err)
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "bob")},
+		"the role-changed account's subauthcache L2 entry must be busted")
 }
 
 func TestHandler_UpdateRole_Success(t *testing.T) {
@@ -367,6 +405,9 @@ func TestHandler_UpdateRole_SetOwnerRoleNotFound(t *testing.T) {
 			Subscription:            &model.Subscription{User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1", Roles: []model.Role{model.RoleMember}},
 			HasIndividualMembership: true,
 		}, nil)
+	// Resolved before the write, so the federation destination is known if the
+	// write succeeds — see TestUpdateRole_ResolvesTheFederationDestinationBeforeTheWrite.
+	store.EXPECT().GetUserSiteID(gomock.Any(), "bob").Return("site-a", nil)
 	store.EXPECT().SetOwnerRole(gomock.Any(), "r1", "bob", true, gomock.Any()).
 		Return(nil, fmt.Errorf("set owner role: %w", model.ErrSubscriptionNotFound))
 
@@ -5941,6 +5982,46 @@ func TestHandleRoomRestricted_PublishesEventNotSysMessage(t *testing.T) {
 		}
 	}
 	assert.True(t, federated, "cross-site fan-out must still run")
+}
+
+// TestHandleRoomRestricted_BustsSubL2ForEverySubscriber covers the bulk
+// role-rewrite path: ApplySubscriptionRestriction demotes every non-owner
+// account to member (and sets the owner) when restricted+ownerAccount are
+// given, so every subscriber's cached Roles must be busted, not just the one
+// named in the request.
+func TestHandleRoomRestricted_BustsSubL2ForEverySubscriber(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockRoomStore(ctrl)
+
+	store.EXPECT().GetUser(gomock.Any(), "admin1").Return(&model.User{Account: "admin1", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
+	store.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Type: model.RoomTypeChannel, Restricted: false, UserCount: 10}, nil)
+	store.EXPECT().CheckMembership(gomock.Any(), "owner1", "r1").Return(nil)
+	store.EXPECT().UpdateRoomVisibility(gomock.Any(), "r1", true, true).Return(nil)
+	store.EXPECT().ApplySubscriptionRestriction(gomock.Any(), "r1", true, true, "owner1", gomock.Any()).Return(nil)
+	store.EXPECT().ListSubscriptionsByRoom(gomock.Any(), "r1").Return([]model.Subscription{
+		{User: model.SubscriptionUser{Account: "owner1"}},
+		{User: model.SubscriptionUser{Account: "bob"}},
+	}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
+		{Account: "owner1", SiteID: "site-a"},
+		{Account: "bob", SiteID: "site-a"},
+	}, nil)
+
+	fake := valkeyfake.New()
+	h := NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
+		func(_ context.Context, _ string, _ []byte, _ string) error { return nil },
+		func(_ context.Context, _ string, _ []byte) error { return nil },
+		nil, 0, subject.RouteGlobal)
+	h.valkey = fake
+
+	_, err := h.roomRestricted(ctxParams(map[string]string{}), model.RoomRestrictedRequest{
+		RoomID: "r1", Account: "admin1", Restricted: true, ExternalAccess: true,
+		OwnerAccount: "owner1",
+	})
+	require.NoError(t, err)
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
+		"every subscriber's subauthcache L2 entry must be busted (roles were bulk-rewritten)")
 }
 
 // TestHandleRoomRestricted_MultiSite_FederatesPerDestination verifies the

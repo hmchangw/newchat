@@ -135,7 +135,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	// @here is deliberately NOT a push trigger — the legacy frontend doesn't render it.
 	mentionsAll := mentionInfo.MentionAll
 	isLargeRoom := len(members) > h.deps.LargeRoomThreshold
-	isThreadOnlyReply := msg.ThreadParentMessageID != "" && !msg.TShow
+	isThreadOnlyReply := msg.IsHiddenThreadReply()
 
 	var followers map[string]struct{}
 	// parentCreatedAt/parentSenderAccount feed the suppression gate; use gatekeeper-carried values

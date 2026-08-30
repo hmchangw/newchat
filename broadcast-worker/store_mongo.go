@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -12,9 +11,13 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
+	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -29,101 +32,108 @@ func (m *mongoStore) EnsureIndexes(ctx context.Context) error {
 }
 
 type mongoStore struct {
-	roomCol       *mongo.Collection
+	// rooms is typed for its BulkWrite, which supplies the empty-input guard,
+	// the unordered execution the preview flush depends on, and a %w wrap that
+	// keeps errors.As(BulkWriteException) working — the same reason
+	// roomlist-worker's store holds typed collections. Raw() serves the one
+	// read that wants the driver handle.
+	rooms         *mongoutil.Collection[model.Room]
 	subCol        *mongo.Collection
 	threadRoomCol *mongo.Collection
-	valkey        valkeyutil.Client // nil disables the L2 tier (pure Mongo)
-	metaTTL       time.Duration
-	metaRec       roommetacache.Recorder
-	// Switches the room-doc update from a plain $set to the guarded pipeline.
-	previews bool
+	// metaTier is built once: a tier's closures escape to the heap, so
+	// constructing one per GetRoomMeta would allocate on the fan-out path.
+	metaTier *roommetacache.L2Tier
+	members  *roomsubcache.Lookup
+	// breaker fences the reads that have no cache tier of their own. Nil is
+	// "protection off" — circuitbreaker.Do1 passes through — so tests and a
+	// breaker-less config both work without a branch at each call site.
+	breaker *circuitbreaker.Breaker
 }
 
-func NewMongoStore(roomCol, subCol, threadRoomCol *mongo.Collection, valkey valkeyutil.Client, metaTTL time.Duration, previews bool) *mongoStore {
+func NewMongoStore(roomCol, subCol, threadRoomCol, userCol *mongo.Collection, valkey valkeyutil.Client, metaTTL, subTTL time.Duration, mongoBreaker *circuitbreaker.Breaker) *mongoStore {
+	// A nil valkey leaves the Lookup cacheless (straight to Mongo). The loader
+	// is always the shared full-projection one: notification-worker reads the
+	// same key and gates on Muted/HistorySharedSince, so a partial write here
+	// would silently unmute users and widen their history windows. userCol is
+	// what lets it stamp HomeSiteID too — without it a cold fill won here hands
+	// notification-worker an entry that misroutes its per-site badge RPC.
+	var subCache roomsubcache.Cache
+	if valkey != nil {
+		subCache = roomsubcache.NewValkeyCache(valkey)
+	}
 	return &mongoStore{
-		roomCol:       roomCol,
+		rooms:         mongoutil.NewCollection[model.Room](roomCol),
 		subCol:        subCol,
 		threadRoomCol: threadRoomCol,
-		valkey:        valkey,
-		metaTTL:       metaTTL,
-		metaRec:       cachemetrics.For("roommeta", "l2"),
-		previews:      previews,
+		metaTier: roommetacache.NewL2Tier(valkey, roomCol, metaTTL,
+			mongoBreaker, cachemetrics.For("roommeta", "l2")),
+		members: roomsubcache.NewLookup(subCache,
+			roomsubcache.GuardLoader(roomsubcache.NewMongoLoader(subCol, userCol), mongoBreaker), subTTL),
+		breaker: mongoBreaker,
 	}
 }
 
+// mongoBreakerFailure is the failure predicate this service's single Mongo
+// breaker must be built with. It exempts every "healthy absence" sentinel the
+// fenced call sites can return — a missing document or a missing user is an
+// answer from a working Mongo, not evidence it is unwell. A new fenced call
+// site with its own not-found sentinel must be added here rather than given a
+// breaker of its own, or it re-splits the failure budget.
+var mongoBreakerFailure = mongoutil.BreakerFailure(userstore.ErrUserNotFound)
+
+// GetRoom backs the edit path, which has no cache tier to fall back on. It is
+// fenced so a Mongo outage fast-fails instead of spending a server-selection
+// timeout on every one of the OutageRetryBudget's redeliveries.
 func (m *mongoStore) GetRoom(ctx context.Context, roomID string) (*model.Room, error) {
-	filter := bson.M{"_id": roomID}
-	var room model.Room
-	if err := m.roomCol.FindOne(ctx, filter).Decode(&room); err != nil {
-		return nil, fmt.Errorf("find room %s: %w", roomID, err)
-	}
-	return &room, nil
+	return circuitbreaker.Do1(m.breaker, func() (*model.Room, error) {
+		filter := bson.M{"_id": roomID}
+		var room model.Room
+		if err := m.rooms.Raw().FindOne(ctx, filter, roomWithoutPreview).Decode(&room); err != nil {
+			return nil, fmt.Errorf("find room %s: %w", roomID, err)
+		}
+		return &room, nil
+	})
 }
 
-func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error) {
-	filter := bson.M{"roomId": roomID}
-	cursor, err := m.subCol.Find(ctx, filter)
+// roomWithoutPreview keeps the sealed preview out of every GetRoom decode. No
+// caller reads it, and previewCiphertext holds a whole message body plus
+// attachments — the only unbounded field on the document.
+//
+// Excluding rather than listing what to keep: callers touch most of the
+// document, and a missing field would surface as a nil, not a build error.
+var roomWithoutPreview = options.FindOne().SetProjection(bson.M{
+	"previewMeta": 0, "previewCiphertext": 0, "previewNonce": 0,
+})
+
+// ListRoomMembers reads through the shared roomsubcache. The Lookup owns the
+// Mongo fallback, so during an outage a warm room still fans out from L2.
+func (m *mongoStore) ListRoomMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
+	members, err := m.members.GetMembers(ctx, roomID)
 	if err != nil {
-		return nil, fmt.Errorf("query subscriptions for room %s: %w", roomID, err)
+		return nil, fmt.Errorf("list members for room %s: %w", roomID, err)
 	}
-	defer cursor.Close(ctx)
-	var subs []model.Subscription
-	if err := cursor.All(ctx, &subs); err != nil {
-		return nil, fmt.Errorf("decode subscriptions: %w", err)
-	}
-	return subs, nil
+	return members, nil
 }
 
+// GetRoomMeta fences only the Mongo fetch, never the L2 read in front of it: an
+// open breaker must still serve cached rooms, since during the outage that
+// opened it the L2 is the only tier that can answer — and this read gates
+// delivery for every message in the room.
 func (m *mongoStore) GetRoomMeta(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-	return roommetacache.ReadThrough(ctx, m.valkey, m.roomCol, roomID, m.metaTTL, m.metaRec)
+	return m.metaTier.Get(ctx, roomID)
 }
 
-//nolint:gocritic // hugeParam: roomLastMessage is the Store.UpdateRoomLastMessage contract shared with the coalescer and the mock.
-func (m *mongoStore) UpdateRoomLastMessage(ctx context.Context, upd roomLastMessage) error {
-	u := asBuffered(upd)
-	res, err := m.roomCol.UpdateOne(ctx, bson.M{"_id": upd.RoomID}, m.lastMessageUpdate(&u))
-	if err != nil {
-		return fmt.Errorf("update room last message %s: %w", upd.RoomID, err)
-	}
-	if res.MatchedCount == 0 {
-		return fmt.Errorf("update room last message %s: %w", upd.RoomID, mongo.ErrNoDocuments)
-	}
-	return nil
-}
-
-// asBuffered renders a direct update in the buffered form so both paths share one
-// builder. Every field must be carried: one dropped silently changes the write.
+// BulkUpdateRoomPreview applies a batch of room-preview updates in one unordered
+// BulkWrite. Missing rooms are not surfaced — the message is already persisted to
+// Cassandra and already broadcast, and a room with no stored preview is one the
+// reader walks for.
 //
-//nolint:gocritic // hugeParam: matches UpdateRoomLastMessage's by-value contract.
-func asBuffered(upd roomLastMessage) roomLastMsgUpdate {
-	b := roomLastMsgUpdate{
-		msgID:            upd.MsgID,
-		at:               upd.At,
-		lastMentionAllAt: mentionAllAt(upd),
-		pvw:              upd.Preview,
-		pvwFailed:        upd.PreviewFailed,
-		pvwAt:            upd.At,
-	}
-	if !upd.SystemMsg {
-		b.userAt = upd.At
-		b.userMsgID = upd.MsgID
-	}
-	return b
-}
-
-// mentionAllAt renders the flag as the timestamp the buffered form carries.
-//
-//nolint:gocritic // hugeParam: matches UpdateRoomLastMessage's by-value contract.
-func mentionAllAt(upd roomLastMessage) time.Time {
-	if !upd.MentionAll {
-		return time.Time{}
-	}
-	return upd.At
-}
-
-// BulkUpdateRoomLastMessage applies a batch of room updates in one unordered BulkWrite.
-// Missing rooms are not surfaced — the message is already persisted to Cassandra.
-func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[string]roomLastMsgUpdate) error {
+// Deliberately outside the breaker. The fence exists to turn a stalled read into a
+// fast error so the fail-open beneath it can run before the request budget is gone;
+// this write has no caller waiting on it and is already bounded by the flush's own
+// timeout. Fencing it would only let an unrelated read's failures suppress the
+// write, and let its own failures suppress the reads that gate delivery.
+func (m *mongoStore) BulkUpdateRoomPreview(ctx context.Context, updates map[string]roomPreviewUpdate) error {
 	if len(updates) == 0 {
 		return nil
 	}
@@ -134,66 +144,22 @@ func (m *mongoStore) BulkUpdateRoomLastMessage(ctx context.Context, updates map[
 	for roomID, u := range updates {
 		models = append(models, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": roomID}).
-			SetUpdate(m.lastMessageUpdate(&u)))
+			SetUpdate(previewUpdate(&u)))
 	}
-	if _, err := m.roomCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
-		return fmt.Errorf("bulk update room last message (%d rooms): %w", len(updates), err)
+	if _, err := m.rooms.BulkWrite(ctx, models); err != nil {
+		return fmt.Errorf("bulk update room preview (%d rooms): %w", len(updates), err)
 	}
 	return nil
 }
 
-// lastMessageUpdate renders one room's update: $set with previews off, a pipeline with
-// them on — except a system-only window, which always takes the pipeline form (in both
-// modes) since pinning lastUserMsgAt needs the "$ifNull" read-before-write expression.
-// lastMsgAt/lastMsgId stay unguarded — a bad future one would freeze ordering.
-func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
-	fields := bson.M{
-		"lastMsgAt": u.at,
-		"lastMsgId": u.msgID,
-		"updatedAt": u.at,
-	}
-	if !u.lastMentionAllAt.IsZero() {
-		fields["lastMentionAllAt"] = u.lastMentionAllAt
-	}
-	systemOnly := u.userAt.IsZero()
-	if !systemOnly {
-		fields["lastUserMsgAt"] = u.userAt
-	}
-	if !m.previews && !systemOnly {
-		return bson.M{"$set": fields}
-	}
-
-	// A bare "$"-prefixed string reads as a field path in a pipeline stage.
-	for k, v := range fields {
-		if s, ok := v.(string); ok {
-			fields[k] = bson.M{"$literal": s}
-		}
-	}
-	if systemOnly {
-		// Sticky freeze: keep whatever lastUserMsgAt already says, and pin a
-		// floor ONCE for a room that has never carried a message — its
-		// createdAt, which is what makes the room unread for members who have
-		// never opened it while never re-flagging members who have. A room that
-		// already has a lastMsgAt is left untouched: that timestamp is
-		// unclassified (it may itself be a system message), so promoting it
-		// would persist a system position as user activity and the freeze would
-		// then keep it forever. Absent is the safe state — readers coalesce to
-		// lastMsgAt, which is the pre-field behavior. Every expression reads the
-		// pre-update document, so "$lastMsgAt" here is the position BEFORE this
-		// write advances it.
-		fields["lastUserMsgAt"] = bson.M{"$ifNull": bson.A{
-			"$lastUserMsgAt",
-			bson.M{"$cond": bson.A{
-				bson.M{"$eq": bson.A{bson.M{"$ifNull": bson.A{"$lastMsgAt", nil}}, nil}},
-				bson.M{"$ifNull": bson.A{"$createdAt", "$$REMOVE"}},
-				"$$REMOVE",
-			}},
-		}}
-	}
-	if !m.previews {
-		return mongo.Pipeline{{{Key: "$set", Value: fields}}}
-	}
-
+// previewUpdate renders one room's preview update as an aggregation pipeline — the
+// guards read the stored previewAsOf and lastMsgId, which a plain $set cannot do.
+//
+// It touches ONLY the preview fields. lastMsgAt/lastMsgId/lastMentionAllAt on the same
+// document belong to roomlist-worker; writing them here would race its durable, retried
+// batch with a best-effort one that drops on failure. See previewWriter for what the
+// two halves of the document guarantee each other, and what they do not.
+func previewUpdate(u *roomPreviewUpdate) mongo.Pipeline {
 	asOf := u.at.UnixMilli()
 	// The preview rides its own clock, and the flush must not collapse the two. u.at names
 	// the room's NEWEST message, which may be a later ineligible one; the body was
@@ -202,104 +168,85 @@ func (m *mongoStore) lastMessageUpdate(u *roomLastMsgUpdate) any {
 	// corrected body — restoring stale content under a key that then equals lastMsgId, so
 	// the reader serves it as current. Losing to that mutation instead only costs a walk.
 	pvwAsOf := u.pvwAt.UnixMilli()
-	var pvwFields bson.M
+	var fields bson.M
 	switch {
 	case u.pvwFailed:
 		// The stored body is the PREVIOUS message's and opens under any key later pointing at
 		// it, so withholding is not enough — the next ineligible message would revalidate it.
-		pvwFields = preview.GuardedClearFields(pvwAsOf)
+		fields = preview.GuardedClearFields(pvwAsOf)
 	case u.pvw != nil:
 		// The KEY takes the newest message's identity, the WATERMARK the preview's own clock:
 		// "what is this body paired with" and "when was it established" are different
 		// questions, and a later ineligible message answers only the first.
 		sealed := *u.pvw
 		sealed.ForMsgID = u.msgID
-		pvwFields = preview.GuardedSetFields(sealed, pvwAsOf)
+		fields = preview.GuardedSetFields(sealed, pvwAsOf)
 	default:
 		// The key advance IS the newest message's event, so it keeps that clock.
-		pvwFields = preview.GuardedAdvanceKeyFields(u.msgID, asOf)
+		fields = preview.GuardedAdvanceKeyFields(u.msgID, asOf)
 	}
-	maps.Copy(fields, pvwFields)
 	return mongo.Pipeline{{{Key: "$set", Value: fields}}}
 }
 
-// subscriptionMentionsFilter matches subs that have NOT already read past msgCreatedAt.
-// $not/$gte, not $lt: plain $lt skips missing fields, excluding never-read subs (#467).
-func subscriptionMentionsFilter(roomID string, accounts []string, msgCreatedAt time.Time) bson.M {
-	return bson.M{
-		"roomId":     roomID,
-		"u.account":  bson.M{"$in": accounts},
-		"lastSeenAt": bson.M{"$not": bson.M{"$gte": msgCreatedAt}},
-	}
-}
-
-func (m *mongoStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
-	filter := subscriptionMentionsFilter(roomID, accounts, msgCreatedAt)
-	update := bson.M{"$set": bson.M{"hasMention": true}}
-	_, err := m.subCol.UpdateMany(ctx, filter, update)
-	if err != nil {
-		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
-	}
-	return nil
-}
-
-// AdvanceSubscriptionLastSeen advances lastSeenAt via $max so it never regresses a
-// sender who already read later. A missing subscription is a best-effort no-op.
-func (m *mongoStore) AdvanceSubscriptionLastSeen(ctx context.Context, roomID, account string, at time.Time) error {
-	if _, err := m.subCol.UpdateOne(ctx,
-		bson.M{"roomId": roomID, "u.account": account},
-		bson.M{"$max": bson.M{"lastSeenAt": at}},
-	); err != nil {
-		return fmt.Errorf("advance lastSeenAt for %q in room %q: %w", account, roomID, err)
-	}
-	return nil
-}
-
+// GetThreadFollowers gates hidden-thread-reply delivery and, like GetRoom, has
+// no cache in front of it, so it rides the breaker too. A thread with no
+// followers resolves inside the fence to an empty set and a nil error: that is
+// Mongo answering, and it must read as a success rather than pressure.
 func (m *mongoStore) GetThreadFollowers(ctx context.Context, parentMessageID string) (map[string]struct{}, error) {
-	var doc struct {
-		ReplyAccounts []string `bson:"replyAccounts"`
-	}
-	opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "_id": 0})
-	err := m.threadRoomCol.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}, opts).Decode(&doc)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return map[string]struct{}{}, nil
+	return circuitbreaker.Do1(m.breaker, func() (map[string]struct{}, error) {
+		var doc struct {
+			ReplyAccounts []string `bson:"replyAccounts"`
 		}
-		return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
-	}
-	out := make(map[string]struct{}, len(doc.ReplyAccounts))
-	for _, a := range doc.ReplyAccounts {
-		if a != "" {
-			out[a] = struct{}{}
+		opts := options.FindOne().SetProjection(bson.M{"replyAccounts": 1, "_id": 0})
+		err := m.threadRoomCol.FindOne(ctx, bson.M{"parentMessageId": parentMessageID}, opts).Decode(&doc)
+		if err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return map[string]struct{}{}, nil
+			}
+			return nil, fmt.Errorf("find thread room by parent %s: %w", parentMessageID, err)
 		}
-	}
-	return out, nil
+		out := make(map[string]struct{}, len(doc.ReplyAccounts))
+		for _, a := range doc.ReplyAccounts {
+			if a != "" {
+				out[a] = struct{}{}
+			}
+		}
+		return out, nil
+	})
 }
 
+// GetHistorySharedSince is fenced for the same reason as its siblings. The
+// empty-accounts short-circuit stays OUTSIDE the fence: it issues no query, so
+// letting it report success would hold the breaker closed on evidence that
+// never touched Mongo.
 func (m *mongoStore) GetHistorySharedSince(ctx context.Context, roomID string, accounts []string) (map[string]*time.Time, error) {
-	out := make(map[string]*time.Time, len(accounts))
 	if len(accounts) == 0 {
+		return map[string]*time.Time{}, nil
+	}
+	return circuitbreaker.Do1(m.breaker, func() (map[string]*time.Time, error) {
+		filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
+		opts := options.Find().SetProjection(bson.M{"u.account": 1, "historySharedSince": 1, "_id": 0})
+		cursor, err := m.subCol.Find(ctx, filter, opts)
+		if err != nil {
+			return nil, fmt.Errorf("query history windows for room %s: %w", roomID, err)
+		}
+		defer cursor.Close(ctx)
+		// Minimal decode shape: the projection returns only u.account + historySharedSince,
+		// so decode just those rather than the full model.SubscriptionUser (whose other
+		// fields would silently be zero-valued).
+		var rows []struct {
+			User struct {
+				Account string `bson:"account"`
+			} `bson:"u"`
+			HistorySharedSince *time.Time `bson:"historySharedSince"`
+		}
+		if err := cursor.All(ctx, &rows); err != nil {
+			return nil, fmt.Errorf("decode history windows: %w", err)
+		}
+		out := make(map[string]*time.Time, len(accounts))
+		for i := range rows {
+			out[rows[i].User.Account] = rows[i].HistorySharedSince
+		}
 		return out, nil
-	}
-	filter := bson.M{"roomId": roomID, "u.account": bson.M{"$in": accounts}}
-	opts := options.Find().SetProjection(bson.M{"u.account": 1, "historySharedSince": 1, "_id": 0})
-	cursor, err := m.subCol.Find(ctx, filter, opts)
-	if err != nil {
-		return nil, fmt.Errorf("query history windows for room %s: %w", roomID, err)
-	}
-	defer cursor.Close(ctx)
-	// Decode only the projected fields — model.SubscriptionUser's rest would be zero.
-	var rows []struct {
-		User struct {
-			Account string `bson:"account"`
-		} `bson:"u"`
-		HistorySharedSince *time.Time `bson:"historySharedSince"`
-	}
-	if err := cursor.All(ctx, &rows); err != nil {
-		return nil, fmt.Errorf("decode history windows: %w", err)
-	}
-	for i := range rows {
-		out[rows[i].User.Account] = rows[i].HistorySharedSince
-	}
-	return out, nil
+	})
 }

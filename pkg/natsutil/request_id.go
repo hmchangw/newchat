@@ -87,8 +87,7 @@ func NewMsgEncoded(ctx context.Context, subj string, data []byte, encoding strin
 	return msg
 }
 
-// StampRequestID is the single boundary helper every NATS entry point should
-// use. It:
+// StampRequestID is the request-id half of the NATS boundary. It:
 //  1. Resolves the inbound X-Request-ID via idgen.ResolveRequestID (mint when
 //     missing/malformed per the repo-wide policy in docs/error-handling.md),
 //  2. Stamps the resolved id onto ctx via WithRequestID,
@@ -99,8 +98,14 @@ func NewMsgEncoded(ctx context.Context, subj string, data []byte, encoding strin
 //     QueueSubscribe handlers).
 //
 // subject is logged alongside the warn for trace context; pass "" if not
-// applicable (e.g., JetStream consume loops that prefer msg.Subject() at the
-// call site).
+// applicable.
+//
+// Stamping the id is only one of the three things a boundary owes a message —
+// the X-Debug rung and the payload capture ride the same headers, and a site
+// that does one of the three and not the others is how the fleet drifted
+// before. Do not call this directly from a stream consumer: logctx.ConsumeContext
+// does all three and is what a JetStream consume loop should use. natsrouter's
+// RequestID middleware is the equivalent for request/reply.
 func StampRequestID(ctx context.Context, headers nats.Header, subject string) (context.Context, string) {
 	var inbound string
 	if headers != nil {

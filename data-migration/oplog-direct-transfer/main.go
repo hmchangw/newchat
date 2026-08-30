@@ -17,6 +17,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -155,7 +156,7 @@ func main() {
 
 // processOne decodes one event and maps its handler outcome to a JetStream disposition.
 func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, maxDeliver int) {
-	ctx, reqID := natsutil.StampRequestID(ctx, m.Headers(), m.Subject())
+	ctx, reqID := logctx.ConsumeContext(ctx, m.Headers(), m.Subject(), m.Data())
 	dispose := func(action string, fn func() error) {
 		if derr := fn(); derr != nil {
 			slog.Error("jetstream disposition failed", "action", action, "error", derr, "request_id", reqID)
