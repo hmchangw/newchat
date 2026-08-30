@@ -2332,15 +2332,26 @@ func TestCassandraStore_SaveThreadMessage_RedeliveryDoesNotRevertEdit(t *testing
 	})
 }
 
-// TestSaveMessage_EncryptedRedeliveryDoesNotRevertEdit is where the two
-// invariants meet: the body INSERT must be pinned so a redelivery cannot
-// outrank a later edit, while the legacy strip beside it must stay on the
-// client clock so it can still clear a pre-at-rest row. Pinning both together
-// breaks the strip; pinning neither breaks the edit. This asserts the first.
+// TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable asserts what an
+// encrypted create actually has to guarantee across a JetStream redelivery:
+// that enc_payload and enc_meta still come from the SAME encryption attempt.
 //
-// The edit binds a distinctive enc_payload rather than a real re-encryption:
-// the assertion is about which write timestamp wins, not about the ciphertext.
-func TestSaveMessage_EncryptedRedeliveryDoesNotRevertEdit(t *testing.T) {
+// This test used to assert the opposite behaviour — that a pinned create could
+// not outrank a later edit — and that pin is exactly what made the row
+// undecryptable. atrest.Encrypt draws a fresh random nonce per call, so a
+// redelivery produces a different ciphertext AND a different nonce. Pinned,
+// both attempts write at one timestamp, and Cassandra breaks a same-timestamp
+// conflict per cell by comparing values, independently. The row can end up
+// holding attempt A's ciphertext beside attempt B's nonce, which AES-GCM
+// cannot open and nothing repairs.
+//
+// Unpinned, each redelivery is strictly newer, so one attempt wins both cells.
+// The accepted cost is visible below: the redelivered create DOES overwrite an
+// edit made in between. That is recoverable content loss traded against an
+// unrecoverable, undecryptable row. Restoring the pin safely needs the
+// ciphertext and nonce in one reconciled cell, or a deterministic encrypted
+// bundle — see CLAUDE.md.
+func TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable(t *testing.T) {
 	ctx := context.Background()
 	session := setupCassandra(t)
 	mongoDB := setupMongo(t)
@@ -2392,20 +2403,34 @@ func TestSaveMessage_EncryptedRedeliveryDoesNotRevertEdit(t *testing.T) {
 	}{
 		{
 			name: "messages_by_id",
-			q:    `SELECT enc_payload FROM messages_by_id WHERE message_id = ?`,
+			q:    `SELECT enc_payload, enc_meta FROM messages_by_id WHERE message_id = ?`,
 			args: []any{msgID},
 		},
 		{
 			name: "messages_by_room",
-			q:    `SELECT enc_payload FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			q:    `SELECT enc_payload, enc_meta FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 			args: []any{roomID, bucket.Of(createdAt), createdAt, msgID},
 		},
 	} {
-		t.Run(tc.name+" keeps the edit", func(t *testing.T) {
+		t.Run(tc.name+" still decrypts", func(t *testing.T) {
 			var encPayload []byte
-			require.NoError(t, session.Query(tc.q, tc.args...).WithContext(ctx).Scan(&encPayload))
-			assert.Equal(t, edited, encPayload,
-				"%s: the redelivered create must not outrank the edit", tc.name)
+			var encMeta cassandra.EncMeta
+			require.NoError(t, session.Query(tc.q, tc.args...).WithContext(ctx).Scan(&encPayload, &encMeta))
+			require.NotEmpty(t, encPayload)
+			require.Len(t, encMeta.Nonce, 12, "%s: nonce must survive the redelivery intact", tc.name)
+
+			// The load-bearing assertion. A mismatched pair fails here rather
+			// than being noticed by a user who can no longer read the message.
+			plain, err := cipher.Decrypt(ctx, roomID, encPayload, atrest.EncMeta{Nonce: encMeta.Nonce})
+			require.NoError(t, err,
+				"%s: ciphertext and nonce came from different encryption attempts", tc.name)
+
+			// The documented trade: the redelivery won, so the edit is gone and
+			// the original body is back. Recoverable, unlike an unopenable row.
+			assert.Equal(t, msg.Content, plain.Msg,
+				"%s: the redelivered create is expected to overwrite the edit", tc.name)
+			assert.NotEqual(t, edited, encPayload,
+				"%s: an unpinned redelivery must be the write that won", tc.name)
 		})
 	}
 }
