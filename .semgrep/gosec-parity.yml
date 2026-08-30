@@ -70,11 +70,21 @@ rules:
     message: >
       Address taken of a range variable (gosec G601, CWE-118). Safe on Go
       1.22+, where each iteration has its own variable. Suppress with
-      `// #nosec G601 -- reason` plus `// nosemgrep: gosec.G601-1`.
+      `// #nosec G601 -- reason` plus `// nosemgrep: gosec.G601-1` on the
+      lines directly above the `for ... range` statement.
+    # Anchored on the range statement, not the `&v` expression, so the finding
+    # lands on the same line the gate's gosec port reports. Matching `&$V` alone
+    # put it several lines lower, where a directive placed for the gate did not
+    # sit -- the rule fired for us in a different place than for them.
     patterns:
-      - pattern: "&$V"
       - pattern-either:
-          - pattern-inside: |
-              for $K, $V := range $C { ... }
-          - pattern-inside: |
-              for $V := range $C { ... }
+          - pattern: |
+              for $K, $V := range $C {
+                ...
+                <... &$V ...>
+              }
+          - pattern: |
+              for $V := range $C {
+                ...
+                <... &$V ...>
+              }

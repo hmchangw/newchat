@@ -20,7 +20,7 @@ export default function SetPasswordDialog({ authToken, user, onClose, onUpdated 
     }
     // Both operands are values the user just typed into this form, so there
     // is no secret to leak by timing.
-    // nosemgrep: eslint.detect-possible-timing-attack
+    // nosemgrep: eslint.detect-possible-timing-attacks
     if (newPassword !== confirmPassword) {
       setError('Passwords do not match.')
       return
