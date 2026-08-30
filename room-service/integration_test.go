@@ -1284,6 +1284,48 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		assert.Equal(t, "Legacy Assistant", got[0].Member.AppName, "isBot=true must route the account to apps")
 		assert.Empty(t, got[0].Member.EngName)
 	})
+
+	t.Run("bot with no apps document leaves AppName empty without error", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-ghost",
+			User:     model.SubscriptionUser{ID: "u-ghost", Account: "ghost.bot"},
+			RoomID:   "botdm-3",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-3", nil, nil, true)
+		require.NoError(t, err, "a bot with no apps doc must not fail the whole listing")
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName)
+	})
+
+	t.Run("enrich=false skips app enrichment entirely", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-quiet", "name": "Quiet App",
+			"assistant": bson.M{"enabled": true, "name": "quiet.bot"},
+		})
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-quiet",
+			User:     model.SubscriptionUser{ID: "u-quiet", Account: "quiet.bot"},
+			RoomID:   "botdm-4",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, err := store.ListRoomMembers(ctx, "botdm-4", nil, nil, false)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName, "lean listing must carry no display fields")
+	})
 }
 
 func TestMongoStore_ListOrgMembers_Integration(t *testing.T) {
