@@ -25,8 +25,8 @@ derive organizer/attendee addresses):
 | `TEAMS_CLIENT_SECRET` | App registration client secret |
 | `TEAMS_EMAIL_DOMAIN` | Domain appended to an `account` to form an email (`account@domain`); defaults to `dev.local` for local/dev. Used only by the deep-link call RPCs — meetings resolve real object IDs (below). |
 | `GRAPH_PROXY_URL` | Optional. Routes the meetings Graph client through this proxy (scheme+host, e.g. `http://proxy.corp:8080`), overriding `HTTPS_PROXY`/`HTTP_PROXY`. Empty falls back to the standard proxy env vars. |
-| `GRAPH_PROXY_USERNAME` | Optional. Basic-auth user for `GRAPH_PROXY_URL`. Overrides any userinfo embedded in the URL. |
-| `GRAPH_PROXY_PASSWORD` | Optional. Basic-auth password for `GRAPH_PROXY_URL`. **Secret** — store it in a k8s Secret, never a ConfigMap. |
+| `GRAPH_PROXY_USERNAME` | Optional. Proxy user for `GRAPH_PROXY_URL` (Basic for `http`/`https`, RFC 1929 for `socks5`). Overrides any userinfo embedded in the URL. |
+| `GRAPH_PROXY_PASSWORD` | Optional. Proxy password for `GRAPH_PROXY_URL`. **Secret** — store it in a k8s Secret, never a ConfigMap. |
 
 When the Teams credentials are unset, the deep-link call RPCs still work (they
 need only `TEAMS_EMAIL_DOMAIN`); the meetings RPC returns a not-configured
