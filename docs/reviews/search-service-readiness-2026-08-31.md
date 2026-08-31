@@ -70,3 +70,34 @@ Boundaries, consumer-defined interfaces, subject builders, no-stream-creation an
 - `medium` — Split the ES connection knobs onto their own prefix (`SEARCH_ES_`) so the two config structs cannot shadow each other.
 - `low` — Replace the hand-rolled middleware block with `natsrouter.DefaultGuarded(...)` to inherit the correct order; export the restricted-rooms key builder and TTL from one place.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Coverage is **66.9% (674 statements)**, below the §4 80% floor, so the dimension is floored at 2. The suite's *quality* is well above that — the access-filter/HSS and CCS assertions are as good as one would expect anywhere — but the handler entry-guards, the request deadline and the degraded-CCS paths are genuinely untested. The number also **understates reality**: `store_mongo.go`, `users_client.go` and `room_client.go` are covered only by `//go:build integration` tests excluded from the profile.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 66.9%, below the mandatory 80% floor | `coverage_by_service.txt:26` |
+| high | **The missing-`account` rejection is uncovered in all five handlers** — `ctxWithAccount` always supplies one. This is the **auth-adjacent entry guard**: a router/subject-pattern change that stopped binding `{account}` would return results for an empty principal with no test failing | `handler.go:91`, `:143`, `:214`, `:300`, `:336` |
+| high | **`withRequestTimeout`'s actual deadline branch is never executed** — `newTestHandler` leaves `RequestTimeout` zero and no integration fixture sets it. `REQUEST_TIMEOUT` is the only bound on a slow ES/CCS call, and nothing proves it is applied or propagated to `store.Search` | `handler.go:84`; `handler_test.go:88-96` |
+| medium | `loadRestricted`'s "cache miss **and** ES prefetch fails" branch (healthy cache, ES down) is uncovered; only the cache-also-errored sibling is tested, and the two produce different wrapped chains | `handler.go:274` vs `:272` |
+| medium | **No CCS *degraded* test**, and it is untestable as written: `rawResponse` decodes `_shards.total` but **not `failed`/`skipped`**, so **a partial CCS result is returned as complete with an undercounted `Total`** | `integration_ccs_test.go:282`, `:373`; `response.go:21-23` |
+| medium | Response-parse failure branches uncovered in three handlers. The parsers are unit-tested for malformed input directly, but no test drives a malformed body *through* a handler, so the wraps and the metrics `statusLabel` they produce are unverified | `handler.go:131`, `:180`, `:245` |
+| medium | `Register` is 0% — no unit test asserts the five `subject.Search*Pattern` bindings; only 4 of 5 are indirectly exercised by integration fixtures | `handler.go:72` |
+| medium | `newHandler` is 55.6%: **all four zero-value fallbacks are uncovered** because `newTestHandler` always passes explicit values, so a broken default ships silently | `handler.go:57-68` |
+| medium | **`mock_store_test.go` (291 generated lines) is unused** — every test uses hand-rolled fakes. §4 mandates `go.uber.org/mock`; the file is dead weight `make generate` keeps regenerating | `handler_test.go:25-84` |
+| low | `enrichMessages`' apps-lookup **error** fallback is uncovered — the existing test covers an empty result, not a failure, so the degrade-without-appInfo path is unproven | `enrich.go:99-101` |
+| low | `config_test.go:71` calls `os.Unsetenv` with no prior `t.Setenv`, so **no cleanup is registered and the var stays unset for the rest of the process** — an order-dependence hazard §4 forbids | `config_test.go:71` |
+| nitpick | ~130 handler/query tests are near-identical single-scenario funcs; `config_test.go:48` shows the house style done right | `handler_test.go:177-948` |
+
+**Positive, and genuinely exemplary:** the integration harness uses `RunTestsWithPrewarm`, containers from `pkg/testutil`, `FlushValkey` registered in cleanup, and the **sanctioned inline CCS ES pair stores its ref with `t.Cleanup(Terminate)` plus network removal** — exactly what `CLAUDE.md` asks of the inline-container exception.
+
+### Recommendations
+- `high` — Add a table-driven `Test<Handler>_MissingAccountParam` over all five handlers using `natsrouter.NewContext(nil)`, asserting the `errcode` category.
+- `high` — Set `RequestTimeout` in `newTestHandler` and add a test whose fake `store.Search` blocks until `ctx.Done()`, asserting a `DeadlineExceeded`-derived error and that `cancel()` fires.
+- `medium` — **Decode `_shards.failed`/`skipped` in `rawResponse`, surface it**, then add a CCS test that stops the remote container mid-suite and asserts the degraded result is flagged rather than reported complete.
+- `medium` — Cover `loadRestricted` cache-miss + ES-error and the three handler-level parse-error branches via fakes returning malformed JSON.
+- `medium` — Either migrate `handler_test.go` to the generated mocks or delete `mock_store_test.go` and its directive — **do not keep both**.
+- `low` — Table-drive the repeated pagination/empty-query cases; add `newHandler` default-fallback and `enrich` apps-error cases; guard the `config_test.go` env manipulation with `t.Setenv`.
+
