@@ -192,3 +192,29 @@ No raw `fmt.Sprintf` subject construction anywhere. Every `Timestamp` field is s
 - `low` — Change `bot-room-service/deploy/docker-compose.yml:21` to `${ROOM_KEY_RETIRED_TTL:-30m}` so all four services move together.
 - `low` — Reconcile the self-DM case with the "exactly two participants" DM rule — amend the rule to name the note-to-self exception.
 
+---
+
+## 7. Performance — 4 / 5
+
+Strong, deliberately engineered performance discipline — precise projections, over-fetch+1 pagination, batched Go-side rollups replacing correlated `$lookup`s, parallelized independent reads, concurrency and pool guards — with two real hot-path gaps.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `ListMentionableSubscriptions` runs **two correlated `$lookup`s per subscription *before*** the keyword `$regex` `$match` and `$limit`. Mention autocomplete fires per keystroke; a 1,000-member room costs ~2,000 index lookups per keystroke to return ≤`limit` rows. Neither lookup is guarded by member type (unlike `enrichRoomMembersStages:686`, which gates on `$$mtyp`), so bots pay the users join and humans pay the apps join | `store_mongo.go:1760`, `:1775`, `:1801`, `:1803` |
+| high | `ListOrgMembers` has **no `$limit`, no pagination**, and its handler is not wrapped in `boundedReply`. A large `sectId`/`deptId` materializes the whole org into memory and into one NATS reply; oversized replies fail the RPC outright at `max_payload`. Only 3 handlers use the `boundedReply` guard, and this is exactly the shape it exists for | `store_mongo.go:995`; `handler.go:419-426` |
+| medium | `expandChannelRefs` resolves channel refs **serially**, each with its own 5 s `MEMBER_LIST_TIMEOUT`, and `len(req.Channels)` is never capped — two slow refs exhaust the 10 s `REQUEST_TIMEOUT`. Cross-site refs are independent NATS RPCs and should ride an `errgroup`, as `validateMembershipRefs:1108` and `roomsInfoBatch:1220` already do | `handler.go:1119-1155`; `main.go:64` |
+| medium | `ListReadReceipts` places the users `$lookup` **before** `$limit`; the `lastSeenAt >= since` match narrows it, but a busy room still joins every recent reader to discard all but `limit` | `store_mongo.go:1471`, `:1484` |
+| medium | `GetTeamsMeeting` fetches the whole document with **no projection** — the only find/aggregation in the service missing one, against §MongoDB's "always project precisely" | `store_mongo.go:180` |
+| low | `GetSubscriptionWithMembership`'s org lookup uses `$expr` with `$or` on `member.id`. The service's **own comment at `:635`** documents that this exact shape cannot use an index, and that it was removed from the enrichment path for that reason; it survives here on the remove-member path | `store_mongo.go:315-330` |
+| low | Cross-site federation publishes one synchronous JetStream `PublishMsg` per remote site, serially, inside the request handler — bounded by peer count, but each is a full publish-ack RTT on the caller's latency budget | `handler.go:2162-2166` |
+| nitpick | Coverage is 57.2% and the untested paths include the enrichment/lookup pipelines above, so a perf refactor there would land **without a regression net** | — |
+
+### Recommendations
+- `high` — In `ListMentionableSubscriptions`, push the cheap discriminator forward: compute `isApp` in an `$addFields` before the joins and gate each `$lookup` on it (mirroring `enrichRoomMembersStages`'s `$$mtyp` guard), halving the joins. Better still, apply the account-side regex in the initial `$match` and follow the `attachOrgDisplay` precedent — one batched `users`/`apps` fetch keyed by the surviving accounts, rolled up in Go.
+- `high` — Give `ListOrgMembers` a `limit`/`offset` using the existing `pagedLimit`/`trimOverFetch` helpers, and wrap `listOrgMembers` in `boundedReply`.
+- `medium` — Parallelize `expandChannelRefs` with `errgroup.SetLimit`, and reject requests whose `len(req.Channels)` exceeds a new cap, so the request budget is bounded by construction rather than by the guard timeout.
+- `medium` — Reorder `ListReadReceipts` to `$match → $sort → $limit → $lookup`, so the join fans out over at most `limit` rows.
+- `medium` — Add the missing projection to `GetTeamsMeeting`.
+- `low` — Replace the `$expr $or` with two `$eq` lookups unioned in Go, matching the `FindExistingOrgIDs` two-`Distinct` pattern already justified at `store_mongo.go:1015-1027`.
+- `low` — Batch the per-site federation publishes with `PublishAsync` + a single `PublishAsyncComplete` wait, keeping all-or-nothing error semantics.
+
