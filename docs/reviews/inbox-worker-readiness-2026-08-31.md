@@ -100,3 +100,29 @@ INBOX ownership, bootstrap scoping and the two-lane consumer are exemplary and w
 - `medium` — Extend the `handleSubscriptionMention` `wantPermanent` table pattern to `room_renamed` and `room_visibility_changed`.
 - `low` — Collapse the `MemberRemoved_*` and `SubscriptionRead_BadgeCache_*` clusters into two tables; cover `HandleRoomActivity`'s two error branches, since it is the only fire-and-forget entry point where a swallowed failure is invisible in production.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Excellent WHY-comment discipline and well-factored small units (`roomsubcache.go`, `bootstrap.go`), undermined by a 1,046-line `main.go` that swallows the whole store layer, a dead generated mock shadowed by a 600-line hand-written double, and a dispatch switch that mixes literals with constants.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `main.go` is 1,046 lines carrying **three unrelated responsibilities**: `config`, the entire 30-method / ~715-line Mongo store, and `main()` + two-lane dispatch. `CLAUDE.md` mandates `store_mongo.go`; **20 peer services comply.** Adding one federated event means editing a file where wiring, lane routing and 30 Mongo queries already compete for attention | `main.go:68` |
+| high | **The generated mock is dead.** `mock_store_test.go` (454 lines) has **zero** references; all 100 unit tests drive a hand-written 46-method `stubInboxStore` spanning 600+ lines. **Two doubles for one interface**: every `InboxStore` change requires hand-editing ~620 lines that mockgen already regenerates for free | `handler_test.go:104-715` |
+| medium | `HandleEvent`'s switch mixes 9 bare string literals with 12 `model.Inbox*` constants — for keys that **all exist as constants**. `InboxEventType` is a **type alias for `string`**, so there is no compile-time check: a typo or a constant-value change routes to `default:` and **silently Acks**. `isMembershipSubject` already uses the constants, so the two dispatch points can drift apart | `handler.go:224`; `pkg/model/event.go:164`, `:167-187` |
+| medium | Dead interface method: `CreateSubscription` is declared, implemented (the only method in the file returning a bare unwrapped `err`), and stubbed in tests — but **no handler calls it** | `handler.go:23`; `main.go:132` |
+| medium | `InboxStore` has **30 methods over five collections** and `HandleEvent` fans to 22 event types. The five `user_*` appliers replicate identity/settings/permissions/chatlist and **share nothing with room membership** — clear responsibility creep past the service's original remit | `handler.go:22`, `:671-741` |
+| medium | The watermark filter `$or: [{x: {$exists: false}}, {x: {$lt|$lte: t}}]` is **hand-written 13 times**. A mistyped field name is a **permanently silent no-op with no test that would notice.** The already-extracted `threadReadGuard`/`threadReadUpdate` prove the pattern is extractable — it was just applied once | `main.go:146`, `:175`, `:265`, `:267`, `:286`, `:313`, `:331`, `:349`, `:421`, … |
+| low | **Orphaned doc comment**: `handleMemberRemoved`'s six-line doc block sits directly above `handleMemberJoinedAtRefreshed`'s own comment and function, so godoc **describes a different function**, and the real `handleMemberRemoved` is undocumented | `handler.go:366-375`, `:394` |
+| low | `handler_test.go` is 3,426 lines / 100 top-level tests in one file, mirroring `handler.go`'s breadth | `handler_test.go:1` |
+| nitpick | `handleMemberRemoved` performs six actions with **three different failure policies** (return-error, log-and-continue, nil-checked no-op) interleaved; the ordering constraints live only in comments | `handler.go:394-435` |
+
+### Recommendations
+- `high` — Split `main.go` per `CLAUDE.md`: move `mongoInboxStore` and its 30 methods verbatim to `store_mongo.go`, the interface + `//go:generate` to `store.go`, and the two-lane pull loop + `isMembershipSubject`/`buildConsumerConfig` to `consumer.go`. **Leaves `main.go` at ~150 lines. Pure code motion, no behaviour change.**
+- `high` — Delete `stubInboxStore` and migrate the unit tests to the already-generated `MockInboxStore`; or, if the stub's recorded-call accessors are genuinely needed, delete `mock_store_test.go` and the directive instead. **Keeping both is the worst option.**
+- `medium` — Replace every string literal in the switch with its constant, add the missing `InboxRoomSync` constant, and change `InboxEventType` from a type alias to a **defined type** so the compiler catches drift.
+- `medium` — Drop `CreateSubscription` from the interface, the store and the double.
+- `medium` — Extract `watermarkGuard(field string, at any) bson.A` and use it at all 13 sites; add one table test asserting the produced filter per field name.
+- `low` — Move the misplaced doc block; extract the five `user_*` handlers into `handler_user.go`/`store_mongo_user.go` as the low-risk first step toward splitting user replication out of inbox-worker entirely.
+
