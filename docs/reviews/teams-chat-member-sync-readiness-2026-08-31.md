@@ -132,3 +132,23 @@ Not applicable and correctly absent: `pkg/subject` builders, `pkg/stream` config
 - `medium` — Consider a sanity floor (e.g. refuse a roster that drops below some fraction of the currently stored member count) given `DeleteSubscriptionsByAccounts` is unconditional downstream.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+Projections, batched user lookup and a shared throttle gate are all correct; the unbounded backlog load and a dispatch loop that ignores cancellation are the gaps.
+
+### Findings
+- `medium` — `ListChatsToSync` has **no limit, no batching and no pagination**: `FindMany` runs `cursor.All` into a single slice (`pkg/mongoutil/collection.go:60-73`) over every `needMemberSync: true` chat (`store_mongo.go:36-37`). `teams-chat-sync` re-sets that flag on every re-sync of a large chat (`teams-chat-sync/syncer.go:124`), so a full re-sync makes one run responsible for the entire backlog with no ceiling — unlike `teams-room-verify`, which has a `VERIFY_BATCH_SIZE`. The projection keeps each row tiny, so this is a run-duration and Graph-quota risk more than a memory one.
+- `medium` — The dispatch loop ignores cancellation: `for _, chat := range chats { jobs <- chat }` (`syncer.go:154-157`) has no `select` on `ctx.Done()`. On SIGTERM the pool keeps draining the whole backlog, each chat failing fast with a context error, emitting one `slog.Error` per chat (`syncer.go:149`) and exiting non-zero — a cancelled run is indistinguishable from a broken one in both logs and CronJob status.
+- `low` — Cold-start cache stampede: `userRefCache.resolve` releases the mutex before the DB call (`syncer.go:65-70`), so up to `MaxWorkers` (default 8) goroutines can issue overlapping `UsersByIDs` for the same ids at run start. Documented at `syncer.go:37-38`, bounded, self-healing, and pinned at ≤2 with 4 workers by `worker_test.go:120-126` — acceptable as-is.
+- `low` — No per-operation timeout on Mongo calls; only `MONGO_SERVER_SELECTION_TIMEOUT` (2s default, `pkg/mongoutil/poolconfig.go:49`) bounds server selection. `main.go:86-87` explicitly delegates the run deadline to the CronJob, which is defensible but means a slow query has no app-side bound.
+
+Verified good: both queries carry explicit precise projections (`store_mongo.go:37,83`); no `$lookup`; no N+1 — user resolution is batched per chat and memoised run-wide (`syncer.go:51-83`), the one Graph call per chat being irreducible; `UsersByIDs` short-circuits on an empty id list (`store_mongo.go:79-81`); no `time.Sleep` for synchronization — `sync.WaitGroup` + channel close (`syncer.go:135-158`) and `atomic.Int64` counters (`syncer.go:113-117`); no goroutine leak (every worker terminates on `close(jobs)`); the Graph client has a 30s HTTP timeout (`pkg/msgraph/msgraph.go:251`) and a tenant-wide throttle gate shared across workers with capped Retry-After backoff (`pkg/msgraph/chats.go:127-186`), with idle conns sized to `MaxWorkers` (`main.go:113`). `pkg/jsretry`, consumer `BackOff`, `MaxAckPending`, sonic, and the Cassandra `USING TIMESTAMP` rules are all not applicable — this service touches neither JetStream nor Cassandra.
+
+### Recommendations
+- `medium` — Add a `MAX_CHATS_PER_RUN` (with `envDefault`) applied as a `SetLimit` on `ListChatsToSync`, so one run's Graph spend and duration are bounded and the backlog drains across scheduled runs.
+- `medium` — `select { case jobs <- chat: case <-ctx.Done(): }` in the dispatch loop, and classify `context.Canceled` in `run`'s switch as its own benign bucket (`chatsCancelled`) so a SIGTERM does not log an error per remaining chat or fail the CronJob.
+- `low` — Add a per-chat `context.WithTimeout` around `syncChat` so one hung dependency cannot consume the whole CronJob window.
+- `low` — Optional: prime `userRefCache` with a single `UsersByIDs` over the union of member ids before fan-out, removing the cold-start stampede entirely.
