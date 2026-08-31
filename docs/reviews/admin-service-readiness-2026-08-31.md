@@ -129,3 +129,28 @@ Unusually well-commented and cleanly split by topic for its size, but `package m
 - `medium` — Route `handleChangePassword` through `h.audit`/`h.auditEntry` so `admin_audit._id` has one format and one clock.
 - `low` — Generate `userProjection` from the `userView` field set (or add a test asserting the three lists match); delete the `requireAuth` comment references and inline `authenticate` into its only caller.
 
+---
+
+## 6. Integration — 4 / 5
+
+Cross-service contracts are unusually disciplined — every subject comes from `pkg/subject`, every event struct carries a `Timestamp` set at the publish site, and both INBOX event types have a live consumer in `inbox-worker` — but two revoke paths skip the session-cache bust and the fanout has no durable retry lane.
+
+### The `docs/client-api.md` obligation does **not** bind this service
+The rule is scoped to handlers on `chat.user.{account}.…` subjects and `auth-service` HTTP routes. admin-service registers **no NATS handler at all** (it is an outbound RPC client only) and no auth-service route. It is nonetheless documented voluntarily and accurately: all 17 routes in `routes.go` map 1:1 onto `docs/client-api.md` §9.1–9.17, and the derived view matches — including `syncFailures`, the resync lanes and the `client_update.upload` audit action. **No drift found**; `events.md` correctly omits these.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `setPassword`, `handleChangePassword` and the deactivate branch revoke sessions in Mongo but never call `sessioncache.Bust*`, so revoked tokens keep authenticating **in every peer service that resolves through the shared session cache**. The service's own test asserts this exact invariant for the other two paths ("every revoked session must be evicted from the cache that authorizes it"), and its comment puts the window at ~67 minutes | `handler.go:697`, `:492`; `login.go:198`; `store_mongo.go:296-298`, `:321-322`; `revokebust_test.go:36-48` |
+| medium | Cross-site `user_account_updated` / `user_permissions_updated` are **direct JetStream publishes into the remote INBOX with no OUTBOX buffering**, so a failed cross-gateway publish is surfaced as a response field and then lost. The federation contract buffers origin-side federation through OUTBOX "so a failed cross-gateway publish is durably retried rather than lost"; this service instead relies on an operator noticing `syncFailures` and calling `POST …/resync`. A deliberate, documented trade — but a **manual**-healing lane where the rest of the fleet has an automatic one, and a SIGTERM mid-fanout drops the signal entirely | `handler.go:214`; `permissions.go:361-386`, rationale at `:391-403` |
+| medium | `CLAUDE.md`'s federation section does not list `admin-service` among the cross-site publishers, so **its two INBOX event types are undocumented in the binding architecture doc** | `CLAUDE.md` §"Stream bootstrap ownership"; publishers at `handler.go:214`, `permissions.go:361` |
+| medium | Audit `_id`s are generated in **two different formats for the same collection**: `idgen.GenerateUUIDv7()` (32-char hex) everywhere except the self-service password change, which uses `idgen.GenerateID()` (17-char base62). Same collection, two key shapes, hence two B-tree insert patterns — and `ListAudit` sorts on `timestamp` + `_id` desc, so a tie-break across the two formats is not even consistently ordered | `login.go:207` vs `handler.go:251`; `store_mongo.go:353` |
+| low | `subject.OrgSyncUsersUpsert` documents its parameter as the **central** site id, but admin-service passes its own `SITE_ID`. Benign in practice (hr-sync-worker provisions `HR-{siteID}` per entry in `SITE_IDS`, and room-worker/message-worker do the same), but the builder's doc comment invites a future caller to pass a real central id and silently publish to a stream nobody owns | `handler.go:238`; `pkg/subject/subject.go:1774-1776` |
+| nitpick | `RoomRestrictedRequest.Timestamp` is deliberately left zero at the publish site. Correct here — it is a request/reply body, not a JetStream event, and room-service overwrites it on acceptance, and the comment says so — but it is the one `pkg/model` struct this service marshals without stamping a timestamp, so it reads as a violation until you read the comment | `room_onduty.go:71-78`; `pkg/model/room.go:160` |
+
+### Recommendations
+- `high` — Widen the two revoke methods to return the deleted session `_id`s (both already run `DeleteMany`; switch to a projected `Find`+`DeleteMany` inside the same transaction) and call `sessioncache.BustMany` at all three call sites, matching `handler.go:599`.
+- `medium` — Route the two INBOX event types through `pkg/outbox.Publish` with both added to `ConcurrentEventTypes` (both are watermark-guarded and order-insensitive by construction), keeping `syncFailures` as a fast-path signal rather than the only recovery path.
+- `medium` — Add `admin-service` to `CLAUDE.md`'s cross-site-publisher list, naming the two event types it originates.
+- `medium` — Replace `idgen.GenerateID()` at `login.go:207` with `GenerateUUIDv7()`, or better, build that entry through `h.auditEntry` so there is exactly one audit-ID construction site.
+- `low` — Rename `OrgSyncUsersUpsert`'s parameter to `siteID` and correct the doc comment; add a fanout-lane test asserting the subject built for a remote peer is exactly `chat.inbox.{dest}.external.user_account_updated`.
+
