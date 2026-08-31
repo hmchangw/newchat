@@ -69,3 +69,32 @@ Boundaries, consumer-defined interfaces, DI, `pkg/stream`/`pkg/subject` discipli
 - `medium` — Amend `CLAUDE.md` §"JetStream Consumer Pattern" to name a third sanctioned **batch/bulk-sink** pattern (Fetch + bounded flush pipeline) and cite this service, or restate why it is exempt — right now the rule and the fleet disagree.
 - `low` — Gate the Mongo connect on `cfg.Mode == "teams"`; unexport or delete `Handler.Add`.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Coverage is **67.7% (746 statements)**, below the §4 80% floor, so the dimension is floored at 2. The tests that exist are unusually good — real NAK-pacing, poison-drop and pipeline-depth assertions — and **165 of the 241 uncovered statements are in one 322-line `main()`**; the rest of the service is 80–100%.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 67.7%, under the 80% floor; `main()` alone is 0% and holds 165 of the 241 uncovered statements | `main.go:102` |
+| high | **The entire Mongo store `mongoTeamsUserResolver` is 0% with neither a unit nor an integration test.** Its two-hop `teams_user → account → users` join, the "account exists but no `users` row ⇒ empty `UserID`" case, and both error wraps are entirely unexercised — while `testutil.MongoDB(t, prefix)` is already available in this package's `TestMain` | `teams_user_store.go:23`, `:32` |
+| high | **`MODE=teams` is wired only in `main()` and has no test at any level**; `teamsMessagesStreamCfg` and `botMessagesStreamCfg` are both 0%. Nothing pins which stream the bot and teams consumers bind to — and **a wrong stream/subject here fails silently** (consumer created, zero deliveries) | `messages.go:104`, `:109` |
+| medium | The decode-payload poison branch in `AddWithContext` is uncovered — a truncated/corrupt zstd frame must **Ack-drop, not NAK-loop**, and that Ack plus its accounting is unpinned | `handler.go:90-95` |
+| medium | The `BuildByQuery` error branch is uncovered: a malformed `room_renamed` payload must Ack-drop, but today an **inverted Ack/Nak here would redeliver poison to `MaxDeliver` unnoticed** | `handler.go:104-110` |
+| medium | The multi-failure branch of the per-message settle loop is uncovered. Every bulk-failure test uses one action per message, so the "first failure decides, later failures only increment" invariant is never exercised for a **fan-out** message, where a permanent 400 followed by a transient 429 must still Ack-drop | `handler.go:280-281` |
+| medium | `newESRead`'s failure branches are uncovered despite an injectable `esSearcher` making them trivial unit tests. **Dropping `threadParentMessageCreatedAt` silently changes search-service's restricted-room access filtering** | `thread_parent_resolver.go:45-78` |
+| low | Two reachable invalid-input branches in `BuildAction` uncovered (missing `createdAt`, non-positive `Timestamp`), while missing message ID is covered | `messages.go:187-192` |
+| low | `newSyncMetrics` instrument-construction error branches (5) uncovered | `metrics.go:68-91` |
+| nitpick | Remaining uncovered blocks are unreachable `json.Marshal` errors on struct literals — not worth chasing | `spotlight.go:92`, `:142`, `:173` |
+
+**Test hygiene is compliant:** `package main` throughout, mocks generated into `mock_store_test.go`, no real DB/NATS in unit tests, integration files carry `//go:build integration` with a `TestMain` built on `testutil.PrewarmFailFast` + `TerminateAll`, containers from `pkg/testutil`, no `time.Sleep` synchronization (channel/`Eventually` based, with bounded negative assertions).
+
+### Recommendations
+- `high` — Extract the ~12 fail-fast gates from `main()` into `validateConfig(cfg) error` and table-test it. Single largest coverage win, and it turns silent startup misconfiguration into a pinned contract.
+- `high` — Add `teams_user_store_integration_test.go` using `testutil.MongoDB`: hit, miss, account-without-`users`-row, empty input, and both query-error wraps.
+- `high` — Extract the collection-wiring block into `buildCollections(cfg, engine, db, metrics) []Collection` and unit-test both MODE branches, asserting each collection's `StreamConfig`/`ConsumerName`/`FilterSubjects` — **this also closes the `critical` filter mismatch in Chapter 6.**
+- `medium` — Extract the per-collection stream/consumer loop far enough to test that `Bootstrap.Enabled=true` still skips the INBOX and HR stream names — the guard that keeps this service from creating a stream `inbox-worker`/`hr-syncer` owns.
+- `medium` — Add three `Handler` cases: corrupt-zstd ⇒ Ack + no buffer growth; `BuildByQuery` error ⇒ Ack-drop; fan-out message failing permanent-then-transient ⇒ Ack-drop with zero `nakDelay`.
+- `medium` — Unit-test `newESRead` with a stub `esSearcher` for search error, malformed JSON, zero hits, and zero `CreatedAt`.
+
