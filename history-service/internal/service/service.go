@@ -31,7 +31,7 @@ type MessageReader interface {
 }
 
 type MessageWriter interface {
-	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, editedAt time.Time) error
+	UpdateMessageContent(ctx context.Context, msg *models.Message, newMsg string, mentions []pkgmodel.Participant, editedAt time.Time) error
 	// SoftDeleteMessage performs a Cassandra LWT on messages_by_id and only
 	// runs the mirror-table and parent-tcount work when the LWT applies.
 	// Returns the updated_at value now persisted (the deletedAt argument when

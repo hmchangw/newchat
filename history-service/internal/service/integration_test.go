@@ -185,11 +185,20 @@ func (stubRoomRepo) ClearPreview(_ context.Context, _ string, _ int64) (bool, er
 	return true, nil
 }
 
+type stubUserStore struct{}
+
+func (stubUserStore) FindUserByAccount(_ context.Context, _ string) (*model.User, error) {
+	return nil, nil
+}
+func (stubUserStore) FindUsersByAccounts(_ context.Context, _ []string) ([]model.User, error) {
+	return nil, nil
+}
+
 func TestEditMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, stubUserStore{}, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -253,7 +262,7 @@ func TestDeleteMessage_Integration(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, stubUserStore{}, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -315,7 +324,7 @@ func TestDeleteMessage_ParentWithReplies_NoCascade(t *testing.T) {
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, stubUserStore{}, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
@@ -384,7 +393,7 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 	session := setupCassandra(t)
 	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
 	pub := &recordingPublisher{}
-	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, nil, nil, &config.Config{
+	svc := closeOnCleanupIn(t, New(repo, alwaysSubscribedRepo{}, stubRoomRepo{}, pub, nil, nil, stubUserStore{}, nil, &config.Config{
 		MessageHistoryFloorDays: 730,
 		LargeRoomThreshold:      500,
 		MaxPinnedPerRoom:        10,
