@@ -73,3 +73,32 @@ Boundaries are unusually disciplined — every interface is consumer-defined, co
 - `medium` — Validate in `config.Load` that `SiteID` appears in `AllSiteIDs` when non-empty, and log the resolved peer list at startup so a federation-disabled deploy is visible.
 - `low` — Extract `service/subscriptions.go`'s enrichment engine into `service/enrich.go`; add a comment at `main.go:126` recording why no `bootstrapStreams` exists.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Statement-weighted coverage is **53.2% (1223/2300)** — below the §4 60% critical line. Two structural distortions are worth stating: `service/mocks/mock_repository.go` contributes **306 uncovered statements (13.3% of the denominator)** as generated non-`_test` code, and `mongorepo/` (421 stmts) is deliberately integration-only per §4. Excluding both, real unit coverage is **~72.7%** — still under 80%.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| critical | 53.2%, below the §4 60% line | `coverage_by_service.txt` |
+| high | **All six client-facing chatlist RPCs are handler-untested** — `chatlist_test.go` exercises only pure helpers. `GetChatlist`, `Create/Delete/RenameChatlistSection`, `ReorderChatlistSections`, `SetChatlistSectionSortMode` are registered on `chat.user.{account}.…` yet no test drives one end-to-end: the `user not found` → `errcode.NotFound`, the store-error wrap, and the last-write-wins read-modify-write in `mutateChatlist` are all unexercised | `service/chatlist.go:27`, `:45`, `:74`, `:91`, `:116`, `:131` (45/153 stmts) |
+| high | The cross-site chatlist replication fan-out is entirely uncovered. Its sibling `publishSettingsInbox` is at 81.8%; the chatlist lane's per-dest `InboxEvent` construction, `dest == s.siteID` skip and marshal-failure logging have never run in a test | `service/chatlist.go:200` (0%) |
+| high | Both error paths of `GET /api/v1/subscriptions/count` have zero hits. The sibling `ListSubscriptions` has both branches covered, so this is an **asymmetry, not a pattern**; `integration_test.go` never hits the route either | `handler.go:80-83`, `:86-89` |
+| medium | The local-site thread-list degrade branch is uncovered — the `history.GetThreadList` failure → `results[i].failed = true` path that decides whether a partial thread list is returned or a page silently loses a site. Its cross-site twin is at 79.2% | `service/threads.go:207-210` |
+| medium | `historyclient.GetThreadList` is 0% while `RoomsGet` in the same file is 83.3%; the test file is untagged/unit, so this is a testable encode/decode path that was simply skipped | `historyclient/client.go:33` |
+| medium | `RegisterHandlers` is 0% (29 stmts) — nothing asserts the 29 subject patterns match the client contract; a typo'd `subject.*Pattern` or dropped registration would ship green | `service/service.go:232` |
+| low | `oidcValidator` is 0%. The runtime auth path itself is fine — `middleware.go` is **100%** covered including `WithCause`-on-invalid-token, expired-token and ambiguous-credential branches | `oidc.go:15` |
+| low | `publishSubscriptionUpdate`'s publish-failure branch uncovered | `service/apps.go:116-118` |
+| nitpick | `roomclient` (0/50), `presenceclient` (0/13), `publisher` (0/12) are integration-only — permitted, but none has a unit test for request marshalling | — |
+
+**Load-bearing positives:** every integration file carries `//go:build integration` and a `TestMain` calling `testutil.RunTests(m)`; containers come exclusively from `pkg/testutil` with zero inline `GenericContainer`; no `time.Sleep`, no shared mutable state, no order dependence; mocks generated and confirmed non-stale.
+
+### Recommendations
+- `critical` — Exclude `service/mocks/` from the coverage denominator (build-tag or `-coverpkg` filter). It alone accounts for 13.3% of the shortfall and no amount of real testing will move it.
+- `high` — Add table-driven handler tests for all six chatlist RPCs against `mocks.UserRepository`: nil-user → `NotFound`, `GetUserChatlist` error → wrapped infra error, duplicate-name rejection, non-permutation reorder.
+- `high` — Cover `publishChatlistInbox` with a 3-site `allSiteIDs` and a stubbed `EventPublisher`, asserting one event per remote dest, self-site skipped, and a shared `Timestamp`.
+- `high` — Extend the existing malformed-query / service-error tests to the `count` endpoint.
+- `medium` — Stub a `history.GetThreadList` error so the degrade branch runs, asserting the page returns degraded rather than erroring; add a `historyclient.GetThreadList` unit test mirroring `RoomsGet`.
+- `low` — Table-test `oidcValidator`'s unconfigured-issuer return, and assert `RegisterHandlers` registers the expected subject set against a fake router.
+
