@@ -70,3 +70,26 @@ Textbook consumer-defined store, constructor DI and typed env config with correc
 - `low` — add the same justifying comment for the absent `obs.Init`.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Precomputed statement coverage is **53.4% (118 statements)**, below the 60% critical threshold — floored at 1 by the CLAUDE.md Section 4 rule, even though the business logic itself is fully covered.
+
+### Findings
+- `critical` — 53.4% is below both the 80% floor and the 60% critical line — `teams-user-sync/store_mongo.go:43-92`, `teams-user-sync/main.go:34-102`
+  The number is dominated by four functions at 0.0% (`newMongoStore`, `ExistingIDs`, `HRUsers`, `UpsertTeamsUsers`) plus `run` at 16.7% and `disconnect` at 0.0%.
+- `high` — the entire store layer *is* tested, but only behind `//go:build integration` (`store_integration_test.go:19-99`), and the CI pipeline never builds that tag — `teams-user-sync/deploy/azure-pipelines.yml:44`
+  The single test step is `go test ./teams-user-sync/... -race`, with no `-tags=integration` stage and no `make lint`/`make sast` stage even though CLAUDE.md Section 5 calls SAST a blocking CI gate. Only 4 of the repo's 29 service pipelines have any of these. So the 0%-covered store code is verified on no machine but a developer's.
+- `low` — `run` is exercised only on its two fail-fast branches (`main_test.go:9-26`); the Mongo-connect, Graph-client-construction and stats-logging paths (`main.go:52-93`) are never executed in any test, tagged or not.
+
+**Quality assessment — the percentage understates this service.** `handler.go` is at **100.0%** across all four functions, and it is meaningful coverage, not vanity: all four error paths are covered as distinct subtests (`handler_test.go:224-268` — Graph abort, `ExistingIDs`, `HRUsers`, `Upsert`), plus the empty-page and empty-tenant boundaries (`handler_test.go:198-219`), the invalid-UPN and HR-miss branches (`handler_test.go:91-136`) and a 7-case table for `splitUPN` (`handler_test.go:271-292`). Structure is compliant throughout: `package main`, table-driven with descriptive subtest names, a fresh `gomock.NewController` and fresh mocks per subtest with no shared state, mocks generated into `mock_store_test.go`, the Graph client injected as an interface (`fakeLister`, `handler_test.go:19`) so no unit test touches a network. Integration tests use `testutil.MongoDB` with a `TestMain` calling `testutil.RunTests(m)` (`store_integration_test.go:17`) and register cleanup on the two inline `httptest` servers (`integration_test.go:56`, `testhelpers_integration_test.go:21`) — no rogue `testcontainers.GenericContainer`.
+
+### Recommendations
+- `critical` — add an `-tags=integration` stage to `deploy/azure-pipelines.yml` so the store tests that already exist actually gate merges; that alone moves the measured number over 80% without writing a line of test.
+- `high` — add `make lint` and `make sast` stages to the pipeline, per CLAUDE.md Section 5.
+- `medium` — cover the specific uncovered path that matters: `store_mongo.go:59-61` and `:76-78` (a Mongo error mid-walk must abort the run, not silently return a partial `existing` map that would cause real users to be skipped as "already present").
+- `low` — extract the Mongo/Graph wiring out of `run` behind a small seam so `main.go:52-93` becomes reachable, or accept it as untestable glue and document that.
+
+---
