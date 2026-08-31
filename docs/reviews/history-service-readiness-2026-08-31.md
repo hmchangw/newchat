@@ -146,3 +146,32 @@ All integration files carry `//go:build integration`; all three packages have `T
 - `medium` — Cover `buildEditPayload` with a fake cipher for both branches, and `blankQuotedBody` for its nil-in/nil-out contract.
 - `low` — Collapse the `LoadHistory_*` and `pin_test.go` families into table-driven suites; ~170 near-duplicate functions are the main maintenance drag.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Well-crafted code with exceptional WHY-comment discipline and tight per-concern files, held back by a 330-line untestable `main`, a repo-unique directory layout, and three hand-maintained decorators over a duplicated interface that make adding one room-read feature a four-file edit.
+
+### Evidence
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `main()` is 330 lines with 15 `os.Exit(1)` sites and no `run() error` seam, so all startup wiring (Vault cipher, three cache tiers, two breakers, a three-layer decorator stack, nine shutdown closers) is untestable and measured at 0.0%. **The wiring is where the outage-survival semantics live** — which source is base, which layer seeds Valkey — and a mis-ordered decorator would compile and ship silently | `cmd/main.go:90` |
+| high | `service.RoomRepository` (8 methods) is re-declared verbatim as `readcache.RoomSource`, then hand-implemented method-by-method twice more by `breakerRoomRepo` and `RoomCache`; neither embeds. Adding one room read means editing the interface, the duplicate interface, two decorators, the mock and `roomTimesSeeder`. Five of `RoomCache`'s eight methods are pure delegation boilerplate | `internal/service/service.go:67`; `internal/readcache/readcache.go:157`; `cmd/roomrepo_breaker.go:26` |
+| medium | The post-read enrichment pipeline (`redactUnavailableQuotes` → `setDecodedAttachments` → `resolveRemovedMemberNames`) is copy-pasted at 8 call sites, and 3 silently drop the third step with no comment saying why — the asymmetry is indistinguishable from a bug | `internal/service/messages.go:90-92`; `internal/service/threads.go:139-140`, `:383-384`; `internal/service/pin.go:209-210` |
+| medium | Only service in the monorepo using `cmd/` + `internal/`; §1 forbids both. `internal/` also blocks `roomrepo_breaker.go` and `roomtimes_seeder.go` — real, tested logic — from ever being reused | `cmd/main.go:1` |
+| medium | `internal/service/utils.go` is a 317-line junk drawer of five unrelated concerns; ~115 lines of it are one cohesive page-fitting algorithm that **already has its own 476-line test file named after it**. The test file names the concern the source file refuses to | `internal/service/utils.go:202-317`; `internal/service/pagefit_test.go` |
+| low | `internal/cassrepo/utils.go` mixes three unrelated primitives — cursor codec, reflection-based `structScan`, and `QueryBuilder` | `internal/cassrepo/utils.go:19`, `:86`, `:107` |
+| nitpick | `messages_test.go` is 3,088 lines / 131 KB and `write_integration_test.go` 1,773 lines; production code is only 8.0k of the service's 25.7k lines | `internal/service/messages_test.go:1` |
+
+`CLAUDE.md` bans `utils` as a *package* name; a `utils.go` catch-all is the same anti-pattern one level down.
+
+### Recommendations
+
+- `high` — Extract `main()` into a testable `run(ctx, cfg) (closers, error)` plus small `wireSubscriptions()` / `wireRooms()` / `wireCiphers()` builders returning `(T, error)`; keep `os.Exit` only in `main`. This alone makes the decorator ordering assertable.
+- `high` — Delete `readcache.RoomSource`, import `service.RoomRepository`, and have `RoomCache`/`breakerRoomRepo` **embed** it — as `roomTimesSeeder` already correctly does — overriding only the methods they actually intercept. Removes ~90 lines of delegation and makes interface growth a one-file change.
+- `medium` — Introduce one `enrichPage(ctx, msgs, accessSince)` used by all eight sites; if threads and pinned genuinely must skip name resolution, express it as an explicit option with a WHY comment rather than an omission.
+- `medium` — Split `internal/service/utils.go` into `pagefit.go` (matching the existing test file), `authz.go` and `quotes.go`; same treatment for `cassrepo/utils.go` → `cursor.go` / `scan.go` / `query.go`.
+- `medium` — Migrate to the sanctioned flat layout, **or** amend `CLAUDE.md` §1 to sanction `cmd/`+`internal/`. One of the two must move: today the largest service is also the only one a reader cannot navigate by convention.
+- `low` — Split `messages_test.go` along the handler boundaries the source already has; the source files are well-factored, the tests are not.
+
