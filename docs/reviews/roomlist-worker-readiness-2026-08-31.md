@@ -151,3 +151,32 @@ Genuinely well-factored — small pure functions, a real per-concern split (`flu
 - `low` — Compress the essay comments to ≤2 lines each (repo's own `remove_comments` norm), and convert the two cross-file invariants — the no-mixed-join rule (`flush.go:208-216`) and the NewerRow/preview agreement (`batch.go:81-87`) — into named assertions or a shared helper so they fail loudly rather than by review.
 - `low` — Collapse `deploy/bot/` and `deploy/user/` to one `deploy/Dockerfile` plus two compose files that differ only in `MODE`; parameterize `IMAGE_NAME` in a single pipeline.
 - `low` — Replace `#NNN` and "the design spec" with the concrete doc path; pass `*writeIntents` and delete both `hugeParam` waivers.
+
+---
+
+## 6. Integration — 4 / 5
+
+Integration surface is small and unusually disciplined — the central cross-service tie-break claim holds end to end, subjects come only from `pkg/subject` via `stream.Resolve`, and the service publishes nothing — but the one test guarding its `pkg/model` contract has a hole on the highest-consequence field, and its shared-collection index dependency is unverified.
+
+**Verified clean**
+- **NewerRow agreement (central claim): PASS.** Both coalescers order by `msgbucket.NewerRow` — `roomlist-worker/batch.go:87` (room pointer) and `:97` (user position), `broadcast-worker/preview_writer.go:114,120` (preview key + body). The Mongo-side guard is the same comparator in BSON (`roomlist-worker/store_mongo.go:42-49`: `$not/$gte` OR same-instant `lastMsgId $lt`), pinned by `store_mongo_test.go:44-46` and `integration_test.go:152-179`. Both sides compare at millisecond precision (`pkg/msgbucket/order.go:27`), matching BSON date granularity.
+- **Disjoint halves: PASS.** `roomlist-worker` is the sole writer of `rooms.lastMsgAt/lastMsgId/lastUserMsgAt/lastMentionAllAt` (`store_mongo.go:110-137`); `broadcast-worker/store_mongo.go:156-158` touches only `preview*` under its own `previewAsOf` watermark; `message-worker/store_mongo.go:138-152` writes only `thread_rooms`.
+- **No publish sites**, so the event-`Timestamp` rule is vacuous here — zero `Publish`/`QueueSubscribe`/`natsrouter` registrations, zero raw `fmt.Sprintf` subject construction. No OUTBOX/INBOX participation, no `chat.user.…` handler, hence no `docs/client-api.md` obligation (confirmed: no mention in the doc or its derived views).
+- **Stream/consumer wiring** is `stream.Resolve` → `subject.MsgCanonicalWildcard` (`main.go:127-135`); `bootstrap.go:242-244` sets only `Name + Subjects`; `buildConsumerConfig` derives `BackOff` via `stream.DurableConsumerDefaults` (`main.go:394`) and never hardcodes it.
+- **Projection tags** match `model.MessageEvent` (`pkg/model/event.go:29-35`) and `model.Message` (`pkg/model/message.go:10-42`) field for field.
+
+### Findings
+- `medium` — the projection drift-guard asserts 8 of the 9 fields it decodes, omitting `Type` — `roomlist-worker/projection_test.go:57-68`; the fixture never sets it either (`:24-40`).
+  `Type` is the only input to `SystemMsg` (`handler.go:64`), which selects the `lastUserMsgAt` freeze. A rename of `model.Message`'s `json:"type"` would silently decode empty, classify every system message as a user message, and promote a system timestamp into `lastUserMsgAt` — which `roomPointerUpdate`'s sticky `$ifNull` then keeps forever (`store_mongo.go:129-136`). This is the one drift with an unrecoverable outcome and it is the one field left unpinned.
+- `medium` — the service issues `(roomId, u.account)` filters on the shared `subscriptions` collection twice per flush at full message rate (`store_mongo.go:151`, `:55-61`) but never verifies the index — `mongoutil.WarnMissingIndexes` is absent from the whole service.
+  `inbox-worker/main.go:560-562` does exactly this warn for the same-shape query at far lower volume, and the index is owned by `room-service/store_mongo.go:125`. A dropped index degrades this worker into a collscan per bulk model, which under `MaxDeliver=-1` becomes a flush-timeout retry loop rather than a visible error.
+- `low` — `bootstrapStreams(ctx, js, streamName, subjectFilter, enabled)` (`bootstrap.go:240`) deviates from CLAUDE.md's mandated `bootstrapStreams(ctx, js, siteID, enabled)`, and the disabled branch verifies the stream (`:250-252`) rather than no-opping as CLAUDE.md specifies. The fail-fast is defensible; the contract drift is not — CLAUDE.md wins. `broadcast-worker/main.go:330` carries the identical drift, so it is a two-service convention, not a local slip.
+- `low` — two writers of `subscriptions.lastSeenAt` with different monotonicity: `$max` here (`store_mongo.go:152`) vs `$set` in `room-service/store_mongo.go:1085`. A `messageRead` landing after a sender advance can regress the value this service's comment (`handler.go:34-41`) calls read-floor input for `MinSubscriptionLastSeenByRoomID`.
+- `nitpick` — `pkg/subject/subject.go:666-669` documents `MsgCanonicalMessageWildcard` as excluding a `.teams.batch` subject on this stream, but that subject is `chat.teams.msg.canonical.…` on `MESSAGES-TEAMS` (`:353`). Binding `.>` here is therefore safe; the comment implies a hazard that does not exist and could push a future consumer to the wrong builder.
+
+### Recommendations
+- `medium` — set `Type: model.MessageTypeRoomRenamed` (or similar) in `canonicalPayload` and add `assert.Equal(t, full.Message.Type, got.Message.Type)` to `TestEventProjection_MatchesFullDecode`; assert `SystemMsg` in `TestEventProjection_DerivesTheSameIntents`.
+- `medium` — add an `ensureIndexes` on `mongoStore` calling `mongoutil.WarnMissingIndexes(ctx, subCol, "roomId_1_u.account_1")` at startup, mirroring `inbox-worker`.
+- `low` — align `bootstrapStreams` with the CLAUDE.md signature, or amend CLAUDE.md §6 to sanction the `(streamName, subjectFilter)` form plus the verify-when-disabled branch, since two services now depend on it.
+- `low` — document in `deploy/README.md` which of `$max` and `$set` is authoritative for `lastSeenAt`, so the read-floor contract is explicit rather than emergent.
+- `nitpick` — correct the `MsgCanonicalMessageWildcard` doc comment to name the real Teams subject prefix.
