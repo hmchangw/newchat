@@ -218,3 +218,23 @@ Strong, deliberately engineered performance discipline — precise projections, 
 - `low` — Replace the `$expr $or` with two `$eq` lookups unioned in Go, matching the `FindExistingOrgIDs` two-`Distinct` pattern already justified at `store_mongo.go:1015-1027`.
 - `low` — Batch the per-site federation publishes with `PublishAsync` + a single `PublishAsyncComplete` wait, keeping all-or-nothing error semantics.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Make the OUTBOX dedup key unique per event (fold the seed / `eventType` / `roomID` into `InboxDedupID`), and assert N distinct `Nats-Msg-Id`s in a rebalance test | Integration | `handler.go:2419-2439` | **Silent cross-site data divergence.** A rebalancing section move federates one row and JetStream drops the rest; the remote replica keeps stale ordering with no reconciliation path. Invisible in the single-row common case. |
+| 2 | `high` | Bound `ListOrgMembers` with `limit`/`offset` and wrap it in `boundedReply` | Performance | `store_mongo.go:995`; `handler.go:419-426` | An unbounded org materializes into one NATS reply and fails at `max_payload` — a hard outage for that endpoint, and the guard for it already exists in-service. |
+| 3 | `high` | Gate the two `$lookup`s in `ListMentionableSubscriptions` on member type, or replace them with a batched Go-side rollup | Performance | `store_mongo.go:1760`, `:1775` | Fires **per keystroke**. ~2,000 index lookups per keystroke in a 1,000-member room, to return a handful of rows. |
+| 4 | `critical` | Add integration tests for the ~60 zero-coverage `store_mongo` methods, starting with the section-ordering quartet | Test coverage | `store_mongo.go:1185` | Clears the 60% bar and puts a net under items 1 and 3. Float-midpoint ordering with a rebalance trigger is precisely what fails on ties and precision exhaustion. |
+| 5 | `high` | Convert the 17 uncorrelated `slog` sites to `*Context` + `request_id`, and add a `.semgrep/` rule (with fixture) banning the bare form | Code quality | `handler.go:1516`, `:1871`, … | These are the read-receipt and thread-read fan-out failures — the logs an operator needs during an incident, currently unjoinable to a request. The semgrep rule is what stops the drift recurring. |
+| 6 | `high` | Replace the 13-arg `NewHandler` + 11 field mutations with a validated `HandlerDeps` struct | Maintainability / Architecture | `handler.go:102`; `main.go:373-383` | A forgotten assignment is a silent zero value, not a compile error — and one of them (`mentionableMaxLimit`) would silently defeat a limit the startup path explicitly validates. |
+| 7 | `high` | Split `handler.go` along its existing domain seams (pure file moves) | Maintainability | `handler.go:127-155` | 31 RPCs across ~10 domains in one file, with an 8,171-line test mirror. Zero behaviour risk, and it is the prerequisite for items 6 and 8. |
+| 8 | `medium` | Map `GetSubscriptionWithMembership`'s miss to `model.ErrSubscriptionNotFound` and drop the `mongo` import from the handlers | Architecture | `store_mongo.go:356` | One inconsistent method is the sole reason Mongo driver semantics leak into the handler layer at six sites. |
+| 9 | `medium` | Move `BADGE_CACHE_TTL` and `ROOM_KEY_RETIRED_TTL`/`GRACE_PERIOD` into config types owned by `pkg/badgecache` / `pkg/roomkeystore` | Architecture | `main.go:65`, `:67`, `:115` | Four services agree on the retired-TTL only by coincidence; `CLAUDE.md` says divergence permanently breaks `key.get` for messages already on the wire. |
+| 10 | `medium` | Parallelize `expandChannelRefs` under an `errgroup` with a cap on `len(req.Channels)` | Performance | `handler.go:1119-1155` | Two slow refs currently exhaust the whole request budget on a user-facing path. |
+
+### Verdict
+
+**Ship-capable, with item 1 fixed first.** The federation architecture is right and the boundary genuinely holds; the defect is one dedup key, not a design error. Items 2–3 are latent capacity cliffs on user-facing paths. Item 4 is what stands between the service and the repo's own merge bar, and items 5–7 are the difference between a service the team can change safely and one it can only add to.
