@@ -75,3 +75,32 @@ OUTBOX federation goes **exclusively** through `outbox.Publish` with both event 
 - `low` — Update `CLAUDE.md`'s `BOOTSTRAP_STREAMS` paragraph to describe the verify-or-fail-fast disabled path that all 12 services actually implement.
 - `nitpick` — Split `handler.go` (858 lines) into `handler.go` (consume + persist) and `handler_thread.go`.
 
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is **56.8% (843 statements)** — under the §4 60% line, so the dimension is floored at 1. `handler.go` is at **95.1%**, meeting the 90% core-logic target; the deficit is one 285-line `main()` plus two dangerous untested rules.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| critical | 56.8%, below the §4 60% line | `coverage_by_service.txt` |
+| high | `main()` is a single 285-line function holding **181 of the 843 statements at 7.2%** — 168 uncovered statements, **~46% of the entire coverage deficit**, all structurally unreachable from a test. Only `buildConsumerConfig` and `canonicalProcessor` were extracted | `main.go:73` |
+| high | **The negative half of the `USING TIMESTAMP` rule is untested.** `store_cassandra_writetime_test.go` asserts creates pin (plaintext) / do not pin (encrypted) / strips ride the client clock — but nothing asserts the **derived SETs must NOT pin**. `CLAUDE.md`: "edits, deletes and derived SETs (`tcount`/`tlm`) MUST NOT [pin], so each stays strictly above the create it supersedes." **Adding `USING TIMESTAMP` to either `UPDATE` today passes the whole suite** while silently letting a redelivered create outrank the tcount it should have bumped | `store_cassandra.go:425` (0%), `:447` (22.2%) |
+| high | `UpdateParentMessageThreadRoomID` is **0% in both lanes** — absent from handler mocks and grep-absent from `integration_test.go`. This is the `IF EXISTS` LWT whose own comment says a silent miss "permanently breaks thread reads for that parent". Nothing verifies the not-applied branch, and nothing guards the rule that an LWT can never carry `USING TIMESTAMP` | `store_cassandra.go:464` |
+| medium | `teamsBatchHandler.consume` is 0%: both poison-drop branches untested. `newTeamsBatchHandler` is 0% and `canonicalProcessor`'s teams-dispatch branch uncovered, so **the whole Teams migration entry path is unexercised** outside one integration test | `teamsbatch.go:59`, `:38`; `main.go:376` |
+| medium | `store_mongo.go` is 0% / 72 statements in the unit profile; most methods are reachable via integration, but `AddReplyAccounts` and `UpsertThreadSubscription` appear in **neither** lane | `store_mongo.go:167`, `:90` |
+| medium | `fakeJSMsg` carries a `numDelivered` field documented as seeding backoff selection, but **no table case varies it**, and the assertion is only `assert.Positive(t, nakDelay)`. Backoff *escalation* across redeliveries and the `MaxDeliver`-exhaustion salvage boundary are never asserted — a regression to a fixed 1 ms delay would pass | `handler_test.go:2481`, `:2587` |
+| low | `teamsbatch_test.go` hand-rolls `captureStore`/`fakeTransformer`/`echoResolver` rather than using the generated `MockStore` | `teamsbatch_test.go:24`, `:38`, `:53` |
+| nitpick | `hridentity.go` and `pretouchJSON` read 0% but are covered by integration / are trivial — profile artefact, not a real gap | — |
+
+**Credit where due:** `handler.go` at 95.1% covers thread fan-out, mention marking, quote reprojection and cross-site publish with error-path cases. The Ack-poison vs Nak-with-backoff distinction *is* table-tested. Integration tests conform exactly: `//go:build integration`, `package main`, `TestMain` → `testutil.RunTests`, containers only from `testutil`, zero inline `GenericContainer`. Every subtest builds a fresh `gomock.NewController(t)` — no shared state, no order dependence. The publish function is injected, so no unit test touches NATS.
+
+### Recommendations
+- `high` — Add `TestCassandraStore_DerivedSetsDoNotPinWriteTimestamp` beside the existing writetime tests, driving `countAndSetParentTcount` through the same captured-query seam and asserting the two `tcount`/`tlm` `UPDATE`s contain **no** `USING TIMESTAMP`. **This closes the one rule whose violation is silent and data-corrupting.**
+- `high` — Extract `main()`'s wiring into testable seams (`buildStores`, `buildConsumer`, `runConsumeLoop`), following the already-extracted `buildConsumerConfig`/`canonicalProcessor`. This alone moves the package from 56.8% toward ~75% without vanity tests.
+- `high` — Cover `UpdateParentMessageThreadRoomID` in integration: applied case, and not-applied against a missing parent, asserting the ERROR log and the returned error.
+- `medium` — Add a `teamsBatchHandler.consume` unit table using `fakeJSMsg`: corrupt frame → Ack, malformed request → Ack, infra error → Nak with positive delay.
+- `medium` — Add integration cases for `AddReplyAccounts` and `UpsertThreadSubscription` (insert-then-upsert idempotency).
+- `medium` — Extend the `HandleJetStreamMsg` table with `numDelivered` variants (1, 3, `MaxDeliver`) asserting the delay grows and exhaustion takes the salvage path.
+- `low` — Replace the hand-rolled fakes with the generated `MockStore` so interface drift breaks the build.
+
