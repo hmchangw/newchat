@@ -103,3 +103,21 @@ No dead code, no leaky abstractions, no function over ~35 lines, no file over 23
 - `low` — Move `inlineMemberThreshold` to `pkg/model` beside `TeamsRoomVerifyMaxChatIDs`, with the Graph cap cited in the doc comment.
 
 ---
+
+---
+
+## 6. Integration — 4 / 5
+
+No NATS surface at all, so most of the dimension is N/A; the Mongo-mediated contracts with the three downstream jobs are consistent and correct — the one real defect is in the Graph pager this service depends on.
+
+### Findings
+- `high` — `ListUserChats` follows the server-supplied `@odata.nextLink` with the bearer token attached and **no origin pin** — `pkg/msgraph/chats.go:102,115` → `getThrottled` sets `Authorization: Bearer` at `chats.go:136`. The sibling users pager in the same package does pin it, with a comment stating exactly why ("a tampered nextLink must not exfiltrate the token to another host") — `pkg/msgraph/msgraph.go:683-688`. A tampered `nextLink` sends an app-only `Chat.Read.All` token to an arbitrary host, and D1's `InsecureSkipVerify=true` default removes the TLS barrier that would otherwise make injection hard. This is the one finding I would block a release on.
+- `low` — No `docs/client-api.md` obligation applies and none is missed: the service registers no `chat.user.*` handler, no `natsrouter` route and no HTTP route (verified — `main.go` has no NATS or Gin import). Consistent with `pkg/model/teams.go:99-102`, which states the Teams-pipeline wire contracts are service-to-service and absent from `client-api.md` by design.
+
+**Verified compliant:** Struct tags on `model.TeamsChat`/`TeamsUser` carry both `json` and `bson`, camelCase, `bson:"_id"` on `ID` (`pkg/model/teams.go:81-97`, `pkg/model/teamsuser.go:11-22`). Downstream contract matches: this job writes `needMemberSync:true` for large rosters and `teams-chat-member-sync` reads exactly `find({needMemberSync:true})` and clears it with `needCreateRoom:true` (`teams-chat-member-sync/store_mongo.go:36,68-69`) — the three partial indexes created here (`store_mongo.go:44-68`) match those three queries key-for-key. `siteId` immutability via `$setOnInsert` is enforced in the model builder and pinned by both a unit test (`store_mongo_test.go:62`) and an integration test (`integration_test.go:139`). No `pkg/subject`, `pkg/stream`, `pkg/outbox`, `pkg/msgbucket`, `pkg/idgen` or `ROOM_KEY_RETIRED_TTL` surface exists here — IDs are Graph-assigned (`gc.ID` → `bson:"_id"`), correctly not `idgen`-generated.
+
+### Recommendations
+- `high` — Apply the `msgraph.go:683-688` origin pin to the chats pager loop at `chats.go:102-116` (ideally hoist it into a shared `nextPage(origin, next)` helper so a third pager cannot forget it), with a test asserting a foreign-host `nextLink` is rejected.
+- `low` — Add one integration assertion that a chat crossing `inlineMemberThreshold` between runs transitions cleanly (inline-finalized → deferred) without clobbering member-sync's roster.
+
+---
