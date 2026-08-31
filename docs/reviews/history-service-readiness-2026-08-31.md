@@ -235,3 +235,25 @@ No `time.Sleep` synchronisation, no bare `Nak()`/`NakWithDelay(0)` (the service 
 - `low` — Make the per-row `atrest.Decrypt` span conditional, or hoist one span around the page-level scan loop, so span cost scales per request rather than per row.
 - `low` — Move `USER_CACHE_SIZE`/`USER_CACHE_TTL` into a `userstore` config type mounted as a named field, and mount `userstore.TTLConfig` so this service gets the same L2 outage buffer as its peers.
 
+---
+
+## 8. Prioritized action list
+
+Ordered by severity first, then impact ÷ effort.
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Use `hasRoomTimelineRow(msg)` instead of `msg.ThreadParentID == ""` in the reaction mirror, and write/delete the `messages_by_room` cell for `TShow` replies | Integration | `internal/cassrepo/reactions.go:39`, `:62` | The only finding that **silently corrupts user-visible state**. Reactions on a shown thread reply vanish from the channel timeline on reload. Every sibling writer already uses the wider rule, so the fix is a one-line predicate swap plus a test. |
+| 2 | `critical` | Unit-test the pure/mockable halves of `cassrepo` + `mongorepo` (cursor decode, bucket-range guards, `structScan`/`Fetch` error branches, pipeline builders) | Test coverage | `internal/mongorepo/pipelines.go:10`; `internal/cassrepo/messages_by_room.go:24` | Clears the 60% merge bar without touching the integration suite. Highest coverage gain per unit of effort in the service. |
+| 3 | `high` | Test `startBucketFromCursor` in both directions (cursor above `defaultBucket`, below `floorBucket`, malformed, empty) | Test coverage | `internal/cassrepo/messages_by_room.go:24` | It is an **anti-abuse guard** against tampered cursors consuming `maxBuckets` empty reads — a DoS vector — and it is a pure function needing no Cassandra. |
+| 4 | `high` | Refactor `checkConfig` → `validateConfig(cfg) error`, `main` keeps the `os.Exit`; table-test each knob | Test coverage / Maintainability | `cmd/main.go:43` | It is the only guard on `MESSAGE_BUCKET_HOURS`, whose mismatch `CLAUDE.md` says silently loses data across services. Currently untestable by construction. |
+| 5 | `high` | Extract `main()` into `run(ctx, cfg) (closers, error)` plus `wireRooms`/`wireCiphers` builders | Maintainability | `cmd/main.go:90` | 330 lines at 0.0% coverage holding the outage-survival semantics; a mis-ordered decorator compiles and ships silently. Unlocks items 4 and 6. |
+| 6 | `high` | Delete `readcache.RoomSource`; have `RoomCache`/`breakerRoomRepo` **embed** `service.RoomRepository` | Maintainability | `internal/readcache/readcache.go:157`; `cmd/roomrepo_breaker.go:26` | Turns a four-file edit into a one-file edit for every future room read, and removes ~90 lines of pure delegation. `roomTimesSeeder` already proves the pattern. |
+| 7 | `medium` | Bound total Cassandra concurrency with one service-wide semaphore shared by the walker and `fetchByIDs` | Performance | `internal/cassrepo/repository.go:17`; `pkg/natsrouter/guard.go:21` | `256 × 16 × 8` composes to ~32k concurrent queries against 8 conns/host. Each layer is bounded; the product is not, and a cold `rooms.get` burst reaches it. |
+| 8 | `medium` | Set `Timestamp` from `time.Now().UTC().UnixMilli()` at the four event-construction sites | Integration | `internal/service/messages.go:554`, `:633`; `internal/service/pin.go:137`; `internal/service/reactions.go:100` | A concurrent delete makes the canonical event carry a timestamp materially older than the publish. The service already documents the rule correctly elsewhere. |
+| 9 | `medium` | Convert the nine bare `slog` request-path calls to `*Context` and add the missing `request_id`s | Code quality | `internal/service/threads.go:65`, `:121`, `:374`; `internal/service/messages.go:737`, `:742` | Publish/marshal failures currently cannot be joined to the request that caused them — exactly the lines an operator needs during an incident. |
+| 10 | `medium` | Decide the layout question: flatten to the sanctioned shape, or amend `CLAUDE.md` §1 | Architecture / Maintainability | `cmd/main.go:1` | The repo's largest service is the only one a reader cannot navigate by convention, and `internal/` blocks reuse of genuinely reusable tested code. Cheap as a mechanical import rewrite; expensive as accumulated drift. |
+
+### Verdict
+
+**Ship-capable with one fix first.** Item 1 is a real data-visibility defect and should not wait. Items 2–4 are what stand between this service and the repo's own merge bar. The remaining items are quality-of-life for the team that maintains it, and item 10 is a decision the repo owes itself either way.
