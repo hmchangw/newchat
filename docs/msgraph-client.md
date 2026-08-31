@@ -104,6 +104,9 @@ rather than silently egressing unauthenticated or breaking on the first request:
 - credentials with no `GRAPH_PROXY_URL`;
 - a password with no username — from the settings *or* from URL userinfo
   (`http://:secret@proxy:8080`), since Basic would send `:secret` and draw a 407;
+- userinfo with no username at all (`http://:@proxy:8080`, `http://@proxy:8080`).
+  `url.Parse` leaves it non-nil with both fields empty, and `net/http` sends
+  `Basic Og==` on the strength of that alone — another 407;
 - a malformed URL, or one missing a scheme or hostname (`http://:8080` has a
   port but no host to dial);
 - a port outside 1-65535 (`url.Parse` only checks that a port is digits);

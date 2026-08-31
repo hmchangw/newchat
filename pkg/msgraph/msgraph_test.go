@@ -1539,3 +1539,37 @@ func TestApplyProxy_RejectsUnencodableSocksCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyProxy_RejectsEmptyUserinfo covers the URL shapes that carry a bare
+// "@": url.Parse leaves User non-nil with both fields empty, and net/http's
+// proxyAuth() keys off nothing but that non-nil — it sends
+// "Proxy-Authorization: Basic Og==" (base64 of ":"). An authenticating proxy
+// answers 407 on the first request, so the pod starts and every Graph call
+// fails. A username is required whenever userinfo is present at all.
+func TestApplyProxy_RejectsEmptyUserinfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		proxy   string
+		wantErr bool
+	}{
+		{name: "http empty username and password", proxy: "http://:@proxy.corp:8080", wantErr: true},
+		{name: "http bare at sign", proxy: "http://@proxy.corp:8080", wantErr: true},
+		{name: "https empty username and password", proxy: "https://:@proxy.corp:8080", wantErr: true},
+		{name: "socks5 empty username and password", proxy: "socks5://:@proxy.corp:1080", wantErr: true},
+		{name: "username without password stays valid", proxy: "http://user@proxy.corp:8080"},
+		{name: "no userinfo at all", proxy: "http://proxy.corp:8080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			// The valid shapes must still reach the transport unchanged.
+			u := proxyTargetOf(t, c)
+			assert.Equal(t, "proxy.corp:8080", u.Host)
+		})
+	}
+}

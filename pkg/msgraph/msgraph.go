@@ -430,16 +430,23 @@ func applyProxy(hc *http.Client, cfg *Config) error {
 	if proxyURL.User != nil {
 		username := proxyURL.User.Username()
 		password, _ := proxyURL.User.Password()
-		if password != "" && username == "" {
-			// Basic would send ":password"; the proxy answers 407 on the first request.
-			return errors.New("graph proxy password set without a username")
+		if username == "" {
+			if password != "" {
+				// Basic would send ":password"; the proxy answers 407 on the first request.
+				return errors.New("graph proxy password set without a username")
+			}
+			// A bare "@" leaves User non-nil with both fields empty, and
+			// net/http's proxyAuth() keys off nothing but that non-nil: it
+			// sends "Basic Og==" (base64 of ":") and draws the same 407. Every
+			// scheme needs a username once userinfo is present at all.
+			return errors.New("empty graph proxy userinfo: GRAPH_PROXY_URL has an '@' but no username")
 		}
 		// RFC 1929 prefixes each field with a one-byte length, so Go's SOCKS
-		// dialer refuses to encode an empty or over-long one — but only when it
+		// dialer refuses to encode an over-long one — but only when it
 		// authenticates, on the first Graph request. Basic has no such limit,
 		// hence the scheme test. Neither message names the credential.
 		if socksProxySchemes[proxyURL.Scheme] {
-			if n := len(username); n == 0 || n > socksCredentialMaxBytes {
+			if len(username) > socksCredentialMaxBytes {
 				return errors.New("invalid graph proxy username for a socks5 proxy: must be 1-255 bytes")
 			}
 			if len(password) > socksCredentialMaxBytes {
