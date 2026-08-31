@@ -98,3 +98,30 @@ Coverage is **67.7% (746 statements)**, below the §4 80% floor, so the dimensio
 - `medium` — Add three `Handler` cases: corrupt-zstd ⇒ Ack + no buffer growth; `BuildByQuery` error ⇒ Ack-drop; fan-out message failing permanent-then-transient ⇒ Ack-drop with zero `nakDelay`.
 - `medium` — Unit-test `newESRead` with a stub `esSearcher` for search error, malformed JSON, zero hits, and zero `CreatedAt`.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Genuinely thoughtful abstractions and comments that explain WHY, undermined by a 319-line `main()`, a fat interface with two side-channel escape hatches, a mode-boolean threaded through five methods, and production API that exists only for tests.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `main()` runs 319 lines with 26 `os.Exit(1)` sites, mixing eight distinct jobs — config validation, obs/engine/Mongo init, mode-gated collection construction, **three separate provisioning loops**, NATS + HR wiring, per-collection stream/consumer/handler wiring, health, shutdown. **Nothing in this function is reachable from a test**, which directly causes the 67.7% | `main.go:102` |
+| high | ~55 lines of copy-pasted `if X <= 0 { slog.Error; os.Exit(1) }` inline in `main()`, with **no `validate()` method anywhere** in the service. `config_test.go` tests only env-tag defaults, so every one of these nine guards is untested — and adding a tenth knob means another copy of the block | `main.go:110-160` |
+| high | **The consumer runtime lives in `main.go`, not in a file of its own** — yet its tests are already split out as `consumer_pipeline_test.go` and `consumer_config_test.go`. **Tests are named after production files that do not exist**; the split has been made mentally but not on disk | `main.go:448`, `:484`, `:498`, `:575`, `:591`, `:611` |
+| medium | `Handler.Add`, `Handler.Flush` and `Handler.MessageCount` have **zero production callers** — grep finds them only in test files. §4: "Test helpers belong in `_test.go` files only — NEVER put test helpers in production code" | `handler.go:81`, `:223`, `:363` |
+| medium | `messageCollection` serves three sources via a `teamsOnly` bool gating five methods plus a `streamCfg func` field; the teams path shares no code with the canonical path beyond the index name. **A fourth source means a second boolean or a tri-state** | `messages.go:51`, gates at `:123`, `:133`, `:141`, `:156`, `:169` |
+| medium | `Collection` is an 8-method interface where three methods exist so most implementers can return `""`/`nil`, routed around by two optional-capability assertions. **`spotlightOrgCollection.BuildAction` is the leak made explicit: it satisfies the interface by returning an error saying it must never be called** | `collection.go:13`; `spotlight_org.go:117` |
+| medium | `spotlightCollection.BuildAction` and `userRoomCollection.BuildAction` duplicate the same 15-line skeleton, differing only in the action built | `spotlight.go:68`; `user_room.go:57` |
+| low | `BuildAction(data []byte)` carries no `context.Context`, so the two collections doing I/O **fabricate one** — both calls invisible to shutdown and to the message's trace | `messages.go:220`, `:304` |
+| nitpick | Stale planning comment ("runConsumer (Task 2) will hold a msgFetcher"); `nakAll`'s comment names "the two defensive paths in `Flush`", both of which moved to `FlushBatch` | `consumer_source.go:24`; `handler.go:351` |
+
+### Recommendations
+- `high` — Extract `func (c config) validate() (time.Time, error)` returning the parsed `syncMessagesFrom`, replacing all nine inline guards; `main()` then does one error check. Table-drive it in `config_test.go`.
+- `high` — Move `flushPipeline`, `consumerTuning`, `runConsumer`, `checkBatchAckCoupling` into `consumer.go`, and `engineAdapter`+`buildConsumerConfig` into `consumer_source.go`, **matching the test files that already exist**. Target `main.go` under 250 lines.
+- `high` — Extract the three provisioning loops into one `provision(ctx, engine, collections) error`, and the collection construction into `buildCollections(...)` — both unit-testable with the existing fakes.
+- `medium` — Delete the three test-only `Handler` methods; give the tests thin `_test.go` wrappers.
+- `medium` — Split `teamsMessageCollection` into its own type in `messages_teams.go`, dropping the `teamsOnly` bool and the four early-returns.
+- `medium` — Add a shared `forEachMemberAccount(...)` helper beside `parseMemberEvent`; both inbox collections shrink to their switch bodies.
+- `low` — Shrink `Collection` to the four methods every implementer needs and move provisioning to an optional `provisioner` interface asserted in the setup loop; `spotlightOrgCollection` then drops its unusable stub.
+
