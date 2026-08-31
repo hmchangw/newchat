@@ -29,6 +29,7 @@ docs/load-testing/
 | What the worst-case load shapes are, read out of the code | [`extreme-scenarios.md`](extreme-scenarios.md) |
 | Which instrument sits on which hop, and what is dark | [`slo-measurement-map.md`](slo-measurement-map.md) |
 | How to run the first SLO-measuring soak | [`first-slo-run-runbook.md`](first-slo-run-runbook.md) |
+| What that run has to hand back (worked example) | [`first-slo-run-report.md`](first-slo-run-report.md) |
 | What to build so J1's SLOs become measurable | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) |
 
 ## The Three Programs

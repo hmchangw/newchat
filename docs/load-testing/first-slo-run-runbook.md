@@ -661,7 +661,11 @@ draft this run exists to inform.
 ## 7a. What this run is expected to produce
 
 Not "a number for the SLOs". Six artefacts, of which only the first is a
-measurement:
+measurement. **A filled-in worked example of all six — with an invented but
+internally consistent set of numbers — is
+[`first-slo-run-report.md`](first-slo-run-report.md).** Fill that template in
+with blanks *before* the run: a blank you cannot see how to fill is a missing
+step in this SOP.
 
 | # | Artefact | Shape | Who uses it next |
 |---|---|---|---|
@@ -716,7 +720,10 @@ Two rules make it structurally hard:
    *healthy*; a ledger with one row is the suspicious one. The count and the
    reasons are the evidence that nobody went shopping.
 2. **The reported number is the median of three runs at the frozen shape, with
-   the spread — never the best of three.** This is execution rule 10 in
+   the spread — never the best of three.** And **a margin over the drafted
+   target that is smaller than the spread is not "met"** — it means the target
+   sits inside the environment's noise. That is a separate, sharper test than
+   the 10%-of-value bar below, and both apply. This is execution rule 10 in
    [`execution-priority-plan.md`](execution-priority-plan.md), applied here. If
    the spread exceeds ~10% of the value, the result is INCONCLUSIVE until the
    variance is explained.
@@ -826,6 +833,7 @@ nothing.
 
 ## 10. Sibling documents
 
+- [`first-slo-run-report.md`](first-slo-run-report.md) — **the output contract**, as a filled-in worked example
 - [`slo-measurement-map.md`](slo-measurement-map.md) §7 — why this works, per SLO
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what unlocks SLO-1b/2
 - [`execution-priority-plan.md`](execution-priority-plan.md) — Track 1.0b

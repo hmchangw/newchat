@@ -301,6 +301,12 @@ These are not new criteria — they are the ones easiest to get wrong.
       seed, same sampler ratio, and neighbour activity recorded for each run.
       Numbers from different hosts are not comparable at all.
     - **A regression claim needs two runs on each side**, before and after.
+    - **When the run is being compared against a target, the margin must exceed
+      the spread.** A median that clears a drafted target by less than the
+      run-to-run spread has not met it — the target is inside the environment's
+      noise. This is sharper than the 10%-of-value bar above and catches cases
+      that bar passes; both apply. Worked example:
+      [`first-slo-run-report.md`](first-slo-run-report.md) Part 4.
 
 ---
 
