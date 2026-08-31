@@ -41,3 +41,23 @@ Idiomatic, consistently context-wrapped, secret-hygiene rule verifiably upheld �
 - `low` — Port `teams-chat-member-sync/log_test.go`'s `recordingHandler` pattern here as a regression guard asserting no emitted record contains the client secret or a bearer token.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook consumer-defined interfaces, constructor DI, and correct shared-knob mounting; the deviations are all conscious and match the CronJob family, with config-safety the one real gap.
+
+### Findings
+- `medium` — `EnsureIndexes` failure only warns and the run continues — `teams-chat-sync/main.go:114-116`. This service *owns* the three partial indexes that `teams-chat-member-sync`, `teams-room-creation` and `teams-room-verify` scan on (`store_mongo.go:44-68`). If creation silently fails on every run, three downstream jobs degrade to collection scans with no alert and no failed run to notice.
+- `low` — `pkg/shutdown.Wait` is not used (`main.go:104` uses `signal.NotifyContext`). CLAUDE.md §6 says "every service's `main.go`", so CLAUDE.md wins on the letter — but all five sibling one-shot jobs use `signal.NotifyContext` and none use `shutdown.Wait`, so the rule plainly targets long-running services. Worth an explicit CLAUDE.md carve-out for run-to-completion jobs rather than a code change.
+- `nitpick` — File-organization analog is fine (`syncer.go` replaces `handler.go`; no `routes.go`/NATS because there is no server surface), but `worker_test.go` tests `syncer.go` and no `worker.go` exists — the pair is unfindable by name.
+
+**Verified compliant:** `TeamsUserStore`/`TeamsChatStore`/`chatsFetcher` are all defined in the consumer with only the methods used, `<Domain>Store` naming, `//go:generate mockgen` present (`store.go:11-36`); `newSyncer`/`newMongoStore` accept interfaces and return structs; config is a single `caarlos0/env` struct with no `os.Getenv`, `required,notEmpty` on `MONGO_URI` and `SYNC_DEFAULT_SITE_ID`, `envDefault` on every non-critical knob (`main.go:24-57`); `Pool mongoutil.PoolConfig` is mounted as a named field, never re-declared (`main.go:30`). No JetStream/INBOX/OUTBOX/`BOOTSTRAP_STREAMS` surface exists — correctly absent, not missing.
+
+### Recommendations
+- `medium` — Make `EnsureIndexes` fatal (`return fmt.Errorf(...)`), or at minimum emit a distinct metric/`slog.Error` so a persistently index-less collection is alertable.
+- `low` — Rename `worker_test.go` → `syncer_test_run.go` or fold into `syncer_test.go`.
+- `low` — Add the CronJob exemption to CLAUDE.md §6's `shutdown.Wait` rule so six services stop reading as non-compliant.
+
+---
