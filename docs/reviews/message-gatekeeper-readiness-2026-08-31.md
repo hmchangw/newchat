@@ -123,3 +123,30 @@ Dependencies are cleanly injected and the WHY-comments are genuinely excellent, 
 - `medium` — Break `TestHandler_ProcessMessage` into per-concern tables matching the `processMessage` split, routing all setup through the existing harness shape.
 - `low` — Rename `nats_metrics.go` → `metrics.go`, move the cached-store tests into `subcache_test.go`, and lift `config` + `buildConsumerConfig` out of `main.go` into `config.go` so the orphan test files have real counterparts. Enable `gocyclo`/`cyclop` with a threshold near 15 and a short baseline exclusion, to lock the refactor in.
 
+
+---
+
+## 6. Integration — 3 / 5
+
+Subject builders, stream/consumer wiring, `Timestamp` and `idgen` validation are all correct and test-asserted. The deductions are documentation drift on the one contract this service owns — the client `msg.send` RPC — plus two undocumented client-facing error surfaces and a silently-swallowed dedup suppression.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **The derived view contradicts the canonical doc on `msg.send` fan-out.** It states "botDM rooms receive no `new_message` fan-out — `broadcast-worker` skips botDM types". The canonical doc and the code say the opposite: `broadcast-worker` routes `RoomTypeBotDM` through `publishDMEvents` and delivers to the non-bot member. **A client reading the derived view will not subscribe for bot-DM messages** | `docs/client-api/request-reply.md:2278` vs `docs/client-api.md:6469`, `broadcast-worker/handler.go:915`, `:295` |
+| high | The same derived view **omits the `type` field from the `msg.send` request body table**, although it is a real client-settable field on the request struct, validated here and documented canonically. Its "Emits" line also omits `new_thread_message`, which the events view documents as the thread-reply variant | `docs/client-api/request-reply.md:2283-2291`, `:2320`; `pkg/model/message.go:79`; `handler.go:381`; `docs/client-api.md:6360`; `docs/client-api/events.md:485` |
+| medium | **Three client-facing `bad_request` errors are unreachable from the docs** — `too many attachments: max %d`, `attachment[%d] must not be empty`, `attachments exceed maximum size of %d bytes`. None appears in the §4 error table; the caps live in a field note only, so a client cannot map the wire string to a cause | `handler.go:368`, `:373`, `:378` vs `docs/client-api.md:6448-6461` |
+| medium | `invalid quoted parent message ID %q` is likewise absent from the §4 error table, which documents only the quoted-parent *not-found* and *thread-context* rejections | `handler.go:348` |
+| medium | **The canonical publish discards `PubAck.Duplicate`.** The dedup key is the **client-supplied** `Message.ID`. Two distinct sends colliding on one `id` inside the stream's duplicate window are silently suppressed — yet the sender still gets a success reply and `resultAccepted` is recorded, **indistinguishable from a real publish in logs and metrics** | `main.go:182-187`; publish site `handler.go:512`; `pkg/natsutil/canonical_dedup.go:44` |
+| low | The event-level `Timestamp` is **not** taken at the publish site: `now` is captured before the quote fetch (2 s) and the thread-parent re-check (a further 2 s + delay). CLAUDE.md requires the publish-site value; on the degraded path the event timestamp can lag the actual publish by seconds | `handler.go:440` → `:504`; `fetcher_history.go:19` |
+| low | The durable consumer sets no `FilterSubject` although `pkg/stream/consumer.go:36` invites it — the same root cause as the architecture finding, seen from the contract side | `main.go:270-274`; `pkg/stream/stream.go:18`; `pkg/subject/subject.go:113` |
+| nitpick | The two pre-validation error replies are built before `natsutil.WithRequestID` runs, so they carry **no `X-Request-ID` header** even when `req.RequestID` parsed fine | `handler.go:174`, `:194` vs `:329` |
+
+**Verified clean:** no raw `fmt.Sprintf` subject construction anywhere in the service; `subject.MsgCanonicalCreated(siteID)` is the sole canonical subject and is asserted in `handler_test.go:118`; `idgen.IsValidMessageID` (17-or-20 base62) and `idgen.IsValidUUID` are used for ID and requestId validation; `msgbucket`/`MESSAGE_BUCKET_HOURS` correctly absent — the gate reaches history over `subject.MsgGet` RPC and never touches Cassandra; no OUTBOX/INBOX participation, so the partition and lane rules do not bind; `bootstrapStreams` sets only `Name + Subjects` and fail-fast-verifies in production (`bootstrap.go:44-71`).
+
+### Recommendations
+- `high` — Fix `docs/client-api/request-reply.md:2278` to match the botDM DM-path behaviour, add the `type` row, and add `new_thread_message` to the Emits line. This is the derived-view-must-not-drift rule in CLAUDE.md §5.
+- `medium` — Add the three attachment errors and `invalid quoted parent message ID` to the §4 error table in `docs/client-api.md`, then re-derive the view.
+- `medium` — Inspect `ack.Duplicate` in the publish closure (`main.go:184`), log it, and record a distinct metric reason so a suppressed canonical publish is visible.
+- `low` — Stamp `time.Now().UTC().UnixMilli()` into `evt.Timestamp` at `handler.go:504`, keeping `now` only for `Message.CreatedAt`.
+- `low` — Set `cc.FilterSubject = subject.MsgSendWildcard(cfg.SiteID)` in `buildConsumerConfig`, and have `ParseUserRoomSiteSubject` callers assert the `msg.send` verb.
+- `nitpick` — Stamp the request ID onto ctx immediately after the payload parse so early error replies carry `X-Request-ID`.
