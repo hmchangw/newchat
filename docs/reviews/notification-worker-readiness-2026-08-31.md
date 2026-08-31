@@ -46,3 +46,47 @@ Idiomatic, carefully-reasoned Go with disciplined error wrapping and correct `er
 - `medium` — mechanically convert the per-message `slog.Warn/Error` calls listed above to `WarnContext`/`ErrorContext`, and add `"request_id", natsutil.RequestIDFromContext(ctx)` to the four `presence.go` lines (thread `ctx` into the goroutine closure, which it already captures).
 - `medium` — add `DebugLog logctx.Config \`envPrefix:"DEBUG_LOG_"\`` to `config` and call `logctx.SetupDefault(os.Stdout)` + `logctx.Configure(cfg.DebugLog)` at startup, matching the other canonical-stream workers — or drop `ConsumeContext` for plain `natsutil.StampRequestID` so the code stops implying a capability it lacks.
 - `low` — wrap the adapter error at `emit.go:91` (`fmt.Errorf("jetstream publish: %w", err)`), and add a sonic-vs-stdlib wire-compat test for `PushNotificationEvent` (including a populated `UnreadCounts`) modelled on `broadcast-worker`'s.
+
+---
+
+## 3. Architecture — 4 / 5
+
+Strong, deliberate architecture — consumer-defined interfaces, constructor DI, correct high-throughput consumer pattern, and clean `pkg/subject`/`pkg/stream` discipline — held back by a bootstrap subject narrowing, an untracked shutdown goroutine, and a few config-convention slips.
+
+### Findings
+- `high` — `bootstrapStreams` creates `MESSAGES-CANONICAL-{site}` with the **`.created` leaf** as its subject list, not the stream's declared `chat.msg.canonical.{site}.>` — `notification-worker/main.go:186`, `notification-worker/bootstrap.go:27-31`
+  `CreateOrUpdateStream` is an update: whichever pod boots last wins, and in dev (`BOOTSTRAP_STREAMS=true`, `deploy/user/docker-compose.yml:47`) this narrows the stream and silently rejects `.edited`/`.deleted` publishes. Sibling consumers pass the wildcard instead (`broadcast-worker/main.go:330`, `roomlist-worker/main.go:128` use `wiring.CanonicalWildcard`), and `pkg/stream.MessagesCanonical` is the declared schema. CLAUDE.md: bootstrap sets `Name + Subjects` **from `pkg/stream.<Stream>(siteID)`**.
+
+- `high` — the member-event invalidation loop goroutine is in no `WaitGroup`, yet `close(invalCh)` runs in the next shutdown step — `notification-worker/main.go:279-303` (goroutine), `main.go:411-425` (shutdown steps 3 and 4)
+  `pullSubscription.Stop()` only closes `done` (`nats.go@v1.50.0/jetstream/pull.go:769-781`); it establishes no happens-before with the loop, which may be between `iter.Next()` returning and `invalCh <- evt.RoomID` (`main.go:296`). A send on a closed channel panics during shutdown. The main fan-out loop is guarded exactly right (`main.go:319-323`, "The loop itself is counted") — the invalidation loop was not given the same treatment.
+
+- `medium` — bootstrap sets `Compression: jetstream.S2Compression` on the PUSH stream — `notification-worker/bootstrap.go:36-37`
+  CLAUDE.md: the helper "sets ONLY the stream's schema — `Name + Subjects`". Storage policy is ops/IaC's; here it silently differs between the dev-bootstrapped stream and the provisioned one. Every other bootstrap in the repo passes `cfg.Name`/`cfg.Subjects` and nothing else (`inbox-worker/bootstrap.go:48-51`, `outbox-worker/bootstrap.go:43-46`, `room-worker/bootstrap.go:48-51`).
+
+- `medium` — the invalidation consumer's config is hand-rolled and never passes through `stream.DurableConsumerDefaults` — `notification-worker/main.go:288-293`
+  It gets no `MaxDeliver`, `AckWait` or `BackOff`, unlike the main consumer (`main.go:190`, `buildConsumerConfig` at `main.go:443-447`). Server defaults apply by accident rather than by the repo's ConsumerSettings contract.
+
+- `medium` — `MONGO_URI` and `NATS_URL` carry `envDefault` localhost values instead of `required` — `notification-worker/main.go:37,40`
+  CLAUDE.md: "never default secrets or connection strings — mark them `required`". `MODE` is correctly `required` (`main.go:76`), and `message-worker/main.go:50` marks `MONGO_URI,required`, so the convention is live in the repo.
+
+- `low` — no `store.go` / `store_mongo.go`; the two Mongo store implementations live in feature files — `notification-worker/threads.go:26`, `notification-worker/usersettings.go:74`
+  Interfaces are correctly consumer-defined (`ThreadFollowerLister` `threads.go:22`, `UserSettingsSnapshotter` `usersettings.go:19`, `badgeClient` `badge_client.go:29`, `publisher` `emit.go:20`) and injected via `HandlerDeps` (`handler.go:45-61`), so the *principle* holds; only the file layout deviates. The sanctioned sub-package exception does not apply to a worker.
+
+- `low` — `push-notification-service` has no `bootstrap.go` and no `BOOTSTRAP_STREAMS`, so `notification-worker` is the de-facto creator of a stream it only publishes to — `notification-worker/bootstrap.go:33-38` vs `push-notification-service/` (no bootstrap file)
+  `pkg/stream.PushNotification` comments it as "ops-owned in prod", so nothing breaks; the ownership is just inverted from the INBOX/OUTBOX model.
+
+- `nitpick` — `deploy/{user,bot}/` nested variant split departs from CLAUDE.md's flat `deploy/` layout — `notification-worker/deploy/user/`, `deploy/bot/`
+  Justified: one binary, two pipelines selected by `MODE` (`main.go:76`); the Dockerfiles are byte-identical and only compose env differs. Worth codifying in CLAUDE.md rather than leaving as an undocumented deviation.
+
+- `nitpick` — `chunkStrings` is defined in `presence.go:109` but consumed by `usersettings.go:104`.
+
+**Boundary verified as sound.** The settings read is against the *local* `users` collection (`main.go:145`, `usersettings.go:118`), replicated cross-site by `inbox-worker` (`inbox-worker/handler.go:684-691`, `inbox-worker/main.go:280-292`) — no synchronous cross-site RPC on the push gate. Read preferences are split with documented intent (`main.go:127,133,141-146`). Consumer pattern is the correct high-throughput form: `cons.Messages()` + `MAX_WORKERS` semaphore + `PullMaxMessages(2*MaxWorkers)` (`main.go:305-315`), never mixed with `Consume()`. No raw `fmt.Sprintf` subject construction anywhere.
+
+### Recommendations
+- `high` — pass `wiring.CanonicalStream.Subjects` (not `CanonicalCreated`) to `bootstrapStreams`; keep `CanonicalCreated` for the consumer `FilterSubjects` only. Add a bootstrap test asserting the created subject list equals `stream.MessagesCanonical(siteID).Subjects`.
+- `high` — add the invalidation loop to a `WaitGroup` (or reuse `invalWG`) and wait on it *before* `close(invalCh)`, mirroring the main loop's counted-goroutine comment at `main.go:319`.
+- `medium` — drop `Compression` from `bootstrap.go`; move it to the IaC stream definition.
+- `medium` — build the invalidation consumer through `stream.DurableConsumerDefaults(cfg.Consumer)` so it inherits `MaxDeliver`/`AckWait`/`BackOff`.
+- `medium` — mark `MONGO_URI` and `NATS_URL` `required`, matching `message-worker`.
+- `low` — consolidate `mongoThreadFollowers` and `mongoUserSettings` into `store_mongo.go` with their interfaces in `store.go`, or get the `deploy/{user,bot}` + per-concern-file layout written into CLAUDE.md as a sanctioned worker variant.
+- `low` — give `push-notification-service` its own `bootstrap.go` verifying (not creating) `PUSH-NOTIFICATION-{siteID}`, so stream ownership follows the INBOX/OUTBOX single-owner rule.
