@@ -29,6 +29,7 @@
 | P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
 | P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
 | P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
+| P9 | **Query dry-run: every query in §5 returns a non-empty result of the expected shape, against the real Prometheus** | us | **Do this before building the dashboard, not after.** Four review rounds on this document found label names, histogram suffixes, range-window semantics and `rate()`'s reset behaviour wrong — none of which is visible in the Go source, and all of which a single dry-run would have caught. See §9 |
 | P8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
 
 ### P6 — how to scope a run to a site
@@ -608,7 +609,59 @@ Two caveats to carry into the write-up:
 
 ---
 
-## 9. Sibling documents
+## 9. Order of operations, and the dry-run
+
+The natural order — *check the metrics exist → build the dashboard → run
+loadgen* — has one thing backwards and one thing missing.
+
+**Backwards: you cannot confirm the metrics exist without traffic.** The
+instruments are constructed at service start (`pkg/natsmetrics/metrics.go:238-247`),
+but the Prometheus exporter only emits a series once a data point has been
+recorded for it. On a quiet site `rpc_server_call_duration_seconds` does not
+exist at all, and `{rpc_method="thread_open"}` does not exist until something
+calls `.msg.thread`. So a short loadgen run comes *first*, as a fixture for the
+verification rather than as a measurement.
+
+**Missing: G6.** The backlog observer that `t0-async` and `t2` depend on runs
+inside the loadgen pod and dies with it (P4). It has infra lead time, it is not
+discovered by any of the steps below, and without it the measurement run cannot
+mark either boundary. Start it now, in parallel.
+
+### The sequence
+
+| # | Step | Proves | Blocks on |
+|---|---|---|---|
+| **0** | Start G6, G1 (isolated `SITE_ID`), P6 (`site` label decision), G2 (`realistic` preset) **in parallel** | — | infra + product lead time |
+| **1** | Confirm the deployed services run a build containing `bf0ea62` | The counters can exist at all | deploy |
+| **2** | **Smoke run**: loadgen at default rates for 10–15 min. Not a measurement | Traffic exists, so the series appear | 1 |
+| **3** | **Query dry-run** (P9): run every §5 query against the real Prometheus | The queries are *right* — the class of defect four review rounds kept finding | 2 |
+| **4** | Build the SLI/SLO dashboard **from the verified queries** | Panels show data on first load | 3 |
+| **5** | The measurement run (§7) | The first numbers | 0, 4 |
+
+Steps 2–4 are one afternoon. Step 0 is the long pole.
+
+### What the dry-run has to check
+
+Per query, not just "it returned something":
+
+| Check | Why it is on this list |
+|---|---|
+| Non-empty result | The base failure mode — a wrong label value returns empty, which reads as "no data" rather than "wrong query" |
+| The `action` values exist as spelled: `load_history`, `get_thread_messages` | Both were wrong in earlier drafts, from memory rather than from source |
+| Histogram queries use `_count` / `_bucket` / `_sum`, never the bare name | A bare histogram name selects nothing |
+| `rpc_method` has exactly `channel_history` and `thread_open` as separate values | The disjointness SLO-4/5 depend on |
+| `error_type` is **absent** on success, and the regex's empty alternative matches those series | The convention makes it conditional; a `{error_type=""}` matcher must actually match |
+| The `site` selector resolves (or is deleted, per P6 option B) | There is no `site` label by default |
+| `le` values include the bounds you intend to report | `0.25`, `0.5`, `1` must be real boundaries in the deployed build |
+| A restart makes the `_count` series behave as expected under `rate()` | The `t0-sync` readiness signal depends on it |
+
+Record the dry-run result — query, returned shape, sample value — next to the
+run. A dashboard built on unverified queries is how a green panel comes to mean
+nothing.
+
+---
+
+## 10. Sibling documents
 
 - [`slo-measurement-map.md`](slo-measurement-map.md) §7 — why this works, per SLO
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what unlocks SLO-1b/2
