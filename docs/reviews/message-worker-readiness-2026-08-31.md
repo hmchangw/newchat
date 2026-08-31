@@ -134,3 +134,30 @@ Genuinely well-reasoned code with excellent WHY-comments, but `handler.go`'s thr
 - `medium` — Extract the Teams migration to its own service directory and schedule its deletion; failing that, replace the `isMigration` flag with a no-op `ThreadStore` decorator selected once at wiring time.
 - `low` — Delete `reactionShortcode`, its test, and the `_ = tm.Forwarded` no-op.
 
+---
+
+## 6. Integration — 4 / 5
+
+Every central contract holds — both OUTBOX event types are partitioned, the `USING TIMESTAMP` pinning rules are **exactly right and test-pinned**, bucket math and IDs are correct — and the remaining issues are observability and robustness edges, not broken wires.
+
+### Verified clean — the load-bearing part
+**Cassandra pinning matches `CLAUDE.md` exactly.** All five plaintext create INSERTs pin `writeTS(msg.CreatedAt)` (`store_cassandra.go:173`, `:184`, `:265`, `:276`, `:297`); all six **encrypted** create INSERTs are unpinned (a fresh nonce per attempt would otherwise pair one attempt's ciphertext with another's nonce under a single timestamp — permanently undecryptable); the three `stripLegacyPlaintext*` tombstones, the tcount/tlm SETs and the `IF EXISTS` stamps are all unpinned.
+
+**OUTBOX partition membership is fully closed end to end**: `InboxThreadSubscriptionUpserted` and `InboxThreadUnreadAdded` are both in `ConcurrentEventTypes`, consumed by outbox-worker's concurrent lane, and handled at the destination in `inbox-worker`. `MESSAGE_BUCKET_HOURS` is validated > 0, one `msgbucket.Sizer` is threaded through every bucketed statement, and the default 360 matches history-service, bot-message-worker and es-index-migrator. Timestamps are set via `time.Now().UTC().UnixMilli()` at all three publish sites. IDs use `idgen.GenerateUUIDv7()` for ThreadRoom/ThreadSubscription and `idgen.MessageIDFromRequestID` (20-char base62) for Teams. No raw `fmt.Sprintf` subject construction. No `chat.user.` handler, so no `docs/client-api.md` obligation.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | **OUTBOX publish failures are labelled `recipient_publish`, not `outbox_publish`.** `pkg/natsmetrics/subject.go:164` maps `chat.outbox.*` correctly, and both sibling producers derive labels that way. message-worker is the only caller of `DestinationOutbox` with a hand-written operation, so **its federation failures fall outside the fleet-wide `outbox_publish` failure series** — the one signal an on-call would query during a cross-site incident | `main.go:218`; cf. `broadcast-worker/main.go:406`, `room-worker/main.go:245` |
+| low | `setParentTcountAndTlm` blind-SETs `messages_by_room` at **event-supplied partition coordinates with no `IF EXISTS`**. Those coordinates come from a value the handler explicitly trusts unverified when the gatekeeper ships it. The neighbouring write to the identical coordinates guards with `IF EXISTS` and logs the miss at ERROR *precisely because* a silent miss is unrecoverable. If the trusted value ever drifts (ms truncation, a re-sent event), the tcount SET creates a **phantom row holding only `tcount`/`thread_last_msg_at`**, undetectably | `store_cassandra.go:435-438`; `handler.go:174-176`; cf. `store_cassandra.go:483-493` |
+| low | Startup verifies only the stream this mode consumes, never `OUTBOX-{siteID}` it publishes to. A misprovisioned OUTBOX surfaces at the first cross-site thread reply as a NAK loop inside the ~1 h outage retry budget, rather than at deploy | `bootstrap.go:63` |
+| low | **Cross-site federation is published before the reply is durably persisted** — `publishThreadSubInboxIfRemote` and `fanOutThreadUnread` both run before `store.SaveThreadMessage`. A Cassandra failure after those publishes leaves remote replicas holding thread-subscription and unread state for a reply that only exists once redelivery re-persists it. The destination applies are idempotent so it converges — but the ordering is publish-then-persist, and the OUTBOX dedup window will not suppress the redelivered copies given the retry budget | `handler.go:216-236` |
+| low | The destination dispatches this service's event **by string literal, not the shared constant** — renaming `model.InboxThreadSubscriptionUpserted` would compile cleanly and silently strand message-worker's federated subscriptions at the destination | `inbox-worker/handler.go:244` |
+| nitpick | `publishMetrics.Failure` is invoked on every core-NATS publish **including successes**; the siblings deliberately classify only on error | `main.go:207` |
+
+### Recommendations
+- `medium` — Replace the hardcoded labels in the publish closure with `natsmetrics.PublishLabelsFromSubject(subj)`, matching room-worker and broadcast-worker, and call `Failure` only when `err != nil`.
+- `low` — Add `IF EXISTS` plus an ERROR log to the `messages_by_room` half of `setParentTcountAndTlm`, mirroring `UpdateParentMessageThreadRoomID`, so a bad parent coordinate is observable instead of writing a phantom row.
+- `low` — Extend `bootstrapStreams` to verify (not create) `stream.Outbox(siteID)` on the production path, since thread federation now depends on it.
+- `low` — Move `fanOutThreadUnread` and the thread-subscription outbox publishes to **after** `SaveThreadMessage` returns, so nothing is federated for a reply that is not yet durable.
+- `low` — Change `inbox-worker/handler.go:244` to the `model.InboxThreadSubscriptionUpserted` constant so the cross-service contract is compiler-enforced.
+
