@@ -854,8 +854,13 @@ func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
 }
 
 // proxyTargetOf resolves the proxy URL a constructed client's transport would
-// dial for a Graph request, so tests can assert on the credentials carried in
-// its userinfo. c must be one of the *graphClient-backed surfaces.
+// dial, so tests can assert on the credentials carried in its userinfo. c must
+// be one of the *graphClient-backed surfaces.
+//
+// The callback takes a nil request because applyProxy installs
+// http.ProxyURL, which returns its fixed URL without reading one. A
+// request-dependent proxy func (NO_PROXY handling, say) would panic here
+// rather than fail quietly, which is the right way to learn this changed.
 func proxyTargetOf(t *testing.T, c any) *url.URL {
 	t.Helper()
 	g, ok := c.(*graphClient)
@@ -863,11 +868,9 @@ func proxyTargetOf(t *testing.T, c any) *url.URL {
 	tr, ok := g.httpClient.Transport.(*http.Transport)
 	require.True(t, ok, "transport must be *http.Transport")
 	require.NotNil(t, tr.Proxy, "proxy must be configured on the transport")
-	req, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	u, err := tr.Proxy(nil)
 	require.NoError(t, err)
-	u, err := tr.Proxy(req)
-	require.NoError(t, err)
-	require.NotNil(t, u, "proxy must resolve for a Graph request")
+	require.NotNil(t, u, "proxy must resolve")
 	return u
 }
 
