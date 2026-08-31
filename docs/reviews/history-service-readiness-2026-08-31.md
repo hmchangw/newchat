@@ -98,3 +98,51 @@ Every subject goes through `pkg/subject` builders with zero raw `fmt.Sprintf`; n
 - `low` — Add `bootstrap.go` + a `Bootstrap` field no-op'ing on `BOOTSTRAP_STREAMS=false`, and set it true in `deploy/docker-compose.yml`.
 - `nitpick` — Thread the SDK's `MeterProvider` into `newPreviewWarmer` instead of the package-level `otel.Meter` global.
 
+---
+
+## 4. Test coverage — 1 / 5
+
+Statement-weighted coverage is **55.0% of 2569 statements**, below the `CLAUDE.md` §4 60% line ("MUST NOT be merged"), so the dimension is floored at 1. The shape matters, though: `internal/service` is genuinely well tested at 93.2%, and the entire deficit sits in the two repository packages and `cmd/`.
+
+### Per-package breakdown
+
+| Package | Coverage | Statements |
+|---------|----------|-----------|
+| `internal/config` | 96.4% | 55 |
+| `internal/service` | 93.2% | 1139 |
+| `internal/readcache` | 89.2% | 83 |
+| `internal/publisher` | 87.5% | 24 |
+| **`internal/cassrepo`** | **32.1%** | 545 |
+| **`cmd`** | **11.3%** | 194 |
+| **`internal/mongorepo`** | **3.5%** | 144 |
+| `internal/service/mocks` | 0.0% | 385 |
+
+### Evidence
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| critical | 55.0% overall, below the §4 60% bar | `internal/cassrepo/write.go:1`; `internal/mongorepo/room.go:29` |
+| high | `cassrepo` and `mongorepo` have **no unit tests at all** for their exported surface — every covering `*_test.go` is `//go:build integration`, so the whole store layer reads 0% in the default profile | `internal/cassrepo/messages_by_room.go:94`; `internal/mongorepo/room.go:53` |
+| high | `startBucketFromCursor` is 0% despite being a **pure function and an anti-abuse guard** — it rejects out-of-range cursor buckets so tampered cursors cannot consume `maxBuckets` empty reads. Needs no Cassandra to test | `internal/cassrepo/messages_by_room.go:24` |
+| high | `checkConfig` is 0% — the only guard on `MESSAGE_BUCKET_HOURS`, which `CLAUDE.md` says must match across services or reads and writes silently target different partitions. Untestable as written: calls `os.Exit(1)` inline instead of returning an error | `cmd/main.go:43` |
+| medium | `PreviewCache.Invalidate` is 0% — the eviction that stops a deleted/edited message being served as a room preview for the whole TTL. The comment itself flags this as a known correctness edge, yet nothing asserts eviction happens | `internal/readcache/readcache.go:287` |
+| medium | The at-rest edit path is uncovered by unit tests, including two pure helpers needing no session. A regression silently drops attachments/card on edit of a legacy row — exactly what the doc comment says the code exists to prevent | `internal/cassrepo/write.go:91`, `:116` |
+| medium | `internal/service/mocks` is a **non-test package**, so its 385 generated statements (15% of the denominator) enter at 0% and depress the figure. Excluding it, the service is ~64.7% | `internal/service/service.go:19` |
+| medium | Tests are almost entirely one-function-per-scenario, not table-driven: `messages_test.go` has 133 `func Test…` and **zero** `t.Run`; `pin_test.go` 39/0 | `internal/service/messages_test.go:1` |
+| low | Breaker-wrapped `GetRoomTimesByIDs` and `GetRoomUserCount` are 0%, so the RoomsGet and large-room-pin paths have no evidence they fail fast under a Mongo outage | `cmd/roomrepo_breaker.go:72` |
+| nitpick | No `t.Parallel()` anywhere; ~25k lines of tests run strictly serially | — |
+
+### Integration hygiene — clean
+
+All integration files carry `//go:build integration`; all three packages have `TestMain` → `testutil.RunTests(m)`; zero inline `testcontainers.GenericContainer`; containers all from `pkg/testutil`; shared Valkey correctly paired with `t.Cleanup(testutil.FlushValkey)` (`internal/service/integration_test.go:495`); mocks generated via `go:generate mockgen` and confirmed non-stale repo-wide; no real DB/NATS in unit tests; no `os.Setenv`; package-level test vars are immutable timestamps only, so no order dependence.
+
+### Recommendations
+
+- `critical` — Unit-test the pure and mockable halves of `cassrepo`/`mongorepo`: cursor decode, bucket-range guards, the `structScan`/`Fetch` error branches (23.1% / 18.2%), and the pipeline builders at `internal/mongorepo/pipelines.go:10`. This alone clears 60% without touching the integration suite.
+- `high` — Unit-test `startBucketFromCursor` in both directions: cursor above `defaultBucket`, below `floorBucket`, malformed encoding, empty-cursor default. Tampered cursors are the DoS vector it was written for.
+- `high` — Refactor `checkConfig` into `validateConfig(cfg) error` with `main` doing the `os.Exit`, then table-test each of the five knobs at 0, 1 and negative.
+- `medium` — Exclude `internal/service/mocks` from the coverage denominator so the number reflects hand-written code.
+- `medium` — Add a `PreviewCache.Invalidate` test asserting a subsequent `Get` re-loads, plus an edit/delete test proving the service calls it.
+- `medium` — Cover `buildEditPayload` with a fake cipher for both branches, and `blankQuotedBody` for its nil-in/nil-out contract.
+- `low` — Collapse the `LoadHistory_*` and `pin_test.go` families into table-driven suites; ~170 near-duplicate functions are the main maintenance drag.
+
