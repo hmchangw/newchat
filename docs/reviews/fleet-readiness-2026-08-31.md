@@ -184,3 +184,55 @@ The mirror-image failure exists in `outbox-worker` itself: **an unset `ALL_SITE_
 - `medium` — Either document `chat.roomactivity.{destSiteID}` in `CLAUDE.md` as an explicitly best-effort third lane with its gateway-export requirement, or move it onto a durable lane. Decide `remote_rooms`' fate in the same change.
 - `medium` — Add `bot-room-service` and `admin-service` to `CLAUDE.md`'s cross-site-publisher lists; both federate today and neither is named.
 
+---
+
+## 5. Cross-cutting risk #4 — security
+
+`gosec` and the 18 repo-owned `semgrep` rules are **clean across the whole repo**. Every finding below came from an expert *reading* the code, not from a scanner — which is exactly the class of defect scanners miss.
+
+### The one to fix today
+
+- **`critical` — Read-SSRF with credential exfiltration in `upload-service`.** `drive_host` is taken **verbatim from the client query string** and used as the upstream base URL, **with the Drive `api-token` header attached** (`upload-service/handler.go:342-358` → `pkg/drive/uploader.go:136-140`). Any authenticated room member can point it at an attacker-controlled host and receive `DRIVE_API_TOKEN` (and `LEGACY_DRIVE_API_TOKEN` via `/api/v3`); the response body is then streamed back, making it a **full read-SSRF into the cluster**. The allowlist to validate against — `cfg.Drive.BaseURLMap` — **already exists in-process and is never consulted.**
+
+### Revocation that does not revoke
+
+- **`high` — `admin-service` session revocation leaves the cache warm.** Three of the four revoke paths delete sessions in Mongo but never bust the Valkey session cache: admin set-password, self-service change-password, and the deactivate branch. **Four of the six experts found this independently.** `pkg/session` was explicitly redesigned to close this exact hole — its bulk deletes return IDs *because* "returning only a count is what let a revoked token keep authenticating from cache until its refresh window elapsed" — and this service's store interface **re-opens it by returning only `error`**. Compounding it: `SESSION_CACHE_TTL` defaults to 90 minutes **and slides on read**, so a revoked or deactivated token keeps authenticating **indefinitely while in active use**. The service's own test asserts the invariant for the other two paths.
+
+### The auth boundary
+
+`auth-service` is the callout every client connection traverses. Three findings there:
+
+- **`high` — the auth-bypass branch ships in the production binary**, gated only by `DEV_MODE` (`envDefault:"false"`). `handleDevAuth` mints a signed, scoped NATS user JWT from a **fully client-supplied `account`** with no token and no validation. There is no build tag, no separate binary, and no startup refusal when the signing key looks production-shaped — **a single config typo is fleet-wide impersonation.**
+- **`high` — a guaranteed nil-panic on the dev path**: dev mode wires a `nil` `TokenValidator`, but `HandleAuth` still routes a token-carrying request into `handleSSO`, which dereferences it. The doc comment asserts the opposite, and **the only test covering that claim injects a non-nil fake — a configuration `main.go` can never produce.** Its sibling `handleSession` has exactly the guard `handleSSO` lacks.
+- **`high` — no admission control on the unauthenticated `POST /api/v1/auth`**, and **unbounded JWKS refetch**: go-oidc's `RemoteKeySet` has no minimum refresh interval, so a caller submitting valid-looking JWTs with random `kid` values drives a continuous 10 s-timeout fetch loop against the IdP, at zero attacker cost, with nothing throttling submission rate. `ginutil.MaxConcurrency` exists and `user-service` already uses it.
+
+### Unauthenticated CPU burn
+
+The same shape appears three times, each on a login endpoint:
+
+- `admin-service`: `POST /v1/login` runs **unconditional bcrypt (cost 10) on every request including both denial arms**, with no limiter installed.
+- `botplatform-service`: `/api/v1/login` has **no rate limiter** and full bcrypt per request; separately, its `botRateLimit` runs **after** `requireBot`, so **an invalid token is never rate-limited** and each bogus request is one uncapped Mongo `FindOne`.
+- `botplatform-service` again: the idempotency middleware does `io.ReadAll(c.Request.Body)` with **no size cap**, and it runs *before* the handler — so `bindStrict`'s documented `MaxBytesReader` cap **can never reject during read**. The in-code comment claiming "body is capped so oversized requests fail during read" is **false whenever Valkey is configured, i.e. in production.**
+
+### Data exposure
+
+- **`medium` — `search-sync-worker` logs message bodies.** The failed-bulk-item log emits Elasticsearch's raw `error.reason`, which routinely quotes the offending field value (`Preview of field's value: '…'`) — and for the messages collection that field is `content`. This violates §3 *and* the rule the same file states 130 lines above it: *"the document body never belongs in an error that reaches the server log."* `ErrorType` and `Status` are already logged and carry the diagnosis.
+- **`medium` — `inbox-worker` decodes whole `model.User` documents** — including `Services`, which carries credential material — on the sequential membership lane, to read two fields.
+- **`medium` — `media-service` caches errors publicly.** `Cache-Control: public, max-age=21600` plus `ETag` are written **before** the blob fetch, so a MinIO 500 or a not-found inherits them and becomes a **shared-cache-storable error**, pinned in CDN and browser caches for six hours per key.
+- **`medium` — `media-service` authorization is asymmetric**: HTTP emoji upload is admin-gated, but the NATS `emoji.delete` RPC is open to any authenticated account, guarded only by a kill-switch — for site-wide shared state the handler's own comment identifies as such.
+- **`medium` — `upload-service` type filtering is bypassable.** `resolveMediaType` returns the **client-declared** Content-Type whenever it is anything but empty or `application/octet-stream`, so the byte-sniff and SVG checks never run for a lying client. A POST declaring `image/png` on SVG bytes sails past the `image/svg+xml` blacklist. **Every SVG-defence test declares `application/octet-stream`; the lying-declared case is untested.** Separately, `/upload/images` never consults the MIME filter at all.
+- **`medium` — image decompression bombs**: `media-service`'s bot-avatar upload calls `image.Decode` with **no `DecodeConfig` dimension pre-check**, so a small compressed PNG declaring huge dimensions allocates the full raster. The emoji path in the same service does this correctly in two phases, with an explicit decompression-bomb comment — the avatar path has no `MAX_DIMENSION` knob at all.
+
+### The audit gap
+
+`govulncheck` and the `semgrep` registry packs could not run. **This is the highest-value scan for exactly the services above** — `auth-service`'s `go-oidc`/`nkeys`/`jwt/v2` tree, and the `minio-go`/`resty`/`gin` trees in the upload path. Nothing in this audit clears them.
+
+### Fleet recommendations
+
+- `critical` — Validate `drive_host` against `cfg.Drive.BaseURLMap` before use, or better, drop the parameter and re-derive the host from the room's `siteID` as the upload path already does.
+- `high` — Return revoked session IDs from `admin-service`'s two transactional revoke methods and call `sessioncache.BustMany` at all three sites.
+- `high` — Move `handleDevAuth` behind a `//go:build dev` file so it is not linked into release images; add the missing nil guard to `handleSSO`; install `ginutil.MaxConcurrency` on `/api/v1/auth`, `admin-service`'s `/v1/login` and `botplatform-service`'s `/api/v1/login`; move `botRateLimit` ahead of `requireBot`.
+- `high` — Cap the idempotency middleware's body read; make `resolveMediaType` decide from bytes and extension with the declared type as a tiebreak only, and run `/upload/images` through the same filter.
+- `medium` — Drop the raw ES `error.reason` from the bulk-failure log; project `FindUsersByAccounts`; move `setImageCacheHeaders` after a successful blob fetch and emit `no-store` on error paths; gate `emoji.delete` on admin; add a `DecodeConfig` dimension pre-check to the avatar upload.
+- `high` — **Run `make sast` (govulncheck + registry packs) from a network-permitted runner before any of this ships.** It is the one blocking CI gate this audit could not exercise.
+
