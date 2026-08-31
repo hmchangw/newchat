@@ -62,14 +62,11 @@ func bsonSetWithoutID(item any) (set bson.M, id any, err error) {
 	return m, id, nil
 }
 
-// MaxBulkChunk is the default number of write models sent in one BulkWrite.
-// It bounds the command each round trip has to build and hold in memory, so a
-// caller that assembled tens of thousands of models does not turn them into a
-// single outsized request.
+// MaxBulkChunk is the default number of write models sent in one BulkWrite,
+// bounding what a caller with tens of thousands of models builds in memory.
 const MaxBulkChunk = 1000
 
-// chunkWriteModels splits models into batches of at most size, preserving order.
-// A non-positive size falls back to MaxBulkChunk.
+// chunkWriteModels splits models into ordered batches of size (MaxBulkChunk if <=0).
 func chunkWriteModels(models []mongo.WriteModel, size int) [][]mongo.WriteModel {
 	if size <= 0 {
 		size = MaxBulkChunk
@@ -85,9 +82,8 @@ func chunkWriteModels(models []mongo.WriteModel, size int) [][]mongo.WriteModel 
 	return chunks
 }
 
-// merge folds one chunk's driver result into the accumulator. base is the
-// chunk's offset within the whole input, used to rebase UpsertedIDs ordinals so
-// each chunk's index 0 does not overwrite the previous chunk's.
+// merge folds a chunk's result into the accumulator, rebasing UpsertedIDs
+// ordinals by base so each chunk's index 0 does not overwrite the last.
 func (r *BulkResult) merge(res *mongo.BulkWriteResult, base int) {
 	if res == nil {
 		return
@@ -108,13 +104,8 @@ func (r *BulkResult) merge(res *mongo.BulkWriteResult, base int) {
 	}
 }
 
-// ChunkedBulkWrite issues models as a sequence of unordered BulkWrites of at
-// most size each (MaxBulkChunk when size is non-positive), returning the merged
-// result. Empty input is a no-op returning (nil, nil).
-//
-// Chunks are not atomic with respect to one another: an error reports how far
-// the write got, so callers must be idempotent — which the upsert-shaped models
-// this package builds already are.
+// ChunkedBulkWrite issues models as unordered BulkWrites of at most size each,
+// merged into one result. Chunks are not atomic, so callers must be idempotent.
 func ChunkedBulkWrite(ctx context.Context, coll *mongo.Collection, models []mongo.WriteModel, size int) (*BulkResult, error) {
 	if len(models) == 0 {
 		return nil, nil

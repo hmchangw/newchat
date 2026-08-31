@@ -174,8 +174,7 @@ func TestBulkResult_Merge(t *testing.T) {
 	assert.Equal(t, int64(33), acc.Upserted)
 	assert.Equal(t, int64(44), acc.Inserted)
 	assert.Equal(t, int64(55), acc.Deleted)
-	// Ordinals are rebased onto the whole input so the second chunk's index 0
-	// does not overwrite the first chunk's.
+	// Rebased onto the whole input, so chunk two's index 0 does not overwrite.
 	assert.Equal(t, map[int64]any{0: "a", 1000: "b"}, acc.UpsertedIDs)
 }
 

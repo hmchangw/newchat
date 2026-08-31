@@ -28,9 +28,8 @@ func indexOf(names []string, want string) int {
 	return -1
 }
 
-// The two correlated $lookups run once per matched user, so every byte carried
-// into them is multiplied. Narrowing the document before the joins is what keeps
-// a 5k-person department from dragging 5k full user documents through both.
+// Both $lookups run once per matched user, so narrowing first is what keeps a
+// 5k-person department from dragging 5k full documents through them.
 func TestOrgMembersPipeline_NarrowsDocumentBeforeLookups(t *testing.T) {
 	names := stageNames(t, orgMembersPipeline("room-1", "org-1"))
 
@@ -44,16 +43,14 @@ func TestOrgMembersPipeline_NarrowsDocumentBeforeLookups(t *testing.T) {
 	assert.Equal(t, "$match", names[0], "the indexed $match selects the org before anything else runs")
 }
 
-// The early projection is only safe if it keeps every field the later stages
-// read; dropping one would silently blank a name or break the sibling-org join.
+// Dropping a field here would silently blank a name or break the sibling join.
 func TestOrgMembersPipeline_EarlyProjectionKeepsFieldsLaterStagesRead(t *testing.T) {
 	p := orgMembersPipeline("room-1", "org-1")
 	names := stageNames(t, p)
 	early, ok := p[indexOf(names, "$project")][0].Value.(bson.M)
 	require.True(t, ok, "early $project is a bson.M")
 
-	// _id feeds the individual-membership lookup; sectId/deptId feed the
-	// sibling-org lookup and the isDept/name/tcName computations.
+	// _id feeds the membership lookup; sectId/deptId feed the sibling-org join.
 	for _, field := range []string{"account", "siteId", "sectId", "deptId", "deptName", "sectName", "deptTCName", "sectTCName"} {
 		assert.Contains(t, early, field, "early projection must keep %q for a later stage", field)
 	}

@@ -44,8 +44,7 @@ func TestHeartbeat_ExtendsDeadlineUntilStopped(t *testing.T) {
 		"no heartbeat may fire after stop — the message is already settled")
 }
 
-// stop is the only termination path callers have; it must be safe to call from
-// a defer that also runs on the panic path.
+// stop is the only termination path, so it must be safe on the panic path too.
 func TestHeartbeat_StopIsIdempotent(t *testing.T) {
 	msg := &countingHeartbeatMsg{}
 	stop := Heartbeat(context.Background(), msg, time.Millisecond)
@@ -62,8 +61,7 @@ func TestHeartbeat_CancelledContextStops(t *testing.T) {
 	require.Eventually(t, func() bool { return msg.calls() >= 1 }, time.Second, time.Millisecond)
 	cancel()
 
-	// Settle, then assert quiescence: a cancelled context must not leave a
-	// ticker goroutine running.
+	// A cancelled context must not leave a ticker goroutine running.
 	require.Eventually(t, func() bool {
 		n := msg.calls()
 		time.Sleep(20 * time.Millisecond)
@@ -71,8 +69,7 @@ func TestHeartbeat_CancelledContextStops(t *testing.T) {
 	}, time.Second, 25*time.Millisecond)
 }
 
-// A failing InProgress means the message is no longer live (already settled, or
-// the consumer is gone). Retrying would just spam the log every interval.
+// A failing InProgress means the message is gone; retrying would spam the log.
 func TestHeartbeat_StopsAfterFailure(t *testing.T) {
 	msg := &countingHeartbeatMsg{fail: errors.New("consumer deleted")}
 	stop := Heartbeat(context.Background(), msg, 2*time.Millisecond)
