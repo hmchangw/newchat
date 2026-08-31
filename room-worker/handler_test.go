@@ -5138,10 +5138,16 @@ func TestProcessAddMembers_NoRoomKeyEventOnAdd(t *testing.T) {
 	assert.Equal(t, 0, pub.publishCount())
 }
 
-func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
+// TestProcessAddMembers_SelfHealsWhenKeyMissing: a key-absent room no longer
+// permanently fails the "added" fan-out. Instead the worker mints a fresh key
+// (SetIfAbsent) and proceeds, so the new member gets a usable key inline —
+// going-forward-only, but no silent drop.
+func TestProcessAddMembers_SelfHealsWhenKeyMissing(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
 	keyStore := NewMockRoomKeyStore(ctrl)
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error { return pub.Publish(subj, data) }
 
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a",
@@ -5155,19 +5161,79 @@ func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing
+	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing → heal
+	mintedKey := roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x07}, 32)}
+	keyStore.EXPECT().SetIfAbsent(gomock.Any(), "r1", gomock.Any()).
+		Return(&roomkeystore.VersionedKeyPair{Version: 0, KeyPair: mintedKey}, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	mockStore.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 2,
+	}, nil)
 
-	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore, roomkeysender.NewSender(&mockPublisher{}), subject.RouteGlobal)
+	h := NewHandler(mockStore, "site-a", publish, keyStore, roomkeysender.NewSender(pub), subject.RouteGlobal)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice", Users: []string{"charlie"}, Timestamp: 1,
 	}
 	data, _ := json.Marshal(req)
 	ctx := natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-0193abcd0012")
-	err := h.processAddMembers(ctx, data)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, errPermanent))
-	assert.True(t, errors.Is(err, errRoomKeyAbsent), "absent key must satisfy errRoomKeyAbsent sentinel")
+	require.NoError(t, h.processAddMembers(ctx, data))
+
+	var evt model.SubscriptionUpdateEvent
+	found := false
+	for _, p := range subscriptionUpdates(pub.published()) {
+		if p.subj == subject.SubscriptionUpdate("charlie") {
+			require.NoError(t, json.Unmarshal(p.data, &evt))
+			found = true
+		}
+	}
+	require.True(t, found, "subscription.update must publish for the healed member")
+	require.NotNil(t, evt.Subscription.Room.PrivateKey, "minted key must ride the added event")
+	assert.Equal(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x07}, 32)), *evt.Subscription.Room.PrivateKey)
+	require.NotNil(t, evt.Subscription.Room.KeyVersion)
+	assert.Equal(t, 0, *evt.Subscription.Room.KeyVersion)
+}
+
+// TestKeyPairOrHeal covers the heal helper directly: a present key is returned
+// untouched (no re-mint — idempotent on redelivery), an absent key is minted via
+// SetIfAbsent, and an infra Get error is a transient failure (no mint).
+func TestKeyPairOrHeal(t *testing.T) {
+	noop := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
+
+	t.Run("present key returned without minting", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		present := &roomkeystore.VersionedKeyPair{Version: 3, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x01}, 32)}}
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(present, nil)
+		// No SetIfAbsent expectation — a mint here would fail the test.
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		got, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.NoError(t, err)
+		assert.Same(t, present, got)
+	})
+
+	t.Run("absent key minted via SetIfAbsent", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		minted := &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x02}, 32)}}
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil)
+		ks.EXPECT().SetIfAbsent(gomock.Any(), "r1", gomock.Any()).Return(minted, nil)
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		got, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.NoError(t, err)
+		assert.Same(t, minted, got)
+	})
+
+	t.Run("infra Get error is transient, no mint", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(nil, errors.New("mongo down"))
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		_, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, errPermanent), "infra error must be transient (NAK), not a permanent drop")
+	})
 }
 
 // TestProcessAddMembers_TransientErrorWhenValkeyFails verifies that a non-nil
