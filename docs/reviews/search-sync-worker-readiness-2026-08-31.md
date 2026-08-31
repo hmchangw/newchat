@@ -151,3 +151,28 @@ Subject builders, INBOX lane handling and stream ownership are exemplary — but
 - `medium` — Thread `msgCtx` from `AddWithContext` into `BuildAction` and the resolvers so the ES and Mongo lookups inherit the span and shutdown deadline.
 - `low` — Move bootstrap into `bootstrap.go`, with the INBOX/HR exclusion expressed there.
 
+---
+
+## 7. Performance — 4 / 5
+
+Genuinely well-engineered hot path — pipelined ES bulk with slot-based backpressure, dual size/interval flush triggers, precomputed metric attribute sets, clean `jsretry` discipline — but **the shipped default tuning is self-defeating** and the ES calls carry no deadline.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **The default config trips its own coupling check.** `BULK_BATCH_SIZE=500` × `PIPELINE_DEPTH=2` needs `MaxAckPending >= 1500`, but the shared default is **1000**. `checkBatchAckCoupling` computes exactly this and **only `slog.Warn`s**. With env unset in production the size-based flush **can never fire** for 1:1 collections — every batch waits the full 5 s `BULK_FLUSH_INTERVAL` and ships undersized. Only the dev compose overrides it, **so dev hides the defect** | `main.go:82`, `:93`, `:163-170`, `:575-587`; `pkg/stream/consumer.go:22`; `deploy/docker-compose.yml:40` |
+| high | **No deadline on any ES request on the flush path.** `ctx` is `context.Background()`, passed through `runConsumer` → `pipe.run` → `h.store.Bulk`, and `searchengine.New` sets no client/transport timeout — only a 5 s startup ping. A hung ES connection **holds a pipeline slot forever**; at depth 2 the collection stalls permanently, `AckWait=30s` expires so JetStream redelivers behind the still-running request, and shutdown's `pipe.wait()` blocks until the 25 s drain is forcibly abandoned | `main.go:172`, `:371`, `:521`; `handler.go:239`; `pkg/searchengine/factory.go:31-68` |
+| medium | **Thread-parent resolution is a synchronous, uncached, cross-index N+1 inside the fetch loop.** It drops the consumer span *and* is immune to shutdown; the lookup is a `term` search over **every monthly index**. It fires only when the gatekeeper omitted the field — but during a replay/backfill that is **every thread reply, serialized**: 100 messages × 2 s is well past `AckWait`. There is **no positive or negative memoization**, so N replies to one parent issue N identical searches, and a genuinely unindexed parent re-pays the full wildcard search forever | `messages.go:220`; `thread_parent_resolver.go:12`, `:46` |
+| medium | **The HTTP connection pool is Go's default, not sized for the pipeline** — elastic-transport falls back to `http.DefaultTransport.Clone()`, i.e. `MaxIdleConnsPerHost=2`, while this pod issues up to `PIPELINE_DEPTH × 5 collections` = 10 concurrent bulk requests plus parent-resolver searches against one host. **Most flushes re-dial (TCP + TLS) instead of reusing a keep-alive** | `elastictransport.go:177` |
+| low | Per-document allocation that is account-invariant: `BuildRemoveRoomUpdateBody(roomID, ts)` takes no account yet is re-marshalled **once per account** inside the fan-out loop — a bulk removal of N members marshals N identical bodies | `pkg/searchindex/userroomdoc.go:127`; `user_room.go:247` |
+| low | Unbounded `$in` on the Teams path: `ResolveIdentities` puts the whole batch's sender set into one `$in` with no chunking. (Projections are correctly explicit on both queries) | `teams_user_store.go:125`, `:143` |
+| nitpick | `fmt.Sprintf("%s_%s", …)` per doc in the spotlight fan-out; `rawBatch.Messages` spawns a goroutine per `Fetch` re-channeling over an unbuffered chan (it terminates because the loop always drains, but it is an extra hop with no ctx-cancel escape) | `spotlight.go:83`; `consumer_source.go:50` |
+
+**Verified clean:** no bare `Nak()`/`NakWithDelay(0)` anywhere; no `time.Sleep` synchronization; `cc.BackOff` derived via `stream.DurableConsumerDefaults`; metric attribute sets fully precomputed per collection; no `$lookup`; `encoding/json` is correct here — this service is not on the sonic list.
+
+### Recommendations
+- `high` — Raise the `CONSUMER_MAX_ACK_PENDING` default (or lower `BULK_BATCH_SIZE` to ~300) so the **shipped defaults satisfy `(depth+1)×bulk`**, and make `checkBatchAckCoupling` a fatal `os.Exit(1)` like the other config validations rather than a warning.
+- `high` — Derive a per-flush context with a bulk timeout (e.g. `BULK_TIMEOUT`, default 30 s aligned to `AckWait`) in `flushPipeline.run`, and pass a cancellable root ctx from `main` that `shutdown.Wait` cancels.
+- `medium` — Add a small TTL/LRU cache (positive **and** negative) in front of `esParentResolver`, and narrow the lookup from `prefix-*` to the reply's own month ± one index.
+- `medium` — Set `MaxIdleConnsPerHost`/`MaxConnsPerHost` on the ES transport in `pkg/searchengine.New`, sized to `PIPELINE_DEPTH × collections`.
+- `low` — Hoist the remove-room body out of the per-account loop; chunk the Teams `$in` at ~1000 ids.
+
