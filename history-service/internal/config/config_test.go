@@ -463,6 +463,40 @@ func TestValidate_RejectsInvalidKeyReadPreference(t *testing.T) {
 	assert.Contains(t, err.Error(), "MONGO_KEY_READ_PREFERENCE")
 }
 
+// The subscriptions collection backs access-control reads, so its default pins
+// to strict primary rather than the service-wide secondaryPreferred — a lagging
+// secondary re-caches a stale grant after an eviction, and primaryPreferred would
+// fall back to one during a primary outage instead of failing closed.
+func TestLoad_DefaultsSubscriptionReadPreferenceToPrimary(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	testutil.UnsetEnv(t, "MONGO_SUBSCRIPTION_READ_PREFERENCE")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "primary", cfg.Mongo.SubscriptionReadPreference)
+}
+
+func TestValidate_RejectsInvalidSubscriptionReadPreference(t *testing.T) {
+	cfg := baseValid()
+	cfg.Mongo.SubscriptionReadPreference = "quorum"
+	err := validate(&cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_SUBSCRIPTION_READ_PREFERENCE")
+}
+
+func TestLoad_SubscriptionReadPreferenceWireName(t *testing.T) {
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("CASSANDRA_HOSTS", "localhost")
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_SUBSCRIPTION_READ_PREFERENCE", "nearest") // a value no default would produce
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "nearest", cfg.Mongo.SubscriptionReadPreference)
+}
+
 // history-service's DEK handles must bind the same wire name as the other
 // key-touching services; its Mongo block carries an envPrefix, so the tag is
 // KEY_READ_PREFERENCE and the wire name is MONGO_KEY_READ_PREFERENCE.

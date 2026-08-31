@@ -20,7 +20,7 @@ func (r *fakeRecorder) Error(context.Context) { r.errs++ }
 func TestTTLCache_Metrics_HitMissError(t *testing.T) {
 	ctx := context.Background()
 	rec := &fakeRecorder{}
-	c, err := newTTLCache[string](10, time.Minute, rec)
+	c, err := newTTLCache[string](10, time.Minute, 0, rec)
 	require.NoError(t, err)
 
 	loadOK := func(context.Context) (string, bool, error) { return "v", true, nil }
