@@ -154,3 +154,31 @@ The rule is scoped to handlers on `chat.user.{account}.…` subjects and `auth-s
 - `medium` — Replace `idgen.GenerateID()` at `login.go:207` with `GenerateUUIDv7()`, or better, build that entry through `h.auditEntry` so there is exactly one audit-ID construction site.
 - `low` — Rename `OrgSyncUsersUpsert`'s parameter to `siteID` and correct the doc comment; add a fanout-lane test asserting the subject built for a remote peer is exactly `chat.inbox.{dest}.external.user_account_updated`.
 
+---
+
+## 7. Performance — 3 / 5
+
+Projection discipline, batching and goroutine budgets are genuinely strong — but the list endpoints rest on an unindexed double collection scan with unbounded `skip`, the permission batch writes are uncapped, and two revoke paths leave the session cache stale.
+
+### Verified clean
+Every find/aggregation carries an explicit projection (`userProjection`, `fanoutProjection`, `accountStateProjection`, `permissionGrantProjection`). **No `$lookup` anywhere.** `FindAccountStates` and `GetUserPermissionsForAccounts` replace what would be N lookups with one `$in`. `mongo.ErrNoDocuments` handled at every expected-miss site. No `time.Sleep` synchronization. The fanout errgroups are per-destination, deadline-bounded and always joined — no leak. The upload relay **streams** rather than buffering. No JetStream consumers, so the `jsretry`/`BackOff` rules do not apply.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `SearchUsers` runs an **unindexed `$or` of three case-insensitive `$regex`** over the whole (all-sites) `users` collection — and does it **twice per page** (`CountDocuments` + `Find`). `EnsureIndexes` deliberately creates no supporting index. With `q==""` the count is still a full scan, since `CountDocuments` never uses collection metadata | `store_mongo.go:133`, `:137`, `:38-41` |
+| high | Sessions deleted inside the two transactional store methods are **never busted from the Valkey session cache**. `SESSION_CACHE_TTL` defaults to 90 m and **slides on read**, so a revoked or deactivated token keeps authenticating from cache **indefinitely while in active use** — the exact failure `pkg/session/session.go:36-39` says the id-returning contract exists to prevent | `store_mongo.go:296`, `:322` vs `handler.go:599`, `:620` |
+| medium | `subjectAccounts` has **no upper bound** — only emptiness is checked. The whole list then flows into a `$in`, an `InsertMany`, an `UpdateMany` `$in` and an `AppendAuditMany` — **the last three inside one Mongo transaction**. Chunking exists only for the fanout (`fanoutChunkSize = 1000`), not for the DB write; a large batch risks the 16 MB BSON limit and the 60 s transaction lifetime. `resyncPermissions` has the same uncapped list | `permissions.go:155`, `:197`, `:471`; `store_mongo.go:437`, `:442`, `:575` |
+| medium | `parsePaging` accepts any `page >= 1` with **no ceiling**, and all three lists use offset paging. `?page=10000000&limit=100` makes the server walk ~10⁹ index entries per request, **on three separate endpoints** | `handler.go:281`; `store_mongo.go:141`, `:376`, `:518` |
+| medium | Unauthenticated `POST /v1/login` performs an **unconditional bcrypt (cost 10) on every request**, including both denial arms, with no shedding: `applyBaseMiddleware` installs no concurrency limiter even though `ginutil.MaxConcurrency` exists and is used by user-service. A trivial request flood saturates all CPU | `login.go:74`, `:85`; `main.go:44-50` |
+| low | `ListAudit`'s `actor` and `action` filters have no supporting index — only `siteId+timestamp` and `siteId+targetAccount+timestamp` are created. Those two filters degrade to a residual scan of an unboundedly growing collection, **paid twice** (count and find) | `store_mongo.go:359-365`, `:44-56` |
+| low | `listSessions` calls `ListForAccount` with no limit. Bounded in practice by `SESSIONS_MAX_PER_ACCOUNT=100`, but the cap is enforced **only on the login path**, so pre-cap or misconfigured data returns unbounded | `handler.go:576`; `pkg/session/session.go:181` |
+| nitpick | `EnsureIndexes` failure is logged and startup continues; a cold deploy against a fresh DB then serves every list from an unindexed collection with no readiness signal | `main.go:92-94` |
+
+### Recommendations
+- `high` — Add a `users` index for the search path (text or prefix-anchored), or replace the unanchored `$regex` with an anchored match; drop the per-page `CountDocuments` in favour of `EstimatedDocumentCount` when `q==""`, or return `hasMore` from a `limit+1` fetch instead of `total`.
+- `high` — Make the two revoke methods return the deleted session `_id`s (the pattern `pkg/session.deleteAndReportIDs` already implements) and call `sessioncache.BustMany` at all three sites.
+- `medium` — Cap `subjectAccounts`/`accounts` at an explicit constant (the `AppendAuditMany` comment already assumes ~200) and reject over it with a 400, so transaction size is bounded by contract.
+- `medium` — Clamp `page` in `parsePaging` (e.g. so `skip <= 10_000`), and prefer keyset pagination on `{recordedAt,_id}` / `{timestamp,_id}` for the audit and ledger browses — both already have matching sort indexes.
+- `medium` — Install `ginutil.MaxConcurrency` on the router (or at minimum on `/v1/login`) so bcrypt work is shed with 429 rather than queued.
+- `low` — Add `admin_audit` indexes on `{siteId, actorAccount, timestamp:-1}` and `{siteId, action, timestamp:-1}`; fail readiness (not just log) when `EnsureIndexes` fails.
+
