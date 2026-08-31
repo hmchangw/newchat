@@ -438,24 +438,16 @@ value already exists on this path** — do not add a new one.
 
 ## 5c. Which PR
 
-**Not #337.** That PR is 67 files, +4 435 / −912, 61 commits, 74 comments, and has
-been in review for a week with `mergeable_state: blocked`. Adding a new
-instrument family to it resets that review for everyone, and P2 is a different
-question from "cut the metrics down to what is read".
+**#337 merged on 2026-08-30 (`bf0ea62`), so this section's original advice — a
+new PR stacked on #337's branch — no longer applies. Branch from `main`.**
+What #337 brought with it, and what P2 therefore has to satisfy from the first
+commit rather than after a rebase:
 
-**A new PR, based on #337's branch.** Two reasons to stack rather than branch from
-`main`:
-
-- #337 **moves the metrics contract** from
-  `docs/load-testing/failure/nats-metrics-contract.md` to
-  `docs/specs/o11y/nats-metrics-contract.md`. A P2 branch off `main` would
-  document its four instruments in the old path and conflict on merge.
-- #337 adds the guards P2 has to satisfy anyway — the `pkg/obs` registry test,
-  the `.semgrep/metrics.yml` cardinality and attribute-construction rules, and the
-  nil-collapse recorder pattern. Stacking means they run against P2 from the first
-  commit instead of after the rebase.
-
-If #337 merges first, rebase onto `main` and nothing else changes.
+- The metrics contract now lives at `docs/specs/o11y/nats-metrics-contract.md`
+  (it moved out of `docs/load-testing/failure/`). Document P2's instruments there.
+- The guards are on `main`: the `pkg/obs` registry test, the
+  `.semgrep/metrics.yml` cardinality and attribute-construction rules, and the
+  nil-collapse recorder pattern.
 
 **Split it in two, by cost and by risk:**
 
