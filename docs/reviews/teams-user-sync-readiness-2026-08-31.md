@@ -45,3 +45,28 @@ Idiomatic, correctly-wrapped errors and disciplined secret-free structured loggi
 - `low` — re-run `make sast-vuln` from an egress-permitted environment before release.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook consumer-defined store, constructor DI and typed env config with correctly mounted shared knobs; the gaps are the missing index-bootstrap hook and a filename that no longer matches its contents.
+
+### Findings
+- `medium` — no `EnsureIndexes` method and no index bootstrap anywhere, against CLAUDE.md's "Create indexes in the store constructor or a dedicated `EnsureIndexes` method at startup" — `teams-user-sync/store_mongo.go:43-49`
+  The sibling service does exactly this (`teams-chat-sync/store_mongo.go:39`, `teams-chat-sync/main.go:114`). See D6 for the query this omission actually costs.
+- `low` — `handler.go` contains no handler; it holds `Syncer`, a batch pipeline. CLAUDE.md's per-service layout defines `handler.go` as "Request/message handling logic". The peer job names the same thing `teams-chat-sync/syncer.go:23` — `teams-user-sync/handler.go:16`
+- `low` — no `pkg/shutdown.Wait`; shutdown is `signal.NotifyContext` + deferred disconnects — `teams-user-sync/main.go:49-61`
+  CLAUDE.md says "every service's `main.go`". Defensible for a one-shot CronJob binary and consistent with the other one-shot jobs (`teams-hr-sync/main.go:71`, `teams-chat-sync/main.go:104`, `teams-room-creation/main.go:48`), but it is an undocumented deviation from binding project law — CLAUDE.md wins, so it should be written down.
+- `low` — no `pkg/obs.Init`, so no OpenTelemetry traces or Prometheus metrics; observability is a raw JSON slog handler — `teams-user-sync/main.go:21`
+  Consistent with the other one-shot jobs (`teams-hr-sync/main.go:135` documents the choice), but this service has none of that justifying comment.
+
+**Verified clean:** `Store` is defined in the consumer with exactly the three methods `syncPage` needs (`store.go:21-30`); `NewSyncer` accepts interfaces and returns a struct (`handler.go:24`); config is a typed `caarlos0/env` struct with `required,notEmpty` on both credentials and both URIs and `envDefault` on every operational knob (`config.go:11-47`), with zero `os.Getenv`; `mongoutil.PoolConfig` is mounted as a named field and never re-declared (`config.go:38`); the two Mongo lanes use `envPrefix` correctly (`config.go:32-33`). The service touches no NATS at all, so `BOOTSTRAP_STREAMS`, `pkg/stream`, consumer patterns and INBOX/OUTBOX ownership are genuinely out of scope, not skipped.
+
+### Recommendations
+- `medium` — add `func (s *mongoStore) EnsureIndexes(ctx) error` and call it from `run` before the sync, mirroring `teams-chat-sync/main.go:114`.
+- `low` — rename `handler.go` → `syncer.go` and `handler_test.go` → `syncer_test.go` to match the peer job.
+- `low` — add a one-line comment at `main.go:49` recording why a CronJob binary uses `signal.NotifyContext` instead of `shutdown.Wait`, as `teams-hr-sync/main.go:135` does for `obs.Init`; or amend CLAUDE.md to sanction the one-shot-job pattern.
+- `low` — add the same justifying comment for the absent `obs.Init`.
+
+---
