@@ -179,3 +179,23 @@ Genuinely strong hot-path engineering on `subscription.list` — a TTL'd sort-ke
 - `medium` — Add the four `// $lookup justification:` comments.
 - `low` — Mount `mongoutil.PoolConfig` with `envPrefix:"HTTP_"` and delete the hand-rolled fields; bound the `threadunread.go` goroutines with `s.fanout()`.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Cap `req.Accounts` in `BadgeCountBatch` and run miss-path recomputes through the bounded fan-out helper | Performance | `service/badge.go:41` | Unbounded serial work on the **notification fan-in path**; a cold cache silently degrades to absent badges when the handler timeout expires. The cap already exists on a sibling RPC. |
+| 2 | `high` | Mount `Pool mongoutil.PoolConfig` with `envPrefix:"HTTP_"` on `HTTPConfig`, deleting the three hand-rolled fields | Architecture / Perf | `config/config.go:47-55` | Not a style nit: the hand-rolled copy **drops `ServerSelectionTimeout`**, so the client-facing sidebar transport keeps the driver's 30 s default — the exact hang the shared type exists to prevent. The justifying comment is factually wrong. |
+| 3 | `high` | Add one generic `forEachSite[T]` in `service/fanout.go` and migrate all five copies | Maintainability | `service/threadunread.go:58` | Five hand-copies have **already drifted** — one lost its semaphore and spawns unbounded goroutines. Fixing the abstraction fixes the live bug and prevents the next one. |
+| 4 | `high` | Add handler tests for the six chatlist RPCs and both chatlist fanouts | Test coverage / Integration | `service/chatlist.go:27-131`, `:200` | Six **client-facing** RPCs and the newest federation lane have no end-to-end test at all; a subject or event-type regression ships green. |
+| 5 | `medium` | Route `SettingsUpdate`/`ChatlistUpdate` through `EncodeAccount` | Integration | `pkg/subject/subject.go:266`, `:273` | A `.bot` account's settings/chatlist events are published on a subject its own JWT scope **cannot match** — silent non-delivery for bot accounts. |
+| 6 | `medium` | Publish settings and chatlist through the local OUTBOX instead of direct-to-remote-INBOX | Integration / Architecture | `service/settings.go:143-160` | Settings drive each remote `notification-worker`'s push decision. A dropped publish leaves a peer pushing against stale mute preferences with no heal path. |
+| 7 | `critical` | Exclude `service/mocks/` from the coverage denominator, then close the real gaps | Test coverage | `service/service.go:19` | 13.3% of the shortfall is generated code no testing can ever move; excluding it makes the remaining 72.7% → 80% gap actionable rather than demoralizing. |
+| 8 | `medium` | Validate `SiteID ∈ AllSiteIDs` in `config.Load` and log the resolved peer list at startup | Architecture | `config/config.go:70` | An empty `ALL_SITE_IDS` turns **every** federation loop into a silent no-op — federation off with zero signal. |
+| 9 | `medium` | Bound the phase-one subscription `Find`; project `ListApps` and the three unprojected reads | Performance | `mongorepo/subscriptions.go:299` | Per-request memory and sort cost currently scale with an account's **total** subscriptions rather than page size. |
+| 10 | `medium` | Replace `service.New`'s 14 positional args with a `Deps` struct | Maintainability | `service/service.go:180` | The two call sites have already diverged silently on `WithPageBudget`, and same-typed neighbours (`pub, clientPub`) transpose without a compile error. |
+
+### Verdict
+
+**Ship-capable.** This is the strongest service in the fleet on code discipline — the secret-handling and error-wrapping review found nothing to fix, which is rare at 18.8k lines. The work here is about *durability and bounds*: item 6 is the one that loses user-visible state across sites, items 1–2 are capacity and latency cliffs on live paths, and items 3–4 are what keep the next change from introducing the fifth copy of a bug.
