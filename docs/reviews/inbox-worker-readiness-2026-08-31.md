@@ -74,3 +74,29 @@ INBOX ownership, bootstrap scoping and the two-lane consumer are exemplary and w
 - `medium` — Decide `remote_rooms`' fate: land the chat-list reader, or delete the activity lane, `roomsubcache.go`, the three store methods and the `ROOM_SUB_CACHE_*` config.
 - `medium` — Decouple the lanes: give the membership lane its own consumer, or make the dispatcher's send non-blocking-with-overflow so a membership stall cannot starve read receipts.
 
+---
+
+## 4. Test coverage — 1 / 5
+
+**44.1% (669 statements) — the lowest in the fleet**, far under the §4 60% line. `handler.go` is genuinely well tested (~90%, with real Permanent/badge/guard assertions), but **the whole `mongoInboxStore` and all of `main()` sit at 0% in the default profile, so the destination side of federation has no signal from `make test`.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| critical | 44.1% (669 stmts) — under 60% and far under the 80% floor | `main.go:86` |
+| high | **The entire store implementation (~50 methods) is 0% in the unit profile**; every guarded-write semantic — high-water `$lt` guards, `$max`, `MatchedCount==0` disambiguation — is verified only behind `//go:build integration`. **Pre-commit/CI unit runs and the coverage gate therefore protect none of the write semantics this service exists to enforce** | `main.go:194` |
+| high | **`main()` is 0% and structurally untestable**: the membership-FIFO vs `MaxWorkers` fan-out dispatcher, the `jsretry.Settle` wiring and the `jobguard` panic→Ack drop are all inline. **Nothing proves a `member_added` actually lands on the sequential lane** — the add/remove resurrection race that the 20-line comment at `main.go:914` defends against is asserted by comment only | `main.go:948` |
+| high | Three store methods have **zero coverage at any level** (absent from integration too): `UpdateSubscriptionSection` (including the `sectionID == nil` `$unset` + favorite-reset branch and its NAK decision), `UpdateUserChatlist`'s watermark, and `BulkRefreshJoinedAt`'s unordered `BulkWrite` | `main.go:473` |
+| medium | **`mock_store_test.go` (454 generated lines) has zero references repo-wide**; all 100 handler tests use a hand-rolled 100-field `stubInboxStore`. The mandated mockgen artifact is dead code `make generate` keeps regenerating | `handler_test.go:104` |
+| medium | Permanent-vs-transient classification is **untested for the two order-sensitive federated events** — the `errcode.Permanent` branches in `handleRoomRenamed` and `handleRoomVisibilityChanged`, and both store-error branches beside them. A mis-tag is either infinite redelivery or a **silent poison-drop of a federated rename** | `handler.go:632` |
+| low | Federation fallback/error branches uncovered: `HandleRoomActivity`'s subscription-check and upsert failures, `handleMemberRemoved`'s warn-only delete path, and the room-sub cache's fill/read error paths | `handler.go:206`, `:212`, `:418`; `roomsubcache.go:80`, `:105` |
+| low | 100 top-level `Test*` funcs but only 10 `t.Run` tables — e.g. seven `MemberRemoved_*` and six `SubscriptionRead_BadgeCache_*` near-clones sharing one input shape | `handler_test.go:1481` |
+| nitpick | Integration hygiene is correct and worth preserving: `TestMain` → `testutil.RunTests`, containers from `pkg/testutil` with no inline `GenericContainer`, no package-level mutable state | `main_test.go:11` |
+
+### Recommendations
+- `high` — Extract the dispatch loop from `main()` into a testable `dispatch(iter, sem, membershipCh)` (or a `laneRouter` type) and unit-test with a fake `jetstream.Msg` that **membership subjects serialize FIFO while others fan out**, and that a panicking handler Acks rather than crash-loops.
+- `high` — Add integration coverage for `UpdateSubscriptionSection` (both `sectionID` nil and non-nil, guard-rejected, missing-sub NAK), `UpdateUserChatlist` (out-of-order skipped / newer applies), and `BulkRefreshJoinedAt` — mirroring the existing out-of-order test pattern.
+- `medium` — Add a coverage target that runs `-tags=integration` so the store's 0% is not the reported number; **the current 44.1% understates real verification and hides which paths are genuinely unverified.**
+- `medium` — Either delete `mock_store_test.go` and its `//go:generate`, or migrate `stubInboxStore`'s call sites to `NewMockInboxStore`. Keeping both is a standing drift risk.
+- `medium` — Extend the `handleSubscriptionMention` `wantPermanent` table pattern to `room_renamed` and `room_visibility_changed`.
+- `low` — Collapse the `MemberRemoved_*` and `SubscriptionRead_BadgeCache_*` clusters into two tables; cover `HandleRoomActivity`'s two error branches, since it is the only fire-and-forget entry point where a swallowed failure is invisible in production.
+
