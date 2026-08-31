@@ -43,3 +43,23 @@ Verified clean: every wrap names what *this* function was doing (`store_mongo.go
 - `low` — Re-run `make sast-vuln` from an environment with `vuln.go.dev` reachable before release sign-off.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Clean consumer-defined interfaces, constructor DI, correct shared-knob mounting; deviations from the documented file layout are job-shaped and match fleet precedent.
+
+### Findings
+- `low` — CLAUDE.md §6 says "Use `pkg/shutdown.Wait` in every service's `main.go`"; this service uses `signal.NotifyContext` instead (`main.go:88`). CLAUDE.md wins on the letter, but `shutdown.Wait` blocks *waiting* for a signal and is wrong for a run-to-completion job — and every sibling CronJob does the same (`teams-chat-sync/main.go:104`, `teams-hr-sync/main.go:71`, `teams-room-creation/main.go:48`, `teams-room-verify/main.go:71`, `teams-user-sync/main.go:49`). The doc, not the code, should carve out CronJobs.
+- `low` — No `handler.go`/`routes.go`/`bootstrap.go`; the orchestration lives in `syncer.go`. Correct for a job with no NATS or HTTP surface (no `nats.go` import at all, so no `BOOTSTRAP_STREAMS`, `pkg/subject` or `pkg/stream` obligation arises), and consistent with `teams-chat-sync`.
+- `low` — This service's only scan depends on an index it does not own (`needMemberSync_pending`, created by `teams-chat-sync/store_mongo.go:44-51`). Ownership is deliberate and documented there, but it is a silent deploy-order dependency: run this job against a fresh cluster before `teams-chat-sync` has started and the scan is a COLLSCAN.
+
+Verified: interfaces defined in the consumer with only the needed methods (`store.go:30,52,60`), accept-interfaces/return-structs (`newSyncer` at `syncer.go:31` takes three interfaces, returns `*syncer`); `mongoutil.PoolConfig` mounted as a named field (`main.go:33`) rather than re-declared; all config via `caarlos0/env` with `required,notEmpty` on `MONGO_URI` and `required` on all three Graph credentials, `envDefault` on the rest (`main.go:28-49`); fail-fast via `validateConfig` (`main.go:64-72`); `run()` returns errors so deferred `Disconnect`s run (`main.go:95,101`), with cleanup contexts deliberately detached from the cancelled `ctx`.
+
+### Recommendations
+- `low` — Add a CronJob carve-out to CLAUDE.md §6 Graceful Shutdown naming `signal.NotifyContext` as the sanctioned pattern for run-to-completion jobs.
+- `low` — Note the `teams-chat-sync`-owned index dependency in this service's package comment so the deploy order is discoverable from here.
+- `low` — Consider a `handler.go`→`syncer.go` mapping note in CLAUDE.md §1 so the job layout is explicitly sanctioned rather than tolerated.
+
+---
