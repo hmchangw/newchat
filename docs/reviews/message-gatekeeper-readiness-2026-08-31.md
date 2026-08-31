@@ -98,3 +98,28 @@ Boundaries, DI, bootstrap gating and the high-throughput consumer pattern are al
 - `medium` — Extend `sonic_wire_test.go` with a cross-codec test (sonic-marshal a `MessageEvent` with HTML metacharacters → `encoding/json.Unmarshal` → assert equality with the stdlib round trip), covering both encode sites.
 - `low` — Give `fakeJSMsg` an injectable `ackErr`; add a `debugFlowReceived` test under a `logctx`-enabled context.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Dependencies are cleanly injected and the WHY-comments are genuinely excellent, but the core `processMessage` has outgrown a single function, `NewHandler`'s 10-positional signature is pinned by 28 call sites, and several doc comments have drifted from the code they describe.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`processMessage` is 205 lines with ~30 decision points**, mixing eight input-validation rules, subscription auth, large-room policy, quote resolution, thread-parent resolution, display-name enrichment, event construction and the canonical publish in one body. **This is also why the 65.5% coverage clusters here** | `handler.go:316-520` |
+| high | **`NewHandler` takes 10 positional parameters, three of them adjacent bare `int`s** (`largeRoomThreshold, maxAttachments, maxAttachmentBytes`). **28 call sites pass `500, 1, 8192` as literals** — any two of the three can be transposed with **no compile error**, and adding an 11th knob is a 28-site edit. The `gatekeeperHandlerOption` machinery already exists but carries only two fields | `handler.go:107`; `handler_test.go:1111`…`:2905` |
+| medium | **`ParentMessageFetcher`'s doc comment is stale**: it states implementations' errors are all soft-failed and "the handler … ships the message without the quote". The handler has since **tiered** errors — terminal ones *reject* the send. A reader implementing a second fetcher against this comment **would get the failure semantics backwards** | `store.go:79-85` vs `handler.go:612-621`, `:563-578` |
+| medium | Three validation comments and **three client-facing error strings** claim message IDs "must be a 20-char base62 string", but `idgen.IsValidMessageID` accepts **17 or 20**, as `CLAUDE.md` requires. **The error text reaches clients**, so a legacy 17-char ID that validates fine is described by a rule that would have rejected it | `handler.go:335-337`, `:341`, `:348`; `pkg/idgen/idgen.go:96` |
+| medium | `HandleJetStreamMsg` repeats the same Ack-and-log block **four times** and the reject triad **three times** — every new rejection reason is four copy-pasted lines that must stay in sync | `handler.go:165-167`, `:183-185`, `:212-214`, `:240-242` |
+| medium | `handler_test.go` is 2,913 lines, of which `TestHandler_ProcessMessage` alone spans ~1,050; 25 sibling tests each rebuild a controller + handler by hand, and only `threadReplyHarness` factors setup | `handler_test.go:51-1101`, `:2434` |
+| low | **File organisation has drifted from its own names**: `nats_metrics.go` holds the *domain* outcome metrics rather than NATS metrics; `metrics_test.go` tests `cachedSubStore`; and `config_test.go`/`consumer_config_test.go`/`debug_log_test.go` test code that lives in `main.go` with **no matching source file**. "Where does this test go?" has no answer a newcomer can derive | `nats_metrics.go:42`; `metrics_test.go:23`; `config_test.go:28` |
+| nitpick | No complexity linter is enabled, so the first finding cannot regress-fail in CI; two operational timeouts are hardcoded consts while every other knob is env-driven | `.golangci.yml:5-12`; `subcache.go:18`; `fetcher_history.go:150` |
+
+### Recommendations
+- `high` — Split `processMessage` into three: a **pure, dependency-free** `validateSendRequest(req, limits) *errcode.Error` (lines 317–393, directly table-testable), an `authorize(...)` covering subscription + large-room gate, and an `enrich`/`publish` tail. Fold the three near-identical ID checks into one loop over `{field, value}` pairs.
+- `high` — Replace `NewHandler`'s positional tail with a `handlerDeps`/`handlerLimits` struct (or options). Give tests one `newTestHandler(t, opts…)` builder and **delete the 28 literal `500, 1, 8192` sites**.
+- `medium` — Fix the stale `ParentMessageFetcher` contract comment to state the terminal-vs-transient tiering, and correct the "20-char" wording in the three ID messages to "17- or 20-char base62".
+- `medium` — Extract `ackOrLog(ctx, msg, requestID)` and `rejectAndAck(...)`; `HandleJetStreamMsg` then reads as three one-line branches.
+- `medium` — Break `TestHandler_ProcessMessage` into per-concern tables matching the `processMessage` split, routing all setup through the existing harness shape.
+- `low` — Rename `nats_metrics.go` → `metrics.go`, move the cached-store tests into `subcache_test.go`, and lift `config` + `buildConsumerConfig` out of `main.go` into `config.go` so the orphan test files have real counterparts. Enable `gocyclo`/`cyclop` with a threshold near 15 and a short baseline exclusion, to lock the refactor in.
+
