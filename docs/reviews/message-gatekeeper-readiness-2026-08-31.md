@@ -69,3 +69,32 @@ Boundaries, DI, bootstrap gating and the high-throughput consumer pattern are al
 - `medium` — Extract quote/thread-parent resolution behind a `parentResolver` type so the gate is validate-and-publish and the enrichment coupling is isolated and separately testable.
 - `low` — Add `subject.AccountFromUserSubject` and delete the local helper; fix the `doc.go` reference.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+**65.5% (444 statements)**, below the §4 80% floor. The gap is **one file**: `main.go` is 126/444 statements at **2.4%**, while every other file is 87–100% (`handler.go` 92.6%, `subcache.go` 96.9%, `bootstrap.go` 100%). **Excluding `main.go` the package is ~91%.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 65.5%, under the §4 80% floor | `handler.go:1` |
+| high | The gap is `main.go` at 2.4%. The one piece of it with real logic and a real failure mode — **the `shutdown.Wait` worker-drain closure that converts a `wg.Wait()` overrun into `worker drain timed out`** — is untested | `main.go:247-256` |
+| medium | **The NAK test double cannot distinguish a compliant backoff from a forbidden bare Nak**: `fakeJSMsg.Nak()` and `NakWithDelay(d)` both just set `naked = true` and discard `d`. The retry-outcome test asserting `msg.naked` **would stay green if `jsretry.Nak` were replaced with `msg.Nak()`** — precisely the regression `CLAUDE.md` says burns `MaxDeliver` in milliseconds | `handler_test.go:2170-2171` |
+| medium | `gatekeeperReason` is 33.3% covered: only `invalid_subject` is asserted anywhere. **The `not_subscribed`, `room_restricted` and `invalid_payload` mappings — the labels operators alert on for the two validation rejections this service exists to make — are never exercised**, so an `errcode` reason rename silently collapses them to `unknown` | `handler.go:245`; `nats_metrics_test.go:77` |
+| medium | `metacache.go` is 0% yet is production wiring. **Nothing tests that `cachedMetaStore` actually puts the L1 in front of `GetRoomMeta`** — the struct embeds `w.S` and overrides with `c.cache`, so an embed-only mis-wiring would bypass the cache and pass compilation. Its sibling `newCachedSubStore` has 11 tests | `metacache.go:18`, `:27`; `main.go:154` |
+| medium | **The sonic wire-compat test is decode-only.** Nothing pins the two *encode* sites: the canonical `MessageEvent` — **consumed off MESSAGES-CANONICAL by `search-sync-worker`, which is not on the sonic list and decodes with `encoding/json`** — and the client reply. `broadcast-worker` has the `SemanticEquivalence` + `CrossCodecRoundTrip` pair this file is missing | `sonic_wire_test.go:18`; `handler.go:505`, `:519` |
+| low | `store_mongo.go` is 66.7%: the `fmt.Errorf` wrap paths are only reachable under the `integration` tag, so the unit run **never proves `errNotSubscribed` survives the wrap for `errors.Is`** | `store_mongo.go:41`, `:61` |
+| low | `debugFlowReceived` is 33.3% — only the disabled fast path is covered; the `stream_wait_ms` derivation and the `Metadata()` error fallback are untested in both suites | `handler.go:263` |
+| low | All four `failed to ack message` branches are unreachable in tests because `fakeJSMsg.Ack()` always returns nil | `handler_test.go:2168` |
+| nitpick | Three tests mutate the global `slog.SetDefault`; restored via cleanup and safe only because no test calls `t.Parallel()` | `debug_log_test.go:73`; `handler_test.go:2605`, `:2752` |
+
+**Compliant:** mocks mockgen-generated; no real DB/NATS in unit tests; publish and reply funcs injected as fields; integration files carry `//go:build integration` with `TestMain → testutil.RunTests`, use `testutil.MongoDB`/`SharedValkeyCluster` with `t.Cleanup(FlushValkey)`, and no inline `GenericContainer`.
+
+### Recommendations
+- `high` — Extract the testable body of `main.go` into `run(ctx, cfg) error` (or per-concern `wireStore`/`buildIter` helpers) and unit-test the drain-timeout closure; **that alone moves the package over 80% without a single new container.**
+- `medium` — Make `fakeJSMsg` record the delay (`nakDelay time.Duration`, plus a distinct `bareNak bool`), then assert `nakDelay > 0` in the two retry subtests so a regression to a bare Nak fails the build.
+- `medium` — Add a table-driven `TestGatekeeperReason` over all four inputs asserting the exact label constants.
+- `medium` — Add `TestNewCachedMetaStore_*`: a hit/miss pair proving the inner store is called once for two `GetRoomMeta` calls, plus the invalid size/ttl error — mirroring `subcache_test.go`.
+- `medium` — Extend `sonic_wire_test.go` with a cross-codec test (sonic-marshal a `MessageEvent` with HTML metacharacters → `encoding/json.Unmarshal` → assert equality with the stdlib round trip), covering both encode sites.
+- `low` — Give `fakeJSMsg` an injectable `ackErr`; add a `debugFlowReceived` test under a `logctx`-enabled context.
+
