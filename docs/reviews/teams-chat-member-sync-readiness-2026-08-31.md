@@ -110,3 +110,25 @@ No dead code, no duplicated logic, no leaky abstraction into the Graph SDK (`mem
 - `nitpick` — Change `userRefCache.resolve` to return `map[string]teamsUserRef` plus an explicit unresolved-id slice, so callers cannot silently treat a miss as an empty identity.
 
 ---
+
+---
+
+## 6. Integration — 2 / 5
+
+No NATS surface to get wrong, but the cross-service `teams_chat.members` contract has two unguarded failure modes whose blast radius lands in `room-worker` as silent subscription deletion.
+
+### Findings
+- `high` — An **empty Graph roster is written verbatim and advances the chat**. `syncChat` calls `SetMembersSynced` unconditionally (`syncer.go:184`), so `ListChatMembers` returning zero members (a 200 with an empty `value`, e.g. after the app loses access to a chat) stores `members: []` and sets `needCreateRoom: true` (`store_mongo.go:66-71`). `room-worker` then treats that list as authoritative and **deletes every subscription not in it** (`room-worker/teamsroomcreate.go:153-158,176-178`, `DeleteSubscriptionsByAccounts`). One degraded Graph response silently empties a room.
+- `high` — A member absent from `teams_user` is persisted with an **empty `Account`** (`store.go:44-47`, `syncer.go:100-106`) and the chat is marked `needMemberSync: false`, so it is never retried. Downstream, `room-worker/teamsroomcreate.go:106-109` skips such a member with a WARN and continues — the person is permanently omitted from the room. This service emits **no log and no counter** for unresolved members; the only summary counters are chats, not members (`syncer.go:160-163`).
+- `medium` — `ListChatsToSync` reads `teams_chat` and `teams_user` through a **secondary-preferred** client (`main.go:91`, `store_mongo.go:26-28`), while `teams-chat-sync` deliberately keeps all its teams-collection access on the primary precisely because these collections are freshly populated (`teams-chat-sync/store_mongo.go:16-21`). Replication lag therefore turns a just-created `teams_user` into the permanent empty-account outcome above, and a stale `updatedAt` into a spurious `errSuperseded`.
+- `low` — The optimistic-concurrency contract with `teams-chat-sync` is otherwise sound: `updatedAt` is written on every upsert (`pkg/model/teams.go:89`) and the conditional filter at `store_mongo.go:53` correctly returns `errSuperseded` on `MatchedCount == 0`, which `run` classifies as benign (`syncer.go:144-147`).
+
+Not applicable and correctly absent: `pkg/subject` builders, `pkg/stream` configs, OUTBOX/INBOX lanes and `outbox.Publish` partition membership, the `Timestamp int64` event-struct rule, `pkg/msgbucket`, `ROOM_KEY_RETIRED_TTL`, `pkg/idgen` — this service publishes no NATS event and registers no handler (no `nats.go` import). It registers nothing on `chat.user.…` and no `auth-service` HTTP route, so its absence from `docs/client-api.md` and the derived views is correct, not drift. Downstream, `teams-room-creation/runner.go:143` does stamp `Timestamp: now.UTC().UnixMilli()` at the publish site.
+
+### Recommendations
+- `high` — Refuse to advance a chat on an empty roster: if `len(raw) == 0`, log WARN, count it, and return without calling `SetMembersSynced` so `needMemberSync` stays true. A room is never legitimately zero-member.
+- `high` — Count and log unresolved members per chat (`membersUnresolved` in the run summary at `syncer.go:160`), and decide explicitly whether an unresolved member should block the advance rather than silently persisting an empty `Account`.
+- `medium` — Move the `teams_user` resolution lane to the primary client (keep the `teams_chat` scan on the secondary), matching `teams-chat-sync`'s stated reason for primary-only teams-collection reads.
+- `medium` — Consider a sanity floor (e.g. refuse a roster that drops below some fraction of the currently stored member count) given `DeleteSubscriptionsByAccounts` is unconditional downstream.
+
+---
