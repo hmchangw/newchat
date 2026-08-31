@@ -106,3 +106,31 @@ Coverage is **62.8% (1701 statements)**, below the §4 80% floor, so the dimensi
 - `medium` — Cover `requireKeyPair(nil)` and both `roomLocalityForMember` branches.
 - `low` — Add a `testutil.NATS(t)` test driving one `member_added` through `outbox.Publish`, asserting the subject and dedup header; collapse the near-duplicate test functions into tables.
 
+---
+
+## 5. Maintainability — 2 / 5
+
+Exceptional WHY-comment discipline and a few well-extracted helpers, but a 2,625-line `handler.go` containing a 476-line function, a 7,920-line test file, a 31-method store interface and five copy-pasted federation blocks make any new membership feature a high-friction, high-risk edit. **This is the lowest maintainability score in the fleet, and it is the dimension most likely to cause the next incident.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `processAddMembers` is **476 lines** performing ~10 distinct phases (cross-site marking, candidate splitting, user lookup, key self-heal, two bulk writes, org backfill, count reconcile, room re-read, four publish fan-outs). Nothing can be tested or changed in isolation; every new add-member rule lands here | `handler.go:834` |
+| high | `handler.go` is 2,625 lines / 53 functions spanning six unrelated flows: add-members, remove-individual, remove-org, create-room, rename, and the synchronous `serverCreateDM` RPC plus key fan-out | `handler.go:1` |
+| high | `handler_test.go` is **7,920 lines** with 195 top-level tests and four near-duplicate fixture constructors | `handler_test.go:2351`, `:2854`, `:3990`, `:6418` |
+| medium | A `publishCanonical` helper already exists, yet three sites hand-roll the identical `MessageEvent` + marshal + `CanonicalDedupID` + publish block | `handler.go:1970` vs `:526`, `:725`, `:1253` |
+| medium | The cross-site relay is copy-pasted **five times** — the same `payloadSeed` → `InboxDedupID` → `federate` shape — wrapped in three near-identical destination loops. A change to dedup-seed composition must be made in five places or the sites silently diverge | `handler.go:542`, `:755`, `:1297`, `:1877`, `:2514`; loops at `:746`, `:1282`, `:1883` |
+| medium | **`deploy/teams/` is a diverged fork, not a variant**: `deploy/teams/Dockerfile` is byte-identical to `deploy/Dockerfile`, and its compose **drops** `ROOM_SUBJECT_MODE`, `ROOM_KEY_RETIRED_TTL`, `MONGO_KEY_READ_PREFERENCE` and the whole `ATREST_*`/`VAULT_*` block while hardcoding values the default parameterises. `CLAUDE.md` requires `ROOM_KEY_RETIRED_TTL` identical across three services — the fork is exactly how that drifts | `deploy/teams/docker-compose.yml:10` |
+| medium | JetStream dispatch is an **order-dependent** `strings.HasSuffix` chain: `.teams.create` must be matched before `.create` or teams messages are misrouted, a constraint enforced only by a comment | `handler.go:254-273` |
+| medium | The two binary modes carry **different, undocumented ack contracts**: teams mode logs and swallows every per-chat error and always returns `nil`, so a teams batch can never NAK, while default mode routes everything through `jsretry.SettleQuiet` | `teamsroomcreate.go:34-38` vs `handler.go:277` |
+| low | Four dependencies bypass the constructor via post-construction field assignment; `main()` is 306 lines of unfactored wiring | `main.go:100`, `:264-273` |
+| nitpick | Orphaned step numbering (`// 6.`, `// 8.`, `// 10.` with no 1–5/7/9) and ticket/branch-relative comments that no longer resolve ("Task 20.15", "Task 35/36/37", "this PR's dept-aware match", "feat/migrated-user-fanout"); a transitional pre-cutover subject match with no removal trigger or owner | `handler.go:200`, `:259-261`, `:1118`, `:1827`; `store.go:48`; `main.go:265` |
+
+### Recommendations
+- `high` — Split `handler.go` by flow into `handler_addmembers.go`, `handler_removemember.go`, `handler_createroom.go`, `handler_rename.go`, `handler_syncdm.go`, `handler_roomkey.go`, keeping the struct, constructor and dispatch in `handler.go`. Split `handler_test.go` to match. **Pure file move — highest value, lowest risk, do it first.**
+- `high` — Decompose `processAddMembers` into named stages returning explicit structs: `classifyCrossSite`, `resolveAddWrites`, `commitAddWrites`, `emitAddEvents`. Each becomes independently table-testable.
+- `medium` — Extract one `emitMembershipChange(ctx, room, evt, accountsBySite)` covering the room event + internal publish + per-destination federate loop, plus a `federationSeed(...)` function; replace the five copies.
+- `medium` — Route the four hand-rolled `MessageEvent` publishes through `publishCanonical`.
+- `medium` — Delete `deploy/teams/Dockerfile` (point the teams pipeline at the shared one) and rebuild its compose from the default with only `MODE`/`OTEL_SERVICE_NAME` overridden, restoring the dropped vars.
+- `medium` — Replace the suffix-chain dispatch with an explicit map keyed on `pkg/subject` constants, removing the ordering hazard.
+- `low` — Move the four poked dependencies into `NewHandler` as an options struct; sweep the stale ticket/PR-relative comments.
+
