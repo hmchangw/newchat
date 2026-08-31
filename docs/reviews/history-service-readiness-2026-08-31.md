@@ -206,3 +206,32 @@ All 17 registrations go through `pkg/subject` builders with zero inline `fmt.Spr
 - `low` — Add `cmd/bootstrap.go` with the standard no-op helper (schema only: `Name + Subjects` from `pkg/stream`), a `Bootstrap` field on `config.Config`, and `BOOTSTRAP_STREAMS` in the local compose.
 - `nitpick` — Add a short comment above the `reactions.go` mirror branch stating the `TShow` rule once fixed, so the next writer of this row does not re-derive it from `pin.go`.
 
+---
+
+## 7. Performance — 4 / 5
+
+The read hot path is unusually well-engineered: every Mongo find carries an explicit projection, the two `$lookup`s carry justification comments, per-request reads are parallelised, user lookups are batched, and every goroutine has a termination path. The deductions are about *composition* — per-request bounds that multiply — and one over-fetching Cassandra read.
+
+### Evidence
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | **Per-request concurrency bounds compose multiplicatively** and nothing caps outstanding Cassandra work service-wide: `MAX_CONCURRENCY` defaults to 256 in-flight handlers, each `RoomsGet` spawns up to 16 concurrent room walks, and each walk fans out to 8 concurrent bucket queries — ~32k concurrent queries against `CASSANDRA_NUM_CONNS=8` per host. Each layer is individually bounded and documented; the product is not, and a cold `rooms.get` burst is exactly the shape that reaches it | `pkg/natsrouter/guard.go:21`; `internal/service/rooms.go:22`; `internal/cassrepo/repository.go:17`; `internal/config/config.go:33` |
+| medium | `GetAllPinnedMessages` reads all 24 pinned columns — bodies, `attachments`, `enc_payload`, `quoted_parent_message` — while its only caller reads `MessageID`/`PinnedAt`. Its own doc comment says so | `internal/cassrepo/pin.go:41`, `:130`; `internal/service/pin.go:57-67` |
+| low | `defaultWalkFanout = 8` is a compile-time constant, not an env knob, even though it is the primary lever on the clock-ceilinged walk: an idle room can cross up to `MESSAGE_READ_MAX_BUCKETS=122` buckets, i.e. ~16 sequential waves of Cassandra RTT | `internal/cassrepo/repository.go:17`; `internal/config/config.go:70` |
+| low | Every paginated reply is JSON-encoded **twice**: `pagefit.rowSizes` encodes each row into a length counter, then the router marshals the same page for the wire. The measure pass runs unconditionally — `Fit`'s "fits comfortably" early return happens *after* `rowSizes`, so the common under-budget 100-row page pays full double encoding | `pkg/pagefit/pagefit.go:67-72`, `:144-158`; `internal/service/messages.go:95` |
+| low | One OpenTelemetry span **per decrypted row**: `atrest.Decrypt` starts a span, invoked per message inside the scan loop and per room in `openStoredPreview`. A 100-message page emits 100 spans of span-processor and attribute allocation | `pkg/atrest/cipher.go:81-83`; `internal/cassrepo/messages_by_room.go:68`; `internal/mongorepo/room.go:112-137` |
+| low | Fronts the shared user store with an L1 cache only and never mounts `userstore.TTLConfig` the way its peers do, re-declaring the L1 knobs inline — the sixth service to copy the same env tag and default | `internal/config/config.go:154-155`; `pkg/userstore/ttlconfig.go:13` |
+| nitpick | `resolveRemovedMemberName` copies the whole `models.Message` into and back out of a one-element slice on every single-message read | `internal/service/sysmsgname.go:106-109` |
+
+No `time.Sleep` synchronisation, no bare `Nak()`/`NakWithDelay(0)` (the service runs no JetStream consumers), no `mongo.ErrNoDocuments` mishandling, and no N+1 — user names go through `FindUsersByAccounts`, and the per-row DEK fetch is LRU-cached and singleflighted.
+
+### Recommendations
+
+- `medium` — Add a service-wide semaphore (or a `CASSANDRA_MAX_INFLIGHT` knob) shared by the bucket walker and `fetchByIDs`, sized against `NUM_CONNS × hosts`, so `MAX_CONCURRENCY × maxRoomsGetConcurrency × walkFanout` cannot be the effective query concurrency.
+- `medium` — Give `GetAllPinnedMessages` its own `SELECT message_id, pinned_at FROM pinned_messages_by_room WHERE room_id = ?`; `pinnedByRoomQuery` stays for `GetPinnedMessages`.
+- `low` — Promote `defaultWalkFanout` to `MESSAGE_READ_WALK_FANOUT` (envDefault 8), validated `>= 1`, and log it at startup beside `MESSAGE_READ_MAX_BUCKETS`.
+- `low` — In `pagefit.Fit`/`FitWindow`, cheap-path the common case: measure the whole slice with one counting encode and compute per-row sizes only when that total exceeds the budget.
+- `low` — Make the per-row `atrest.Decrypt` span conditional, or hoist one span around the page-level scan loop, so span cost scales per request rather than per row.
+- `low` — Move `USER_CACHE_SIZE`/`USER_CACHE_TTL` into a `userstore` config type mounted as a named field, and mount `userstore.TTLConfig` so this service gets the same L2 outage buffer as its peers.
+
