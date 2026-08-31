@@ -160,3 +160,28 @@ All four federated types (`member_added`, `member_removed`, `room_renamed`, `mem
 - `low` — Add `ROOM_SUBJECT_MODE` and `ROOM_KEY_RETIRED_TTL` explicitly to the teams compose so both deploys of one binary are provably configured alike.
 - `low` — Replace suffix matching with a `pkg/subject` parse helper and make the `default:` branch a permanent error rather than a silent Ack; collapse the two member-event payload structs, or add a wire-compat round-trip test.
 
+---
+
+## 7. Performance — 4 / 5
+
+Genuinely performance-engineered on the live add path — concurrent input loads, O(1) `$inc` counts with TTL reconcile, bounded single-marshal key fan-out, correct `jsretry` discipline, projections on most reads — but the rename path, the remove path's unconditional recompute, and the Teams reconciler each carry an avoidable room-sized cost.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`processRoomRename` reads every full subscription document in the room just to extract accounts.** The projected `GetSubscriptionAccounts` returns exactly the list this code needs. On a 10k-member channel a rename pulls ~10k whole docs (which carry room view, roles, HR info) purely to build a string slice, then feeds all 10k into a `$in` | `handler.go:2353`; `store_mongo.go:89-90` vs `:706` |
+| medium | **N+1 user lookup in the Teams reconciler**: `resolveMember` → `store.GetUser` once per member inside the loop, while the live add path batches the identical need via `FindUsersByAccounts`. The L1/L2 cache softens but does not remove it — a first-migration batch is all-miss by construction. Same function also does an unprojected room-wide `ListByRoom` | `teamsroomcreate.go:124` → `:249`, `:89`; cf. `handler.go:955` |
+| medium | The remove path never got the add path's counter optimization: `ReconcileMemberCounts` (two `CountDocuments` over the room's subscriptions) runs **unconditionally** on every individual removal, every org removal, every room create and every Teams chat. `ApplyMemberCountDelta` already provides the O(1)+TTL alternative and is used only by `processAddMembers` — **removals have an exactly-known delta too** | `handler.go:420`, `:634`, `:1800`; `teamsroomcreate.go:196`; `store_mongo.go:145` |
+| medium | **Long handlers can outlive `AckWait` with no `InProgress()` heartbeat.** `AckWait` defaults to 30 s while `processRemoveOrg` runs two correlated-`$lookup` aggregations plus a rotate and key fan-out to every survivor, and `processTeamsRoomCreate` loops a whole batch of chats in one message. `msg.InProgress()` appears **nowhere in the repo**, so a slow room gets redelivered and processed concurrently with itself | `pkg/stream/consumer.go:19`; `handler.go:562`, `:643`, `:2571`; `teamsroomcreate.go:33` |
+| medium | Four reads fetch whole documents against "always project precisely"; `GetRoom` is on the add-member hot path (post-write re-read) where only `lastMsgAt` plus the subscription-room view is consumed | `store_mongo.go:175`, `:299`, `:738`, `:90` |
+| low | The four `$lookup` stages carry prose comments but not the mandated `// $lookup justification:` marker. `GetOrgMembersWithIndividualStatus` runs **two correlated `room_members` subqueries per matched user** — a server-side N+1 scaling with org size, not room size | `store_mongo.go:329`, `:345`, `:398`, `:418` |
+| low | `resolveSubUpdateCounterpart` issues a `GetApp` Mongo read per subscription inside the fan-out loop; bounded to DM/botDM (≤2 subs) today, but uncached and on a hot path | `handler.go:2231` → `:2175` |
+| nitpick | `jsretry.DefaultBackoff` is used for all four handlers, including user-visible member add/remove whose async job result the requester is blocking on; `LowLatencyBackoff` is the documented choice. Otherwise `jsretry` usage is exemplary — no bare `Nak()`, no hardcoded `cc.BackOff` | `handler.go:278`; `main.go:449` |
+
+### Recommendations
+- `high` — Replace `ListByRoom` with `GetSubscriptionAccounts` at `handler.go:2353`, and drop `ListByRoom` from the `SubscriptionStore` interface so no future caller reaches for it (keep the concrete method for integration tests).
+- `medium` — In `reconcileTeamsRoom`, hoist a single `FindUsersByAccounts(chat.Members…)` before the loop and let `resolveMember` handle only genuine misses; batch the resulting `publishUsers` into one publish per chat.
+- `medium` — Extend `ApplyMemberCountDelta` to the removal paths with a negative delta, and derive create-time counts from `subs` instead of `ReconcileMemberCounts`.
+- `medium` — Start an `InProgress()` ticker (≈`AckWait/2`) around `HandleJetStreamMsg` in `runJobWithRecovery`, or split the Teams batch loop so one message is one chat.
+- `medium` — Add projections to `GetRoom`, `GetSubscription`, `FindDMSubscriptionPair` — starting with `GetRoom`, the add-member hot path.
+- `low` — Add the four `$lookup` justification comments and consider replacing `GetOrgMembersWithIndividualStatus`'s two per-user subqueries with two batched reads joined in Go.
+
