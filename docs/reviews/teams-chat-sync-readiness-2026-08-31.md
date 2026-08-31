@@ -121,3 +121,23 @@ No NATS surface at all, so most of the dimension is N/A; the Mongo-mediated cont
 - `low` — Add one integration assertion that a chat crossing `inlineMemberThreshold` between runs transitions cleanly (inline-finalized → deferred) without clobbering member-sync's roster.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+Correct concurrency primitives and a bounded, throttle-aware Graph client, but a deliberate O(members) write amplification, an unbounded user load, and a cancellation path that turns a graceful stop into a failed run.
+
+### Findings
+- `medium` — SIGTERM produces a failure storm, not a graceful stop. The dispatch loop never checks `ctx.Done()` — `syncer.go:170-176`. On cancellation every remaining user is still fed to a worker, `ListUserChats` fails immediately on the dead context, and each is counted a failure with an `ERROR` log (`syncer.go:161-166`), so `run` returns `"N of M users failed"` (`:186`) and the CronJob records a failure for what was a routine pod eviction. `pkg/msgraph`'s throttle gate already handles cancellation correctly (`chats.go:224-231`), which makes the gap here more visible.
+- `medium` — Write amplification is O(members) per chat: every member's worker re-upserts the same chat, so a 24-member group is written 24 times per run (`syncer.go:34-42`, `syncer.go:224-229`). The durability rationale is sound and test-pinned (`worker_test.go:119-157`), but nothing bounds the cost — at the `inlineMemberThreshold` of 25 that is a 25× multiplier on the busiest chats, and the full member roster is re-serialized on each.
+- `medium` — No per-user retry, on top of a 2-second server-selection default. `Pool.ServerSelectionTimeout` defaults to `2s` (`pkg/mongoutil/poolconfig.go:49`), a bound explicitly tuned for cache-fronted request services ("serves cached data and recovers on the breaker's next probe"). This batch job has no cache and no breaker: a replica-set election lasting >2s fails every in-flight user (`syncer.go:225,230`), and since the watermark holds, those users wait a full CronJob interval. Graph-side, `getThrottled` retries only 429/503 (`chats.go:151-153`) — a transient 500 fails the user outright.
+- `low` — `ListUsers` loads the entire `teams_user` collection into a slice and then a map with no limit or pagination (`store_mongo.go:77-85`, `syncer.go:145-148`); likewise `ListUserChats` accumulates every page of every chat before returning (`chats.go:101-117`). Both are fine at current scale but are the two places memory grows without a knob.
+
+**Verified compliant:** Projection is explicit and minimal on the only read (`store_mongo.go:78-80`) — no whole-document fetch; no `$lookup` anywhere; indexes created at startup and partial-filtered to the actionable working set (`store_mongo.go:44-68`); `BulkWrite` is unordered with an empty-input short-circuit (`pkg/mongoutil/collection.go:169-179`). No `time.Sleep` for synchronization — the throttle wait is timer-based with a `ctx.Done()` arm and says so (`chats.go:218-231`). No goroutine leak: workers terminate on `close(jobs)` and are joined by `wg.Wait()` (`syncer.go:156-178`). Response bodies are `io.LimitReader`-bounded (`chats.go:142`, 64 MiB). `MaxIdleConns` is sized to `MaxWorkers` (`main.go:127`). No JetStream, so the `jsretry`/`Nak()`/`cc.BackOff` and Cassandra `USING TIMESTAMP` rules do not apply.
+
+### Recommendations
+- `medium` — Guard the dispatch loop with `select { case <-ctx.Done(): ...; case jobs <- u: }` and treat `errors.Is(err, context.Canceled)` in the worker as a skip rather than a failure (`syncer.go:161-176`), so a graceful stop exits zero with an accurate skipped count.
+- `medium` — Give this job its own `MONGO_SERVER_SELECTION_TIMEOUT` (10–15s) in the deployment, and add a small bounded retry (2–3 attempts) around `UpsertChats`/`SetFrom` — a batch job should ride out an election rather than defer users a whole cycle.
+- `medium` — Deduplicate chats per run: keep the per-member durability guarantee but skip the redundant upsert when a chat id was already written successfully *this run* and the writing member also succeeded, so the amplification drops toward 1× without reintroducing the claim bug `worker_test.go:119` guards.
+- `low` — Cap the Graph accumulation (page count or total chats per user) and log when the cap is hit, so a pathological user cannot balloon a worker's heap.
