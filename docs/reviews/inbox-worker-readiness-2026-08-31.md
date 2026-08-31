@@ -153,3 +153,29 @@ Every produced INBOX event type is consumed and the lane/ownership rules are imp
 - `medium` — Move `BadgeCacheTTL` into a `badgecache.TTLConfig` mounted in all three services.
 - `low` — Tighten the permissions watermark to `$lt`; add a timestamp guard to `handleRoomSync`.
 
+---
+
+## 7. Performance — 3 / 5
+
+Sound hot-path design (two-lane dispatch, LRU membership cache, `jsretry.Settle` everywhere, guarded idempotent writes), undercut by one unprojected `Find` on the member_added path, cross-lane head-of-line blocking, and an uncoalesced serialized activity lane.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`FindUsersByAccounts` issues a `Find` with no projection**, decoding whole `model.User` docs — which carry `Services` (**credential material**), `Settings`, `Permissions` and `Chatlist` — while `handleMemberAdded` reads only `user.ID` and `user.Account`. A large `member_added` (team import) drags full documents over the wire **on the sequential membership lane** | `main.go:245-253`; `handler.go:306-315`; `pkg/model/user.go:66-79` |
+| high | **The puller blocks on the membership channel, stalling the fan-out lane.** `membershipCh <- m` is an unguarded blocking send from the single `iter.Next()` loop, and the membership lane is one goroutine costing 3–4 sequential Mongo RTTs per event. A membership burst fills the 100-slot buffer and then **no further messages are pulled at all** — the high-volume `subscription_read`/`thread_read` lane stops even though `MaxWorkers` is idle. **Worse, buffered messages sit un-acked past `AckWait` (30 s), so the server redelivers them and duplicate work is amplified exactly when the lane is already behind** | `main.go:970-972`, buffer at `:937` |
+| medium | Room-activity refresh is **fully serialized with an un-coalesced Mongo write per event** — a core-NATS async subscription runs its callback on one goroutine, so every refresh's upsert (and every cache-miss `FindOne`) is serialized at ~1/RTT per pod. Volume grows with active-room count, and **overflow here is a silent slow-consumer drop, not backpressure.** The `$max` guard makes the write coalescible in memory; nothing coalesces it | `main.go:902-908`; `handler.go:212` |
+| medium | Badge invalidation **loops per account** instead of batching — one `SREM` round trip per removed account, on the sequential membership lane, while the adjacent `subauthcache.BustSubs` for the same account list is a **single batched call** | `handler.go:429-431`; `pkg/badgecache/badgecache.go:204-208` vs `handler.go:408` |
+| medium | `InboxEvent.Payload` is `[]byte`, so **every federated payload is base64-encoded on the wire** — ~33% inflation plus an encode and a decode-and-copy per event, on this service's entire input. `OutboxEvent.Envelope` uses `json.RawMessage` and **its comment names precisely this problem.** (Repo-wide change, not inbox-worker-local) | `pkg/model/event.go:289` vs `:294-297` |
+| medium | **The dispatcher goroutine is untracked and can `wg.Add` after `wg.Wait` returned** — the loop has no `wg.Add`, and calls `wg.Add(1)` concurrently with the drain step's `wg.Wait()`. A message already returned by `iter.Next()` can start processing **after the drain declares success**, then run against a Mongo client being disconnected | `main.go:962-984` vs `:996-1010`, `:1014` |
+| low | Every guard-rejected write pays an extra `FindOne` — duplicate/out-of-order deliveries (the **normal** federated case) cost two round trips instead of one. Acceptable on cold paths; `UpdateSubscriptionRead` is not one | `main.go:186`, `:430`, `:462`, `:502`, `:520`, `:545` → `:195-220` |
+| nitpick | `encoding/json` is correct here (not on the sonic list); `jsretry` discipline is clean — single settle point, no bare `Nak()`/`NakWithDelay(0)`, `cc.BackOff` derived | `main.go:948`, `:1041-1045` |
+
+### Recommendations
+- `high` — Project `FindUsersByAccounts` to `{_id:1, account:1}` and decode into a local two-field struct; the handler needs nothing else.
+- `high` — **Make the membership hand-off non-blocking-safe**: size `membershipCh` against `MaxAckPending`, and on a full buffer `NakWithDelay` (via `jsretry.Nak`) rather than blocking the puller, so backpressure lands on **one message** instead of the whole consumer.
+- `medium` — Coalesce room-activity: keep an in-memory per-room `$max` map flushed on a ticker via `BulkWrite`, and/or run the callback on the existing bounded worker pool.
+- `medium` — Batch the badge clears: add `ClearRooms(ctx, accounts, roomID)` to `pkg/badgecache` that pipelines per-slot, mirroring `subauthcache.BustSubs`.
+- `medium` — Track the dispatcher goroutine in `wg` and stop it before the drain step, so no handler can begin after `wg.Wait()` returns.
+- `medium` — Change `InboxEvent.Payload` to `json.RawMessage` in a coordinated PR with the publishers, matching `OutboxEvent.Envelope`.
+- `low` — Fold the existence disambiguation into the guarded write to drop the second round trip on `UpdateSubscriptionRead`.
+
