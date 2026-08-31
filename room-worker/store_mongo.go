@@ -82,10 +82,8 @@ func (s *MongoStore) EnableRoomMetaCache(size int, ttl time.Duration) error {
 	return nil
 }
 
-// ListByRoom returns all subscriptions for roomID across every site. Only the
-// Teams reconcile path uses it, because it diffs per-subscription state
-// (joinedAt) rather than just membership; every other path needs accounts alone
-// and must use the projected GetSubscriptionAccounts instead.
+// ListByRoom returns every subscription in roomID. Only the Teams reconcile path
+// needs full documents; other callers must use projected GetSubscriptionAccounts.
 func (s *MongoStore) ListByRoom(ctx context.Context, roomID string) ([]model.Subscription, error) {
 	cursor, err := s.subscriptions.Find(ctx, bson.M{"roomId": roomID})
 	if err != nil {
@@ -326,10 +324,8 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 		// has member.id = deptId. Checking only sectId would miss that case
 		// and report HasOrgMembership=false, causing the remove flow to drop
 		// the user's subscription even though they are still org-attached.
-		// $lookup justification: single-document read whose two joins resolve
-		// one user's membership and subscription in one round trip, each
-		// sub-pipeline $limit 1. Splitting it would triple the round trips on
-		// the remove path's first call.
+		// $lookup justification: resolves one user's membership and subscription
+		// in a single round trip; splitting it would triple them.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -346,8 +342,7 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 			},
 			"as": "orgMembership",
 		}}},
-		// $lookup justification: see above — same single-user, single-round-trip
-		// read; this half answers "does the user still hold a subscription".
+		// $lookup justification: see above; this half checks for a live subscription.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "subscriptions",
 			"let":  bson.M{"acct": "$account"},
@@ -388,18 +383,15 @@ func (s *MongoStore) GetUserWithMembership(ctx context.Context, roomID, account 
 	return &result, nil
 }
 
-// orgMembersPipeline builds the org-member status aggregation. It is separated
-// from the query so the stage order — in particular that the narrowing $project
-// precedes the two correlated $lookups — is unit-testable without Mongo.
+// orgMembersPipeline builds the org-member status aggregation, split from the
+// query so stage order stays unit-testable without Mongo.
 func orgMembersPipeline(roomID, orgID string) mongo.Pipeline {
 	return mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"$or": bson.A{
 			bson.M{"sectId": orgID},
 			bson.M{"deptId": orgID},
 		}}}},
-		// Narrow before the joins: both lookups run once per matched user, so a
-		// full user document here is carried through the whole pipeline. Only the
-		// fields later stages actually read survive (_id is implicit).
+		// Narrow first: both joins run per matched user, multiplying every byte kept.
 		{{Key: "$project", Value: bson.M{
 			"account":    1,
 			"siteId":     1,
@@ -417,9 +409,8 @@ func orgMembersPipeline(roomID, orgID string) mongo.Pipeline {
 			"tcName": bson.M{"$cond": bson.A{
 				bson.M{"$eq": bson.A{"$deptId", orgID}}, "$deptTCName", "$sectTCName"}},
 		}}},
-		// $lookup justification: the individual-membership flag must be computed
-		// per user in the same pass. The alternative is one extra round trip per
-		// org member; this join's sub-pipeline is $limit 1 projecting only _id.
+		// $lookup justification: per-user membership flag in the same pass; the
+		// alternative is one round trip per org member.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"uid": "$_id"},
@@ -440,9 +431,8 @@ func orgMembersPipeline(roomID, orgID string) mongo.Pipeline {
 		// being removed)? If yes, the user remains a member via that sibling
 		// even after the current org is dropped, so processRemoveOrg must NOT
 		// delete their subscription.
-		// $lookup justification: same-pass sibling-org check. It cannot be
-		// denormalised onto the user because the answer depends on the room being
-		// modified, and a per-member query would be one round trip per member.
+		// $lookup justification: sibling-org check depends on the room being
+		// modified, so it cannot be denormalised onto the user.
 		{{Key: "$lookup", Value: bson.M{
 			"from": "room_members",
 			"let":  bson.M{"sectId": "$sectId", "deptId": "$deptId"},
@@ -555,8 +545,7 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 		filter := bson.M{"roomId": sub.RoomID, "u.account": sub.User.Account}
 		models = append(models, mongoutil.UpsertModel(filter, bson.M{"$setOnInsert": sub}))
 	}
-	// Chunked: an org add can present tens of thousands of candidates, and one
-	// BulkWrite carrying all of them is a single outsized command.
+	// Chunked: an org add can present tens of thousands of candidates.
 	if _, err := mongoutil.ChunkedBulkWrite(ctx, s.subscriptions, models, mongoutil.MaxBulkChunk); err != nil {
 		return fmt.Errorf("bulk create %d subscriptions: %w", len(subs), err)
 	}

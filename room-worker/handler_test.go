@@ -1940,8 +1940,7 @@ func TestHandler_ProcessRemoveIndividual_CountDeltaError(t *testing.T) {
 	assert.Contains(t, err.Error(), "apply member count delta")
 }
 
-// When the TTL says a drift check is due, the full recompute still runs on the
-// remove path and its failure must still propagate.
+// A due drift check still recomputes, and its failure must still propagate.
 func TestHandler_ProcessRemoveIndividual_ReconcileOnDueError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	const roomID, account, siteID = "r1", "alice", "site-a"
@@ -6078,8 +6077,7 @@ func TestHandler_ProcessRemoveOrg_AllOverlap_SectNameFromUnfiltered(t *testing.T
 		}, nil)
 	// toRemove is empty → no DeleteSubscriptionsByAccounts call expected.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-	// Nothing was deleted, so the counters are untouched — no delta and no
-	// full recompute (an org removal that frees no member must cost neither).
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -6113,8 +6111,7 @@ func TestHandler_ProcessRemoveOrg_AllSectNamesEmpty(t *testing.T) {
 		}, nil)
 	// toRemove is empty (the member has individual membership) → no DeleteSubscriptionsByAccounts expected.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-	// Nothing was deleted, so the counters are untouched — no delta and no
-	// full recompute (an org removal that frees no member must cost neither).
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice").
 		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -6162,8 +6159,7 @@ func TestHandler_ProcessRemoveOrg_OtherOrgCovers_PreservesSub(t *testing.T) {
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), gomock.Any()).Times(0)
 	// The X org row still gets deleted; the count gets reconciled.
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "X").Return(nil)
-	// Nothing was deleted, so the counters are untouched — no delta and no
-	// full recompute (an org removal that frees no member must cost neither).
+	// Nothing deleted: no delta and no recompute.
 	store.EXPECT().GetUser(gomock.Any(), "alice-req").
 		Return(&model.User{ID: "u_r", Account: "alice-req", SiteID: "site-a", EngName: "Req", ChineseName: "求"}, nil)
 
@@ -6616,8 +6612,7 @@ func TestHandler_ProcessRemoveOrg_DeptFirstTiebreak(t *testing.T) {
 			store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, "o1").Return(tc.members, nil)
 			// toRemove is empty (all members have individual membership) → no DeleteSubscriptionsByAccounts expected.
 			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, "o1").Return(nil)
-			// Nothing was deleted, so the counters are untouched — no delta and no
-			// full recompute (an org removal that frees no member must cost neither).
+			// Nothing deleted: no delta and no recompute.
 			store.EXPECT().GetUser(gomock.Any(), "alice").
 				Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
 
@@ -7931,10 +7926,8 @@ func TestProcessCreateRoom_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
 		"only setAppSubscription initiated by Alice may set isSubscribed")
 }
 
-// Rename only needs member accounts for the cross-site fan-out, so it must use
-// the projected GetSubscriptionAccounts rather than reading every full
-// subscription document in the room (a 5k-member rename otherwise ships 5k
-// documents to extract two string fields).
+// Rename needs accounts only, so it must use the projected query: a 5k-member
+// rename otherwise ships 5k documents to extract two string fields.
 func TestProcessRoomRename_UsesProjectedAccountsQuery(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -7945,8 +7938,7 @@ func TestProcessRoomRename_UsesProjectedAccountsQuery(t *testing.T) {
 	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
 	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
 	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-	// The projected read — and no ListByRoom expectation, so a full-document
-	// read fails the test as an unexpected call.
+	// No ListByRoom expectation, so a full-document read fails as unexpected.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{"alice", "bob"}, nil)
 	store.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{
 		{Account: "alice", SiteID: "site-a"}, {Account: "bob", SiteID: "site-a"},
@@ -7962,13 +7954,8 @@ func TestProcessRoomRename_UsesProjectedAccountsQuery(t *testing.T) {
 	require.NoError(t, h.processRoomRename(ctx, body))
 }
 
-// --- member-count deltas on the remove paths -------------------------------
-//
-// Removing one member used to trigger ReconcileMemberCounts, which runs two
-// CountDocuments over the whole room — two full index scans of a 50k-member
-// room to record a delta of one. The remove paths now $inc an exact delta and
-// fall back to the full recompute only when the TTL says a drift check is due
-// or the delete was partial.
+// Remove paths $inc an exact delta, falling back to the whole-room recompute
+// only when the TTL says drift is due or the delete was partial.
 
 func removeIndividualStore(t *testing.T, ctrl *gomock.Controller, roomID, account, siteID string, deleted int64) *MockSubscriptionStore {
 	t.Helper()
@@ -7980,8 +7967,7 @@ func removeIndividualStore(t *testing.T, ctrl *gomock.Controller, roomID, accoun
 	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(deleted, nil)
 	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, []string{account}).Return(nil)
 	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, []string{account}).Return(nil)
-	// Key fan-out is downstream of the counter work these tests assert on, and
-	// an error case returns before reaching it.
+	// Downstream of the counter work asserted here; error cases never reach it.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil).AnyTimes()
 	return store
 }
@@ -8024,14 +8010,12 @@ func TestHandler_ProcessRemoveIndividual_ReconcilesWhenDeltaReportsDue(t *testin
 	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
 }
 
-// A redelivery finds the subscription already gone. The counter was decremented
-// on the first delivery, so a second decrement would drift it: apply nothing.
+// A redelivery finds the sub already gone; a second decrement would drift it.
 func TestHandler_ProcessRemoveIndividual_RedeliveryAppliesNoDelta(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	const roomID, account, siteID = "room-1", "alice", "site-a"
 	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 0)
-	// No ApplyMemberCountDelta and no ReconcileMemberCounts expectation: either
-	// call is an unexpected-call failure.
+	// No count expectations at all: either call fails as unexpected.
 
 	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
 }
@@ -8061,9 +8045,8 @@ func TestHandler_ProcessRemoveOrg_AppliesCountDeltaForDeletedAccounts(t *testing
 	require.NoError(t, h.processRemoveMember(context.Background(), data))
 }
 
-// Fewer documents deleted than accounts targeted means the delta cannot be
-// derived from the target set (a concurrent remove, or a partial redelivery),
-// so fall back to the authoritative full recompute.
+// Fewer deleted than targeted means the delta cannot come from the target set,
+// so the authoritative recompute must run instead.
 func TestHandler_ProcessRemoveOrg_PartialDeleteFallsBackToReconcile(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)
@@ -8087,8 +8070,7 @@ func TestHandler_ProcessRemoveOrg_PartialDeleteFallsBackToReconcile(t *testing.T
 	require.NoError(t, h.processRemoveMember(context.Background(), data))
 }
 
-// An org whose members all survive via individual rows deletes nothing, so it
-// must not touch the counters at all — least of all with a full recompute.
+// An org whose members all survive deletes nothing, so it must not count.
 func TestHandler_ProcessRemoveOrg_NoDeletionsSkipsCountWork(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockSubscriptionStore(ctrl)

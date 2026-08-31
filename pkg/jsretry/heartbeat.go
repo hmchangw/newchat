@@ -7,20 +7,16 @@ import (
 	"time"
 )
 
-// minHeartbeatInterval floors the derived interval so a short AckWait cannot
-// produce a heartbeat so frequent it becomes its own load.
+// minHeartbeatInterval stops a short AckWait making the heartbeat its own load.
 const minHeartbeatInterval = time.Second
 
 // InProgressMsg is the subset of the JetStream message API the heartbeat needs.
-// jetstream.Msg satisfies it, as do the wrappers that embed it.
 type InProgressMsg interface {
 	InProgress() error
 }
 
-// HeartbeatInterval derives a heartbeat period from a consumer's AckWait: a
-// third of the budget, so two consecutive heartbeats can be lost before the
-// server considers the message un-acked. A non-positive AckWait returns 0,
-// which disables the heartbeat.
+// HeartbeatInterval derives a heartbeat period from AckWait: a third of the
+// budget, so two ticks can be lost before the message counts as un-acked.
 func HeartbeatInterval(ackWait time.Duration) time.Duration {
 	if ackWait <= 0 {
 		return 0
@@ -28,18 +24,8 @@ func HeartbeatInterval(ackWait time.Duration) time.Duration {
 	return max(ackWait/3, minHeartbeatInterval)
 }
 
-// Heartbeat extends msg's ack deadline every interval until the returned stop
-// is called or ctx is done, and returns stop. Callers must defer stop so the
-// goroutine always terminates, including on the panic path.
-//
-// Without this, a handler that runs longer than the consumer's AckWait is
-// redelivered while it is still working, and a second worker begins executing
-// the same job concurrently — for room mutations that means duplicate key
-// rotations and duplicate fan-out. A non-positive interval disables it.
-//
-// A failing InProgress ends the loop: it means the message is no longer live
-// (already settled, or the consumer is gone), so retrying every interval would
-// only spam the log.
+// Heartbeat extends msg's ack deadline until stop (defer it) or ctx is done, so
+// a slow handler is not redelivered into a second worker running the same job.
 func Heartbeat(ctx context.Context, msg InProgressMsg, every time.Duration) (stop func()) {
 	if every <= 0 {
 		return func() {}

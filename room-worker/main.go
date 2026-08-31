@@ -324,11 +324,7 @@ func main() {
 			go func(msgCtx context.Context, msg jetstream.Msg) {
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.RoomEventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msgCtx = tracked.Context(msgCtx)
-				// Keep the ack deadline alive for the duration of the handler.
-				// Room mutations on a large room (org removal, key rotation and
-				// fan-out over every survivor) can outrun AckWait, and a
-				// redelivery mid-flight would run the whole job a second time
-				// concurrently with the first.
+				// A large-room mutation can outrun AckWait; redelivery double-runs it.
 				stopHeartbeat := jsretry.Heartbeat(msgCtx, tracked, jsretry.HeartbeatInterval(consumerCfg.AckWait))
 				// runJobWithRecovery contains handler panics (it Acks — drops — the
 				// poison message) so this async goroutine, which runs outside

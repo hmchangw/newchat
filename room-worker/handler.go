@@ -402,7 +402,6 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return nil
 	}
 
-	// Individual-only: delete sub, adjust userCount, publish leave/removed events.
 	deleted, delErr := h.store.DeleteSubscription(ctx, req.RoomID, req.Account)
 	if delErr != nil {
 		return fmt.Errorf("delete subscription: %w", delErr)
@@ -418,9 +417,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return err
 	}
 
-	// deleted==0 means a redelivery found the subscription already gone: the
-	// counter was decremented on the first delivery, so decrementing again
-	// would drift it.
+	// deleted==0 is a redelivery: the first delivery already decremented.
 	if deleted > 0 {
 		userDelta, appDelta := -1, 0
 		if subIsBot(req.Account) {
@@ -432,7 +429,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
-	// Rotate after delete + count adjustment; survivors are the post-deletion accounts.
+	// Survivors are the post-deletion accounts.
 	// Bots hold keys too, so a bot removal rotates like any other member.
 	survivorAccounts, listErr := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if listErr != nil {
@@ -644,9 +641,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		return fmt.Errorf("delete room member (org): %w", err)
 	}
 
-	// Counters follow what the delete actually removed, never a full recompute
-	// per removal — dropping a 5k-person department otherwise costs two whole-room
-	// CountDocuments on top of the delete itself.
+	// Keyed on what the delete actually removed, so a redelivery is a no-op.
 	switch {
 	case len(accounts) == 0:
 		// Every org member survives via another source: nothing left the room.
@@ -663,9 +658,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			return err
 		}
 	default:
-		// Fewer documents deleted than accounts targeted (a concurrent removal,
-		// or a partially-applied redelivery): the target set no longer describes
-		// what left, so fall back to the authoritative recompute.
+		// Fewer deleted than targeted, so recompute rather than trust that set.
 		if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
 			return fmt.Errorf("reconcile member counts: %w", err)
 		}
@@ -1530,18 +1523,14 @@ func subscriptionRoomFor(room *model.Room, pair *roomkeystore.VersionedKeyPair) 
 	return sr
 }
 
-// subIsBot is the single definition of the u.isBot flag stamped at subscription
-// creation. The remove paths derive their count deltas from it, so the counter
-// they decrement is the one the add path incremented.
+// subIsBot is the one definition of the u.isBot flag stamped at sub creation, so
+// removals decrement the counter the add path incremented.
 func subIsBot(account string) bool {
 	return model.IsBot(account) || model.IsPlatformAdminAccount(account)
 }
 
-// applyMemberRemovalCounts $inc's the room's counters by an exact delta, running
-// the full recompute only when the TTL clock says a drift check is due.
-// ReconcileMemberCounts is two CountDocuments over the entire room, so it must
-// never be the per-removal default: on a 50k-member room that is two full index
-// scans to record the departure of one member.
+// applyMemberRemovalCounts $inc's an exact delta, recomputing only when the TTL
+// says drift is due: ReconcileMemberCounts scans the whole room twice.
 func (h *Handler) applyMemberRemovalCounts(ctx context.Context, roomID string, userDelta, appDelta int) error {
 	if userDelta == 0 && appDelta == 0 {
 		return nil
@@ -2414,8 +2403,6 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	// Single room-scoped event (the room_renamed sys message published above)
 	// is sufficient — clients update their subscription state from the room
 	// event without per-subscription fan-out.
-	// Projected: the fan-out below only needs accounts, so a full-document read
-	// of every subscription in the room is pure waste on large channels.
 	accounts, err := h.store.GetSubscriptionAccounts(ctx, req.RoomID)
 	if err != nil {
 		return fmt.Errorf("list subscription accounts: %w", err)

@@ -82,10 +82,8 @@ func TestConsumedSubjectsClassifyToBoundedEventTypes(t *testing.T) {
 	}
 }
 
-// The consumer loop derives its ack heartbeat from the consumer's own AckWait,
-// so the two can never disagree. Two heartbeats must fit inside the budget:
-// that is the headroom which lets a lost tick pass without the server deciding
-// the message went un-acked and redelivering it into a second worker.
+// The heartbeat derives from the consumer's own AckWait, so the two cannot
+// disagree; two ticks must fit inside the budget to survive a lost one.
 func TestHeartbeatIntervalLeavesHeadroomUnderAckWait(t *testing.T) {
 	for _, ackWait := range []time.Duration{30 * time.Second, time.Minute, 5 * time.Minute} {
 		cc := buildConsumerConfig(stream.ConsumerSettings{
@@ -98,8 +96,7 @@ func TestHeartbeatIntervalLeavesHeadroomUnderAckWait(t *testing.T) {
 	}
 }
 
-// An unset AckWait means the server picks the deadline, so there is no local
-// budget to pace against: disable the heartbeat rather than invent an interval.
+// No local budget to pace against, so disable rather than invent an interval.
 func TestHeartbeatDisabledWhenAckWaitUnset(t *testing.T) {
 	cc := buildConsumerConfig(stream.ConsumerSettings{MaxDeliver: 5}, "default")
 	assert.Zero(t, jsretry.HeartbeatInterval(cc.AckWait))
