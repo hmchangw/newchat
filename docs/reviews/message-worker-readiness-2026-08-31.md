@@ -47,3 +47,31 @@ Idiomatic, lint-clean Go with disciplined `%w` wrapping, sentinel errors via `er
 - `low` — Introduce `type mode string` with `modeDefault`/`modeTeams` constants and a `parseMode` validator; convert `newTeamsBatchHandler` to the existing option type for one DI idiom service-wide.
 - `nitpick` — Switch the two `store_cassandra.go` logs to `ErrorContext`; fix the mojibake.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Boundaries, DI, the federation lane and the high-throughput consumer are all correct and unusually well reasoned; the deductions are config-surface drift and a `handler.go` that has outgrown a single file.
+
+### Verified clean
+OUTBOX federation goes **exclusively** through `outbox.Publish` with both event types in `ConcurrentEventTypes`; no direct remote-INBOX publish; no stream creation beyond the mode's own. Subjects always via `pkg/subject` (zero raw `Sprintf("chat…")`). No `os.Getenv`. The high-throughput pattern is `cons.Messages()` + `MAX_WORKERS` semaphore + `PullMaxMessages(2*MaxWorkers)`, not mixed. Shutdown is `pkg/shutdown.Wait` in the documented order.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | **`METRICS_ADDR` is parsed into config but never read anywhere in the service** — the real Prometheus listener is `pkg/obs`'s `OTEL_EXPORTER_PROMETHEUS_PORT` (default 2112). An operator who sets `METRICS_ADDR=:9090` gets silence, and the deploy manifests will scrape the wrong port. Confirmed dead by grep (one hit: the declaration) | `main.go:61`; `pkg/obs/obs.go:87-88` |
+| medium | `USER_CACHE_SIZE`/`USER_CACHE_TTL` re-declared with their own tag and `envDefault`, violating the shared-knob rule. The same pair is copy-declared in **seven** services. The L2 tier immediately below it (`UserL2 userstore.TTLConfig`) already shows the correct mounted-field shape — the L1 tier never got it | `main.go:56-57` vs `:58` |
+| medium | The injected `PublishFunc` **hardcodes its metric labels per transport branch** instead of deriving them from the subject, so `thread_unread_added` and `thread_subscription_upserted` OUTBOX failures are indistinguishable, and the core-NATS branch is unconditionally labelled `OperationThreadTCount` even though the branch is generic. room-worker solves this correctly with `natsmetrics.PublishLabelsFromSubject` | `main.go:211`, `:218`; cf. `room-worker/main.go:245` |
+| low | Cross-service MongoDB collection ownership is asserted **only by comment**: this service writes `thread_rooms`/`thread_subscriptions` while the unique index is owned by room-service and only warned about here. Ownership by comment means a room-service index change silently degrades this service's writes at runtime rather than at deploy | `store_mongo.go:31-34`, `:47-49` |
+| low | `bootstrapStreams` does not "no-op when `Enabled=false`" as `CLAUDE.md` specifies — the disabled path issues a `js.Stream()` existence RPC and fails startup on a miss. **The behaviour is better than the documented one and is now repo-wide (all 12 `bootstrap.go` files do it), so this is CLAUDE.md drift, not a service defect** — reported because `CLAUDE.md` is binding | `bootstrap.go:44-64` |
+| low | `Handler`, `PublishFunc`, `Store`, `ThreadStore`, `CassandraStore`, `HRIdentityStore`, `MessageTransformer` all exported from `package main` although nothing outside the binary can consume them; mockgen does not require it | `store.go:15`, `:32`; `handler.go:32`, `:34` |
+| nitpick | `teamsBatchHandler` takes the full 5-method `Store` but calls only `SaveMessage`; the Teams-migration store impl lives in `hridentity.go` rather than `store_mongo.go` | `teamsbatch.go:31`, `:137`; `hridentity.go:16` |
+
+### Recommendations
+- `medium` — Delete `MetricsAddr` from the config struct and fix any deploy manifest publishing `:9090`; document `OTEL_EXPORTER_PROMETHEUS_PORT` as the metrics port.
+- `medium` — Add a `userstore.CacheConfig{Size, TTL}` beside the existing `TTLConfig` and mount it as a named field here, then in the other six services.
+- `medium` — Replace the two hardcoded label pairs with `natsmetrics.PublishLabelsFromSubject(subj)`, matching room-worker.
+- `low` — Make the room-service-owned index a startup hard failure (or move ownership here); a warn-only path defers the breakage to first write.
+- `low` — Unexport the handler/store types and their constructors; regenerate mocks.
+- `low` — Update `CLAUDE.md`'s `BOOTSTRAP_STREAMS` paragraph to describe the verify-or-fail-fast disabled path that all 12 services actually implement.
+- `nitpick` — Split `handler.go` (858 lines) into `handler.go` (consume + persist) and `handler_thread.go`.
+
