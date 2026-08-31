@@ -80,10 +80,13 @@ type Handler struct {
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
 	routeMode subject.RoomRouteMode
+	// appName is the cached bot app-name lookup (wraps appNameLookup); nil-safe
+	// because BotAwareDisplayName skips a nil lookup.
+	appName preview.AppNameLookup
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:            store,
 		siteID:           siteID,
 		publish:          publish,
@@ -92,6 +95,8 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 		keyFanoutWorkers: defaultKeyFanoutWorkers,
 		routeMode:        routeMode,
 	}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+	return h
 }
 
 // bustRoomMeta best-effort invalidates a room's L2 (Valkey) metadata entry
@@ -387,7 +392,7 @@ func (h *Handler) appNameLookup(ctx context.Context, botAccount string) (string,
 // name for a bot account. Only member-side names are bot-aware — the requester keeps
 // displayName() unchanged.
 func (h *Handler) memberDisplayName(ctx context.Context, u *model.User) string {
-	return preview.BotAwareDisplayName(ctx, h.appNameLookup, u.EngName, u.ChineseName, u.Account)
+	return preview.BotAwareDisplayName(ctx, h.appName, u.EngName, u.ChineseName, u.Account)
 }
 
 func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.RemoveMemberRequest, currentPair *roomkeystore.VersionedKeyPair) (err error) {

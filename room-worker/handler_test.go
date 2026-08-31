@@ -26,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
@@ -5765,6 +5766,7 @@ func TestHandler_ProcessAddMembers_Content_SingleBot(t *testing.T) {
 		published = append(published, publishedMsg{subj: subj, data: data})
 		return nil
 	}, keyStore: testKeyStore, keySender: testKeySender}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
 
 	req := model.AddMembersRequest{
 		RoomID: roomID, RequesterID: "u_a", RequesterAccount: "alice",
@@ -6115,6 +6117,7 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotContent(t *testing.T)
 		published = append(published, publishedMsg{subj: subj, data: data})
 		return nil
 	}, keyStore: testKeyStore, keySender: testKeySender}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
 
 	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: "helper.bot", Timestamp: 1}
 	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
@@ -6123,99 +6126,72 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotContent(t *testing.T)
 	assert.Equal(t, `"Alice 愛" removed "Helper Bot" from the chatroom`, sysMsg.Content)
 }
 
-// Self-leave by a bot: Content uses the registered app name.
+// Self-leave by a bot: Content uses the registered app name when GetApp resolves it,
+// and degrades to the composed name / raw account (bot has no EngName/ChineseName, so
+// it falls all the way back to the account) when GetApp misses or errors. An infra
+// error is — unlike ErrAppNotFound, which is silent — logged, but the flow still
+// succeeds end to end either way.
 func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-	expectThreadCleanupAny(store)
+	tests := []struct {
+		name        string
+		setupApp    func(store *MockSubscriptionStore)
+		wantContent string
+	}{
+		{
+			name: "app found",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+			},
+			wantContent: `"Helper Bot" left the chatroom`,
+		},
+		{
+			name: "app not found",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, ErrAppNotFound)
+			},
+			wantContent: `"helper.bot" left the chatroom`,
+		},
+		{
+			name: "app lookup error",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, fmt.Errorf("mongo timeout"))
+			},
+			wantContent: `"helper.bot" left the chatroom`,
+		},
+	}
 
-	roomID := "r1"
-	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
-		Return(&UserWithMembership{
-			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
-			Roles: []model.Role{model.RoleUser},
-		}, nil)
-	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
-	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			expectThreadCleanupAny(store)
 
-	var published []publishedMsg
-	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}, keyStore: testKeyStore, keySender: testKeySender}
+			roomID := "r1"
+			store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+				Return(&UserWithMembership{
+					User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+					Roles: []model.Role{model.RoleUser},
+				}, nil)
+			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+			tt.setupApp(store)
 
-	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
-	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+			var published []publishedMsg
+			h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, keyStore: testKeyStore, keySender: testKeySender}
+			h.appName = preview.CachedAppNameLookup(h.appNameLookup)
 
-	sysMsg := findSysMsg(t, published, "site-a", "member_left")
-	assert.Equal(t, `"Helper Bot" left the chatroom`, sysMsg.Content)
-}
+			req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
+			require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
 
-// ErrAppNotFound degrades to the composed name / raw account (current behavior) —
-// bot has no EngName/ChineseName so it falls all the way back to the account.
-func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent_AppNotFound(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-	expectThreadCleanupAny(store)
-
-	roomID := "r1"
-	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
-		Return(&UserWithMembership{
-			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
-			Roles: []model.Role{model.RoleUser},
-		}, nil)
-	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
-	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, ErrAppNotFound)
-
-	var published []publishedMsg
-	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}, keyStore: testKeyStore, keySender: testKeySender}
-
-	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
-	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
-
-	sysMsg := findSysMsg(t, published, "site-a", "member_left")
-	assert.Equal(t, `"helper.bot" left the chatroom`, sysMsg.Content)
-}
-
-// An infra error from GetApp also degrades to the composed name/account, and — unlike
-// ErrAppNotFound, which is silent — is logged, but the flow still succeeds end to end.
-func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent_AppLookupError(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-	expectThreadCleanupAny(store)
-
-	roomID := "r1"
-	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
-		Return(&UserWithMembership{
-			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
-			Roles: []model.Role{model.RoleUser},
-		}, nil)
-	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
-	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, fmt.Errorf("mongo timeout"))
-
-	var published []publishedMsg
-	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}, keyStore: testKeyStore, keySender: testKeySender}
-
-	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
-	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
-
-	sysMsg := findSysMsg(t, published, "site-a", "member_left")
-	assert.Equal(t, `"helper.bot" left the chatroom`, sysMsg.Content)
+			sysMsg := findSysMsg(t, published, "site-a", "member_left")
+			assert.Equal(t, tt.wantContent, sysMsg.Content)
+		})
+	}
 }
 
 // C3: org remove with every member also having individual subs (toRemove empty)
