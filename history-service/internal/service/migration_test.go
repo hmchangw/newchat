@@ -50,6 +50,7 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 		Msg:         "old body",
 		Attachments: attachments,
 		Card:        &models.Card{Template: "legacy-card-v1"},
+		Mentions:    []models.Participant{{Account: "carol", ID: "carol-id"}},
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
 
@@ -75,6 +76,9 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 			assert.Equal(t, attachments, evt.Message.Attachments)
 			require.NotNil(t, evt.Message.Card)
 			assert.Equal(t, "legacy-card-v1", evt.Message.Card.Template)
+			// Preserved mentions ride the event so search-sync's full-doc replace keeps them.
+			require.Len(t, evt.Message.Mentions, 1)
+			assert.Equal(t, "carol", evt.Message.Mentions[0].Account)
 			// Event-level Timestamp is publish-time (now), distinct from the historical
 			// domain editedAt carried inside Message.
 			assert.Greater(t, evt.Timestamp, editedAt.UnixMilli())

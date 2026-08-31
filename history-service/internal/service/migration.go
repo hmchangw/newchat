@@ -66,14 +66,18 @@ func (s *HistoryService) MigrationEditMessage(c *natsrouter.Context, siteID stri
 	evt := model.MessageEvent{
 		Event: model.EventUpdated,
 		Message: model.Message{
-			ID:                           msg.MessageID,
-			RoomID:                       msg.RoomID,
-			UserID:                       msg.Sender.ID,
-			UserAccount:                  msg.Sender.Account,
-			CreatedAt:                    msg.CreatedAt,
-			Content:                      req.Content,
-			Attachments:                  msg.Attachments,
-			Card:                         msg.Card,
+			ID:          msg.MessageID,
+			RoomID:      msg.RoomID,
+			UserID:      msg.Sender.ID,
+			UserAccount: msg.Sender.Account,
+			CreatedAt:   msg.CreatedAt,
+			Content:     req.Content,
+			Attachments: msg.Attachments,
+			Card:        msg.Card,
+			// Carry the preserved mentions: canonical consumers rebuild the full
+			// doc, so omitting them would erase mentions from search on a
+			// content-only migration edit while Cassandra keeps them.
+			Mentions:                     existingMentions,
 			EditedAt:                     &editedAt,
 			UpdatedAt:                    &editedAt,
 			ThreadParentMessageID:        msg.ThreadParentID,
