@@ -1874,6 +1874,7 @@ When the synchronous reply is an error envelope, the request was rejected before
 | `sectName` | string | Optional. The member's section name. Populated only when `enrich: true` and entry is an individual. |
 | `employeeId` | string | Optional. The member's employee ID. Populated only when `enrich: true` and entry is an individual. |
 | `appName` | string | Optional. Bot/app display name from `apps.name`. Always set for an account ending `.bot`. A bot account **without** that suffix resolves only when the room falls back to subscriptions (the only source carrying an `isBot` flag), so treat the `.bot` suffix as the reliable signal. Mutually exclusive with `engName`/`chineseName`. |
+| `name` | string | Optional. **Deprecated** alias of `appName`, emitted with the same value for pre-rename clients. Prefer `appName`. |
 | `isOwner` | boolean | Optional. Populated only when `enrich: true`. |
 | `orgName` | string | Optional. Org's display name (dept name preferred, sect name fallback), combined with the TC name when present. Populated only when `enrich: true` and entry is an org. |
 | `orgCode` | string | Optional. Org's plain section/department name (dept-first), without the TC-name combination `orgName` applies and with no orgID fallback. Populated only when `enrich: true` and entry is an org. |
