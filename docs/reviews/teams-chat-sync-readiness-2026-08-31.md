@@ -61,3 +61,24 @@ Textbook consumer-defined interfaces, constructor DI, and correct shared-knob mo
 - `low` — Add the CronJob exemption to CLAUDE.md §6's `shutdown.Wait` rule so six services stop reading as non-compliant.
 
 ---
+
+---
+
+## 4. Test coverage — 2 / 5
+
+Unit coverage is **67.6% (136 stmts)** — below the CLAUDE.md §4 80% floor, so the score is floored at 2, though the *quality* of what is tested is well above what that number implies.
+
+### Findings
+- `high` — 67.6% statement coverage, below the mandated 80% floor — `coverage_by_service.txt`. Fleet-wide (34/35 services under the floor), not a local regression.
+- `medium` — The real untested surface is `run()` — `main.go:91-143`, 0.0% in `covfunc.txt`. Nothing exercises the wiring: the `mongoutil.Connect` failure path (`:107-110`), the `EnsureIndexes`-fails-and-continues branch (`:114-116`), or the `msgraph.NewChatsClient` error path (`:128-130`). The other 0.0% functions (`newMongoStore`, `EnsureIndexes`, `ListUsers`, `SetFrom`, `UpsertChats`) *are* covered — by `integration_test.go:33-291`, which the unit profile cannot see, so ~15 points of the gap is measurement artifact.
+- `medium` — Test-fixture drift from production: `newTestSyncer` constructs `syncConfig` with `DefaultSiteID` unset (`worker_test.go:32`), so nine of the eleven `TestRun_*` cases run a configuration that `main.go:39`'s `required,notEmpty` makes unreachable in production. The empty-vote skip branch (`syncer.go:218-221`) is therefore heavily tested while the actual production behaviour — default siteID applied — rests on a single case (`worker_test.go:241-265`).
+- `low` — No test covers cancellation: neither `syncer.run` under a cancelled `ctx` nor the SIGTERM path (see D6).
+
+**Verified compliant:** `package main` throughout; table-driven with descriptive subtest names (`main_test.go:77-137`, `syncer_test.go:33-67`, `syncer_test.go:113-142`); mocks generated into `mock_store_test.go` and confirmed non-stale repo-wide; no real DB/NATS in unit tests; genuine error-path coverage (`TestRun_GraphFailureHoldsWatermarkAndFailsRun`, `TestRun_UpsertFailureHoldsWatermark`, `TestRun_SetFromFailureFailsUser`, `TestRun_ListUsersFailure`) plus a named regression guard for the shared-chat-claim data-loss bug (`worker_test.go:119-157`) and a boundary table on `inlineMemberThreshold` (`syncer_test.go:113-142`). Integration side is fully to spec: `//go:build integration`, `TestMain(m) { testutil.RunTests(m) }` at `integration_test.go:21`, `testutil.MongoDB(t, "teamsstore")` everywhere, zero inline `testcontainers.GenericContainer`.
+
+### Recommendations
+- `high` — Extract the wiring in `main.go:107-140` behind a seam (e.g. `newDeps(ctx, cfg)` returning the store + fetcher) so the connect/index/client error branches become unit-testable; that alone closes most of the gap.
+- `medium` — Set `DefaultSiteID: "site-default"` in `newTestSyncer` (`worker_test.go:32`) and add one explicit `DefaultSiteID: ""` case for the defensive skip, so the default configuration under test matches production.
+- `medium` — Add `TestRun_ContextCancelled` asserting the intended SIGTERM semantics once D6's finding is resolved.
+
+---
