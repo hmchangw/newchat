@@ -125,3 +125,29 @@ Genuinely thoughtful abstractions and comments that explain WHY, undermined by a
 - `medium` — Add a shared `forEachMemberAccount(...)` helper beside `parseMemberEvent`; both inbox collections shrink to their switch bodies.
 - `low` — Shrink `Collection` to the four methods every implementer needs and move provisioning to an optional `provisioner` interface asserted in the setup loop; `spotlightOrgCollection` then drops its unusable stub.
 
+---
+
+## 6. Integration — 2 / 5
+
+Subject builders, INBOX lane handling and stream ownership are exemplary — but **the bot-message consumer is wired to a filter that cannot match its own stream**, and JetStream fetch/batch errors are swallowed without a log or a metric.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| **critical** | **The bot-message collection binds `BOT-MESSAGES-CANONICAL-{site}` (subjects `chat.bot.canonical.{site}.>`) but its consumer filter is `chat.msg.canonical.{site}.*`** — reached because `newBotMessageCollection` sets only `streamCfg`, not a filter. The filter is **not a subset of the stream's subjects**, so `CreateOrUpdateConsumer` is rejected and `main.go:344-356` **exits 1 in `MODE=default`**; were it accepted, **no bot message would ever be indexed**. Bot messages are published on `chat.bot.canonical.{site}.created` with the same `model.MessageEvent` shape — only the subject is wrong | `messages.go:129`, `:74-80`; `pkg/stream/stream.go:94-99`; `bot-message-handler/handler.go:199` |
+| high | **The wrong filter is enshrined by a unit test** asserting `chat.msg.canonical.site-a.*` for the bot collection. No integration test binds the bot collection to a real stream, so **nothing in CI can catch it** | `messages_test.go:621-622` |
+| high | **JetStream errors are invisible.** `msgBatch` exposes only `Messages()` although the o11y batch implements `Error() error`, so post-fetch failures (consumer deleted, leader change, no heartbeat) are never surfaced; and the `Fetch` error path logs nothing, records no metric, and `continue`s immediately — **a persistently failing consumer spins hot and silently indexes nothing** | `consumer_source.go:19-21`; `main.go:538-550` |
+| medium | A Teams author-resolution failure is **Acked permanently**: `resolveTeamsIdentities` returns `nil` on Mongo error, `buildTeamsActions` then emits docs with empty `userId`/`userAccount` that flush successfully and Ack. **Nothing re-indexes them.** The hazard is documented and mitigated only via read preference — there is no metric or retry for the error branch itself | `messages.go:304-307`, `:265-268`; `handler.go:301-317`; `main.go:48-53` |
+| medium | Enrichment calls drop the message context (`context.Background()` in both resolvers), so the ES parent lookup and Mongo lookup fall **outside the trace and outside shutdown cancellation** | `messages.go:220`, `:304` |
+| low | Stream bootstrap is inline rather than the mandated `bootstrap.go` helper. The behaviour is correct (INBOX and HR excluded by name comparison, only `Name + Subjects` set), but the deviation **makes the exclusion easy to lose when a collection is added** | `main.go:311-325`, `:307-314` |
+| nitpick | The spotlight room-name LWW guard compares **two different hosts' clocks** — the rename ts is stamped in room-service, `roomNameUpdatedAt` on member docs in room-worker. Skew widens the already-documented rename/add race | `spotlight.go:143`, `:186` |
+
+**Verified clean:** every subject comes from `pkg/subject` with no `fmt.Sprintf` subject building; both INBOX lanes are consumed and **neither INBOX nor HR is ever created**; all four consumed inbox types carry a publish-site `time.Now().UTC().UnixMilli()` timestamp; consumer config derives from `stream.DurableConsumerDefaults` with no hardcoded `BackOff`; the service registers no `chat.user.` handler, so `docs/client-api.md` is not implicated.
+
+### Recommendations
+- `critical` — Give `messageCollection` a `filterSubjects func(siteID) []string` field beside `streamCfg`, set it to `subject.BotCanonicalWildcard` (or `stream.Resolve(stream.PipelineBot, siteID).CanonicalWildcard`) for the bot collection, and **fix `messages_test.go:622`**.
+- `high` — Add an assertion that **every collection's `FilterSubjects(siteID)` is a subset of its own `StreamConfig(siteID).Subjects`** — a table test over all five collections, so this class of drift cannot recur.
+- `high` — Add `Error() error` to `msgBatch`, check it after draining `Messages()`, and log + count both it and the `Fetch` error with a short backoff before `continue`.
+- `medium` — On `ResolveIdentities` error, return the error so the batch Naks (or emit a dedicated failure metric plus a re-index path) instead of indexing author-less documents.
+- `medium` — Thread `msgCtx` from `AddWithContext` into `BuildAction` and the resolvers so the ES and Mongo lookups inherit the span and shutdown deadline.
+- `low` — Move bootstrap into `bootstrap.go`, with the INBOX/HR exclusion expressed there.
+
