@@ -180,3 +180,39 @@ Integration surface is small and unusually disciplined — the central cross-ser
 - `low` — align `bootstrapStreams` with the CLAUDE.md signature, or amend CLAUDE.md §6 to sanction the `(streamName, subjectFilter)` form plus the verify-when-disabled branch, since two services now depend on it.
 - `low` — document in `deploy/README.md` which of `$max` and `$set` is authoritative for `lastSeenAt`, so the read-floor contract is explicit rather than emergent.
 - `nitpick` — correct the `MsgCanonicalMessageWildcard` doc comment to name the real Teams subject prefix.
+
+---
+
+## 7. Performance — 4 / 5
+
+Genuinely strong performance engineering — coalescing, bounded batches, back-pressure, a narrow sonic projection and zero read-path — with a handful of real but bounded hot-path and sizing gaps.
+
+### Findings
+- `medium` — `mention.Parse` runs a full RE2 scan over every created message's content, including the large majority containing no `@` at all — `roomlist-worker/handler.go:59` (and `:84` on edits).
+  The pattern is `(^|\s)@(…)` (`pkg/mention/mention.go:15`); the leading alternation defeats Go's literal-prefix optimization, so the whole (up to 20KB) body is walked, and `FindAllStringSubmatch` allocates a `[][]string` of 4 submatches per hit. This is the single consume goroutine — the worker's entire throughput ceiling.
+
+- `medium` — the mention budget is checked *after* the merge, so one message can overshoot it, and `BulkSetMentions` never chunks — `roomlist-worker/flush.go:66-69`, `roomlist-worker/batch.go:114-119`, `roomlist-worker/store_mongo.go:158-166`.
+  `newFlusher`'s own comment says `mention.Parse` caps neither token count nor input; a 20KB body yields ~5k accounts, all added under one `f.add` before the `>= mentionBudget` test can fire. The map can therefore reach ~9k (budget 4000 at defaults, `main.go:145`) and `BulkSetMentions` emits one `UpdateOne` model per entry in a single un-chunked `BulkWrite` under `FLUSH_TIMEOUT` (10s) with majority write concern — exactly the "cannot complete inside flushTimeout" livelock the budget was written to prevent.
+
+- `low` — the service has no `EnsureIndexes`; every `BulkAdvanceLastSeen`/`BulkSetMentions` model filters on `roomId` + `u.account` and depends on an index another service owns — `roomlist-worker/store_mongo.go:151`, `:162`, created only in `room-service/store_mongo.go:124-125`.
+  CLAUDE.md §6 (MongoDB) says indexes are created in the store constructor or an `EnsureIndexes` at startup. Deployed against a DB where room-service has not yet run, each flush becomes up to `MaxAckPending` COLLSCANs on `subscriptions`.
+
+- `low` — a deterministically panicking message has no drop path under `MaxDeliver=-1` — `roomlist-worker/main.go:364`.
+  `jobguard.Guard` recovers but does not settle, so the message is neither held nor acked and re-occupies an ack-pending slot every `AckWait` forever. `jobguard.Run` is the Ack-on-panic variant (`pkg/jobguard/jobguard.go:47-50`). Note the nuance that makes this only `low`: a panic *after* `f.add` would double-settle under `Run`, so the fix is a guard scoped to the derive step, not a blanket swap. Malformed payloads are handled correctly by contrast (`main.go:368-373`).
+
+- `low` — the room stage emits two write models per room into one unordered bulk, both targeting the same document — `roomlist-worker/store_mongo.go:72` and `:95`.
+  Justified (the `$max` dimensions must escape the pointer's regression filter, and the comment says so), but it doubles the op count and adds same-document write-lock contention on the hottest collection. Worth measuring whether the `$max` fields can ride the pipeline branch of `roomPointerUpdate`.
+
+- `nitpick` — `writeIntents` is copied by value three times per message (return from `deriveIntents`, `flusher.add`, `batch.add`) — `roomlist-worker/handler.go:51`, `flush.go:66`, `batch.go:76`. Both `//nolint:gocritic // hugeParam` directives acknowledge it; a `*writeIntents` would remove ~100B×3 of copying per message with no readability cost.
+
+- `nitpick` — ~4 context allocations per message on the hot path (`logctx.ConsumeContext` → `StampRequestID` + `Admit`, then `obs.ContextWithIdentity`) — `roomlist-worker/main.go:365`, `:375`, and each is retained in `held` until flush.
+
+**Verified clean (no finding):** no Mongo reads at all, so no N+1 and the projection rule is N/A (`handler.go:49-50`); no `$lookup`; `BulkWrite` is unordered with an empty-input guard (`pkg/mongoutil/collection.go:169-179`); sonic confined to `Unmarshal` of a narrow `eventProjection` with startup pretouch — no byte-identity exposure (`projection.go`, `pretouch.go:12`); jsretry discipline correct throughout — `Settle`/`SettleQuiet` only, never a bare `Nak()` or `NakWithDelay(0)` (`main.go:371`, `flush.go:218`); `cc.BackOff` derived, never hardcoded (`main.go:392`); no `time.Sleep` anywhere; both long-lived goroutines have explicit termination paths (`main.go:148` + `:207-215`; `main.go:173` + `:194-204`); `newBatch` reuse sizing is clamped by `flushloop.ReuseCap` (`batch.go:58-68`); `validateFlushBudget` correctly charges `2×timeout+interval` against `EffectiveAckWait` (`main.go:78`, `:295-313`).
+
+### Recommendations
+- `medium` — Add `if strings.IndexByte(content,'@') < 0 { return ParseResult{} }` at the top of `pkg/mention.Parse`; it benefits `broadcast-worker` and `notification-worker` identically.
+- `medium` — Chunk `BulkSetMentions` models (e.g. 1000/call) in `store_mongo.go:158-166`, or have `batch.add` report the mention count so `flusher.add` can drain mid-message; today one message can defeat the budget.
+- `low` — Add an `EnsureIndexes` to `mongoStore` asserting `(roomId, u.account)` and `_id`, or document the room-service ownership dependency inline at `store_mongo.go:151`.
+- `low` — Scope panic recovery to `deriveIntents` and settle the message permanently on panic, so `MaxDeliver=-1` cannot pin an ack-pending slot indefinitely.
+- `nitpick` — Take `*writeIntents` through `flusher.add`/`batch.add` and drop the two `hugeParam` nolints.
+- `nitpick` — Emit a metric for batch sizes (`rooms`/`lastSeen`/`mentions`/`held`) and flush duration; the budget and `FLUSH_TIMEOUT` are both tuned against numbers nothing currently exports.
