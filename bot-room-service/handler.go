@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subauthcache"
@@ -346,21 +347,18 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	// Fan out the room's current key only to newly-subscribed accounts — duplicate adds already
 	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
-		pair, err := h.keyStore.Get(c, roomID)
+		// Self-heal a key-absent room instead of silently skipping the fan-out
+		// (which left the new member unable to decrypt with no retry). Mirrors the
+		// create path's mint; going-forward-only — see keyPairOrHeal.
+		pair, err := h.keyPairOrHeal(c, roomID)
 		if err != nil {
-			if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-				// Legacy/broken room with no key: nothing to fan out, not fatal.
-				slog.WarnContext(c, "no current key on add-member; skip fan-out", "roomID", roomID)
-			} else {
-				return nil, fmt.Errorf("get room key: %w", err)
-			}
-		} else {
-			h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
-				RoomID:     roomID,
-				Version:    pair.Version,
-				PrivateKey: pair.KeyPair.PrivateKey,
-			}, "fan out room key on add failed")
+			return nil, fmt.Errorf("get room key: %w", err)
 		}
+		h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
+			RoomID:     roomID,
+			Version:    pair.Version,
+			PrivateKey: pair.KeyPair.PrivateKey,
+		}, "fan out room key on add failed")
 	}
 
 	// Skip sysmsg on all-dup batches (true no-op: no message, no OUTBOX event).
@@ -556,6 +554,31 @@ func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 			slog.WarnContext(ctx, warnMsg, "account", acct, "roomID", roomID, "error", err)
 		}
 	}
+}
+
+// keyPairOrHeal returns the room's current key, minting and persisting a fresh
+// key when the room has none (legacy / never-keyed). Going-forward-only: it
+// unblocks new members but does NOT recover history a lost key had encrypted.
+// RecordKeyAbsent fires on the mint so ops can spot a lost-key event. SetIfAbsent
+// converges concurrent minters on a single v0 key. Mirrors the create path's mint.
+func (h *handler) keyPairOrHeal(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
+	pair, err := h.keyStore.Get(ctx, roomID)
+	if err != nil && !errors.Is(err, roomkeystore.ErrNoCurrentKey) {
+		return nil, fmt.Errorf("get room key: %w", err)
+	}
+	if pair != nil {
+		return pair, nil
+	}
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fresh, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate room key: %w", err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fresh)
+	if err != nil {
+		return nil, fmt.Errorf("store room key: %w", err)
+	}
+	return committed, nil
 }
 
 // rotateAndFanOut commits before fan-out; a predicted current+1 mislabels keys when removals race.

@@ -1006,14 +1006,13 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	// pair cannot go stale between here and the fan-out below.
 	var pair *roomkeystore.VersionedKeyPair
 	if len(subs) > 0 {
+		// A key-absent room here would otherwise permanently fail the "added"
+		// fan-out, leaving the new member unable to decrypt with no retry. Instead
+		// self-heal: mint a fresh key for the (never-keyed) room. Going-forward-only
+		// — see keyPairOrHeal.
 		var err error
-		pair, err = h.keyStore.Get(ctx, req.RoomID)
+		pair, err = h.keyPairOrHeal(ctx, req.RoomID)
 		if err != nil {
-			roomkeymetrics.RecordStoreError(ctx, "Get")
-			return fmt.Errorf("get room key for subscription fan-out: %w", err)
-		}
-		// A keyless "added" event would leave the new member unable to decrypt with no retry.
-		if err := requireKeyPair(ctx, pair); err != nil {
 			return err
 		}
 	}
@@ -1693,6 +1692,35 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
+}
+
+// keyPairOrHeal returns the room's current key, minting and persisting a fresh
+// key when the store holds none. A key-absent room is a never-keyed channel
+// (legacy / pre-encryption); the mint unblocks going-forward messages but does
+// NOT recover history that a lost key had encrypted — it is going-forward-only.
+// RecordKeyAbsent still fires on the mint so ops can spot a lost-key event.
+// SetIfAbsent (not Set) converges concurrent minters — JetStream redelivery or a
+// racing worker — on a single v0 key instead of fanning out rival bytes.
+func (h *Handler) keyPairOrHeal(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
+	pair, err := h.keyStore.Get(ctx, roomID)
+	if err != nil {
+		roomkeymetrics.RecordStoreError(ctx, "Get")
+		return nil, fmt.Errorf("get room key: %w", err)
+	}
+	if pair != nil {
+		return pair, nil
+	}
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fallback, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate fallback room key: %w", err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fallback)
+	if err != nil {
+		roomkeymetrics.RecordStoreError(ctx, "SetIfAbsent")
+		return nil, fmt.Errorf("store fallback room key: %w", err)
+	}
+	return committed, nil
 }
 
 func (h *Handler) processCreateRoomChannel(ctx context.Context, req *model.CreateRoomRequest, room *model.Room, requester *model.User, pair *roomkeystore.VersionedKeyPair, requestID string, acceptedAt, now time.Time) error {

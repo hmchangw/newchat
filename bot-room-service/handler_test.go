@@ -707,9 +707,10 @@ func TestHandleAdd_ExistingMembersNoKeyFanOut(t *testing.T) {
 	assert.Empty(t, pub.subjects, "no key fan-out for a pre-existing member")
 }
 
-// TestHandleAdd_NoCurrentKeyDoesNotFailOp: a legacy/broken room with no
-// stored key must not fail add-member — just skip the fan-out.
-func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
+// TestHandleAdd_NoCurrentKeySelfHeals: a legacy/never-keyed room no longer skips
+// the fan-out. Add-member mints a fresh key (SetIfAbsent) and fans it out so the
+// new member can decrypt going forward — going-forward-only, but no silent drop.
+func TestHandleAdd_NoCurrentKeySelfHeals(t *testing.T) {
 	store := &fakeStore{
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
@@ -719,9 +720,16 @@ func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
 	}
+	var minted []byte
+	setIfAbsentCalls := 0
 	keyStore := &fakeKeyStore{
 		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
 			return nil, roomkeystore.ErrNoCurrentKey
+		},
+		SetIfAbsentFn: func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+			setIfAbsentCalls++
+			minted = pair.PrivateKey
+			return &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: pair}, nil
 		},
 	}
 	pub := &fakePublisher{}
@@ -729,9 +737,52 @@ func TestHandleAdd_NoCurrentKeyDoesNotFailOp(t *testing.T) {
 	c := withIdentity(t, "r1", ident())
 
 	resp, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
-	require.NoError(t, err, "missing key must not fail add-member")
+	require.NoError(t, err, "missing key self-heals; must not fail add-member")
 	assert.Equal(t, []string{"bob-id"}, resp.Added.UserIDs)
-	assert.Empty(t, pub.subjects, "nothing to fan out when there is no current key")
+	assert.Equal(t, 1, setIfAbsentCalls, "absent key must be minted exactly once")
+	require.Len(t, minted, 32, "minted key is a fresh 32-byte secret")
+	require.Len(t, pub.subjects, 1, "the minted key is fanned out to the new member")
+	var evt model.RoomKeyEvent
+	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
+	assert.Equal(t, "r1", evt.RoomID)
+	assert.Equal(t, 0, evt.Version)
+	assert.Equal(t, minted, evt.PrivateKey)
+}
+
+// TestHandleAdd_PresentKeyNotReminted: when the room already has a key, add-member
+// fans out that key without minting (idempotent — no SetIfAbsent).
+func TestHandleAdd_PresentKeyNotReminted(t *testing.T) {
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) { return true, nil },
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
+		},
+	}
+	setIfAbsentCalls := 0
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{Version: 2, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("existing-key-bytes")}}, nil
+		},
+		SetIfAbsentFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+			setIfAbsentCalls++
+			return nil, errors.New("must not mint when key present")
+		},
+	}
+	pub := &fakePublisher{}
+	h := newHandler(store, "site-a", nil, (&captureOutbox{}).publish, keyStore, roomkeysender.NewSender(pub))
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, setIfAbsentCalls, "present key must not be re-minted")
+	require.Len(t, pub.subjects, 1)
+	var evt model.RoomKeyEvent
+	require.NoError(t, json.Unmarshal(pub.payloads[0], &evt))
+	assert.Equal(t, 2, evt.Version)
+	assert.Equal(t, []byte("existing-key-bytes"), evt.PrivateKey)
 }
 
 // TestHandleAdd_KeyStoreGetErrorFailsOp: unlike ErrNoCurrentKey, an infra
