@@ -82,3 +82,24 @@ Unit coverage is **67.6% (136 stmts)** — below the CLAUDE.md §4 80% floor, so
 - `medium` — Add `TestRun_ContextCancelled` asserting the intended SIGTERM semantics once D6's finding is resolved.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Small files, small pure functions, comments that explain WHY — the debt is triplicated prose and a worker-pool skeleton copy-pasted from a sibling.
+
+### Findings
+- `medium` — The three-branch upsert rule (oneOnOne / small-inline / large-deferred) is narrated in full **three times**: `store.go:23-28`, `store_mongo.go:95-99`, and `store_mongo.go:112-121`. All three must be edited together; nothing enforces that, so they will drift. Keep the one at `chatUpsertModel` and reduce the other two to a pointer.
+- `medium` — The fan-out skeleton — `summary` struct with `atomic.Int64` counters, unbuffered `jobs` channel, `MaxWorkers` goroutines, `close(jobs)` + `wg.Wait()`, "N of M failed" return — is duplicated near-verbatim in `teams-chat-sync/syncer.go:131-189` and `teams-chat-member-sync/syncer.go:113-158`. Two copies is tolerable; a third (this is a family of six jobs) is the point to extract a `pkg/batchrun` worker-pool helper parameterized by job type.
+- `low` — `inlineMemberThreshold = 25` (`syncer.go:94`) is a cross-service correctness constant — its own comment says exceeding Graph's inline-expansion cap silently loses members — yet it is a bare local `const` with no link to Graph's documented cap and no counterpart in `teams-chat-member-sync`. Compare `model.TeamsRoomVerifyMaxChatIDs` (`pkg/model/teams.go:110`), which the repo deliberately hoisted into `pkg/model` for exactly this reason.
+- `nitpick` — Four `//nolint:gocritic // hugeParam` suppressions on value receivers (`main.go:71`, `syncer.go:103`, `:194`, `:206`) plus one `rangeValCopy` (`store_mongo.go:102`). Each is individually justified; five in a 1725-line service suggests `model.TeamsChat`/`Config` are simply large.
+
+No dead code, no leaky abstractions, no function over ~35 lines, no file over 234 lines.
+
+### Recommendations
+- `medium` — Collapse the triplicated upsert narrative to one authoritative comment at `store_mongo.go:112`.
+- `medium` — Extract the worker-pool + summary into `pkg/batchrun` (generic over the job type) and adopt it in both chat-sync jobs; this is the refactor I would actually do.
+- `low` — Move `inlineMemberThreshold` to `pkg/model` beside `TeamsRoomVerifyMaxChatIDs`, with the Graph cap cited in the doc comment.
+
+---
