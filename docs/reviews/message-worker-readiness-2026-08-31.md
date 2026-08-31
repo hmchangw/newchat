@@ -104,3 +104,33 @@ Coverage is **56.8% (843 statements)** — under the §4 60% line, so the dimens
 - `medium` — Extend the `HandleJetStreamMsg` table with `numDelivered` variants (1, 3, `MaxDeliver`) asserting the delay grows and exhaustion takes the salvage path.
 - `low` — Replace the hand-rolled fakes with the generated `MockStore` so interface drift breaks the build.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Genuinely well-reasoned code with excellent WHY-comments, but `handler.go`'s thread path and `store_cassandra.go`'s ten hand-maintained INSERT column lists have outgrown single-function/single-file shape, and a one-off Teams migration now rides the same binary behind `MODE`.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | The "build subscription → insert/upsert → federate to owner site" sequence is written out **five times**, differing only in `Insert` vs `Upsert` and which account it targets. The parent/replier pair inside the two thread-reply handlers is otherwise byte-for-byte identical | `handler.go:438-459`, `:508-525`, `:533-541`, `:680-687` |
+| high | `processMessage` is 168 lines doing eight things: unmarshal, mention resolve, sender resolve, quote re-projection, parent-createdAt resolution + retry budget, thread room/subs, mention marks, unread fan-out, persist, badge publish. **This is the only entry point to the service's core remit**; every new message feature lands here | `handler.go:92-258` |
+| high | **Ten `INSERT` statements across four near-duplicate save paths, each with its own hand-typed column list and matching `?` count.** Adding one message column requires editing up to seven statements and their bind lists, with **no compiler help** — a miscount is a runtime-only failure. `saveThreadMessageEncrypted` (76 lines) is `SaveThreadMessage` with the body columns swapped | `store_cassandra.go:168`, `:179`, `:217`, `:227`, `:260`, `:271`, `:292`, `:338`, `:350`, `:366` |
+| medium | `mock_hridentity_test.go` has **no `//go:generate` directive**, so `make generate` never visits it — the repo-wide zero-diff does not cover this mock (see Chapter 2) | `mock_hridentity_test.go:2-6` |
+| medium | `main()` is ~275 lines and inlines the publish closure, the Teams wiring and the whole consume loop. Only `canonicalProcessor` was extracted for testability, so the loop, closure and shutdown chain are **untested by construction** — a visible contributor to the 56.8% | `main.go:73-347` |
+| medium | The publish closure infers its metric labels from **whether a msgID was passed**, hardcoding `OperationThreadTCount` for every core-NATS publish. These labels encode today's only two call sites; the next core publish is silently reported as a thread-tcount badge | `main.go:211`, `:218` |
+| medium | `isMigration bool` is threaded through five functions and guards six branches. A flag argument this deep means **every new thread side effect must remember to ask** | `handler.go:92`, `:207`, `:363`, `:433`, `:533`, `:679` |
+| medium | Two unrelated remits in one binary: the Teams migration (~460 production lines with its own store, LRU cache and consumer) selected by `MODE`. **A finished one-off migration is now permanent surface area in the sole persister of message history** | `teamsbatch.go`, `teamssender.go`, `teamstransform.go`, `hridentity.go`; `main.go:36-39`, `:264-278` |
+| low | Dead production code: `reactionShortcode` referenced only by its own test; `_ = tm.Forwarded` a no-op keeping an unused field alive | `teamstransform.go:113-131`, `:69` |
+| low | `errThreadRoomNotFound` is never distinguished by any handler — only an integration test asserts on it. It reads as a contract the handler honours and does not | `store_mongo.go:19`, `:74` |
+| low | `Store`'s signatures take `*cassParticipant`, a Cassandra-UDT type with `cql` tags, so **handler code builds storage-shaped structs** — the persistence encoding leaks into the consumer-owned interface | `store.go:16-18`; `handler.go:836` |
+| nitpick | Design rationale now duplicated three ways: `CLAUDE.md` §6, a 38-line `writeTS` doc comment, and a 22-line `stripLegacyPlaintext` comment. Correct today; three places to keep in sync | `store_cassandra.go:82-119`, `:121-142` |
+
+### Recommendations
+- `high` — Extract `subscribeAndFederate(ctx, msg, threadRoomID, userID, account, eventSiteID, ownerSiteID, now, write subWriteFunc) error` and collapse the five copies onto it, passing `Insert`/`Upsert` as the varying step.
+- `high` — Split `processMessage` into `enrich(evt)`, `persistThreadReply(...)` and `persistChannelMessage(...)`; the retry-budget and quote-reprojection logic already have clean seams.
+- `high` — Introduce a single `messageColumns` binder producing (columns, placeholders, values) for the plaintext and encrypted variants, so the four save paths **compose** it instead of restating it ten times.
+- `medium` — Add the missing `//go:generate mockgen` to `teamssender.go`.
+- `medium` — Move the consume loop and publish closure out of `main()` into `run.go`/`consume.go`, and pass the metric destination/operation explicitly rather than deriving it from `msgID != ""`.
+- `medium` — Extract the Teams migration to its own service directory and schedule its deletion; failing that, replace the `isMigration` flag with a no-op `ThreadStore` decorator selected once at wiring time.
+- `low` — Delete `reactionShortcode`, its test, and the `_ = tm.Forwarded` no-op.
+
