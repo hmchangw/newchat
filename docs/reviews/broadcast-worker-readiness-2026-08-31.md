@@ -184,3 +184,23 @@ Genuinely performance-engineered — sonic + pretouch, prebuilt metric attribute
 - `low` — Add a precise inclusion projection for `GetRoom`, or a second narrow store method for the DM path.
 - `low` — Marshal `RoomActivityEvent` with sonic and add it to `pretouchTypes`; run `allowedThreadMentions` and `GetThreadFollowers` concurrently in `channelThreadFanOut`.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Validate `destSiteID` against `cfg.AllSiteIDs` in `federateMentions`; skip + WARN + counter on an unknown peer | Integration | `handler.go:446`, `:498` | An unknown site ID publishes into an OUTBOX subject **no consumer filters on** — the badge sits unconsumed until retention deletes it, with no error anywhere. The peer list is already parsed and sitting unused two files away. |
+| 2 | `high` | Add the preview-writer over-cap shed test | Test coverage | `preview_writer.go:127` | The branch's own comment names the regression it prevents (#224, reintroduced by #289's cap) — certifying a preview for a message it does not describe. **Zero tests reference it.** |
+| 3 | `medium` | Change `NATS_URL` and `MONGO_URI` to `required` | Architecture | `main.go:46`, `:53` | This service is the fleet outlier on a rule `CLAUDE.md` states flatly. A dropped env var currently starts a healthy-looking pod wired to nothing; `SITE_ID` defaulting to `"default"` compounds it into binding the **wrong site's** stream. |
+| 4 | `medium` | Verify `OUTBOX-{siteID}` at startup, and return (not just log) the mention publish error | Integration | `bootstrap.go:29-41`; `handler.go:497-503` | A missing OUTBOX currently costs **every cross-site mention badge for the pod's lifetime**, discovered by nobody. |
+| 5 | `medium` | Route mutation handlers' channel branch through `GetRoomMeta`; bound `publishToThreadAccounts` | Performance | `handler.go:835`, `:1278` | Reactions are the highest-frequency UI event and each takes an uncached Mongo read; the unbounded per-recipient goroutines buy nothing since core NATS serializes on the connection anyway. |
+| 6 | `medium` | Document or durably re-lane `chat.roomactivity.{destSiteID}` | Architecture | `roomactivity.go:193` | A third federation lane exists that `CLAUDE.md`'s model does not describe, with no stream, retry or ack. If ops never exports the subject the feature is **silently dead** — local publish succeeds, nothing arrives. |
+| 7 | `medium` | Fix the `_` on `DecodeAttachments`' `skipped`, and make `handleReacted` return `Permanent` like its five siblings | Code quality | `handler.go:1248`, `:816` | Malformed attachments are silently stripped from the **client-facing** payload with no signal, while the identical call elsewhere treats it as fatal. |
+| 8 | `high` | Split `handler.go` and extract `config.go`/`consumer.go` from `main()` | Maintainability | `handler.go:1`; `main.go:126-503` | 1,449 and 378 lines respectively, with four test files testing code that has no production counterpart. This is also the cheapest route to closing the `main.go` 3.2% coverage hole. |
+| 9 | `medium` | Introduce one `roomFanout` view and collapse the three DM loops and six unknown-room-type arms | Maintainability | `handler.go:701`, `:918`, `:1168` | Two room types in the store contract force every new handler to pick one first — and the DM audience currently differs between a message and its own edit. |
+| 10 | `medium` | Move the preview seal after the delivery publish | Performance | `handler.go:271` | A cold or rotated DEK puts a Vault unwrap in front of user-visible fan-out, for work that depends on nothing the publish produces. |
+
+### Verdict
+
+**Ship-ready.** This is the strongest service in the audit and the one whose hard parts — codec discipline, cache coherence, the one-write boundary, backoff correctness — are demonstrably right. The action list is mostly about *closing edges*: item 1 is a real silent-loss path, items 3–4 are fail-fast hygiene the rest of the fleet already has, and items 8–9 are the structural work that keeps a 1,449-line handler from becoming the reason the next fix is wrong.
