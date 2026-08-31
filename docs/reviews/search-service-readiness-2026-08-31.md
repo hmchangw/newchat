@@ -182,3 +182,23 @@ Solid hot-path fundamentals (batched enrichment with **no N+1**, precomputed met
 - `medium` — Pass `_source_includes=restrictedRooms` on the user-room `GetDoc` and drop `Rooms` from the local doc type; set `track_total_hits` to a bounded integer for rooms and orgs.
 - `medium` — Run `UsersByAccounts` and `AppsByAssistantNames` concurrently, and start `fetchRoomNames` as soon as the subscription partition is known.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Add `MSG_INDEX_PREFIX` to config and derive both read patterns from it | Integration | `query_messages.go:18` vs `search-sync-worker/main.go:60` | The **primary search target** is a hardcoded literal while its writer is fully operator-configured. A prefix that doesn't start with `messages-` makes `search.messages` **return zero hits with no error** — and the other three indices already have exactly this guard. |
+| 2 | `high` | Cap `offset` and `len(req.RoomIDs)`, and bound the restricted-room clause expansion | Performance | `handler.go:374-384`; `query_messages.go:112-134` | Three unbounded client-controlled inputs on a public search RPC: deep pagination across every remote cluster, a 50k-term clause, and unbounded bool-clause expansion. Any one is a cheap denial-of-service. |
+| 3 | `high` | Decide `search.apps` and `search.users`: finish them or withdraw them | Code quality / Maintainability | `query_apps.go:49`; `users_client.go:21`, `:40`, `:59` | `search.apps` threads an `account` through three layers into `_ = account // …once implemented` — **a discarded parameter that reads as access control**. `search.users` is a live route whose URL, body and auth are all invented, and `USERS_API_URL` is `required`, so the service **cannot boot without pointing at an unspecified endpoint**. |
+| 4 | `high` | Size the ES and HR HTTP connection pools | Performance | `main.go:212-215`; `pkg/searchengine/factory.go:33-58` | `MaxIdleConnsPerHost=2` behind a 256-way concurrency guard: beyond two in-flight requests every call pays a fresh TCP+TLS handshake. Two sibling services already set this. |
+| 5 | `high` | Add a `$project` to the apps aggregation | Performance | `query_apps.go:51-55` | Whole documents decoded per request on a client-facing RPC, against the repo's explicit projection rule. |
+| 6 | `high` | Delete `SearchConfig.RequestTimeout`; let `natsrouter.GuardConfig` own the deadline | Architecture | `main.go:71` vs `pkg/natsrouter/guard.go:24` | Two deadlines are applied and **the compose file exposes only the one that loses** — an operator raising `SEARCH_REQUEST_TIMEOUT` to 30 s is still cut at 10 s, silently. |
+| 7 | `high` | Test the missing-`account` guard across all five handlers, and the request-deadline branch | Test coverage | `handler.go:91`…`:336`, `:84` | The **auth-adjacent entry guard** is untested in every handler, and the only bound on a slow CCS call is never exercised. |
+| 8 | `medium` | Decode `_shards.failed`/`skipped` and surface CCS degradation | Test coverage / Integration | `response.go:21-23` | **A partial cross-cluster result is currently returned as complete, with an undercounted total.** The user cannot tell a degraded search from a real one. |
+| 9 | `medium` | Extract the five-way duplicated handler preamble into one helper | Maintainability | `handler.go:87-104`, … | Five copies of the account/validation/pagination/timeout block; a sixth collection means a sixth copy, and a fix means five edits. |
+| 10 | `medium` | Split the `SEARCH_` prefix so `ESConfig` and `SearchConfig` cannot shadow | Architecture / Maintainability | `main.go:82-86` | The collision hazard is **documented rather than removed** — and a comment cannot prevent it. Do it now, while the field sets happen not to overlap. |
+
+### Verdict
+
+**Ship-capable with items 1–2 fixed.** The documentation discipline here is the best in the fleet — five RPCs, canonical doc and both derived views, no drift — and the enrichment path is genuinely well engineered. What needs attention is the gap between *configured* and *hardcoded* (item 1, where the primary index escapes the contract its siblings follow), and the absence of ceilings on client-supplied query parameters (item 2). Item 3 is a product decision more than an engineering one, but shipping a required-config route with an invented wire contract is a decision worth making deliberately.
