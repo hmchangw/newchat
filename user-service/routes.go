@@ -28,4 +28,5 @@ func registerRoutes(r *gin.Engine, h *handler, auth authDeps, d httpDeps) {
 	api.Use(authMiddleware(auth))
 
 	api.GET("/subscriptions", h.ListSubscriptions)
+	api.GET("/subscriptions/count", h.CountSubscriptions)
 }
