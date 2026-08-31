@@ -126,3 +126,30 @@ Excellent WHY-comment discipline and well-factored small units (`roomsubcache.go
 - `medium` — Extract `watermarkGuard(field string, at any) bson.A` and use it at all 13 sites; add one table test asserting the produced filter per field name.
 - `low` — Move the misplaced doc block; extract the five `user_*` handlers into `handler_user.go`/`store_mongo_user.go` as the low-risk first step toward splitting user replication out of inbox-worker entirely.
 
+---
+
+## 6. Integration — 3 / 5
+
+Every produced INBOX event type is consumed and the lane/ownership rules are implemented exactly as `CLAUDE.md` specifies — but **the destination-side lane split silently discards the FIFO ordering guarantee the origin OUTBOX pays for**, and one concurrent-lane handler lacks the high-water-mark guard its lane assignment assumes.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`room_renamed` is in `pkg/outbox.OrderedEventTypes`** — it shares the per-destination FIFO lane precisely "so a `room_renamed` can't overtake the `member_added` that creates the subscription it renames" — **but at the destination `isMembershipSubject` routes only `member_added`/`member_removed` to the sequential lane.** `room_renamed` goes to the `MaxWorkers` fan-out pool and is processed concurrently with an in-flight `member_added`. **The stranding is permanent, not transient**: `UpdateSubscriptionNamesForRoom` is an `UpdateMany` over *existing* subs, so a rename applied before the subscription exists matches zero documents, and `handleMemberAdded` then writes the stale `event.RoomName` with no later event to correct it. **The origin FIFO lane (`MaxAckPending=1`) buys an ordering the destination throws away** | `main.go:1032-1035`; `main.go:633-646`; `handler.go:313` |
+| high | **`subscription_opened` is applied with no high-water-mark guard, contradicting the stated precondition for its lane.** `UpdateSubscriptionOpen` is a bare `$set{open}`, while `model.SubscriptionOpenedEvent.Timestamp` **exists and is simply ignored** — and `pkg/outbox.ConcurrentEventTypes` justifies concurrent forwarding on the claim that "inbox-worker applies them under high-water-mark / idempotent-upsert guards". A hide→reopen pair reordered across the fan-out pool leaves the room **permanently in the wrong state**. Every sibling handler (mute, favorite, section_moved, role, rename, restrict) *does* carry the `$lt` guard — this one is the outlier | `main.go:511-523`; `handler.go:532-541`; `pkg/model/event.go:673-678` |
+| medium | **`room_sync` has no `model.Inbox*` constant** — the producer builds it as `model.InboxEventType("room_sync")` and the consumer matches a bare literal. The one cross-site contract with **no compile-time anchor at either end** | `data-migration/oplog-collections-transformer/rooms.go:205`; `handler.go:231` |
+| medium | 12 of the 22 dispatch cases match raw string literals. Because `InboxEventType` is a **type alias** for `string`, changing a constant's value compiles clean everywhere and silently routes the new subject to `default:` → `Warn` + **Ack — events dropped, not redelivered**. The file already uses constants for the newer 10 cases, so this is half-migrated drift | `handler.go:226-246`, `:270-272` |
+| medium | `BADGE_CACHE_TTL` re-declared in three services against the declare-once rule. `pkg/badgecache` is the owner, and **inbox-worker writes badge state that user-service reads**, so a divergent TTL is a real coherence bug the tag-level default cannot prevent | `main.go:64`; `room-service/main.go:115`; `user-service/config/config.go:125` |
+| low | `ApplyUserPermissions`'s watermark uses `$lte` on `updatedAt`, so two events sharing a millisecond resolve last-write-wins rather than being rejected; **every other guard in the file uses strict `$lt`** | `main.go:314` |
+| low | `handleRoomSync` upserts the whole `model.Room` with **no timestamp guard**, unlike every other room-scoped handler, and rides the fan-out pool alongside the guarded `room_renamed`/`room_restricted` events the transformer emits with it | `handler.go:436-447` |
+
+### Verified clean
+**All 21 `model.Inbox*` constants plus `room_sync` are dispatched** — cross-checked against `ConcurrentEventTypes` (13), `OrderedEventTypes` (3), and every direct external-lane publisher (`user-service` ×3, `admin-service` ×2, `outbox-worker`, the oplog transformer). **No produced type is unconsumed.** Consumer filters `external.>` only, leaving `internal.>` to search-sync-worker. Sole INBOX owner with fail-fast verification when disabled, setting only `Name + Subjects`. Subjects built exclusively via `pkg/subject`. `idgen.GenerateUUIDv7()` for federated subscriptions. `jsretry.Settle` throughout; no bare `Nak()`. No `chat.user.*` handler, so `docs/client-api.md` is not implicated.
+
+### Recommendations
+- `high` — **Extend `isMembershipSubject` to cover every `pkg/outbox.OrderedEventTypes` member — derive the set from that slice rather than hardcoding two subjects** — so the destination lane split mirrors the origin FIFO partition; add a test asserting the two sets agree.
+- `high` — Add a `nameUpdatedAt`-style watermark to `member_added`'s subscription insert, or have `UpdateSubscriptionNamesForRoom` record the rename so a later-created subscription adopts it. **The ordering fix alone still loses a rename that races a redelivered `member_added`.**
+- `high` — Guard `UpdateSubscriptionOpen` with an `openUpdatedAt` `$lt` from `SubscriptionOpenedEvent.Timestamp`, matching the mute/favorite handlers — **the event already carries the field.**
+- `medium` — Replace all remaining literal cases with constants and add a `room_sync` constant used by both the transformer and this switch.
+- `medium` — Move `BadgeCacheTTL` into a `badgecache.TTLConfig` mounted in all three services.
+- `low` — Tighten the permissions watermark to `$lt`; add a timestamp guard to `handleRoomSync`.
+
