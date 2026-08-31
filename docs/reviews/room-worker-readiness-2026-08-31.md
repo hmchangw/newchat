@@ -49,3 +49,32 @@ Disciplined, idiomatic Go — correct `%w` wrapping, `errors.Is` never string co
 - `medium` — Drop `err.Error()` from `handler.go:2302`; use the static `errcode.BadRequest` form the other three sites use.
 - `low` — Rename `SubscriptionStore` to `RoomWorkerStore` or split off the thread-cleanup and org-display groups; switch `loadAddMemberInputs` to `errgroup.WithContext`; normalize log keys to `snake_case`.
 
+---
+
+## 3. Architecture — 4 / 5
+
+The federation boundary, stream-bootstrap opt-in, consumer pattern and shutdown ordering are all correct and unusually well-reasoned. The deductions are a mode leak, constructor DI bypassed by field pokes, and units that have outgrown the flat layout.
+
+### Verified clean
+All cross-site publishes route through `federate` → `outbox.Publish` (`handler.go:341-343`, call sites `:544`, `:757`, `:1299`, `:1900`, `:2406`, `:2515`, `teamsroomcreate.go:328`, `:392`) — **no direct remote-INBOX publish anywhere**; only same-site `subject.InboxInternal` search-feed writes. Every type used is in exactly one `pkg/outbox` partition set. `bootstrapStreams` sets only `Name + Subjects` and, when disabled, **verifies** the stream rather than no-op'ing — stricter than the spec. The consumer is `cons.Messages()` + `MAX_WORKERS` semaphore with `PullMaxMessages(2*MaxWorkers)`, never mixed with `Consume()`, and `BackOff` comes from `stream.DurableConsumerDefaults`. Shutdown follows `iter.Stop → wg.Wait → Drain → DB` at 25 s. Config is a typed `caarlos0/env` struct with fail-fast validation; no `os.Getenv`.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | The **`teams`-mode deploy unconditionally registers the production sync-RPC** `chat.server.request.room.{site}.create.dm` on the shared `room-worker` queue group. `Mode` gates the stream, the durable and `bootstrapStreams` — but **not the router**. A Teams-migration pod sized for a batch job silently takes production DM-create traffic | `main.go:283-285` vs `:213`, `:449-452`; `bootstrap.go:43-46` |
+| medium | Four dependencies assigned by **direct field poke after `NewHandler`** (`publishUsers`, `dekProvisioner`, `valkey`, `reconcileTTL`). The comment states the reason is avoiding churn — which is exactly what the functional-option pattern already used in-repo (`broadcast-worker/handler.go:102`, `inbox-worker/handler.go:172`) solves. A zero-value `reconcileTTL` silently means "recompute every add" | `main.go:266`, `:279-281`; `handler.go:64-67` |
+| medium | `SubscriptionStore` is a **31-method interface** spanning subscriptions, rooms, users, apps, room_members, thread state, org-display rollups and room creation, with no seam for the Teams-only methods — so the default-mode deploy carries the migration surface | `store.go:64` |
+| medium | `handler.go` is 2,625 lines / 111 KB with remove, add, create, rename, key-fan-out and sync-DM flows in one file (`processAddMembers` alone spans ~475 lines); `store_mongo.go` is 829 lines | `handler.go:834-1309` |
+| low | Cross-service coherence knobs re-declared per service: `ROOM_KEY_RETIRED_TTL` duplicated verbatim in four services that `CLAUDE.md` requires to agree. `roomkeystore` owns the collection and should own a mounted config struct, as `roommetacache/ttlconfig.go:13` does | `main.go:70`; `room-service/main.go:67`; `bot-room-service/main.go:42`; `broadcast-worker/main.go:82` |
+| low | `ROOM_META_CACHE_TTL` defaults to **60 s here vs 2 m** in broadcast-worker, message-gatekeeper and notification-worker. Per-process L1 caches, so not a shared-key bug — but exactly the drift the declare-once rule prevents | `main.go:58` |
+| low | The single `PublishFunc` picks its transport **implicitly from whether `msgID` is empty** (core NATS vs JetStream), coupling durability choice to a parameter's emptiness | `main.go:239-262`; `handler.go:50` |
+| nitpick | JetStream dispatch matches subjects with `strings.HasSuffix`/`Contains` rather than `pkg/subject` parsers; correctness depends on `.teams.create` being tested before `.create` | `handler.go:256-274` |
+| nitpick | `MongoStore`/`NewMongoStore` exported from `package main` | `store_mongo.go:22`, `:42` |
+
+### Recommendations
+- `medium` — Gate `natsrouter.Register` (and the router construction) behind `cfg.Mode == "default"`, or give teams mode its own queue group.
+- `medium` — Replace the four post-construction assignments with `NewHandler(..., opts ...handlerOption)`, mirroring broadcast-worker.
+- `medium` — Split `SubscriptionStore` along the flows the handler already has; move the Teams surface behind its own interface; rename the residual to `RoomStore`.
+- `medium` — Adopt the sanctioned sub-package layout: extract `processAddMembers`/`processRemoveMember` into `member.go`, create into `create.go`, key fan-out into `keyfanout.go`.
+- `low` — Move `ROOM_KEY_RETIRED_TTL` + `ROOM_KEY_GRACE_PERIOD` into a `roomkeystore.Config` mounted in all four services; align `ROOM_META_CACHE_TTL` or document why 60 s.
+- `nitpick` — Add `subject.ParseRoomCanonical`-style helpers so dispatch uses parsed tokens rather than suffix matching.
+
