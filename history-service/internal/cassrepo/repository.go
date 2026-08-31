@@ -5,6 +5,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/threadcount"
 )
 
 // defaultWalkFanout caps how many buckets a bucketed-table read fetches
@@ -25,6 +26,9 @@ type Repository struct {
 	maxBuckets int
 	walkFanout int
 	cipher     atrest.Cipher // nil when ATREST_ENABLED=false
+	// threadPolicy tunes where exact counting stops and how often an
+	// approximate count is re-derived; tests override it.
+	threadPolicy threadcount.Policy
 }
 
 // NewRepository wires a session, bucket sizer, max-walk depth, and (optional)
@@ -34,10 +38,11 @@ type Repository struct {
 // and the write path uses legacy plaintext columns.
 func NewRepository(session *gocql.Session, bucket msgbucket.Sizer, maxBuckets int, cipher atrest.Cipher) *Repository {
 	return &Repository{
-		session:    session,
-		bucket:     bucket,
-		maxBuckets: maxBuckets,
-		walkFanout: defaultWalkFanout,
-		cipher:     cipher,
+		session:      session,
+		bucket:       bucket,
+		maxBuckets:   maxBuckets,
+		walkFanout:   defaultWalkFanout,
+		cipher:       cipher,
+		threadPolicy: threadcount.DefaultPolicy(),
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/msgbucket"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/pkg/userstore"
 )
@@ -1232,6 +1233,210 @@ func TestCassandraStore_SaveThreadMessage_IncrementsParentTcount(t *testing.T) {
 	})
 }
 
+// Once the thread partition reaches the scan limit, tcount maintenance must
+// switch from the exact partition scan to the O(1) incremental CAS path and
+// keep advancing the stamped count in both parent tables.
+func TestCassandraStore_SaveThreadMessage_PastScanLimit_IncrementalTcount(t *testing.T) {
+	cassSession := setupCassandra(t)
+	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	store.threadPolicy.ScanLimit = 3
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parentBucket := msgbucket.New(24 * time.Hour).Of(parentCreatedAt)
+
+	parentSender := &cassParticipant{ID: "u-mega-parent", Account: "alice", EngName: "Alice"}
+	parentMsg := &model.Message{
+		ID:        "mega-parent",
+		RoomID:    "mega-room",
+		UserID:    "u-mega-parent",
+		CreatedAt: parentCreatedAt,
+		Content:   "parent message",
+	}
+	require.NoError(t, store.SaveMessage(ctx, parentMsg, parentSender, "site-a"))
+
+	replySender := &cassParticipant{ID: "u-mega-replier", Account: "bob", EngName: "Bob"}
+	var lastReplyAt time.Time
+	// Replies 1–2 stay under the limit (exact scan); replies 3–5 hit or exceed
+	// it and must go through the incremental path with no discontinuity.
+	for i := 1; i <= 5; i++ {
+		lastReplyAt = parentCreatedAt.Add(time.Duration(i) * time.Minute)
+		reply := &model.Message{
+			ID:                           fmt.Sprintf("mega-reply-%d", i),
+			RoomID:                       "mega-room",
+			UserID:                       "u-mega-replier",
+			Content:                      "reply",
+			CreatedAt:                    lastReplyAt,
+			ThreadParentMessageID:        "mega-parent",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		}
+		n, err := store.SaveThreadMessage(ctx, reply, replySender, "site-a", "tr-mega")
+		require.NoError(t, err)
+		require.NotNil(t, n)
+		assert.Equal(t, i, *n, "reply %d must report tcount %d", i, i)
+	}
+
+	t.Run("tcount and tlm stamped in messages_by_id", func(t *testing.T) {
+		var (
+			tcount int
+			tlm    time.Time
+		)
+		require.NoError(t, cassSession.Query(
+			`SELECT tcount, thread_last_msg_at FROM messages_by_id WHERE message_id = ?`,
+			"mega-parent",
+		).Scan(&tcount, &tlm))
+		assert.Equal(t, 5, tcount)
+		assert.Equal(t, lastReplyAt.UnixMilli(), tlm.UTC().UnixMilli())
+	})
+
+	t.Run("tcount and tlm mirrored in messages_by_room", func(t *testing.T) {
+		var (
+			tcount int
+			tlm    time.Time
+		)
+		require.NoError(t, cassSession.Query(
+			`SELECT tcount, thread_last_msg_at FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"mega-room", parentBucket, parentCreatedAt, "mega-parent",
+		).Scan(&tcount, &tlm))
+		assert.Equal(t, 5, tcount)
+		assert.Equal(t, lastReplyAt.UnixMilli(), tlm.UTC().UnixMilli())
+	})
+}
+
+// Past the scan limit a redelivery must not count the same reply twice. Repair
+// of any accumulated drift is the re-anchor's job, not the redelivery's — a
+// retry no longer forces the full partition scan it used to.
+func TestCassandraStore_SaveThreadMessage_PastScanLimit_Redelivery(t *testing.T) {
+	cassSession := setupCassandra(t)
+	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	store.threadPolicy.ScanLimit = 3
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parentBucket := msgbucket.New(24 * time.Hour).Of(parentCreatedAt)
+	parentSender := &cassParticipant{ID: "u-redeliv-parent", Account: "alice", EngName: "Alice"}
+	require.NoError(t, store.SaveMessage(ctx, &model.Message{
+		ID: "redeliv-parent", RoomID: "redeliv-room", UserID: "u-redeliv-parent",
+		CreatedAt: parentCreatedAt, Content: "parent",
+	}, parentSender, "site-a"))
+
+	replySender := &cassParticipant{ID: "u-redeliv-replier", Account: "bob", EngName: "Bob"}
+	mkReply := func(i int) *model.Message {
+		return &model.Message{
+			ID:                           fmt.Sprintf("redeliv-reply-%d", i),
+			RoomID:                       "redeliv-room",
+			UserID:                       "u-redeliv-replier",
+			Content:                      "reply",
+			CreatedAt:                    parentCreatedAt.Add(time.Duration(i) * time.Minute),
+			ThreadParentMessageID:        "redeliv-parent",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		}
+	}
+	readCount := func(t *testing.T) int {
+		t.Helper()
+		var got int
+		require.NoError(t, cassSession.Query(
+			`SELECT tcount FROM messages_by_id WHERE message_id = ?`, "redeliv-parent",
+		).Scan(&got))
+		return got
+	}
+
+	store.threadPolicy.ReanchorBudget = 0 // pin the approximate path
+	for i := 1; i <= 5; i++ {
+		_, err := store.SaveThreadMessage(ctx, mkReply(i), replySender, "site-a", "tr-redeliv")
+		require.NoError(t, err)
+	}
+	require.Equal(t, 5, readCount(t))
+
+	t.Run("redelivery does not count the reply twice", func(t *testing.T) {
+		n, err := store.SaveThreadMessage(natsutil.WithRedelivery(ctx), mkReply(5), replySender, "site-a", "tr-redeliv")
+		require.NoError(t, err)
+		require.NotNil(t, n)
+		assert.Equal(t, 5, *n)
+		assert.Equal(t, 5, readCount(t))
+	})
+
+	t.Run("re-anchor repairs a count that drifted high", func(t *testing.T) {
+		// Only an exact recount can walk a too-high count back; the +/-1 path
+		// never can.
+		require.NoError(t, cassSession.Query(
+			`UPDATE messages_by_id SET tcount = ? WHERE message_id = ?`, 99, "redeliv-parent",
+		).Exec())
+
+		store.threadPolicy.ReanchorBudget = 1_000_000 // force it
+		defer func() { store.threadPolicy.ReanchorBudget = 0 }()
+
+		n, err := store.SaveThreadMessage(ctx, mkReply(6), replySender, "site-a", "tr-redeliv")
+		require.NoError(t, err)
+		require.NotNil(t, n)
+		assert.Equal(t, 6, *n, "the exact recount replaces the drifted estimate")
+		assert.Equal(t, 6, readCount(t))
+
+		var mirrored int
+		require.NoError(t, cassSession.Query(
+			`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			"redeliv-room", parentBucket, parentCreatedAt, "redeliv-parent",
+		).Scan(&mirrored))
+		assert.Equal(t, 6, mirrored, "the mirror follows the authority")
+	})
+}
+
+// With re-anchoring pinned off, a reply past the scan limit takes the purely
+// approximate path: it reads the stamped count, adds one, and never scans the
+// partition. The stamped value is deliberately far from the real row count, so
+// a scan-derived answer would be obvious.
+func TestCassandraStore_SaveThreadMessage_PastScanLimit_AdjustsWithoutScanning(t *testing.T) {
+	cassSession := setupCassandra(t)
+	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	store.threadPolicy.ScanLimit = 3
+	store.threadPolicy.ReanchorBudget = 0 // never re-anchor, so the estimate is what we assert on
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parentBucket := msgbucket.New(24 * time.Hour).Of(parentCreatedAt)
+	parentSender := &cassParticipant{ID: "u-approx-parent", Account: "alice", EngName: "Alice"}
+	require.NoError(t, store.SaveMessage(ctx, &model.Message{
+		ID: "approx-parent", RoomID: "approx-room", UserID: "u-approx-parent",
+		CreatedAt: parentCreatedAt, Content: "parent",
+	}, parentSender, "site-a"))
+
+	// Stamp a count unrelated to the (empty) partition: 900 replies "already"
+	// counted. Only the stamped value may drive the result.
+	require.NoError(t, cassSession.Query(
+		`UPDATE messages_by_id SET tcount = ? WHERE message_id = ?`, 900, "approx-parent",
+	).Exec())
+
+	replyAt := parentCreatedAt.Add(time.Minute)
+	n, err := store.SaveThreadMessage(ctx, &model.Message{
+		ID:                           "approx-reply-1",
+		RoomID:                       "approx-room",
+		UserID:                       "u-approx-replier",
+		Content:                      "reply",
+		CreatedAt:                    replyAt,
+		ThreadParentMessageID:        "approx-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+	}, &cassParticipant{ID: "u-approx-replier", Account: "bob", EngName: "Bob"}, "site-a", "tr-approx")
+	require.NoError(t, err)
+	require.NotNil(t, n)
+	assert.Equal(t, 901, *n, "the stamped count moves by one; the partition is never counted")
+
+	var (
+		tcount int
+		tlm    time.Time
+	)
+	require.NoError(t, cassSession.Query(
+		`SELECT tcount, thread_last_msg_at FROM messages_by_id WHERE message_id = ?`, "approx-parent",
+	).Scan(&tcount, &tlm))
+	assert.Equal(t, 901, tcount)
+	assert.Equal(t, replyAt.UnixMilli(), tlm.UTC().UnixMilli())
+
+	require.NoError(t, cassSession.Query(
+		`SELECT tcount FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		"approx-room", parentBucket, parentCreatedAt, "approx-parent",
+	).Scan(&tcount))
+	assert.Equal(t, 901, tcount, "the mirror follows the authority")
+}
+
 func TestCassandraStore_SaveThreadMessage_IdempotentOnRedelivery(t *testing.T) {
 	cassSession := setupCassandra(t)
 	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
@@ -2072,27 +2277,6 @@ func TestCassandraStore_SaveThreadMessage_TShowPersistedInThread(t *testing.T) {
 	})
 }
 
-// A thread well past the old 99 ceiling counts exactly — the add path reports
-// the true reply total, not a badge value.
-func TestCassandraStore_countThreadReplies_LongThreadExact(t *testing.T) {
-	ctx := context.Background()
-	cassSession := setupCassandra(t)
-
-	const replies = 150
-	base := time.Now().UTC()
-	for i := 0; i < replies; i++ {
-		require.NoError(t, cassSession.Query(
-			`INSERT INTO thread_messages_by_thread (thread_room_id, created_at, message_id) VALUES (?, ?, ?)`,
-			"thread-1", base.Add(time.Duration(i)*time.Millisecond), fmt.Sprintf("reply-%d", i),
-		).WithContext(ctx).Exec())
-	}
-
-	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
-	n, err := store.countThreadReplies(ctx, "thread-1")
-	require.NoError(t, err)
-	assert.Equal(t, replies, n)
-}
-
 func TestAdvanceThreadSubscriptionLastSeen_OnlyAdvances(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
@@ -2433,4 +2617,49 @@ func TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable(t *testing.T) {
 				"%s: an unpinned redelivery must be the write that won", tc.name)
 		})
 	}
+}
+
+// A save that is NOT marked as a redelivery is a first delivery by definition,
+// so it counts. This pins the contract that replaced the old pre-insert
+// existence probe: redelivery is a property of the JetStream delivery, stamped
+// by the consumer, not something the store re-derives with a database read on
+// every reply. Suppression/reconcile behaviour for real redeliveries is covered
+// by TestCassandraStore_SaveThreadMessage_PastScanLimit_RedeliveryReconciles.
+func TestCassandraStore_SaveThreadMessage_PastScanLimit_UnmarkedSaveCounts(t *testing.T) {
+	cassSession := setupCassandra(t)
+	store := NewCassandraStore(cassSession, msgbucket.New(24*time.Hour), nil)
+	store.threadPolicy.ScanLimit = 3
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Truncate(time.Millisecond)
+	parentSender := &cassParticipant{ID: "u-redel-parent", Account: "alice", EngName: "Alice"}
+	require.NoError(t, store.SaveMessage(ctx, &model.Message{
+		ID: "redel-parent", RoomID: "redel-room", UserID: "u-redel-parent",
+		CreatedAt: parentCreatedAt, Content: "parent message",
+	}, parentSender, "site-a"))
+
+	replySender := &cassParticipant{ID: "u-redel-replier", Account: "bob", EngName: "Bob"}
+	newReply := func(i int) *model.Message {
+		return &model.Message{
+			ID:                           fmt.Sprintf("redel-reply-%d", i),
+			RoomID:                       "redel-room",
+			UserID:                       "u-redel-replier",
+			Content:                      "reply",
+			CreatedAt:                    parentCreatedAt.Add(time.Duration(i) * time.Minute),
+			ThreadParentMessageID:        "redel-parent",
+			ThreadParentMessageCreatedAt: &parentCreatedAt,
+		}
+	}
+	for i := 1; i <= 5; i++ {
+		n, err := store.SaveThreadMessage(ctx, newReply(i), replySender, "site-a", "tr-redel")
+		require.NoError(t, err)
+		require.NotNil(t, n)
+		assert.Equal(t, i, *n)
+	}
+
+	var tcount int
+	require.NoError(t, cassSession.Query(
+		`SELECT tcount FROM messages_by_id WHERE message_id = ?`, "redel-parent",
+	).Scan(&tcount))
+	assert.Equal(t, 5, tcount)
 }

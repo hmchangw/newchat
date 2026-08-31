@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -346,6 +347,7 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 			}
 			return time.Time{}, false, nil, nil, fmt.Errorf("read updated_at after cas miss for message %s: %w", msg.MessageID, err)
 		}
+		r.reconcileAfterCASMiss(ctx, msg)
 		return existing, false, nil, nil, nil
 	}
 
@@ -395,48 +397,47 @@ func (r *Repository) SoftDeleteMessage(ctx context.Context, msg *models.Message,
 	return deletedAt, true, newTcount, newTlm, nil
 }
 
-// countThreadReplies returns the exact, soft-delete-aware reply count and the
-// latest surviving reply's created_at (tlm; nil when none survive) for the
-// thread. It delegates to pkg/threadcount so this delete-path writer and the
-// message-worker add-path writer compute an identical count. tlm is the newest
-// survivor — the partition's DESC clustering order surfaces it first.
-func (r *Repository) countThreadReplies(ctx context.Context, threadRoomID string) (int, *time.Time, error) {
-	return threadcount.CountAndLatest(ctx, r.session, threadRoomID)
-}
-
-// setParentTcountAndTlm co-SETs tcount and tlm on the parent row in both tables
-// (one UPDATE). tlm nil → clears the column (last reply deleted).
-func (r *Repository) setParentTcountAndTlm(ctx context.Context, msg *models.Message, n int, tlm *time.Time) error {
-	parentID := msg.ThreadParentID
-	parentCreatedAt := *msg.ThreadParentCreatedAt
-	if err := r.session.Query(
-		`UPDATE messages_by_id SET tcount = ?, thread_last_msg_at = ? WHERE message_id = ?`,
-		n, tlm, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_id: %w", parentID, err)
-	}
-	parentBucket := r.bucket.Of(parentCreatedAt)
-	if err := r.session.Query(
-		`UPDATE messages_by_room SET tcount = ?, thread_last_msg_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
-		n, tlm, msg.RoomID, parentBucket, parentCreatedAt, parentID,
-	).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("set tcount/tlm on parent %s in messages_by_room: %w", parentID, err)
-	}
-	return nil
-}
-
-// countAndSetParentTcount recomputes tcount+tlm from the surviving rows and sets both.
-// Returns (nil, nil, nil) when ThreadParentCreatedAt is unset; tlm nil when no replies survive.
+// countAndSetParentTcount stamps the parent's reply count after this reply's
+// soft-delete; the policy lives in pkg/threadcount, shared with the add-path
+// writers. Returns (nil, nil, nil) when ThreadParentCreatedAt is unset.
 func (r *Repository) countAndSetParentTcount(ctx context.Context, msg *models.Message) (*int, *time.Time, error) {
 	if msg.ThreadParentCreatedAt == nil {
 		return nil, nil, nil
 	}
-	n, tlm, err := r.countThreadReplies(ctx, msg.ThreadRoomID)
+	res, err := threadcount.Maintain(ctx, r.session, msg.ThreadRoomID, r.parent(msg), r.threadPolicy, -1, nil, false)
 	if err != nil {
-		return nil, nil, fmt.Errorf("count thread replies: %w", err)
+		return nil, nil, fmt.Errorf("maintain parent tcount: %w", err)
 	}
-	if err := r.setParentTcountAndTlm(ctx, msg, n, tlm); err != nil {
-		return nil, nil, err
+	return &res.Count, res.TLM, nil
+}
+
+// parent locates the thread parent's two rows for pkg/threadcount.
+func (r *Repository) parent(msg *models.Message) threadcount.Parent {
+	parentCreatedAt := *msg.ThreadParentCreatedAt
+	return threadcount.Parent{
+		MessageID: msg.ThreadParentID,
+		RoomID:    msg.RoomID,
+		CreatedAt: parentCreatedAt,
+		Bucket:    r.bucket.Of(parentCreatedAt),
 	}
-	return &n, tlm, nil
+}
+
+// reconcileAfterCASMiss repairs the parent count when a thread reply's delete
+// LWT reports "already deleted".
+//
+// Usually a concurrent delete won and did the decrement itself, so there is
+// nothing to do. But it is also what the retry of a partly applied delete sees
+// — LWT committed, count not adjusted — which above the scan limit nothing
+// else would ever correct. Gated by ShouldReanchor so the full scan it costs
+// stays inside the same amortized budget as every other re-anchor, and
+// best-effort throughout: the delete has already committed, so a failure here
+// must not fail the request.
+func (r *Repository) reconcileAfterCASMiss(ctx context.Context, msg *models.Message) {
+	if msg.ThreadParentID == "" || msg.ThreadRoomID == "" || msg.ThreadParentCreatedAt == nil {
+		return
+	}
+	if _, err := threadcount.ReanchorIfDue(ctx, r.session, msg.ThreadRoomID, r.parent(msg), r.threadPolicy); err != nil {
+		slog.WarnContext(ctx, "thread tcount re-anchor after delete cas miss failed — parent count left as stamped",
+			"error", err, "thread_room_id", msg.ThreadRoomID, "parent_message_id", msg.ThreadParentID)
+	}
 }

@@ -296,6 +296,9 @@ func main() {
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msg = tracked
 				msgCtx = tracked.Context(msgCtx)
+				// Mark retries so the thread-reply writer can tell a redelivery
+				// from a first delivery: its tcount increment is not idempotent.
+				msgCtx = natsutil.StampRedelivery(msgCtx, msg)
 				defer func() {
 					tracked.Finish(msgCtx)
 					<-sem
