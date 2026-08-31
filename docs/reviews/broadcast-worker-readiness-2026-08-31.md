@@ -134,3 +134,27 @@ Well-documented and conventional at the package boundary, but the fan-out logic 
 - `medium` — Move the long-form rationale into `docs/design/broadcast-worker.md`, leaving ≤2-line pointers inline.
 - `low` — Enable `funlen` (or `cyclop`) with a generous threshold and a grandfathering exclusion, so the next `handler.go` growth is caught at lint time rather than at audit time.
 
+---
+
+## 6. Integration — 4 / 5
+
+Federation plumbing is correct and well-tested — `subscription_mention` is in exactly one `pkg/outbox` partition set, the subject comes from `subject.Outbox`, and every event carries a publish-site `Timestamp` — but the **destination axis is unvalidated** and OUTBOX existence is never verified at startup.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`federateMentions` derives `destSiteID` straight from `participant.SiteID` with no check against the configured peer set.** A stale, typo'd or decommissioned site ID publishes to `chat.outbox.{origin}.{unknownDest}.subscription_mention` — a subject **no `outbox-worker` per-peer consumer filters on** — leaving the event to sit in OUTBOX unconsumed until retention deletes it. This is the exact failure mode `pkg/outbox`'s `knownEventTypes` guard exists to prevent, applied on the event-type axis but **not** the destination axis. `cfg.AllSiteIDs` is already parsed and used only for the room-activity refresher, never handed to the mention path | `handler.go:446`, publish at `:498`; cf. `pkg/outbox/outbox.go:87-89`; `main.go:52`, `:353` |
+| medium | `bootstrapStreams` only creates/verifies the canonical **input** stream; the OUTBOX stream this service publishes into is never verified at startup, so a misprovisioned or missing `OUTBOX-{siteID}` is discovered only at the first mention publish — **and that error is logged, never returned**. Every cross-site mention badge is then silently lost for the pod's lifetime. Correct not to *create* it (ops owns it), but the same `js.Stream(ctx, name)` fail-fast the canonical stream already gets applies | `bootstrap.go:29-41`; `main.go:330`; `handler.go:497-503` |
+| medium | `ROOM_KEY_RETIRED_TTL` re-declared with its own tag and `envDefault:"30m"` in four services instead of once in `roomkeystore`. **Drift is already visible in deploy**: three composes take `${ROOM_KEY_RETIRED_TTL:-30m}`, but `bot-room-service/deploy/docker-compose.yml:21` hardcodes `30m` with no override — so an operator raising the fleet value leaves that service expiring versions its peers still consider resolvable | `main.go:82`; `room-service/main.go:67`; `room-worker/main.go:70`; `bot-room-service/main.go:42` |
+| low | The `retiredTTLSafe` fail-fast is the last arm of a `switch`, so it is **never evaluated when the key cache is disabled** by grace-period or by `TTL<=0`/`size<=0`. Defensible (with no cache the invariant does not bind) — but broadcast-worker is the **only service that sees both numbers**, so a fleet-wide misconfiguration goes unreported in exactly the deployment shape where nobody else can catch it | `main.go:384-394`; `keycache.go:131` |
+| low | The mention fan-out budget-exhaustion path counts `dropped` destinations but emits only an `slog.Error` — no counter, so silently-skipped peers are invisible to alerting (the per-publish failure path *does* record `publishMetrics.Failure`) | `handler.go:487-491`, `:507-511` |
+
+### Verified clean
+`model.InboxSubscriptionMention` is in `ConcurrentEventTypes` only, with a disjointness test (`pkg/outbox/outbox_test.go:13`). Subject is `chat.outbox.{origin}.{dest}.{eventType}` via `subject.Outbox` — no `outbox.{siteID}.to.{dest}` drift anywhere. `Timestamp` is set via `time.Now().UTC().UnixMilli()` at **every** publish site (ten sites). Zero raw `fmt.Sprintf` subject construction in non-test code. Dedup ID is redelivery-stable (`natsutil.InboxDedupID` off the inbound request ID). Consumer is the correct high-throughput pattern settled through `jsretry.Settle`. `msgbucket.NewerRow` tie-breaks both preview watermarks. `chat.roomactivity.{dest}` is a documented deliberate non-INBOX lane (see Chapter 3). **No `chat.user.` client-facing handler is registered, so no `docs/client-api.md` obligation is triggered.**
+
+### Recommendations
+- `high` — Pass `cfg.AllSiteIDs` into `withOutboxFederation` and skip (with a `WARN` + counter) any `destSiteID` outside it, mirroring `pkg/outbox`'s event-type guard on the destination axis.
+- `medium` — Extend `bootstrapStreams` to also verify `stream.Outbox(siteID).Name` when `publish != nil`, so a missing OUTBOX kills the pod at startup rather than draining badges.
+- `medium` — Move `ROOM_KEY_RETIRED_TTL` into a `roomkeystore.RetiredConfig` mounted as a named field in all four services; fix `bot-room-service/deploy/docker-compose.yml:21` to use `${ROOM_KEY_RETIRED_TTL:-30m}`.
+- `low` — Hoist `retiredTTLSafe` above the `switch` so it validates whenever `Encryption.Enabled`, regardless of cache state.
+- `low` — Add a `dropped_sites` counter in the mention fan-out; add an integration case asserting an unknown-site mention does not reach OUTBOX.
+
