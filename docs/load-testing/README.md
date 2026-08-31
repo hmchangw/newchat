@@ -30,6 +30,7 @@ docs/load-testing/
 | Which instrument sits on which hop, and what is dark | [`slo-measurement-map.md`](slo-measurement-map.md) |
 | How to run the first SLO-measuring soak | [`first-slo-run-runbook.md`](first-slo-run-runbook.md) |
 | What that run has to hand back (worked example) | [`first-slo-run-report.md`](first-slo-run-report.md) |
+| The P2 metrics work, as an implementable task | [`p2-implementation-task.md`](p2-implementation-task.md) |
 | What to build so J1's SLOs become measurable | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) |
 
 ## The Three Programs

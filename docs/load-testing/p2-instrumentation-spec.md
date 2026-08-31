@@ -1,5 +1,12 @@
 # P2 Instrumentation Spec — J1 (SLO-1a / 1b / 2)
 
+> **To hand this to an implementer, use
+> [`p2-implementation-task.md`](p2-implementation-task.md) instead.** That file is
+> the executable brief, verified against current `main`, and it **corrects this
+> document's §5b design**: the `broadcast_path` label cannot live on the
+> gatekeeper counter (there is no `sub.RoomType`, and the only room-type source
+> there is a conditional `GetRoomMeta`). This document remains the *why*.
+
 > What to build so the flagship journey becomes measurable, written against the
 > code rather than against the roadmap line. Constraint: **the fewest instruments
 > that make the three SLOs computable, and no regression on the send hot path.**
