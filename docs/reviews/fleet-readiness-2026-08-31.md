@@ -93,3 +93,37 @@ A second, smaller contributor is worth naming because it makes the numbers *look
 - `high` — **Exclude generated mocks from the coverage denominator** repo-wide (build tag or `-coverpkg` filter), and add a `-tags=integration` coverage target so store layers that *are* tested stop reading as 0%.
 - `high` — Once both are done, re-baseline and **enforce the 80% gate in CI**. It is currently a rule the whole fleet violates, which means it is not a rule.
 
+---
+
+## 3. Cross-cutting risk #2 — shared knobs re-declared per service
+
+`CLAUDE.md` §6 is unusually explicit: *"A knob shared by more than one service is declared once, in the package that owns the thing it configures, and mounted as a named field… Never re-declare the env tag and `envDefault` in a service — that is how two services reading the same Valkey key end up on different TTLs, which the tag-level default cannot prevent."*
+
+**This rule is violated by at least nine distinct knobs across the fleet**, and the experts found it independently in twelve services:
+
+| Knob | Services re-declaring it | Owning package that should hold it | Consequence if they drift |
+|---|---|---|---|
+| `ROOM_KEY_RETIRED_TTL` / `ROOM_KEY_GRACE_PERIOD` | room-service, room-worker, bot-room-service, broadcast-worker | `roomkeystore` (exports no config type) | `CLAUDE.md` states it directly: a short TTL expires versions peers still consider resolvable, and **`key.get` then permanently fails for messages already on the wire** |
+| `USER_CACHE_SIZE` / `USER_CACHE_TTL` | message-worker, message-gatekeeper, broadcast-worker, room-worker, notification-worker, history-service, user-presence-service (**7**) | `userstore` — **which already has the correct `TTLConfig` for the L2 tier one line below** | Two services front the same user data with different L1 lifetimes |
+| `BADGE_CACHE_TTL` | inbox-worker, room-service, user-service | `badgecache` (exports no config type) | **inbox-worker writes badge state that user-service reads** — a divergent TTL is a live coherence bug |
+| `ROOM_META_CACHE_TTL` | room-worker (**60 s**), broadcast-worker / message-gatekeeper / notification-worker (**2 m**) | `roommetacache` (has the L2 `TTLConfig`) | Already divergent today — per-process L1 so not a shared-key bug, but exactly the drift the rule exists to stop |
+| `ADMIN_ACCT_PREFIX` | search-sync-worker, room-service, message-gatekeeper, broadcast-worker, media-service (**5**) | `pkg/model` (owns `SetPlatformAdminAccountPrefix`) | **A prefix mismatch mis-classifies platform admins** |
+| `SESSIONS_MAX_PER_ACCOUNT`, `BCRYPT_COST` | admin-service, botplatform-service | `session` / `pwhash` | Both write the **same `sessions` collection**; drifting caps mean one service evicts sessions the other still honours |
+| MinIO endpoint / keys / `MINIO_DOWNLOAD_TIMEOUT` | upload-service, client-update-service, media-service | `minioutil` (**has no `Config` type at all**) | Three services, one object store, three sets of defaults |
+| `VALKEY_ADDRS` / `VALKEY_PASSWORD` | `user-presence-service/sync` hand-dials instead of `valkeyutil` | `valkeyutil` | The sync's Valkey traffic is **uninstrumented** and carries a different dial policy against the same keyspace — and `presencestore`'s own comment says this duplication *was already removed once* |
+| `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` | user-presence-service **and** its own `sync/` sibling | `presencestore` | Both feed the **same Lua script against the same keys**; an operator override moves one and not the other |
+
+Two of these have already drawn blood in the deploy layer rather than in Go:
+
+- **`bot-room-service/deploy/docker-compose.yml:21` hardcodes `ROOM_KEY_RETIRED_TTL=30m`** while its three peers all use `${ROOM_KEY_RETIRED_TTL:-30m}`. The Go defaults agree, so this looks fine — but **an operator raising the fleet value moves three services and silently leaves the fourth short**, producing exactly the permanent `key.get` failure `CLAUDE.md` warns about. Three separate experts flagged this independently.
+- **`room-worker/deploy/teams/` is a diverged fork, not a variant**: its Dockerfile is byte-identical to the default, and its compose *drops* `ROOM_SUBJECT_MODE`, `ROOM_KEY_RETIRED_TTL`, `MONGO_KEY_READ_PREFERENCE` and the entire `ATREST_*`/`VAULT_*` block while hardcoding values the default parameterises.
+
+The tell that this is a systemic gap rather than carelessness: **several services get it exactly right in the same struct where they get it wrong.** message-worker mounts `UserL2 userstore.TTLConfig` correctly one line below its hand-rolled `USER_CACHE_*`. inbox-worker mounts `mongoutil.PoolConfig` and `valkeyutil.Config` correctly beside its re-declared `BADGE_CACHE_TTL`. user-service mounts `Pool mongoutil.PoolConfig` on the NATS path and hand-rolls it on the HTTP path — **and that one has a live cost: the hand-rolled copy drops `ServerSelectionTimeout`, so the transport serving the client-facing sidebar keeps the driver's 30 s default, the exact hang `poolconfig.go` exists to prevent.** The justifying comment there is factually wrong about why the shared type could not be used.
+
+### Fleet recommendations
+
+- `high` — **Add the missing config types**: `roomkeystore.TTLConfig`, `badgecache.TTLConfig`, `userstore.CacheConfig` (L1, beside the existing L2 `TTLConfig`), `minioutil.Config`, `presencestore.TTLConfig`, `session.CapConfig`, `pwhash.Config`, and an admin-prefix config in `pkg/model`. Then delete the per-service declarations in one PR per knob. **Nine PRs, each mechanical, each closing a class of silent divergence.**
+- `high` — Fix `bot-room-service/deploy/docker-compose.yml:21` to `${ROOM_KEY_RETIRED_TTL:-30m}` **now** — it is a one-character-class change guarding a documented permanent-failure mode.
+- `medium` — Rebuild `room-worker/deploy/teams/` from the default deploy with only `MODE` and `OTEL_SERVICE_NAME` overridden.
+- `medium` — Add a repo-owned semgrep rule (with fixture, per §2) that flags an `env:"…"` tag whose name already appears in a `pkg/` config struct. This is the mechanical guard that makes the rule self-enforcing rather than review-enforced.
+
