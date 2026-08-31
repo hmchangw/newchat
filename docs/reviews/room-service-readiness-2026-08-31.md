@@ -58,3 +58,34 @@ The 17 uncorrelated log sites are **drift, not ignorance** — `handler.go:869`,
 - `low` — Return `MemberListClient` from `NewNATSMemberListClient`; unexport the store implementation.
 - `low` — Re-run `make sast-vuln` with `vuln.go.dev` reachable before shipping.
 
+---
+
+## 3. Architecture — 3 / 5
+
+The federation, subject, bootstrap and shutdown boundaries are all correct and carefully reasoned. The service has, however, clearly outgrown the flat layout.
+
+### Verified clean (and load-bearing)
+
+**The federation boundary holds.** Every cross-site relay goes through `outbox.Publish` on the local OUTBOX; there is no direct remote-INBOX publish anywhere in the service (`handler.go:882-885`). All nine event types it emits — `InboxRoleUpdated`, `InboxSubscriptionRead`, `InboxThreadRead`, `InboxThreadReadAll`, `InboxSubscriptionMuteToggled`/`FavoriteToggled`/`SectionMoved`/`Opened`, `InboxRoomRestricted` — are present in `pkg/outbox.ConcurrentEventTypes` (`pkg/outbox/outbox.go:20-46`). Also verified: no `os.Getenv`; zero raw `fmt.Sprintf` subject building across all 41 sites; stream configs from `pkg/stream`; typed `caarlos0/env` config with fail-fast validation (`main.go:170-205`); `pkg/shutdown.Wait` in the documented order (`main.go:395-420`); the two goroutines in `requireMembershipAndGetRoom` are `WaitGroup`-bounded (`handler.go:538-547`).
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | Mongo driver semantics decided in the **handler** layer: `handler.go` imports the mongo driver and branches on `mongo.ErrNoDocuments`; `handler_teams.go:192` branches on `mongo.IsDuplicateKeyError`. A non-Mongo `RoomStore` cannot satisfy the handler's contract | `handler.go:18`, `:780`, `:1999`, `:2011`, `:2071`, `:2526` |
+| medium | Root cause of that leak: `GetSubscriptionWithMembership` returns a wrapped `mongo.ErrNoDocuments` while **every sibling method** maps to `model.ErrSubscriptionNotFound` — which is why `handler.go:780` must test both | `store_mongo.go:356` vs `:257`, `:274`, `:969`, `:1089`, `:1110`, `:1174` |
+| medium | `RoomStore` is a **47-method interface** spanning rooms, subscriptions, thread rooms, members, orgs, users, apps and bot menus, implemented by a 65-method `MongoStore` holding 15 collection handles | `store.go:61-284`; `store_mongo.go:26-44` |
+| medium | Split constructor: 14 positional args, then ten more dependencies set by direct field assignment. Correctness rests on scattered nil checks, not the compiler | `handler.go:87`; `main.go:355-368` |
+| medium | **Shared knobs re-declared per service**, against §6's "declared once, in the package that owns the thing it configures": `BADGE_CACHE_TTL` duplicated in `inbox-worker` and `user-service`; `ROOM_KEY_RETIRED_TTL`/`ROOM_KEY_GRACE_PERIOD` duplicated in `room-worker`, `bot-room-service`, `broadcast-worker`. Neither `pkg/badgecache` nor `pkg/roomkeystore` exports a config type | `main.go:65`, `:67`, `:115` |
+| low | The sanctioned sub-package layout exists precisely for request/reply services this large; only Teams was ever split out | `handler.go` (2,677 lines); `handler_test.go` (8,171 lines) |
+| low | `MongoStore`/`NewMongoStore` exported though nothing outside `package main` consumes them; 11 of 15 sibling services use the unexported form | `store_mongo.go:26`, `:59` |
+| nitpick | `bootstrapStreams` verifies only ROOMS, though the service also publishes to MESSAGES-CANONICAL and OUTBOX | `bootstrap.go:44-59` |
+| nitpick | `bootstrapStreams` does not "no-op when disabled" as `CLAUDE.md` words it — it verifies via `js.Stream` and fails startup. This is the repo-wide pattern (12/12 `bootstrap.go` files), so **the convention text is stale, not the code** | `bootstrap.go:55` |
+
+On the shared-knob finding: `CLAUDE.md` names this divergence as producing exactly the failure it warns about — a short retired-TTL permanently breaking `key.get` for messages already on the wire. Today all four services agree at 30m; nothing but coincidence keeps them agreeing.
+
+### Recommendations
+- `medium` — Map `GetSubscriptionWithMembership`'s miss to `model.ErrSubscriptionNotFound`, then delete the `mongo` import from `handler.go`/`handler_teams.go`, adding a store-level `ErrDuplicate` sentinel for the Teams idempotency path.
+- `medium` — Move `BadgeCacheTTL` into a `badgecache.Config` and `RoomKeyRetiredTTL`/`GracePeriod` into a `roomkeystore.TTLConfig`, mounted as named fields in all four services.
+- `medium` — Fold the ten post-construction assignments into an options-style constructor.
+- `low` — Split `RoomStore` along its natural seams (`RoomReader`, `SubscriptionStore`, `MemberStore`, `ThreadStore`, `DirectoryStore`), keeping one `MongoStore` implementing all of them; adopt the sanctioned sub-package layout; unexport the store.
+- `nitpick` — Extend `bootstrapStreams` to verify MESSAGES-CANONICAL and OUTBOX (verify only — never create).
+
