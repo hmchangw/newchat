@@ -66,3 +66,35 @@ The nine bare-`slog` sites are **drift, not house style** — the rest of the se
 - `low` — Re-run `make sast-vuln` from an environment with egress to `vuln.go.dev` before shipping.
 - `nitpick` — Move `getOrLoad`'s doc block back above it; either unexport `ErrEncryptedRowCipherDisabled` or add the cross-package `errors.Is` check its comment promises.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Genuinely strong layering — consumer-defined interfaces, a disciplined decorator composition root, correct config and shutdown wiring — held back by a directory layout matching neither `CLAUDE.md` rule, and by repository/transport types leaking through a boundary the code itself calls "transport-agnostic".
+
+### Verified clean
+
+Every subject goes through `pkg/subject` builders with zero raw `fmt.Sprintf`; no stream creation anywhere; no `os.Getenv`; shared knobs are mounted as named fields with `envPrefix` (`mongoutil.PoolConfig`, `subauthcache.TTLConfig`, `atrest.BreakerConfig`, `roomtimescache.TTLConfig`) rather than re-declared; config fails fast with a thoughtful *relational* bucket-budget check (`internal/config/config.go:242-266`); `pkg/shutdown.Wait` runs the correct order (router → drain → warm-back drain → Mongo → Cassandra → Vault → health → Valkey → obs) with a sub-budget for the optional drain; `deploy/` is complete with the mandated base images.
+
+### Evidence
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | Client-facing wire structs live under `internal/`, so no other module can import them and copies drift — `tools/loadgen` hand-duplicates the RPC contract twice, each with a comment admitting it cannot import | `internal/models/message.go:24`; `tools/loadgen/history_generator.go:100`; `tools/loadgen/soak_wire.go:10` |
+| medium | `HistoryService` is documented "transport-agnostic" but 35 signatures take `*natsrouter.Context`, including purely internal helpers. The transport type is **pooled** (`pkg/natsrouter/context.go:36`), so pushing it to background depth is the shape that eventually leaks a recycled context | `internal/service/service.go:187`; `internal/service/messages.go:652` |
+| medium | Consumer-defined interfaces are typed in the *implementers'* packages — `MessageReader` is expressed in `cassrepo.PageRequest`/`Page[…]`, `GetRoomTimesByIDs` returns `map[string]mongorepo.RoomTimes`. The interface is nominally in the consumer, but the dependency edge still points at Cassandra/Mongo | `internal/service/service.go:22-29`, `:70`, `:119` |
+| medium | Layout deviates from **both** `CLAUDE.md` forms — the flat rule ("no `cmd/` or `internal/`") and the sanctioned sub-package exception. This is the only service in the repo with either | `cmd/main.go:1`; `internal/config/config.go:1` |
+| low | `service.New` takes the whole `*config.Config`, coupling the domain layer to the env-parsing package for six fields | `internal/service/service.go:232`; `internal/service/room_times.go:63` |
+| low | No `bootstrap.go` and no `BOOTSTRAP_STREAMS` field, though the service publishes to MESSAGES-CANONICAL. Production behaviour is correct (it creates nothing); the gap is the documented dev-bootstrap contract that twelve peers carry | `internal/config/config.go:59`; `internal/service/messages.go:561` |
+| nitpick | Warm-back metrics bypass the injected o11y SDK, using the OTel global at package-init while every other instrument comes from `sdk.MeterProvider()` and respects `sdk.Toggles.Metrics` | `internal/service/warmback.go:46` vs `cmd/main.go:120` |
+
+### Recommendations
+
+- `medium` — Move the client-facing request/response structs into `pkg/model` as the `RoomsGet` trio already was, and delete the two loadgen mirrors that exist only because `internal/` forbids the import.
+- `medium` — Either drop the "transport-agnostic" claim or make it true: a thin transport shim extracts account/roomID/requestID, and every non-entrypoint helper takes a plain `context.Context`.
+- `medium` — Move `Page`/`PageRequest`, `RoomTimes` and `ThreadSubRow` into `internal/models` (or `pkg/model`) so `service`'s interfaces stop importing `cassrepo`/`mongorepo` — the repos then depend on models, not the reverse.
+- `medium` — Flatten to the sanctioned shape (`history-service/{main.go, config/, models/, mongorepo/, cassrepo/, service/, service/mocks/}`), matching `user-service`. Mechanical: an import-path rewrite plus a Dockerfile build path.
+- `low` — Replace the `*config.Config` parameter with an explicit `service.Params` struct carrying the six values actually used.
+- `low` — Add `bootstrap.go` + a `Bootstrap` field no-op'ing on `BOOTSTRAP_STREAMS=false`, and set it true in `deploy/docker-compose.yml`.
+- `nitpick` — Thread the SDK's `MeterProvider` into `newPreviewWarmer` instead of the package-level `otel.Meter` global.
+
