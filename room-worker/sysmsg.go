@@ -27,8 +27,8 @@ func plural(n int, singular, pluralForm string) string {
 	return strconv.Itoa(n) + " " + pluralForm
 }
 
-func formatAddedSingle(requester, added *model.User) string {
-	return quoted(displayName(requester)) + " added " + quoted(displayName(added)) + " to the chatroom"
+func formatAddedSingle(requester *model.User, addedName string) string {
+	return quoted(displayName(requester)) + " added " + quoted(addedName) + " to the chatroom"
 }
 
 // formatAddedCounts renders the count form. At least one of people/orgs is > 0
@@ -47,11 +47,11 @@ func formatAddedCounts(requester *model.User, people, orgs int) string {
 }
 
 // addedContent renders members_added Content for both add and create: named form
-// for a lone individual (no orgs), else counts. lookup returns nil if unresolved.
-func addedContent(requester *model.User, individuals, orgs []string, lookup func(string) *model.User) string {
+// for a lone individual (no orgs), else counts. nameOf returns "" if unresolved.
+func addedContent(requester *model.User, individuals, orgs []string, nameOf func(string) string) string {
 	if len(individuals) == 1 && len(orgs) == 0 {
-		if u := lookup(individuals[0]); u != nil {
-			return formatAddedSingle(requester, u)
+		if name := nameOf(individuals[0]); name != "" {
+			return formatAddedSingle(requester, name)
 		}
 	}
 	return formatAddedCounts(requester, len(individuals), len(orgs))
@@ -77,14 +77,14 @@ func withoutAccount(accounts []string, account string) []string {
 	return out
 }
 
-func formatRemovedUser(requester, removed *model.User) string {
-	return quoted(displayName(requester)) + " removed " + quoted(displayName(removed)) + " from the chatroom"
+func formatRemovedUser(requester *model.User, removedName string) string {
+	return quoted(displayName(requester)) + " removed " + quoted(removedName) + " from the chatroom"
 }
 
 func formatRemovedOrg(requester *model.User, name, tcName, orgID string) string {
 	return quoted(displayName(requester)) + " removed " + quoted(displayOrg(name, tcName, orgID)) + " from the chatroom"
 }
 
-func formatLeft(user *model.User) string {
-	return quoted(displayName(user)) + " left the chatroom"
+func formatLeft(name string) string {
+	return quoted(name) + " left the chatroom"
 }

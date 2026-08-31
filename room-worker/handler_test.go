@@ -181,6 +181,8 @@ func TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate(t *testing.T)
 	// Rotation now runs for a bot removal too — the survivor fan-out reads accounts.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u1", Account: requester, SiteID: siteID, EngName: "Alice"}, nil)
+	// Removed member is a bot: sys-msg content resolution looks up its app name.
+	store.EXPECT().GetApp(gomock.Any(), botAcct).Return(nil, ErrAppNotFound)
 
 	var published []publishedMsg
 	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
@@ -5738,6 +5740,44 @@ func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 	assert.Equal(t, `"Alice 愛" added "U1 一" to the chatroom`, sysMsg.Content)
 }
 
+// Single added individual is a bot: Content substitutes the registered app name.
+func TestHandler_ProcessAddMembers_Content_SingleBot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	roomID := "r1"
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{"helper.bot"}, roomID).
+		Return([]AddMemberCandidate{{Account: "helper.bot"}}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{ID: "bot_id", Account: "helper.bot", SiteID: "site-a"}}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").
+		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
+	expectGetRoom(store, roomID, "Chan")
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+
+	req := model.AddMembersRequest{
+		RoomID: roomID, RequesterID: "u_a", RequesterAccount: "alice",
+		Users: []string{"helper.bot"}, Timestamp: 1,
+	}
+	data, _ := json.Marshal(req)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	require.NoError(t, h.processAddMembers(ctx, data))
+
+	sysMsg := findSysMsg(t, published, "site-a", "members_added")
+	assert.True(t, strings.HasSuffix(sysMsg.Content, `added "Helper Bot" to the chatroom`))
+}
+
 // B2: len(subs)>=2 → multi form.
 func TestHandler_ProcessAddMembers_Content_Multi(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -6048,6 +6088,134 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 	assert.Equal(t, "alice", sysMsg.UserAccount)
 	assert.Equal(t, "u_a", sysMsg.UserID, "forced removal sets sender to requester")
 	assert.Equal(t, `"Alice 愛" removed "Bob 鮑" from the chatroom`, sysMsg.Content)
+}
+
+// Removed member is a bot: Content substitutes the registered app name for the
+// raw bot account. The requester side stays composed-name as always.
+func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotContent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	roomID := "r1"
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+		Return(&UserWithMembership{
+			User: model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+		}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").
+		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: "helper.bot", Timestamp: 1}
+	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+	sysMsg := findSysMsg(t, published, "site-a", "member_removed")
+	assert.Equal(t, `"Alice 愛" removed "Helper Bot" from the chatroom`, sysMsg.Content)
+}
+
+// Self-leave by a bot: Content uses the registered app name.
+func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	roomID := "r1"
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+		Return(&UserWithMembership{
+			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+			Roles: []model.Role{model.RoleUser},
+		}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
+	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+	sysMsg := findSysMsg(t, published, "site-a", "member_left")
+	assert.Equal(t, `"Helper Bot" left the chatroom`, sysMsg.Content)
+}
+
+// ErrAppNotFound degrades to the composed name / raw account (current behavior) —
+// bot has no EngName/ChineseName so it falls all the way back to the account.
+func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent_AppNotFound(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	roomID := "r1"
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+		Return(&UserWithMembership{
+			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+			Roles: []model.Role{model.RoleUser},
+		}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, ErrAppNotFound)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
+	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+	sysMsg := findSysMsg(t, published, "site-a", "member_left")
+	assert.Equal(t, `"helper.bot" left the chatroom`, sysMsg.Content)
+}
+
+// An infra error from GetApp also degrades to the composed name/account, and — unlike
+// ErrAppNotFound, which is silent — is logged, but the flow still succeeds end to end.
+func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent_AppLookupError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	roomID := "r1"
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+		Return(&UserWithMembership{
+			User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+			Roles: []model.Role{model.RoleUser},
+		}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, fmt.Errorf("mongo timeout"))
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
+	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+	sysMsg := findSysMsg(t, published, "site-a", "member_left")
+	assert.Equal(t, `"helper.bot" left the chatroom`, sysMsg.Content)
 }
 
 // C3: org remove with every member also having individual subs (toRemove empty)

@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -369,6 +370,26 @@ func (h *Handler) cleanupThreadMembership(ctx context.Context, roomID string, ac
 	return nil
 }
 
+// appNameLookup adapts store.GetApp to preview.AppNameLookup: no match is ("", nil)
+// so BotAwareDisplayName degrades to the composed name.
+func (h *Handler) appNameLookup(ctx context.Context, botAccount string) (string, error) {
+	app, err := h.store.GetApp(ctx, botAccount)
+	if errors.Is(err, ErrAppNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return app.Name, nil
+}
+
+// memberDisplayName renders a sys-msg member's name, substituting the registered app
+// name for a bot account. Only member-side names are bot-aware — the requester keeps
+// displayName() unchanged.
+func (h *Handler) memberDisplayName(ctx context.Context, u *model.User) string {
+	return preview.BotAwareDisplayName(ctx, h.appNameLookup, u.EngName, u.ChineseName, u.Account)
+}
+
 func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.RemoveMemberRequest, currentPair *roomkeystore.VersionedKeyPair) (err error) {
 	if req.Timestamp <= 0 {
 		req.Timestamp = time.Now().UTC().UnixMilli()
@@ -509,9 +530,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp))
 	var content string
 	if isSelfLeave {
-		content = formatLeft(&user.User)
+		content = formatLeft(h.memberDisplayName(ctx, &user.User))
 	} else {
-		content = formatRemovedUser(requester, &user.User)
+		content = formatRemovedUser(requester, h.memberDisplayName(ctx, &user.User))
 	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
@@ -1234,11 +1255,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			sysMsgData, _ := json.Marshal(membersAdded)
 			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) string {
 				if u, ok := userMap[a]; ok {
-					return &u
+					return h.memberDisplayName(ctx, &u)
 				}
-				return nil
+				return ""
 			})
 			sysMsg := model.Message{
 				ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
@@ -1948,8 +1969,11 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 	if err != nil {
 		return fmt.Errorf("marshal members_added sys data: %w", err)
 	}
-	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) *model.User {
-		return userByAccount[a]
+	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) string {
+		if u, ok := userByAccount[a]; ok {
+			return h.memberDisplayName(ctx, u)
+		}
+		return ""
 	})
 	msg2 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "members_added"),
