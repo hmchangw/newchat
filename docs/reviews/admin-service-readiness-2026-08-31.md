@@ -44,3 +44,33 @@ Idiomatic, exceptionally well-commented Go with consistent contextual error wrap
 - `medium` — Replace the hand-built entry with `h.audit(ctx, c, "password_change_self", …)` so every `admin_audit._id` is a UUIDv7 and the stamping lives in one place.
 - `low` — Drop the extra `WarnContext` in `loginDenied` (or move it to a dedicated non-error auth log) and reorder its parameters to `(ctx, c, account)`; reject an all-nil PATCH with `errcode.BadRequest` before touching the store.
 
+---
+
+## 3. Architecture — 3 / 5
+
+Boundaries, DI and consumer-defined interfaces are textbook, and the timeout/budget design is unusually well reasoned — but the store interface reintroduces a session-cache invalidation gap `pkg/session` was redesigned to close, and two shared knobs are re-declared locally.
+
+### Verified clean
+Routes live only in `routes.go`; `GET /healthz` + `/readyz` exposed; request-ID and access-log middleware wired; Gin `ReadTimeout`/`WriteTimeout` set; the outbound client comes from `restyutil` with an explicit timeout; no `os.Getenv`; no raw `fmt.Sprintf` subjects (all via `pkg/subject`); `pkg/shutdown.Wait` with the documented HTTP order; `Pool mongoutil.PoolConfig` and `Valkey valkeyutil.Config` correctly mounted as named fields.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `UpdateUserPasswordAndRevoke` and `DeactivateAndRevoke` delete sessions inside their own Mongo transaction and **return no session IDs**, so no `sessioncache.Bust*` can run on the three most security-critical revoke paths (see Chapter 2) | `store.go:67`, `:74`; `store_mongo.go:296`, `:322` |
+| medium | `pkg/session.DeleteForAccountExcept` now has **zero production callers repo-wide** — orphaned when admin-service moved the revoke into its own transaction. Dead contract surface that hides the gap above | `pkg/session/session.go:42`, impl `:135` |
+| medium | `SESSIONS_MAX_PER_ACCOUNT` and `BCRYPT_COST` are re-declared with their own tag + `envDefault` here **and** in `botplatform-service`. Both services write the same shared `session.Collection`, so the per-account cap is a shared knob | `config.go:38`, `:44`; `botplatform-service/config.go:34`, `:37` |
+| medium | Cross-site fanout publishes straight into the remote INBOX with **at-most-once** semantics: a failed publish is reported in `syncFailures` and healed only by a manual `POST …/resync`. `user_account_updated` and `user_permissions_updated` appear in **neither** `pkg/outbox` partition set, so the durable OUTBOX retry lane does not cover this service | `handler.go:214`; `permissions.go:382`; `pkg/outbox/outbox.go:21`, `:51` |
+| medium | One `Handler` and one 16-method `AdminStore` span six unrelated domains across 2,317 non-test lines — exactly the size at which the sanctioned sub-package layout applies. The flat layout is still legal, but it is now the reason a permission change and a file upload share a struct | `handler.go:31`; `store.go:46` |
+| low | `AdminStore.EnsureIndexes` is never called **through the interface** — `main.go` and every integration test call it on the concrete type. Interface surface no consumer uses, paid for by every mock and fake | `store.go:110` |
+| low | `loadConfig` validates timeouts, pool and client-update settings but **not** `BcryptCost` or `SessionsMaxPerAccount`; `botplatform-service` fails fast on both. `BCRYPT_COST=0` silently degrades to bcrypt's default | `config.go:38`, `:44` |
+| low | Startup uses two failure idioms in one function: every path returns a wrapped error, but the read-preference branch calls `os.Exit(1)` inline, bypassing `run() error` | `main.go:79-81` |
+| nitpick | `gin.Recovery()` is registered **third**, after `ginutil.CORS()` and `obsMW`; a panic in either before `c.Next()` is unrecovered | `main.go:45` |
+| nitpick | `h.valkey` is assigned post-construction although the `handlerOption` seam exists two lines earlier | `main.go:125`; `handler.go:73` |
+
+### Recommendations
+- `high` — Change the two revoke methods to return `[]string` of revoked session `_id`s and call `sessioncache.BustMany` at all three sites; then delete the orphaned `DeleteForAccountExcept`.
+- `medium` — Move `SESSIONS_MAX_PER_ACCOUNT` (and `BCRYPT_COST` if `pkg/pwhash` should own it) into a `session.CapConfig`/`pwhash.Config` mounted as a named field in both services.
+- `medium` — Either route the two INBOX event types through `outbox.Publish` (adding them to `ConcurrentEventTypes`), or record in code why manual resync is the accepted heal path, so the divergence from the federation rule is deliberate on the page.
+- `medium` — Split along the existing seams: `permissions.go` and `client_update.go` are already self-contained; promoting them to sub-packages with their own narrow store interfaces would cut `AdminStore` roughly in half.
+- `low` — Validate `BcryptCost ∈ [4,31]` and `SessionsMaxPerAccount > 0`; replace `main.go:79-81`'s `os.Exit` with a wrapped return.
+- `nitpick` — Move `gin.Recovery()` to the first `r.Use`; inject Valkey via a `withValkey` option.
+
