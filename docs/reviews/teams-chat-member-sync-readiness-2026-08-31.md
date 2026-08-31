@@ -88,3 +88,25 @@ Verified good: table-driven with named subtests (`main_test.go:57-78`); `package
 - `low` — Report combined unit+integration coverage in CI for this service so the 60.3% figure stops reading as a business-logic gap.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+1213 lines across 11 files, no function over ~45 lines, comments consistently explain WHY; the only real smells are a leaky counter parameter and test-file naming.
+
+### Findings
+- `medium` — `syncChat` takes `sum *summary` purely to do `sum.MembersWritten.Add` (`syncer.go:175,187`), while every other counter is updated by the caller in `run`'s switch (`syncer.go:141-150`). Two places own the tally; adding a third counter means deciding again which side owns it.
+- `low` — `run` mixes three responsibilities in one 45-line function: worker-pool construction, dispatch, and outcome classification/logging (`syncer.go:124-169`). Adding one feature — a batch limit, a per-chat timeout, or cancellation-aware dispatch — touches all three.
+- `low` — Test helper naming drift: `worker_test.go` and `log_test.go` name no production file (`syncer.go` is the unit under test in both), and `log_test.go` depends on symbols defined in the other two.
+- `nitpick` — `teamsUserRef` (`store.go:44`) encodes "unresolved" as its zero value with the semantics documented in three places (`store.go:45-46`, `syncer.go:36`, `syncer.go:87`). A explicit `found bool` or a distinct sentinel would make the D5 finding impossible to write accidentally.
+
+No dead code, no duplicated logic, no leaky abstraction into the Graph SDK (`membersFetcher` at `store.go:60` is a one-method consumer interface). Comment discipline is genuinely strong — `main.go:24-27`, `main.go:85-87`, `syncer.go:36-38`, and `main.go:105-106` all explain rationale, not mechanics.
+
+### Recommendations
+- `medium` — Return `len(members)` from `syncChat` and let `run`'s switch own every counter, dropping the `*summary` parameter.
+- `low` — Extract the classification switch into `func (s *syncer) classify(chat ChatToSync, err error, sum *summary)`, leaving `run` as load → dispatch → report.
+- `low` — Rename `worker_test.go` → `syncer_run_test.go` and merge `log_test.go` into it.
+- `nitpick` — Change `userRefCache.resolve` to return `map[string]teamsUserRef` plus an explicit unresolved-id slice, so callers cannot silently treat a miss as an empty identity.
+
+---
