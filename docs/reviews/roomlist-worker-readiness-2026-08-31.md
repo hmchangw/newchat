@@ -111,3 +111,43 @@ Table-driven with descriptive subtest names throughout (`main_test.go:40`, `flus
 - `medium` — Add an integration test that drives a real `BulkWriteException` (e.g. a `DocumentValidationFailure` via a JSON-schema-validated `rooms` collection, or a duplicate `_id`) through `classifyFlushErr`, asserting it classifies permanent — pinning the allow-list against the real driver.
 - `low` — Add `TestFlusher_FlushNowWithoutTimeoutUsesTheDefaultBound`: construct with `flushTimeout: 0`, call `flushNow`, assert the store saw a deadline.
 - `low` — Either add the `//go:generate mockgen` directive and a generated `mock_store_test.go`, or note the stub exception in `store.go` as an explicit, reviewed departure; also guard `stubStore.order`/`rooms` with the existing mutex.
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Genuinely well-factored — small pure functions, a real per-concern split (`flush.go`/`batch.go`/`projection.go`/`store_mongo.go`), and comments that explain WHY — but `main.go` has quietly absorbed two whole concerns that already have their own test files, and comment volume has outgrown the code it annotates.
+
+### Findings
+- `medium` — `main()` is 157 lines of straight-line wiring (config validation → obs → Mongo → NATS → bootstrap → consumer → flusher goroutine → iterator → signal → consume goroutine → health → 8 shutdown stages) — `roomlist-worker/main.go:65-222`
+  Adding one dependency means reading all 157 lines to find the right insertion point and the matching shutdown stage; the flusher's start (`:146-150`) and its teardown (`:207-215`) are 60 lines apart with no compiler link between them.
+
+- `medium` — `main.go` also holds the consume loop, the readiness state machine, the self-SIGTERM escalation, the flush-budget validator and the consumer config — five concerns, four of which already have dedicated test files with no matching source file — `roomlist-worker/main.go:226-400` vs `consumeloop_test.go`, `config_test.go`, `main_test.go`
+  The tests were split per concern; the source was not. `consumeloop_test.go` (396 lines) tests code that lives in `main.go`, so the obvious "where does the loop live" lookup fails.
+
+- `medium` — `handler.go` contains no handler: it is the pure `writeIntents`/`deriveIntents` derivation. The actual per-message handler (unmarshal → settle-on-malformed → add → inline drain) is an anonymous closure inside `consumeLoop` — `roomlist-worker/handler.go:14-97`, `roomlist-worker/main.go:364-382`
+  CLAUDE.md §1 defines `handler.go` as "request/message handling logic". A reader following the convention finds the wrong file, and the real handler is only reachable through the loop.
+
+- `medium` — Comment lines are 42% of `flush.go` (127/299) and 33% of `main.go` (130/400), with six blocks of 12–19 consecutive comment lines — `flush.go:34-51` (18-line `newFlusher` doc), `flush.go:122-140`, `main.go:276-294`
+  The content is correct and load-bearing, but at this density the invariants are prose-only: `flush.go:208-216` documents a cross-file invariant ("`out.err` is never a mixture") whose enforcement is "three frames away" in `write`, and only a named test guards it.
+
+- `low` — `deploy/bot/Dockerfile` and `deploy/user/Dockerfile` are byte-identical (`diff` exits 0); the two compose files differ only in name/`MODE`/dockerfile path — `roomlist-worker/deploy/bot/`, `roomlist-worker/deploy/user/`
+  Two copies of the same build recipe drift silently; only the compose `MODE` var actually varies.
+
+- `low` — Untraceable references: `#382`, `#396`, `#467`, and "the design spec's 'Consistency trade-off' section" with no path — `handler.go:23`, `handler.go:36`, `handler.go:38`, `store.go:28`, `store_mongo.go:121`
+  The spec does exist (`docs/superpowers/specs/2026-08-13-unread-worker-extraction-design.md`) but is never named, so the reasoning behind the read-floor trade-off is unreachable from the code.
+
+- `low` — `writeIntents` is passed by value through two layers, each needing a `//nolint:gocritic // hugeParam` suppression — `flush.go:65-66`, `batch.go:75-76`
+  A duplicated lint waiver is the signal the struct has outgrown by-value; `*writeIntents` removes both.
+
+- `nitpick` — `heldMsg` stores a `context.Context` as a struct field — `batch.go:37-40`. Justified by the comment (settle-time request id), but it is the one place the batch abstraction leaks request scope into buffer state.
+
+- `nitpick` — Two independent fake-message types in tests (`fakeMsg`, `fakeJetstreamMsg`) — `batch_test.go:17`, `consumeloop_test.go:23`; and `Store`/`NewMongoStore` are exported from `package main`, which nothing can import — `store.go:16`, `store_mongo.go:23`.
+
+### Recommendations
+- `medium` — Extract `consumeloop.go` (`messageIterator`, `consumeLoop`, and the per-message closure lifted to a named `handleMessage(ctx, msg, f)`) and `consumestate.go` (`consumeState`, `requestSelfShutdown`, `Check`) from `main.go`. Existing test files already carry those names; this is a pure move.
+- `medium` — Move `deriveIntents`/`writeIntents` to `intents.go` and let `handler.go` hold the extracted `handleMessage`, restoring the CLAUDE.md file-role mapping.
+- `medium` — Group the flusher's start/stop into one `startFlusher(...) (f *flusher, stop func(context.Context) error)` returning its own shutdown stage, and move config validation into `config.go` (`cfg.validate()`). Target `main()` under ~70 lines.
+- `low` — Compress the essay comments to ≤2 lines each (repo's own `remove_comments` norm), and convert the two cross-file invariants — the no-mixed-join rule (`flush.go:208-216`) and the NewerRow/preview agreement (`batch.go:81-87`) — into named assertions or a shared helper so they fail loudly rather than by review.
+- `low` — Collapse `deploy/bot/` and `deploy/user/` to one `deploy/Dockerfile` plus two compose files that differ only in `MODE`; parameterize `IMAGE_NAME` in a single pipeline.
+- `low` — Replace `#NNN` and "the design spec" with the concrete doc path; pass `*writeIntents` and delete both `hugeParam` waivers.
