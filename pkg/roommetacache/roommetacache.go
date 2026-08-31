@@ -48,6 +48,12 @@ type Meta struct {
 	// CrossSiteAt mirrors Room.CrossSiteAt — the flip time driving the post-flip
 	// grace window (nil for rooms born cross-site). See pkg/subject.RoomEventTargets.
 	CrossSiteAt *time.Time `json:"crossSiteAt,omitempty"`
+	// Restricted / ExternalAccess mirror Room.{Restricted,ExternalAccess} so the
+	// add-member path (room-worker newSub) denorms the room's real access state
+	// onto new subscriptions instead of a dropped false (#416). omitempty keeps
+	// old L2 (Valkey) entries decodable, matching CrossSite.
+	Restricted     bool `json:"restricted,omitempty"`
+	ExternalAccess bool `json:"externalAccess,omitempty"`
 }
 
 // Loader fetches a fresh Meta for the given roomID. The cache calls
@@ -191,32 +197,38 @@ func (w *Wrapper[S]) GetRoomMeta(ctx context.Context, roomID string) (Meta, erro
 // safe to errors.Is-check.
 func FetchFromMongo(ctx context.Context, rooms *mongo.Collection, roomID string) (Meta, error) {
 	opts := options.FindOne().SetProjection(bson.M{
-		"type":        1,
-		"name":        1,
-		"siteId":      1,
-		"userCount":   1,
-		"crossSite":   1,
-		"crossSiteAt": 1,
+		"type":           1,
+		"name":           1,
+		"siteId":         1,
+		"userCount":      1,
+		"crossSite":      1,
+		"crossSiteAt":    1,
+		"restricted":     1,
+		"externalAccess": 1,
 	})
 	var doc struct {
-		ID          string         `bson:"_id"`
-		Type        model.RoomType `bson:"type"`
-		Name        string         `bson:"name"`
-		SiteID      string         `bson:"siteId"`
-		UserCount   int            `bson:"userCount"`
-		CrossSite   *bool          `bson:"crossSite"`
-		CrossSiteAt *time.Time     `bson:"crossSiteAt"`
+		ID             string         `bson:"_id"`
+		Type           model.RoomType `bson:"type"`
+		Name           string         `bson:"name"`
+		SiteID         string         `bson:"siteId"`
+		UserCount      int            `bson:"userCount"`
+		CrossSite      *bool          `bson:"crossSite"`
+		CrossSiteAt    *time.Time     `bson:"crossSiteAt"`
+		Restricted     bool           `bson:"restricted"`
+		ExternalAccess bool           `bson:"externalAccess"`
 	}
 	if err := rooms.FindOne(ctx, bson.M{"_id": roomID}, opts).Decode(&doc); err != nil {
 		return Meta{}, fmt.Errorf("fetch room meta %s: %w", roomID, err)
 	}
 	return Meta{
-		ID:          doc.ID,
-		Type:        doc.Type,
-		Name:        doc.Name,
-		SiteID:      doc.SiteID,
-		UserCount:   doc.UserCount,
-		CrossSite:   doc.CrossSite,
-		CrossSiteAt: doc.CrossSiteAt,
+		ID:             doc.ID,
+		Type:           doc.Type,
+		Name:           doc.Name,
+		SiteID:         doc.SiteID,
+		UserCount:      doc.UserCount,
+		CrossSite:      doc.CrossSite,
+		CrossSiteAt:    doc.CrossSiteAt,
+		Restricted:     doc.Restricted,
+		ExternalAccess: doc.ExternalAccess,
 	}, nil
 }

@@ -194,7 +194,7 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Roo
 	if err != nil {
 		return nil, err
 	}
-	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount, CrossSite: meta.CrossSite, CrossSiteAt: meta.CrossSiteAt}, nil
+	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount, CrossSite: meta.CrossSite, CrossSiteAt: meta.CrossSiteAt, Restricted: meta.Restricted, ExternalAccess: meta.ExternalAccess}, nil
 }
 
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
