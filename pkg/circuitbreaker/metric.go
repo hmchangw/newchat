@@ -32,7 +32,13 @@ type StateGauge struct {
 // NewStateGauge creates the shared breaker-state gauge on meter. Most callers
 // want the package-level Tracked instead, which uses the global meter.
 func NewStateGauge(meter metric.Meter) (StateGauge, error) {
-	g, err := meter.Int64Gauge(StateMetricName,
+	// The name is written as a literal rather than StateMetricName because
+	// pkg/obs's instrument registry guard reads source: a constant here is
+	// invisible to it, so the instrument would ship undocumented with the guard
+	// still green (pkg/obs.TestInstrumentNamesAreLiterals). The two cannot drift
+	// -- the gauge tests read datapoints through gaugeValue, which matches on
+	// StateMetricName, so a literal that drifted from it would find nothing.
+	g, err := meter.Int64Gauge("circuit_breaker_state",
 		metric.WithDescription("Circuit breaker state (0=closed, 1=open, 2=half-open)"))
 	if err != nil {
 		return StateGauge{}, fmt.Errorf("create %s gauge: %w", StateMetricName, err)
@@ -45,11 +51,21 @@ func NewStateGauge(meter metric.Meter) (StateGauge, error) {
 // describes (e.g. "subscription", "roommeta", "atrestdek") and must be distinct
 // within a service.
 func (s StateGauge) Track(ctx context.Context, name string) Option {
-	// Built once at wiring time rather than per transition.
+	// Built once at wiring time rather than per transition: Track runs once per
+	// breaker during startup, and the closure below reuses this set for every
+	// transition that breaker ever makes.
 	attrs := metric.WithAttributes(attribute.String("breaker", name))
 	return WithOnTransition(func(from, to State) {
 		slog.WarnContext(ctx, "circuit breaker transition",
 			"breaker", name, "from", from.String(), "to", to.String())
+		// attrs is the set built above, once per breaker at wiring time, not per
+		// recording call. metrics-no-per-call-attribute-set is intraprocedural
+		// taint and cannot tell a closure capture from a local rebuilt on every
+		// call: both put the source and the sink inside one function. The rule's
+		// own note calls "building it in a constructor and looking it up here"
+		// the shape it wants, and this is that -- Track is the constructor, the
+		// captured variable is the lookup.
+		// nosemgrep: metrics-no-per-call-attribute-set
 		s.gauge.Record(ctx, int64(to), attrs)
 	})
 }
