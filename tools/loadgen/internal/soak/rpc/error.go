@@ -1,4 +1,4 @@
-package main
+package rpc
 
 import "errors"
 
@@ -14,22 +14,22 @@ type soakRequestError struct {
 	Reason   soakErrorReason
 	Attempts int
 	Retries  int
-	err      error
+	Cause    error
 }
 
 // Error passes the cause through unchanged. The action reaches the reader
 // twice over already — once from the lane's own wrap, once from the action
 // attr — and a third copy here only lengthens the line.
 func (e *soakRequestError) Error() string {
-	if e.err == nil {
+	if e.Cause == nil {
 		return string(e.Action) + " request failed"
 	}
-	return e.err.Error()
+	return e.Cause.Error()
 }
 
 // Unwrap keeps errors.Is working through the carrier: retry classification and
 // the ledger both key on sentinels below it.
-func (e *soakRequestError) Unwrap() error { return e.err }
+func (e *soakRequestError) Unwrap() error { return e.Cause }
 
 // soakErrorAttrs renders err as slog key/value pairs, adding the request
 // identity when a carrier is anywhere in the chain. Empty fields are dropped —
@@ -68,4 +68,10 @@ func soakErrorAttrs(err error) []any {
 		attrs = append(attrs, "retries", carrier.Retries)
 	}
 	return attrs
+}
+
+type RequestError = soakRequestError
+
+func ErrorAttrs(err error) []any {
+	return soakErrorAttrs(err)
 }

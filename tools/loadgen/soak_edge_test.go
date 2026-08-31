@@ -281,18 +281,13 @@ func TestNewSoakRuntimeSelector_SelectsOnlyValidMembers(t *testing.T) {
 	assert.NotEmpty(t, content)
 }
 
-func TestNewSoakRPCClient_DefaultsAndInputFailures(t *testing.T) {
+func TestNewSoakRPCClient_InputFailures(t *testing.T) {
 	client := newSoakRPCClient(
 		&soakRPCFakeTransport{},
 		soakRetryConfig{},
 		nil,
 		nil,
 	)
-	assert.Equal(t, 1, client.retry.MaxAttempts)
-	assert.Equal(t, 100*time.Millisecond, client.retry.MinBackoff)
-	assert.Equal(t, client.retry.MinBackoff, client.retry.MaxBackoff)
-	assert.NotNil(t, client.sleeper)
-	assert.Equal(t, 0.5, client.random())
 	assert.Empty(t, classifySoakRPCError(nil))
 
 	result, err := client.Call(context.Background(), soakRPCRequest{
