@@ -10,7 +10,8 @@
 
 | | |
 |---|---|
-| **Produces** | The **achieved distribution** for **SLO-4, 5, 7** and an approximate indicator for **SLO-1a** — the evidence a target gets chosen *from*, not a verdict against one. Plus the loadgen-vs-production latency gap for 4/5 |
+| **Produces** | Six artefacts, listed in **§7a** — achieved good-ratio *curves* for **SLO-4/5**, a ratio for **SLO-7**, an approximate indicator for **SLO-1a**, one-sided bounds for **1b/2**, the loadgen-vs-production latency gap, and the verified measurement apparatus itself. Evidence a target gets chosen *from*, not a verdict against one |
+| **How many runs** | **3–6 shakedown runs** (instrument only, nothing reported) then **3 identical measurement runs**, median + spread. Which knobs may move between them, and which may not: **§7b** |
 | **Stance** | **This run is calibration-only and gates nothing.** `common/sli-slo.md` remains the acceptance contract for any gating run until Track 1.3 amends it — §4a |
 | **loadgen code changes** | **None** — but the warm-up→measurement boundary needs a run protocol, not a code path; see §7 |
 | **Dashboard changes** | **Yes** — the existing dashboard has 22 panels and not one SLO ratio |
@@ -657,6 +658,87 @@ draft this run exists to inform.
 
 ---
 
+## 7a. What this run is expected to produce
+
+Not "a number for the SLOs". Six artefacts, of which only the first is a
+measurement:
+
+| # | Artefact | Shape | Who uses it next |
+|---|---|---|---|
+| **1** | **Achieved good-ratio curves for SLO-4 and SLO-5** | Not one number per SLO — **one point per histogram boundary**: `≤250 ms x% · ≤500 ms y% · ≤1 s z%`, for each of `channel_history` and `thread_open`. `le` stays a series dimension on the dashboard for exactly this reason | Track 1.3 picks the target *off the curve*: the boundary where the ratio is comfortably reachable, not the one already drafted |
+| **2** | **An achieved ratio for SLO-7** | One ratio (`ok / eligible`), with its denominator | Same |
+| **3** | **SLO-1a's approximate per-attempt indicator, or `INCONCLUSIVE`** | One ratio, explicitly labelled per-*attempt* not per-*message*, or the word INCONCLUSIVE and the reason (§7) | Track 1.3, and the argument for building P2a |
+| **4** | **One-sided bounds for SLO-1b and SLO-2** | Intervals, from a short `run --preset=realistic --rate=100`. Weak, and known to be weak — SLO-2's follows from E2's interval strictly containing it | The case for P2b, and a floor under the drafted targets |
+| **5** | **The loadgen-vs-production latency gap for SLO-4/5** | A delta, measured **once**. loadgen's client-side timing vs `rpc_server_call_duration_seconds` | Sizes the permanent blind spot, so later runs need not re-derive it |
+| **6** | **The measurement apparatus itself** | The verified query set (PRE-9), the SLI/SLO dashboard built on it, the background contamination share `n_b/n_c`, and `t2`'s floor band (§1a) | Every subsequent run in Tracks 2 and 3. This is arguably the most durable output of the whole exercise |
+
+**The honest framing of #1–#4:** they are *achievability evidence*. "At this
+load, on this box, with this shape, the system did X." They are the input to
+choosing a target. They are not a verdict, and §7's write-up template exists to
+stop them being read as one.
+
+**And a genuinely useful negative result is on the table.** If a curve comes back
+well under the drafted target — say SLO-5 achieves 88% at 250 ms against a drafted
+95% — that is not a failed run. It is the run doing its job: the draft was set by
+gut feel, and this is the first evidence that the gut was wrong. Either the target
+moves or the system does, and now there is a number to argue from.
+
+---
+
+## 7b. Iteration: which knobs may move, and when
+
+Yes, there will be repeated runs — the first few will not produce usable numbers.
+That is expected. What matters is that the iteration is over the **instrument**,
+never over the **workload** and never over the **system**, because those two
+converge on a number rather than measuring one.
+
+### Three kinds of change, three different rules
+
+| | Examples | Rule |
+|---|---|---|
+| **A — the instrument** | A query returns empty; the `site` selector does not resolve; `t0-sync` was marked before the catalog refilled; the scrape interval is too coarse for a 30 min window; the backlog observer was not actually running; sampler ratio wrong | **Iterate freely, before `t0`.** These runs are shakedown runs and claim nothing. A change *after* `t0` discards the run entirely — do not repair a window in flight |
+| **B — the workload** | `sendRate`, `readRate`, `threadShare`, the room mix, the preset, `ENCRYPTION_ENABLED` | **Freeze before the run (G2), and do not touch it to improve a number.** A different shape is a **different measurement**, not a better one. Changing it produces a *new labelled point*, and both points stay in the ledger |
+| **C — the system under test** | Consumer `MaxDeliver`/`AckWait`, pool sizes, cache TTLs, replica counts | **Not during calibration.** Tuning the system mid-programme means the numbers describe a configuration that exists nowhere else. If something genuinely needs to change, it lands as a normal change, and every prior run's numbers are marked superseded |
+
+### The failure mode this is guarding against
+
+If the target is chosen *from* the run, and the run is repeated with adjustments
+until the number looks acceptable, then the target is the **maximum of N
+samples**, not a reachable level. It will be missed in production for reasons
+nobody can reconstruct. This is the same error as tuning a threshold on the test
+set.
+
+Two rules make it structurally hard:
+
+1. **Every run gets a ledger row — including the discarded ones, with the
+   reason.** "Discarded: `t0-sync` marked 40 s early, catalog not refilled" is a
+   perfectly good row. A ledger with twelve rows and one reported result is
+   *healthy*; a ledger with one row is the suspicious one. The count and the
+   reasons are the evidence that nobody went shopping.
+2. **The reported number is the median of three runs at the frozen shape, with
+   the spread — never the best of three.** This is execution rule 10 in
+   [`execution-priority-plan.md`](execution-priority-plan.md), applied here. If
+   the spread exceeds ~10% of the value, the result is INCONCLUSIVE until the
+   variance is explained.
+
+### So the realistic sequence
+
+| Phase | Runs | Duration each | Produces |
+|---|---|---|---|
+| **Shakedown** | However many it takes — expect **3–6** | 10–30 min | A working instrument. No numbers are reported from these, ever |
+| **Freeze** | — | — | The shape is declared and recorded (G2), the queries are verified (PRE-9), the dashboard is built |
+| **Measurement** | **3**, identical | ≥30 min steady state each | Artefacts 1–5 above, as median + spread |
+
+Shakedown runs are cheap and short — do not run them for 30 minutes. The point
+is to break the instrument early, on purpose.
+
+**One asymmetry worth stating:** discovering a defect in the *instrument* during a
+measurement run is normal and costs one run. Discovering that the *workload
+shape* was wrong costs all three, because the shape is what the numbers are
+labelled with. That is why G2 gates the run rather than being resolved during it.
+
+---
+
 ## 8. What this run cannot answer
 
 | | Why | Where it comes from instead |
@@ -714,7 +796,9 @@ as G6.
 | **2b** | Only if a label value is missing (typically `thread_open`): a 10–15 min loadgen run to produce it, then re-check. Not a measurement | The absent series was absence of traffic, not a wrong name | 2 |
 | **3** | **Background baseline**: the same §5 queries over a background-only window, plus `num_pending + num_ack_pending` over the same window | The contamination share `n_b`, and `t2`'s non-zero floor band (§1a) | 2 |
 | **4** | Build the SLI/SLO dashboard **from the verified queries** | Panels show data on first load | 2 |
-| **5** | The measurement run (§7) | The first numbers | 0, 3, 4 |
+| **5a** | **Shakedown runs** (§7b): short, repeated, instrument-only. Expect 3–6 | A working instrument. Nothing is reported from these | 0, 4 |
+| **5b** | **Freeze the shape** (G2) and record it | The measurement runs are all labelled with the same thing | 5a |
+| **5c** | **3 identical measurement runs** (§7) | The artefacts in §7a, as median + spread | 5b |
 
 Steps 1–4 are one afternoon and start immediately. **Step 0 is the long pole**,
 and it is the only part of this that is not ours to schedule.
