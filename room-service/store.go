@@ -295,9 +295,6 @@ type RoomKeyStore interface {
 	GetByVersion(ctx context.Context, roomID string, version int) (*roomkeystore.RoomKeyPair, error)
 	// Set writes a fresh keypair as the room's current key (version 0).
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
-	// SetIfAbsent writes pair as the current key only if none exists, returning
-	// the winning key — race-safe for concurrent on-demand heals.
-	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 }
 
 // DEKProvisioner eagerly provisions a room's at-rest data encryption key at

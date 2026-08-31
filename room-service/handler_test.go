@@ -5561,29 +5561,14 @@ func TestHandler_natsGetRoomKey(t *testing.T) {
 			want: want{errSubstr: "only room members"},
 		},
 		{
-			name: "current key absent, dm — no heal",
+			name: "current key absent",
 			body: []byte(`{}`),
 			setup: func(t *testing.T, store *MockRoomStore, ks *MockRoomKeyStore) {
 				store.EXPECT().CheckMembership(gomock.Any(), account, roomID).
 					Return(nil)
 				ks.EXPECT().Get(gomock.Any(), roomID).Return(nil, nil)
-				store.EXPECT().GetRoomAppRead(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, Type: model.RoomTypeDM}, nil)
 			},
 			want: want{errSubstr: "room key not available"},
-		},
-		{
-			name: "current key absent, channel — mints and returns",
-			body: []byte(`{}`),
-			setup: func(t *testing.T, store *MockRoomStore, ks *MockRoomKeyStore) {
-				store.EXPECT().CheckMembership(gomock.Any(), account, roomID).
-					Return(nil)
-				ks.EXPECT().Get(gomock.Any(), roomID).Return(nil, nil)
-				store.EXPECT().GetRoomAppRead(gomock.Any(), roomID).
-					Return(&model.Room{ID: roomID, Type: model.RoomTypeChannel}, nil)
-				ks.EXPECT().SetIfAbsent(gomock.Any(), roomID, gomock.Any()).Return(sampleVersioned, nil)
-			},
-			want: want{replyJSON: `{"roomId":"room-1","version":7,"privateKey":"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="}`},
 		},
 		{
 			name: "historical version absent",

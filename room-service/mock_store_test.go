@@ -826,21 +826,6 @@ func (mr *MockRoomKeyStoreMockRecorder) Set(ctx, roomID, pair any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockRoomKeyStore)(nil).Set), ctx, roomID, pair)
 }
 
-// SetIfAbsent mocks base method.
-func (m *MockRoomKeyStore) SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetIfAbsent", ctx, roomID, pair)
-	ret0, _ := ret[0].(*roomkeystore.VersionedKeyPair)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// SetIfAbsent indicates an expected call of SetIfAbsent.
-func (mr *MockRoomKeyStoreMockRecorder) SetIfAbsent(ctx, roomID, pair any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetIfAbsent", reflect.TypeOf((*MockRoomKeyStore)(nil).SetIfAbsent), ctx, roomID, pair)
-}
-
 // MockDEKProvisioner is a mock of DEKProvisioner interface.
 type MockDEKProvisioner struct {
 	ctrl     *gomock.Controller
