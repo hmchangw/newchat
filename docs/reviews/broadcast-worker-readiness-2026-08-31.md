@@ -72,3 +72,38 @@ Boundaries hold exactly as `CLAUDE.md` documents them — one MongoDB write, OUT
 - `low` — Replace `broadcastSub.Unsubscribe()` with `Drain()` and register the server-broadcast callback on `wg` so hook 3 actually drains it.
 - `nitpick` — Hoist the `previews != nil` check to guard the goroutine spawn; rename `NewMongoStore` → `newMongoStore`.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Coverage is **67.7% (1067 statements)**, below the §4 80% floor, so the dimension is floored at 2. The number is **not vanity** — the fan-out core is genuinely well tested and the deficit is wiring code never extracted into testable units.
+
+| File | Coverage |
+|------|----------|
+| `preview_writer.go` | 97.1% |
+| `roomactivity.go` | 95.9% |
+| `handler.go` | 88.0% |
+| `store_mongo.go` | 26.2% |
+| **`main.go`** | **3.2%** (of 217 stmts) |
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 67.7%, under the 80% floor; driver is `main.go` at 3.2% (`main`, `Publish`, `broadcastProcessor` all 0%) | `coverage_by_service.txt` |
+| high | **The preview writer's drop branch is 0% covered** and no test file even references `maxPendingPreviews` or `pendingPreviews`. Its own comment says getting this wrong "would take the flush's key-advance branch and stamp the new id over the room's previous body, certifying a preview for a message it does not describe. That is #224, reintroduced by the cap that bounds #289" — **the exact regression the branch exists to prevent has no test** | `preview_writer.go:127` |
+| medium | The production per-message settle closure is 0% covered. `consumeloop_test.go` re-implements `jsretry.Settle(ctx, msg, LowLatencyBackoff, …)` as a **parallel copy**, directly contradicting the comment at `main.go:549` ("The integration test drives this exact composition rather than a parallel copy of the loop"). Swapping `LowLatencyBackoff` for `DefaultBackoff`, or regressing to a bare `Nak()`, would fail nothing | `main.go:523`; `consumeloop_test.go:438`, `:545` |
+| medium | Untagged **unit** tests start an in-process NATS/JetStream server — `consumeloop_test.go` imports `nats-server/v2/server` with no `//go:build integration` tag, so it runs under `make test`. §4: "Never connect to real databases, NATS, or external services in unit tests." The file's own AckWait-tuning rationale documents that these tests are already load-sensitive on a busy runner | `consumeloop_test.go:12`, `:50-58` |
+| medium | `publishThreadMetadata` is 50%: the DM/BotDM fan-out loop, its bot-skip/publish-error wrap and the unknown-room-type warn are 0%. **Thread badge delivery into DM rooms is entirely untested** | `handler.go:674`, `:696-708`, `:750-755` |
+| medium | `cachedMetaStore` has **zero coverage in both suites** — the integration test exercises `MongoStore.GetRoomMeta`'s L2 path instead of the wrapper `main.go:289` actually wires into production | `metacache.go:18`, `:27` |
+| low | `HandleServerBroadcast` is 66.7%: both non-happy branches (malformed-payload drop, unknown event type) uncovered — and this is a fire-and-forget core-NATS entry point where **dropping is the only failure mode** | `handler.go:216`, `:218-223`, `:233-236` |
+| low | `appNameRepo.lookup` and `newAppNameRepo` are 0% in both suites, including the documented no-match branch `BotAwareDisplayName` depends on | `preview.go:142`, `:150-151` |
+| nitpick | 90 top-level tests vs 29 `t.Run` calls; the `Missing*_ReturnsError` family would collapse into one table | `handler_test.go:963`, `:1221`, `:1911` |
+
+**Worth recording:** sonic wire-compat is properly pinned — `sonic_wire_test.go:89` asserts semantic equality *and* the deliberate byte divergence, and `:67` pins the attachment-shadow case; no `map`-typed field is sonic-marshalled here, so the key-ordering caveat does not bite. Integration hygiene is clean: `TestMain` → `testutil.RunTests(m)`, containers from `pkg/testutil`, `testutil.FlushValkey` registered, no inline `GenericContainer`, no `time.Sleep`.
+
+### Recommendations
+- `high` — Add `TestPreviewWriter_OverTheCapShedsTheBodyAndMarksSealFailure`: buffer `maxPendingPreviews+1` distinct rooms with eligible previews, assert room N+1 flushes with `pvw == nil && pvwFailed == true` (**not** the key-advance branch), and that `pendingPreviews` returns to 0 after `Flush`.
+- `medium` — Call `broadcastProcessor(handler)` from `consumeloop_test.go` instead of the hand-rolled closures, so the real backoff choice and Permanent Ack-drop are under test.
+- `medium` — Move `consumeloop_test.go` behind `//go:build integration`, or keep the embedded server and document the exception in-file.
+- `medium` — Cover `publishThreadMetadata`'s DM path (bots skipped, one publish per human account, error wrapped with room+account) and unit-test `cachedMetaStore.GetRoomMeta` with a mock `Store` — it needs no container.
+- `low` — Two table cases for `HandleServerBroadcast` (undecodable bytes, unknown event); extract the remaining `main.go` wiring behind small testable funcs as `buildConsumerConfig`/`guardedProcessor` already are.
+
