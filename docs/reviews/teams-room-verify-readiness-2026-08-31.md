@@ -124,3 +124,30 @@ No dead code, no duplicated logic, no leaky abstractions: the store interface ex
 - `low` — Compute `expectedMembers` inside `logMismatch` (it already takes `c`), removing the parameter and the confusion.
 
 ---
+
+---
+
+## 6. Integration — 4 / 5
+
+The cross-service contract is properly shared through `pkg/model` with the batch cap enforced identically at both ends; the one gap is that the endpoint path itself is hardcoded twice.
+
+### Findings
+- `medium` — the verify endpoint path is a private constant duplicated on both sides of the contract — `teams-room-verify/client.go:13` and `teams-room-inspector/routes.go:9`
+  Inconsistent with how the *same* contract handles its other invariant: `TeamsRoomVerifyMaxChatIDs` lives in `pkg/model/teams.go:110` precisely so both ends cannot drift (`teams-room-inspector/handler.go:17` consumes it). The path deserves the same treatment; a rename on the inspector compiles cleanly and fails only at runtime, as 404s that this client reports as a generic status error (`client.go:35`).
+- `low` — a transient inspector failure has no in-run retry — `teams-room-verify/client.go:26-33`
+  One connection blip leaves a whole batch flagged until the next CronJob tick. Defensible by design (the job is idempotent and self-healing, and `runner.go:111-114` says so), but with `MaxWorkers` concurrency and 30s timeouts a single retry would materially cut the flagged backlog.
+
+Correct by inspection, and worth recording as verified rather than assumed:
+- **No NATS surface at all** — the service publishes and consumes nothing. The `Timestamp int64` event rule, `pkg/subject` builders, INBOX/OUTBOX lanes and `outbox.Publish` partition membership are all genuinely N/A here; there is no subject built by `fmt.Sprintf` anywhere in the service.
+- **`docs/client-api.md` is correctly untouched.** This is an internal service-to-service HTTP contract on `/internal/…`, not a `chat.user.…` RPC, and `pkg/model/teams.go:100-103` states the exclusion explicitly. No drift in the derived views is possible from this service.
+- **Wire structs are shared, not re-declared**: `TeamsRoomVerifyRequest`/`Result`/`Response` (`pkg/model/teams.go:115-146`) with both `json` and `bson` tags and round-trip tests (`pkg/model/model_test.go:5421-5501`).
+- **The misroute guard is a real contract feature**, tolerant of older inspectors that send an empty `SiteID` (`runner.go:116-126`) — a thoughtful federation-compatibility decision.
+- **Query/index alignment across services**: this service's `find({needVerify:true}).sort({_id:1})` (`store_mongo.go:34-36`) is served by the partial index `teams-chat-sync` owns and documents for exactly this shape (`teams-chat-sync/store_mongo.go:62-67`).
+- No ID generation in production code; the only `idgen` use is test fixtures (`runner_test.go:75`).
+
+### Recommendations
+- `medium` — Promote `verifyPath` to `pkg/model/teams.go` beside `TeamsRoomVerifyMaxChatIDs` and have `teams-room-inspector/routes.go` register from it, so both ends break at compile time on a rename.
+- `low` — Add one bounded retry (or `resty`'s `SetRetryCount(1)` with a short backoff) for connection-level failures and 5xx, so a single blip does not defer a whole batch a full CronJob period.
+- `low` — Log `RequestedCount`/`FoundCount` from the response alongside the summary; both are already on the wire and unused, and they would expose an inspector that answers with the wrong cardinality.
+
+---
