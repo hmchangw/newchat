@@ -101,3 +101,29 @@ Coverage is **66.9% (674 statements)**, below the §4 80% floor, so the dimensio
 - `medium` — Either migrate `handler_test.go` to the generated mocks or delete `mock_store_test.go` and its directive — **do not keep both**.
 - `low` — Table-drive the repeated pagination/empty-query cases; add `newHandler` default-fallback and `enrich` apps-error cases; guard the `config_test.go` env manipulation with `t.Setenv`.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Small files, excellent WHY-oriented comments and clean layering are undercut by a five-way duplicated handler preamble, two endpoints still shipping as TODO-marked prototypes, and a self-documented config-prefix landmine.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`search.apps` threads `account` through three layers to a discard**: `_ = account // referenced in the access-guard $lookup once implemented`. The signature and doc comment read as an access-guarded pipeline; the body is `$match/$skip/$limit` only. **A dead parameter that looks load-bearing is the worst kind of maintenance trap** | `query_apps.go:49`; `store.go:442`; `handler.go:317` |
+| high | **`httpUsersClient` is a placeholder whose request body, URL path and auth scheme are all unresolved TODOs — yet `search.users` is a live registered route.** The "stable contract" claimed in-file is the return type only; everything on the wire is guesswork | `users_client.go:21`, `:40`, `:59`; `handler.go:376` |
+| medium | **Five handlers repeat an identical ~12-line preamble** (`Params.Require("account")` → `WithLogValues` → `normalizePagination` → trim + empty-query check → `withRequestTimeout`). Adding a sixth searchable collection means copy-pasting it a sixth time; a fix to the account/validation path has to be applied five times | `handler.go:87-104`, `:139-160`, `:210-230`, `:296-315`, `:332-357` |
+| medium | `parseRooms` and `parseOrgs` are structural clones over an already-generic `rawResponse[T]`, differing only in the `_source` type and the projection function | `response.go:108-124` vs `:153-169` |
+| medium | **`ESConfig` and `SearchConfig` are both mounted at `envPrefix:"SEARCH_"`.** The hazard is *documented rather than removed*, and the naming already misleads: `SEARCH_URL` is the Elasticsearch URL while `HealthAddr` sits in the request-shape struct. **A comment cannot prevent the collision; only distinct prefixes can** | `main.go:83`, `:86`, `:75-80`, `:66-72` |
+| medium | Zero-result diagnostics are **asymmetric**: `logEmptyResult` fires for rooms and orgs but not messages — and `parseMessagesResponse` does not even return the shard count, so the `messages-*` wildcard read has the same allow-no-indices blind spot the helper exists to catch | `handler.go:184`, `:249` vs `:130`; `response.go:71` |
+| low | `enrichMessages` is 138 lines running six sequential phases in one function | `enrich.go:18-151` |
+| low | `main()` is 177 lines containing **14 repetitions** of `slog.Error(...); os.Exit(1)` | `main.go:124-300` |
+| nitpick | `MessageIndexPattern` is an exported **mutable** package-level `var` in `package main`, so nothing can consume it and any test can mutate it globally | `query_messages.go:18` |
+
+### Recommendations
+- `high` — **Decide per endpoint**: either finish `buildSearchAppsPipeline`'s subscription access guard, or delete the `account` parameter from the store method and the builder so the signature stops advertising scoping that does not exist. Same call for `search.users`: pin the third-party contract or unregister the route until it exists.
+- `medium` — Extract the handler preamble into one helper (e.g. `begin(c, size, offset, query) (ctx, account, cancel, error)`) and have all five handlers call it; the roomType/empty-query specifics stay in the handler body. **This is the single highest-leverage refactor here.**
+- `medium` — Collapse `parseRooms`/`parseOrgs` into `parseHits[S, R any](raw, conv)`; keep `parseMessagesResponse` as a thin wrapper that also returns shards, then call `logEmptyResult` from `searchMessages` for parity.
+- `medium` — **Split the `SEARCH_` prefix now, while the field sets happen not to collide**: move `ESConfig` to `SEARCH_ES_` and `HealthAddr` to a top-level `HEALTH_ADDR`.
+- `low` — Break `enrichMessages` into `collectEnrichKeys`, `resolveDirectory`, `buildRooms` and a final attach loop; add a `fatal(msg, args...)` helper and a `mustParseConfig()` to compress the 14 exit blocks.
+- `nitpick` — Make `MessageIndexPattern` unexported and return it from a function (or pass it via `handlerConfig`) so all three index sources are configured in one place.
+
