@@ -75,3 +75,28 @@ Positives worth recording: `TeamsChatStore` declares exactly the two methods thi
 - `low` — Rename `store_mongo_test.go` → `integration_test.go` to match the per-service layout.
 
 ---
+
+---
+
+## 4. Test coverage — 2 / 5
+
+78.9% of 171 statements — 1.1 points under the CLAUDE.md floor, which forces the score to 2, but the shortfall is entirely `main()` wiring plus a store that *is* covered by integration tests, and the business logic is at 100%.
+
+### Findings
+- `high` — 78.9% statement coverage, below the mandatory 80% floor — `teams-room-verify` (`coverage_by_service.txt`)
+  Score floored at 2 per CLAUDE.md §4. Note how close it is: the entire gap is `main.go:main` 0%, `main.go:disconnect` 0%, `run` 33.3%, and the three `store_mongo.go` methods at 0% in the unit profile.
+- `medium` — `store_mongo.go` is 0% in the unit profile and its integration tests do not run in the service's Azure lane — `teams-room-verify/deploy/azure-pipelines.yml:45`
+  The step is `go test ./$(SERVICE_DIR)/...` with no `-tags=integration`; peers do pass it (`data-migration/oplog-connector/deploy/azure-pipelines.yml:48`). Mitigated: `.github/workflows/ci.yml:119-140` auto-discovers any dir containing a `//go:build integration` file, so these tests *do* run in the GitHub lane. The Azure lane also runs `go vet` rather than `make lint` and has no SAST stage.
+- `medium` — no test covers context cancellation mid-pass — `teams-room-verify/runner.go:78-86`
+  SIGTERM is the documented abort path (`main.go:68-71`), yet no test asserts what a canceled run does. The behaviour is untested *and* wrong (see D6).
+- `low` — no test asserts the `MaxWorkers` bound is honoured; `TestRunner_BatchesLargeSites` (`runner_test.go:343-361`) produces 3 batches against `MaxWorkers: 4`, so the semaphore never blocks in any test.
+
+Quality is otherwise genuinely high, not vanity: every runner function is 100% (`covfunc.txt`), and the covered paths are the ones that matter — inspector call failure (`runner_test.go:230`), per-site blast-radius isolation (`:247`), misrouted `SiteID` echo (`:287`), omitted-chat-not-treated-as-missing-room (`:312`), `MarkVerified` failure not failing the run (`:384`), plus the two subtle convergence cases that would otherwise flag chats forever — guest members with empty accounts (`:120`) and duplicate accounts (`:156`). Mocks are generated (`mock_store_test.go:1-6`, no diff repo-wide), tests are in `package main`, independent, and touch no real DB or network except `httptest`.
+
+### Recommendations
+- `high` — Close the 1.1-point gap where it is cheapest and most meaningful: table-drive `run()`'s early-exit branches in `main_test.go` (currently 33.3%), which needs no Mongo.
+- `medium` — Add `-tags=integration` to the Azure pipeline's test step and a `make lint` + `make sast` stage, matching `data-migration/*` and the GitHub lane.
+- `medium` — Add `TestRunner_CanceledContextStopsDispatch`: cancel before `run`, assert no inspector call and no `failedBatches` flood.
+- `low` — Add a `MaxWorkers: 1` case asserting the semaphore serializes, so the bound is actually exercised.
+
+---
