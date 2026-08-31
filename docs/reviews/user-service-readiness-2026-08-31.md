@@ -127,3 +127,28 @@ The sub-package decomposition is coherent and the comment discipline exemplary (
 - `medium` — Move the list-planning functions out of `mongorepo/subscriptions.go` into `mongorepo/listplan.go`; add the four missing `$lookup` justification comments.
 - `low` — Export `service.BadgeCache`, delete the mirror interface, and add it to the assertion block.
 
+---
+
+## 6. Integration — 3 / 5
+
+Subject construction, INBOX lane naming, `idgen` formats and `docs/client-api.md` coverage are all correct, but the client-fanout subject builders are inconsistent about account encoding, the cross-site fanout blocks the request path, and the chatlist fanout pair is entirely untested.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | `subject.SettingsUpdate` / `ChatlistUpdate` **do not call `EncodeAccount`**, unlike the sibling `SubscriptionUpdate`. `natsrouter` hands handlers the *decoded* dotted account, and both publish with it verbatim. For a `.bot` account (`weather.site-a.bot`) the subject spans four extra tokens and **never matches the recipient's JWT-scoped `chat.user.weather_site-a_bot.>`**. `docs/client-api.md:5692` documents this encoding requirement for `subscription.update` only — the invariant exists, it is just not applied here | `pkg/subject/subject.go:260` (encodes) vs `:266`, `:273`; `service/settings.go:124`; `service/chatlist.go:192` |
+| medium | Chatlist's two fanouts have **zero** test coverage — no expectation on `subject.ChatlistUpdate` or `subject.InboxExternal` exists anywhere. Status, settings and apps all assert their subjects; chatlist is the outlier, so a subject or event-type regression on the **newest** federation path is invisible | `service/chatlist.go:190-224`; `service/chatlist_test.go` |
+| medium | Cross-site INBOX publishing is synchronous and sequential **inside the request path** — each handler loops `ALL_SITE_IDS` doing a blocking `PublishMsg` (waits on PubAck) before returning. Every `status.set`/`settings.set` pays N × supercluster RTT, and a partitioned peer can consume `HANDLER_TIMEOUT` and fail an RPC whose local write already succeeded | `service/status.go:107-121`; `service/settings.go:136-158`; `service/chatlist.go:203-224` |
+| medium | No durable retry for user-config federation: publish failures are logged and dropped. `CLAUDE.md` sanctions user-service as a direct publisher, so not a rule violation — but **settings are what each remote `notification-worker` reads locally to decide whether to push**, so one lost publish leaves a remote site pushing against stale mute preferences indefinitely. Status is genuinely LWW-benign; settings and chatlist are not | `service/settings.go:154-157`; `service/chatlist.go:218-221` |
+| low | `SettingsUpdateEvent` and `ChatlistUpdateEvent` carry `Timestamp int64` with **no `bson` tag**. The load-bearing half is correct: every publish site sets it via `time.Now().UTC().UnixMilli()`, and settings/chatlist correctly derive **one** timestamp shared by the stored HWM and both fanouts | `pkg/model/usersettings.go:47-50`; `pkg/model/chatlist.go:68-71` |
+| low | The six chatlist-section RPCs are documented only as a compact shape table rather than the mandated per-RPC field table with explicit types and a JSON example; every other user-service RPC follows the mandated style | `docs/client-api.md:5206-5211` |
+
+### Verified clean
+All 28 client subjects and `BadgeCountBatch` built via `pkg/subject` — no raw `fmt.Sprintf` anywhere. Every registered `chat.user.…` subject appears in both `docs/client-api.md` and `docs/client-api/request-reply.md`, and both fanout events appear in `docs/client-api/events.md` — **no derived-view drift**. `BadgeCountBatchPattern` is `chat.server.request.…` and correctly absent from client docs. INBOX lane is `chat.inbox.{destSiteID}.external.{eventType}` with self-site skipped. No `bootstrap.go` — correct, since `inbox-worker` owns INBOX and this service publishes to remote lanes only. IDs via `idgen.GenerateID()` 17-char base62 for `sso_tokens._id` and `idgen.GenerateUUIDv7()` for section ids. No JetStream consumer, so no `Nak`/`BackOff` surface.
+
+### Recommendations
+- `medium` — Route `SettingsUpdate` and `ChatlistUpdate` through `EncodeAccount`, matching `SubscriptionUpdate`; add a `pkg/subject` table case for a `.bot` account across all three builders so they cannot diverge again.
+- `medium` — Add chatlist fanout test expectations asserting both subjects, the self-site skip and a non-zero shared timestamp, mirroring `status_test.go:74-160`.
+- `medium` — Move the `ALL_SITE_IDS` fanout off the reply path: fan out concurrently under the existing `MAX_SITE_FANOUT` semaphore and reply as soon as the local write commits.
+- `medium` — For settings and chatlist specifically, publish through the local OUTBOX instead of direct-to-remote-INBOX, so a gateway failure is durably retried rather than logged and dropped.
+- `low` — Add `bson` tags to the two event structs; update `docs/client-api.md` §Chatlist Sections to the mandated field-table + JSON-example style in the same PR.
+
