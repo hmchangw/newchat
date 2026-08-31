@@ -86,7 +86,7 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 	for i, f := range files {
 		fields = append(fields,
 			formField{fmt.Sprintf("files[%d].fileName", i), f.Filename},
-			formField{fmt.Sprintf("files[%d].mode", i), "KeepBoth"})
+			formField{fmt.Sprintf("files[%d].mode", i), "Normal"})
 	}
 	body, err := buildStreamedBody(fields, files)
 	if err != nil {
