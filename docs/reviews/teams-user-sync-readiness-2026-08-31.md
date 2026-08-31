@@ -93,3 +93,25 @@ Precomputed statement coverage is **53.4% (118 statements)**, below the 60% crit
 - `low` — extract the Mongo/Graph wiring out of `run` behind a small seam so `main.go:52-93` becomes reachable, or accept it as untestable glue and document that.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+At 1,115 lines across 12 files with the largest production file at 134 lines, nothing has outgrown its purpose; the comments explain WHY at a genuinely high standard.
+
+### Findings
+- `medium` — `syncPage` does four distinct jobs in 73 lines — page accounting, existence diff, UPN parsing/candidate construction, HR join and write — with the HR-merge loop mutating candidates in place — `teams-user-sync/handler.go:51-124`
+  It is still readable, but it is the one function where adding a fifth step (e.g. a refresh lane, see D5) means editing a block that already carries every concern.
+- `low` — `RunStats` is threaded as a `*RunStats` out-parameter mutated from inside `syncPage` (`handler.go:44,52-53,66`), which is why every counter assertion in the tests has to reason about accumulation across pages. Returning a per-page `RunStats` and summing in `UpdateUsers` would make each page's contribution independently assertable.
+- `nitpick` — `handler.go:13-15`'s doc comment says "insert the users missing from teams_user", while the method it documents is named `UpdateUsers` and the store method `UpsertTeamsUsers`. The comment is the accurate one; the names promise more than the code does.
+
+**Verified clean:** no dead code, no duplicated logic, no leaky abstraction — `mongoutil.Collection[T]` keeps projection and cursor handling out of the service entirely (`store_mongo.go:37-49`). Comment discipline is a strength worth naming: `main.go:29-33` explains why the binary exits after one pass (CronJob owns the schedule), `main.go:96-97` explains why `disconnect` builds its own context, `config.go:35-37` explains why `Pool` sits at the top level, and `handler.go:104-105` explains why the log carries the GUID rather than the account. These are all WHY, not WHAT.
+
+### Recommendations
+- `medium` — the refactor I would actually do: split `syncPage` into `newCandidates(users, existing, *RunStats) []model.TeamsUser` and `enrichWithHR(ctx, candidates, *RunStats) error`, leaving `syncPage` as diff → build → enrich → write. Roughly 25 lines each, each independently table-testable, and it creates the seam a refresh lane would slot into.
+- `low` — have `syncPage` return a `RunStats` for the page and accumulate in `UpdateUsers`, removing the out-parameter.
+- `low` — rename `UpdateUsers` → `InsertMissingUsers` (or make the method match the name, per D5).
+- `nitpick` — align the `Syncer` doc comment at `handler.go:13` with whichever of the two the team chooses.
+
+---
