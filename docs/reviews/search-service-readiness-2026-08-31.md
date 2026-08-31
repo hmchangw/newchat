@@ -153,3 +153,32 @@ All five handlers registered via `subject.Search*Pattern` builders, **no raw `fm
 - `medium` — Delete the local `UserRoomDoc` and read `searchindex.UserRoomUpsertDoc`, removing the stale cross-service comment.
 - `low` — Skip the `RoomsInfoBatch` fan-out for an empty site key; swap the two `fmt.Sprintf` calls for `searchindex.IndexPattern`; add the missing error-envelope/triggered-events stanzas to the Search Users doc section.
 
+---
+
+## 7. Performance — 3 / 5
+
+Solid hot-path fundamentals (batched enrichment with **no N+1**, precomputed metric attribute sets, bounded fan-out, Valkey L2, `_source` excludes, `secondaryPreferred` reads), undercut by **unbounded client-driven query cost**, an unprojected Mongo aggregation, and no HTTP connection-pool sizing behind a 256-way concurrency guard.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **The apps aggregation has no `$project`**, so `search.apps` decodes whole `apps` documents into `[]model.App` on every request. §MongoDB ("always project precisely") is violated outright; the TODO block above it also plans `$lookup`s that `CLAUDE.md` forbids without a justification comment | `query_apps.go:51-55`; `store_mongo.go:141-149` |
+| high | **`offset` is validated non-negative but never capped**, while `size` is. A client can send `offset: 5000000`; ES pays deep-pagination cost across `messages-*` **and every remote cluster** before `index.max_result_window` rejects it. `MAX_DOC_COUNTS` bounds only half the `from+size` product | `handler.go:374-384` |
+| high | **`req.RoomIDs` goes straight into an inline `terms` clause with no length bound.** A 50k-element `roomIds` array becomes a 50k-term clause; a large `restricted` map likewise expands to **two bool clauses per restricted room** with no cap — risking `max_clause_count` rejection and a multi-MB request body per search | `query_messages.go:112-134`, `:99-107` |
+| high | **No idle-connection pool sizing on either outbound HTTP client while `MAX_CONCURRENCY` defaults to 256.** The ES client inherits `http.DefaultTransport.Clone()` (`MaxIdleConnsPerHost = 2`), and the HR client is built without `WithMaxIdleConns`. **Beyond 2 in-flight calls per host every request pays a fresh TCP+TLS handshake.** `media-service` and `upload-service` already set `WithMaxIdleConns(32)` — this service is the outlier | `main.go:212-215`; `pkg/searchengine/factory.go:33-58`; `pkg/natsrouter/guard.go:21` |
+| medium | `GetUserRoomDoc` fetches the **entire** user-room doc including the `rooms[]` array on every cache miss — while `store.go:19-22` **explicitly states that array is never needed locally** (terms-lookup resolves it server-side). For a heavy user this decodes and discards thousands of room IDs per miss | `store_es.go:37-52`; `pkg/searchengine/adapter.go:393-397` |
+| medium | `track_total_hits: true` on all three ES queries, but **only `searchMessages` returns `Total`** — `parseRooms`/`parseOrgs` discard it. For rooms and orgs this buys an exact cross-shard count nobody reads | `query_messages.go:57`; `query_rooms.go:43`; `query_orgs.go:18`; `response.go:110-121`, `:160-171` |
+| medium | Enrichment issues its independent lookups **serially** on the user-visible path: subscriptions → users → apps → room RPCs. `UsersByAccounts` and `AppsByAssistantNames` have **no data dependency on each other**, so up to three round trips of latency are added in sequence when two would do | `enrich.go:36-44`, `:87-106` |
+| low | `loadRestricted` has **no single-flight**: on TTL expiry (5 m) or a Valkey blip, concurrent requests for the same hot account each fire their own ES `GET`. The empty-map caching comment shows miss-storms were already anticipated | `handler.go:250-292` |
+| low | The apps `$match` is an **unanchored `$options:"i"` regex** over `name` — it cannot take index bounds, so the `{name:1}` index at best converts a collection scan into a full index scan; and `$skip` before `$limit` with **no `$sort`** makes page ordering unstable | `query_apps.go:37-40`, `:53` |
+| nitpick | Every ES body is rebuilt as nested `map[string]any` and re-marshalled per request; dwarfed by the ES round trip | `query_messages.go:41-84` |
+
+**No goroutine leaks**: `fetchRoomNames` bounds fan-out and joins, the health server exits via `Shutdown`, and no `time.Sleep` appears in production code. No JetStream consumers, so the `jsretry`/`BackOff` rules do not apply.
+
+### Recommendations
+- `high` — Add a terminal `$project` matching `model.App`'s bson tags to the apps pipeline; drop the `$lookup` plan from the TODO or attach the required justification comment.
+- `high` — Cap `offset` in `normalizePagination` (bounded well under `index.max_result_window`) and reject it with `errcode.BadRequest` rather than letting ES do it.
+- `high` — Bound `len(req.RoomIDs)` (reject above ~200) and cap the restricted-room clause expansion, falling back to a terms-lookup-only clause past the ceiling.
+- `high` — **Size the connection pools**: `restyutil.WithMaxIdleConns(32)` on the HR client, and thread a `MaxIdleConnsPerHost` knob through `searchengine.Config` for the ES transport, derived from `MAX_CONCURRENCY`.
+- `medium` — Pass `_source_includes=restrictedRooms` on the user-room `GetDoc` and drop `Rooms` from the local doc type; set `track_total_hits` to a bounded integer for rooms and orgs.
+- `medium` — Run `UsersByAccounts` and `AppsByAssistantNames` concurrently, and start `fetchRoomNames` as soon as the subscription partition is known.
+
