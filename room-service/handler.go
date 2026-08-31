@@ -488,7 +488,24 @@ func (h *Handler) getRoomKey(c *natsrouter.Context) (*model.RoomKeyGetResponse, 
 			return nil, fmt.Errorf("get room key: %w", err)
 		}
 		if existing == nil {
-			return nil, errRoomKeyAbsent
+			// Migrated/legacy channel with no key: mint on demand (roll-out).
+			// Gate to channels (DMs aren't encrypted); SetIfAbsent so concurrent
+			// pulls converge on one key.
+			room, rErr := h.store.GetRoomAppRead(ctx, roomID)
+			if rErr != nil {
+				return nil, fmt.Errorf("get room key: room lookup: %w", rErr)
+			}
+			if room.Type != model.RoomTypeChannel {
+				return nil, errRoomKeyAbsent
+			}
+			roomkeymetrics.RecordKeyAbsent(ctx, "GetHeal")
+			pair, gErr := roomkeystore.GenerateKeyPair()
+			if gErr != nil {
+				return nil, fmt.Errorf("get room key: generate: %w", gErr)
+			}
+			if existing, err = h.keyStore.SetIfAbsent(ctx, roomID, *pair); err != nil {
+				return nil, fmt.Errorf("get room key: heal: %w", err)
+			}
 		}
 		// #nosec G117 -- RoomKeyGetResponse.PrivateKey is the intended payload: on-demand key delivery to the authorized room member over an auth-callout-gated per-user NATS subject, not a leak
 		return &model.RoomKeyGetResponse{

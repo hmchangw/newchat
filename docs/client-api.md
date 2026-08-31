@@ -6809,12 +6809,19 @@ inbound message event). Clients are already authorized for
 Same shape as `RoomKeyEvent` minus `timestamp`, so a client can feed the
 reply through the same caching path it uses for live events.
 
+**Roll-out on a keyless channel:** a current-key request (no `version`) for an
+encrypted **channel** that has no key yet — e.g. a room carried over from the
+legacy system — mints a fresh key on demand and returns it, so the client can
+start encrypting. This applies only to the current-key request on a channel; a
+non-channel room, or an explicit historical `version` that isn't held, still
+returns `room key not available`.
+
 #### Errors
 
 | Condition | Error envelope `error` text | Notes |
 |---|---|---|
 | Requester is not a member of the room | `only room members can list members` | Surfaces the existing `errNotRoomMember` sentinel. |
-| Key not held (rolled past grace window, or never existed) | `room key not available` | Includes "explicit version resolvable in neither the previous-key slot nor the retired-key archive". |
+| Explicit `version` not held (rolled past grace window, or never existed), or a non-channel room with no key | `room key not available` | A current-key request (no `version`) on an encrypted **channel** with no key does **not** error — it mints and returns (see roll-out above). |
 | Malformed request body | `invalid request: …` | |
 | Internal failure | `internal error` | |
 
