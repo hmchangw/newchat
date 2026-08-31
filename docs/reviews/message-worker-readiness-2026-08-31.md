@@ -189,3 +189,23 @@ The plain-message hot path is genuinely well-tuned (one UnloggedBatch per messag
 - `medium` — Fold `AdvanceThreadSubscriptionLastSeen` into the replier's subscription upsert as a `$max` in the same statement.
 - `low` — Gate the three debug log calls behind `logctx.Enabled`; align `pretouchTypes` with the types actually sonic-encoded; validate `MaxWorkers`.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Add `TestCassandraStore_DerivedSetsDoNotPinWriteTimestamp` asserting the `tcount`/`tlm` UPDATEs carry no `USING TIMESTAMP` | Test coverage | `store_cassandra.go:425`, `:447` | **The one rule whose violation is silent and data-corrupting.** The positive half is test-pinned; the negative half is not, so adding a pin to either derived SET today passes the entire suite while letting a redelivered create outrank the tcount that supersedes it. |
+| 2 | `high` | Stop the full-partition `tcount` rescan per reply; maintain the count incrementally | Performance | `pkg/threadcount/count.go:41-44`; `store_cassandra.go:451` | O(N²) per thread. A long thread's Nth reply walks N rows while holding a worker slot for up to 15 s — the service's sharpest scaling cliff. |
+| 3 | `high` | Restrict `UpdateParentMessageThreadRoomID` to first-reply and redelivery | Performance | `store_cassandra.go:467-470`, `:482-485` | Two Paxos LWTs on **every** reply to re-stamp an immutable value, in a store whose own comment avoids LWT for its 5–10× overhead. |
+| 4 | `high` | Collapse `MarkThreadSubscriptionMention` to one write per mentionee and `BulkWrite` the loop | Performance | `store_mongo.go:120`, `:132`; `handler.go:682` | A 20-mention reply costs 40 serial Mongo round-trips **before the message is persisted**. |
+| 5 | `high` | Extract `main()`'s wiring into testable seams | Test coverage / Maintainability | `main.go:73` | 181 statements at 7.2% — ~46% of the entire coverage deficit, and the reason the consume loop, publish closure and shutdown chain are untested by construction. |
+| 6 | `high` | Cover `UpdateParentMessageThreadRoomID` in integration, both applied and not-applied | Test coverage | `store_cassandra.go:464` | 0% in both lanes, on the LWT whose own comment says a silent miss "permanently breaks thread reads for that parent". |
+| 7 | `high` | Introduce one `messageColumns` binder; collapse the five `subscribeAndFederate` copies; split `processMessage` | Maintainability | `store_cassandra.go:168`…`:366`; `handler.go:92-258` | Ten hand-typed column lists with no compiler help (a miscount is runtime-only), a 168-line core function, and five copies of the subscribe-and-federate sequence. |
+| 8 | `medium` | Use `natsmetrics.PublishLabelsFromSubject` in the publish closure | Integration / Architecture | `main.go:211`, `:218` | OUTBOX failures are labelled `recipient_publish`, so this service's federation failures **fall outside the fleet-wide `outbox_publish` series** an on-call would query during a cross-site incident. |
+| 9 | `medium` | Delete the dead `METRICS_ADDR` knob and document the real metrics port | Architecture | `main.go:61` | An operator setting it gets silence, and deploy manifests will scrape a port nothing listens on. |
+| 10 | `medium` | Extract the Teams migration to its own service, or decorate the flag away | Maintainability | `teamsbatch.go`, `main.go:36-39` | ~460 lines of finished one-off migration is now permanent surface area — with its own store, cache and consumer — inside the **sole persister of message history**, threaded through five functions by an `isMigration` bool. |
+
+### Verdict
+
+**Ship-capable.** This service handles the most dangerous correctness rule in the repo — Cassandra write-timestamp pinning across plaintext, encrypted and tombstone paths — and gets every case right. The work here splits cleanly: item 1 protects that correctness from a future edit, items 2–4 are real scaling cliffs on the thread path that will bite as threads grow, and items 5–7 are what make the rest safe to change.
