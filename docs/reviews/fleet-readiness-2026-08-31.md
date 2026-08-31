@@ -127,3 +127,60 @@ The tell that this is a systemic gap rather than carelessness: **several service
 - `medium` — Rebuild `room-worker/deploy/teams/` from the default deploy with only `MODE` and `OTEL_SERVICE_NAME` overridden.
 - `medium` — Add a repo-owned semgrep rule (with fixture, per §2) that flags an `env:"…"` tag whose name already appears in a `pkg/` config struct. This is the mechanical guard that makes the rule self-enforcing rather than review-enforced.
 
+---
+
+## 4. Cross-cutting risk #3 — federation guarantees that break at the seams
+
+The federation architecture is genuinely well designed. The OUTBOX partition is airtight: the two filter sets in `pkg/outbox` are **provably disjoint** (there is a test), they **jointly cover all 16 event types any producer emits**, `outbox.Publish` **rejects any type outside the partition** so a gap cannot go silent, and consumer `FilterSubjects` are built from the same slices so adding a type auto-creates its lane. Subjects come from `pkg/subject` builders everywhere — **zero raw `fmt.Sprintf` subject construction outside `pkg/subject` in the entire fleet.**
+
+**The design is right. The seams are where it fails.**
+
+### 4.1 The ordering guarantee the origin pays for is discarded at the destination
+
+This is the single most consequential systemic finding in the audit.
+
+`room_renamed` is in `pkg/outbox.OrderedEventTypes`. It rides the per-destination FIFO lane at `MaxAckPending=1` — deliberately capping that lane's throughput to one in-flight message — for a stated reason: *"so a `room_renamed` can't overtake the `member_added` that creates the subscription it renames."*
+
+**At the destination, `inbox-worker`'s `isMembershipSubject` routes only `member_added` and `member_removed` to the sequential lane.** `room_renamed` goes to the `MaxWorkers` fan-out pool and is processed **concurrently with an in-flight `member_added`** (`inbox-worker/main.go:1032-1035`).
+
+And the stranding is **permanent, not transient**: `UpdateSubscriptionNamesForRoom` is an `UpdateMany` over *existing* subscriptions, so a rename applied before the subscription exists matches zero documents; `handleMemberAdded` then writes the stale `event.RoomName`, and **no later event corrects it**.
+
+The same chapter found a second instance of the same class: **`subscription_opened` is applied with no high-water-mark guard**, even though `pkg/outbox.ConcurrentEventTypes` justifies concurrent forwarding *on the explicit claim* that "inbox-worker applies them under high-water-mark / idempotent-upsert guards." Every sibling handler (mute, favorite, section_moved, role, rename, restrict) carries the `$lt` guard. This one does not — and `SubscriptionOpenedEvent.Timestamp` **already exists on the wire and is simply ignored**. A reordered hide→reopen pair leaves the room permanently in the wrong state.
+
+**The lesson generalises: the origin-side partition is enforced by code (`outbox.Publish` rejects unknown types), while the destination-side lane split is a hand-maintained list of two subjects.** One side is mechanical; the other is a comment.
+
+### 4.2 Contracts that do not exist, or do not match
+
+Five cross-service contracts were found to be broken, undocumented, or unimplemented — each verified from both sides:
+
+| Contract | State | Evidence |
+|---|---|---|
+| **notification-worker → user-presence-service** bulk presence | **No responder exists anywhere in the repo.** The worker requests `chat.presence.{siteID}.request.snapshot`; the presence service registers only `query.batch`/`query.batch.peer`. The payloads are also incompatible (`PresenceSnapshotReply` vs `PresenceQueryResponse`), **and** the batch sizes disagree (worker chunks at 512, service hard-rejects above 100). Three independent incompatibilities. Masked today only because `PRESENCE_RPC_ENABLED` defaults false — **flipping that flag yields a 2 s timeout per chunk and fail-open on every message**, so DND/in-call suppression never engages | `notification-worker/presence.go:61`; `user-presence-service/main.go:172-178` |
+| **search-sync-worker bot-message lane** | **`critical`.** The collection binds `BOT-MESSAGES-CANONICAL` (subjects `chat.bot.canonical.…`) but its consumer filter is `chat.msg.canonical.…` — **not a subset of its own stream**, so `CreateOrUpdateConsumer` is rejected and the pod exits 1 in default mode; if accepted, no bot message would ever be indexed. **A unit test asserts the wrong filter**, so CI cannot catch it | `search-sync-worker/messages.go:129`, `:74-80`; `messages_test.go:622` |
+| **botplatform-service member endpoints** | The code registers `POST …/members/add` and `…/members/remove`; **`docs/client-api.md` publishes `POST`/`DELETE …/members`.** Any SDK written against the doc gets a 404 on both. The derived view also drops all five bot endpoints and says "Emits: None — HTTP-only" | `botplatform-service/routes.go:69-73` vs `docs/client-api.md:8584` |
+| **`BotIdentity` enrichment** | `AppID`/`AppName`/`EngName`/`ChineseName` are read downstream (`bot-room-service` persists them as room-owner identity; `bot-message-handler` derives display names) but **botplatform-service — the only producer — never populates them.** Every bot room stores an empty owner app identity | `botplatform-service/bot_forwarder.go:62` vs `bot-room-service/handler.go:199` |
+| **auth-service JWT scope** | `docs/client-api.md:200` states scope "is derived server-side from the principal's roles (admin > bot > user)". **It is not** — `signNATSJWT` stamps only `account:<name>`, and bots, admins and SSO users all receive the identical `scoped_user` template. Clients are told a security property the server does not provide | `auth-service/handler.go:321`; `pkg/principal/principal.go` |
+
+### 4.3 A third federation lane nobody documented
+
+`broadcast-worker` publishes cross-site room-activity as a **fire-and-forget core-NATS publish to `chat.roomactivity.{destSiteID}`** — bypassing both OUTBOX and INBOX. `CLAUDE.md`'s federation model has exactly two lanes. This one has **no stream, no retry, no ack**, and if ops/IaC never exports the subject across the gateway the feature is **silently dead**: the local publish succeeds and nothing arrives. Nothing in `docs/` describes the subject.
+
+Meanwhile the destination side of that lane writes to `remote_rooms` — a collection `inbox-worker` upserts and deletes, `pkg/model` documents inbox-worker as owning, and **which a repo-wide grep finds no reader for.** The whole activity-refresh lane (core-NATS subscriber, a 110-line cache, three store methods, its own config) currently feeds nothing.
+
+### 4.4 Destination-axis validation is missing where event-type validation exists
+
+`pkg/outbox.Publish` guards the **event-type** axis: publish an unpartitioned type and it is rejected. **Nothing guards the destination axis.** `broadcast-worker/federateMentions` derives `destSiteID` straight from `participant.SiteID` with no check against `cfg.AllSiteIDs` — which is already parsed and sitting unused two files away — so a stale or decommissioned site ID publishes to a subject **no `outbox-worker` consumer filters on**, and the event sits in OUTBOX until retention deletes it.
+
+The mirror-image failure exists in `outbox-worker` itself: **an unset `ALL_SITE_IDS` creates zero consumers**, so the sole OUTBOX owner runs as a **no-op while producers keep filling the stream** — and the health check reports green, because it only checks the NATS connection. The shipped compose default collapses to exactly that case.
+
+### Fleet recommendations
+
+- `critical` — **Derive `inbox-worker`'s `isMembershipSubject` from `pkg/outbox.OrderedEventTypes`** rather than a hardcoded pair, and add a test asserting the two sets agree. This makes the destination lane split mechanical, like the origin partition already is.
+- `critical` — Guard `UpdateSubscriptionOpen` with an `openUpdatedAt` `$lt` from the event's own `Timestamp`, matching its six sibling handlers.
+- `critical` — Fix the search-sync-worker bot-lane filter **and the test that enshrines it**, then add a table test asserting **every collection's `FilterSubjects` ⊆ its own `StreamConfig.Subjects`**.
+- `high` — Resolve the presence contract: implement the snapshot handler **or** repoint notification-worker at `PresenceQueryBatch`, reconcile the 512-vs-100 batch limits, and add a test that a request the worker builds is accepted by the service.
+- `high` — Validate `destSiteID` against the configured peer set in `broadcast-worker`, and make an empty `ALL_SITE_IDS` in `outbox-worker` a startup failure or a red readiness probe.
+- `high` — Reconcile the botplatform route/doc mismatch and the auth-service scope claim; both are published contracts that are currently wrong.
+- `medium` — Either document `chat.roomactivity.{destSiteID}` in `CLAUDE.md` as an explicitly best-effort third lane with its gateway-export requirement, or move it onto a durable lane. Decide `remote_rooms`' fate in the same change.
+- `medium` — Add `bot-room-service` and `admin-service` to `CLAUDE.md`'s cross-site-publisher lists; both federate today and neither is named.
+
