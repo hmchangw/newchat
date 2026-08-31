@@ -107,3 +107,30 @@ Coverage is **67.7% (1067 statements)**, below the §4 80% floor, so the dimensi
 - `medium` — Cover `publishThreadMetadata`'s DM path (bots skipped, one publish per human account, error wrapped with room+account) and unit-test `cachedMetaStore.GetRoomMeta` with a mock `Store` — it needs no container.
 - `low` — Two table cases for `HandleServerBroadcast` (undecodable bytes, unknown event); extract the remaining `main.go` wiring behind small testable funcs as `buildConsumerConfig`/`guardedProcessor` already are.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Well-documented and conventional at the package boundary, but the fan-out logic has accreted into one 1,449-line `handler.go` and a 378-line `main()`, with visible duplication a new room type or event type would have to be threaded through by hand.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `handler.go` is 1,449 lines / 25 methods covering dispatch, six event handlers, four thread variants, encryption, cross-site federation, metric labelling, debug helpers and event builders — the repo's 3rd-largest handler, while peers split the same concerns into topic files (`notification-worker` has 14; `roomlist-worker` has `flush.go`/`projection.go`/`batch.go`) | `handler.go:1-1449` |
+| high | `main()` is 378 lines of wiring and has absorbed **four test files' worth of subject matter with no production counterpart**: `config_test.go`, `consumer_config_test.go`, `consumeloop_test.go`, `debug_log_test.go` all test code that lives in `main.go`. A missing `config.go`/`consumer.go` is the clearest signal the file outgrew its remit | `main.go:126-503` |
+| medium | **The DM audience comes from two different sources depending on which handler you land in**: `publishMutation` and `publishThreadMetadata` iterate the denormalized `room.Accounts`, while `publishDMEvents` reads `store.ListRoomMembers` through `roomsubcache`. A new message and its later edit can address different recipient sets, and neither call site says why it chose its source | `handler.go:701`, `:918` vs `:1168` |
+| medium | The same DM publish loop (bot skip → `subject.UserRoomEvent` → publish → error log) is written out three times | `handler.go:700-707`, `:917-935`, `:1181-1207` |
+| medium | **Six copies** of the identical `default: slog.WarnContext(ctx, "unknown room type…")` switch arm — adding a room type means finding all six by grep | `handler.go:300`, `:383`, `:583`, `:636`, `:709`, `:941` |
+| medium | Two room representations are both first-class in the store contract (`GetRoom → *model.Room`, `GetRoomMeta → roommetacache.Meta`), and every downstream helper is typed to one or the other. **This type split is what forces the duplicated fan-out above**; each new handler must first pick a room type | `store.go:20-21`; `handler.go:947` vs `:1226` |
+| medium | Comment volume: 42% of `preview_writer.go`, 38% of `keycache.go`, 36% of `roomactivity.go`, including 25–35-line design essays above 12-line functions. The WHY is genuinely good, but at this density it is a design doc pasted inline — and `docs/design/` has no broadcast-worker page to hold it | `preview_writer.go:57-88`; `keycache.go:16-44` |
+| low | No complexity linter is enabled repo-wide (no `funlen`, `gocyclo`, `cyclop`, `gocognit`, `dupl`), so **nothing mechanically flagged `handler.go` or `main()` as they grew** | `.golangci.yml:1-27` |
+| low | Five optional dependencies are encoded as nil-means-disabled, each with its own guard idiom in a different file — one needing a companion bool to stay unambiguous. A sixth optional feature adds a sixth convention | `handler.go:104`, `:437`; `roomactivity.go:74`; `preview_writer.go:107`; `preview.go:47` |
+| nitpick | `handler_test.go` is 4,181 lines / 90 tests in one file, mirroring the production sprawl. No dead code found; `staticcheck`'s `unused` is enabled and lint passes | — |
+
+### Recommendations
+- `high` — Split `handler.go` along seams it already has: `handler.go` (dispatch + struct + options), `handler_thread.go`, `federation.go`, `roomevent.go` (the four builders), `encrypt.go`. Precedented in-repo, no interface changes.
+- `high` — Extract `config.go` (the config struct + validation) and `consumer.go` (`buildConsumerConfig`, `broadcastProcessor`, `guardedProcessor`, `natsPublisher`), giving the four orphan test files real counterparts and leaving `main()` as wiring only.
+- `medium` — Introduce one internal fan-out view (`roomFanout{ID, Type, SiteID, Accounts, UserCount, CrossSite, CrossSiteAt}`) that both `model.Room` and `roommetacache.Meta` convert into, then collapse the three DM loops into a single `publishToAccounts` and the six unknown-room-type arms into one helper. **This is the refactor the other three findings all point at.**
+- `medium` — Pick one DM audience source (`ListRoomMembers`, since it is cache-backed and survives a Mongo outage) and use it for edits/pins/reactions too, or document at both call sites why `room.Accounts` is authoritative for mutations.
+- `medium` — Move the long-form rationale into `docs/design/broadcast-worker.md`, leaving ≤2-line pointers inline.
+- `low` — Enable `funlen` (or `cyclop`) with a generous threshold and a grandfathering exclusion, so the next `handler.go` growth is caught at lint time rather than at audit time.
+
