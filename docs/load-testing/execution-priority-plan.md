@@ -217,6 +217,14 @@ Answering *"what else before prod"*. These are not capacity questions; they are
 
 ## 4. Gate backlog
 
+> **Identifiers used across these documents.** **Gn** — a gate: external work
+> with a named owner that blocks programme items (this section). **PRE-n** — a
+> precondition for one specific run, an operator checklist item
+> ([`first-slo-run-runbook.md`](first-slo-run-runbook.md) §1). **P1/P2/P3** — an
+> instrumentation *priority tier*, i.e. how urgent a piece of missing telemetry
+> is ([`p2-instrumentation-spec.md`](p2-instrumentation-spec.md)). A gate and a
+> precondition can name the same work: G1 is PRE-3, G2 is PRE-7.
+
 Gates are the schedulable unit for everything above that is blocked. Ordered by
 how much they unblock. **⬆ marks the ones promoted since rev 1.** G4 was "nice to
 have for hard-gating" while the programme was exploratory; now that the question
@@ -229,7 +237,7 @@ so it now gates the first SLO run rather than following it. **G9 closed on
 code — it is G6.** The backlog observer that `t0-async` and `t2` depend on lives
 inside the loadgen pod and dies with it, so a run cannot mark either boundary
 without the JetStream exporter or an equivalent out-of-band reader
-([`first-slo-run-runbook.md`](first-slo-run-runbook.md) P4). That is infra work,
+([`first-slo-run-runbook.md`](first-slo-run-runbook.md) PRE-4). That is infra work,
 and it is now the thing standing between here and a first number.
 
 | Gate | Work | Unblocks | Owner |

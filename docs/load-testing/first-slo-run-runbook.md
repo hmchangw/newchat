@@ -20,19 +20,32 @@
 
 ## 1. Preconditions
 
+> **Reading the identifiers.** Three prefixes appear across these documents and
+> they are not the same kind of thing:
+>
+> | Prefix | Means | Lives in |
+> |---|---|---|
+> | **PRE-n** | A precondition for *this run* — an operator step, checked off before the run starts | this document, §1 |
+> | **Gn** | A **gate** — external work (infra, product, app) that blocks one or more items in the programme, with a named owner | [`execution-priority-plan.md`](execution-priority-plan.md) §"Gate backlog" |
+> | **P1 / P2 / P3** | An **instrumentation priority tier** — how urgent a piece of missing telemetry is | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md), [`slo-measurement-map.md`](slo-measurement-map.md) |
+>
+> The ones this run actually waits on: **G1** (isolated site — same thing as
+> PRE-3), **G2** (workload shape — same thing as PRE-7), **G6** (backlog
+> observer — the enabler PRE-4 needs).
+
 | # | Precondition | Owner | Note |
 |---|---|---|---|
-| ~~P1~~ | ~~#337 merged~~ — **done, 2026-08-30 (`bf0ea62`)** | app | `main` carries `rpc_server_call_duration_seconds{rpc_method, error_type}`, with `channel_history` and `thread_open` as disjoint methods |
-| P2 | **Prometheus scrapes the *services*' o11y SDK endpoint**, not just loadgen's `:9099` | infra | This is the one that gets missed. The Helm chart annotates **loadgen's own** service only (`metrics.serviceAnnotations`, port 9099). Every domain counter this run reads — `message_gatekeeper_messages_total`, `message_worker_persistence_total`, `rpc_server_call_duration_seconds`, `search_service_requests_total` — is emitted through the SDK meter on the services' own endpoint (`:2112` in compose; confirm the port on your service manifests). No service scrape, no SLO numbers |
-| P3 | **A dedicated test `SITE_ID`** | infra | Counters are monotonic and shared. `increase()` excludes history, not concurrent traffic |
-| P4 | **A backlog observer that outlives the loadgen pod** | infra | **Not optional, and not satisfiable by loadgen.** `loadgen_consumer_*` comes from a `ConsumerSampler` running *inside* the loadgen binary (`consumerlag.go:17`), so `phase: stopped` deletes the Deployment and the backlog signal with it — exactly when §7 tells you to watch the backlog drain. Both `t0-async` and `t2` need one of: the **P3 JetStream exporter deployed**, or an **operator reading `ConsumerInfo` directly** (NATS monitoring endpoint / `nats consumer info`) at those two marks. The service-side counters are unaffected — they are scraped from the services, which stay up |
-| P5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
-| P6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
-| P7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
-| P9 | **Query dry-run: every query in §5 returns a non-empty result of the expected shape, against the real Prometheus** | us | **Do this before building the dashboard, not after.** Four review rounds on this document found label names, histogram suffixes, range-window semantics and `rate()`'s reset behaviour wrong — none of which is visible in the Go source, and all of which a single dry-run would have caught. See §9 |
-| P8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
+| ~~PRE-1~~ | ~~#337 merged~~ — **done, 2026-08-30 (`bf0ea62`)** | app | `main` carries `rpc_server_call_duration_seconds{rpc_method, error_type}`, with `channel_history` and `thread_open` as disjoint methods |
+| PRE-2 | **Prometheus scrapes the *services*' o11y SDK endpoint**, not just loadgen's `:9099` | infra | This is the one that gets missed. The Helm chart annotates **loadgen's own** service only (`metrics.serviceAnnotations`, port 9099). Every domain counter this run reads — `message_gatekeeper_messages_total`, `message_worker_persistence_total`, `rpc_server_call_duration_seconds`, `search_service_requests_total` — is emitted through the SDK meter on the services' own endpoint (`:2112` in compose; confirm the port on your service manifests). No service scrape, no SLO numbers |
+| PRE-3 | **A dedicated test `SITE_ID`** — this is **G1** in the plan's gate backlog, restated here as an operator step | infra | Counters are monotonic and shared, so a snapshot difference excludes *historical* traffic but not *concurrent* traffic. See §1a: on a site that already carries bot and developer traffic this is what decides whether the numbers are the run's |
+| PRE-4 | **A backlog observer that outlives the loadgen pod** | infra | **Not optional, and not satisfiable by loadgen.** `loadgen_consumer_*` comes from a `ConsumerSampler` running *inside* the loadgen binary (`consumerlag.go:17`), so `phase: stopped` deletes the Deployment and the backlog signal with it — exactly when §7 tells you to watch the backlog drain. Both `t0-async` and `t2` need one of: the **JetStream exporter (G6) deployed**, or an **operator reading `ConsumerInfo` directly** (NATS monitoring endpoint / `nats consumer info`) at those two marks. The service-side counters are unaffected — they are scraped from the services, which stay up |
+| PRE-5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
+| PRE-6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
+| PRE-7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
+| PRE-8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
+| PRE-9 | **Query dry-run: every query in §5 returns a non-empty result of the expected shape, against the real Prometheus** | us | **Do this before building the dashboard, not after.** Four review rounds on this document found label names, histogram suffixes, range-window semantics and `rate()`'s reset behaviour wrong — none of which is visible in the Go source, and all of which a single dry-run would have caught. See §9 |
 
-### P6 — how to scope a run to a site
+### PRE-6 — how to scope a run to a site
 
 Two workable options. **Do not derive a metric label from request baggage** — it
 is per-request data, and the repo's own semgrep cardinality rule blocks exactly
@@ -45,6 +58,65 @@ that class of label.
 
 Whichever you pick, the §5 queries change accordingly. They are written for
 option A; under option B delete the `site` selector and the `by (site)` grouping.
+
+---
+
+## 1a. The site already carries traffic — what that changes
+
+Staging is **not quiet**: it carries continuous real traffic from bots and from
+developers. That changes two of the steps below, one for the better and one for
+the worse.
+
+**Better — the series already exist, so verification does not need a fixture
+run.** The concern in §9 was that otelprom only exports an instrument once a
+data point has been recorded for it, so on a quiet site the metric names simply
+are not there to check. With bot and developer traffic that no longer holds:
+`rpc_server_call_duration_seconds` and the domain counters are already being
+recorded. **Confirming #337's metrics, and the whole PRE-9 query dry-run, can be
+done today** — against real data, with no loadgen involvement. One caveat
+survives: a *label value* still only exists if something exercised it. Check
+`rpc_method="thread_open"` and the thread lanes specifically; if organic traffic
+never opens a thread, that series is still absent and only loadgen will produce
+it.
+
+**Worse — the counters are shared, and the measurement method is a snapshot
+difference.** §5 computes every ratio as `@t1 − @t0` on monotonic counters.
+That difference contains *everything* the site did in the window, not just the
+run. Three consequences:
+
+| | What breaks | What to do |
+|---|---|---|
+| **Ratios** (SLO-1a, 7) | A ratio is only *diluted*, not biased — unless the background traffic's own good-ratio differs from the run's. You cannot assume it doesn't: bots retry on their own schedules and developers hit half-broken branches | Decompose (below) or isolate |
+| **Latency** (SLO-4, 5) | Outright distribution mixing. Developer traffic is bursty, low-volume, and often against cold or unusual rooms; those samples land in the same histogram buckets and there is no label to separate them | Isolation is the only clean answer — a histogram cannot be decomposed after the fact |
+| **The `t1` / `t2` marks** (§7) | `t1` says "wait until in-flight RPCs reach zero" and `t2` says "backlog at its **pre-run floor**". With traffic that never stops, in-flight never reaches zero and the floor is not zero | Use `t1`'s stated fallback — one full `soak` RPC timeout — and record that you did. For `t2`, characterise the floor first: sample `num_pending + num_ack_pending` over a background-only window *before* the run, and treat `t2` as "back inside that band, stable for one scrape interval" |
+
+### If G1 cannot be had in time
+
+There is a defensible decomposition, and it is worth knowing its exact limit.
+Run the **same §5 queries over a background-only window** of the same length
+immediately before the run. That gives the background's own count `n_b` and its
+own ratio `r_b`. The run window gives the combined `n_c`, `r_c`. Then
+
+```
+r_run = (r_c·n_c − r_b·n_b) / (n_c − n_b)
+```
+
+This is valid **only while the run's added load does not change the
+background's behaviour** — it assumes the background rate and its success ratio
+are stationary across the two windows. That assumption holds for a low-load
+calibration run. It does **not** hold for a ramp, a breach run, or anything in
+Track 2, where changing the background's behaviour is the entire point. So:
+
+- **Calibration run at declared load** — decomposition acceptable, report
+  `n_b / n_c` (the contamination share) beside every number.
+- **Any ramp or failure run** — decomposition invalid. **G1 is required**, and
+  without it the run is `INCONCLUSIVE`, not "approximately right".
+- **Latency (SLO-4, 5)** — decomposition never applies. Report the mixed
+  distribution as mixed, or isolate.
+
+This is why PRE-3 / G1 moved from hygiene to load-bearing once the site turned
+out to be busy. Isolation is a cheaper answer than the arithmetic above, and it
+is the only one that survives Track 2.
 
 ---
 
@@ -385,7 +457,7 @@ histogram_quantile(0.95, sum by (le) (rate(loadgen_soak_rpc_latency_seconds_buck
       service_name="history-service", rpc_method="channel_history"}[$window])))
 ```
 
-Drop the `site` selector under P6 option B.
+Drop the `site` selector under PRE-6 option B.
 
 Three things the denominators encode, all from `sli-slo.md` §0.1:
 
@@ -411,7 +483,7 @@ and denominator across two windows.
 Report it as **`SLO-1a approximate (lag-enforced) indicator`**, paired with the
 consumer-lag panel, and read a value near or above 100% as evidence of redelivery
 rather than as a good result. A hard gate on SLO-1a needs one of: logical-outcome
-dedup (the P7 outcome ledger), max-delivery advisories, or loadgen's own
+dedup (the PRE-7 outcome ledger), max-delivery advisories, or loadgen's own
 authoritative read-back of run-owned message IDs — which the soak ledger already
 does per message and which is the cheapest of the three to reach for.
 
@@ -463,7 +535,7 @@ That is why the baselines are split:
 
 1. **Reach steady state**, then `phase: stopped`.
 2. **Watch the backlog fall to its pre-run floor — using the out-of-band
-   observer from P4, not `loadgen_consumer_*`.** The sampler died with the pod in
+   observer from PRE-4, not `loadgen_consumer_*`.** The sampler died with the pod in
    step 1. Hold at floor for at least one scrape interval, then take
    **`t0-async`** — the SLO-1a baseline — *while dispatch is still stopped*.
    Taking it at first dispatch races the scrape. Keep the pause shorter than
@@ -591,8 +663,8 @@ draft this run exists to inform.
 |---|---|---|
 | **SLO-1b, SLO-2** | The enqueue counter and age histogram do not exist | P2a / P2b ([`p2-instrumentation-spec.md`](p2-instrumentation-spec.md)). A short `run --preset=realistic --rate=100` gives SLO-2 a one-sided bound in the meantime |
 | **SLO-3** | The soak connects with backend creds and never touches auth-service's HTTP leg | A separate short `max-rps --workload=login` |
-| **SLO-6** | The notification counter is per message, not per recipient | P4 |
-| **SLO-8** | No `status` on the duration histogram, and the soak has no client-side SLO-8 scoring | P4, or `max-rps --workload=search` for a client-side number |
+| **SLO-6** | The notification counter is per message, not per recipient | PRE-4 |
+| **SLO-8** | No `status` on the duration histogram, and the soak has no client-side SLO-8 scoring | PRE-4, or `max-rps --workload=search` for a client-side number |
 | **SLO-9** | Single-site driver | A second site |
 | **Anything about the ceiling** | This is a fixed-load run | Track 2 — the same ratios re-read at each ramp step |
 
@@ -612,33 +684,40 @@ Two caveats to carry into the write-up:
 ## 9. Order of operations, and the dry-run
 
 The natural order — *check the metrics exist → build the dashboard → run
-loadgen* — has one thing backwards and one thing missing.
+loadgen* — is close to right, given §1a. Two adjustments.
 
-**Backwards: you cannot confirm the metrics exist without traffic.** The
-instruments are constructed at service start (`pkg/natsmetrics/metrics.go:238-247`),
-but the Prometheus exporter only emits a series once a data point has been
-recorded for it. On a quiet site `rpc_server_call_duration_seconds` does not
-exist at all, and `{rpc_method="thread_open"}` does not exist until something
-calls `.msg.thread`. So a short loadgen run comes *first*, as a fixture for the
-verification rather than as a measurement.
+**Verification comes first and needs no loadgen.** On a quiet site it would
+not: otelprom emits a series only once a data point has been recorded for it
+(the instruments themselves are constructed at service start,
+`pkg/natsmetrics/metrics.go:238-247`), so the names would not be there to check.
+The site is not quiet, so steps 1–3 below run today against organic traffic.
+The one thing organic traffic may not cover is a *label value* nothing
+exercises — check `rpc_method="thread_open"` explicitly, and if it is missing,
+that is what a short loadgen run is for.
 
-**Missing: G6.** The backlog observer that `t0-async` and `t2` depend on runs
-inside the loadgen pod and dies with it (P4). It has infra lead time, it is not
-discovered by any of the steps below, and without it the measurement run cannot
-mark either boundary. Start it now, in parallel.
+**Missing entirely: G6.** The backlog observer that `t0-async` and `t2` depend
+on runs inside the loadgen pod and dies with it (PRE-4). It has infra lead time,
+it is not discovered by any of the steps below, and without it the measurement
+run cannot mark either boundary. Start it now, in parallel.
+
+**And G1 got heavier.** §1a: on a busy site the isolated `SITE_ID` is what
+decides whether the numbers belong to the run. It is on the same critical path
+as G6.
 
 ### The sequence
 
 | # | Step | Proves | Blocks on |
 |---|---|---|---|
-| **0** | Start G6, G1 (isolated `SITE_ID`), P6 (`site` label decision), G2 (`realistic` preset) **in parallel** | — | infra + product lead time |
+| **0** | Start **G6** and **G1** (isolated `SITE_ID`), plus PRE-6 (`site` label decision) and G2 (`realistic` preset) — **all in parallel, all now** | — | infra + product lead time |
 | **1** | Confirm the deployed services run a build containing `bf0ea62` | The counters can exist at all | deploy |
-| **2** | **Smoke run**: loadgen at default rates for 10–15 min. Not a measurement | Traffic exists, so the series appear | 1 |
-| **3** | **Query dry-run** (P9): run every §5 query against the real Prometheus | The queries are *right* — the class of defect four review rounds kept finding | 2 |
-| **4** | Build the SLI/SLO dashboard **from the verified queries** | Panels show data on first load | 3 |
-| **5** | The measurement run (§7) | The first numbers | 0, 4 |
+| **2** | **Query dry-run** (PRE-9): run every §5 query against the real Prometheus, on organic traffic | The queries are *right* — the class of defect four review rounds kept finding | 1 |
+| **2b** | Only if a label value is missing (typically `thread_open`): a 10–15 min loadgen run to produce it, then re-check. Not a measurement | The absent series was absence of traffic, not a wrong name | 2 |
+| **3** | **Background baseline**: the same §5 queries over a background-only window, plus `num_pending + num_ack_pending` over the same window | The contamination share `n_b`, and `t2`'s non-zero floor band (§1a) | 2 |
+| **4** | Build the SLI/SLO dashboard **from the verified queries** | Panels show data on first load | 2 |
+| **5** | The measurement run (§7) | The first numbers | 0, 3, 4 |
 
-Steps 2–4 are one afternoon. Step 0 is the long pole.
+Steps 1–4 are one afternoon and start immediately. **Step 0 is the long pole**,
+and it is the only part of this that is not ours to schedule.
 
 ### What the dry-run has to check
 
@@ -651,7 +730,7 @@ Per query, not just "it returned something":
 | Histogram queries use `_count` / `_bucket` / `_sum`, never the bare name | A bare histogram name selects nothing |
 | `rpc_method` has exactly `channel_history` and `thread_open` as separate values | The disjointness SLO-4/5 depend on |
 | `error_type` is **absent** on success, and the regex's empty alternative matches those series | The convention makes it conditional; a `{error_type=""}` matcher must actually match |
-| The `site` selector resolves (or is deleted, per P6 option B) | There is no `site` label by default |
+| The `site` selector resolves (or is deleted, per PRE-6 option B) | There is no `site` label by default |
 | `le` values include the bounds you intend to report | `0.25`, `0.5`, `1` must be real boundaries in the deployed build |
 | A restart makes the `_count` series behave as expected under `rate()` | The `t0-sync` readiness signal depends on it |
 
