@@ -176,3 +176,23 @@ Genuinely well-engineered hot path — pipelined ES bulk with slot-based backpre
 - `medium` — Set `MaxIdleConnsPerHost`/`MaxConnsPerHost` on the ES transport in `pkg/searchengine.New`, sized to `PIPELINE_DEPTH × collections`.
 - `low` — Hoist the remove-room body out of the per-account loop; chunk the Teams `$in` at ~1000 ids.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `critical` | Give the bot-message collection its own `filterSubjects` (`chat.bot.canonical.{site}.>`), and fix the test that asserts the wrong one | Integration | `messages.go:129`, `:74-80`; `messages_test.go:622` | **The filter is not a subset of its own stream's subjects.** In `MODE=default` the consumer is rejected and the pod exits 1; if it were accepted, **no bot message would ever be indexed** — and a unit test currently locks the wrong value in. |
+| 2 | `high` | Add a table test asserting every collection's `FilterSubjects` ⊆ its own `StreamConfig.Subjects` | Integration / Tests | all five collections | This is the guard that would have caught item 1 at write time, and it generalizes to the next collection someone adds. |
+| 3 | `high` | Make the defaults satisfy the batch/ack coupling, and make `checkBatchAckCoupling` fatal | Performance | `main.go:82`, `:93`, `:163-170` | **The shipped default tuning breaks its own invariant**: the size-based flush can never fire, so every batch waits the full 5 s interval and ships undersized. Dev compose overrides it, which is precisely why nobody has noticed. |
+| 4 | `high` | Give every ES flush a bounded context, and pass a cancellable root ctx from `main` | Performance | `main.go:172`; `handler.go:239` | A hung ES connection holds a pipeline slot **forever**, stalls the collection at depth 2, causes redelivery behind the still-running request, and blocks graceful shutdown. |
+| 5 | `high` | Surface JetStream errors: add `Error()` to `msgBatch`, and log + count the `Fetch` error path | Integration | `consumer_source.go:19-21`; `main.go:538-550` | A persistently failing consumer currently **spins hot and indexes nothing, silently** — no log, no metric. |
+| 6 | `high` | Move stream bootstrap into `bootstrap.go`, and put INBOX/HR non-ownership on the `Collection` interface | Architecture | `main.go:306-325` | The service's most load-bearing rule is enforced by a name comparison inside an untestable `main()`. Making it a property of the collection means it **travels with the next collection** instead of being forgotten. |
+| 7 | `high` | Extract `validate()`, `consumer.go` and `buildCollections()` from `main()` | Maintainability / Tests | `main.go:102`, `:110-160`, `:448-618` | 319 lines holding 165 of the 241 uncovered statements — and its tests (`consumer_pipeline_test.go`, `consumer_config_test.go`) are **already named after production files that do not exist**. |
+| 8 | `high` | Add integration tests for `mongoTeamsUserResolver` | Test coverage | `teams_user_store.go:23`, `:32` | An entire Mongo store with zero tests in either lane, while the container helper is already wired into this package's `TestMain`. |
+| 9 | `medium` | Stop logging ES's raw `error.reason` on bulk failures | Code quality | `handler.go:293-295` | It quotes the offending field value — **for the messages collection that is the message body**, against §3 and against the rule this same file states 130 lines earlier. |
+| 10 | `medium` | Cache the thread-parent resolver (positive and negative) and narrow its index wildcard | Performance | `thread_parent_resolver.go:46` | An uncached cross-index N+1 inside the fetch loop; during a backfill it serializes a 2 s wildcard search per reply, well past `AckWait`. |
+
+### Verdict
+
+**Do not ship until item 1 is fixed.** The bot-message lane is wired to a filter its own stream cannot satisfy — in the default mode that is a startup crash, and the only test covering it asserts the wrong value. Items 3–5 are the difference between a pipeline that degrades visibly and one that stalls silently. Beneath those, the bulk-indexing design is genuinely good work.
