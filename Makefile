@@ -1,4 +1,4 @@
-.PHONY: lint fmt tidy test test-integration benchmark-natsmetrics test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint fmt tidy test test-integration benchmark-natsmetrics benchmark-threadcount test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep sast-semgrep-test \
         fed-deps-up fed-deps-down fed-regen require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
@@ -115,6 +115,12 @@ endif
 # outside the result.
 benchmark-natsmetrics:
 	go test -run '^$$' -bench 'Benchmark(Consumer|Message)_' -benchmem ./pkg/natsmetrics
+
+# Measure what the thread-count scan limit trades between: the bounded partition
+# read at each candidate limit, the batched stamp both regimes pay, and a whole
+# reply on each side of the limit. Needs Docker; see pkg/threadcount.
+benchmark-threadcount:
+	go test -tags integration -run '^$$' -bench 'Benchmark(Scan|StampParent|Maintain)' -benchmem ./pkg/threadcount
 
 # Run integration tests (requires Docker)
 test-integration:
