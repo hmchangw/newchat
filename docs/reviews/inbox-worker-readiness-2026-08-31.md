@@ -45,3 +45,32 @@ Error wrapping, logging discipline and guard documentation are consistently abov
 - `low` — Drop the two `slog.WarnContext` calls before a returned `Permanent`; change `handler.go:271` to `WarnContext` and include `evt.SiteID`, since that line is the **only trace of a dropped federated event**.
 - `nitpick` — Split the store out of `main.go` into `store.go` + `store_mongo.go` (see Chapter 3); use the existing `HandlerOption`s for `badge`/`valkey`.
 
+---
+
+## 3. Architecture — 3 / 5
+
+INBOX ownership, bootstrap scoping and the two-lane consumer are exemplary and well-reasoned, but the service violates the mandated file organization and re-declares a shared cross-service knob.
+
+### Verified correct — the ownership rules
+`bootstrap.go` sets **only `Name + Subjects`** from `stream.Inbox`, contains **no sourcing/mirror/SubjectTransform/gateway config**, no-ops creation when `Enabled=false`, and fail-fast-verifies in production. **Sole INBOX creator confirmed** — `search-sync-worker` explicitly skips INBOX bootstrap. The consumer is the correct high-throughput pattern (`cons.Messages()` + `PullMaxMessages(2*MaxWorkers)` + semaphore), never mixed with `Consume()`; `buildConsumerConfig` uses `stream.DurableConsumerDefaults` with no hardcoded `BackOff`; `FilterSubjects` correctly scopes to `external.>`, leaving `internal.>` to search-sync-worker. `shutdown.Wait` order matches the documented sequence.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **No `store.go` / `store_mongo.go`.** The `InboxStore` interface lives in `handler.go` and ~730 lines of MongoDB implementation (33 methods) live in `main.go`. This is a flat worker, so the sanctioned sub-package exception does not apply — `main.go` should be config + wiring + shutdown, and is instead the largest file in the service | `main.go:68-793`; `handler.go:22` |
+| high | **Shared knob re-declared per service**: `BADGE_CACHE_TTL` duplicated verbatim in `room-service` and `user-service`, while `pkg/badgecache` declares no `TTLConfig`. **The in-code comment ("Keep identical across all badge-cache writers") documents exactly the drift the rule exists to prevent** — and this service *writes* badge state that user-service *reads*. Contrast the correct handling of `Pool mongoutil.PoolConfig` and `Valkey valkeyutil.Config` in the same struct | `main.go:64`; `room-service/main.go:115`; `user-service/config/config.go:125` |
+| medium | Constructor DI bypassed — `handler.badge`/`handler.valkey` assigned post-construction, though a `HandlerOption` mechanism already exists and `NewHandler` accepts variadic options | `main.go:889-890`; `handler.go:172-186` |
+| medium | Event-type dispatch is **half-typed**: 11 raw literals, 11 constants — while `isMembershipSubject` builds the *same* two subjects from the constants. **A rename of `model.InboxMemberAdded` would silently desynchronise the router from the lane classifier** | `handler.go:226-243`; `main.go:1035-1036` |
+| medium | **`remote_rooms` is a write-only collection.** inbox-worker upserts and deletes ordering rows and `pkg/model.RemoteRoom` documents it as the writer, but a repo-wide grep finds **no reader**. The whole activity-refresh lane — core-NATS subscriber, `roomsubcache.go` (110 lines), three store methods, `HasRoomSubscription`, plus `ROOM_SUB_CACHE_*` config — currently feeds nothing | `main.go:81`, `:101`, `:111`, `:902` |
+| medium | **The two lanes are coupled by back-pressure.** The single dispatcher does a **blocking** `membershipCh <- m`; when the sequential membership worker is slow, the buffer fills and the dispatcher stops calling `iter.Next()`, **stalling the fan-out lane too**. The comment claims serialising membership "costs negligible throughput" — that holds for steady state, not for a membership stall | `main.go:962`, buffer at `:942`, comment at `:917-931` |
+| low | No `New<Type>` constructor for the store; it is a bare struct literal with five collection handles in `main()`, so the collection-name wiring is untestable and unshared | `main.go:840-846` |
+| low | `pkg/stream.Inbox` builds INBOX subjects with raw `fmt.Sprintf` rather than `subject.InboxInternal`/`InboxExternalAll`, unlike sibling `Outbox`. **inbox-worker itself is clean** — zero `fmt.Sprintf` in service code | `pkg/stream/stream.go:69-70` vs `:78` |
+| nitpick | Service-local `roomSubCache` shadows the unrelated `pkg/roomsubcache` — different data, same name | `roomsubcache.go:23` |
+
+### Recommendations
+- `high` — Split `main.go`: move `InboxStore` + `//go:generate` to `store.go`, the 33 Mongo methods to `store_mongo.go`, add `newMongoInboxStore(db)`, and move the two-lane pull loop + `isMembershipSubject`/`buildConsumerConfig` to `consumer.go`. Leaves `main.go` at ~150–250 lines. **Pure code motion.**
+- `high` — Add `badgecache.TTLConfig{ TTL … }` in `pkg/badgecache` and mount it as a named field in all three services; delete the per-service declarations.
+- `medium` — Add `WithBadgeCache` / `WithSubauthValkey` options and drop the post-construction writes.
+- `medium` — Convert every `HandleEvent` case to a constant, and change `InboxEventType` from a **type alias** (`= string`) to a defined type so a missing constant is a compile error.
+- `medium` — Decide `remote_rooms`' fate: land the chat-list reader, or delete the activity lane, `roomsubcache.go`, the three store methods and the `ROOM_SUB_CACHE_*` config.
+- `medium` — Decouple the lanes: give the membership lane its own consumer, or make the dispatcher's send non-blocking-with-overflow so a membership stall cannot starve read receipts.
+
