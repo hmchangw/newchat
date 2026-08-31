@@ -46,3 +46,27 @@ Idiomatic, disciplined Go — error wrapping is consistently contextual, `errcod
 - `low` — Delete the five redundant `"request_id"` arguments; unexport the interfaces, DTOs and config structs (`mockgen -source` handles unexported types fine).
 - `low` — Rename `MongoStore` to a domain name (`CatalogStore`/`EnrichmentStore` — it serves apps/users/subscriptions lookups) and `SearchStore` to `IndexStore`, so the handler's two dependencies are distinguishable by purpose.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Boundaries, consumer-defined interfaces, subject builders, no-stream-creation and shutdown order are all correct; the deductions are a duplicated request-timeout knob that makes the documented operator dial ineffective, post-construction DI, and a hardcoded message index.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`SearchConfig.RequestTimeout` re-declares a knob `pkg/natsrouter` already owns** as `GuardConfig.RequestTimeout` — both default to 10 s and **both deadlines are applied**, so the effective bound is the min. `deploy/docker-compose.yml` exposes only `SEARCH_REQUEST_TIMEOUT`, so **raising it to 30 s still gets cut at 10 s by the guard, silently.** §6: a knob is declared once, in the package that owns the thing it configures | `main.go:71` vs `pkg/natsrouter/guard.go:24`; `main.go:249`; `handler.go:80`; `deploy/docker-compose.yml:28` |
+| medium | **The message index is a hardcoded literal** (`{"messages-*", "*:messages-*"}`) while the writer's index name is fully operator-configured (`MSG_INDEX_PREFIX,required`). The service applies a strict read/write contract to the *other three* indices — required, notEmpty, `StripVersion`-checked, read pattern derived from config — but **the primary search target escapes it.** A prefix that doesn't literally start with `messages-` **returns empty hits with no error**, and a v1→v2 reindex is double-searched | `query_messages.go:18` vs `search-sync-worker/main.go:60`; `main.go:88-96`, `:141-155` |
+| medium | `handler.room` is injected **by field assignment after construction**, not through `newHandler`. The consequence leaks into business logic as nil-guards: `if h.room == nil` and three `if h.mongo != nil` branches. **A test-only convenience has become a production nil-check on the enrichment path** | `main.go:243`; `handler.go:56`; `enrich.go:152`, `:41`, `:79`, `:87` |
+| medium | `ESConfig` and `SearchConfig` are **both mounted on `envPrefix:"SEARCH_"`**. The code *documents* the shadowing hazard rather than removing it ("any new field added to either must be checked against the other"), and the naming already misleads — `SEARCH_URL` is the Elasticsearch URL, while `HealthAddr` sits in the request-shape struct | `main.go:82-86`, `:75-80`, `:66-72` |
+| low | Middleware is hand-rolled in the **wrong order** (`RequestID → Recovery → Logging`) whereas `natsrouter.Default` establishes `Recovery(), RequestID(), Logging()`. `natsrouter.DefaultGuarded` exists to do exactly what this reassembles by hand, and **its doc comment says it exists "so a service can't apply only half the overload protection"** | `main.go:245-249`; `pkg/natsrouter/router.go:142`; `pkg/natsrouter/guard.go:67-71` |
+| low | The restricted-rooms Valkey key builder is **duplicated outside the service**, along with a hand-copied TTL — two independent literals for one Valkey keyspace | `store_valkey.go:23`; `tools/seed-sample-data/sidestores.go:14-18` |
+| low | The health listener uses `http.NewServeMux`, while §6 says "never `net/http` mux directly". This is the sole `pkg/health.Register` caller in the repo, so it is a one-off; a health-only port arguably doesn't warrant Gin, but `CLAUDE.md` as written carves out no exception | `main.go:262` |
+| nitpick | `MessageIndexPattern` is an exported, **mutable** package-level `var` in `package main` with no external consumer; `appMetrics` is a process-wide mutable global that tests swap and restore | `query_messages.go:18`; `metrics.go:107` |
+
+### Recommendations
+- `high` — **Delete `SearchConfig.RequestTimeout` and `handler.withRequestTimeout`**; let `natsrouter.GuardConfig` own the per-request deadline, and update the compose file to `REQUEST_TIMEOUT`. If a search-specific ceiling is genuinely wanted, mount `Guard natsrouter.GuardConfig` with `envPrefix:"SEARCH_"` so there is exactly one dial.
+- `medium` — Add `MSG_INDEX_PREFIX` (`required,notEmpty`) to `Config`, run it through `searchindex.StripVersion` like the spotlight indices, and derive both the local and CCS read patterns from it.
+- `medium` — Move `room RoomInfoClient` into the `newHandler` signature and drop the nil guards in `enrich.go`; tests pass explicit no-op fakes.
+- `medium` — Split the ES connection knobs onto their own prefix (`SEARCH_ES_`) so the two config structs cannot shadow each other.
+- `low` — Replace the hand-rolled middleware block with `natsrouter.DefaultGuarded(...)` to inherit the correct order; export the restricted-rooms key builder and TTL from one place.
+
