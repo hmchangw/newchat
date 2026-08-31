@@ -100,3 +100,27 @@ Quality is otherwise genuinely high, not vanity: every runner function is 100% (
 - `low` — Add a `MaxWorkers: 1` case asserting the semaphore serializes, so the bound is actually exercised.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Small, single-purpose files with unusually good WHY-comments; the one real smell is that `verifyBatch` now carries four failure branches plus the classification loop, and the same rationale is written out three times.
+
+### Findings
+- `medium` — `verifyBatch` is 75 lines mixing four abort paths with the per-chat classification — `teams-room-verify/runner.go:96-170`
+  The classification decision (`!RoomExists` → missing room; `SubscriptionCount != accountsPresent` → mismatch; else converged) is the service's entire domain logic and is only reachable through batch plumbing, mock store and a fake verifier. Adding a fifth outcome (say "subscriptions exist but room is gone", already flagged as meaningful in `pkg/model/teams.go:135-137`) means editing the middle of this function.
+- `low` — the accountsPresent-vs-raw-member-count rationale is written three times — `teams-room-verify/runner.go:144-150`, `:172-176`, `:222-223`
+  Three copies drift independently; the doc comment on `accountsPresent` is the right home.
+- `low` — `expectedMembers` is computed for every chat but consumed only on the two mismatch branches — `teams-room-verify/runner.go:151`
+  Reads as if it participates in the comparison, which is exactly the misreading the surrounding comment spends seven lines preventing.
+- `nitpick` — comment volume in `runner.go` runs ~35% of lines. The content is genuinely WHY-oriented and valuable; several blocks would simply read better as doc comments on the functions they describe than as inline paragraphs.
+
+No dead code, no duplicated logic, no leaky abstractions: the store interface exposes nothing Mongo-shaped, and `planBatches`/`accountsPresent` are pure and directly tested.
+
+### Recommendations
+- `medium` — Extract `func classify(c *model.TeamsChat, res model.TeamsRoomVerifyResult) (outcome, bool)` returning an enum, and table-test the outcome matrix directly. `verifyBatch` shrinks to plumbing and the domain rule becomes independently testable — this is the refactor I would actually do.
+- `low` — Move the guest/duplicate-account rationale to the `accountsPresent` doc comment and leave a one-line pointer at the call site.
+- `low` — Compute `expectedMembers` inside `logMismatch` (it already takes `c`), removing the parameter and the confusion.
+
+---
