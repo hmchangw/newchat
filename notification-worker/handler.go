@@ -79,12 +79,15 @@ func isNotifiable(msgType string) bool {
 // decodable attachment; both empty when the message carries none. Malformed blobs
 // are skipped, matching DecodeAttachments' lenient decode — the skipped count is
 // discarded because a push carrying no file info is the intended degraded result.
+// Decodes one blob at a time so reading the first entry never materializes the rest.
 func attachmentFileInfo(attachments [][]byte) (fileName, fileType string) {
-	atts, _ := cassandra.DecodeAttachments(attachments)
-	if len(atts) == 0 {
-		return "", ""
+	for i := range attachments {
+		atts, _ := cassandra.DecodeAttachments(attachments[i : i+1])
+		if len(atts) != 0 {
+			return atts[0].Title, atts[0].FileType
+		}
 	}
-	return atts[0].Title, atts[0].FileType
+	return "", ""
 }
 
 func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one-time constructor arg
