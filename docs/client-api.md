@@ -87,7 +87,7 @@ paths.
 12. [Client Update Service](#12-client-update-service)
     - [POST /api/v1/version](#post-apiv1version) · [GET /api/v1/version/:fileName](#get-apiv1versionfilename)
 13. [User Service HTTP API](#13-user-service-http-api)
-    - [13.1 Authentication](#131-authentication) · [13.2 GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions)
+    - [13.1 Authentication](#131-authentication) · [13.2 GET /api/v1/subscriptions](#132-http--get-apiv1subscriptions) · [13.3 GET /api/v1/subscriptions/count](#133-http--get-apiv1subscriptionscount)
 
 ---
 
@@ -5614,6 +5614,8 @@ Same shape as `subscription.list` — a (here, at most one) list:
 
 Returns the count of active subscriptions, optionally filtered to unread rooms only.
 
+> Also available over HTTP with no payload ceiling: [GET /api/v1/subscriptions/count](#133-http--get-apiv1subscriptionscount).
+
 **Active set:** an active subscription is a non-muted, **open** DM or channel, **or** a botDM that is non-muted, open **and** subscribed (`isSubscribed: true`). Excluded from the count: unsubscribed botDMs, muted rooms of any type, and rooms the user has closed (`open: false`) — closed rooms are hidden from `subscription.list`, so counting them would put the badge and the list permanently out of step. A missing `open` field (legacy documents) counts as open. Membership in the active set is decided from subscription state alone — no room document is consulted, and no room name is filtered. That holds for the whole request when `unread` is absent or `false`; `unread: true` then narrows the set using each room's activity (the local `$lookup` baseline, and `GetRoomsMeta` for cross-site rows) — see **Unread count behavior** below.
 
 ##### Request body
@@ -9012,3 +9014,32 @@ X-Request-ID: 01970a4f-8c2d-7c9a-abcd-e0123456789f
 ```
 
 **Client contract:** honour `Retry-After` and retry with jitter. A 429 means *this pod* is momentarily full, not that the request was wrong — an immediate uniform retry from every client re-creates the burst that caused it. Do not treat it as a fatal error or force re-login.
+
+### 13.3 HTTP — GET /api/v1/subscriptions/count
+
+The HTTP form of [`subscription.count`](#subscriptioncount). Same active-set semantics, same unread-count behavior and staleness bounds, same `{count}` response.
+
+#### Query parameters
+
+| Parameter | Type | Required | Notes |
+|---|---|---|---|
+| `unread` | boolean | no | When `true`, returns the number of active rooms with unread messages or unread followed threads (degrades per-site for cross-site rooms, as with the NATS form). Omitted or `false` ⇒ the total active-subscription count. |
+
+```http
+GET /api/v1/subscriptions/count?unread=true HTTP/1.1
+ssoToken: <oidc-access-token>
+```
+
+#### Success response
+
+Identical to the NATS reply — see [`subscription.count`](#subscriptioncount).
+
+| Field | Type | Notes |
+|---|---|---|
+| `count` | number | The subscription count (total or unread depending on `unread`). |
+
+```json
+{ "count": 5 }
+```
+
+The response is marked `Cache-Control: private, no-store` (per-account data behind a non-standard credential header).
