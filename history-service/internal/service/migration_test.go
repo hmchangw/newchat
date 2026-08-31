@@ -54,7 +54,7 @@ func TestHistoryService_MigrationEditMessage_Success(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
 
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), migrationLocator("msg-1", "r1", createdAt), "new body", editedAt).
+		UpdateMessageContent(gomock.Any(), migrationLocator("msg-1", "r1", createdAt), "new body", gomock.Any(), editedAt).
 		Return(nil)
 
 	pub.EXPECT().
@@ -103,7 +103,7 @@ func TestHistoryService_MigrationEditMessage_AlreadyDeletedAcksOK(t *testing.T) 
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
 		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt, Deleted: true}, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
@@ -124,7 +124,7 @@ func TestHistoryService_MigrationEditMessage_RoomMismatchRejected(t *testing.T) 
 	createdAt := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
 		Return(&models.Message{MessageID: "msg-1", RoomID: "r-actual", CreatedAt: createdAt}, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	ack, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
@@ -144,7 +144,7 @@ func TestHistoryService_MigrationEditMessage_ReaderErrorPropagates(t *testing.T)
 
 	readerErr := errors.New("cassandra down")
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(nil, readerErr)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	_, err := svc.MigrationEditMessage(c, "site-test", model.MigrationEditRequest{
@@ -164,7 +164,7 @@ func TestHistoryService_MigrationEditMessage_RowVanishesRetries(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
 		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt}, nil)
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(fmt.Errorf("edit message msg-1: %w", cassrepo.ErrMessageNotFound))
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
@@ -187,7 +187,7 @@ func TestHistoryService_MigrationEditMessage_WriterError(t *testing.T) {
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").
 		Return(&models.Message{MessageID: "msg-1", RoomID: "r1", CreatedAt: createdAt}, nil)
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(errors.New("cassandra down"))
 	// No publish on writer failure.
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
@@ -323,7 +323,7 @@ func TestHistoryService_MigrationEditMessage_AbsentRowRetries(t *testing.T) {
 	// update and no publish happen.
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-5").Return(nil, nil)
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Times(0)
 	pub.EXPECT().PublishMigration(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 

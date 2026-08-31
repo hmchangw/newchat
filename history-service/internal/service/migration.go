@@ -46,7 +46,14 @@ func (s *HistoryService) MigrationEditMessage(c *natsrouter.Context, siteID stri
 		return nil, errcode.NotFound("message not found in room")
 	}
 
-	if err := s.msgWriter.UpdateMessageContent(c, msg, req.Content, req.EditedAt); err != nil {
+	// Preserve the row's existing mentions: a migration edit replaces content
+	// from the legacy source, which carries no resolved mentions, so re-writing
+	// the column with its current value keeps this a content-only change.
+	existingMentions := make([]model.Participant, len(msg.Mentions))
+	for i := range msg.Mentions {
+		existingMentions[i] = toWireParticipant(&msg.Mentions[i])
+	}
+	if err := s.msgWriter.UpdateMessageContent(c, msg, req.Content, existingMentions, req.EditedAt); err != nil {
 		// Row vanished between read and update (hard-missing on the
 		// cipher-path read) — benign, retryable.
 		if errors.Is(err, cassrepo.ErrMessageNotFound) {

@@ -272,7 +272,7 @@ func TestRepository_GetPinnedMessages_EditedEncryptedPin(t *testing.T) {
 	toEdit, err := repo.GetMessageByID(ctx, "m1")
 	require.NoError(t, err)
 	require.NotNil(t, toEdit.PinnedAt, "the edit only touches the pinned mirror when PinnedAt is set")
-	require.NoError(t, repo.UpdateMessageContent(ctx, toEdit, "edited body", created.Add(2*time.Hour)))
+	require.NoError(t, repo.UpdateMessageContent(ctx, toEdit, "edited body", nil, created.Add(2*time.Hour)))
 
 	page, err := repo.GetPinnedMessages(ctx, roomID, PageRequest{PageSize: 10})
 	require.NoError(t, err)
