@@ -161,3 +161,31 @@ Every central contract holds — both OUTBOX event types are partitioned, the `U
 - `low` — Move `fanOutThreadUnread` and the thread-subscription outbox publishes to **after** `SaveThreadMessage` returns, so nothing is federated for a reply that is not yet durable.
 - `low` — Change `inbox-worker/handler.go:244` to the `model.InboxThreadSubscriptionUpserted` constant so the cross-service contract is compiler-enforced.
 
+---
+
+## 7. Performance — 3 / 5
+
+The plain-message hot path is genuinely well-tuned (one UnloggedBatch per message, sonic, correct semaphore backpressure, clean `jsretry` discipline), but the **thread-reply path carries an O(N²)-per-thread partition scan, two LWTs and ~10 serial Mongo round-trips per reply.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **Every thread reply re-scans the entire `thread_messages_by_thread` partition to derive `tcount`**, so the Nth reply costs O(N) and a thread costs O(N²) overall. A 20k-reply thread walks 20k rows (4 pages at `PageSize(5000)`) per new reply, **holding a `MAX_WORKERS` slot for up to the 15 s `scanTimeout`** | `pkg/threadcount/count.go:41-44`, called unconditionally from `store_cassandra.go:451` |
+| high | `UpdateParentMessageThreadRoomID` fires **two LWTs** (`IF EXISTS`, Paxos, ~4 extra round-trips each) on *every subsequent* reply as an idempotent re-stamp, **even though the stamp is immutable after the first reply**. `SaveThreadMessage`'s own comment avoids LWT for its "5–10× Paxos overhead" — and the re-stamp then pays it twice per reply. It only needs to run on thread-room creation or a detected redelivery | `store_cassandra.go:467-470`, `:482-485`, called at `handler.go:572`; cf. `:245-247` |
+| high | `MarkThreadSubscriptionMention` issues **two sequential `UpdateOne` calls per mentioned user** inside a per-mention loop, with a cross-site `outbox.Publish` also in-loop. A 20-mention reply is **40 serial Mongo round-trips plus up to 20 publishes before the message is persisted** | `store_mongo.go:120`, `:132`; loop at `handler.go:682`, publish at `:685` |
+| medium | `GetThreadRoomByParentMessageID` has **no projection** and decodes the whole `thread_rooms` document, while its caller uses only `.ID` and `.ReplyAccounts` | `store_mongo.go:70-79`; `handler.go:498-499` |
+| medium | The parent author is re-resolved on **every** reply — a Cassandra point read plus a user lookup — to recover values that are invariant for the life of the thread and partly already stored in `thread_rooms.replyAccounts` | `handler.go:500`, `:504` |
+| medium | `AdvanceThreadSubscriptionLastSeen` is a standalone `UpdateOne` issued immediately beside the replier's own subscription upsert **on the same key** — two round trips where one `$setOnInsert` + `$max` would do | `handler.go:214` → `store_mongo.go:158`, `:93` |
+| low | Three debug/flow log sites build their varargs slice and **box their arguments unconditionally**, one of them reached on *every* message. The file demonstrates the correct pattern two lines earlier: the flow log at `:80` is gated behind `logctx.Enabled` precisely because "slog.Log evaluates its args before Enabled runs" | `handler.go:117`, `:163`, `:346` (via `:240`/`:254`) vs `:75` |
+| low | The sonic pretouch set is **misaligned with actual sonic use**: `model.InboxEvent` is warmed but never sonic-marshalled here (`pkg/outbox` uses `encoding/json`), while `model.ThreadUnreadAddedEvent`, which *is* sonic-marshalled on the reply path, is not warmed | `pretouch.go:13`; `handler.go:752` |
+| low | `MaxWorkers` is unvalidated while `Pool`, `Breaker` and `MessageBucketHours` all get explicit validation — and it sizes both the semaphore and `PullMaxMessages` | `main.go:48` vs `:88-101` |
+| nitpick | Clean on the traps: no bare `Nak()`/`NakWithDelay(0)` anywhere; no hardcoded `cc.BackOff`; bucket math is a cheap div/mul via the injected sizer; goroutine termination and shutdown ordering correct | `handler.go:89`; `main.go:360` |
+
+### Recommendations
+- `high` — Stop the full-partition `tcount` scan on the add path: maintain the count incrementally (a counter column or a `thread_rooms` field) and reserve `threadcount.CountAndLatest` for the delete path that actually needs soft-delete awareness — or gate the rescan behind a length threshold.
+- `high` — Restrict `UpdateParentMessageThreadRoomID` to the first-reply path and to explicit redeliveries (`natsmetrics.DeliveryAttemptFromContext` is already available); drop the two per-reply LWTs from the steady state.
+- `high` — Collapse `MarkThreadSubscriptionMention` to one `UpdateOne` per mentionee (fold the guard into a single filter/pipeline update), and batch the loop's writes with `BulkWrite`.
+- `medium` — Add an explicit projection to `GetThreadRoomByParentMessageID` selecting only `_id` and `replyAccounts`.
+- `medium` — Denormalize `parentAuthorAccount`/`parentAuthorSiteId` onto the `thread_rooms` document at creation, removing the per-reply Cassandra read and user lookup.
+- `medium` — Fold `AdvanceThreadSubscriptionLastSeen` into the replier's subscription upsert as a `$max` in the same statement.
+- `low` — Gate the three debug log calls behind `logctx.Enabled`; align `pretouchTypes` with the types actually sonic-encoded; validate `MaxWorkers`.
+
