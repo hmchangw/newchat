@@ -179,3 +179,23 @@ Sound hot-path design (two-lane dispatch, LRU membership cache, `jsretry.Settle`
 - `medium` — Change `InboxEvent.Payload` to `json.RawMessage` in a coordinated PR with the publishers, matching `OutboxEvent.Envelope`.
 - `low` — Fold the existence disambiguation into the guarded write to drop the second round trip on `UpdateSubscriptionRead`.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Derive `isMembershipSubject` from `pkg/outbox.OrderedEventTypes` so `room_renamed` rides the sequential lane, and add a test asserting the two sets agree | Integration | `main.go:1032-1035` | **The destination throws away the ordering the origin pays `MaxAckPending=1` to preserve.** A rename processed before its `member_added` matches zero subscriptions, and `handleMemberAdded` then writes the stale name — **permanently, with no correcting event.** |
+| 2 | `high` | Guard `UpdateSubscriptionOpen` with an `openUpdatedAt` `$lt` from the event's own `Timestamp` | Integration | `main.go:511-523`; `pkg/model/event.go:673` | Its concurrent lane is justified on the claim that inbox-worker applies it under a watermark. **It does not.** A reordered hide→reopen leaves the room permanently wrong, and the field it needs is already on the wire. |
+| 3 | `high` | Project `FindUsersByAccounts` to `{_id:1, account:1}` | Performance | `main.go:245-253` | Whole `model.User` documents — including credential material in `Services` — pulled over the wire on the sequential membership lane, to read two fields. |
+| 4 | `high` | Make the membership hand-off non-blocking (Nak on full buffer instead of blocking the puller) | Performance | `main.go:970-972` | **Head-of-line blocking across lanes**: a membership burst stops `iter.Next()` entirely, stalling read receipts while workers idle — and the buffered messages then exceed `AckWait` and get redelivered, amplifying the backlog. |
+| 5 | `critical` | Split `main.go` into `store.go` / `store_mongo.go` / `consumer.go`, then unit-test the dispatcher and the three uncovered store methods | Test coverage / Maintainability | `main.go:68-793`, `:948` | 44.1% is the fleet's worst, and **the whole store and all of `main()` are 0%** — so `make test` verifies none of the guarded-write semantics this service exists to enforce. The split is pure code motion and is what makes items 1–4 testable. |
+| 6 | `medium` | Replace every literal dispatch case with a `model.Inbox*` constant; make `InboxEventType` a defined type, not an alias | Code quality / Integration | `handler.go:226-246`; `pkg/model/event.go:164` | Today a constant rename compiles clean and routes the event to `default:` — which **Acks**. Federated events are dropped, not retried, with one `Warn` as the only trace. |
+| 7 | `high` | Delete either `stubInboxStore` or `mock_store_test.go` | Maintainability | `handler_test.go:104-715` | Two doubles for one 30-method interface; the generated one is dead, so every interface change means hand-editing ~620 lines mockgen would regenerate free. |
+| 8 | `medium` | Move `BADGE_CACHE_TTL` into `badgecache.TTLConfig`; extract `watermarkGuard(field, at)` and use it at all 13 sites | Architecture / Maintainability | `main.go:64`; 13 sites from `:146` | The badge TTL comment already says "keep identical across all writers" — which is the rule, hand-enforced. A mistyped watermark field is a **permanently silent no-op** no test would catch. |
+| 9 | `medium` | Decide `remote_rooms`' fate — land the reader or delete the lane | Architecture | `main.go:81`, `:101`, `:111`, `:902` | An entire write-only collection plus a core-NATS subscriber, a 110-line cache, three store methods and its own config, **feeding nothing**. |
+| 10 | `medium` | Track the dispatcher goroutine in `wg` and stop it before the drain | Performance | `main.go:962-984` | A handler can currently begin **after** the drain declares success and then run against a Mongo client mid-disconnect. |
+
+### Verdict
+
+**Fix items 1–2 before shipping.** This service holds the most important position in the fleet — the destination side of all federation — and it gets stream ownership and event coverage exactly right. But two ordering guarantees that the rest of the system pays real throughput for are silently dropped here, and both cause **permanent** state divergence rather than transient lag. Item 5 is why nobody would notice: at 44.1%, with the store and `main()` at zero, the unit suite verifies none of it.
