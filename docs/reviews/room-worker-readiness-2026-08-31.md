@@ -134,3 +134,29 @@ Exceptional WHY-comment discipline and a few well-extracted helpers, but a 2,625
 - `medium` — Replace the suffix-chain dispatch with an explicit map keyed on `pkg/subject` constants, removing the ordering hazard.
 - `low` — Move the four poked dependencies into `NewHandler` as an options struct; sweep the stale ticket/PR-relative comments.
 
+---
+
+## 6. Integration — 4 / 5
+
+Federation plumbing is correct and disciplined — every OUTBOX type is in the partition, all subjects come from `pkg/subject`, every envelope stamps `Timestamp` at the publish site — but the rename path can permanently diverge two documents, and the teams deploy silently serves live client RPCs.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **`processRoomRename` commits an unconditional room-name `$set` and then returns (NAKs) on every downstream failure**, so a redelivered stale rename re-applies the old name to the room doc — while the subscription write **is** high-water-mark guarded and refuses to follow it back, leaving `rooms.name` and `subscriptions.name` **permanently divergent**. `UpdateRoomName` is a bare `$set` with no `nameUpdatedAt` guard, unlike `UpdateSubscriptionNamesForRoom`. The code's own comment at `handler.go:2386-2392` states exactly this hazard as the reason the internal-lane publish is best-effort — then returns on the OUTBOX federate 17 lines below | `handler.go:2311`, `:2409`; `store_mongo.go:767-771` vs `:812-826` |
+| medium | The DM-create RPC is registered unconditionally, so `MODE=teams` pods answer live client `chat.server.request.room.{siteID}.create.dm` traffic on the shared queue group, even though the JetStream durable **is** mode-split. A migration-only deploy joins the serving path for a synchronous, user-facing operation; a teams batch saturating the Mongo pool degrades DM creation fleet-wide | `main.go:283-285`, `:452-456` |
+| medium | The teams deploy omits `ROOM_SUBJECT_MODE` (falls back to `global`) while the default deploy sets `dual`. Harmless today only because the teams stream path publishes no room-scoped events; combined with the finding above it becomes a live divergence the moment that path grows one | `deploy/teams/docker-compose.yml:9-31` vs `deploy/docker-compose.yml:17` |
+| medium | `ROOM_KEY_RETIRED_TTL` / `ROOM_KEY_GRACE_PERIOD` re-declared with their own tag and `envDefault` in four services rather than owned by `pkg/roomkeystore`. Values currently agree (30 m / 24 h), so drift risk rather than live defect — but the documented failure mode (`key.get` permanently failing for messages already on the wire) is prevented only by four copies happening to agree | `main.go:67`, `:70`; `room-service/main.go:65`, `:67`; `bot-room-service/main.go:39`, `:42`; `broadcast-worker/main.go:78`, `:82` |
+| low | JetStream dispatch routes on raw `strings.HasSuffix`/`Contains` literals rather than a `pkg/subject` parser, so a builder rename silently falls through to `default:`, which logs a Warn and **Acks (drops)** the message | `handler.go:254-275` |
+| low | The same federated event type is carried by **two different payload structs**: `model.MemberAddEvent` on the live paths and `model.InboxMemberEvent` on the Teams path. They decode compatibly today purely because the JSON tags overlap — nothing enforces that | `handler.go:1283`; `teamsroomcreate.go:280` |
+
+### Verified clean
+All four federated types (`member_added`, `member_removed`, `room_renamed`, `member_joinedat_refreshed`) are in exactly one `pkg/outbox` set, the first three on the **ORDERED** lane (`pkg/outbox/outbox.go:47-51`). No direct `InboxExternal` publish anywhere. OUTBOX subject is the `CLAUDE.md` form `chat.outbox.{origin}.{dest}.{type}` via `subject.Outbox`. Zero raw `fmt.Sprintf` subject construction. Every `InboxEvent` envelope and inner event sets `Timestamp` at the publish site. Every internal-lane type is covered by `subject.InboxMemberEventSubjects`. `bootstrapStreams` sets only `Name + Subjects` and fail-fast-verifies in prod. IDs use `idgen` with the correct per-entity format. No bare `Nak()`/`NakWithDelay(0)`. No client-facing `chat.user.` handler, so no `docs/client-api.md` obligation is outstanding.
+
+### Recommendations
+- `high` — Guard `UpdateRoomName` with the same monotonic `nameUpdatedAt` high-water mark the subscription update already uses, so a redelivered stale rename is a no-op on **both** documents rather than only one.
+- `high` — Make the post-commit tail of `processRoomRename` best-effort-with-log (as the internal publish already is), or move the OUTBOX federate ahead of the Mongo commits. Returning an error after a non-idempotent `$set` **guarantees** the divergence.
+- `medium` — Gate `natsrouter.Register(subject.RoomCreateDMSync…)` on `cfg.Mode == "default"`, mirroring the mode split already applied to the durable.
+- `medium` — Move `RoomKeyRetiredTTL`/`RoomKeyGracePeriod` into a `roomkeystore.TTLConfig` mounted as a named field in all four services.
+- `low` — Add `ROOM_SUBJECT_MODE` and `ROOM_KEY_RETIRED_TTL` explicitly to the teams compose so both deploys of one binary are provably configured alike.
+- `low` — Replace suffix matching with a `pkg/subject` parse helper and make the `default:` branch a permanent error rather than a silent Ack; collapse the two member-event payload structs, or add a wire-compat round-trip test.
+
