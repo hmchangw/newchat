@@ -44,3 +44,28 @@ Disciplined error tiering, typed `errcode` usage and zero string-matching on err
 - `low` — Wrap the tail marshal as a typed `errcode.Internal(…, WithCause(err))` so a permanently unmarshalable message **Acks instead of burning `MaxDeliver` NAKs**; wrap `metacache.go:21`.
 - `nitpick` — Make the singleflight assertion comma-ok with a defensive fallback; switch `interface{}` → `any`.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Boundaries, DI, bootstrap gating and the high-throughput consumer pattern are all correct and well-documented; the deductions are an unfiltered client-facing consumer, per-service re-declaration of shared cache knobs, and a constructor that has outgrown positional DI.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **The consumer binds MESSAGES with no `FilterSubjects`**, so every verb under `chat.user.*.room.*.{siteID}.msg.>` is processed as a create. `buildConsumerConfig` sets only `Durable`; the stream captures `msg.>`, and `subject.ParseUserRoomSiteSubject` returns `ok` from the first four tokens, **never inspecting the trailing verb**. A client publishing `…msg.edit` today is validated as a send and republished to `chat.msg.canonical.{siteID}.created`. `CLAUDE.md` explicitly reserves `.edited`/`.deleted` "for future", so **the gate will silently mis-route them the day they exist.** Fix is one line | `main.go:269-275`; `pkg/stream/stream.go:18`; `pkg/subject/subject.go:113-118` |
+| medium | **L1 cache knobs re-declared per service** — `ROOM_META_CACHE_TTL`, `USER_CACHE_SIZE`, `USER_CACHE_TTL` carry their own tag + `envDefault` here and again in four sibling services. **The L2 siblings already do it right** (`RoomMetaL2 roommetacache.TTLConfig`, `UserL2 userstore.TTLConfig`); the L1 tier never got it. The consequence is the documented one: two services reading the same data drift apart on a default nobody notices | `main.go:52-53`, `:58-59` |
+| medium | `NewHandler` takes **10 positional parameters**, four of which are policy scalars (`largeRoomThreshold, maxAttachments, maxAttachmentBytes, chatBaseURL`) — call-site-indistinguishable ints and strings. The options pattern is **already present** in the same file | `handler.go:107`, `:82-102` |
+| medium | The gate performs a **synchronous cross-service RPC plus a timed re-check inside the JetStream worker slot**: quote and thread-parent resolution issue a 2 s NATS request to history-service, and a missing thread parent adds a 150 ms retry. **Ingest availability is therefore coupled to history-service latency** — each in-flight send holds a `MaxAckPending` slot for up to ~4.2 s. Architecturally this is *enrichment* work living in the *validation* gate | `fetcher_history.go:82`; `handler.go:547-561` |
+| low | MESSAGES-CANONICAL is **not exclusively produced by this service**, so the invariants enforced here (20-char message ID, 20 KB content cap, attachment caps) apply only to the client lane. Legitimate for system messages, but "gatekeeper validates → canonical" is not the whole truth | `room-worker/handler.go:533`, `:732`, `:1260`, `:1981`; `room-service/handler_teams.go:269` |
+| low | Subject-shape knowledge duplicated outside `pkg/subject`: `accountFromSubject` re-implements the `chat.user.{account}.…` split with a raw `strings.Split`, existing only because `ParseUserRoomSiteSubject` is all-or-nothing | `handler.go:305-311` |
+| nitpick | Dangling reference to a file that does not exist (`see doc.go`) | `handler.go:179` |
+
+**Verified correct:** `Store` is consumer-defined with exactly the two methods used; `bootstrapStreams` sets only `Name + Subjects` from `pkg/stream`, verifies-and-fails-fast when disabled, matching the repo-wide shape; the high-throughput pattern is intact (`cons.Messages()` + `PullMaxMessages(2*MaxWorkers)` + semaphore/WaitGroup), never mixed with `Consume()`; shutdown order is correct under `shutdown.Wait`; publish/reply injected as fields; zero `os.Getenv`.
+
+### Recommendations
+- `high` — **Set `FilterSubjects` to the `msg.send` pattern on the durable** (or reject non-`send` verbs before `processMessage`), and add a `pkg/subject` parser that returns the verb.
+- `medium` — Move the `USER_CACHE_*` / `ROOM_META_CACHE_*` L1 knobs into `userstore` / `roommetacache` as mounted config structs, mirroring the existing `TTLConfig` fields.
+- `medium` — Collapse the four policy scalars into a `sendPolicy` struct or handler options.
+- `medium` — Extract quote/thread-parent resolution behind a `parentResolver` type so the gate is validate-and-publish and the enrichment coupling is isolated and separately testable.
+- `low` — Add `subject.AccountFromUserSubject` and delete the local helper; fix the `doc.go` reference.
+
