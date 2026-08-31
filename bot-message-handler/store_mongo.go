@@ -16,6 +16,7 @@ type storeMongo struct {
 	subscriptions *mongo.Collection
 	rooms         *mongo.Collection
 	users         *mongo.Collection
+	apps          *mongo.Collection
 }
 
 func newStoreMongo(db *mongo.Database) *storeMongo {
@@ -23,7 +24,25 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 		subscriptions: db.Collection("subscriptions"),
 		rooms:         db.Collection("rooms"),
 		users:         db.Collection("users"),
+		apps:          db.Collection("apps"),
 	}
+}
+
+// AppNameByAccount resolves a bot account (assistant.name) to its app display name,
+// returning ("", nil) when no app matches. Mirrors history-service's AppRepo.
+func (s *storeMongo) AppNameByAccount(ctx context.Context, botAccount string) (string, error) {
+	var app struct {
+		Name string `bson:"name"`
+	}
+	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount},
+		options.FindOne().SetProjection(bson.M{"name": 1, "_id": 0})).Decode(&app)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find app by account %q: %w", botAccount, err)
+	}
+	return app.Name, nil
 }
 
 func (s *storeMongo) FindSubscription(ctx context.Context, roomID, userID string) (*Subscription, error) {

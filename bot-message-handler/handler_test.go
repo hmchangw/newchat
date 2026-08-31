@@ -28,6 +28,14 @@ type fakeStore struct {
 	FindRoomFn         func(ctx context.Context, roomID string) (*Room, error)
 	ListMemberIDsFn    func(ctx context.Context, roomID string) ([]string, error)
 	FindUserFn         func(ctx context.Context, userID string) (*model.User, error)
+	AppNameByAccountFn func(ctx context.Context, botAccount string) (string, error)
+}
+
+func (f *fakeStore) AppNameByAccount(ctx context.Context, botAccount string) (string, error) {
+	if f.AppNameByAccountFn == nil {
+		return "", nil
+	}
+	return f.AppNameByAccountFn(ctx, botAccount)
 }
 
 func (f *fakeStore) FindSubscription(ctx context.Context, roomID, userID string) (*Subscription, error) {
@@ -107,7 +115,7 @@ func TestHandleSendRoom_HappyPath(t *testing.T) {
 		},
 	}
 	pub := &fakePublisher{}
-	h := newHandler(store, pub, "site-a")
+	h := newHandler(store, pub, "site-a", nil)
 
 	msgID := idgen.GenerateMessageID()
 	created := time.Now().UnixMilli()
@@ -137,6 +145,35 @@ func TestHandleSendRoom_HappyPath(t *testing.T) {
 	assert.Equal(t, created, evt.Timestamp)
 }
 
+// TestHandleSendRoom_DisplayNameFromAppName: a real bot identity carries no
+// EngName/ChineseName (the header stamps only id/account/siteId), so the sender
+// display name must resolve from the app name, not fall back to the raw account.
+func TestHandleSendRoom_DisplayNameFromAppName(t *testing.T) {
+	store := &fakeStore{
+		FindSubscriptionFn: func(_ context.Context, _, _ string) (*Subscription, error) {
+			return &Subscription{RoomID: "r1", UserID: "bot-1", SiteID: "site-a"}, nil
+		},
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
+		},
+		AppNameByAccountFn: func(_ context.Context, account string) (string, error) {
+			assert.Equal(t, "myapp.bot", account)
+			return "Payroll Assistant", nil
+		},
+	}
+	pub := &fakePublisher{}
+	h := newHandler(store, pub, "site-a", store.AppNameByAccount)
+
+	// Bare identity: no EngName/ChineseName, as the live X-Bot-Identity header carries.
+	id := BotIdentity{ID: "bot-1", Account: "myapp.bot", SiteID: "site-a"}
+	c := newCtx(t, "r1", validHeaders(t, id, idgen.GenerateMessageID(), time.Now().UnixMilli()), nil)
+
+	resp, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})
+	require.NoError(t, err)
+	assert.Equal(t, "Payroll Assistant", resp.Message.UserDisplayName,
+		"bot sender name resolves from the app name, not the raw account")
+}
+
 func TestHandleSendRoom_SubscriptionMissing(t *testing.T) {
 	store := &fakeStore{
 		FindSubscriptionFn: func(_ context.Context, _, _ string) (*Subscription, error) {
@@ -144,7 +181,7 @@ func TestHandleSendRoom_SubscriptionMissing(t *testing.T) {
 		},
 	}
 	pub := &fakePublisher{}
-	h := newHandler(store, pub, "site-a")
+	h := newHandler(store, pub, "site-a", nil)
 
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})
@@ -159,7 +196,7 @@ func TestHandleSendRoom_RoomMissing(t *testing.T) {
 		},
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) { return nil, ErrNotFound },
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})
@@ -185,7 +222,7 @@ func TestHandleSendRoom_ContentValidation(t *testing.T) {
 					return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
 				},
 			}
-			h := newHandler(store, &fakePublisher{}, "site-a")
+			h := newHandler(store, &fakePublisher{}, "site-a", nil)
 			c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 			_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: tc.content})
 			requireErrcode(t, err, errcode.CodeBadRequest, tc.reason)
@@ -202,7 +239,7 @@ func TestHandleSendRoom_HeaderValidation(t *testing.T) {
 			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
 		},
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 
 	tests := []struct {
 		name    string
@@ -261,7 +298,7 @@ func TestHandleSendRoom_MentionCanonicalization(t *testing.T) {
 			return &model.User{ID: id, Account: "alice.true", SiteID: "site-a", EngName: "Alice True"}, nil
 		},
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	req := BotSendRoomRequest{
@@ -293,7 +330,7 @@ func TestHandleSendRoom_MentionNonMemberRejected(t *testing.T) {
 			return []string{"bot-1"}, nil
 		},
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	req := BotSendRoomRequest{
@@ -313,7 +350,7 @@ func TestHandleSendRoom_ThreadReplyFieldsCopied(t *testing.T) {
 			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
 		},
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 
 	parentCreated := time.Now().UTC()
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
@@ -339,7 +376,7 @@ func TestHandleSendRoom_TShowIgnoredOnNonThread(t *testing.T) {
 			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
 		},
 	}
-	h := newHandler(store, &fakePublisher{}, "site-a")
+	h := newHandler(store, &fakePublisher{}, "site-a", nil)
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	resp, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi", TShow: true})
 	require.NoError(t, err)
@@ -356,7 +393,7 @@ func TestHandleSendRoom_PublishError(t *testing.T) {
 		},
 	}
 	pub := &fakePublisher{err: errors.New("nats down")}
-	h := newHandler(store, pub, "site-a")
+	h := newHandler(store, pub, "site-a", nil)
 
 	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), 1), nil)
 	_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})

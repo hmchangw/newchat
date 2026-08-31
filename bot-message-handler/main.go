@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -94,7 +95,8 @@ func run() error {
 	store := newStoreMongo(mongoClient.Database(cfg.MongoDB))
 
 	pub := JetStreamPublisher{JS: js}
-	h := newHandler(store, pub, cfg.SiteID)
+	appName := preview.CachedAppNameLookup(store.AppNameByAccount)
+	h := newHandler(store, pub, cfg.SiteID, appName)
 
 	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
 	router := natsrouter.DefaultGuarded(nc, "bot-message-handler", guard,

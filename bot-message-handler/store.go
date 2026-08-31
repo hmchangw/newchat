@@ -20,6 +20,10 @@ type Store interface {
 
 	// FindUser returns the users doc used to canonicalize mention Participants.
 	FindUser(ctx context.Context, userID string) (*model.User, error)
+
+	// AppNameByAccount returns the app display name for a bot account, or ("", nil)
+	// when no app matches. Used to stamp a bot message's sender display name.
+	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
 }
 
 // ErrNotFound is returned by store lookups when the requested document does not exist.

@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -45,13 +46,14 @@ func (j JetStreamPublisher) PublishWithMsgID(ctx context.Context, subj string, d
 }
 
 type handler struct {
-	store  Store
-	pub    Publisher
-	siteID string
+	store   Store
+	pub     Publisher
+	siteID  string
+	appName preview.AppNameLookup
 }
 
-func newHandler(store Store, pub Publisher, siteID string) *handler {
-	return &handler{store: store, pub: pub, siteID: siteID}
+func newHandler(store Store, pub Publisher, siteID string, appName preview.AppNameLookup) *handler {
+	return &handler{store: store, pub: pub, siteID: siteID, appName: appName}
 }
 
 // verifyRoomExists is a defence-in-depth local-Mongo check. BP routes to the room's home site, so a miss indicates a dangling subscription.
@@ -110,7 +112,7 @@ func (h *handler) handleSendDM(c *natsrouter.Context, req BotSendRoomRequest) (*
 	msg := model.Message{
 		ID: messageID, RoomID: roomID,
 		UserID: ident.ID, UserAccount: ident.Account,
-		UserDisplayName: displayfmt.CombineWithFallback(ident.EngName, ident.ChineseName, ident.Account),
+		UserDisplayName: preview.BotAwareDisplayName(c, h.appName, ident.EngName, ident.ChineseName, ident.Account),
 		Content:         req.Content, Card: req.Card, Mentions: mentions,
 		CreatedAt:                    createdAt,
 		ThreadParentMessageID:        req.ThreadParentMessageID,
@@ -165,7 +167,7 @@ func (h *handler) handleSendRoom(c *natsrouter.Context, req BotSendRoomRequest) 
 		RoomID:                       roomID,
 		UserID:                       ident.ID,
 		UserAccount:                  ident.Account,
-		UserDisplayName:              displayfmt.CombineWithFallback(ident.EngName, ident.ChineseName, ident.Account),
+		UserDisplayName:              preview.BotAwareDisplayName(c, h.appName, ident.EngName, ident.ChineseName, ident.Account),
 		Content:                      req.Content,
 		Card:                         req.Card,
 		Mentions:                     mentions,
