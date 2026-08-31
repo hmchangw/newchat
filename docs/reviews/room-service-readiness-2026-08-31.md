@@ -89,3 +89,43 @@ On the shared-knob finding: `CLAUDE.md` names this divergence as producing exact
 - `low` — Split `RoomStore` along its natural seams (`RoomReader`, `SubscriptionStore`, `MemberStore`, `ThreadStore`, `DirectoryStore`), keeping one `MongoStore` implementing all of them; adopt the sanctioned sub-package layout; unexport the store.
 - `nitpick` — Extend `bootstrapStreams` to verify MESSAGES-CANONICAL and OUTBOX (verify only — never create).
 
+---
+
+## 4. Test coverage — 1 / 5
+
+Statement-weighted coverage is **57.2% (1317/2301 statements)** — below the `CLAUDE.md` §4 60% line, so the dimension is floored at 1. The distribution is unusual and worth stating plainly: the handler layer is genuinely well tested at 87.5%, and the deficit is concentrated in the store and `main`.
+
+| File | Coverage |
+|------|----------|
+| `bootstrap.go` | 100% |
+| `helper.go` | 95.6% |
+| `reader_history.go` | 92.0% |
+| `handler_teams.go` | 91.8% |
+| `handler.go` | 87.5% (1047/1196) |
+| `memberlist_client.go` | 76.6% |
+| **`main.go`** | **8.1%** (14/172) |
+| **`store_mongo.go`** | **3.4%** (23/674) |
+
+60 of 65 `store_mongo` methods read 0% in the unit profile because they are only reachable under `//go:build integration` — the number is real, but the risk is narrower than 57.2% alone suggests.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| critical | 57.2%, under the §4 60% bar and far under the 80% merge floor | `store_mongo.go:1` |
+| high | The section-ordering Mongo path is untested in **both** profiles: `ComputeSectionOrder`, `MoveSubscriptionSection`, `sectionOrderExtreme`, `findOneAndUpdateSub` are never called from any non-mock test; `RebalanceSection` has exactly one integration call. Float-midpoint ordering with a rebalance trigger is precisely the logic that fails on precision exhaustion and ties | `store_mongo.go:1185` |
+| high | `moveChat` is the weakest handler at 67.7%: the rebalance branch and the single-room cross-site `section_moved` federation branch are both uncovered — the same code path as the `critical` dedup defect in Chapter 6 | `handler.go:2371-2459` |
+| high | The Teams-meeting Mongo store has zero coverage anywhere: `GetTeamsMeeting`/`InsertTeamsMeeting` appear only against hand stubs, so the duplicate-key/idempotent-insert behaviour the stub *fakes* is never validated against real Mongo | `store_mongo.go:178` |
+| medium | Cross-site error-decode fallbacks in the member-list federation client are uncovered — the legacy-peer branch and the `ee.Metadata` propagation branch. These are the mixed-version paths that only fire during a rolling upgrade | `memberlist_client.go:119-134` |
+| medium | Best-effort read-receipt fan-out failure paths uncovered; these **log-and-swallow**, so a regression is silent in production and invisible in CI | `handler.go:1541-1556`, `:1902-1930` |
+| medium | `handleCreateRoomDMOrBotDM` at 69.6% — the lowest-covered create path, while its two siblings are at 88.9% / 86.4% | `handler.go:270`, uncovered `:273-311` |
+| low | Unit tests start a real embedded `nats-server` and use a fixed `time.Sleep(500ms)` to force the timeout path — §4 forbids both real NATS in unit tests and `time.Sleep` for synchronization | `memberlist_client_test.go:22`, `:189` |
+| low | `handler_teams_test.go` (738 lines) contains **zero** table-driven cases despite testing many input variations of one flow, while `handler_test.go` does this well (45 tables) | `handler_teams_test.go:1` |
+| nitpick | Integration hygiene is correct: `TestMain` → `testutil.RunTests(m)`, all 15 Mongo handles via `testutil.MongoDB(t, prefix)`, one `testutil.NATS(t)`, no inline `GenericContainer` | `main_test.go:11` |
+
+### Recommendations
+- `critical` — Add integration tests for the ~60 zero-coverage `store_mongo` methods, starting with the section-ordering quartet and the Teams-meeting pair; that alone moves the largest untested block.
+- `high` — Cover `moveChat`'s rebalance and cross-site `section_moved` branches with mocked-store cases (`needRebalance=true`, `userSiteID != h.siteID`), mirroring the `federate mute-toggled` failure assertions already in `handler_test.go`.
+- `high` — Add a stub-free integration test asserting `InsertTeamsMeeting` idempotency on duplicate key against real Mongo, so the hand-stubbed `mongo.WriteException` matches reality.
+- `medium` — Table-drive `memberlist_client_test.go` over the remote-error envelope shapes: canonical errcode, `RoomNotMember` remap, legacy/non-canonical code, empty message, populated `Metadata`.
+- `medium` — Assert the log-and-continue fan-out failures by injecting a failing `publishCore` — the publish function is already a struct field, so this needs no new seam.
+- `low` — Replace the 500 ms responder `time.Sleep` with a channel the test closes after asserting the deadline, and move the embedded-NATS tests behind the `integration` tag.
+
