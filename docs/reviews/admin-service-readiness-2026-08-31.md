@@ -102,3 +102,30 @@ Coverage is **68.9% (1055 statements)**, below the §4 80% floor, so the dimensi
 - `medium` — Set `BcryptCost: 32` in a subtest to drive the three `pwhash.Hash` 500 paths.
 - `low` — Use a `roomRequester` fake returning `(nil, nil)`; target `permissions.go:213` and the `client_update.go` multipart paths — these plus the above are worth roughly the 11-point shortfall without vanity padding.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Unusually well-commented and cleanly split by topic for its size, but `package main` now carries five unrelated domains behind one 15-method store and one 8-field `Handler`, with a 183-line handler, a duplicated fanout loop, and a cache-invalidation seam that already leaks.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | The service has outgrown the flat single-package layout: 4,205 production lines in `package main` spanning **five unrelated domains** — admin user CRUD, session auth + self-service password, a permission ledger with its own timezone/date semantics, a room-duty NATS RPC, and a streaming artifact relay. Adding a sixth surface means another file in the same package plus another method on `AdminStore` and a full mock regeneration | `handler.go:31`; `permissions.go:26`; `room_onduty.go:343`; `client_update.go:291` |
+| high | **Session-cache invalidation is split across the store/handler boundary and silently missing on two of four revoke paths** — see Chapters 2–3. Revocation semantics differ by which endpoint you happen to call, and **nothing in the interface signals it** | `handler.go:678`; `store_mongo.go:296`, `:322` |
+| high | `createPermissions` is **183 lines**: ten sequential validation gates, subject/applicant/approver classification via an **index-position trick** (`i < len(subjects)`), grant construction, store write, audit batch and fanout — all inline. The positional coupling to how `checkAccounts` was appended is the kind of invariant a future edit breaks silently | `permissions.go:138-296`, trick at `:220`, append at `:197` |
+| medium | The cross-site fanout loop is duplicated near-verbatim and **has already drifted** — the same publish failure logs at `Warn` in one copy and `Error` in the other | `handler.go:205` and `permissions.go:370` |
+| medium | `AdminStore` is a 15-method interface mixing users, audit and permissions, regenerating a 293-line mock whenever any one domain changes | `store.go:258` |
+| medium | Audit-entry construction is duplicated and **has already diverged**: `h.auditEntry` stamps `idgen.GenerateUUIDv7()`, but `handleChangePassword` hand-builds the same struct with `idgen.GenerateID()` and `nowMillis()` instead of the shared clock — **two `_id` formats in one collection, from one service** | `handler.go:251` vs `login.go:206` |
+| medium | The user field list is maintained in **three hand-synchronized places with no compile-time link**: `userProjection` (19 bson keys), `userView` (19 fields), `toView` (19 assignments). Adding a user field requires editing all three plus `fanoutProjection` | `store_mongo.go:89`; `handler.go:82` |
+| low | Dead references: comments describe a `requireAuth` middleware that **does not exist**; `authenticate` was factored out to serve it and now has a single caller | `middleware.go:29`, `:80` |
+| low | The timeout-ordering invariant spanning six knobs is enforced by ~90 lines of prose across two files, and `checkHandlerTimeout` is applied to two of the three timeouts, with the third excluded by comment only. A new timeout has no mechanical rule to follow | `config.go:394`; `client_update.go:361` |
+| nitpick | Two time sources coexist — the stubbable `nowMillis` var and direct `time.Now().UTC()` — so only some timestamps are test-controllable; `handler_test.go` (1,904 lines) mirrors the production god-file | `handler.go:79`, `:266` |
+
+### Recommendations
+- `high` — Take the sanctioned sub-package exception: move `permissions.go`+tests to `permissions/`, `client_update.go` to `clientupdate/`, `login.go`+`middleware.go` to `auth/`, each with its own narrow store interface and `mocks/`. `AdminStore` then splits into `UserStore`/`AuditStore`/`PermissionStore` naturally.
+- `high` — Make the two transactional revoke methods return the deleted session IDs and call `sessioncache.BustMany` in `setPassword` and the deactivate branch, so all four revoke paths invalidate identically.
+- `medium` — Extract `fanoutEnvelopes(ctx, evType, payloads) []string` and have both fanout sites call it; settle on one log level.
+- `medium` — Decompose `createPermissions` into `bindPermissionRequest`, `validateAccounts(...)` returning `(unknown, inactive []string)` with **explicit roles** instead of the positional test, and `buildGrants`.
+- `medium` — Route `handleChangePassword` through `h.audit`/`h.auditEntry` so `admin_audit._id` has one format and one clock.
+- `low` — Generate `userProjection` from the `userView` field set (or add a test asserting the three lists match); delete the `requireAuth` comment references and inline `authenticate` into its only caller.
+
