@@ -181,6 +181,9 @@ func roomActivityPublisher(p Publisher, siteID string, peers []string) func(cont
 			LastMsgAt: r.at.UTC().UnixMilli(),
 			Timestamp: time.Now().UTC().UnixMilli(),
 		}
+		// The coalescer flush owns this error; there is no message and no ack
+		// decision on this lane.
+		// nosemgrep: jsretry-marshal-failure-must-be-permanent
 		data, err := json.Marshal(evt)
 		if err != nil {
 			return fmt.Errorf("marshal room activity event: %w", err)

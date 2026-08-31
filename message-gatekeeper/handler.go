@@ -195,12 +195,25 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// account — so decode here. No-op for every non-bot account.
 	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
-		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
+		// Permanent → server-side fault that cannot succeed on redelivery: reply + Ack, counted failed.
+		// Typed *errcode.Error → client-facing validation: reply + Ack, counted rejected.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
 		// errnats.Marshal runs Classify which logs once at category-aware level —
-		// validation branch must NOT also log here. Infra branch owns its log.
+		// the two Ack branches must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
-		if errors.As(err, &ee) {
+		if pe, isPermanent := errcode.IsPermanent(err); isPermanent {
+			// A permanent server-side fault (a value that cannot be marshaled) is
+			// undeliverable work, not a client rejection: Ack, because redelivering
+			// identical bytes can only fail identically, but count it as failed so
+			// the rejected series stays a pure client-error signal.
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			h.metrics.Record(ctx, resultFailed, reasonInternal)
+			debugFlowRejected(ctx, req.RequestID, string(pe.Code))
+			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.ErrorContext(ctx, "failed to ack permanent message", "error", ackErr, "request_id", req.RequestID)
+			}
+		} else if errors.As(err, &ee) {
 			// A validation or policy rejection is an ordinary client error, not
 			// undeliverable work: the sender receives an error reply and the
 			// rejection is already counted by message_gatekeeper_messages_total.
@@ -504,19 +517,30 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: siteID, Timestamp: now.UnixMilli(), QuotedParentUnverified: quotedUnverified, ThreadParentSenderAccount: threadParentSenderAccount}
 	evtData, err := sonic.Marshal(evt)
 	if err != nil {
-		return nil, fmt.Errorf("marshal message event: %w", err)
+		return nil, errcode.MarshalFailed("message event", err)
 	}
 
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
+		if errors.Is(err, nats.ErrMaxPayload) {
+			// Rejected client-side before the wire. The caps this handler enforces
+			// (content, attachments) are meant to keep a message under max_payload,
+			// so reaching this is a misconfiguration, not a client error — but the
+			// message can never be published, so reply and drop rather than retry.
+			return nil, errcode.Permanent(errcode.Internal("canonical message exceeds broker max_payload"))
+		}
 		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
 		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 
-	return sonic.Marshal(msg)
+	replyData, err := sonic.Marshal(msg)
+	if err != nil {
+		return nil, errcode.MarshalFailed("send message reply", err)
+	}
+	return replyData, nil
 }
 
 // resolveThreadParent resolves the thread parent's createdAt and sender account

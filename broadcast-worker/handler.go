@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -363,7 +364,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 		}
 		payload, err := sonic.Marshal(roomEvt)
 		if err != nil {
-			return fmt.Errorf("marshal thread created event for parent %s: %w", parentMsgID, err)
+			return errcode.MarshalFailed("thread created event", err)
 		}
 		viewPayload := h.sealThreadViewPayload(ctx, meta.ID, payload, func() (any, error) {
 			sealed := roomEvt
@@ -564,7 +565,7 @@ func (h *Handler) handleThreadUpdated(ctx context.Context, evt *model.MessageEve
 		}
 		payload, err := sonic.Marshal(&edit)
 		if err != nil {
-			return fmt.Errorf("marshal thread edit event for parent %s: %w", parentMsgID, err)
+			return errcode.MarshalFailed("thread edit event", err)
 		}
 		viewPayload := h.sealThreadViewPayload(ctx, room.ID, payload, func() (any, error) {
 			sealed := edit
@@ -619,7 +620,7 @@ func (h *Handler) handleThreadDeleted(ctx context.Context, evt *model.MessageEve
 		}
 		payload, err := sonic.Marshal(&del)
 		if err != nil {
-			return fmt.Errorf("marshal thread delete event for parent %s: %w", parentMsgID, err)
+			return errcode.MarshalFailed("thread delete event", err)
 		}
 		// A delete carries ids and timestamps, no body, so both lanes share it.
 		if err := h.publishChannelThreadEvent(ctx, room.ID, parentMsgID, room.CrossSite, room.CrossSiteAt, payload, payload, fanOut); err != nil {
@@ -689,7 +690,7 @@ func (h *Handler) publishThreadMetadata(ctx context.Context, room *model.Room, n
 	}
 	payload, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal thread metadata event for room %s: %w", room.ID, err)
+		return errcode.MarshalFailed("thread metadata event", err)
 	}
 	switch room.Type {
 	case model.RoomTypeChannel:
@@ -901,7 +902,7 @@ func (h *Handler) publishMutation(ctx context.Context, room *model.Room, roomEvt
 	ctx = withBroadcastMetricLabels(ctx, roomKind(room.Type), labels.eventType)
 	payload, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal %s event: %w", roomEvtType, err)
+		return errcode.MarshalFailed(string(roomEvtType)+" event", err)
 	}
 
 	switch room.Type {
@@ -998,7 +999,7 @@ func (h *Handler) encryptEditedContent(ctx context.Context, roomID string, edite
 	}
 	encJSON, err := sonic.Marshal(encrypted)
 	if err != nil {
-		return fmt.Errorf("marshal encrypted edit content: %w", err)
+		return errcode.MarshalFailed("encrypted edit content", err)
 	}
 	edited.EncryptedNewContent = json.RawMessage(encJSON)
 	edited.NewContent = ""
@@ -1026,7 +1027,7 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	}
 	msgJSON, err := sonic.Marshal(clientMsg)
 	if err != nil {
-		return fmt.Errorf("marshal client message for room %s: %w", roomID, err)
+		return errcode.MarshalFailed("client message", err)
 	}
 	key, err := h.currentRoomKey(ctx, roomID)
 	if err != nil {
@@ -1038,7 +1039,7 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	}
 	encJSON, err := sonic.Marshal(encrypted)
 	if err != nil {
-		return fmt.Errorf("marshal encrypted message for room %s: %w", roomID, err)
+		return errcode.MarshalFailed("encrypted message", err)
 	}
 	evt.EncryptedMessage = json.RawMessage(encJSON)
 	evt.Message = nil
@@ -1056,7 +1057,7 @@ func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.M
 	}
 	payload, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal channel event: %w", err)
+		return errcode.MarshalFailed("channel event", err)
 	}
 	// flow: one room-stream publish; NATS fans out to subscribers downstream, so
 	// this reports the room audience, not per-recipient deliveries from here.
@@ -1076,6 +1077,13 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	var pubErr error
 	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {
+			if errors.Is(err, nats.ErrMaxPayload) {
+				// Rejected client-side before the wire: the same payload is oversized
+				// for every remaining target and every redelivery, so stop here rather
+				// than spend the consumer's budget on a publish that cannot land.
+				return errcode.Permanent(errcode.Internal(
+					fmt.Sprintf("%s for room %s exceeds broker max_payload", op, roomID)))
+			}
 			pubErr = fmt.Errorf("publish %s for room %s to %s: %w", op, roomID, subj, err)
 		}
 	}
@@ -1190,7 +1198,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 
 		payload, err := sonic.Marshal(evt)
 		if err != nil {
-			return fmt.Errorf("marshal DM event for user %s: %w", account, err)
+			return errcode.MarshalFailed("DM event", err)
 		}
 		recipients++
 		// Publish errors are intentionally swallowed here (log-and-continue). DM thread

@@ -81,3 +81,14 @@ func Terminal(err error) (*Error, bool) {
 		return ee, true
 	}
 }
+
+// MarshalFailed marks a serialization failure non-retryable. Marshaling a fixed
+// struct is deterministic — a value the encoder rejects (a NaN float, an erroring
+// custom marshaler) is rejected identically on every redelivery — so a JetStream
+// worker Ack-drops it instead of spending its MaxDeliver budget on a doomed retry.
+//
+// what names the value being marshaled; the encoder error rides as the cause, so
+// Classify logs it once server-side and it never reaches the client.
+func MarshalFailed(what string, cause error) error {
+	return Permanent(Internal("marshal "+what, WithCause(cause)))
+}

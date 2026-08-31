@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -266,7 +267,7 @@ func main() {
 	handler.publishUsers = func(ctx context.Context, users []model.IUserWithChange) error {
 		data, err := json.Marshal(users)
 		if err != nil {
-			return fmt.Errorf("marshal user identity fanout: %w", err)
+			return errcode.MarshalFailed("user identity fanout", err)
 		}
 		subj := subject.OrgSyncUsersUpsert(cfg.SiteID)
 		if _, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {

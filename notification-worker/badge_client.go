@@ -40,6 +40,9 @@ func newNatsBadgeClient(nc *o11ynats.Conn) *natsBadgeClient {
 // responder, remote errcode envelope, unmarshal) is wrapped and returned so the caller
 // can decide how to degrade — the badge phase must never NAK the push on its behalf.
 func (c *natsBadgeClient) Counts(ctx context.Context, siteID, roomID string, accounts []string) (map[string]int, error) {
+	// fetchUnreadCounts is fail-open and discards this error, so it never reaches
+	// a settle decision.
+	// nosemgrep: jsretry-marshal-failure-must-be-permanent
 	reqBytes, err := sonic.Marshal(model.BadgeCountBatchRequest{RoomID: roomID, Accounts: accounts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal badge count batch request for site %s: %w", siteID, err)

@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
@@ -233,11 +234,13 @@ func (s *MongoStore) CreateRoom(ctx context.Context, room *model.Room, key *room
 	// encKey field can be attached and the whole thing written in one upsert.
 	raw, err := bson.Marshal(room)
 	if err != nil {
-		return false, fmt.Errorf("marshal room: %w", err)
+		return false, errcode.MarshalFailed("room", err)
 	}
 	var doc bson.M
 	if err := bson.Unmarshal(raw, &doc); err != nil {
-		return false, fmt.Errorf("unmarshal room doc: %w", err)
+		// raw is the bson.Marshal output from the line above: round-tripping our own
+		// bytes cannot fail transiently, so a redelivery can only fail identically.
+		return false, errcode.Permanent(errcode.Internal("unmarshal room doc", errcode.WithCause(err)))
 	}
 	// _id is supplied by the filter; $setOnInsert must not also set it.
 	delete(doc, "_id")

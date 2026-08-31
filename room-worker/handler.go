@@ -1916,7 +1916,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal room_created sys data: %w", err)
+		return errcode.MarshalFailed("room_created sys data", err)
 	}
 	msg1 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_created"),
@@ -1946,7 +1946,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal members_added sys data: %w", err)
+		return errcode.MarshalFailed("members_added sys data", err)
 	}
 	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) *model.User {
 		return userByAccount[a]
@@ -1976,7 +1976,7 @@ func (h *Handler) publishCanonical(ctx context.Context, msg *model.Message, site
 	}
 	data, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal MessageEvent: %w", err)
+		return errcode.MarshalFailed("MessageEvent", err)
 	}
 	return h.publish(ctx, subject.MsgCanonicalCreated(siteID), data, natsutil.CanonicalDedupID(&evt))
 }
@@ -2324,7 +2324,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 
 	sysData, err := json.Marshal(model.RoomRenamedSysData{NewName: req.NewName, ByAccount: req.Account})
 	if err != nil {
-		return fmt.Errorf("marshal sys data: %w", err)
+		return errcode.MarshalFailed("room_renamed sys data", err)
 	}
 	requester, err := h.store.GetUser(ctx, req.Account)
 	if err != nil && !errors.Is(err, ErrUserNotFound) {
@@ -2367,7 +2367,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		RoomID: req.RoomID, NewName: req.NewName, Timestamp: req.Timestamp,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal rename inbox payload: %w", err)
+		return errcode.MarshalFailed("rename inbox payload", err)
 	}
 	now := time.Now().UTC().UnixMilli()
 	// Same-site search feed: search-sync re-indexes the room name from this
@@ -2383,7 +2383,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	internalRenameData, err := json.Marshal(internalRename)
 	if err != nil {
-		return fmt.Errorf("marshal internal rename event: %w", err)
+		return errcode.MarshalFailed("internal rename event", err)
 	}
 	// Best-effort: log, don't Nak. Returning here would redeliver the whole
 	// handler, and UpdateRoomName / UpdateSubscriptionNamesForRoom (already
@@ -2503,7 +2503,7 @@ func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requ
 	}
 	pData, err := json.Marshal(memberEvt)
 	if err != nil {
-		return fmt.Errorf("marshal member_added inbox payload: %w", err)
+		return errcode.MarshalFailed("member_added inbox payload", err)
 	}
 	// Dedup keys on intrinsic room identity (stable across retries and
 	// re-subscribes) plus the destination site, NOT the request ID — the router
