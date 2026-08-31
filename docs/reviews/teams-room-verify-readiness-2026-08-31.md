@@ -151,3 +151,27 @@ Correct by inspection, and worth recording as verified rather than assumed:
 - `low` — Log `RequestedCount`/`FoundCount` from the response alongside the summary; both are already on the wire and unused, and they would expose an inspector that answers with the wrong cardinality.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+No goroutine leaks, no `time.Sleep`, precise projections and an unordered bulk write — but the flagged-chat scan is unbounded in memory, the shared HTTP client is left at the stdlib's 2 idle connections, and a canceled run keeps dispatching work.
+
+### Findings
+- `high` — the flagged-chat list is loaded whole into memory with no limit or pagination — `teams-room-verify/store_mongo.go:34-36`
+  `FindMany` accumulates the entire cursor into one slice (`pkg/mongoutil/collection.go:60-73`). `needVerify` is raised by `teams-room-creation` on every room creation (`teams-room-creation/store_mongo.go:61`), so the flagged set is exactly the backlog that grows without bound whenever a site's inspector is down — the failure mode this job exists to detect is also the one that makes it OOM. Everything downstream (`planBatches` at `runner.go:237-258` re-copies every chat into per-site slices) scales with that same unbounded set.
+- `medium` — a canceled context does not stop batch dispatch — `teams-room-verify/runner.go:78-86`
+  The loop has no `ctx.Err()` check and `sem <- struct{}{}` has no `select` on `ctx.Done()`. After SIGTERM every remaining batch is still launched; each fails fast in resty and is logged as `inspector call failed` and counted as a `failedBatches` (`runner.go:111-114`). A routine pod eviction therefore emits a warning per batch and a summary that is indistinguishable from a total federation outage.
+- `medium` — the shared resty client keeps the stdlib default of 2 idle connections per host — `teams-room-verify/client.go:23`
+  One client serves up to `MaxWorkers` (default 8) concurrent calls. `restyutil.WithMaxIdleConns` exists for precisely this case and documents the cost — "the stdlib keeps only 2, so a third concurrent request pays a fresh handshake" (`pkg/restyutil/restyutil.go:37-39`). Against a single large site, most calls in a pass re-handshake.
+- `low` — `MarkVerified` is invoked per batch even when no chat converged — `teams-room-verify/runner.go:166`
+  Harmless (`store_mongo.go:46-48` no-ops on empty), but it means an all-failing site still round-trips through the write client's interface on every batch.
+
+Verified correct: explicit precise projection on the only find (`store_mongo.go:35`), no `$lookup` anywhere, `BulkWrite` runs unordered so one CAS miss cannot abort the batch (`pkg/mongoutil/collection.go:173`), the semaphore + `WaitGroup` give every goroutine a clear termination path (`runner.go:76-87`), stats are guarded by a mutex (`runner.go:190-203`), Mongo disconnect is bounded by its own fresh context rather than the already-canceled run context (`main.go:43-51`) — a subtle and correct detail. The `pkg/jsretry` / `Nak` / `BackOff` / Cassandra `USING TIMESTAMP` rules are N/A: this service touches neither JetStream nor Cassandra.
+
+### Recommendations
+- `high` — Bound the scan: add `mongoutil.WithLimit` (or paginate on `_id` using the existing sort, which is already `_id`-ascending for exactly this reason) so one pass processes a capped slice of the backlog and the remainder rolls to the next CronJob tick.
+- `medium` — Add `if ctx.Err() != nil { break }` to the batch loop and `select` on `ctx.Done()` when acquiring the semaphore, so SIGTERM stops dispatch instead of manufacturing a failure summary.
+- `medium` — Pass `restyutil.WithMaxIdleConns(cfg.MaxWorkers)` in `newHTTPVerifier` to stop re-handshaking on every concurrent call.
+- `low` — Skip the `MarkVerified` call when `len(refs) == 0`, keeping the no-op contract as a safety net rather than the common path.
