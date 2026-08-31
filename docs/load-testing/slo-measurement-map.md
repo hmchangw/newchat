@@ -554,7 +554,7 @@ Steps 1–3 need **no code change**. Step 4 needs none either.
 | SLO | Numerator today | Denominator today | Verdict | Missing |
 |---|---|---|---|---|
 | **1a** persist | `message_worker_persistence_total{result="success"}` | `message_gatekeeper_messages_total{result="accepted"}` | ⚠️ **approximate indicator now** — computable, but both sides count attempts, so a redelivery can push it **over 100%**. Not a hard gate | Logical-outcome dedup (P7), advisories, or loadgen read-back |
-| **1b** channel enqueue | per-target, wrong unit | no `broadcast_path` slice | ❌ | a per-message enqueue counter plus a `broadcast_path`-labelled denominator — both on broadcast-worker, per [`p2-implementation-task.md`](p2-implementation-task.md) §3 |
+| **1b** channel enqueue | per-target, wrong unit | no `broadcast_path` slice | ❌ | a `broadcast_path`-labelled denominator at the **gatekeeper** publish site (upstream, so a dead worker drops the ratio instead of vanishing) plus a per-message enqueue counter on broadcast-worker — [`p2-implementation-task.md`](p2-implementation-task.md) §3 |
 | **2** enqueue ≤ 1 s | none — processing duration excludes stream wait | as 1b | ❌ | Age histogram from the JetStream metadata timestamp |
 | **3** login | `http.server.request.duration` | same | ✅ one leg of three | Journey join (prober) |
 | **4** enter channel | `rpc.server.call.duration{channel_history}` **#337** | same | ✅ as a server-side proxy | Caller-visible boundary |

@@ -49,8 +49,8 @@ Attached to every number, per §7 step 8.
 | Workload shape | `realistic` preset, `i12=derived`, `sendRate=100`, `readRate=700`, `threadShare=0.10` |
 | Encryption | `ENCRYPTION_ENABLED=true`, `ATREST_ENABLED=true` |
 | Sampler ratio | `0.1` |
-| Live consumer config | `MaxDeliver=6`, `AckWait=30s`, `BackOffFactor=2`, `BackOffMax=8m` |
-| Derived `t2` operational cap | **1050 s (17.5 m)**, per §5 |
+| Live consumer config | message-worker `MaxDeliver=17` (raised from the repo default 6 by `stream.WithOutageRetryBudget`), `AckWait=30s`, `BackOffFactor=2`, `BackOffMax=8m` |
+| Derived `t2` operational cap | **8 160 s (2 h 16 m)**, per runbook §5 — a ceiling on waiting, not an expectation. All three runs drained in under 4 min |
 | Scrape interval | `30s` |
 | Marks (M1) | `t0-async 09:14:00` · `t0-sync 09:21:30` · `t1 09:55:30` · `t2 09:58:00` |
 | Background contamination | `n_b/n_c = 1.86%` (gatekeeper accepted: 3 417 over an equal background-only window vs 183 402 in-run) |
@@ -70,7 +70,7 @@ INCONCLUSIVE regardless of how the numbers look.
 | Dispatch ratio ≥ 95% | ✅ 99.2% | ✅ 99.4% | ✅ 98.9% |
 | No loadgen NATS disconnect | ✅ | ✅ | ✅ |
 | No emit underrun / GC pause invalidation | ✅ | ✅ | ✅ |
-| `t2` reached inside the 1050 s cap | ✅ 150 s | ✅ 210 s | ✅ 135 s |
+| `t2` reached inside the 8 160 s cap | ✅ 150 s | ✅ 210 s | ✅ 135 s |
 | Neighbour activity recorded | ✅ none | ✅ none | ✅ none |
 
 ---

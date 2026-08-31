@@ -1,11 +1,16 @@
 # P2 Instrumentation Spec — J1 (SLO-1a / 1b / 2)
 
-> **To hand this to an implementer, use
-> [`p2-implementation-task.md`](p2-implementation-task.md) instead.** That file is
-> the executable brief, verified against current `main`, and it **corrects this
-> document's §5b design**: the `broadcast_path` label cannot live on the
-> gatekeeper counter (there is no `sub.RoomType`, and the only room-type source
-> there is a conditional `GetRoomMeta`). This document remains the *why*.
+> **This document is rationale only. The executable contract is
+> [`p2-implementation-task.md`](p2-implementation-task.md), and above it
+> [`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract".**
+>
+> Everything below that names a *specific* instrument, label, PromQL expression,
+> diff or ordering has been superseded and removed — it disagreed with the
+> contract on where the `broadcast_path` denominator lives (gatekeeper, upstream
+> of both workers, so a dead worker drops the ratio instead of vanishing) and on
+> label names (`outcome=ok|failed`, not `result`/`accepted`). What remains is the
+> reasoning: which instruments exist today, why each missing one is needed, and
+> what was deliberately *not* added.
 
 > What to build so the flagship journey becomes measurable, written against the
 > code rather than against the roadmap line. Constraint: **the fewest instruments
@@ -30,7 +35,7 @@ them are already done and one should be dropped.
 
 | Roadmap piece | Reality | Action |
 |---|---|---|
-| gatekeeper `messages_canonical_published_total{broadcast_path}` | **The counter already exists** as `message_gatekeeper_messages_total{result="accepted"}` (`message-gatekeeper/nats_metrics.go:56`, recorded at `handler.go:218` after the canonical publish). Only the `broadcast_path` slice is missing | **Widen the label** (or add a small dedicated counter) — §1A |
+| gatekeeper `messages_canonical_published_total{broadcast_path}` | `message_gatekeeper_messages_total{result="accepted"}` is close but is a *handler-outcome* counter recorded after the reply, not at the publish site, and it carries no fan-out label | **Add a dedicated counter at the publish site** — decided in [`p2-implementation-task.md`](p2-implementation-task.md) §4.1 |
 | message-worker persisted numerator | **Already exists** as `message_worker_persistence_total{message_kind,result}` (`message-worker/nats_metrics.go:46`, recorded at `handler.go:190,193,204,207`) | **Nothing** — §1B |
 | broadcast-worker `broadcast_channel_enqueue_total` | #337's `broadcast_worker_recipient_deliveries_total` is close but counts per publish target | **Add**, one counter — §1C |
 | broadcast-worker `broadcast_channel_enqueue_age_seconds` | Absent, and the handler cannot see the message | **Add** + plumbing — §1D |
@@ -41,7 +46,7 @@ them are already done and one should be dropped.
 
 ## 1. The instruments
 
-### A. The J1 denominator — message-gatekeeper · **already exists; it needs one more label**
+### A. The J1 denominator — message-gatekeeper · **needs a dedicated, `broadcast_path`-labelled counter**
 
 **The counter is already there.** `message_gatekeeper_messages_total{result, reason}`
 records `resultAccepted` at `message-gatekeeper/handler.go:218` — after the
@@ -89,7 +94,7 @@ with messages they do not own.
 
 **Two ways to carry the label; pick one deliberately.**
 
-| | Widen the existing counter | Add `messages_canonical_published_total{broadcast_path}` |
+| | *(superseded — the choice was made: a dedicated counter, [`p2-implementation-task.md`](p2-implementation-task.md) §4.1)* | |
 |---|---|---|
 | New instruments | 0 | 1 |
 | Series | `accepted` currently pairs only with `reason="none"`, so adding 3 paths turns 1 series into 3 — total goes 32 → 34 | 32 unchanged + 3 |
@@ -138,7 +143,7 @@ never saw.
 
 ---
 
-### C. `broadcast_channel_enqueue_total{result}` — broadcast-worker · **add**
+### C. `broadcast_channel_enqueue_total{outcome}` — broadcast-worker · **add**
 
 The SLO-1b numerator. `result` is `ok` | `failed`.
 
@@ -303,160 +308,20 @@ reader is named: the SLO-1a/1b/2 recording rules, and the load-test hard gate.
 
 ---
 
-## 4. The resulting queries
+## 4. Superseded sections
 
-```promql
-# SLO-1a — persisted / published.  WORKS TODAY, no code change.
-sum by (site) (rate(message_worker_persistence_total{
-      message_kind=~"user|thread_reply", result="success"}[28d]))
-/ sum by (site) (rate(message_gatekeeper_messages_total{result="accepted"}[28d]))
+This document used to carry the resulting PromQL (§4), an order of work (§5), a
+file-by-file diff (§5b) and a PR split (§5c). All four have been removed rather
+than left to rot: they encoded the pre-contract design, and a stale executable
+section beside a live one is worse than no section at all — a reader cannot tell
+which is current.
 
-# SLO-1b — channel enqueue accepted / published on the room-subject path
-sum by (site) (rate(broadcast_channel_enqueue_total{result="ok"}[28d]))
-/ sum by (site) (rate(message_gatekeeper_messages_total{
-      result="accepted", broadcast_path="room_subject"}[28d]))
-
-# SLO-2 — enqueued within 1 s / published on the room-subject path
-sum by (site) (rate(broadcast_channel_enqueue_age_seconds_bucket{le="1"}[28d]))
-/ sum by (site) (rate(message_gatekeeper_messages_total{
-      result="accepted", broadcast_path="room_subject"}[28d]))
-```
-
-`by (site)` is required for the same reason #337 spelled out for SLO-4/5: a bare
-`sum()` lets one healthy site hide another site's total failure.
-
-Note the SLO-2 numerator and denominator come from **different processes**, so
-tail-end in-flight messages land after the denominator has been counted. That is
-what the load-test settle window exists for; over a 28-day production window it
-rounds away.
-
----
-
-## 5. Order of work
-
-0. **Nothing** — write the SLO-1a recording rule against the two counters that
-   already exist (§4) and start its calibration window immediately. This is a
-   Grafana/rules change, not a code change, and it puts a third of J1 into
-   observation weeks before the rest.
-1. **A** — widen the gatekeeper label. Smallest diff; unblocks 1b and 2's
-   denominator.
-2. **C + E** — broadcast-worker counters. No plumbing needed.
-3. **D** — the metadata plumbing and the histogram. Benchmark before and after.
-4. Update `sli-slo.md`: §1 marks SLO-1a ✅ (approximate), §8's P1 row is ✅ (#337),
-   the P2 row loses B and narrows to A/C/D/E.
-
-Step 0 matters for scheduling: the calibration window (Track 1.2) does not have to
-wait for steps 1–3 to begin.
-
----
-
-## 5b. The actual diff, file by file
-
-Verified call sites, so the change can be estimated rather than guessed.
-
-### A — the `broadcast_path` label · `message-gatekeeper`
-
-| | |
+| What it said | Where it lives now |
 |---|---|
-| Files | `handler.go`, `nats_metrics.go` |
-| Size | ~30 lines |
-| Hot-path cost | none — the counter is already incremented on this line |
-
-**The label must be computed inside `processMessage`, not at the `Record` call.**
-`resultAccepted` is recorded at `handler.go:218`, in `HandleJetStreamMsg`. Two of
-the three inputs (`req.ThreadParentMessageID`, `req.TShow`) are in scope there,
-but the two that decide the answer are not:
-
-- `sub.RoomType` is fetched inside `processMessage` (`handler.go:376`).
-- **`TShow` must be the normalized value.** `processMessage` computes
-  `tshow := req.TShow && req.ThreadParentMessageID != ""` (`handler.go:455`) and
-  it is that value which lands on the message and which
-  `shouldUseThreadFanOut` reads. Using the raw `req.TShow` would misclassify a
-  `tshow=true` send that carries no thread parent.
-
-So: compute the path in `processMessage` next to the built `msg`, and return it —
-`processMessage(...) ([]byte, broadcastPath, error)`. There is exactly one call
-site (`handler.go:176`), so the signature change is contained. `Record` then takes
-the path and applies it **only to the `resultAccepted` key**; the other three
-results have no fan-out route and must not gain the label.
-
-*(Alternative: record the accepted outcome inside `processMessage` right after the
-publish succeeds. That is arguably more correct — "accepted" would then mean
-published rather than published-and-replied — but it moves the call site, and
-`sendReply` returns no error today, so nothing observable changes. Not worth the
-churn.)*
-
-### C — `broadcast_channel_enqueue_total{result}` · `broadcast-worker`
-
-| | |
-|---|---|
-| Files | `handler.go`, `nats_metrics.go` |
-| Size | ~25 lines |
-| Hot-path cost | one counter add per canonical channel message |
-
-`publishChannelEvent` (`handler.go:1034`) currently ends with
-`return h.publishRoomEvent(...)`. Capture that error, record once, return it. That
-is the whole change.
-
-**The denominator match is exact, and this is worth checking rather than
-assuming.** `publishChannelEvent` has **one caller** — `handleCreated`
-(`handler.go:285`). Mutations (edit, delete, pin, react) reach the room subject
-through `publishMutation` → `publishRoomEvent`, bypassing `publishChannelEvent`
-entirely. So a counter placed here counts exactly "created channel messages on the
-room-subject path", which is precisely SLO-1b's denominator. No filtering, no
-event-type label needed.
-
-### D + E — the age histogram · `broadcast-worker`
-
-| | |
-|---|---|
-| Files | `main.go`, `handler.go`, `nats_metrics.go` |
-| Size | ~60 lines plus a benchmark |
-| Hot-path cost | one `msg.Metadata()` parse per consumed message |
-
-1. `broadcastProcessor` (`main.go:427`) parses `msg.Metadata()` once and keeps
-   `meta.Timestamp`. The existing flow-log branch (`main.go:436`) then **reuses**
-   it instead of parsing again.
-2. **Carry it in the context value that already exists.** `HandleMessage` already
-   does two `context.WithValue` calls per message
-   (`obs.ContextWithIdentity`, `withBroadcastMetricLabels`), so a third would be
-   out of step — instead add a `streamTS time.Time` field to the existing
-   `broadcastMetricLabels` struct. It is already a ctx value, so a bigger struct
-   costs no additional allocation. The three re-stamping call sites
-   (`handler.go:665, 887, 1060`) must preserve it rather than zeroing it — that is
-   the one thing a test should pin.
-3. `publishChannelEvent` records `now − streamTS` into the histogram, or
-   increments `_age_invalid_total{missing_metadata|negative_age}` when the reading
-   is broken.
-
-Threading it as an explicit parameter would touch `HandleMessage`,
-`handleCreated` and `publishChannelEvent` signatures; the ctx-field approach
-touches one struct and three call sites. Prefer the latter **only because the ctx
-value already exists on this path** — do not add a new one.
-
----
-
-## 5c. Which PR
-
-**#337 merged on 2026-08-30 (`bf0ea62`), so this section's original advice — a
-new PR stacked on #337's branch — no longer applies. Branch from `main`.**
-What #337 brought with it, and what P2 therefore has to satisfy from the first
-commit rather than after a rebase:
-
-- The metrics contract now lives at `docs/specs/o11y/nats-metrics-contract.md`
-  (it moved out of `docs/load-testing/failure/`). Document P2's instruments there.
-- The guards are on `main`: the `pkg/obs` registry test, the
-  `.semgrep/metrics.yml` cardinality and attribute-construction rules, and the
-  nil-collapse recorder pattern.
-
-**Split it in two, by cost and by risk:**
-
-| PR | Contents | Why separate |
-|---|---|---|
-| **P2a** | A + C + E | Zero hot-path cost, ~55 lines, no plumbing. **Delivers SLO-1b outright.** Reviewable in one sitting |
-| **P2b** | D | Needs the metadata plumbing, a ctx-struct change, and a before/after benchmark. **Delivers SLO-2.** Its review is about the cost, not the metric |
-
-Shipping P2a alone is a real milestone: J1 goes from one enforceable SLO to two.
+| PromQL for SLO-1a/1b/2 | [`first-slo-run-runbook.md`](first-slo-run-runbook.md) §5, against the shipped series |
+| Order of work, PR split | [`p2-implementation-task.md`](p2-implementation-task.md) §1 |
+| File-by-file diff, call sites, tests | [`p2-implementation-task.md`](p2-implementation-task.md) §3–§6 |
+| Which label goes where, and its name | [`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract" — the contract, above both |
 
 ---
 

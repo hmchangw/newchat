@@ -43,7 +43,7 @@
 | PRE-5 | Cassandra keyspace, `MESSAGE_BUCKET_HOURS` matching every reader/writer, Vault/KMS up for the encryption preflight | infra | The soak's own pre-run gate (`soak/cassandra-soak-plan.md` §6.1) |
 | PRE-6 | **Decide how a run is scoped to a site, and verify it before the run** | infra | **There is no `site` label on any metric.** `pkg/obs` defines `SiteIDKey = "chat.site.id"` as a **baggage / span** attribute (`obs.go:37,44,265`) — it reaches traces, not the metric stream — and the Prometheus relabels add `instance` and `service` only. A query filtering `site="…"` returns nothing. Pick one of the two options below and confirm the label (or the isolation) exists **before** the run, not while reading an empty panel |
 | PRE-7 | **Workload-model inputs confirmed or the shape explicitly named** | product + infra | G2. See §2 — the defaults are not a neutral baseline |
-| PRE-8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. All are environment overrides. Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
+| PRE-8 | **Read the live `MaxDeliver`, `AckWait`, the consumer `BackOff`, and the scrape interval** | infra | They set `t2`'s cap (§5) and how long every mark waits. **Read them from the live consumer, never from the table in §5** — `message-worker` and `broadcast-worker` both opt into `stream.WithOutageRetryBudget`, which raises `MaxDeliver` well above the repo default (§5). Two cases to resolve *before* the run, not during it: `MaxDeliver` of `0`/`-1` is unlimited, so no finite cap exists and the limit becomes policy; and `CONSUMER_BACKOFF_STEPS=0` yields an empty consumer schedule, in which case that path costs one `AckWait` per delivery |
 | PRE-9 | **Query dry-run: every query in §5 returns a non-empty result of the expected shape, against the real Prometheus** | us | **Do this before building the dashboard, not after.** Four review rounds on this document found label names, histogram suffixes, range-window semantics and `rate()`'s reset behaviour wrong — none of which is visible in the Go source, and all of which a single dry-run would have caught. See §9 |
 
 ### PRE-6 — how to scope a run to a site
@@ -401,15 +401,37 @@ totals:
 These are distinct JetStream mechanisms — an acknowledgement-timeout `BackOff`
 and a delayed NAK — so neither dominates the other at every step.
 
-At the shipped defaults (app `1, 5, 30, 120, 600`; consumer `30, 60, 120, 240,
-480`; `AckWait` 30 s):
+**`MaxDeliver` is not 6 on the services this run measures.** The repo default is
+6 (`pkg/stream/consumer.go:20`), but `message-worker` and `broadcast-worker` both
+wrap their settings in `stream.WithOutageRetryBudget`
+(`message-worker/main.go:360`, `broadcast-worker/main.go:558`), which raises the
+cap until the client-side schedule spans `stream.OutageRetryWindow` = **1 hour**
+(`pkg/stream/consumer.go:139,152-160`). `jsretry.DeliveriesFor` resolves that to:
 
-| `MaxDeliver` | delay floor | execution margin | **operational cap** |
-|---:|---:|---:|---:|
-| 6 | 1 050 s (17.5 min) | 150 s | **≈ 20 min** |
-| 10 | 3 450 s (57.5 min) | 270 s | **≈ 62 min** |
+| Service | app schedule | **live `MaxDeliver`** |
+|---|---|---:|
+| `message-worker` | `jsretry.DefaultBackoff` | **17** |
+| `broadcast-worker` | `jsretry.LowLatencyBackoff` | **18** |
 
-`BACKOFF_STEPS=0` makes `backOffSchedule()` return `nil`
+At those values (consumer `30, 60, 120, 240, 480`; `AckWait` 30 s):
+
+| Consumer | delay floor | execution margin | **operational cap** |
+|---|---:|---:|---:|
+| `message-worker` — **the one `t2` waits on** | 7 650 s (127.5 min) | 480 s | **≈ 2 h 16 min** |
+| `broadcast-worker` | 8 130 s (135.5 min) | 510 s | ≈ 2 h 25 min |
+| *repo default `MaxDeliver=6`, for reference only* | 1 050 s (17.5 min) | 150 s | ≈ 20 min |
+
+**Do not shorten the cap to something more convenient.** A two-hour ceiling looks
+unusable next to a 30-minute run, and the temptation is to declare INCONCLUSIVE
+at 20 minutes instead. That would call a legitimate outage-budget drain a failed
+measurement. The cap is a *ceiling on waiting*, not an expectation: a healthy run
+drains in minutes, and a run still draining at 20 minutes has **already failed the
+§6 validity gate** on backlog flatness — which is the signal to act on, not the
+cap. Record the derived cap for the live `MaxDeliver` you read in PRE-8, and if
+you choose a shorter operational limit, record that it is a policy choice and
+that overshooting it is not evidence of loss.
+
+`CONSUMER_BACKOFF_STEPS=0` makes `backOffSchedule()` return `nil`
 (`pkg/stream/consumer.go:75-77`) — that switches the consumer *schedule* off, not
 the *path*: redelivery falls back to plain `AckWait`, so `consumer[k] = AckWait`
 for every `k`. **`MaxDeliver` of `0` or `-1` is unlimited** (the server normalizes
@@ -542,32 +564,56 @@ That is why the baselines are split:
    Taking it at first dispatch races the scrape. Keep the pause shorter than
    `soak.heartbeatStaleAfter`, and do not run teardown during it.
 3. **`phase: soak` with `soak.warmup: 0`.** Dispatch resumes immediately.
-4. **Wait for the full mix.** Watch
+4. **Wait for the full mix.** The signal is the thread-read lane producing
+   samples again, on the **new** process only.
+
+   **First, in PRE-9, find out what identifies a target here.** PRE-6 already
+   established that the scrape adds `instance` and `service` and nothing else —
+   **there is no `pod` label unless your infra added one.** An earlier revision of
+   this document wrote `pod="<the NEW pod>"` anyway, which returns empty forever
+   on the default relabel set and reads as "the lane has not recovered". Run
+   this first and use whatever it actually returns:
+
+   ```promql
+   # PRE-9: what distinguishes one loadgen process from the next?
+   count by (instance, service, pod) (
+     loadgen_soak_rpc_latency_seconds_count{action="get_thread_messages"})
+   ```
+
+   Substitute the label that changes across a restart for `<target>` below.
+   If **nothing** changes — a stable `instance` such as a Service DNS name, or a
+   pod name recycled by the StatefulSet — you cannot isolate the new process by
+   label at all, and the snapshot method in step (b) is the only one that works.
+
+   **(a) Wait out the range window.** A bare `[1m]` taken immediately after the
+   restart still covers the minute *before* it. `rate()` compensates for counter
+   resets rather than isolating processes, so both the old and the new series can
+   sit near the expected rate while the new catalog is still empty, and `t0-sync`
+   gets marked early. Wait a full range window past the restart, then:
 
    ```promql
    rate(loadgen_soak_rpc_latency_seconds_count{
-         action="get_thread_messages", pod="<the NEW pod>"}[1m])
+         action="get_thread_messages", <target>}[1m])
    ```
 
-   climb back to its expected rate — that is the catalog having refilled past
-   `soak.persistGrace`. Three things this query has to get right, each of which an
-   earlier revision got wrong:
+   **(b) Judge on a post-restart delta, not an absolute rate.** This is the part
+   the earlier revision named but never made executable, and it is the one that
+   works with no distinguishing label at all. Take one snapshot at resume, one
+   later, and divide:
 
-   - **Query the `_count` series, not the bare metric name.** A Prometheus
-     histogram exposes only `_count`, `_sum` and `_bucket`; a selector on the base
-     name returns nothing, and `t0-sync` would never be markable.
-   - **Pin the new pod, and wait out the window.** A bare `[1m]` immediately after
-     the restart still covers the minute *before* it. Depending on whether the
-     `instance`/`pod` label changed, you either sum the old and new series
-     together or read one series across a counter reset — `rate()` compensates for
-     resets rather than isolating processes, so both readings can sit near the
-     expected rate while the new catalog is still empty, and `t0-sync` gets marked
-     early. Bind the selector to the new pod, **and** wait a full range window past
-     the restart so no pre-restart sample remains, **then** require two consecutive
-     confirming scrapes.
-   - **Take a post-restart baseline** for the same counter, and judge readiness on
-     the fresh delta rather than on an absolute rate that could be carrying
-     history.
+   ```promql
+   # B0, at `phase: soak` + one scrape interval — instant query, record the value
+   sum(loadgen_soak_rpc_latency_seconds_count{action="get_thread_messages"})
+
+   # B1, at least 2 min later — instant query, same expression
+   sum(loadgen_soak_rpc_latency_seconds_count{action="get_thread_messages"})
+
+   # ready when (B1 - B0) / (t_B1 - t_B0) is within ~10% of the expected rate
+   ```
+
+   A counter reset at the restart makes `B0` small, which is exactly what you
+   want: the delta then measures only the new process. Require **two consecutive
+   confirming intervals** before marking `t0-sync`.
 
    **"Expected rate" is derived, not configured.** The read lane rolls its action
    from a fixed mix — 75% history, **15% thread**, 10% point lookup

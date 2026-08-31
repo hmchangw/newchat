@@ -23,10 +23,17 @@ those.
 | **SLO-1b** | channel room-subject broadcast **enqueue-accepted** / canonical messages routed to the room-subject path | Both sides |
 | **SLO-2** | room-subject broadcast enqueue-accepted **within 1 s** of canonical acceptance / same denominator as 1b | The age measurement |
 
-**Ship as two PRs.** P2a (§4) delivers SLO-1a's denominator and all of SLO-1b,
-costs one counter add per message, and needs no plumbing. P2b (§5) delivers
-SLO-2 and is the one that needs a benchmark. P2a is independently valuable —
-merge it without waiting for P2b.
+**Ship as two PRs.** P2a (§4) delivers SLO-1a's denominator and SLO-1b. P2b (§5)
+delivers SLO-2. P2a is independently valuable — merge it without waiting for P2b.
+
+**Both need a benchmark**, for different reasons: P2a makes a cache-fronted
+room-meta lookup unconditional (§3.2), P2b makes a JetStream metadata parse
+unconditional (§5.4). Neither is free, neither is obviously expensive, and
+neither should be merged on an assertion.
+
+**Two things P2a does not deliver, and they belong in the PR body**: SLO-1b's
+ratio can exceed 1 under redelivery (§4.2), and a `broadcast_path="unknown"`
+rate above a small fraction makes SLO-1b INCONCLUSIVE for that window (§3.3).
 
 ---
 
@@ -66,153 +73,192 @@ These are not preferences. A PR that violates one gets sent back.
 
 ---
 
-## 3. The design decision, and why it is not what the older spec says
+## 3. Where each side of the ratio lives
 
-`p2-instrumentation-spec.md` §5b proposes putting a `broadcast_path` label on
-`message_gatekeeper_messages_total{result="accepted"}`, computed from
-`sub.RoomType`. **Do not implement that.** Two problems, both found by reading
-the current code:
+`common/sli-slo.md:169-185` fixes this, and the reason it gives is the one that
+matters:
 
-- **There is no `sub.RoomType`.** `model.Subscription` does not carry the room
-  type. The gatekeeper's only source is `h.store.GetRoomMeta`, and that is called
-  **conditionally** — `message-gatekeeper/handler.go:416` guards it with
-  `if !isThreadReply && !bypass`. Labelling the counter would force an
-  unconditional `GetRoomMeta` on every message: a store call per message, which
-  constraint 6 forbids.
-- **It would be a prediction, not an observation.** broadcast-worker decides the
-  fan-out route from `meta.Type` at `broadcast-worker/handler.go:290-299`. A
-  gatekeeper-side label would be a second, independent guess at the same fact,
-  and the two can disagree — giving SLO-1b a numerator and denominator counted
-  under different definitions, which is the one defect that makes a ratio
-  worthless.
+> **Denominators, `broadcast_path`-scoped:** `messages_canonical_published_total{broadcast_path}`,
+> emitted by **message-gatekeeper** at the canonical publish site — **upstream of
+> both workers, so a dead worker drops the ratio instead of vanishing.**
 
-**Instead: put each side of the ratio where the fact is already known.**
+**Implement it that way.** An earlier revision of this brief moved the
+`broadcast_path` denominator onto a broadcast-worker counter to avoid a store
+call. That is wrong, and the way it is wrong is the failure mode SLOs exist to
+catch: a consumer-side denominator is only incremented by a worker that is
+running. If broadcast-worker stalls or exhausts its delivery budget, the
+messages it never processed leave **both** sides of SLO-1b, and the ratio stays
+at 100% through the outage. SLO-1a does not cover that gap either —
+message-worker and broadcast-worker are independent consumers of
+MESSAGES-CANONICAL, so message-worker persisting everything says nothing about
+whether broadcast-worker fanned anything out.
 
-| Series | Service | Why there |
+### 3.1 The classification, and why it is not a second guess
+
+`sli-slo.md` requires the label to mirror broadcast-worker's dispatch exactly.
+It can, because the thread/non-thread half is a **shared predicate**, not a
+re-derivation: `model.IsHiddenThreadReply(threadParentMessageID, tshow)`
+(`pkg/model/message.go:107`) is what broadcast-worker's `handleCreated` calls at
+`broadcast-worker/handler.go:242`. Call the same function.
+
+| `broadcast_path` | Condition | Mirrors |
 |---|---|---|
-| `messages_canonical_published_total` (no path label) | message-gatekeeper | SLO-1a's denominator is all paths, so no label is needed at all |
-| `broadcast_canonical_consumed_total{broadcast_path}` | broadcast-worker | `meta.Type` is already fetched at `handler.go:279` for routing. The label costs nothing |
-| `broadcast_channel_enqueue_total{result}` | broadcast-worker | The enqueue is here |
+| `thread` | `model.IsHiddenThreadReply(req.ThreadParentMessageID, tshow)` | `handler.go:242` early return |
+| `room_subject` | else, `meta.Type == model.RoomTypeChannel` | `handler.go:291` |
+| `dm` | else, `meta.Type` is `RoomTypeDM` or `RoomTypeBotDM` | `handler.go:295` |
+| `unknown` | else, **or the room-meta lookup failed** | `handler.go:299`, plus fail-open (§3.3) |
 
-**The trade-off, stated honestly.** SLO-1b's denominator becomes "canonical
-messages **consumed** by broadcast-worker and routed to the room subject" rather
-than "**published** and routed". A message lost between the canonical publish and
-broadcast-worker consuming it is invisible to SLO-1b. That gap is exactly what
-SLO-1a covers, so the pair still spans the journey — but write it into the
-contract doc so nobody later reads SLO-1b as covering more than it does.
+**Use the normalized `tshow`, not `req.TShow`.** `processMessage` computes
+`tshow := req.TShow && req.ThreadParentMessageID != ""` at
+`message-gatekeeper/handler.go:481`, and it is that value which lands on the
+message broadcast-worker later classifies. Passing the raw request field
+misclassifies a `tshow=true` send that carries no thread parent.
+
+### 3.2 The cost, honestly stated
+
+The `thread` test is free. Splitting `room_subject` from `dm` needs the room
+type, and the gatekeeper's only source is `h.store.GetRoomMeta` — called
+**conditionally** today, guarded by `if !isThreadReply && !bypass`
+(`handler.go:416`). Making it unconditional is a real change, and an earlier
+revision of this brief rejected the whole design on that basis. That rejection
+overstated the cost:
+
+- **`GetRoomMeta` is already cache-fronted in this service.**
+  `message-gatekeeper/metacache.go` wraps the store in a
+  `roommetacache.Wrapper` with a size and TTL, so the common case is an
+  in-process lookup, not a Mongo read.
+- The messages that would newly pay for it are the ones that skip the fetch
+  today: bypass-eligible senders (owners, admins, bots) and thread replies —
+  **and thread replies classify without it**, so only the bypass path is
+  actually new.
+
+**It still has to be measured, not assumed.** Requirements:
+
+- A before/after benchmark of `processMessage`, `-benchmem`, both numbers in the
+  PR body.
+- The cold-miss path — a room not in the cache — timed separately, because the
+  benchmark's steady state will be all hits and will flatter the change.
+- If the regression exceeds **1% of per-message wall time**, stop and raise it
+  rather than merging. The fallback is *not* to move the denominator downstream;
+  it is to widen the room-meta cache, or to emit `unknown` for the bypass path
+  and record the resulting blind spot. Bring the numbers and let the owner choose.
+
+### 3.3 Fail open, and count the failures
+
+A metric must never fail a message. If `GetRoomMeta` returns an error on a path
+that would otherwise not have called it, **label the message `unknown` and carry
+on** — the same fail-open stance `handler.go:422` already takes for the
+large-room cap.
+
+`unknown` is not a silent bucket. It is a validity signal: SLO-1b's denominator
+is the `room_subject` slice, so a message misfiled as `unknown` is silently
+removed from it. **Alert on it, and make it a run-validity check** — if
+`unknown` exceeds a small fraction of the total during a measurement run, SLO-1b
+is INCONCLUSIVE for that run, exactly as an unmarkable `t2` makes SLO-1a
+INCONCLUSIVE. Put that in the runbook's §6 gate when this lands.
 
 ---
 
-## 4. P2a — the two counters and the denominator
+## 4. P2a — the denominator and the enqueue counter
 
-### 4.1 `messages_canonical_published_total` · message-gatekeeper
+### 4.1 `messages_canonical_published_total{broadcast_path}` · message-gatekeeper
 
-**Why a new counter rather than reusing the existing one.** `sli-slo.md` wants
-SLO-1a's denominator to be "canonical messages published".
-`message_gatekeeper_messages_total{result="accepted"}` is recorded at
-`handler.go:238`, *after* `processMessage` returns. But `processMessage` publishes
-to MESSAGES-CANONICAL at `handler.go:512` and then does
-`return sonic.Marshal(msg)` at `handler.go:519`. **If that marshal fails, the
-message is already on MESSAGES-CANONICAL, yet the handler takes the infra branch
-— records `retry`/`failed` and Naks.** The redelivery publishes again (deduped by
-`natsutil.CanonicalDedupID`) and *then* counts `accepted`.
+**Why a new counter rather than a label on the existing one.**
+`message_gatekeeper_messages_total{result,reason}` is a handler-outcome counter,
+and `result="accepted"` is recorded at `handler.go:238` — after `sendReply`, not
+at the publish. Widening it with `broadcast_path` would multiply its label space
+across all four `result` values for the benefit of one, and would change the
+meaning of a series other dashboards already read. Add a sibling.
 
-So the existing counter is not "published": it can miss a published message and
-it can count a republish. In practice `sonic.Marshal` of a built message
-essentially never fails, so the *magnitude* is negligible — but an SLO
-denominator has to be right by construction, not by luck, or the first person to
-debug a 0.01% discrepancy will not be able to tell instrument error from data
-loss.
+> **A correction to an earlier revision of this brief.** It justified the new
+> counter by claiming that `return sonic.Marshal(msg)` at `handler.go:519` can
+> fail after the publish at `:512`, leaving a published message uncounted. **That
+> is unreachable**: `evt` is built as `model.MessageEvent{… Message: msg …}`
+> (`handler.go:504`), `sonic.Marshal(evt)` at `:505` has already succeeded on the
+> same value, and `msg` is not touched in between. The reason for a separate
+> counter is the label and the publish-site semantics, not that failure mode.
 
-**Change:**
+**Placement:** in `processMessage`, immediately after the publish succeeds —
+between the error return at `:514` and the flow log at `:516`.
 
-- New file section in `message-gatekeeper/nats_metrics.go`: an
-  `Int64Counter` named `messages_canonical_published_total`, description
-  *"Messages successfully published to MESSAGES-CANONICAL."*, constructed in
-  `newGatekeeperMetrics` with the same no-op fallback.
-- **No labels.** Adding one would only invite the cardinality question later.
-- New method `func (m *gatekeeperMetrics) RecordCanonicalPublished(ctx context.Context)`,
-  nil-guarded, `Add(ctx, 1)`.
-- Call it in `processMessage`, on the line **immediately after** the publish
-  succeeds — i.e. between `handler.go:514` (the error return) and the flow log at
-  `:516`. Not at the end of the function; the point of the change is that the
-  counter fires when the publish lands.
+**It is an approximate count, and the caveat is not optional.** The publish is
+deduplicated (`jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))`,
+`handler.go:512`) and the `*jetstream.PubAck` is currently **discarded**. Two
+consequences:
 
-**Tests** (`message-gatekeeper/handler_test.go`, or `nats_metrics_test.go` for
-the recorder itself):
+- Counting every successful PubAck counts a JetStream **redelivery of an
+  already-published message a second time** — the stream deduplicates it, the
+  counter does not.
+- Excluding duplicates undercounts when a first publish succeeds but its ack is
+  lost: the retry is then flagged duplicate and neither attempt is counted.
+
+**No application counter can be an exactly-once logical-publish count.** Do this:
+
+- Capture the PubAck (`ack, err := h.publish(...)`) and increment the main
+  counter only when the ack is **not** flagged as a duplicate. *Verify the field
+  name on the pinned nats.go version before writing the condition.*
+- Add `messages_canonical_publish_duplicate_total` (no labels) for the excluded
+  case, so the magnitude is visible rather than inferred.
+- Document in `docs/specs/o11y/nats-metrics-contract.md` that this is an
+  **approximate PubAck-based publish count**, that duplicates are excluded, and
+  that a lost ack undercounts by one. An exact logical-publish denominator needs
+  a server-side stream delta or a persisted ledger — out of scope here, and
+  `sli-slo.md` §0.1 already labels these numerators approximate.
+
+**Tests:**
 
 | Case | Expected |
 |---|---|
-| Publish succeeds, `sonic.Marshal` of the reply succeeds | `messages_canonical_published_total` = 1, `messages_total{accepted}` = 1 |
-| Publish fails | `messages_canonical_published_total` = 0 |
-| Validation rejects before the publish | `messages_canonical_published_total` = 0 |
-| Nil metrics struct | No panic |
+| Publish succeeds, ack not duplicate | `+1` on the path the classifier chose |
+| Publish succeeds, ack flagged duplicate | main counter unchanged, `_duplicate_total` `+1` |
+| Publish fails | neither counter moves |
+| Validation rejects before the publish | neither counter moves |
+| Hidden thread reply | `broadcast_path="thread"`, and `GetRoomMeta` is **not** called |
+| `TShow=true` with no thread parent | **not** `thread` — the normalized-`tshow` case |
+| Channel / DM / BotDM | `room_subject` / `dm` / `dm` |
+| `GetRoomMeta` errors | `broadcast_path="unknown"`, message still published |
+| Nil metrics struct | no panic |
 
-> The "publish succeeds but the reply marshal fails" case is the one that
-> motivates the counter. It is hard to reach without an injection seam; **do not
-> add production code to make it testable**. Assert the ordering instead — the
-> publish-success test proves the counter fires before the marshal — and note the
-> gap in the PR body.
+**And one test that is the whole point of §3.1:** a shared table of
+`(threadParentMessageID, tshow, roomType)` cases asserting that the gatekeeper's
+label and broadcast-worker's dispatch branch agree, case for case. If the two
+ever diverge, SLO-1b's numerator and denominator are counted under different
+definitions and the ratio is worthless — this test is what stops that.
 
-### 4.2 `broadcast_canonical_consumed_total{broadcast_path}` · broadcast-worker
-
-The denominator for SLO-1b/2. Recorded in `handleCreated`
-(`broadcast-worker/handler.go:240`), where the routing decision is made.
-
-**Label — a closed enum with exactly four values:**
-
-| `broadcast_path` | Recorded where |
-|---|---|
-| `thread` | `handler.go:243` — the `msg.IsHiddenThreadReply()` early return |
-| `room_subject` | `handler.go:291` — `case model.RoomTypeChannel` |
-| `direct` | `handler.go:295` — `case model.RoomTypeDM, model.RoomTypeBotDM` |
-| `unknown` | `handler.go:299` — the `default` branch that warns and skips fan-out |
-
-Record **once per call**, on entry to the branch, **before** the publish attempt —
-this is a denominator, so it must count the message regardless of whether the
-publish then succeeds.
-
-**One thing to get right:** the `thread` case returns before `GetRoomMeta`
-(`handler.go:279`) has run, so the counter for it must be recorded at the top of
-`handleCreated`, not after the meta fetch. Structure it so every path through
-`handleCreated` records exactly one value — a table test that walks all four
-branches and asserts a total of exactly 1 is the right shape.
-
-**Tests:** one subtest per label value asserting the label, plus
-`GetRoomMeta` returning an error → **no** counter increment (the function returns
-before routing, so nothing was routed), plus nil-safety.
-
-### 4.3 `broadcast_channel_enqueue_total{result}` · broadcast-worker
+### 4.2 `broadcast_channel_enqueue_total{outcome}` · broadcast-worker
 
 The numerator for SLO-1b.
 
+**Label name:** `outcome`, values `ok` and `failed` — as
+`common/sli-slo.md:188` specifies. Not `result`, and not `accepted`; earlier
+drafts of this brief and of the spec used both, and the contract wins.
+
 `publishChannelEvent` (`broadcast-worker/handler.go:1048`) currently ends at
-`:1067` with `return h.publishRoomEvent(...)`. Capture the error, record, return
-it:
+`:1067` with `return h.publishRoomEvent(...)`. Capture the error, record, return:
 
 ```go
 err := h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
-h.metrics.RecordChannelEnqueue(ctx, enqueueResultFor(err))
+h.metrics.RecordChannelEnqueue(ctx, enqueueOutcomeFor(err))
 return err
 ```
 
-**Label — a closed enum with two values:** `accepted` (nil error), `failed`
-(non-nil). Do **not** classify the error further; that is a different metric and
-a different conversation.
+Do **not** classify the error further; that is a different metric.
 
-**The denominator match is exact and worth verifying rather than assuming.**
+**The denominator match is exact, and worth verifying rather than assuming.**
 `publishChannelEvent` has exactly one caller — `handleCreated` at
 `handler.go:292`. Mutations (edit, delete, pin, react) reach the room subject via
 `publishMutation` → `publishRoomEvent` (`handler.go:913`), bypassing
 `publishChannelEvent` entirely. So this counter counts exactly "created channel
-messages on the room-subject path", which is 4.2's `room_subject` denominator.
-**Add a test that fails if a second caller appears** — assert the ratio in an
-existing handler test that exercises both creates and mutations.
+messages on the room-subject path", which is what
+`messages_canonical_published_total{broadcast_path="room_subject"}` counts
+upstream. **Add a test that fails if a second caller appears** — assert the
+counts in an existing handler test that exercises both creates and mutations.
 
-**Redelivery caveat for the contract doc:** both 4.2 and 4.3 are consumer-side,
-so a JetStream redelivery increments both again. The ratio stays meaningful
-(numerator and denominator move together) but neither is a message count. Write
-that down.
+**Redelivery caveat for the contract doc:** the numerator is consumer-side, so a
+JetStream redelivery increments it again while the upstream denominator does not
+move. The ratio can therefore exceed 1. That is the correct trade — an
+outage-safe denominator is worth an over-countable numerator — but it must be
+written down, and the dashboard must not clamp it silently.
 
 ---
 
@@ -303,24 +349,36 @@ Check every box. Each is verifiable, not a judgement call.
 
 **P2a**
 
-- [ ] `messages_canonical_published_total` increments on the line after a
-      successful canonical publish, and does not increment on any failure before it
-- [ ] `broadcast_canonical_consumed_total{broadcast_path}` records exactly one
-      value per `handleCreated` call, across all four branches
-- [ ] `broadcast_channel_enqueue_total{result}` records exactly one value per
-      `publishChannelEvent` call, `accepted` / `failed`
+- [ ] `messages_canonical_published_total{broadcast_path}` increments on the line
+      after a successful, **non-duplicate** canonical publish, and on no failure
+      before it
+- [ ] `messages_canonical_publish_duplicate_total` increments when the PubAck is
+      flagged duplicate; the main counter does not
+- [ ] `broadcast_path` is computed with `model.IsHiddenThreadReply` and the
+      **normalized** `tshow`, never `req.TShow`
+- [ ] A shared table test asserts the gatekeeper's `broadcast_path` and
+      broadcast-worker's dispatch branch agree, case for case (§4.1)
+- [ ] A `GetRoomMeta` failure yields `broadcast_path="unknown"` and **does not
+      fail the message**
+- [ ] `broadcast_channel_enqueue_total{outcome}` records exactly one value per
+      `publishChannelEvent` call, `ok` / `failed` — the label name and values from
+      `common/sli-slo.md:188`, not `result`/`accepted`
+- [ ] A test fails if `publishChannelEvent` gains a second caller
 - [ ] Every label is a closed Go enum enumerated in a package-level slice
 - [ ] Attribute sets are precomputed in the constructor and looked up at the
       recording site — no `metric.WithAttributes` in any recording function
 - [ ] Every instrument falls back to no-op on construction error; every recorder
       is nil-safe
+- [ ] **Before/after `processMessage` benchmark with `-benchmem` in the PR body**,
+      cold-miss path timed separately, within the §3.2 budget
 - [ ] `make test SERVICE=message-gatekeeper` and `SERVICE=broadcast-worker` pass
       with `-race`; new code is ≥80% covered
 - [ ] `make lint`, `make sast` clean
 - [ ] `docs/specs/o11y/nats-metrics-contract.md` and
-      `o11y-metrics-inventory.md` updated, **including the two caveats**: the
-      consumer-side redelivery double-count (§4.3) and SLO-1b's denominator being
-      *consumed* rather than *published* (§3)
+      `o11y-metrics-inventory.md` updated, **including the three caveats**: the
+      approximate PubAck-based publish count with its dedup behaviour (§4.1), the
+      consumer-side numerator that can push the ratio above 1 (§4.2), and
+      `unknown` as a validity signal rather than a bucket (§3.3)
 - [ ] PR body states that `docs/client-api.md` is not affected, and why
 
 **P2b**
@@ -364,6 +422,12 @@ Do not add these, even though they are adjacent:
 - A `status` label on the search duration histogram (also P4).
 - The max-delivery advisory consumer (P7) — and note the owner has said the
   NATS/JetStream team's advisory surface is not available to us.
+- **Renaming anything to match `common/sli-slo.md`'s draft names.** The contract
+  writes SLO-1a's numerator as `messages_persisted_total{outcome}`; the shipped
+  metric is `message_worker_persistence_total{message_kind,result}`
+  (`message-worker/nats_metrics.go:46`). That drift is real and worth resolving,
+  but it is the contract owner's call and it would break existing dashboards.
+  **Flag it in the PR, change nothing.**
 - Any change to what `message_gatekeeper_messages_total` already records. The new
   counter sits beside it; the existing one keeps its current meaning, which other
   dashboards depend on.
