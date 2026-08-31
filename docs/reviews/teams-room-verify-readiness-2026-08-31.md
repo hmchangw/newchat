@@ -50,3 +50,28 @@ Idiomatic, consistently wrapped errors and disciplined slog usage throughout; de
 - `low` — Drop the duplicated `"list chats needing verify: "` prefix at `runner.go:67`; the store already supplies it.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook consumer-side store interface, constructor DI and a dependency-free runner; the only real gaps are the missing `pkg/obs.Init` wiring and two filename/knob conventions.
+
+### Findings
+- `medium` — the service never calls `pkg/obs.Init`, so it emits no OTel traces or Prometheus metrics — `teams-room-verify/main.go:30-36`
+  CLAUDE.md §1 requires each service to wire the o11y SDK once via `pkg/obs.Init`; 20 services do. All five `teams-*` jobs skip it, so this is a family-wide gap, not a one-off — but the effect here is that a CronJob whose entire product is an audit signal exports zero metrics, and `mongoutil.Connect` silently takes its uninstrumented path (`pkg/mongoutil/mongo.go:41-42` runs only when `cfg.obs != nil`).
+- `low` — no shared-knob mounts: neither `mongoutil.PoolConfig` nor `mongoutil.BreakerConfig` is mounted as a named field — `teams-room-verify/config.go:14-30`
+  Both Mongo clients run on library defaults. Acceptable for a low-QPS job, but CLAUDE.md's named-field pattern is how the pool is made operable at all.
+- `low` — the integration test file is named `store_mongo_test.go`, not `integration_test.go` — `teams-room-verify/store_mongo_test.go:1`
+  Correct build tag and a correct `TestMain` (`:17`), just off the prescribed per-service filename; `runner.go` likewise stands in for the prescribed `handler.go`, which is reasonable for a job with no request handler.
+- `nitpick` — the site registry is a JSON document smuggled through one env var — `teams-room-verify/config.go:24`
+  In tension with "no config files", but it has an in-repo precedent (`portal-service/main.go:40`), is validated eagerly (`config.go:35-49`), and is the only way to express sites on different domains. Not a defect.
+
+Positives worth recording: `TeamsChatStore` declares exactly the two methods this consumer needs (`store.go:25-31`); `verifyFunc` is injected as a function field (`client.go:17`) so the runner needs no HTTP; `runConfig` (`runner.go:14-19`) keeps the pass pure; `validateConfig` fails fast before any dial (`main.go:60-62`); config is a typed `caarlos0/env` struct with no `os.Getenv`; the Dockerfile matches the mandated `golang:1.25.13-alpine` → `alpine:3.21` pair and runs non-root (`deploy/Dockerfile:1,9-12`). No NATS/JetStream at all, so the stream-bootstrap, subject-builder and consumer-pattern rules are correctly N/A.
+
+### Recommendations
+- `medium` — Wire `pkg/obs.Init` in `main()` and pass the observability option through to both `mongoutil.Connect`/`ConnectRead`; do it for the whole `teams-*` family in one PR.
+- `low` — Mount `Pool mongoutil.PoolConfig` (and `Breaker`) as named fields rather than relying on driver defaults.
+- `low` — Rename `store_mongo_test.go` → `integration_test.go` to match the per-service layout.
+
+---
