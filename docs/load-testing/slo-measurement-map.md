@@ -381,7 +381,7 @@ docker-local. Nothing new has to be built to run this.
 | **1b** channel enqueue | No enqueue counter; loadgen observes hop 9, downstream of the boundary | ⚠️ **One-sided bound only** — see below |
 | **2** enqueue ≤ 1 s | Same | ⚠️ **One-sided bound only** — see below |
 | **3** login | loadgen drives the real HTTP leg; `http.server.request.duration` is the production counter | ✅ **Real number.** `max-rps --workload=login` |
-| **4** enter channel | Production counter lands **#337**; and loadgen is the caller, so it can measure the better boundary | ✅ **Real number, and better than production's** — see below |
+| **4** enter channel | Production counter on `main` since #337; and loadgen is the caller, so it can measure the better boundary | ✅ **Real number, and better than production's** — see below |
 | **5** enter thread | Same | ✅ Same |
 | **6** push handoff | Counter is per-message, not per-recipient; no PUSH observer in loadgen | ❌ |
 | **7** search ok | `search_service_requests_total{kind,status}` exists | ✅ **Real number.** `max-rps --workload=search` |

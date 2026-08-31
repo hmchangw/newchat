@@ -22,7 +22,7 @@
 
 | # | Precondition | Owner | Note |
 |---|---|---|---|
-| P1 | **#337 merged** | app | Delivers `rpc.server.call.duration{rpc.method, error.type}` → SLO-4/5 |
+| ~~P1~~ | ~~#337 merged~~ — **done, 2026-08-30 (`bf0ea62`)** | app | `main` carries `rpc_server_call_duration_seconds{rpc_method, error_type}`, with `channel_history` and `thread_open` as disjoint methods |
 | P2 | **Prometheus scrapes the *services*' o11y SDK endpoint**, not just loadgen's `:9099` | infra | This is the one that gets missed. The Helm chart annotates **loadgen's own** service only (`metrics.serviceAnnotations`, port 9099). Every domain counter this run reads — `message_gatekeeper_messages_total`, `message_worker_persistence_total`, `rpc_server_call_duration_seconds`, `search_service_requests_total` — is emitted through the SDK meter on the services' own endpoint (`:2112` in compose; confirm the port on your service manifests). No service scrape, no SLO numbers |
 | P3 | **A dedicated test `SITE_ID`** | infra | Counters are monotonic and shared. `increase()` excludes history, not concurrent traffic |
 | P4 | **A backlog observer that outlives the loadgen pod** | infra | **Not optional, and not satisfiable by loadgen.** `loadgen_consumer_*` comes from a `ConsumerSampler` running *inside* the loadgen binary (`consumerlag.go:17`), so `phase: stopped` deletes the Deployment and the backlog signal with it — exactly when §7 tells you to watch the backlog drain. Both `t0-async` and `t2` need one of: the **P3 JetStream exporter deployed**, or an **operator reading `ConsumerInfo` directly** (NATS monitoring endpoint / `nats consumer info`) at those two marks. The service-side counters are unaffected — they are scraped from the services, which stay up |
@@ -173,7 +173,7 @@ candidate bound, not a single ratio against a target.**
 | Panel | Query | Shows |
 |---|---|---|
 | J2 channel-load good-ratio curve | §5 query 2 | good-ratio at **every** bucket boundary — the input to choosing SLO-4's bound and target |
-| J2 thread-open good-ratio curve | §5 query 3 | same, for SLO-5 |
+| J2 thread-open good-ratio curve | §5 query 3 | same, for SLO-5. Reference line at the current draft, **95% within 250 ms** |
 | J4 search availability | §5 query 4 | ok / eligible — a ratio, no bound to choose |
 | SLO-1a approximate indicator | §5 query 1 | **label the panel `approximate · lag-enforced · non-gating`** — it can read over 100% (§5) |
 | Measurement gap, J2 | §5 query 5 | loadgen-side minus server-side p95 — the size of the blind spot |
@@ -203,14 +203,14 @@ the first row:
 | **1.3** | Choose bounds and targets from 1.0b + 1.2, get approval, **and update `common/sli-slo.md`** | — |
 | **1.4 / 1.5** | Assertion mode and the re-run, scored against the **approved, updated** criteria | **Yes** |
 
-**SLO-5's divergence is an open item for 1.3, not a licence to ignore either
-number.** This checkout says 99% / 300 ms; #337 proposes 95% / 250 ms. Neither is
-"the draft you may pick" — the source of truth says 300 ms today, and 1.3 must
-either keep it or change it *in the document*. What 1.0b contributes is the
-evidence for that decision, plus one hard fact: **300 ms is not computable**, so
-whichever way the target goes, the bound has to move to a real boundary. Record
-which text the checkout carried so a later reader knows what the reference line
-meant.
+**SLO-5's bound is settled as a draft; its target is not.** #337 merged on
+2026-08-30, so `sli-slo.md` now reads *95% within 250 ms*, carrying its own
+`target provisional — no baseline yet` label. That closed the earlier
+300 ms / 250 ms divergence **in the source of truth**, by moving the bound onto a
+real histogram boundary — 300 ms sat between `0.25` and `0.5` and could not be
+computed at all. The **target** still has no evidence behind it, which is exactly
+what 1.0b supplies and 1.3 decides. Record the `sli-slo.md` revision the run was
+measured against, so a later reader knows what the reference line meant.
 
 Report the good-ratio at every bucket boundary, let 1.3 choose, and record why.
 
@@ -563,6 +563,24 @@ missing. Do not publish a number, an interval, or a caveat-laden estimate.
    the live `MaxDeliver`/backoff and the derived cap, the scrape interval,
    `t0-async / t0-sync / t1 / t2`, the workload shape label from §2, all six
    validity checks, and the ratios.
+
+### How to write it up
+
+**Evidence for a target, not a verdict against one:**
+
+> J2 channel load, achieved at 100 msg/s over 30 min (t0-sync 14:32:10 → t1
+> 15:02:10 → t2 15:03:15), isolated site `slo-test-a`, shape
+> `default-zipf / i12=derived`, sampler 0.1, backlog flat, no invalidations,
+> `sli-slo.md` @ `bf0ea62`:
+> `≤250 ms 91.4% · ≤500 ms 96.2% · ≤1 s 99.1%`.
+> Draft at run time: 95% within 500 ms — met.
+> J2 thread open: `≤250 ms 97.8% · ≤500 ms 99.3%`. Draft: 95% within 250 ms
+> (target provisional) — met at the drafted bound.
+> SLO-1a approximate indicator = 99.94% (per-attempt, §5).
+
+Never *"SLO-1a = 99.94%"*, and never *"SLO-5 passed"* or *"failed"* — the SLO is
+a 28-day window over production traffic, and its target is still a provisional
+draft this run exists to inform.
 
 ---
 
