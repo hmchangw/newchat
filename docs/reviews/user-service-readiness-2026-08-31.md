@@ -152,3 +152,30 @@ All 28 client subjects and `BadgeCountBatch` built via `pkg/subject` — no raw 
 - `medium` — For settings and chatlist specifically, publish through the local OUTBOX instead of direct-to-remote-INBOX, so a gateway failure is durably retried rather than logged and dropped.
 - `low` — Add `bson` tags to the two event structs; update `docs/client-api.md` §Chatlist Sections to the mandated field-table + JSON-example style in the same PR.
 
+---
+
+## 7. Performance — 4 / 5
+
+Genuinely strong hot-path engineering on `subscription.list` — a TTL'd sort-key LRU, page-sized batch refetches instead of a join-and-sort, bounded per-site fan-out, precise projections — undercut by an unbounded serial per-account recompute in `badge.count.batch`, a few unprojected reads, and an unbounded phase-one scan.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `BadgeCountBatch` recomputes `unreadRooms` **serially, once per account, with no cap on `req.Accounts`**. Each miss is a Mongo aggregate (`$lookup` per active sub) plus cross-site `GetRoomsMeta` RPCs. `GetChannels` caps its account list via `MAX_ACCOUNT_NAMES`; this one does not — and it is the notification fan-in path. A cold cache on a large room walks accounts one at a time until the 15 s `HANDLER_TIMEOUT` runs out and the remainder silently degrade to absent badges | `service/badge.go:41`; cf. `service/subscriptions.go:664` |
+| medium | `ListApps`' `$lookup` sub-pipeline has **no `$project` and no `$limit`** — only `$size > 0` is consumed, yet every matching botDM subscription document is materialized for every app on the page. The outer aggregation also has no terminal projection | `mongorepo/apps.go:95-106`, `:107` |
+| medium | Phase-one subscription read is unbounded — no `$limit`, no cap. Every list request materializes one `subLite` per subscription the account holds and sorts them in Go, regardless of `page.Limit` | `mongorepo/subscriptions.go:299`, `:313-314` |
+| medium | Unprojected reads on client-facing paths, against "always project precisely" | `mongorepo/subscriptions.go:838`; `mongorepo/apps.go:85`, `:140` |
+| medium | The four `$lookup` sites in `subscriptions.go` carry no `// $lookup justification:` comment (the convention is live here — `apps.go:92` does it). The `hrUser` join at `:723` is additionally a `localField`/`foreignField` lookup with **no sub-pipeline projection**, pulling whole `users` documents to read three fields | `mongorepo/subscriptions.go:96`, `:151`, `:673`, `:723-731` |
+| low | HTTP-path Mongo pool knobs re-declared instead of mounting `mongoutil.PoolConfig` — two pools against one cluster whose defaults can drift independently (see also Chapter 3) | `config/config.go:45-54` vs `:146` |
+| low | Thread-unread fan-out spawns one goroutine per site with **no semaphore**, while every other fan-out bounds itself with `s.fanout()` | `service/threadunread.go:58-77` |
+| nitpick | No L2 (`pkg/userstore`) tier for HR/user display lookups; `GetHRInfoByAccounts` hits Mongo on every list page. Mitigated by secondary routing and by being a single batched `$in` | `mongorepo/users.go:81` |
+
+**Checked and clean:** no `time.Sleep` synchronization; no leaked goroutines (`fanOutChunks` acquires the semaphore *before* spawning); no JetStream consumers so no `Nak()`/`BackOff` exposure; `mongo.ErrNoDocuments` handled at every expected-miss site; indexes created at startup; `encoding/json` correct here (not a designated sonic worker).
+
+### Recommendations
+- `high` — Cap `req.Accounts` in `BadgeCountBatch` (reuse `MAX_ACCOUNT_NAMES`) and run the miss-path `unreadRooms` calls through the existing bounded `fanOutChunks` helper rather than serially.
+- `medium` — Add `{"$project":{"_id":1}}` and `{"$limit":1}` to the `ListApps` co-subscription `$lookup`, plus a terminal `$project` naming only the `AppListItem` fields.
+- `medium` — Bound the phase-one `Find` with `SetLimit` derived from `MAX_SUBSCRIPTION_LIMIT` plus headroom, so per-request cost tracks the page.
+- `medium` — Add explicit projections to `GetAppSubscription`, `GetApp`, `GetAppsByAssistants`, and convert the `hrUser` join to a `let`/`pipeline` form projecting three fields.
+- `medium` — Add the four `// $lookup justification:` comments.
+- `low` — Mount `mongoutil.PoolConfig` with `envPrefix:"HTTP_"` and delete the hand-rolled fields; bound the `threadunread.go` goroutines with `s.fanout()`.
+
