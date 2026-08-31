@@ -676,9 +676,9 @@ func TestHandleAdd_NewMembersReceiveRoomKey(t *testing.T) {
 	}
 }
 
-// TestHandleAdd_ExistingMembersNoKeyFanOut: a duplicate add (created=false)
-// already has the key from its original add, so it must not trigger a
-// keyStore.Get or a fresh key-event publish.
+// TestHandleAdd_ExistingMembersNoKeyFanOut: a duplicate add (created=false) gets
+// no key fan-out. The key is still resolved up front (heal-before-commit), but
+// with no newly-added account there is no key-event publish.
 func TestHandleAdd_ExistingMembersNoKeyFanOut(t *testing.T) {
 	store := &fakeStore{
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
@@ -703,7 +703,7 @@ func TestHandleAdd_ExistingMembersNoKeyFanOut(t *testing.T) {
 	resp, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.NoError(t, err)
 	assert.Empty(t, resp.Added.UserIDs)
-	assert.False(t, getCalled, "keyStore.Get is skipped when nothing was newly added")
+	assert.True(t, getCalled, "key is resolved up front, before any subscription commit")
 	assert.Empty(t, pub.subjects, "no key fan-out for a pre-existing member")
 }
 
@@ -808,6 +808,36 @@ func TestHandleAdd_KeyStoreGetErrorFailsOp(t *testing.T) {
 	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "get room key")
+}
+
+// TestHandleAdd_KeyFailureShortCircuitsBeforeCommit: the key is resolved before
+// any subscription is committed, so an infra key failure strands no member — a
+// retry re-runs the whole add cleanly (regression for the commit-then-heal race).
+func TestHandleAdd_KeyFailureShortCircuitsBeforeCommit(t *testing.T) {
+	upsertCalled := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		UpsertSubscriptionFn: func(_ context.Context, _ *Subscription) (bool, error) {
+			upsertCalled = true
+			return true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return nil, errors.New("mongo down")
+		},
+	}
+	h := newHandler(store, "site-a", nil, (&captureOutbox{}).publish, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleAdd(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.Error(t, err)
+	assert.False(t, upsertCalled, "no subscription may commit before the room key is resolved")
 }
 
 // TestHandleAdd_KeyFanOutSendFailureDoesNotFailOp: a per-account Send

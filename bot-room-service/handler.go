@@ -311,6 +311,16 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	created := h.now()
 	added := []string{}
 	newAccounts := []string{}
+
+	// Resolve (and heal) the room key BEFORE committing any subscription: a key
+	// failure after a member is committed would strand them keyless, since a retry
+	// sees them as a dup (newlyAdded=false) and the fan-out below skips them.
+	// Mirrors room-worker's key-before-commit ordering. See keyPairOrHeal.
+	pair, err := h.keyPairOrHeal(c, roomID)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, userID := range req.UserIDs {
 		u, err := h.store.FindUser(c, userID)
 		if err != nil {
@@ -344,15 +354,9 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		}
 	}
 
-	// Fan out the room's current key only to newly-subscribed accounts — duplicate adds already
+	// Fan out the pre-resolved key only to newly-subscribed accounts — duplicate adds already
 	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
-		// Self-heal a key-absent room instead of silently skipping the fan-out
-		// (new member couldn't decrypt, no retry). See keyPairOrHeal.
-		pair, err := h.keyPairOrHeal(c, roomID)
-		if err != nil {
-			return nil, err
-		}
 		h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
 			RoomID:     roomID,
 			Version:    pair.Version,
