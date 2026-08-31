@@ -127,3 +127,29 @@ Small files, excellent WHY-oriented comments and clean layering are undercut by 
 - `low` — Break `enrichMessages` into `collectEnrichKeys`, `resolveDirectory`, `buildRooms` and a final attach loop; add a `fatal(msg, args...)` helper and a `mustParseConfig()` to compress the 14 exit blocks.
 - `nitpick` — Make `MessageIndexPattern` unexported and return it from a function (or pass it via `handlerConfig`) so all three index sources are configured in one place.
 
+---
+
+## 6. Integration — 4 / 5
+
+**Client-API documentation and `pkg/subject` usage are exemplary** — all five RPCs registered via builders and documented in the canonical doc plus both derived views with **no field drift** — but the messages-index read contract with `search-sync-worker` is hardcoded rather than configured, and three index `_source` shapes are re-declared locally.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **The messages read pattern is a hardcoded literal** while the writer's index name is fully env-driven (`MSG_INDEX_PREFIX`, e.g. `messages-site-a-v1-2026-04`). search-service has **no `MSG_INDEX_PREFIX` counterpart at all** — its compose configures only the other three indices. The writer's validation enforces only a `-v<N>` suffix, so `MSG_INDEX_PREFIX=chatmsg-site-a-v1` is accepted and **`search.messages` then returns zero hits silently** (`allow_no_indices` + `ignore_unavailable`). This is precisely the drift the adjacent comment says the other three envs exist to prevent | `query_messages.go:18` vs `search-sync-worker/main.go:60`; `deploy/docker-compose.yml:33-38`; `main.go:88-91` |
+| medium | **The `-v<N>` index version is validated but has no read-side effect** — reads use the version-stripped base wildcard, so a v1→v2 reindex is read from **both versions at once**. There is no alias anywhere in `pkg/searchindex` or the migrator, so during a cutover the same spotlight `_id` exists in v1 and v2 and `search.rooms` **returns the room twice**; `search.messages` double-counts `total` | `main.go:146-157`; `query_messages.go:18` |
+| medium | `messageSearchHit` re-declares the messages-index `_source` contract locally, **against the explicit instruction on the canonical type** ("this is the one place the wire/mapping contract for the messages index is defined; do not redefine it anywhere else"). Same pattern for `roomSearchHit` | `response.go:33-49` vs `pkg/searchindex/messagedoc.go:12-15`; `response.go:54-59` |
+| medium | `UserRoomDoc`'s sync comment **points at a symbol that no longer exists** — the referenced type has moved and been renamed. The local copy also silently omits `roomTimestamps`, so a reader following the comment cannot find the contract | `store.go:27-34` vs `pkg/searchindex/userroomdoc.go:68` |
+| low | `main.go` reimplements the wildcard helper that exists to prevent exactly this drift — `fmt.Sprintf("%s-*", …)` duplicates `searchindex.IndexPattern`, whose doc comment says "template and mapping push share it to avoid drift" | `main.go:151`, `:158`; `pkg/searchindex/version.go:33` |
+| low | Cross-site room enrichment has **no guard on an empty `siteId`** — an empty site yields `chat.server.request.room..info.batch` (empty token), a request that can never be served. Degrades correctly but wastes a 5 s round trip per response | `enrich.go:31`, `:56`, `:164` |
+| nitpick | `Search Users` is the only search RPC whose error table omits the "See [Error envelope]" pointer and both "Triggered events" subsections that every sibling carries | `docs/client-api.md:4544-4553` |
+
+### Verified clean
+All five handlers registered via `subject.Search*Pattern` builders, **no raw `fmt.Sprintf` subjects**; all five subjects documented in `docs/client-api.md` and **both derived views** (`events.md` correctly has no entry); request/response field tables match `pkg/model/search.go` **exactly**, including the prototype `$lookup` caveat; the service publishes no NATS events and owns no JetStream consumer or stream, so the `Timestamp`/OUTBOX-partition/`bootstrapStreams` rules do not apply; `RoomsInfoBatchRequest{SkipKeys:true}` matches room-service's expectation.
+
+### Recommendations
+- `high` — Add `MSG_INDEX_PREFIX` to `Config` (unprefixed, `required,notEmpty`, same `StripVersion` validation as the other three), derive the local pattern via `searchindex.IndexPattern` and the CCS pattern as `"*:" + that`, and set it in the compose file beside the existing three.
+- `medium` — **Pick a read-side version policy and encode it**: either publish a read alias per index family from `search-sync-worker`/`es-index-migrator` and read the alias, or read the exact configured `-v<N>` name. **The current base-wildcard makes the version suffix decorative.**
+- `medium` — Replace `messageSearchHit` and `roomSearchHit` with `searchindex.MessageDoc` / `SpotlightDoc` (adding a `SpotlightOrgDoc` for parity), keeping the `to*` functions as the only projection layer.
+- `medium` — Delete the local `UserRoomDoc` and read `searchindex.UserRoomUpsertDoc`, removing the stale cross-service comment.
+- `low` — Skip the `RoomsInfoBatch` fan-out for an empty site key; swap the two `fmt.Sprintf` calls for `searchindex.IndexPattern`; add the missing error-envelope/triggered-events stanzas to the Search Users doc section.
+
