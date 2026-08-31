@@ -175,3 +175,34 @@ Well-crafted code with exceptional WHY-comment discipline and tight per-concern 
 - `medium` — Migrate to the sanctioned flat layout, **or** amend `CLAUDE.md` §1 to sanction `cmd/`+`internal/`. One of the two must move: today the largest service is also the only one a reader cannot navigate by convention.
 - `low` — Split `messages_test.go` along the handler boundaries the source already has; the source files are well-factored, the tests are not.
 
+---
+
+## 6. Integration — 3 / 5
+
+Subject builders, cross-service RPC types and `docs/client-api.md` coverage are all correct and complete. The score is pulled down by one Cassandra mirror-write branch that diverges from every other write path in the service, and by inconsistent application of the event-level `Timestamp` convention.
+
+### Evidence
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | **Reactions on a `TShow=true` thread reply are never mirrored into `messages_by_room`**, so the channel-timeline copy of the row permanently lacks them | `internal/cassrepo/reactions.go:39` (and the identical branch at `:62`) |
+| medium | Event-level `Timestamp` is bound to a *domain* timestamp instead of publish time, contrary to §"Event Timestamps" | `internal/service/messages.go:633`, `:554`; `internal/service/reactions.go:100`; `internal/service/pin.go:137` |
+| low | The two derived doc views carry divergent `last synced` markers, so at least one is behind the other by construction — and both referenced commits are unreachable in this clone, so the claim cannot be checked mechanically | `docs/client-api/request-reply.md:3` vs `docs/client-api/events.md:3` |
+| low | Publishes into `MESSAGES-CANONICAL-{siteID}` but has no `Bootstrap` config field and no `bootstrap.go`; the local compose cannot stand up against a fresh NATS on its own | `internal/config/config.go`; `deploy/docker-compose.yml:13` |
+
+**On the reaction bug.** `AddReaction`/`RemoveReaction` route on `msg.ThreadParentID == ""` alone. Every other writer of the same row uses the wider rule `hasRoomTimelineRow` = `ThreadParentID == "" || TShow` — pin at `internal/cassrepo/pin.go:51`, edit at `write.go:269`, delete at `write.go:348`, and create at `message-worker/store_cassandra.go:291`. `reactions` is in the room-timeline projection (`internal/cassrepo/messages_by_room.go:16`), so `msg.history` / `msg.next` / `msg.surrounding` return the reply with **no** reactions while `msg.thread` returns it with them. The canonical `message_reacted` event masks this live; a reload exposes it.
+
+**On the timestamps.** `deletedAtMs` comes from `actualDeletedAt`, which `MessageWriter.SoftDeleteMessage` documents (`internal/service/service.go:39-45`) as *the existing value when a concurrent delete won the race* — so the canonical event can carry a `Timestamp` materially older than the publish. `internal/service/pin.go:179` and `migration.go:78`, `:127` do it correctly and even carry the comment explaining the distinction, so the service already knows the rule.
+
+### Verified clean
+
+All 17 registrations go through `pkg/subject` builders with zero inline `fmt.Sprintf` (`internal/service/service.go:270-302`). All 13 `chat.user.…` subjects appear in `docs/client-api.md`, `client-api/request-reply.md` and, where they fan out, `client-api/events.md`, with request/response tables matching `internal/models/message.go` field-for-field. `RoomsGet`, `ThreadSubscriptionList` and both migration RPCs share `pkg/model` types with their only callers. `MESSAGE_BUCKET_HOURS` defaults to 360 identically across `message-worker`, `bot-message-worker`, `es-index-migrator` and this service; the sizer is threaded into every bucketed statement via `r.bucket.Of`; and `internal/config/config.go:270-279` actively warns when `MESSAGE_READ_MAX_BUCKETS` is too small for the configured window. No JetStream consumers, no OUTBOX/INBOX participation, no `idgen` use.
+
+### Recommendations
+
+- `high` — Replace the `msg.ThreadParentID == ""` branch in `reactions.go` with the existing `hasRoomTimelineRow(msg)` predicate, adding the `messages_by_room` cell write/delete for `TShow` replies alongside the thread mirror. Add an integration case that reacts to a `TShow=true` reply and asserts the reaction is readable from **both** `GetThreadMessages` and `GetMessagesBefore`.
+- `medium` — Set `Timestamp: time.Now().UTC().UnixMilli()` at the four construction sites, leaving the domain values on `Message.EditedAt`/`UpdatedAt`/`PinnedAt` and the RPC responses untouched.
+- `low` — Regenerate both derived views from the current `docs/client-api.md` in one commit so they carry the same `last synced` marker.
+- `low` — Add `cmd/bootstrap.go` with the standard no-op helper (schema only: `Name + Subjects` from `pkg/stream`), a `Bootstrap` field on `config.Config`, and `BOOTSTRAP_STREAMS` in the local compose.
+- `nitpick` — Add a short comment above the `reactions.go` mirror branch stating the `TShow` rule once fixed, so the next writer of this row does not re-derive it from `pin.go`.
+
