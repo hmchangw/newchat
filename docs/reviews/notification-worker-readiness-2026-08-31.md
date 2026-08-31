@@ -119,3 +119,47 @@ Quality note (the part that counts): the covered portion is **not** vanity. `han
 - `medium` — Replace the embedded NATS server in `parent_fetcher_test.go` with a stub requester interface, matching `presenceRequester`'s pattern.
 - `medium` — Add a wiring test asserting `UserSettingsEnabled=false` produces `noopUserSettings` and thus zero suppression (`main.go:231-233`).
 - `low` — Add `//go:generate mockgen` for `MemberCache`/`ThreadFollowerLister`/`Emitter` or document the hand-fake choice in-service.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Excellent WHY-oriented commenting and clean small-file decomposition per collaborator, undercut by a 252-line/CC≈30 `HandleMessage` and a 361-line `main()` that concentrate almost all of the service's decision logic in two functions.
+
+### Findings
+- `high` — `HandleMessage` is 252 lines with ~40 decision points (cyclomatic ≈30), spanning six unrelated stages: payload decode, cache invalidation, thread-parent resolution + retry-budget policy, member filtering, settings/presence gating, badge fan-out, push-event construction and batch emission — `notification-worker/handler.go:109-354`
+  Adding one new suppression rule means editing the middle of a function whose local state (`followers`, `parentCreatedAt`, `parentSenderAccount`, `badgeAccounts`, `siteByAccount`, `candidates`, `accounts`, `survivors`, `emitErrs`) is eight live variables deep. `.golangci.yml` enables neither `funlen`, `gocyclo` nor `cyclop`, so nothing bounds this.
+
+- `high` — `main()` is 361 lines and mixes config validation, Mongo/Valkey/NATS wiring, two independent JetStream consumers, an inline invalidation worker goroutine, and a nine-step shutdown — `notification-worker/main.go:81-438`
+  The invalidation subsystem (consumer creation, decode loop, bounded channel, two of the shutdown steps) is a self-contained feature inlined into `main`; it has no unit test because it cannot be reached without a live NATS.
+
+- `high` — the invalidation reader goroutine is untracked by any `WaitGroup`, unlike the main consumer loop which is deliberately counted (`main.go:337-342`) — `notification-worker/main.go:304-325`
+  Shutdown step 3 calls `invalIter.Stop()` and step 4 immediately `close(invalCh)` (`main.go:417-420`). Nothing proves the reader has exited, so a goroutine sitting between `sonic.Unmarshal` and `invalCh <- evt.RoomID` sends on a closed channel and panics the process during drain.
+
+- `medium` — five `HandlerDeps` fields carry nil-sentinel semantics, but `NewHandler` normalizes only two of them; the other three are nil-checked at scattered use sites — `notification-worker/handler.go:52-60`, `handler.go:100-105`, vs `handler.go:363`, `handler.go:465`, `handler.go:491`
+  Two different conventions for "optional dependency" in one struct; a sixth optional dep will pick whichever the author noticed last.
+
+- `medium` — every batching collaborator re-declares its own default, duplicating the `envDefault` in `config` — `handler.go:28` vs `main.go:56` (100), `handler.go:95` vs `main.go:55` (500), `presence.go:49,52` vs `main.go:63,64` (512/2s), `usersettings.go:79,82` vs `main.go:68,69` (512/2s)
+  Two sources of truth per knob; CLAUDE.md's "declared once in the package that owns the thing it configures" principle is being violated locally.
+
+- `medium` — `natsBadgeClient.Counts` and `historyParentFetcher.FetchParent` are the same five-step request/reply body (sonic marshal → `nc.Request` → `errcode.Parse` + `Code.Valid()` → sonic unmarshal → wrap) — `notification-worker/badge_client.go:42-60`, `notification-worker/parent_fetcher.go:69-89`
+  `badge_client.go:29` admits it ("mirroring historyParentFetcher's shape"). A third RPC will copy it a third time.
+
+- `low` — `bootstrapStreams` takes six positional parameters, four of them adjacent strings (`inputStream, inputSubject, outputStream, outputSubject`) — `notification-worker/bootstrap.go:25`
+  Transposing any pair compiles cleanly and creates a stream on the wrong subject. CLAUDE.md's stated shape is `bootstrapStreams(ctx, js, siteID, enabled)`.
+
+- `low` — `Vetoer` has exactly one production implementation, `noopVetoer`, wired unconditionally at `main.go:264`; the only real implementation is a test fake — `notification-worker/hook.go:12-19`, `handler_test.go:133-137`
+  A per-recipient interface call inside the hot member loop (`handler.go:245`) that can never do anything.
+
+- `nitpick` — `isDND`/`isPresenting` are package-level `var` function stubs that always return false, making rule 2 of `shouldPush` permanently inert — `notification-worker/presence.go:132-135`, `presence.go:160`
+
+- `nitpick` — `handler_test.go` is 2083 lines / 69 top-level tests in one file, ~4× the file it tests — `notification-worker/handler_test.go`
+
+### Recommendations
+- `high` — Split `HandleMessage` into named stages in new files: `audience.go` (`selectAudience` → badge accounts, candidates, `siteByAccount`), `threadctx.go` (`resolveThreadContext` → followers + parent, owning `parentResolveExhausted`), `pushevent.go` (`buildPushEvent` + `emitBatches`). `HandleMessage` becomes a ~40-line orchestration that reads as the documented pipeline.
+- `high` — Extract the invalidation subsystem from `main()` into `invalidator.go` with a `newRoomInvalidator(...)` returning a struct with `Start`/`Stop`; track its goroutine in a `WaitGroup` and join it *before* `close(invalCh)`, closing the send-on-closed-channel window.
+- `medium` — Enable `funlen` (say 80) and `cyclop`/`gocyclo` (say 15) in `.golangci.yml` so the next 250-line handler is rejected at lint time rather than at audit time.
+- `medium` — Make every optional `HandlerDeps` field normalized in `NewHandler` (nil `RoomMeta`/`MentionNames`/`BadgeClient` → explicit noop types, as `Settings` already does), then delete the three scattered nil checks.
+- `medium` — Hoist the shared defaults into single constants consumed by both the `envDefault` tag site and the constructor, or drop the constructor fallbacks entirely and rely on config validation.
+- `low` — Extract the shared RPC body into one `requestJSON[Req, Resp]` helper in the service; `badge_client.go` and `parent_fetcher.go` each shrink to a subject + type pair.
+- `low` — Change `bootstrapStreams` to take a small struct (`streamSpec{name, subject}` pair) instead of four positional strings, and delete `Vetoer`/`noopVetoer` until a real veto exists.
