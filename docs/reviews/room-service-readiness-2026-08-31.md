@@ -158,3 +158,37 @@ For scale context: room-service's production code is 6,460 lines, on par with `u
 - `medium` — Split `RoomStore` into per-domain interfaces sharing the one `MongoStore`; split `store_mongo.go` to match and regenerate mocks per interface.
 - `low` — Lift the eight `main()` validation blocks into `validate(cfg) error`; add the missing `$lookup` justification comment.
 
+---
+
+## 6. Integration — 4 / 5
+
+Integration hygiene is strong — every subject goes through `pkg/subject` builders, all nine federated event types are inside `outbox.ConcurrentEventTypes`, and all 22 `chat.user.…` RPCs are documented. One defect stands out, and it is the most consequential finding in this review.
+
+### The `moveChat` dedup collision
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | In the `moveChat` rebalance loop, every iteration calls `federateOne` with the same `ctx` and the same `destSiteID`, so **all N `subscription_section_moved` events get an identical `Nats-Msg-Id`**. `natsutil.InboxDedupID` ignores the per-row `payloadSeed` whenever a request ID is present and returns `requestID + ":" + destSiteID`. OUTBOX sets no explicit `Duplicates`, so JetStream's default 2-minute dedup window **drops every event after the first** | `handler.go:2419-2439`; `pkg/natsutil/request_id.go:149-155`; `pkg/stream/stream.go:77-82` |
+
+A cross-site section move that renumbers siblings federates only one row. The remote replica keeps stale `sectionOrder` for the rest, with **no reconciliation path**. The single-row `else` branch (`handler.go:2456`) is unaffected — which is exactly why the bug is invisible in the common case. It compounds with Chapter 4's finding that `moveChat`'s rebalance branch is one of the service's least-covered paths.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | `handler.go:2436` passes `row.RoomID+":"+account` as `dedupSeed` — dead as a uniqueness mechanism (used only on the missing-request-ID fallback), which makes the collision above *look defended when it is not*. The same shape at five other sites is safe only because those are single-event handlers | `handler.go:1440`, `:1743`, `:2272`, `:2318`, `:2500` |
+| medium | JetStream msg-ID dedup is **stream-wide, not per-subject**, so `requestID:destSiteID` is unsafe for any handler that ever federates two events to one destination in one request. Nothing in `federateOne` enforces one-event-per-(request, destination) | `handler.go:882-885` |
+| low | `bootstrapStreams` fail-fast verification covers only ROOMS, though the service also publishes to `OUTBOX-{siteID}` and `MESSAGES-CANONICAL-{siteID}`. The doc comment claims it verifies "the streams it publishes to"; a missing OUTBOX surfaces only at the first cross-site RPC | `bootstrap.go:34-63` |
+| low | `bot-room-service/deploy/docker-compose.yml:21` hardcodes `ROOM_KEY_RETIRED_TTL=30m` while room-service, room-worker and broadcast-worker all use `${ROOM_KEY_RETIRED_TTL:-30m}`. Defaults agree today, but an operator-set env moves three services and not the fourth — exactly the divergence `CLAUDE.md` forbids | `bot-room-service/deploy/docker-compose.yml:21` |
+| low | Self-DM builds a DM room id via `idgen.BuildDMRoomID(requester.ID, requester.ID)` for a one-participant room. `CLAUDE.md` states a DM room is "always exactly two participants"; the code is deliberate and commented, but the rule as written does not sanction it | `handler.go:264` |
+| nitpick | All five `RoomCanonical` publishes pass `msgID=""`, so a client retry after a NATS request timeout double-enqueues onto ROOMS; idempotence rests entirely on `room-worker`. The Teams path already shows the alternative with `natsutil.CanonicalDedupID` | `handler.go:403`, `:737`, `:1034`, `:2031`, `:2242` vs `handler_teams.go:269` |
+
+### Verified clean
+No raw `fmt.Sprintf` subject construction anywhere. Every `Timestamp` field is set at the publish site from `time.Now().UTC()` (nine sites), including `roomRestricted`, which correctly **overwrites the caller's value server-side** at `handler.go:2097` before federating. The OUTBOX subject is the `CLAUDE.md` form `chat.outbox.{origin}.{dest}.{eventType}`. No INBOX/OUTBOX stream creation here. Cross-site `errcode.Parse` used correctly. No JetStream consumers (pure publisher + request/reply), so consumer-pattern rules are N/A.
+
+### Recommendations
+- `high` — Make the OUTBOX dedup key unique per event, not per request: change `federateOne` to `dedupID = InboxDedupID(ctx, destSiteID, seed) + ":" + seed` (or fold in `eventType`+`roomID`), and add a `handler_test.go` case asserting the rebalance loop emits N **distinct** `Nats-Msg-Id`s to one destination.
+- `medium` — Add a regression test for cross-site `moveChat` *with* a rebalance, capturing the injected publish func's `msgID` per call — no test currently greps for `rebalanc` plus federation.
+- `medium` — Document the one-event-per-(request, destination) invariant on `federateOne`, or remove the misleading `dedupSeed` fallback so the key's real uniqueness domain is visible at every call site.
+- `low` — Extend `bootstrapStreams` to `Stream()`-verify OUTBOX and MESSAGES-CANONICAL on the production path (verify only — ownership stays with `outbox-worker`/ops).
+- `low` — Change `bot-room-service/deploy/docker-compose.yml:21` to `${ROOM_KEY_RETIRED_TTL:-30m}` so all four services move together.
+- `low` — Reconcile the self-DM case with the "exactly two participants" DM rule — amend the rule to name the note-to-self exception.
+
