@@ -78,3 +78,31 @@ All cross-site publishes route through `federate` → `outbox.Publish` (`handler
 - `low` — Move `ROOM_KEY_RETIRED_TTL` + `ROOM_KEY_GRACE_PERIOD` into a `roomkeystore.Config` mounted in all four services; align `ROOM_META_CACHE_TTL` or document why 60 s.
 - `nitpick` — Add `subject.ParseRoomCanonical`-style helpers so dispatch uses parsed tokens rather than suffix matching.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Coverage is **62.8% (1701 statements)**, below the §4 80% floor, so the dimension is floored at 2. The harness is otherwise well built — injected publisher, generated mocks, correct `testutil` integration setup — but **every federation-failure and Ack/Nak branch is structurally untestable because the publisher double cannot fail.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 62.8%, under the §4 80% floor | `coverage_by_service.txt` |
+| high | **`HandleJetStreamMsg` is 0%** — the service's only subject router and its only `jsretry.SettleQuiet` Ack/Nak decision point. Nothing tests that `.member.add`/`.member.remove`/the transitional `.teams.create` vs `.create` suffix ordering routes correctly, nor that a `permanent()` error Acks while a transient one Naks with backoff. A routing regression silently misroutes a whole event class | `handler.go:238-278` |
+| high | **Every cross-site `federate()` failure branch is uncovered** — the `return err` on OUTBOX publish failure, i.e. the path that must NAK so an ordered `member_added`/`room_renamed` is retried rather than lost. `:544` and `:757` *are* covered, so this is inconsistent, not absent by design | `handler.go:1299`, `:1900`, `:2407`; `teamsroomcreate.go:328`, `:392` |
+| high | **Root cause of the above: the test publisher always returns `nil`.** With no error-injection seam, no publish/federate error path in the service can be exercised — which also explains the uncovered `publishSubscriptionUpdate`, `publishRoomEvent` and `publishMemberEvent` | `mock_publisher_test.go:19-25` |
+| medium | `permanent()` is used at **26 sites** but only **2** assertions reference `errcode.IsPermanent` in the whole suite. The Ack-poison-vs-retry classification — the highest-consequence per-error decision in a JetStream worker — is essentially unasserted | `handler_test.go:3878` |
+| medium | Four Mongo store implementations are exercised **only through gomock**, never against real Mongo. These are hand-written aggregation pipelines with explicit projections — exactly the class of defect (wrong field name, wrong projection) a mock provably cannot catch. (The 0% shown for `store_mongo.go` is a tag artifact; the other ~28 methods are covered properly) | `store_mongo.go:269`, `:586`, `:713`, `:737` |
+| medium | `requireKeyPair`'s nil guard is never tested (50%, happy branch only) — this is the invariant "**nothing keyless is ever published**"; its metric emission and permanent-error return are unverified | `handler.go:2534-2540` |
+| medium | `roomLocalityForMember` is 28.6%; only the `!UsesLocal()` early return runs. Both the `GetRoomMeta` success path and the documented fail-open-to-global branch are uncovered — a regression silently routes member events to the wrong namespace | `handler.go:2475-2481` |
+| low | `cleanupThreadMembership` error wraps uncovered | `handler.go:363`, `:366` |
+| low | No NATS integration test: `integration_test.go` uses only `testutil.MongoDB`, never `testutil.NATS`, so the OUTBOX publish path is never validated against real JetStream (dedup `Nats-Msg-Id`, subject acceptance) | `integration_test.go:74` |
+| nitpick | 195 top-level test funcs vs 26 `t.Run` calls in a 7,920-line file; near-identical scenarios are copy-pasted per function. Positively: no build-tag violations, `TestMain` correct, no inline `GenericContainer`, no real DB/NATS in unit tests, mocks generated and unedited | `handler_test.go` |
+
+### Recommendations
+- `high` — Give `mockPublisher` a failure seam (e.g. `failOn func(subj string) error`); then add table-driven tests asserting each `federate()` site returns a **non-permanent** error so JetStream retries. This one change unlocks four of the findings above.
+- `high` — Add a `HandleJetStreamMsg` table test over a fake `jetstream.Msg` covering all five subject suffixes plus the transitional `.teams.create`, the corrupt-payload branch and the unknown-subject default, asserting Ack vs `NakWithDelay` per `jsretry.DefaultBackoff`.
+- `medium` — Assert `errcode.IsPermanent` in every test that drives a `permanent()` site, not just the two current ones.
+- `medium` — Add integration tests for the four untested pipelines against `testutil.MongoDB`, asserting the projected field set.
+- `medium` — Cover `requireKeyPair(nil)` and both `roomLocalityForMember` branches.
+- `low` — Add a `testutil.NATS(t)` test driving one `member_added` through `outbox.Publish`, asserting the subject and dedup header; collapse the near-duplicate test functions into tables.
+
