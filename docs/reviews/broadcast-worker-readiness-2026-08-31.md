@@ -158,3 +158,29 @@ Federation plumbing is correct and well-tested — `subscription_mention` is in 
 - `low` — Hoist `retiredTTLSafe` above the `switch` so it validates whenever `Encryption.Enabled`, regardless of cache state.
 - `low` — Add a `dropped_sites` counter in the mention fan-out; add an integration case asserting an unknown-site mention does not reach OUTBOX.
 
+---
+
+## 7. Performance — 4 / 5
+
+Genuinely performance-engineered — sonic + pretouch, prebuilt metric attribute sets, singleflight-guarded bounded caches, a coalescing preview writer with a body cap, correct `jsretry.LowLatencyBackoff` settling and `PullMaxMessages(2*MaxWorkers)` — with a handful of avoidable hot-path costs.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | `publishToThreadAccounts` spawns **one goroutine per recipient with no semaphore** — unbounded in the number of thread followers plus mentions, on a 100-worker consumer, so worst case is 100×N live goroutines. `federateMentions` bounds the same shape at `maxSiteFanout=8`. Each goroutine only does a core-NATS publish, which **serializes on the connection write lock anyway**, so the concurrency buys little for the risk | `handler.go:1278`; cf. `:35`, `:465` |
+| medium | **Every mutation event takes an uncached Mongo point-read via `GetRoom`**, bypassing the L1+L2 room-meta cache the create path uses. Reactions are the highest-frequency event a UI produces. Only the DM/BotDM branches need `room.Accounts`; the channel branch uses fields all present in `roommetacache.Meta` | `handler.go:402`, `:728`, `:765`, `:835`; `store_mongo.go:87` vs `:122` |
+| medium | The optional preview seal runs **ahead of** the delivery publish. Steady state is cheap, but a cold or rotated preview DEK pays a Vault unwrap plus Mongo DEK read of up to `previewSealTimeout` **in front of user-visible fan-out**. The write is already buffered and never awaited; the seal is the only part still on the critical path, and it depends on nothing the publish produces | `handler.go:271`, before `:279` and `:294` |
+| low | `GetRoom` uses an **exclusion** projection, so the whole room document minus three preview fields is fetched and decoded — on six handlers. §6 requires a projection selecting only the fields the caller needs | `store_mongo.go:104` |
+| low | The cross-site room-activity event is marshalled with `encoding/json` while every other event on this worker uses sonic, and `model.RoomActivityEvent` is absent from `pretouchTypes` — so it takes neither the codec nor the warm-up. Impact bounded by the 5 s per-room throttle | `roomactivity.go:184`; `pretouch.go:12` |
+| low | `channelThreadFanOut` performs three **sequential** round-trips per channel thread event (2 s NATS RPC to history-service, then two independent Mongo reads). The last two are independent of each other and could overlap; on the fetch path the reply's latency is the sum of all three | `handler.go:1397`, `:1414`, `:1418` |
+| nitpick | `publishDMEvents` rebuilds and re-marshals the event per recipient — harmless only because a DM is always exactly two participants; the loop shape would not survive that invariant changing | `handler.go:1187`, `:1191` |
+| nitpick | `account := account` is redundant under Go 1.25 | `handler.go:1279` |
+
+**Verified clean:** no bare `Nak()`/`NakWithDelay(0)` anywhere (`main.go:539` settles via `jsretry.Settle` + `LowLatencyBackoff`); no hardcoded `cc.BackOff`; no `time.Sleep` outside tests; the flush goroutine and its `flushDone` channel have a clear termination path; `previewWriter.Flush` swaps the map under lock and writes outside it.
+
+### Recommendations
+- `medium` — Bound `publishToThreadAccounts` with the same `maxSiteFanout`-style semaphore used by `federateMentions`, or drop the goroutines entirely and publish in-line.
+- `medium` — Route the channel branch of `handleReacted`/`handlePinned`/`handleUnpinned`/`handleDeleted`/`handleUpdated` through `GetRoomMeta`, keeping `GetRoom` only where `room.Accounts` is actually consumed.
+- `medium` — Move `previewForInserted` + `previews.buffer` to **after** the publish call in `handleCreated`; both already consume only values computed before the switch.
+- `low` — Add a precise inclusion projection for `GetRoom`, or a second narrow store method for the DM path.
+- `low` — Marshal `RoomActivityEvent` with sonic and add it to `pretouchTypes`; run `allowedThreadMentions` and `GetThreadFollowers` concurrently in `channelThreadFanOut`.
+
