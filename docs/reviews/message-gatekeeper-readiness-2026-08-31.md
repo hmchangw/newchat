@@ -150,3 +150,33 @@ Subject builders, stream/consumer wiring, `Timestamp` and `idgen` validation are
 - `low` — Stamp `time.Now().UTC().UnixMilli()` into `evt.Timestamp` at `handler.go:504`, keeping `now` only for `Message.CreatedAt`.
 - `low` — Set `cc.FilterSubject = subject.MsgSendWildcard(cfg.SiteID)` in `buildConsumerConfig`, and have `ParseUserRoomSiteSubject` callers assert the `msg.send` verb.
 - `nitpick` — Stamp the request ID onto ctx immediately after the payload parse so early error replies carry `X-Request-ID`.
+
+---
+
+## 7. Performance — 4 / 5
+
+The hot path is genuinely well-engineered: precomputed metric attribute sets, L1+L2 caches with singleflight, precise Mongo projections, the correct semaphore consumer pattern, sonic with `Pretouch`, and clean `jsretry` discipline. What holds it back is the parent-resolution path — no deadline, no cache, no concurrency — on the first hop of every user message.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| medium | **`processMessage` has no overall deadline.** A thread reply that also quotes a *different* parent issues two serial 2 s history RPCs, and a missing thread parent adds `waitFor` plus a third — **~6.15 s worst case holding a worker slot and the client's reply.** At `MAX_WORKERS=100` that caps throughput near **16 msg/s during a history-service brownout**, on the first hop of every send | `handler.go:442`, `:455`, `:553`; `fetcher_history.go:19` |
+| medium | **Parent-fetch results are never cached.** Every reply in a hot thread re-issues an identical `FetchQuotedParent` for the same parent, and `resolveThreadParent` consumes only `snap.CreatedAt` + `snap.Sender.Account` — **both immutable.** A small TTL'd LRU keyed `(roomID, messageID)` removes one Cassandra-backed RPC per thread reply; the service already has three LRU tiers to copy | `handler.go:548-570`; `fetcher_history.go:70-113` |
+| medium | **Four sub-INFO log calls on the accepted-message path build their variadic `[]any` unguarded**, boxing ints and bools per message. `pkg/logctx/handler.go:40-41` documents exactly this hazard, and `handler.go:264` already applies the `logctx.Enabled` guard — so the pattern is known and inconsistently applied | `handler.go:406`, `:436`, `:448`, `:516` |
+| medium | **Negative subscription results are cached at neither tier**, so every send from a non-subscriber reaches MongoDB. MESSAGES is client-facing: a client looping sends at a room it left bypasses L1+L2 entirely. `singleflight` collapses only *concurrent* misses, and the breaker fences failures, not load | `subcache.go:87-90`; `pkg/subauthcache/subauthcache.go:8-9` |
+| medium | **No startup index assertion** for the `(roomId, u.account)` subscription read, though lower-traffic readers of the same shape do assert it. The service most exposed to a missing index is the only one that will not warn about it | `store_mongo.go:31-40`; cf. `inbox-worker/main.go:562`, `user-service/mongorepo/subscriptions.go:75` |
+| low | The infra Nak uses `jsretry.DefaultBackoff` (first rung 1 s). `pkg/jsretry/jsretry.go:74-76` reserves `LowLatencyBackoff` for "where the first retry must be near-immediate so a sub-second hiccup isn't user-visible" — and **the gatekeeper is the most user-visible consumer in the fleet**: the client is blocked awaiting `chat.user.{account}.response.{requestId}` and gets no reply at all on this branch | `handler.go:232` |
+| low | The quote fetch and the thread-parent fetch are independent but run serially; they share a snapshot only when the two IDs match, otherwise the latencies add rather than overlap | `handler.go:442` then `:455`, `:537-540` |
+| low | `getMessageByIDRequest` and `quotedParentProjection` are absent from `pretouchTypes`; the comment justifies the omission by the type being narrow, but sonic's JIT cost is per-type regardless of width | `pretouch.go:11-17`; `fetcher_history.go:43-64` |
+| low | `historyRequestTimeout` is a hardcoded const, not an env knob — unlike every other latency-relevant setting in `config` | `fetcher_history.go:19`; `main.go:31-70` |
+| nitpick | `model.Message` is marshaled **twice per accepted send** — once embedded in `evt`, once standalone for the reply: up to ~2×20 KB of redundant encode per message at peak | `handler.go:505`, `:519` |
+
+**Verified clean:** no bare `Nak()`/`NakWithDelay(0)`; no `time.Sleep` (the recheck uses the ctx-aware `waitFor`, `helper.go:43-49`); no goroutine leaks — the singleflight fetch is bounded by `subFetchTimeout` (`subcache.go:20`) and `natsmetrics.Consume` uses the documented semaphore + `WaitGroup` high-throughput pattern; no `$lookup`; projections explicit; `MaxAckPending=1000` ≥ `PullMaxMessages=200`.
+
+### Recommendations
+- `medium` — Wrap `processMessage`'s parent-resolution block in a single `context.WithTimeout` (~1 s) so client-visible send latency is bounded regardless of how many fetches fire.
+- `medium` — Add a TTL'd LRU for `FetchQuotedParent` keyed `(roomID, messageID)`; scope it to thread-parent resolution first, where the cached fields are immutable.
+- `medium` — Apply the `logctx.Enabled(ctx, …)` guard already used at `handler.go:264` to lines 406, 436, 448 and 516.
+- `medium` — Add `mongoutil.WarnMissingIndexes(ctx, subCol, "roomId_1_u.account_1")` in `NewMongoStore`, matching `inbox-worker`/`user-service`.
+- `medium` — Cache negative subscription results in L1 with a short TTL (5–15 s) so a non-subscriber's send loop cannot pin Mongo; keep L2 positive-only.
+- `low` — Switch `handler.go:232` to `jsretry.LowLatencyBackoff`, and run the quote and thread-parent fetches concurrently when the two IDs differ.
+- `low` — Add the two projection types to `pretouchTypes`, and move `historyRequestTimeout` into `config` as `HISTORY_REQUEST_TIMEOUT`.
