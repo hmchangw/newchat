@@ -368,6 +368,15 @@ Three server rules the code must respect (`nats-io/nats-server`, `server/consume
   when MaxDeliver means unlimited — the server normalizes `0` and `< -1` to `-1` first
   (`:612-617`). `DurableConsumerDefaults` clamps and warns.
 
+**Size `MaxDeliver` against the outage, not the blip.** Exhausting it drops the message
+silently. The shared default (6) buys ~6 minutes — fine for a database hiccup, far too
+short for work that waits on a dependency: `stream.WithOutageRetryBudget(s, schedule)`
+derives the count covering `stream.OutageRetryWindow` from the schedule the service
+actually settles with, and `stream.WithUnlimitedRedelivery` lifts the cap where the
+handler drops poison itself. A cross-site lane needs it too — `inbox-worker`'s events
+wait on other sites, not just on a database. At a cap, `Term` explicitly so the give-up
+is logged instead of vanishing.
+
 ### Graceful Shutdown
 - Use `pkg/shutdown.Wait` in every service's `main.go`
 - JetStream workers cleanup order: `iter.Stop()` → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases
