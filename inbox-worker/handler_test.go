@@ -16,6 +16,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // --- In-memory InboxStore stub ---
@@ -123,6 +125,7 @@ type stubInboxStore struct {
 	addThreadUnreadErr    error
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
+	listAccountsErr       error
 	settingsUpdates       []userSettingsUpdate
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
@@ -545,6 +548,21 @@ func (s *stubInboxStore) getVisibilityUpdates() []visibilityUpdate {
 	return cp
 }
 
+func (s *stubInboxStore) ListSubscriptionAccountsByRoom(_ context.Context, roomID string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listAccountsErr != nil {
+		return nil, s.listAccountsErr
+	}
+	var accounts []string
+	for i := range s.subscriptions {
+		if s.subscriptions[i].RoomID == roomID {
+			accounts = append(accounts, s.subscriptions[i].User.Account)
+		}
+	}
+	return accounts, nil
+}
+
 func (s *stubInboxStore) getThreadSubs() []model.ThreadSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -799,8 +817,8 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 	if sub.SiteID != "site-b" {
 		t.Errorf("subscription SiteID = %q, want %q", sub.SiteID, "site-b")
 	}
-	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleMember)
+	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleUser)
 	}
 	if sub.RoomType != model.RoomTypeChannel {
 		t.Errorf("subscription RoomType = %q, want %q", sub.RoomType, model.RoomTypeChannel)
@@ -1202,8 +1220,8 @@ func TestHandleEvent_MemberAdded_EventSourcedFields(t *testing.T) {
 		if !sub.HistorySharedSince.Equal(historyShared) {
 			t.Errorf("sub[%d] HistorySharedSince = %v, want %v", i, *sub.HistorySharedSince, historyShared)
 		}
-		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleMember)
+		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleUser)
 		}
 	}
 
@@ -1272,6 +1290,104 @@ func TestHandleEvent_RoomSync_InvalidPayload(t *testing.T) {
 	if len(store.getRooms()) != 0 {
 		t.Error("room should not be upserted with invalid payload")
 	}
+}
+
+// TestHandleEvent_RoleUpdated_BustsSubL2 covers the federated role-change
+// case: this site's local replica of a remote-origin room's subscription had
+// its Roles rewritten, so this site's own subauthcache L2 entry must die too.
+func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	subEvt := model.SubscriptionUpdateEvent{
+		UserID: "u2",
+		Subscription: model.Subscription{
+			ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
+			RoomID: "room-1", SiteID: "site-a", Roles: []model.Role{model.RoleOwner},
+		},
+		Action: "role_updated", Timestamp: 1735689600000,
+	}
+	subEvtData, _ := json.Marshal(subEvt)
+	evt := model.InboxEvent{
+		Type: "role_updated", SiteID: "site-a", DestSiteID: "site-b",
+		Payload: subEvtData, Timestamp: 1735689600000,
+	}
+	evtData, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleEvent(context.Background(), evtData))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("room-1", "bob")})
+}
+
+// TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount covers the
+// federated removal case: this site's local replicas of the removed accounts'
+// subscriptions are deleted, so each one's subauthcache L2 entry must die too
+// — the same security case as room-worker's local removal, mirrored here for
+// federated rooms.
+func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2"},
+	)
+	store.mu.Unlock()
+
+	memberEvt := model.MemberRemoveEvent{
+		Type: "member-removed", RoomID: "r2", Accounts: []string{"alice", "dave"}, SiteID: "site-a",
+	}
+	payload, _ := json.Marshal(memberEvt)
+	evt := model.InboxEvent{Type: "member_removed", SiteID: "site-a", DestSiteID: "site-b", Payload: payload, Timestamp: time.Now().UnixMilli()}
+	data, _ := json.Marshal(evt)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")})
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip for all removed accounts")
+}
+
+// TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber
+// covers the critical gap: ApplySubscriptionRestriction is the same store
+// method room-service's roomRestricted calls, and it can bulk-rewrite Roles
+// for every local subscriber of the room (owner set, everyone else demoted),
+// so every one of them — not just OwnerAccount — needs their subauthcache L2
+// entry busted on this (federated-destination) site too.
+func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "owner1"}, RoomID: "r1"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1"},
+		model.Subscription{ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "unrelated"}, RoomID: "other-room"},
+	)
+	store.mu.Unlock()
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "owner1", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
+		"every local subscriber of the restricted room must be busted")
+	assert.NotContains(t, fake.DeletedKeys(), subauthcache.SubKey("other-room", "unrelated"),
+		"a subscriber of a different room must not be busted")
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip")
 }
 
 func TestHandleEvent_RoleUpdated(t *testing.T) {
@@ -1369,7 +1485,7 @@ func TestHandleEvent_MemberRemoved(t *testing.T) {
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
-		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleMember},
+		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleUser},
 	})
 	store.mu.Unlock()
 
@@ -1444,8 +1560,8 @@ func TestHandleEvent_MemberRemoved_MultipleAccounts(t *testing.T) {
 	// Pre-populate subscriptions for both accounts
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions,
-		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
-		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
 	)
 	store.mu.Unlock()
 
@@ -1864,7 +1980,7 @@ func TestHandleEvent_MemberAdded_PartialUsers_CreatesPresentAndErrors(t *testing
 }
 
 func TestRolesForType(t *testing.T) {
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesForType(model.RoomTypeChannel))
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesForType(model.RoomTypeChannel))
 	assert.Nil(t, rolesForType(model.RoomTypeDM))
 	assert.Nil(t, rolesForType(model.RoomTypeBotDM))
 }
@@ -2009,7 +2125,7 @@ func TestHandleMemberAdded_Channel_BuildsChannelSub(t *testing.T) {
 	require.Len(t, subs, 2)
 	for _, s := range subs {
 		assert.Equal(t, "deal team", s.Name)
-		assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+		assert.Equal(t, []model.Role{model.RoleUser}, s.Roles)
 		assert.Equal(t, model.RoomTypeChannel, s.RoomType)
 		assert.Equal(t, "site-A", s.SiteID)
 	}
@@ -2042,7 +2158,7 @@ func TestHandleMemberAdded_EmptyRoomType_DefaultsToChannel(t *testing.T) {
 	subs := store.bulkSubscriptions
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType, "empty RoomType must default to channel")
-	assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, subs[0].Roles)
 }
 
 func TestHandleMemberAdded_DuplicateKey_IsIdempotent(t *testing.T) {
@@ -3167,6 +3283,35 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}
+
+// ApplySubscriptionRestriction can bulk-rewrite Roles for every subscriber —
+// owner set, everyone else demoted — so by the time the bust runs the write has
+// already made every cached authorization decision for this room wrong. Acking
+// on a listing failure leaves those demoted members authorized from L2 for the
+// rest of the TTL. The event is idempotent, so the error must reach JetStream
+// and let the redelivery complete the invalidation.
+func TestHandler_RoomVisibilityChanged_ListingFailureIsRetryable(t *testing.T) {
+	store := &stubInboxStore{listAccountsErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "bob", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+
+	require.Error(t, err, "the event must NAK so the redelivery can finish the bust")
+	assert.NotErrorIs(t, err, errcode.ErrPermanent,
+		"a listing failure is transient — it must retry, not Ack-drop")
+	// The authoritative write still ran; only the invalidation is outstanding.
+	assert.Len(t, store.getVisibilityUpdates(), 1)
 }
 
 func TestHandleEvent_SubscriptionMention(t *testing.T) {

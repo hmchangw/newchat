@@ -22,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -46,7 +47,16 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 // Docker) with the MESSAGES-CANONICAL stream and a broadcast-worker-style
 // durable consumer, returning the JetStream handle, the iterator, the subject
 // to publish canonical messages on, and the durable's MaxDeliver.
-func startEmbeddedCanonicalConsumer(t *testing.T, siteID string) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
+// ackWait is a parameter because the two callers want opposite things from it.
+// The redelivery test needs it short, so an unacked message visibly redelivers
+// inside the test window. The metrics test needs it long: its handler Naks, and
+// a Nak issued after AckWait has already expired is rejected by the server —
+// natsmetrics.Message.finish then records left_pending instead of nak, the
+// server redelivers on expiry anyway, and the nak assertion fails on a loaded
+// runner while the test still observes its redelivery. That is a real property
+// of the system rather than a test artifact, and it is the subject of an open
+// review thread; here it is only noise, so the metrics test buys headroom.
+func startEmbeddedCanonicalConsumer(t *testing.T, siteID string, ackWait time.Duration) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
 	t.Helper()
 	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
 	// visibly redelivers within the test window. jobguard Acks the poison
@@ -120,7 +130,8 @@ func startEmbeddedCanonicalConsumerWith(t *testing.T, siteID string, settings st
 // must be Acked (poison drop) rather than redelivered — a redelivery loop is
 // what crash-loops a real worker.
 func TestConsume_PoisonMessageDoesNotBlockStream(t *testing.T) {
-	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-test")
+	// Short AckWait: this test wants an unacked message to redeliver fast.
+	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-test", time.Second)
 
 	var poisonCalls atomic.Int32
 	good := make(chan struct{}, 1)
@@ -184,7 +195,7 @@ func newTestBroadcastMetrics(t *testing.T) (*natsmetrics.Metrics, sdkmetric.Read
 // check: run real deliveries through a real durable and assert the exact
 // counter deltas, the loop gauge, and that no identifier leaked into a label.
 func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
-	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-metrics")
+	js, iter, subj, maxDeliver := startEmbeddedCanonicalConsumer(t, "site-metrics", 30*time.Second)
 	m, reader := newTestBroadcastMetrics(t)
 	consumer := m.Consumer(natsmetrics.ConsumerConfig{
 		Site:   "site-metrics",
@@ -203,8 +214,13 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 			acked <- struct{}{}
 		case "transient":
 			// Nak once, then Ack on the redelivery so the run terminates.
+			//
+			// assert, not require: this runs on a Consume goroutine where FailNow
+			// is illegal. The error is checked rather than discarded because a
+			// rejected Nak is recorded as left_pending, and the only symptom used
+			// to be the nak assertion below reading 0 with nothing to explain it.
 			if naks.Add(1) == 1 {
-				_ = msg.Nak()
+				assert.NoError(t, msg.Nak(), "Nak was rejected — the nak assertion below will read 0")
 				return
 			}
 			_ = msg.Ack()
@@ -244,13 +260,25 @@ func TestConsume_MetricsAgainstRealJetStream(t *testing.T) {
 		t.Fatal("transient message never redelivered")
 	}
 
+	// Both signals above are sent from inside the handler, but the outcome is
+	// recorded after it: Nak() tells the server first and calls finish second
+	// (metrics.go), and a bare Nak redelivers instantly — so the redelivery can
+	// be handled and signalled while the naked message's goroutine has not yet
+	// reached its finish. Waiting on the handler WaitGroup is what makes the
+	// counters readable; without it the nak assertion below reads 0 whenever a
+	// loaded scheduler wins that race.
+	wg.Wait()
+
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
 
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.loop.up", nil), "loop must be up")
 	assert.Equal(t, int64(3), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "ack", "event_type": "created"}))
+	// The nak above is the redelivery signal. A nakked delivery is what makes
+	// JetStream redeliver, and this counter already carries the event type, so
+	// "which kind of message keeps failing" is answered here; "how many times it
+	// was redelivered" is the broker's jetstream_consumer_num_redelivered.
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.messages", map[string]string{"outcome": "nak", "event_type": "created"}))
-	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.consumer.redeliveries", map[string]string{"event_type": "created"}))
 	assert.Equal(t, int64(1), sumOf(t, rm, "chat.nats.terminal.failures", map[string]string{"reason": "invalid_payload"}))
 
 	// The stream, subject and site carry a site id and a message body, but no
@@ -333,18 +361,15 @@ func (ackPendingStore) GetThreadFollowers(context.Context, string) (map[string]s
 }
 
 func (ackPendingStore) GetRoom(context.Context, string) (*model.Room, error) { return nil, nil }
-func (ackPendingStore) ListSubscriptions(context.Context, string) ([]model.Subscription, error) {
+
+// No members, matching the nil subscription list this fake carried before the
+// room-level writes moved to roomlist-worker: this test is about ack-pending on
+// an unretryable failure, not about fan-out reaching anyone.
+func (ackPendingStore) ListRoomMembers(context.Context, string) ([]roomsubcache.Member, error) {
 	return nil, nil
-}
-func (ackPendingStore) UpdateRoomLastMessage(context.Context, roomLastMessage) error { return nil }
-func (ackPendingStore) SetSubscriptionMentions(context.Context, string, []string, time.Time) error {
-	return nil
 }
 func (ackPendingStore) GetHistorySharedSince(context.Context, string, []string) (map[string]*time.Time, error) {
 	return map[string]*time.Time{}, nil
-}
-func (ackPendingStore) AdvanceSubscriptionLastSeen(context.Context, string, string, time.Time) error {
-	return nil
 }
 
 type ackPendingUsers struct{}

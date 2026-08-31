@@ -330,7 +330,7 @@ func buildSoakSubscriptions(
 ) []model.Subscription {
 	subscriptions := make([]model.Subscription, len(members))
 	for i := range members {
-		roles := []model.Role{model.RoleMember}
+		roles := []model.Role{model.RoleUser}
 		name := room.Name
 		if room.Type == model.RoomTypeChannel && i == 0 {
 			roles = []model.Role{model.RoleOwner}

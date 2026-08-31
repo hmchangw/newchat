@@ -37,7 +37,7 @@ func TestHandleRemove_DiffNonEmpty_RotatesThenFansOutToSurvivors(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -92,7 +92,12 @@ func TestHandleRemove_DiffEmpty_NoRotation(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return false, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "", false, nil },
+		// Reached before the delete now: the removal destination is resolved
+		// while the subscription row that identifies it still exists.
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
+		},
 	}
 	getCalled := false
 	keyStore := &fakeKeyStore{
@@ -122,7 +127,7 @@ func removeKeyStore() *fakeStore {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -253,7 +258,7 @@ func TestHandleRemove_RotateOtherError_FailsHandler(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -288,7 +293,7 @@ func TestHandleRemove_KeySendFailureDoesNotFailOp(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -336,4 +341,148 @@ func TestHandleRemove_RotateFails_FansOutNothing(t *testing.T) {
 	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
 	require.Error(t, err)
 	assert.Empty(t, pub.payloads, "a failed rotation must not hand survivors a phantom key")
+}
+
+// A federation publish failure must not cancel the key rotation. The local
+// subscriptions are already deleted, and the retry cannot recover: it sees
+// wasThere=false, skips to the end, and never rotates. Returning before the
+// rotation therefore leaves the removed member holding a key that still opens
+// every future message in the room — permanently, since nothing rotates later.
+//
+// Sibling of TestHandleRemove_BustsWhenFederationFails: same committed-delete
+// reasoning, applied to the key instead of the cache entry.
+func TestHandleRemove_RotatesWhenFederationFails(t *testing.T) {
+	rotated := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			// A remote home site, so the removal federates and hits the failure.
+			return &model.User{ID: id, Account: "bob", SiteID: "site-b"}, nil
+		},
+		ListRoomMemberAccountsFn: func(_ context.Context, _ string) ([]string, error) {
+			return []string{"carol"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{
+				Version: 3,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
+			}, nil
+		},
+		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
+			rotated = true
+			return 4, nil
+		},
+	}
+	failing := func(context.Context, string, []byte, string) error { return errors.New("outbox down") }
+	h := newHandler(store, "site-a", []string{"site-b"}, failing, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+
+	require.Error(t, err, "the caller must still learn federation failed")
+	assert.True(t, rotated, "a federation failure must not leave the removed member holding the room key")
+}
+
+// Sibling of TestHandleRemove_RotatesWhenFederationFails: the same
+// committed-delete reasoning, applied to a failure in the MIDDLE of the batch
+// rather than after it. An error on a later user returns before the rotation,
+// and the retry cannot repair it — every delete this attempt already committed
+// reports wasThere=false next time, so `removed` can come back empty and the
+// rotation is skipped permanently, leaving the removed member holding a key
+// that opens every future message in the room.
+func TestHandleRemove_RotatesWhenTheBatchFailsPartWayThrough(t *testing.T) {
+	rotated := false
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+			return "alice", true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			if id == "bob-id" {
+				// Transient, NOT ErrNotFound: the handler returns rather than
+				// treating the user as absent and carrying on.
+				return nil, errors.New("mongo unreachable")
+			}
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+		ListRoomMemberAccountsFn: func(_ context.Context, _ string) ([]string, error) {
+			return []string{"carol"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{
+				Version: 3,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
+			}, nil
+		},
+		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
+			rotated = true
+			return 4, nil
+		},
+	}
+	ok := func(context.Context, string, []byte, string) error { return nil }
+	h := newHandler(store, "site-a", []string{"site-b"}, ok, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"alice-id", "bob-id"}})
+
+	require.Error(t, err, "the caller must still learn the batch failed")
+	assert.True(t, rotated, "a mid-batch failure must not leave the already-removed member holding the room key")
+}
+
+// The third face of the same hazard. The deferred net covers a mid-batch error,
+// but not a failure of the rotation itself: `rotated` was set BEFORE the call,
+// so a failing rotation suppressed its own safety net. The caller's retry cannot
+// repair that — every committed delete reports wasThere=false, `removed` comes
+// back empty, and the rotation is skipped for good — which is the very reasoning
+// the deferred net exists for. So a failed rotation must get its one remaining
+// chance inside this request, while `removed` still says a key must be rotated.
+func TestHandleRemove_RetriesRotationWhenTheFirstAttemptFails(t *testing.T) {
+	rotateCalls := 0
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+			return "alice", true, nil
+		},
+		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
+			return &model.User{ID: id, Account: "alice", SiteID: "site-a"}, nil
+		},
+		ListRoomMemberAccountsFn: func(_ context.Context, _ string) ([]string, error) {
+			return []string{"carol"}, nil
+		},
+	}
+	keyStore := &fakeKeyStore{
+		GetFn: func(_ context.Context, _ string) (*roomkeystore.VersionedKeyPair, error) {
+			return &roomkeystore.VersionedKeyPair{
+				Version: 3,
+				KeyPair: roomkeystore.RoomKeyPair{PrivateKey: []byte("old-key-bytes-0123456789012345")},
+			}, nil
+		},
+		RotateFn: func(_ context.Context, _ string, _ roomkeystore.RoomKeyPair) (int, error) {
+			rotateCalls++
+			if rotateCalls == 1 {
+				return 0, errors.New("transient rotation failure")
+			}
+			return 4, nil
+		},
+	}
+	ok := func(context.Context, string, []byte, string) error { return nil }
+	h := newHandler(store, "site-a", []string{"site-b"}, ok, keyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"alice-id"}})
+
+	require.Error(t, err, "the caller must still learn the removal did not complete cleanly")
+	assert.Equal(t, 2, rotateCalls,
+		"a failed rotation must get its one remaining chance in this request, because the retry cannot rotate at all")
 }

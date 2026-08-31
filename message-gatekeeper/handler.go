@@ -416,9 +416,12 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	if !isThreadReply && !bypass {
 		meta, err := h.store.GetRoomMeta(ctx, roomID)
 		if err != nil {
-			return nil, fmt.Errorf("get room meta for %s: %w", roomID, err)
-		}
-		if meta.UserCount > h.largeRoomThreshold {
+			// Fail-open: during a Mongo outage the room-meta read is
+			// unavailable. The large-room cap is a spam/noise control, not an
+			// access control, so allow the post rather than block the send.
+			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap (fail-open)",
+				"request_id", req.RequestID, "room_id", roomID, "error", err)
+		} else if meta.UserCount > h.largeRoomThreshold {
 			slog.Info("send blocked",
 				"reason", string(errcode.MessageLargeRoomPostRestricted),
 				"account", account,

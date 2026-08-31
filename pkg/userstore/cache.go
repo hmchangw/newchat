@@ -11,19 +11,17 @@ import (
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // fetchTimeout bounds the detached shared load so a hung backend cannot leak
 // the singleflight goroutine or pin the in-flight key. See the design spec.
 const fetchTimeout = 10 * time.Second
 
-// Recorder records the outcome of a cache lookup. cachemetrics.Recorder
-// satisfies it; tests substitute a spy.
-type Recorder interface {
-	Hit(ctx context.Context)
-	Miss(ctx context.Context)
-	Error(ctx context.Context)
-}
+// Recorder records the outcome of an L2 cache lookup. An alias of
+// valkeyutil.CacheRecorder: every tier in this repo records against one
+// interface, and cachemetrics.Recorder satisfies it.
+type Recorder = valkeyutil.CacheRecorder
 
 // Cache fronts a UserStore with two LRU+TTL stores (byID, byAccount) sharing
 // value pointers; populate writes to both so a hit on either satisfies the
@@ -166,17 +164,23 @@ func (c *Cache) FindUsersByAccounts(ctx context.Context, accounts []string) ([]m
 		return hits, nil
 	}
 	fresh, err := c.store.FindUsersByAccounts(ctx, missing)
+	// Populate and return whatever resolved, error or not. The store below is
+	// the L2 tier, which deliberately answers with its warm entries ALONGSIDE
+	// its error during a Mongo outage — dropping them here would discard a
+	// completed round trip, leave the L1 cold so the next message repeats it,
+	// and defeat the tier at the one moment it exists for. Mention resolution
+	// above is built on the same rule: a partial answer beats none.
+	for i := range fresh {
+		c.populate(&fresh[i])
+	}
 	if err != nil {
 		for range missing {
 			c.metrics.Error(ctx)
 		}
-		return hits, fmt.Errorf("cached find users by accounts: %w", err)
+		return append(hits, fresh...), fmt.Errorf("cached find users by accounts: %w", err)
 	}
 	for range missing {
 		c.metrics.Miss(ctx)
-	}
-	for i := range fresh {
-		c.populate(&fresh[i])
 	}
 	return append(hits, fresh...), nil
 }

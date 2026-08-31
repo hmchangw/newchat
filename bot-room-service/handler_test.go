@@ -25,7 +25,7 @@ type fakeStore struct {
 	InsertRoomFn             func(ctx context.Context, r *Room) error
 	FindRoomFn               func(ctx context.Context, id string) (*Room, error)
 	UpsertSubscriptionFn     func(ctx context.Context, s *Subscription) (bool, error)
-	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (bool, error)
+	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (account string, deleted bool, err error)
 	FindUserFn               func(ctx context.Context, id string) (*model.User, error)
 	ListRoomMemberAccountsFn func(ctx context.Context, roomID string) ([]string, error)
 }
@@ -40,7 +40,7 @@ func (f *fakeStore) FindRoom(ctx context.Context, id string) (*Room, error) {
 func (f *fakeStore) UpsertSubscription(ctx context.Context, s *Subscription) (bool, error) {
 	return f.UpsertSubscriptionFn(ctx, s)
 }
-func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (bool, error) {
+func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (string, bool, error) {
 	return f.DeleteSubscriptionFn(ctx, r, u)
 }
 func (f *fakeStore) FindUser(ctx context.Context, id string) (*model.User, error) {
@@ -477,7 +477,7 @@ func TestHandleRemove_EmitsSysmsgWhenSomethingChanged(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (bool, error) { return true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -791,6 +791,61 @@ func isErrcode(err error, out **errcode.Error) bool {
 	}
 	*out = e
 	return true
+}
+
+// A transient FindUser failure must not strand the federation. The user doc is
+// the only place the removal's destination site lives (the subscription's own
+// siteId is the ROOM's site, and u carries just _id/account/isBot), so losing
+// that lookup after the delete has committed means the remote site is never
+// told and nothing will retry: the row is gone, so a retry sees wasThere=false
+// and skips federation for good.
+func TestHandleRemove_TransientFindUserFailureLeavesTheSubscriptionIntact(t *testing.T) {
+	deletes := 0
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+			deletes++
+			return "bob", true, nil
+		},
+		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
+			return nil, errors.New("mongo down")
+		},
+	}
+	ob := &captureOutbox{}
+	h := newHandler(store, "site-a", nil, ob.publish, testKeyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	_, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.Error(t, err, "the caller must learn the removal did not complete, so it can retry")
+	assert.Zero(t, deletes, "the destination must be resolved before the row that identifies it is deleted")
+}
+
+// A user doc that is genuinely gone is not an outage: there is no remote site to
+// notify, so the local removal proceeds.
+func TestHandleRemove_MissingUserDocStillRemovesLocally(t *testing.T) {
+	deletes := 0
+	store := &fakeStore{
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
+		},
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+			deletes++
+			return "bob", true, nil
+		},
+		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
+			return nil, ErrNotFound
+		},
+	}
+	ob := &captureOutbox{}
+	h := newHandler(store, "site-a", nil, ob.publish, testKeyStore, testKeySender)
+	c := withIdentity(t, "r1", ident())
+
+	resp, err := h.handleRemove(c, BotMembersBatchRequest{UserIDs: []string{"bob-id"}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, deletes, "a vanished user doc must not block the local removal")
+	assert.Equal(t, []string{"bob-id"}, resp.Removed.UserIDs)
 }
 
 // dm.ensure wrote neither roomType nor name, so the rows matched no list bucket

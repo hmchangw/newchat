@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/preview"
@@ -137,53 +139,99 @@ func TestHandler_PreviewForInserted(t *testing.T) {
 	}
 }
 
+// fakeBulkWriter captures what the writer drained, so a test asserts on the batch
+// rather than on MongoDB.
+type fakeBulkWriter struct {
+	mu    sync.Mutex
+	calls []map[string]roomPreviewUpdate
+	err   error
+}
+
+func (f *fakeBulkWriter) BulkUpdateRoomPreview(_ context.Context, updates map[string]roomPreviewUpdate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make(map[string]roomPreviewUpdate, len(updates))
+	for k, v := range updates {
+		cp[k] = v
+	}
+	f.calls = append(f.calls, cp)
+	return f.err
+}
+
+func (f *fakeBulkWriter) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
 // A newer INELIGIBLE message must advance the last-message id without evicting the
 // preview it cannot replace, so a room whose latest activity is a join notice still shows.
-func TestCoalescingStore_IneligibleMessageAdvancesTheKeyButKeepsThePreview(t *testing.T) {
+func TestPreviewWriter_IneligibleMessageAdvancesTheKeyButKeepsThePreview(t *testing.T) {
 	bulk := &fakeBulkWriter{}
-	c := newCoalescingStore(nil, bulk)
+	w := newPreviewWriter(bulk)
 	t0 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 	sealed := &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-eligible"}}
 
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), roomLastMessage{
-		RoomID: "r-1", MsgID: "m-eligible", At: t0, Preview: sealed,
-	}))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), roomLastMessage{
-		RoomID: "r-1", MsgID: "m-system", At: t0.Add(time.Second), Preview: nil,
-	}))
-	require.NoError(t, c.Flush(context.Background()))
+	w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-eligible", At: t0, Preview: sealed})
+	w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-system", At: t0.Add(time.Second), Preview: nil})
+	require.NoError(t, w.Flush(context.Background()))
 
 	require.Len(t, bulk.calls, 1)
 	got := bulk.calls[0]["r-1"]
-	assert.Equal(t, "m-system", got.msgID, "lastMsgId follows the newest message, eligible or not")
+	assert.Equal(t, "m-system", got.msgID, "the freshness key follows the newest message, eligible or not")
 	require.NotNil(t, got.pvw)
 	assert.Equal(t, "m-eligible", got.pvw.Meta.MessageID, "the system message must not evict the preview")
 }
 
-func TestCoalescingStore_NewerEligiblePreviewWins(t *testing.T) {
+func TestPreviewWriter_NewerEligiblePreviewWins(t *testing.T) {
 	bulk := &fakeBulkWriter{}
-	c := newCoalescingStore(nil, bulk)
+	w := newPreviewWriter(bulk)
 	t0 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
 	// Delivered newest-first, as an unordered consumer may see them.
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), roomLastMessage{
+	w.buffer(roomPreview{
 		RoomID: "r-1", MsgID: "m-2", At: t0.Add(time.Second),
 		Preview: &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-2"}},
-	}))
-	require.NoError(t, c.UpdateRoomLastMessage(context.Background(), roomLastMessage{
+	})
+	w.buffer(roomPreview{
 		RoomID: "r-1", MsgID: "m-1", At: t0,
 		Preview: &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-1"}},
-	}))
-	require.NoError(t, c.Flush(context.Background()))
+	})
+	require.NoError(t, w.Flush(context.Background()))
 
 	got := bulk.calls[0]["r-1"]
 	assert.Equal(t, "m-2", got.msgID)
 	assert.Equal(t, "m-2", got.pvw.Meta.MessageID, "arrival order must not decide which preview survives")
 }
 
+// Same millisecond, so created_at cannot order them: the id has to. roomlist-worker
+// coalesces the same pair with the same comparator, and the reader only serves a
+// stored preview while the two agree on the room's newest message — so a tie broken
+// by arrival order here is a preview that reads as stale until the next message.
+func TestPreviewWriter_SameMillisecondTieBreaksOnTheMessageID(t *testing.T) {
+	t0 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	for _, order := range [][2]string{{"m-1", "m-2"}, {"m-2", "m-1"}} {
+		t.Run(order[0]+" then "+order[1], func(t *testing.T) {
+			bulk := &fakeBulkWriter{}
+			w := newPreviewWriter(bulk)
+			for _, id := range order {
+				w.buffer(roomPreview{
+					RoomID: "r-1", MsgID: id, At: t0,
+					Preview: &preview.Sealed{Meta: model.PreviewMeta{MessageID: id}},
+				})
+			}
+			require.NoError(t, w.Flush(context.Background()))
+
+			got := bulk.calls[0]["r-1"]
+			assert.Equal(t, "m-2", got.msgID, "the higher id wins regardless of arrival order")
+			assert.Equal(t, "m-2", got.pvw.Meta.MessageID)
+		})
+	}
+}
+
 // A seal failure is not an ineligible message: it must ride the preview clock, or an
 // older successful seal arriving later in the same flush window would overwrite it (#224).
-func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
+func TestPreviewWriter_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 	t0 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 	t1 := t0.Add(time.Second)
 	sealedFor := func(id string) *preview.Sealed {
@@ -191,14 +239,14 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 	}
 	tests := []struct {
 		name       string
-		updates    []roomLastMessage
+		updates    []roomPreview
 		wantMsgID  string
 		wantFailed bool
 		wantPvw    string // "" when no body may be written
 	}{
 		{
 			name: "a failure after a good seal withdraws it",
-			updates: []roomLastMessage{
+			updates: []roomPreview{
 				{RoomID: "r-1", MsgID: "m-1", At: t0, Preview: sealedFor("m-1")},
 				{RoomID: "r-1", MsgID: "m-2", At: t1, PreviewFailed: true},
 			},
@@ -206,7 +254,7 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 		},
 		{
 			name: "an older good seal must not overtake a newer failure",
-			updates: []roomLastMessage{
+			updates: []roomPreview{
 				{RoomID: "r-1", MsgID: "m-2", At: t1, PreviewFailed: true},
 				{RoomID: "r-1", MsgID: "m-1", At: t0, Preview: sealedFor("m-1")},
 			},
@@ -214,7 +262,7 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 		},
 		{
 			name: "a newer clean seal heals an earlier failure",
-			updates: []roomLastMessage{
+			updates: []roomPreview{
 				{RoomID: "r-1", MsgID: "m-1", At: t0, PreviewFailed: true},
 				{RoomID: "r-1", MsgID: "m-2", At: t1, Preview: sealedFor("m-2")},
 			},
@@ -222,7 +270,7 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 		},
 		{
 			name: "a later ineligible message leaves the failure standing",
-			updates: []roomLastMessage{
+			updates: []roomPreview{
 				{RoomID: "r-1", MsgID: "m-1", At: t0, PreviewFailed: true},
 				{RoomID: "r-1", MsgID: "m-sys", At: t1},
 			},
@@ -232,15 +280,15 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			bulk := &fakeBulkWriter{}
-			c := newCoalescingStore(nil, bulk)
+			w := newPreviewWriter(bulk)
 			for _, u := range tc.updates {
-				require.NoError(t, c.UpdateRoomLastMessage(context.Background(), u))
+				w.buffer(u)
 			}
-			require.NoError(t, c.Flush(context.Background()))
+			require.NoError(t, w.Flush(context.Background()))
 
 			require.Len(t, bulk.calls, 1)
 			got := bulk.calls[0]["r-1"]
-			assert.Equal(t, tc.wantMsgID, got.msgID, "lastMsgId follows the newest message either way")
+			assert.Equal(t, tc.wantMsgID, got.msgID, "the key follows the newest message either way")
 			assert.Equal(t, tc.wantFailed, got.pvwFailed)
 			if tc.wantPvw == "" {
 				assert.Nil(t, got.pvw)
@@ -252,34 +300,70 @@ func TestCoalescingStore_SealFailureSuppressesThePreviewWrite(t *testing.T) {
 	}
 }
 
-func TestLastMessageUpdate_PlainSetWhenPreviewsOff(t *testing.T) {
-	m := &mongoStore{previews: false}
-	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+func TestPreviewWriter_EmptyBufferIsNotWritten(t *testing.T) {
+	bulk := &fakeBulkWriter{}
+	w := newPreviewWriter(bulk)
 
-	got := m.lastMessageUpdate(&roomLastMsgUpdate{msgID: "m-1", at: at, userAt: at, userMsgID: "m-1"})
-
-	set, ok := got.(bson.M)
-	require.True(t, ok, "with previews off the update must stay the plain $set it has always been")
-	fields := set["$set"].(bson.M)
-	assert.Equal(t, "m-1", fields["lastMsgId"])
-	assert.Equal(t, at, fields["lastUserMsgAt"])
-	assert.NotContains(t, fields, "previewForMsgId")
+	require.NoError(t, w.Flush(context.Background()))
+	assert.Zero(t, bulk.callCount(), "an idle interval must not issue a BulkWrite")
 }
 
-func TestLastMessageUpdate_EligibleMessageStampsTheNewestIDNotTheSealedOne(t *testing.T) {
-	m := &mongoStore{previews: true}
+// A nil writer is what a deployment with preview persistence off gets, and the handler
+// calls into it on every insert — so every method has to tolerate it.
+func TestPreviewWriter_NilIsInert(t *testing.T) {
+	var w *previewWriter
+
+	assert.NotPanics(t, func() { w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-1"}) })
+	assert.NoError(t, w.Flush(context.Background()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); w.Run(ctx, time.Millisecond) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run on a nil writer must return immediately")
+	}
+}
+
+// The room pointer moved to roomlist-worker, which holds its messages un-acked until
+// MongoDB takes them. This write must not touch those fields: a best-effort write that
+// drops on failure racing a durable, retried one would let a stalled preview flush
+// resurrect an older lastMsgId over the pointer roomlist-worker had already advanced.
+func TestPreviewUpdate_TouchesOnlyThePreviewFields(t *testing.T) {
+	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	sealed := &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-1"}}
+	updates := map[string]roomPreviewUpdate{
+		"eligible":   {msgID: "m-1", at: at, pvw: sealed, pvwAt: at},
+		"ineligible": {msgID: "m-sys", at: at},
+		"failed":     {msgID: "m-1", at: at, pvwFailed: true, pvwAt: at},
+	}
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
+	for name, u := range updates {
+		t.Run(name, func(t *testing.T) {
+			fields := previewUpdate(&u)[0][0].Value.(bson.M)
+			for _, owned := range []string{"lastMsgAt", "lastMsgId", "lastMentionAllAt", "updatedAt"} {
+				assert.NotContains(t, fields, owned, "%s belongs to roomlist-worker", owned)
+			}
+			for k := range fields {
+				assert.True(t, strings.HasPrefix(k, "preview"),
+					"%q is not a preview field; this write must stay within its half of the document", k)
+			}
+		})
+	}
+}
+
+func TestPreviewUpdate_EligibleMessageStampsTheNewestIDNotTheSealedOne(t *testing.T) {
 	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
-	got := m.lastMessageUpdate(&roomLastMsgUpdate{
+	fields := previewUpdate(&roomPreviewUpdate{
 		msgID: "m-system", at: at,
 		// Sealed while m-eligible was newest; a system message arrived in the same window.
 		pvw:   &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-eligible"}, ForMsgID: "m-eligible"},
 		pvwAt: at.Add(-time.Second),
-	})
-
-	pipeline, ok := got.(mongo.Pipeline)
-	require.True(t, ok, "the guarded preview write needs an aggregation pipeline")
-	fields := pipeline[0][0].Value.(bson.M)
+	})[0][0].Value.(bson.M)
 
 	require.Contains(t, fields, "previewCiphertext")
 	keyCond := fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)
@@ -293,75 +377,65 @@ func TestLastMessageUpdate_EligibleMessageStampsTheNewestIDNotTheSealedOne(t *te
 	// landed in between carrying the correct body.
 	assert.EqualValues(t, at.Add(-time.Second).UnixMilli(),
 		fields["previewAsOf"].(bson.M)["$cond"].(bson.A)[1],
-		"the body write is ordered by pvwAt, not by the room tuple's clock")
+		"the body write is ordered by pvwAt, not by the room's newest-message clock")
 }
 
-// The coalescer keeps pvwAt on its own clock precisely so a later ineligible message
+// The writer keeps pvwAt on its own clock precisely so a later ineligible message
 // cannot displace the preview. The flush must not discard that separation: a mutation
 // landing between the sealed message and the flush writes the correct body, and a flush
 // stamped with the ineligible message's later time would overwrite it with stale content
 // under a key that then equals lastMsgId -- so the reader serves it as current.
-func TestLastMessageUpdate_BodyWriteCannotOutrankAnInterveningMutation(t *testing.T) {
-	m := &mongoStore{previews: true}
+func TestPreviewUpdate_BodyWriteCannotOutrankAnInterveningMutation(t *testing.T) {
 	sealedAt := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 	ineligibleAt := sealedAt.Add(10 * time.Second)
 
 	for _, tc := range []struct {
 		name string
-		upd  roomLastMsgUpdate
+		upd  roomPreviewUpdate
 	}{
-		{"a stored body", roomLastMsgUpdate{
+		{"a stored body", roomPreviewUpdate{
 			msgID: "m-system", at: ineligibleAt,
 			pvw:   &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-eligible"}},
 			pvwAt: sealedAt,
 		}},
-		{"a cleared body", roomLastMsgUpdate{
+		{"a cleared body", roomPreviewUpdate{
 			msgID: "m-system", at: ineligibleAt,
 			pvwFailed: true, pvwAt: sealedAt,
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fields := m.lastMessageUpdate(&tc.upd).(mongo.Pipeline)[0][0].Value.(bson.M)
+			fields := previewUpdate(&tc.upd)[0][0].Value.(bson.M)
 			got := fields["previewAsOf"].(bson.M)["$cond"].(bson.A)[1]
 			assert.EqualValues(t, sealedAt.UnixMilli(), got,
 				"the preview write is as-of when the preview was established")
 			assert.NotEqualValues(t, ineligibleAt.UnixMilli(), got,
-				"the room tuple's clock must not order the preview")
+				"the newest message's clock must not order the preview")
 		})
 	}
 }
 
-func TestLastMessageUpdate_IneligibleMessageAdvancesTheKeyOnly(t *testing.T) {
-	m := &mongoStore{previews: true}
+func TestPreviewUpdate_IneligibleMessageAdvancesTheKeyOnly(t *testing.T) {
 	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
-	got := m.lastMessageUpdate(&roomLastMsgUpdate{msgID: "m-system", at: at})
-
-	pipeline, ok := got.(mongo.Pipeline)
-	require.True(t, ok)
-	fields := pipeline[0][0].Value.(bson.M)
+	fields := previewUpdate(&roomPreviewUpdate{msgID: "m-system", at: at})[0][0].Value.(bson.M)
 
 	assert.Contains(t, fields, "previewForMsgId")
 	assert.NotContains(t, fields, "previewCiphertext", "there is no new body to write; the stored one is still correct")
 	assert.NotContains(t, fields, "previewMeta")
+	// A "$"-prefixed message id would be read as a field path inside a pipeline stage.
+	assert.Equal(t, bson.M{"$literal": "m-system"},
+		fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)[1])
 }
 
 // ForMsgID is not in the AEAD's authenticated data, so a stale body opens cleanly under a
 // moved key and the reader's identity guard passes on it — hence the clear (#224).
-func TestLastMessageUpdate_SealFailureClearsTheStaleBody(t *testing.T) {
-	m := &mongoStore{previews: true}
+func TestPreviewUpdate_SealFailureClearsTheStaleBody(t *testing.T) {
 	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
-	got := m.lastMessageUpdate(&roomLastMsgUpdate{
+	fields := previewUpdate(&roomPreviewUpdate{
 		msgID: "m-unsealable", at: at, pvwFailed: true, pvwAt: at,
-	})
+	})[0][0].Value.(bson.M)
 
-	pipeline, ok := got.(mongo.Pipeline)
-	require.True(t, ok)
-	fields := pipeline[0][0].Value.(bson.M)
-
-	assert.Equal(t, bson.M{"$literal": "m-unsealable"}, fields["lastMsgId"],
-		"ordering still advances; only the preview is removed")
 	// Assert the $cond pass-branch, not just the key: GuardedSetFields emits the same
 	// keys, so presence alone would still pass if this regressed to a write.
 	for _, f := range []string{"previewMeta", "previewCiphertext", "previewNonce", "previewKeyEpoch", "previewForMsgId"} {
@@ -375,20 +449,19 @@ func TestLastMessageUpdate_SealFailureClearsTheStaleBody(t *testing.T) {
 
 // The bug the clear closes: pvwFailed lives only until the next flush, so a later
 // ineligible message would restamp the key over the stale body and stop the walk.
-func TestLastMessageUpdate_IneligibleAfterSealFailureCannotRevalidateAStaleBody(t *testing.T) {
-	m := &mongoStore{previews: true}
+func TestPreviewUpdate_IneligibleAfterSealFailureCannotRevalidateAStaleBody(t *testing.T) {
 	t0 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
 
 	// Window 1: eligible m2 fails to seal. The stored body is still m1's.
-	cleared := m.lastMessageUpdate(&roomLastMsgUpdate{
+	cleared := previewUpdate(&roomPreviewUpdate{
 		msgID: "m2", at: t0, pvwFailed: true, pvwAt: t0,
-	}).(mongo.Pipeline)[0][0].Value.(bson.M)
+	})[0][0].Value.(bson.M)
 	require.Contains(t, cleared, "previewCiphertext", "precondition: the failure clears the body")
 
 	// Window 2: an ineligible system message. pvwFailed is gone with the flushed buffer.
-	advanced := m.lastMessageUpdate(&roomLastMsgUpdate{
+	advanced := previewUpdate(&roomPreviewUpdate{
 		msgID: "m3-system", at: t0.Add(time.Second),
-	}).(mongo.Pipeline)[0][0].Value.(bson.M)
+	})[0][0].Value.(bson.M)
 
 	// The advance is still correct in isolation — but it can only ever revalidate a body
 	// that survived window 1, and window 1 no longer leaves one.
@@ -397,68 +470,40 @@ func TestLastMessageUpdate_IneligibleAfterSealFailureCannotRevalidateAStaleBody(
 		"the advance must never write a body; it can only point at one that is already there")
 }
 
-// Both write paths must render the same buffered shape — a dropped field silently changes
-// the write (#224), so assert the whole struct, not the fields we happen to remember.
-func TestAsBuffered_CarriesEveryFieldToTheDirectPath(t *testing.T) {
-	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
-	sealed := &preview.Sealed{Meta: model.PreviewMeta{MessageID: "m-1"}}
-	tests := []struct {
-		name string
-		in   roomLastMessage
-		want roomLastMsgUpdate
-	}{
-		{
-			name: "a sealed preview with mention-all",
-			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-1", At: at, MentionAll: true, Preview: sealed},
-			want: roomLastMsgUpdate{msgID: "m-1", at: at, lastMentionAllAt: at, pvw: sealed, pvwAt: at, userAt: at, userMsgID: "m-1"},
-		},
-		{
-			name: "a seal failure",
-			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-2", At: at, PreviewFailed: true},
-			want: roomLastMsgUpdate{msgID: "m-2", at: at, pvwFailed: true, pvwAt: at, userAt: at, userMsgID: "m-2"},
-		},
-		{
-			name: "an ineligible message",
-			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-sys", At: at},
-			want: roomLastMsgUpdate{msgID: "m-sys", at: at, pvwAt: at, userAt: at, userMsgID: "m-sys"},
-		},
-		{
-			name: "a system message",
-			in:   roomLastMessage{RoomID: "r-1", MsgID: "m-sys2", At: at, SystemMsg: true},
-			want: roomLastMsgUpdate{msgID: "m-sys2", at: at, pvwAt: at},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, asBuffered(tc.in))
-		})
-	}
-}
+// The app-name read is the last unfenced Mongo read on the fan-out path, and the one
+// whose failure costs least — so it must fail FAST and degrade, never stall the seal.
+func TestGuardedAppNameLookup(t *testing.T) {
+	t.Run("an open breaker fails without reaching Mongo", func(t *testing.T) {
+		var calls int
+		inner := func(context.Context, string) (string, error) {
+			calls++
+			return "", errors.New("mongo unreachable")
+		}
+		b := circuitbreaker.New(1, time.Minute)
+		lookup := guardedAppNameLookup(inner, b)
 
-// The direct path must reach the same clear the coalesced one does, via asBuffered (#224).
-func TestLastMessageUpdate_DirectSealFailureAlsoClearsTheStaleBody(t *testing.T) {
-	m := &mongoStore{previews: true}
-	at := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+		_, err := lookup(context.Background(), "bot-1")
+		require.Error(t, err)
+		require.Equal(t, circuitbreaker.StateOpen, b.State())
 
-	u := asBuffered(roomLastMessage{RoomID: "r-1", MsgID: "m-unsealable", At: at, PreviewFailed: true})
-	fields := m.lastMessageUpdate(&u).(mongo.Pipeline)[0][0].Value.(bson.M)
+		_, err = lookup(context.Background(), "bot-1")
+		assert.ErrorIs(t, err, circuitbreaker.ErrOpen)
+		assert.Equal(t, 1, calls, "an open breaker must not reach Mongo")
+	})
 
-	assert.Equal(t, bson.M{"$literal": "m-unsealable"}, fields["lastMsgId"])
-	// The pass-branch, not just the key: GuardedSetFields emits the same keys, so presence
-	// alone would still pass if the direct path regressed to a write.
-	assert.Equal(t, "$$REMOVE", fields["previewForMsgId"].(bson.M)["$cond"].(bson.A)[1])
-	assert.Equal(t, "$$REMOVE", fields["previewCiphertext"].(bson.M)["$cond"].(bson.A)[1])
-	assert.Contains(t, fields, "previewAsOf")
-}
+	t.Run("a nil breaker passes through", func(t *testing.T) {
+		lookup := guardedAppNameLookup(func(context.Context, string) (string, error) {
+			return "Helper Bot", nil
+		}, nil)
 
-// A "$"-prefixed message id would be read as a field path inside a pipeline stage.
-func TestLastMessageUpdate_LiteralWrapsStringsInThePipelineForm(t *testing.T) {
-	m := &mongoStore{previews: true}
-	fields := m.lastMessageUpdate(&roomLastMsgUpdate{
-		msgID: "m-1", at: time.Now().UTC(),
-	}).(mongo.Pipeline)[0][0].Value.(bson.M)
+		got, err := lookup(context.Background(), "bot-1")
+		require.NoError(t, err)
+		assert.Equal(t, "Helper Bot", got)
+	})
 
-	assert.Equal(t, bson.M{"$literal": "m-1"}, fields["lastMsgId"])
+	t.Run("a nil inner stays nil so BotAwareDisplayName skips it", func(t *testing.T) {
+		assert.Nil(t, guardedAppNameLookup(nil, circuitbreaker.New(1, time.Minute)))
+	})
 }
 
 // blockingCipher stalls until its context is cancelled, standing in for a wedged
@@ -550,4 +595,66 @@ func TestHandler_PreviewForInserted_SealsWhenTheCallerHasNoDeadline(t *testing.T
 
 	assert.False(t, failed, "a deadline-free caller must not read as an exhausted budget")
 	require.NotNil(t, sealed, "the seal must run")
+}
+
+// A panic in the flush must not take the process down. This is the one write in
+// this service that is explicitly optional and droppable, and the service exists
+// to keep fan-out alive — crashing over a room-list preview inverts that.
+func TestPreviewWriter_FlushPanicDoesNotKillTheLoop(t *testing.T) {
+	bulk := newPanickingBulkWriter()
+	w := newPreviewWriter(bulk)
+	w.buffer(roomPreview{RoomID: "r-1", MsgID: "m-1", At: time.Now().UTC()})
+
+	// Driven through the real loop rather than a flush helper: the claim is that
+	// this service's preview loop survives a panicking write, and the loop is
+	// what has to survive it.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		assert.NotPanics(t, func() { w.Run(ctx, time.Millisecond) })
+	}()
+
+	select {
+	case <-bulk.first:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("the loop never attempted a flush")
+	}
+	// Still usable: buffer again and let the loop pick it up.
+	w.buffer(roomPreview{RoomID: "r-2", MsgID: "m-2", At: time.Now().UTC()})
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop did not return after a panicking flush")
+	}
+	assert.GreaterOrEqual(t, bulk.count(), 2, "the loop kept flushing after the panic")
+}
+
+// panickingBulkWriter stands in for a write that blows up on user-derived data.
+type panickingBulkWriter struct {
+	mu        sync.Mutex
+	calls     int
+	firstOnce sync.Once
+	first     chan struct{}
+}
+
+func newPanickingBulkWriter() *panickingBulkWriter {
+	return &panickingBulkWriter{first: make(chan struct{})}
+}
+
+func (p *panickingBulkWriter) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *panickingBulkWriter) BulkUpdateRoomPreview(context.Context, map[string]roomPreviewUpdate) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	p.firstOnce.Do(func() { close(p.first) })
+	panic("bulk write exploded")
 }

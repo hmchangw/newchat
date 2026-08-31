@@ -5,8 +5,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,11 +20,15 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/config"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
+	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgbucket"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // setupCassandra provisions an isolated keyspace with message tables and UDTs for service-layer tests.
@@ -449,3 +455,129 @@ func TestDeleteMessage_Integration_ThreadReplyPublishesMetadataEvent(t *testing.
 // history-service/internal/mongorepo/room_preview_test.go. The handler's own contract
 // (serves stored, omits unstored, never reads a message) is covered by the unit
 // tests in rooms_test.go.
+// subL2SubscriptionSource fronts the shared-L2 subauthcache read-through
+// directly (bypassing the L1 process-local cache) for GetHistorySharedSince,
+// so the outage test below exercises exactly the breaker+L2 wiring main.go
+// configures. GetSubscription (pin/unpin) delegates to the real Mongo repo,
+// matching production wiring where only the access-check goes through L2.
+// subAuthReadThrough mirrors main.go's closure type: the shared-L2 access check
+// running behind the circuit breaker.
+type subAuthReadThrough func(ctx context.Context, account, roomID string) (sharedSince *time.Time, subscribed bool, err error)
+
+type subL2SubscriptionSource struct {
+	l2    subAuthReadThrough
+	inner SubscriptionRepository
+}
+
+func (s subL2SubscriptionSource) GetHistorySharedSince(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+	return s.l2(ctx, account, roomID)
+}
+
+func (s subL2SubscriptionSource) GetSubscription(ctx context.Context, account, roomID string) (*model.Subscription, error) {
+	return s.inner.GetSubscription(ctx, account, roomID)
+}
+
+// TestLoadHistory_SubscriptionSurvivesMongoOutage proves the load-history
+// outage-survival contract end to end: a warm room's access check resolves
+// from the shared Valkey L2 tier without consulting the (unavailable) Mongo
+// loader (so LoadHistory still returns the seeded Cassandra messages), while a
+// cold (never-cached) room's access check is denied once Mongo is unavailable
+// and the breaker has tripped.
+//
+// The outage is simulated soundly — a HEALTHY context throughout, with Mongo
+// unavailability modeled by a spy Loader that deterministically errors (exactly
+// the shape production wires: breaker.Do around the subscription loader). This
+// avoids the unsound "expired shared context" pattern, which also kills the
+// Valkey L2 read and so never exercises the L2-through-outage path. Executed in
+// CI where Docker/testcontainers are available.
+func TestLoadHistory_SubscriptionSurvivesMongoOutage(t *testing.T) {
+	ctx := context.Background()
+	valkey := valkeyutil.WrapClusterClient(testutil.SharedValkeyCluster(t))
+	t.Cleanup(func() { testutil.FlushValkey(t) })
+
+	const (
+		warmRoom = "warmroom"
+		coldRoom = "coldroom"
+		account  = "alice"
+		ttl      = 90 * time.Minute
+	)
+	subRec := cachemetrics.For("subauth", "l2")
+
+	// Warm the real Valkey L2 for the warm room with a healthy loader (Mongo up).
+	warmTier := subauthcache.NewTierWithLoader(valkey, ttl, subRec,
+		func(context.Context, string, string) (subauthcache.SubAuth, bool, error) {
+			return subauthcache.SubAuth{ID: "u1", Account: account}, true, nil
+		})
+	_, subscribed, err := warmTier.Resolve(ctx, warmRoom, account)
+	require.NoError(t, err)
+	require.True(t, subscribed)
+
+	// Simulate Mongo down: a spy loader wrapped in the breaker that
+	// deterministically errors. Context stays healthy so the Valkey read is
+	// unaffected — only the Mongo loader is "down".
+	breaker := circuitbreaker.New(1, 10*time.Second)
+	var loaderCalls atomic.Int32
+	outageTier := subauthcache.NewTierWithLoader(valkey, ttl, subRec,
+		func(context.Context, string, string) (subauthcache.SubAuth, bool, error) {
+			var (
+				auth subauthcache.SubAuth
+				sub  bool
+			)
+			err := breaker.Do(func() error {
+				loaderCalls.Add(1)
+				return errors.New("mongo unreachable")
+			})
+			return auth, sub, err
+		})
+	subL2 := func(ctx context.Context, account, roomID string) (*time.Time, bool, error) {
+		auth, subscribed, err := outageTier.Resolve(ctx, roomID, account)
+		if err != nil || !subscribed {
+			return nil, false, err
+		}
+		var ss *time.Time
+		if auth.HistorySharedSince != nil {
+			t := time.UnixMilli(*auth.HistorySharedSince).UTC()
+			ss = &t
+		}
+		return ss, true, nil
+	}
+
+	// inner is only reached by GetSubscription (pin/unpin), which LoadHistory
+	// never calls; alwaysSubscribedRepo satisfies the interface without Mongo.
+	subSource := subL2SubscriptionSource{l2: subL2, inner: alwaysSubscribedRepo{}}
+
+	session := setupCassandra(t)
+	repo := cassrepo.NewRepository(session, msgbucket.New(24*time.Hour), 365, nil)
+	svc := New(repo, subSource, stubRoomRepo{}, &recordingPublisher{}, nil, nil, nil, nil, &config.Config{
+		MessageHistoryFloorDays: 730,
+		LargeRoomThreshold:      500,
+		MaxPinnedPerRoom:        10,
+		PinEnabled:              true,
+	})
+
+	// Seed one Cassandra message in the warm room so the survived read returns data.
+	sender := models.Participant{ID: "u1", Account: account}
+	msgID := "m-outage-warm"
+	createdAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+	require.NoError(t, session.Query(
+		`INSERT INTO messages_by_room (room_id, bucket, created_at, message_id, sender, msg) VALUES (?, ?, ?, ?, ?, ?)`,
+		warmRoom, msgbucket.New(24*time.Hour).Of(createdAt), createdAt, msgID, sender, "hi",
+	).Exec())
+
+	// Warm room: LoadHistory succeeds via the L2 hit — the Mongo loader is never
+	// consulted for the access check.
+	warmC := natsrouter.NewContext(map[string]string{"account": account, "roomID": warmRoom})
+	resp, err := svc.LoadHistory(warmC, models.LoadHistoryRequest{})
+	require.NoError(t, err, "warm room's access check must survive the outage via L2")
+	require.Len(t, resp.Messages, 1)
+	assert.Equal(t, msgID, resp.Messages[0].MessageID)
+	assert.Equal(t, int32(0), loaderCalls.Load(), "warm L2 hit must not consult the Mongo loader")
+
+	// Cold room: never cached -> L2 miss -> loader invoked -> errors -> breaker
+	// trips -> access check denied.
+	coldC := natsrouter.NewContext(map[string]string{"account": "bob", "roomID": coldRoom})
+	_, err = svc.LoadHistory(coldC, models.LoadHistoryRequest{})
+	require.Error(t, err, "cold room's access check must fail once Mongo is unavailable")
+	assert.GreaterOrEqual(t, loaderCalls.Load(), int32(1), "cold L2 miss must consult the loader")
+	assert.Equal(t, circuitbreaker.StateOpen, breaker.State(), "the cold-miss loader failure must trip the breaker")
+}

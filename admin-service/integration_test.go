@@ -471,9 +471,9 @@ func TestIntegration_Sessions(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), n, "site-b admin must not revoke a site-a session")
 
-		n, err = sessStore.DeleteForAccount(ctx, "site-b", "grace")
+		revoked, err := sessStore.DeleteForAccount(ctx, "site-b", "grace")
 		require.NoError(t, err)
-		assert.Equal(t, int64(0), n, "site-b admin must not revoke site-a sessions in bulk")
+		assert.Empty(t, revoked, "site-b admin must not revoke site-a sessions in bulk")
 
 		// hash-a survives the cross-site attempts.
 		got, err := sessStore.FindByHash(ctx, "hash-a")
@@ -503,9 +503,10 @@ func TestIntegration_Sessions(t *testing.T) {
 	})
 
 	t.Run("DeleteForAccount removes all of the account's sessions", func(t *testing.T) {
-		n, err := sessStore.DeleteForAccount(ctx, "site-a", "grace")
+		revoked, err := sessStore.DeleteForAccount(ctx, "site-a", "grace")
 		require.NoError(t, err)
-		assert.GreaterOrEqual(t, n, int64(1)) // hash-b remains at this point
+		// The ids come back so the caller can bust their cache entries.
+		assert.GreaterOrEqual(t, len(revoked), 1) // hash-b remains at this point
 
 		sessions, err := sessStore.ListForAccount(ctx, "site-a", "grace")
 		require.NoError(t, err)
@@ -514,9 +515,9 @@ func TestIntegration_Sessions(t *testing.T) {
 
 	t.Run("DeleteForAccount removes the other account's sessions only", func(t *testing.T) {
 		// hash-c belongs to the "other" account and is still present.
-		n, err := sessStore.DeleteForAccount(ctx, "site-a", "other")
+		revoked, err := sessStore.DeleteForAccount(ctx, "site-a", "other")
 		require.NoError(t, err)
-		assert.Equal(t, int64(1), n)
+		assert.Equal(t, []string{"hash-c"}, revoked)
 
 		_, err = sessStore.FindByHash(ctx, "hash-c")
 		assert.ErrorIs(t, err, session.ErrNotFound)

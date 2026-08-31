@@ -12,6 +12,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // InboxStore abstracts the data store operations needed by the inbox worker.
@@ -95,8 +97,14 @@ type InboxStore interface {
 	// in the room, each guarded by its own restrictUpdatedAt so an out-of-order
 	// visibility change cannot regress the flags/roles. When restricted=true and
 	// ownerAccount is non-empty, a $cond pipeline demotes all accounts except
-	// ownerAccount to RoleMember.
+	// ownerAccount to RoleUser.
 	ApplySubscriptionRestriction(ctx context.Context, roomID string, restricted, externalAccess bool, ownerAccount string, restrictUpdatedAt time.Time) error
+	// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID
+	// on this site's local replica. Used to drive the room_restricted bust
+	// loop: ApplySubscriptionRestriction can bulk-rewrite Roles for every
+	// local subscriber, not just OwnerAccount, so every one of them needs an
+	// L2 bust. Mirrors room-service's ListSubscriptionsByRoom.
+	ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error)
 	// UpdateUserStatus replicates a cross-site status change onto the local users doc keyed by
 	// account, guarded by statusUpdatedAt (the event publish time): an older/equal high-water
 	// mark is a no-op so out-of-order multi-site delivery can't regress the status. statusIsShow
@@ -149,6 +157,12 @@ type Handler struct {
 	// badge is the badge cache; nil (VALKEY_ADDRS unset) disables the
 	// invalidation hooks. Injected post-construction.
 	badge badgeCache
+	// valkey is the L2 (Valkey) client used only to invalidate this site's
+	// local subauthcache entries after a federated write that replicates a
+	// role change or member removal onto this site's own subscription copy.
+	// nil disables invalidation (best-effort). Set post-construction,
+	// mirroring room-worker/room-service's valkey field.
+	valkey valkeyutil.Client
 	// roomSubs memoizes the "is this site a member of this room" check the
 	// activity refresh performs; nil disables it and every refresh reads through.
 	roomSubs *roomSubCache
@@ -388,6 +402,10 @@ func (h *Handler) handleMemberRemoved(ctx context.Context, evt *model.InboxEvent
 	if err := h.store.DeleteSubscriptionsByAccounts(ctx, memberEvt.RoomID, memberEvt.Accounts); err != nil {
 		return fmt.Errorf("delete subscriptions for room %s: %w", memberEvt.RoomID, err)
 	}
+	// Bust AFTER the write, in one batched round trip: this site's local
+	// replica of each removed member's subscription is gone, so their cached
+	// positive decision must die immediately, not linger for the L2 TTL.
+	subauthcache.BustSubs(ctx, h.valkey, memberEvt.RoomID, memberEvt.Accounts)
 	// Other members may remain, so re-resolve rather than caching a guess. When
 	// none do, the ordering row has no reader left here — drop it, or it becomes
 	// the orphan the seed path is careful not to create. Best-effort: a stale row
@@ -449,6 +467,9 @@ func (h *Handler) handleRoleUpdated(ctx context.Context, evt *model.InboxEvent) 
 	if err := h.store.UpdateSubscriptionRoles(ctx, account, roomID, roles, time.UnixMilli(subEvt.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("update subscription roles: %w", err)
 	}
+	// Bust AFTER the write: this site's local replica's cached Roles must not
+	// keep serving the pre-change decision.
+	subauthcache.BustSub(ctx, h.valkey, roomID, account)
 	return nil
 }
 
@@ -625,6 +646,23 @@ func (h *Handler) handleRoomVisibilityChanged(ctx context.Context, evt *model.In
 	if err := h.store.ApplySubscriptionRestriction(ctx, p.RoomID, p.Restricted, p.ExternalAccess, p.OwnerAccount, time.UnixMilli(p.Timestamp).UTC()); err != nil {
 		return fmt.Errorf("apply subscription visibility for room %s: %w", p.RoomID, err)
 	}
+	// Bust every local subscriber's subauthcache L2 entry in one batched round
+	// trip: ApplySubscriptionRestriction is the same store method
+	// room-service's roomRestricted calls, and it can bulk-rewrite Roles for
+	// every subscriber (owner set, everyone else demoted) alongside the
+	// restricted/externalAccess flags — not just OwnerAccount.
+	//
+	// A listing failure is RETRYABLE, not best-effort. By this point the write
+	// has already made every cached authorization decision for this room wrong,
+	// so Acking here would leave demoted members passing authorization from L2
+	// for the rest of the TTL. The whole event is idempotent — the restriction
+	// write is timestamp-guarded and the bust is a delete — so returning the
+	// error costs one redelivery and completes the invalidation.
+	accounts, err := h.store.ListSubscriptionAccountsByRoom(ctx, p.RoomID)
+	if err != nil {
+		return fmt.Errorf("list local subscribers for subauthcache bust (room %s): %w", p.RoomID, err)
+	}
+	subauthcache.BustSubs(ctx, h.valkey, p.RoomID, accounts)
 	return nil
 }
 
@@ -714,7 +752,7 @@ func (h *Handler) handleSubscriptionSectionMoved(ctx context.Context, evt *model
 
 func rolesForType(t model.RoomType) []model.Role {
 	if t == model.RoomTypeChannel {
-		return []model.Role{model.RoleMember}
+		return []model.Role{model.RoleUser}
 	}
 	return nil
 }

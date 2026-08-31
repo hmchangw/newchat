@@ -2,10 +2,11 @@
 // metrics. It observes existing publish and message-disposition behavior; it
 // never retries, acknowledges, or changes a business result on its own.
 //
-// Every label value comes from a closed enum in this file, so the attribute
-// sets are precomputed once per Consumer/Publisher and looked up by value on
-// the hot path — fan-out records one publish per recipient and must not pay for
-// attribute-set construction each time.
+// Every label value comes from a closed enum in this file, so each attribute
+// set is built once per Consumer/Publisher and looked up by value thereafter —
+// fan-out records one publish per recipient and must not pay for attribute-set
+// construction each time. The sets are cached on first use rather than
+// precomputed across the full cross product; see optTable for why.
 package natsmetrics
 
 import (
@@ -38,8 +39,6 @@ const (
 	OutcomeHandlerCancelled Outcome = "handler_cancelled"
 )
 
-var allOutcomes = []Outcome{OutcomeAck, OutcomeNak, OutcomeTerm, OutcomeLeftPending, OutcomeHandlerCancelled}
-
 type EventType string
 
 const (
@@ -60,16 +59,11 @@ const (
 	EventUnknown          EventType = "unknown"
 )
 
-var allEventTypes = []EventType{
-	EventCreated, EventUpdated, EventDeleted, EventPinned, EventUnpinned,
-	EventReacted, EventThreadReplyAdded, EventSend, EventTeamsBatch, EventUnknown,
-	EventRoomCreate, EventMemberAdd, EventMemberRemove, EventRoomRename, EventMemberMuted,
-}
-
 type PublishOutcome string
 
+// PublishOutcome is a bounded failure cause. There is deliberately no success
+// value: a successful publish is not recorded (see Publisher.Failure).
 const (
-	PublishSuccess         PublishOutcome = "success"
 	PublishTimeout         PublishOutcome = "timeout"
 	PublishNoResponders    PublishOutcome = "no_responders"
 	PublishDisconnected    PublishOutcome = "disconnected"
@@ -79,9 +73,19 @@ const (
 	PublishOtherError      PublishOutcome = "other_error"
 )
 
-var allPublishOutcomes = []PublishOutcome{
-	PublishSuccess, PublishTimeout, PublishNoResponders, PublishDisconnected,
-	PublishBufferFull, PublishPermission, PublishPayloadTooLarge, PublishOtherError,
+// RequestSucceeded marks a request that did not fail. It is not a label value:
+// semconv makes error.type conditional on failure, so a successful call carries
+// no error class at all. Outbound request/reply is still recorded on both
+// halves because nothing else counts a Core NATS exchange — unlike a publish,
+// where the broker owns the success side.
+const RequestSucceeded PublishOutcome = "success"
+
+// classifyRequestOutcome keeps success distinguishable for the request family.
+func classifyRequestOutcome(err error) PublishOutcome {
+	if err == nil {
+		return RequestSucceeded
+	}
+	return ClassifyPublishError(err)
 }
 
 type TerminalReason string
@@ -96,11 +100,6 @@ const (
 	TerminalInternal          TerminalReason = "internal"
 )
 
-var allTerminalReasons = []TerminalReason{
-	TerminalMaxDeliver, TerminalPermanent, TerminalPublishExhausted, TerminalConsumerDeleted,
-	TerminalStreamUnavailable, TerminalInvalidPayload, TerminalInternal,
-}
-
 type RequestResult string
 
 const (
@@ -114,11 +113,6 @@ const (
 	RequestUnavailable     RequestResult = "unavailable"
 	RequestInternal        RequestResult = "internal"
 )
-
-var allRequestResults = []RequestResult{
-	RequestSuccess, RequestBadRequest, RequestUnauthenticated, RequestForbidden,
-	RequestNotFound, RequestConflict, RequestTooManyRequests, RequestUnavailable, RequestInternal,
-}
 
 type DestinationKind string
 
@@ -137,12 +131,6 @@ const (
 	DestinationUnknown        DestinationKind = "unknown"
 )
 
-var allDestinations = []DestinationKind{
-	DestinationCanonical, DestinationRecipientEvent, DestinationNotification, DestinationPush,
-	DestinationOutbox, DestinationInbox, DestinationRoomCanonical, DestinationRoomEvent,
-	DestinationMemberEvent, DestinationClientResponse, DestinationUserSync, DestinationUnknown,
-}
-
 type Operation string
 
 const (
@@ -155,47 +143,63 @@ const (
 	OperationPresenceLookup      Operation = "presence_lookup"
 	OperationThreadTCount        Operation = "thread_tcount"
 	OperationTeamsUserUpsert     Operation = "teams_user_upsert"
-	OperationHistoryRead         Operation = "history_read"
-	OperationHistoryMutation     Operation = "history_mutation"
-	OperationRoomRead            Operation = "room_read"
-	OperationRoomMutation        Operation = "room_mutation"
-	OperationMemberRead          Operation = "member_read"
-	OperationMemberMutation      Operation = "member_mutation"
-	OperationTeamsRoom           Operation = "teams_room"
-	OperationRoomPublish         Operation = "room_publish"
-	OperationMemberPublish       Operation = "member_publish"
-	OperationOutboxPublish       Operation = "outbox_publish"
-	OperationUnknown             Operation = "unknown"
+	// OperationChannelHistory and OperationThreadOpen are split out of
+	// history_read because SLO-4 and SLO-5 measure them separately, against
+	// different bounds. Their cost models differ — channel load walks
+	// messages_by_room buckets, thread open slices one partition of
+	// thread_messages_by_thread — so one shared label would drag the fast
+	// family's ratio down with walk latency and dilute the slow family's
+	// violations with fast traffic, in opposite directions and at a ratio that
+	// drifts with traffic mix.
+	OperationChannelHistory Operation = "channel_history"
+	OperationThreadOpen     Operation = "thread_open"
+	// OperationHistoryRead keeps every other history route: scroll, jump,
+	// single and batch reads, pinned lists, thread parents, and the
+	// server-to-server thread lanes. None of them is described by an SLO.
+	OperationHistoryRead     Operation = "history_read"
+	OperationHistoryMutation Operation = "history_mutation"
+	OperationRoomRead        Operation = "room_read"
+	OperationRoomMutation    Operation = "room_mutation"
+	OperationMemberRead      Operation = "member_read"
+	OperationMemberMutation  Operation = "member_mutation"
+	OperationTeamsRoom       Operation = "teams_room"
+	OperationRoomPublish     Operation = "room_publish"
+	OperationMemberPublish   Operation = "member_publish"
+	OperationOutboxPublish   Operation = "outbox_publish"
+	OperationUnknown         Operation = "unknown"
 )
-
-var allOperations = []Operation{
-	OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
-	OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
-	OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
-	OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
-	OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
-	OperationMemberPublish, OperationOutboxPublish, OperationUnknown,
-}
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
 // to no-op instruments so telemetry can never block service startup or work.
 type Metrics struct {
 	loop               metric.Int64UpDownCounter
 	messages           metric.Int64Counter
-	redeliveries       metric.Int64Counter
 	processingDuration metric.Float64Histogram
-	publishAttempts    metric.Int64Counter
-	publishRetries     metric.Int64Counter
+	publishFailures    metric.Int64Counter
 	terminalFailures   metric.Int64Counter
-	requests           metric.Int64Counter
-	requestDuration    metric.Float64Histogram
-	handledRequests    metric.Int64Counter
-	handlerDuration    metric.Float64Histogram
+	clientCallDuration metric.Float64Histogram
+	serverCallDuration metric.Float64Histogram
 }
 
 // NewFromProvider builds the shared instruments on this package's own scope.
 // Prefer it over New so every caller in a process lands on one scope.
 func NewFromProvider(mp metric.MeterProvider) *Metrics { return New(mp.Meter(ScopeName)) }
+
+// NewFromProviderIfEnabled returns nil when metrics are toggled off, so the
+// recorders collapse to their zero value instead of to no-op instruments.
+//
+// The distinction matters on the hot path. o11y installs no-op providers when
+// O11Y_ENABLED is false, but a no-op instrument is still a live interface: the
+// recording call does its map lookup and the SDK's Add still allocates. Only
+// the nil path skips that work entirely. Callers pass sdk.Toggles.Metrics, so
+// enablement stays an operator decision rather than a second compile-time gate
+// each service has to remember to wire.
+func NewFromProviderIfEnabled(mp metric.MeterProvider, enabled bool) *Metrics {
+	if !enabled {
+		return nil
+	}
+	return NewFromProvider(mp)
+}
 
 func New(meter metric.Meter) *Metrics {
 	noopMeter := noop.NewMeterProvider().Meter("natsmetrics-fallback")
@@ -213,43 +217,35 @@ func New(meter metric.Meter) *Metrics {
 	if err != nil {
 		messages, _ = noopMeter.Int64Counter("chat.nats.consumer.messages")
 	}
-	redeliveries, err := meter.Int64Counter("chat.nats.consumer.redeliveries", metric.WithDescription("JetStream delivery attempts whose delivery count is greater than one."))
-	if err != nil {
-		redeliveries, _ = noopMeter.Int64Counter("chat.nats.consumer.redeliveries")
-	}
 	processing, err := meter.Float64Histogram("chat.nats.consumer.processing.duration", metric.WithDescription("Time from handler start through the disposition attempt."), metric.WithUnit("s"), latency)
 	if err != nil {
 		processing, _ = noopMeter.Float64Histogram("chat.nats.consumer.processing.duration")
 	}
-	publishAttempts, err := meter.Int64Counter("chat.nats.publish.attempts", metric.WithDescription("Actual Core NATS or JetStream publish attempts."))
+	publishFailures, err := meter.Int64Counter("chat.nats.publish.failures", metric.WithDescription("Publishes that failed, by bounded cause. Successes are not recorded."))
 	if err != nil {
-		publishAttempts, _ = noopMeter.Int64Counter("chat.nats.publish.attempts")
-	}
-	publishRetries, err := meter.Int64Counter("chat.nats.publish.retries", metric.WithDescription("Application-managed publish attempts after the first."))
-	if err != nil {
-		publishRetries, _ = noopMeter.Int64Counter("chat.nats.publish.retries")
+		publishFailures, _ = noopMeter.Int64Counter("chat.nats.publish.failures")
 	}
 	terminal, err := meter.Int64Counter("chat.nats.terminal.failures", metric.WithDescription("Work that will receive no further application attempt."))
 	if err != nil {
 		terminal, _ = noopMeter.Int64Counter("chat.nats.terminal.failures")
 	}
-	requests, err := meter.Int64Counter("chat.nats.requests", metric.WithDescription("NATS request/reply results."))
+	// The two request families are the convention's, not ours: name, unit,
+	// description and bucket boundaries all come from semconv. Each replaces a
+	// histogram AND the counter that used to shadow it — a histogram publishes
+	// its own `_count`, so `chat.nats.requests` was
+	// `rpc_client_call_duration_seconds_count` under a second name.
+	rpcBuckets := metric.WithExplicitBucketBoundaries(rpcDurationBuckets...)
+	clientCall, err := meter.Float64Histogram("rpc.client.call.duration",
+		metric.WithDescription("Measures the duration of an outgoing Remote Procedure Call (RPC)."), metric.WithUnit("s"), rpcBuckets)
 	if err != nil {
-		requests, _ = noopMeter.Int64Counter("chat.nats.requests")
+		clientCall, _ = noopMeter.Float64Histogram("rpc.client.call.duration")
 	}
-	requestDuration, err := meter.Float64Histogram("chat.nats.request.duration", metric.WithDescription("End-to-end NATS request/reply duration."), metric.WithUnit("s"), latency)
+	serverCall, err := meter.Float64Histogram("rpc.server.call.duration",
+		metric.WithDescription("Measures the duration of an incoming Remote Procedure Call (RPC)."), metric.WithUnit("s"), rpcBuckets)
 	if err != nil {
-		requestDuration, _ = noopMeter.Float64Histogram("chat.nats.request.duration")
+		serverCall, _ = noopMeter.Float64Histogram("rpc.server.call.duration")
 	}
-	handledRequests, err := meter.Int64Counter("chat.nats.request.handled", metric.WithDescription("Inbound NATS request/reply handler results."))
-	if err != nil {
-		handledRequests, _ = noopMeter.Int64Counter("chat.nats.request.handled")
-	}
-	handlerDuration, err := meter.Float64Histogram("chat.nats.request.handler.duration", metric.WithDescription("Inbound NATS request/reply handler duration."), metric.WithUnit("s"), latency)
-	if err != nil {
-		handlerDuration, _ = noopMeter.Float64Histogram("chat.nats.request.handler.duration")
-	}
-	return &Metrics{loop: loop, messages: messages, redeliveries: redeliveries, processingDuration: processing, publishAttempts: publishAttempts, publishRetries: publishRetries, terminalFailures: terminal, requests: requests, requestDuration: requestDuration, handledRequests: handledRequests, handlerDuration: handlerDuration}
+	return &Metrics{loop: loop, messages: messages, processingDuration: processing, publishFailures: publishFailures, terminalFailures: terminal, clientCallDuration: clientCall, serverCallDuration: serverCall}
 }
 
 // ConsumerConfig carries the per-consumer label base. Service identity is
@@ -281,11 +277,6 @@ type publishKey struct {
 	outcome     PublishOutcome
 }
 
-type retryKey struct {
-	destination DestinationKind
-	operation   Operation
-}
-
 type requestKey struct {
 	operation Operation
 	outcome   PublishOutcome
@@ -299,51 +290,65 @@ type handledRequestKey struct {
 type Consumer struct {
 	metrics *Metrics
 	loopOpt metric.MeasurementOption
-	message map[consumerKey]metric.MeasurementOption
-	redeliv map[EventType]metric.MeasurementOption
-	termOpt map[terminalKey]metric.MeasurementOption
+	message *optTable[consumerKey]
+	termOpt *optTable[terminalKey]
 	up      atomic.Bool
 }
 
 func (m *Metrics) Consumer(cfg ConsumerConfig) *Consumer {
+	// A nil Metrics means metrics are toggled off. Return a live Consumer with
+	// no instruments rather than nil: the worker loops call Track and Finish
+	// unconditionally, and every recorder below already guards on a nil
+	// metrics field.
+	if m == nil {
+		return &Consumer{}
+	}
 	base := []attribute.KeyValue{
 		attribute.String("site", cfg.Site),
 		attribute.String("stream", cfg.Stream),
 		attribute.String("consumer", cfg.Consumer),
 	}
-	withEvent := func(event EventType, extra ...attribute.KeyValue) []attribute.KeyValue {
+	withEvent := func(event EventType, extra ...attribute.KeyValue) metric.MeasurementOption {
 		attrs := make([]attribute.KeyValue, 0, len(base)+1+len(extra))
 		attrs = append(attrs, base...)
 		attrs = append(attrs, attribute.String("event_type", string(event)))
-		return append(attrs, extra...)
+		return metric.WithAttributes(append(attrs, extra...)...)
 	}
-	c := &Consumer{
+	return &Consumer{
 		metrics: m,
 		loopOpt: metric.WithAttributes(base...),
-		message: make(map[consumerKey]metric.MeasurementOption, len(allEventTypes)*len(allOutcomes)),
-		redeliv: make(map[EventType]metric.MeasurementOption, len(allEventTypes)),
-		termOpt: make(map[terminalKey]metric.MeasurementOption, len(allEventTypes)*len(allTerminalReasons)),
+		message: newOptTable(func(key consumerKey) metric.MeasurementOption {
+			return withEvent(key.event, attribute.String("outcome", string(key.outcome)))
+		}),
+		termOpt: newOptTable(func(key terminalKey) metric.MeasurementOption {
+			return withEvent(key.event, attribute.String("reason", string(key.reason)))
+		}),
 	}
-	for _, event := range allEventTypes {
-		c.redeliv[event] = metric.WithAttributes(withEvent(event)...)
-		for _, outcome := range allOutcomes {
-			c.message[consumerKey{event, outcome}] = metric.WithAttributes(withEvent(event, attribute.String("outcome", string(outcome)))...)
-		}
-		for _, reason := range allTerminalReasons {
-			c.termOpt[terminalKey{event, reason}] = metric.WithAttributes(withEvent(event, attribute.String("reason", string(reason)))...)
-		}
-	}
-	return c
 }
 
+// enabled reports whether this Consumer carries live instruments. A Consumer
+// built from a nil Metrics (metrics toggled off) keeps its loop-state flag so
+// IsUp still answers correctly, but records nothing.
+func (c *Consumer) enabled() bool { return c != nil && c.metrics != nil }
+
 func (c *Consumer) LoopStarted(ctx context.Context) {
-	if c.up.CompareAndSwap(false, true) {
+	if c == nil {
+		return
+	}
+	if c.up.CompareAndSwap(false, true) && c.enabled() {
 		c.metrics.loop.Add(ctx, 1, c.loopOpt)
 	}
 }
 
 func (c *Consumer) LoopStopped(ctx context.Context) {
-	if c.up.CompareAndSwap(true, false) {
+	if c == nil {
+		return
+	}
+	wasUp := c.up.CompareAndSwap(true, false)
+	if !c.enabled() {
+		return
+	}
+	if wasUp {
 		c.metrics.loop.Add(ctx, -1, c.loopOpt)
 		return
 	}
@@ -352,10 +357,13 @@ func (c *Consumer) LoopStopped(ctx context.Context) {
 }
 
 // IsUp reports whether the loop is currently able to receive messages.
-func (c *Consumer) IsUp() bool { return c.up.Load() }
+func (c *Consumer) IsUp() bool { return c != nil && c.up.Load() }
 
 // LoopFailed marks the loop down before recording the bounded terminal cause.
 func (c *Consumer) LoopFailed(ctx context.Context, err error) {
+	if c == nil {
+		return
+	}
 	wasUp := c.up.Load()
 	c.LoopStopped(ctx)
 	if !wasUp {
@@ -376,18 +384,21 @@ func (c *Consumer) LoopFailed(ctx context.Context, err error) {
 func (c *Consumer) Track(ctx context.Context, msg jetstream.Msg, eventType EventType, maxDeliver int) *Message {
 	eventType = NormalizeEventType(string(eventType))
 	tracked := &Message{Msg: msg, consumer: c, ctx: ctx, eventType: eventType, maxDeliver: maxDeliver, started: time.Now()}
+	// numDelivered still drives IsFinalDelivery. The redelivery count itself is
+	// the broker's jetstream_consumer_num_redelivered, and which event type is
+	// failing is already carried by the nak disposition below.
 	if meta, err := msg.Metadata(); err == nil && meta != nil {
 		tracked.numDelivered = meta.NumDelivered
-		if meta.NumDelivered > 1 {
-			c.metrics.redeliveries.Add(ctx, 1, c.redeliv[eventType])
-		}
 	}
 	return tracked
 }
 
 func (c *Consumer) Terminal(ctx context.Context, eventType EventType, reason TerminalReason) {
+	if !c.enabled() {
+		return
+	}
 	key := terminalKey{NormalizeEventType(string(eventType)), normalizeTerminalReason(reason)}
-	c.metrics.terminalFailures.Add(ctx, 1, c.termOpt[key])
+	c.metrics.terminalFailures.Add(ctx, 1, c.termOpt.get(key))
 }
 
 // Message intercepts disposition calls while preserving the wrapped message's
@@ -518,7 +529,10 @@ func (m *Message) finish(want Outcome, err error) {
 
 func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 	m.disposeOnce.Do(func() {
-		opt := m.consumer.message[consumerKey{m.eventType, outcome}]
+		if !m.consumer.enabled() {
+			return
+		}
+		opt := m.consumer.message.get(consumerKey{m.eventType, outcome})
 		m.consumer.metrics.messages.Add(ctx, 1, opt)
 		m.consumer.metrics.processingDuration.Record(ctx, time.Since(m.started).Seconds(), opt)
 	})
@@ -526,97 +540,101 @@ func (m *Message) finishWithOutcome(ctx context.Context, outcome Outcome) {
 
 type Publisher struct {
 	metrics *Metrics
-	attempt map[publishKey]metric.MeasurementOption
-	retry   map[retryKey]metric.MeasurementOption
-	request map[requestKey]metric.MeasurementOption
-	handled map[handledRequestKey]metric.MeasurementOption
+	attempt *optTable[publishKey]
+	request *optTable[requestKey]
+	handled *optTable[handledRequestKey]
 }
 
 // Publisher builds the publish-side recorder. Like Consumer, it carries no
 // inline service identity — the resource-derived `service_name` constant
 // label supplies it, and duplicating it here breaks the /metrics endpoint.
 func (m *Metrics) Publisher(site string) Publisher {
+	// Toggled off: hand back the zero value so Failure/Request/HandledRequest
+	// take their nil short-circuit instead of recording into no-op instruments.
+	if m == nil {
+		return Publisher{}
+	}
 	base := []attribute.KeyValue{attribute.String("site", site)}
 	build := func(extra ...attribute.KeyValue) metric.MeasurementOption {
 		attrs := make([]attribute.KeyValue, 0, len(base)+len(extra))
 		attrs = append(attrs, base...)
 		return metric.WithAttributes(append(attrs, extra...)...)
 	}
-	p := Publisher{
+	return Publisher{
 		metrics: m,
-		attempt: make(map[publishKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)*len(allPublishOutcomes)),
-		retry:   make(map[retryKey]metric.MeasurementOption, len(allDestinations)*len(allOperations)),
-		request: make(map[requestKey]metric.MeasurementOption, len(allOperations)*len(allPublishOutcomes)),
-		handled: make(map[handledRequestKey]metric.MeasurementOption, len(allOperations)*len(allRequestResults)),
-	}
-	for _, destination := range allDestinations {
-		dst := attribute.String("destination_kind", string(destination))
-		for _, operation := range allOperations {
-			op := attribute.String("operation", string(operation))
-			p.retry[retryKey{destination, operation}] = build(dst, op)
-			for _, outcome := range allPublishOutcomes {
-				p.attempt[publishKey{destination, operation, outcome}] = build(dst, op, attribute.String("outcome", string(outcome)))
+		attempt: newOptTable(func(key publishKey) metric.MeasurementOption {
+			return build(
+				attribute.String("destination_kind", string(key.destination)),
+				attribute.String("operation", string(key.operation)),
+				attribute.String("outcome", string(key.outcome)),
+			)
+		}),
+		// error.type is omitted on success, per semconv: its absence is what
+		// marks a call as having succeeded.
+		request: newOptTable(func(key requestKey) metric.MeasurementOption {
+			if key.outcome == RequestSucceeded {
+				return build(rpcSystemName, rpcMethod(key.operation))
 			}
-		}
+			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.outcome)))
+		}),
+		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
+			if key.result == RequestSuccess {
+				return build(rpcSystemName, rpcMethod(key.operation))
+			}
+			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.result)))
+		}),
 	}
-	for _, operation := range allOperations {
-		op := attribute.String("operation", string(operation))
-		for _, outcome := range allPublishOutcomes {
-			p.request[requestKey{operation, outcome}] = build(op, attribute.String("outcome", string(outcome)))
-		}
-		for _, result := range allRequestResults {
-			p.handled[handledRequestKey{operation, result}] = build(op, attribute.String("result", string(result)))
-		}
-	}
-	return p
 }
 
-// Attempt records one actual publish call.
+// Failure records a publish that did not succeed, by bounded cause. A nil err
+// records nothing, so callers pass the publish result directly.
 //
-// For Core NATS a nil error means the message entered the client's write or
-// reconnect buffer, NOT that the broker accepted it: nats.go buffers publishes
-// across a disconnect and only fails once the reconnect buffer overflows. Treat
-// `outcome="success"` on a Core NATS destination as "handed to the client", and
-// read it alongside the connection-state metrics in pkg/natsutil. JetStream
-// destinations wait for a PubAck, so their success is broker-confirmed.
-func (p Publisher) Attempt(ctx context.Context, destination DestinationKind, operation Operation, err error) {
-	if p.metrics == nil {
+// Successes are deliberately not counted, and that leaves two blind spots the
+// owner accepted rather than gaps something else covers.
+//
+// There is no cumulative acceptance denominator. jetstream_stream_total_messages
+// is current stream depth, not accepted publishes: a Nats-Msg-Id deduplicated
+// PubAck succeeds without raising it — and this repo publishes with WithMsgID in
+// four services — while retention and MaxAge walk it back down. So read this
+// family as a rate against itself over time, never as a ratio.
+//
+// For a Core NATS destination a nil error only means the message entered the
+// client's write or reconnect buffer — nats.go buffers publishes across a
+// disconnect and fails only once the reconnect buffer overflows — so a success
+// there never meant delivery. The cost is that during a disconnect this counter
+// reads exactly zero, which does not distinguish zero at-risk publishes from
+// thousands; the connection-state metrics in pkg/natsutil are what show the
+// outage. §4 and §7.1 of the contract carry the full reasoning.
+//
+// The cost mattered: the fan-out paths in broadcast-worker and
+// pkg/roomkeysender call this once per recipient.
+func (p Publisher) Failure(ctx context.Context, destination DestinationKind, operation Operation, err error) {
+	if err == nil || p.metrics == nil {
 		return
 	}
 	key := publishKey{normalizeDestination(destination), normalizeOperation(operation), ClassifyPublishError(err)}
-	p.metrics.publishAttempts.Add(ctx, 1, p.attempt[key])
+	p.metrics.publishFailures.Add(ctx, 1, p.attempt.get(key))
 }
 
-// Retry counts an application-managed publish attempt after the first. It is
-// only meaningful for a caller that loops around its own publish; JetStream's
-// internal PubAck retries and the consumer Nak path are not application retries
-// and must not be counted here.
-func (p Publisher) Retry(ctx context.Context, destination DestinationKind, operation Operation) {
-	if p.metrics == nil {
-		return
-	}
-	p.metrics.publishRetries.Add(ctx, 1, p.retry[retryKey{normalizeDestination(destination), normalizeOperation(operation)}])
-}
-
+// Request records one outbound request/reply call as rpc.client.call.duration.
+// The histogram's own count is the call count, so there is no paired counter.
 func (p Publisher) Request(ctx context.Context, operation Operation, duration time.Duration, err error) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.request[requestKey{normalizeOperation(operation), ClassifyPublishError(err)}]
-	p.metrics.requests.Add(ctx, 1, opt)
-	p.metrics.requestDuration.Record(ctx, duration.Seconds(), opt)
+	opt := p.request.get(requestKey{normalizeOperation(operation), classifyRequestOutcome(err)})
+	p.metrics.clientCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
-// HandledRequest records one inbound request/reply handler result. Both labels
-// are normalized against closed enums; subjects and error strings are never
-// attributes.
+// HandledRequest records one inbound request/reply handler result as
+// rpc.server.call.duration. Both labels are normalized against closed enums;
+// subjects and error strings are never attributes.
 func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.handled[handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)}]
-	p.metrics.handledRequests.Add(ctx, 1, opt)
-	p.metrics.handlerDuration.Record(ctx, duration.Seconds(), opt)
+	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
+	p.metrics.serverCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
 func NormalizeEventType(value string) EventType {
@@ -645,6 +663,7 @@ func normalizeOperation(operation Operation) Operation {
 	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
 		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
 		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
+		OperationChannelHistory, OperationThreadOpen,
 		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
 		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
 		OperationMemberPublish, OperationOutboxPublish:
@@ -677,7 +696,9 @@ func ClassifyPublishError(err error) PublishOutcome {
 	var jsErr jetstream.JetStreamError
 	switch {
 	case err == nil:
-		return PublishSuccess
+		// Unreachable through Publisher.Failure, which returns before
+		// classifying a nil error. Kept total for direct callers.
+		return PublishOtherError
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, nats.ErrTimeout):
 		return PublishTimeout
 	case errors.Is(err, nats.ErrNoResponders), errors.Is(err, jetstream.ErrNoStreamResponse):

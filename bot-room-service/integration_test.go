@@ -121,13 +121,17 @@ func TestIntegration_DeleteSubscription_ByUserID(t *testing.T) {
 	_, err := st.UpsertSubscription(ctx, newSub("room-1", "user-1", "alice"))
 	require.NoError(t, err)
 
-	deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
+	account, deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	assert.True(t, deleted)
+	// The account is read off the deleted row, which is what makes the caller's
+	// subauthcache bust independent of any follow-up user lookup.
+	assert.Equal(t, "alice", account)
 
-	deleted, err = st.DeleteSubscription(ctx, "room-1", "user-1")
+	account, deleted, err = st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	assert.False(t, deleted, "duplicate remove is a no-op")
+	assert.Empty(t, account, "nothing was deleted, so there is no account to bust")
 }
 
 func TestIntegration_DeleteSubscription_LeavesOtherRooms(t *testing.T) {
@@ -139,7 +143,7 @@ func TestIntegration_DeleteSubscription_LeavesOtherRooms(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
+	_, deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	require.True(t, deleted)
 

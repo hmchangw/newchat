@@ -131,8 +131,7 @@ func TestUpload_SessionCaller_NoEmail_Succeeds(t *testing.T) {
 	// no email is the normal case, because bots have no directory record.
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alerts.sa.bot").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alerts.sa.bot").Return("site-a", true, nil)
 	fd := &fakeDrive{uploadResp: driveOKResponse()}
 	h := newHandler(store, fd)
 
@@ -149,8 +148,7 @@ func TestUpload_SessionCaller_NoEmail_Succeeds(t *testing.T) {
 func TestUpload_SessionCaller_SynthesizedEmail_ReachesDrive(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alerts.sa.bot").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alerts.sa.bot").Return("site-a", true, nil)
 	fd := &fakeDrive{uploadResp: driveOKResponse()}
 	h := newHandler(store, fd)
 
@@ -207,7 +205,7 @@ func TestUpload_NoEmail_500(t *testing.T) {
 func TestUpload_NotMember_403(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(false, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("", false, nil)
 	h := newHandler(store, &fakeDrive{})
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
@@ -218,24 +216,38 @@ func TestUpload_NotMember_403(t *testing.T) {
 	assert.Equal(t, "not_room_member", env.Reason)
 }
 
-func TestUpload_RoomNotFound_404(t *testing.T) {
+// A cross-site room has no local rooms doc — only the mirrored subscription.
+// The upload must resolve the room's home site from it, not 404.
+func TestUpload_CrossSiteRoom_UsesSubscriptionSiteID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("", ErrRoomNotFound)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-remote", true, nil)
+	fd := &fakeDrive{uploadResp: driveOKResponse()}
+	h := newHandler(store, fd)
+	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
+	c, w := newUploadCtx(t, "r1", body, ct, okUser())
+	h.HandleUploadImages(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "site-remote", fd.uploadGot.origin, "drive upload must target the room's home site")
+}
+
+// A membership store failure is infra, not a 403/404.
+func TestUpload_MemberSiteIDError_500(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("", false, errors.New("mongo boom"))
 	h := newHandler(store, &fakeDrive{})
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
 	h.HandleUploadImages(c)
-	assert.Equal(t, http.StatusNotFound, w.Code)
-	assert.Equal(t, "not_found", decodeErr(t, w).Code)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, "internal", decodeErr(t, w).Code)
 }
 
 func TestUpload_NotMultipart_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	h := newHandler(store, &fakeDrive{})
 	c, w := newUploadCtx(t, "r1", bytes.NewBufferString("not-multipart"), "text/plain", okUser())
 	h.HandleUploadImages(c)
@@ -246,8 +258,7 @@ func TestUpload_NotMultipart_400(t *testing.T) {
 func TestUpload_TooManyFiles_400(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	h := NewHandler(store, &fakeDrive{}, &fakeS3{}, 1, testMaxAttachments, testMaxImageSize, 0, nil, testCacheMaxAge, true, &fakeDrive{}) // image limit 1
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x"), "b.png": []byte("y")})
 	c, w := newUploadCtx(t, "r1", body, ct, okUser())
@@ -259,8 +270,7 @@ func TestUpload_TooManyFiles_400(t *testing.T) {
 func TestUpload_AllRejected_EarlyExit_NoDriveCall(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{}
 	h := newHandler(store, fd)
 	// .exe is an invalid type -> rejected in preprocessing.
@@ -281,8 +291,7 @@ func TestUpload_AllRejected_EarlyExit_NoDriveCall(t *testing.T) {
 func TestUpload_OversizeRejectedPerFile(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{}
 	h := NewHandler(store, fd, &fakeS3{}, testMaxImages, testMaxAttachments, 4, 0, nil, testCacheMaxAge, true, &fakeDrive{}) // 4-byte per-image ceiling
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("0123456789")})
@@ -302,8 +311,7 @@ func TestUpload_OversizeRejectedPerFile(t *testing.T) {
 func TestUpload_MixedSuccessAndFailure_Merges(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{
 		baseURL: "https://drive.example.com",
 		uploadResp: []drive.UploadGroupImageResponse{
@@ -345,8 +353,7 @@ func TestUpload_MixedSuccessAndFailure_Merges(t *testing.T) {
 func TestUpload_DriveError_500(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{uploadErr: errors.New("boom")}
 	h := newHandler(store, fd)
 	body, ct := multipartBody(t, "images", map[string][]byte{"a.png": []byte("x")})
@@ -387,8 +394,7 @@ func TestHandleHealth(t *testing.T) {
 func TestHandleUploadImages_MultiFileBatch_ResultsMatchSendOrder(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{
 		baseURL: "https://drive.example.com",
 		uploadResp: []drive.UploadGroupImageResponse{
@@ -432,8 +438,7 @@ func TestHandleUploadImages_MultiFileBatch_ResultsMatchSendOrder(t *testing.T) {
 func TestHandleUploadImages_SendsOriginalName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{
 		baseURL: "https://drive.example.com",
 		uploadResp: []drive.UploadGroupImageResponse{
@@ -462,8 +467,7 @@ func TestHandleUploadImages_SendsOriginalName(t *testing.T) {
 func TestHandleUploadImages_DriveErrorEmptyFilename_KeepsOriginalName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	// Drive reports a per-file failure: status "failure", empty File (so
 	// resp.File.Filename == "").
 	fd := &fakeDrive{
@@ -493,8 +497,7 @@ func TestHandleUploadImages_DriveErrorEmptyFilename_KeepsOriginalName(t *testing
 func TestHandleUploadFile_SendsOriginalName(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "r1").Return("site-x", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{
 		baseURL: "http://drive",
 		uploadResp: []drive.UploadGroupImageResponse{
@@ -650,7 +653,7 @@ func TestDownload_NoUser_500(t *testing.T) {
 func TestDownload_NotMember_403(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(false, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("", false, nil)
 	h := newHandler(store, &fakeDrive{})
 	c, w := newDownloadCtx(t, "r1", "f1", "https://d.example.com", okUser())
 	h.HandleDownloadFile(c)
@@ -663,7 +666,7 @@ func TestDownload_NotMember_403(t *testing.T) {
 func TestDownload_DriveError_503(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{getErr: errors.New("image not found")}
 	h := newHandler(store, fd)
 	c, w := newDownloadCtx(t, "r1", "f1", "https://d.example.com", okUser())
@@ -759,7 +762,7 @@ func TestS3Download_NotMember_403(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(sampleUpload(), nil)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(false, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("", false, nil)
 	h := newHandler(store, &fakeDrive{})
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
@@ -773,7 +776,7 @@ func TestS3Download_S3Error_503(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(sampleUpload(), nil)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	h := NewHandler(store, &fakeDrive{}, &fakeS3{err: errors.New("no such key")}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, testCacheMaxAge, true, &fakeDrive{})
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
@@ -785,7 +788,7 @@ func TestS3Download_Success_StreamsWithHeaders(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(sampleUpload(), nil)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	s3 := &fakeS3{body: "PDFDATA"}
 	h := NewHandler(store, &fakeDrive{}, s3, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, testCacheMaxAge, true, &fakeDrive{})
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
@@ -808,7 +811,7 @@ func TestS3Download_EmptyType_DefaultsOctetStream(t *testing.T) {
 	up := sampleUpload()
 	up.Type = ""
 	store.EXPECT().GetUpload(gomock.Any(), "f1").Return(up, nil)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	h := NewHandler(store, &fakeDrive{}, &fakeS3{body: "PDFDATA"}, testMaxImages, testMaxAttachments, testMaxImageSize, 0, nil, testCacheMaxAge, true, &fakeDrive{})
 	c, w := newS3DownloadCtx(t, "f1", "x.pdf", okUser())
 	h.HandleDownloadMinioS3File(c)
@@ -819,7 +822,7 @@ func TestS3Download_EmptyType_DefaultsOctetStream(t *testing.T) {
 func TestDownload_Success_StreamsBinary(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{getResp: &drive.GetGroupImageResponse{
 		Reader:        readCloser{strings.NewReader("PNGDATA")},
 		ContentType:   "image/png",
@@ -844,7 +847,7 @@ func TestDownload_Success_StreamsBinary(t *testing.T) {
 func TestDownload_Success_NoFilename(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	fd := &fakeDrive{getResp: &drive.GetGroupImageResponse{
 		Reader:        readCloser{strings.NewReader("PNGDATA")},
 		ContentType:   "image/png",
@@ -905,7 +908,7 @@ func TestDownloadV3_NoUser_500(t *testing.T) {
 func TestDownloadV3_NotMember_403(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(false, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("", false, nil)
 	h := newHandler(store, &fakeDrive{})
 	c, w := newDownloadCtx(t, "r1", "f1", "https://legacy.example.com", okUser())
 	h.HandleDownloadProtectedImageV3(c)
@@ -918,7 +921,7 @@ func TestDownloadV3_NotMember_403(t *testing.T) {
 func TestDownloadV3_DriveError_503(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	legacy := &fakeDrive{getErr: errors.New("image not found")}
 	h := newHandlerWithLegacy(store, &fakeDrive{}, legacy)
 	c, w := newDownloadCtx(t, "r1", "f1", "https://legacy.example.com", okUser())
@@ -932,7 +935,7 @@ func TestDownloadV3_DriveError_503(t *testing.T) {
 func TestDownloadV3_UsesLegacyDrive(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "r1", "alice").Return(true, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
 	primary := &fakeDrive{getResp: &drive.GetGroupImageResponse{
 		Reader: readCloser{strings.NewReader("PRIMARY")}, ContentType: "image/png", ContentLength: 7,
 	}}
@@ -1005,8 +1008,7 @@ func okFileDrive() *fakeDrive {
 func TestHandleUploadFile_Success(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("pdfbytes"), "application/pdf", map[string]string{"description": "Q2"})
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1033,8 +1035,7 @@ func TestHandleUploadFile_Success(t *testing.T) {
 func TestHandleUploadFile_SessionCaller_NoEmail_Succeeds(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alerts.sa.bot").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alerts.sa.bot").Return("site-a", true, nil)
 	fd := okFileDrive()
 
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("pdfbytes"), "application/pdf", nil)
@@ -1049,8 +1050,7 @@ func TestHandleUploadFile_SessionCaller_NoEmail_Succeeds(t *testing.T) {
 func TestHandleUploadFile_ImageSuccess(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 
 	body, ct := multipartTyped(t, "file", "photo.png", png64x48, "image/png", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1076,29 +1076,30 @@ func TestHandleUploadFile_ImageSuccess(t *testing.T) {
 func TestHandleUploadFile_NotMember(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(false, nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("", false, nil)
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
 	fileHandler(store, okFileDrive()).HandleUploadFile(c)
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestHandleUploadFile_RoomNotFound(t *testing.T) {
+// Cross-site: the subscription's siteID (room's home site) drives the upload.
+func TestHandleUploadFile_CrossSiteRoom_UsesSubscriptionSiteID(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("", ErrRoomNotFound)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-remote", true, nil)
+	fd := okFileDrive()
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
-	fileHandler(store, okFileDrive()).HandleUploadFile(c)
-	assert.Equal(t, http.StatusNotFound, w.Code)
+	fileHandler(store, fd).HandleUploadFile(c)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "site-remote", fd.uploadGot.origin, "drive upload must target the room's home site")
 }
 
 func TestHandleUploadFile_BlockedMIME(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	body, ct := multipartTyped(t, "file", "x.svg", []byte("<svg/>"), "image/svg+xml", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
 	fileHandler(store, okFileDrive()).HandleUploadFile(c)
@@ -1108,8 +1109,7 @@ func TestHandleUploadFile_BlockedMIME(t *testing.T) {
 func TestHandleUploadFile_OverSize(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	h := NewHandler(store, &fakeDrive{baseURL: "http://drive"}, &fakeS3{}, 0, testMaxAttachments, 0, 4, newMediaTypeFilter("", ""), testCacheMaxAge, true, &fakeDrive{})
 	body, ct := multipartTyped(t, "file", "big.pdf", []byte("morethan4"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1120,8 +1120,7 @@ func TestHandleUploadFile_OverSize(t *testing.T) {
 func TestHandleUploadFile_DriveError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	fd := &fakeDrive{baseURL: "http://drive", uploadErr: fmt.Errorf("drive boom")}
 	h := fileHandler(store, fd)
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
@@ -1133,8 +1132,7 @@ func TestHandleUploadFile_DriveError(t *testing.T) {
 func TestHandleUploadFile_DriveStatusFailure(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	fd := &fakeDrive{baseURL: "http://drive", uploadResp: []drive.UploadGroupImageResponse{
 		{Status: "failure", Error: "quota exceeded"},
 	}}
@@ -1194,8 +1192,7 @@ func multipartFileParts(t *testing.T, n int) (*bytes.Buffer, string) {
 func TestHandleUploadFile_TooManyFiles(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	fd := okFileDrive()
 	h := fileHandler(store, fd) // maxAttachments == testMaxAttachments == 1
 
@@ -1211,8 +1208,7 @@ func TestHandleUploadFile_TooManyFiles(t *testing.T) {
 func TestHandleUploadFile_MissingFile(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	body, ct := multipartTyped(t, "other", "x.txt", []byte("x"), "text/plain", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
 	fileHandler(store, okFileDrive()).HandleUploadFile(c)
@@ -1281,8 +1277,7 @@ func TestHandler_HandleSetCookie_NoToken(t *testing.T) {
 func TestHandleUploadFile_OctetStreamResolvesFromBytes(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 
 	body, ct := multipartTyped(t, "file", "photo.png", png64x48, "application/octet-stream", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1307,8 +1302,7 @@ func TestHandleUploadFile_OctetStreamResolvesFromBytes(t *testing.T) {
 func TestHandleUploadFile_OctetStreamResolvesFromExtension(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 
 	body, ct := multipartTyped(t, "file", "report.docx", zipBytes, "application/octet-stream", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1330,8 +1324,7 @@ func TestHandleUploadFile_OctetStreamResolvesFromExtension(t *testing.T) {
 func TestHandleUploadFile_BlockedAfterResolution(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	fd := okFileDrive()
 
 	body, ct := multipartTyped(t, "file", "logo.svg", svgBytes, "application/octet-stream", nil)
@@ -1346,8 +1339,7 @@ func TestHandleUploadFile_BlockedAfterResolution(t *testing.T) {
 func TestHandleUploadFile_SpecificDeclaredTypeIsKept(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 
 	body, ct := multipartTyped(t, "file", "data.bin", []byte("a,b\n1,2"), "text/csv", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
@@ -1373,12 +1365,11 @@ func TestHandleUploadFile_RoomIDRequired(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// A generic GetRoomSiteID failure (not ErrRoomNotFound) is infra, not a 404.
-func TestHandleUploadFile_GetRoomSiteIDError(t *testing.T) {
+// A generic MemberSiteID failure is infra, not a 403/404.
+func TestHandleUploadFile_MemberSiteIDError(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("", errors.New("mongo boom"))
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("", false, errors.New("mongo boom"))
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())
 	fileHandler(store, okFileDrive()).HandleUploadFile(c)
@@ -1389,8 +1380,7 @@ func TestHandleUploadFile_GetRoomSiteIDError(t *testing.T) {
 func TestHandleUploadFile_DriveNoResponses(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), "room-1", "alice").Return(true, nil)
-	store.EXPECT().GetRoomSiteID(gomock.Any(), "room-1").Return("site-a", nil)
+	store.EXPECT().MemberSiteID(gomock.Any(), "room-1", "alice").Return("site-a", true, nil)
 	fd := &fakeDrive{baseURL: "http://drive", uploadResp: []drive.UploadGroupImageResponse{}}
 	body, ct := multipartTyped(t, "file", "report.pdf", []byte("x"), "application/pdf", nil)
 	c, w := newUploadCtx(t, "room-1", body, ct, okUser())

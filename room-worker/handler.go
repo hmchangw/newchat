@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -31,6 +29,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/timeutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
@@ -311,7 +310,7 @@ func (h *Handler) processRemoveMember(ctx context.Context, data []byte) (err err
 	// Accepted as a documented limitation; see docs/superpowers/specs/2026-05-08-room-encryption-keys-design.md.
 	currentPair, err := h.keyStore.Get(ctx, req.RoomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return fmt.Errorf("get room key: %w", err)
 	}
 
@@ -396,6 +395,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 			if err := h.store.RemoveRole(ctx, req.Account, req.RoomID, model.RoleOwner); err != nil {
 				return fmt.Errorf("demote dual-member owner: %w", err)
 			}
+			// Bust AFTER the write: the cached Roles drove canBypassLargeRoomCap
+			// in the gatekeeper and must not keep serving owner-level authz.
+			subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 		}
 		return nil
 	}
@@ -404,6 +406,10 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	if _, err := h.store.DeleteSubscription(ctx, req.RoomID, req.Account); err != nil {
 		return fmt.Errorf("delete subscription: %w", err)
 	}
+	// Bust AFTER the write: a removed member's cached positive decision must
+	// die immediately, not linger for the L2 TTL (the security case this
+	// invalidation exists for).
+	subauthcache.BustSub(ctx, h.valkey, req.RoomID, req.Account)
 
 	// Individual-only branch (dual-members returned above), so the account has
 	// truly left: scrub its thread footprint (#308).
@@ -610,6 +616,10 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, req.RoomID, accounts); err != nil {
 			return fmt.Errorf("delete subscriptions by accounts: %w", err)
 		}
+		// Bust AFTER the write, in one batched round trip: each removed
+		// account's cached positive decision must die immediately, not linger
+		// for the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, req.RoomID, accounts)
 		// accounts is exactly the set that truly lost membership (survivors
 		// filtered out above), so scrub their thread footprint too (#308).
 		if err := h.cleanupThreadMembership(ctx, req.RoomID, accounts); err != nil {
@@ -980,7 +990,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		user := userMap[c.Account]
 		// newSub stamps u.isBot from the account; room is the channel fetched by
 		// req.RoomID so RoomType/SiteID/Name/ID all match the prior inline build.
-		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt)
+		sub := newSub(idgen.GenerateUUIDv7(), &user, room, []model.Role{model.RoleUser}, room.Name, false, acceptedAt)
 		// Pre-resolved above the candidate debug log; shared pointer is safe —
 		// nothing mutates through it after this point.
 		sub.HistorySharedSince = historySharedSinceAt
@@ -999,7 +1009,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		var err error
 		pair, err = h.keyStore.Get(ctx, req.RoomID)
 		if err != nil {
-			roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+			roomkeymetrics.RecordStoreError(ctx, "Get")
 			return fmt.Errorf("get room key for subscription fan-out: %w", err)
 		}
 		// A keyless "added" event would leave the new member unable to decrypt with no retry.
@@ -1373,7 +1383,7 @@ func buildChannelSubs(requester *model.User, users []model.User, room *model.Roo
 	subs = append(subs, preRead(newSub(idgen.GenerateUUIDv7(), requester, room, []model.Role{model.RoleOwner}, room.Name, false, acceptedAt), acceptedAt))
 	for i := range users {
 		u := &users[i]
-		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleMember}, room.Name, false, acceptedAt))
+		subs = append(subs, newSub(idgen.GenerateUUIDv7(), u, room, []model.Role{model.RoleUser}, room.Name, false, acceptedAt))
 	}
 	return subs
 }
@@ -1671,7 +1681,7 @@ func (h *Handler) processCreateRoom(ctx context.Context, data []byte) (err error
 func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPair *roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
 	pair, err := h.keyStore.Get(ctx, roomID)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Get")))
+		roomkeymetrics.RecordStoreError(ctx, "Get")
 		return nil, fmt.Errorf("get room key: %w", err)
 	}
 	if pair != nil {
@@ -1679,7 +1689,7 @@ func (h *Handler) existingRoomKey(ctx context.Context, roomID string, fallbackPa
 	}
 	ver, err := h.keyStore.Set(ctx, roomID, *fallbackPair)
 	if err != nil {
-		roomkeymetrics.StoreErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("op", "Set")))
+		roomkeymetrics.RecordStoreError(ctx, "Set")
 		return nil, fmt.Errorf("store room key: %w", err)
 	}
 	return &roomkeystore.VersionedKeyPair{Version: ver, KeyPair: *fallbackPair}, nil
@@ -2497,7 +2507,7 @@ func (h *Handler) fanOutRoomKeyToSurvivors(ctx context.Context, roomID string, p
 // absence and returns a permanent error so nothing keyless is ever published.
 func requireKeyPair(ctx context.Context, pair *roomkeystore.VersionedKeyPair) error {
 	if pair == nil {
-		roomkeymetrics.KeyAbsentErrors.Add(ctx, 1)
+		roomkeymetrics.RecordKeyAbsent(ctx, "")
 		return permanent(errcode.Internal("room key absent", errcode.WithCause(errRoomKeyAbsent)))
 	}
 	return nil
@@ -2546,7 +2556,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 		// no recipient can be served, so count the whole batch and bail. The
 		// caller treats fan-out as best-effort and JetStream redelivers.
 		slog.Error("marshal room key for fan-out", "error", err, "roomId", roomID, "accounts", len(accounts))
-		roomkeymetrics.FanoutErrors.Add(ctx, int64(len(accounts)), metric.WithAttributes(attribute.String("roomId", roomID)))
+		roomkeymetrics.RecordFanoutErrors(ctx, int64(len(accounts)))
 		return
 	}
 	workers := h.keyFanoutWorkers
@@ -2572,7 +2582,7 @@ func (h *Handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 			}()
 			if err := h.keySender.SendDataContext(ctx, acct, data); err != nil {
 				slog.ErrorContext(ctx, "send room key", "error", err, "account", acct, "roomId", roomID)
-				roomkeymetrics.FanoutErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("roomId", roomID)))
+				roomkeymetrics.RecordFanoutErrors(ctx, 1)
 				failed.Add(1)
 				return
 			}

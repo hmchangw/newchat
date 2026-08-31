@@ -1,21 +1,71 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
 // ErrSubscriptionNotFound is returned when a subscription lookup finds no matching document.
 var ErrSubscriptionNotFound = errors.New("subscription not found")
 
+// Role is a per-room role carried on a subscription. Values cross the wire
+// normalized: the legacy "member" spelling is rewritten to RoleUser by
+// MarshalJSON/UnmarshalJSON, so clients only ever see "user" and may send
+// either. BSON is deliberately left alone — normalizing storage would rewrite
+// documents behind the reader's back.
 type Role string
 
 const (
 	RoleOwner Role = "owner"
 	// RoleAdmin is recognized by message-gatekeeper's large-room bypass but not yet assignable via role-update RPC.
-	RoleAdmin  Role = "admin"
+	RoleAdmin Role = "admin"
+	// RoleUser is the non-owner role every subscription is created with.
+	RoleUser Role = "user"
+	// RoleMember is the pre-cutover spelling of RoleUser. No writer produces it
+	// any more; it survives on stored subscriptions, so reads normalize it.
 	RoleMember Role = "member"
 )
+
+// NormalizeRole maps the legacy RoleMember spelling onto RoleUser; every other
+// role, known or not, passes through unchanged.
+func NormalizeRole(r Role) Role {
+	if r == RoleMember {
+		return RoleUser
+	}
+	return r
+}
+
+// NormalizeRoles returns roles with every legacy RoleMember rewritten to
+// RoleUser, preserving order. nil in, nil out; the input is never mutated.
+func NormalizeRoles(roles []Role) []Role {
+	if roles == nil {
+		return nil
+	}
+	out := make([]Role, len(roles))
+	for i, r := range roles {
+		out[i] = NormalizeRole(r)
+	}
+	return out
+}
+
+// MarshalJSON emits the normalized role so no client ever sees the legacy
+// "member" left on subscriptions written before the cutover.
+func (r Role) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(NormalizeRole(r)))
+}
+
+// UnmarshalJSON accepts either spelling and stores the normalized one, so a
+// client still sending "member" needs no special case downstream.
+func (r *Role) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("decode role: %w", err)
+	}
+	*r = NormalizeRole(Role(s))
+	return nil
+}
 
 type SubscriptionUser struct {
 	ID      string `json:"id" bson:"_id"`

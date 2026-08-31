@@ -5,46 +5,19 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
-	"github.com/hmchangw/chat/pkg/valkeyutil"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
-
-// wireCaptureClient records SetNX / IncrEx / Del so tests assert the chain ran end-to-end.
-type wireCaptureClient struct {
-	setNX int32
-	incr  int32
-	del   int32
-}
-
-func (w *wireCaptureClient) Get(context.Context, string) (string, error) { return "", nil }
-func (w *wireCaptureClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (w *wireCaptureClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	atomic.AddInt32(&w.setNX, 1)
-	return true, nil
-}
-func (w *wireCaptureClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	atomic.AddInt32(&w.incr, 1)
-	return 1, nil
-}
-func (w *wireCaptureClient) Del(context.Context, ...string) error {
-	atomic.AddInt32(&w.del, 1)
-	return nil
-}
-func (w *wireCaptureClient) Close() error { return nil }
-
-var _ valkeyutil.Client = (*wireCaptureClient)(nil)
 
 // successForwarder returns empty 2xx replies so idempotency Del fires.
 type successForwarder struct{}
@@ -90,8 +63,8 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 		SiteID:  "site-a",
 		Roles:   []string{"bot"},
 	}
-	sessions := &fakeSessionStore{
-		FindByHashFn: func(_ context.Context, hash string) (*session.Session, error) {
+	sessions := &sessionOnlyStore{
+		FindSessionByHashFn: func(_ context.Context, hash string) (*session.Session, error) {
 			require.Equal(t, sessiontoken.Hash(rawToken), hash)
 			return botSess, nil
 		},
@@ -106,6 +79,7 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 	}
 	h := &handler{
 		cfg:       cfg,
+		store:     sessions,
 		forwarder: successForwarder{},
 		subs:      &fakeSubStore{FindForBotFn: alwaysLocalSub, FindDMForBotFn: alwaysLocalSub},
 		dmEnsurer: &fakeDMEnsurer{},
@@ -125,9 +99,9 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 
 	for _, tc := range routes {
 		t.Run(tc.name, func(t *testing.T) {
-			valkey := &wireCaptureClient{}
+			valkey := valkeyfake.New()
 			r := gin.New()
-			registerBotRoutes(r, sessions, valkey, cfg, h)
+			registerBotRoutes(r, valkey, cfg, h)
 
 			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -137,9 +111,10 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 			r.ServeHTTP(w, req)
 
 			assert.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, int32(2), atomic.LoadInt32(&valkey.incr), "rate-limit IncrEx must run per-caller + global")
-			assert.Equal(t, int32(1), atomic.LoadInt32(&valkey.setNX), "idempotency SetNX must run")
-			assert.Equal(t, int32(1), atomic.LoadInt32(&valkey.del), "idempotency Del must run on 2xx")
+			calls := valkey.Calls()
+			assert.Equal(t, 2, calls.IncrEx, "rate-limit IncrEx must run per-caller + global")
+			assert.Equal(t, 1, calls.SetNX, "idempotency SetNX must run")
+			assert.Equal(t, 1, calls.Del, "idempotency Del must run on 2xx")
 		})
 	}
 }
@@ -157,8 +132,8 @@ func TestRegisterBotRoutes_NoValkey(t *testing.T) {
 		SiteID:  "site-a",
 		Roles:   []string{"bot"},
 	}
-	sessions := &fakeSessionStore{
-		FindByHashFn: func(_ context.Context, _ string) (*session.Session, error) {
+	sessions := &sessionOnlyStore{
+		FindSessionByHashFn: func(_ context.Context, _ string) (*session.Session, error) {
 			return botSess, nil
 		},
 	}
@@ -169,13 +144,14 @@ func TestRegisterBotRoutes_NoValkey(t *testing.T) {
 	}
 	h := &handler{
 		cfg:       cfg,
+		store:     sessions,
 		forwarder: successForwarder{},
 		subs:      &fakeSubStore{FindForBotFn: alwaysLocalSub, FindDMForBotFn: alwaysLocalSub},
 		dmEnsurer: &fakeDMEnsurer{},
 	}
 
 	r := gin.New()
-	registerBotRoutes(r, sessions, nil, cfg, h)
+	registerBotRoutes(r, nil, cfg, h)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/r1/messages",
 		bytes.NewReader([]byte(`{"content":"hi"}`)))
@@ -191,13 +167,13 @@ func TestRegisterBotRoutes_NoValkey(t *testing.T) {
 func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	sessions := &fakeSessionStore{
-		FindByHashFn: func(_ context.Context, _ string) (*session.Session, error) {
+	sessions := &sessionOnlyStore{
+		FindSessionByHashFn: func(_ context.Context, _ string) (*session.Session, error) {
 			return nil, session.ErrNotFound
 		},
 	}
 	r := gin.New()
-	registerBotRoutes(r, sessions, nil, &config{SiteID: "site-a"}, &handler{})
+	registerBotRoutes(r, nil, &config{SiteID: "site-a"}, &handler{store: sessions})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/r1/messages",
 		bytes.NewReader([]byte(`{"content":"hi"}`)))
@@ -207,4 +183,55 @@ func TestRegisterBotRoutes_AuthRequired(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// Every authenticated bot request must resolve its session through the SAME
+// cached, breaker-fenced lookup that /auth/validate uses. Handing the bot
+// routes a second, raw session store leaves them reading Mongo directly: with
+// Mongo down and a warm 90m entry for a bot active seconds earlier, every
+// message POST still pays a full server-selection timeout and 500s — the exact
+// outcome the session cache was added to prevent — and the failures never reach
+// the breaker, so fast-fail never engages either.
+func TestRegisterBotRoutes_AuthUsesTheCachedStore(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// #nosec G101 -- fabricated test fixture, not a live credential
+	// nosemgrep: gosec.G101-1
+	const rawToken = "cached-path-token"
+	botSess := &session.Session{
+		ID:      sessiontoken.Hash(rawToken),
+		UserID:  "bot-user-id",
+		Account: "myapp.bot",
+		SiteID:  "site-a",
+		Roles:   []string{"bot"},
+	}
+
+	ctrl := gomock.NewController(t)
+	store := NewMockBotplatformStore(ctrl)
+	store.EXPECT().
+		FindSessionByHash(gomock.Any(), sessiontoken.Hash(rawToken)).
+		Return(botSess, nil).
+		Times(1)
+
+	cfg := &config{SiteID: "site-a"}
+	h := &handler{
+		cfg:       cfg,
+		store:     store,
+		forwarder: successForwarder{},
+		subs:      &fakeSubStore{FindForBotFn: alwaysLocalSub, FindDMForBotFn: alwaysLocalSub},
+		dmEnsurer: &fakeDMEnsurer{},
+	}
+
+	r := gin.New()
+	registerBotRoutes(r, nil, cfg, h)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rooms/r1/messages",
+		bytes.NewReader([]byte(`{"content":"hi"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-user-id", "bot-user-id")
+	req.Header.Set("x-auth-token", rawToken)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }

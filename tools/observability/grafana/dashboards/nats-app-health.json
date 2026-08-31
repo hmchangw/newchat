@@ -202,8 +202,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Redelivery rate (chat_nats_consumer_redeliveries_total)",
-      "description": "rate() of the cumulative redelivery counter per consumer \u2014 the historical companion to the point-in-time jetstream num_redelivered gauge. Sustained non-zero = repeated delivery attempts \u2014 a handler sending NAKs, AckWait expiring on a slow/hung handler, or a consumer crash-looping on the same message.",
+      "title": "Messages currently redelivered (jetstream_consumer_num_redelivered)",
+      "description": "Broker gauge: messages in a redelivered state (delivery count > 1) that are NOT yet acked. Sustained non-zero = repeated delivery attempts \u2014 a handler sending NAKs, AckWait expiring on a slow/hung handler, or a consumer crash-looping on the same message. Read it as state, not history: the count resets on ack, so a redelivery that completes between two scrapes leaves nothing behind, and 0 means \"nothing stuck right now\", not \"nothing ever went wrong\". There is no application-side redelivery counter to fill that gap \u2014 it was an accepted blind spot, see docs/specs/o11y/nats-metrics-contract.md \u00a74. Cross-check chat_nats_terminal_failures_total{reason=\"max_deliver\"}: this gauge falls to 0 whether messages were acked or abandoned.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -246,8 +246,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service_name, consumer, stream, site) (rate(chat_nats_consumer_redeliveries_total[$__rate_interval]))",
-          "legendFormat": "{{service_name}} \u00b7 {{consumer}} \u00b7 {{stream}}/{{site}}"
+          "expr": "jetstream_consumer_num_redelivered",
+          "legendFormat": "{{stream_name}} / {{consumer_name}}"
         }
       ]
     },

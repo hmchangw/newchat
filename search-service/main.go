@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,11 +35,6 @@ type ESConfig struct {
 	Username      string `env:"USERNAME"         envDefault:""`
 	Password      string `env:"PASSWORD"         envDefault:""`
 	TLSSkipVerify bool   `env:"TLS_SKIP_VERIFY"  envDefault:"false"`
-}
-
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
 }
 
 type NATSConfig struct {
@@ -83,9 +79,9 @@ type SearchConfig struct {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID   string         `env:"SITE_ID,required"`
-	ES       ESConfig       `envPrefix:"SEARCH_"`
-	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID   string   `env:"SITE_ID,required"`
+	ES       ESConfig `envPrefix:"SEARCH_"`
+	Valkey   valkeyutil.Config
 	NATS     NATSConfig     `envPrefix:"NATS_"`
 	Search   SearchConfig   `envPrefix:"SEARCH_"`
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
@@ -131,6 +127,10 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
 		os.Exit(1)
 	}
 	if err := cfg.Pool.Validate(); err != nil {
@@ -183,16 +183,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -242,7 +239,9 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	router := natsrouter.New(nc, "search-service", cfg.Guard.Options()...)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "search-service",
+		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())

@@ -100,7 +100,7 @@ func TestBuildSoakTopology_ChannelDMSplitMembershipAndRoles(t *testing.T) {
 			assert.False(t, duplicate)
 			dmIDs[room.ID] = struct{}{}
 			for _, sub := range subs {
-				assert.Equal(t, []model.Role{model.RoleMember}, sub.Roles)
+				assert.Equal(t, []model.Role{model.RoleUser}, sub.Roles)
 			}
 		default:
 			t.Fatalf("unexpected room type %q", room.Type)

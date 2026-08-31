@@ -17,6 +17,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/migration"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -140,7 +141,7 @@ func main() {
 func processOne(ctx context.Context, h *handler, m jetstream.Msg, mtr *metrics, maxDeliver, deleteMaxDeliver int) {
 	// Stamp a correlation id once at entry; it flows via ctx into the history RPC and canonical publish
 	// (both read it from ctx through natsutil.NewMsg), so transformer→history→worker shares one request_id.
-	ctx, reqID := natsutil.StampRequestID(ctx, m.Headers(), m.Subject())
+	ctx, reqID := logctx.ConsumeContext(ctx, m.Headers(), m.Subject(), m.Data())
 	// dispose runs a JetStream ack/term/nak and logs (rather than silently drops) any failure —
 	// the message will redeliver, but a failing disposition signals a NATS-health problem worth seeing.
 	dispose := func(action string, fn func() error) {

@@ -69,6 +69,9 @@ type RoomMemberEntry struct {
 	// AppName is the app's display name (apps.name) for bot members. Humans
 	// carry EngName/ChineseName instead; display: appName ?? engName ?? account.
 	AppName string `json:"appName,omitempty"     bson:"-"`
+	// Name is a deprecated alias of AppName, emitted with the same value so
+	// clients that predate the appName rename keep working. Prefer appName.
+	Name    string `json:"name,omitempty"        bson:"-"`
 	IsOwner bool   `json:"isOwner,omitempty"     bson:"-"`
 	OrgName string `json:"orgName,omitempty"     bson:"-"`
 	// OrgCode is the org's plain section/department name (dept-first), distinct from the possibly TC-combined OrgName.

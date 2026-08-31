@@ -75,3 +75,36 @@ func TestPoolConfig_Validate_RejectsNegativeMaxIdleTime(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, "MONGO_MAX_IDLE_TIME must be >= 0, got -1s", err.Error())
 }
+
+// A stopped MongoDB does not error, it goes quiet: the driver's 30s default
+// server-selection wait turns an outage into a hang, and every fail-open path
+// downstream depends on the read erroring while the request still has budget.
+// The bound rides on PoolConfig so a service gets it by adopting one field,
+// rather than each of eighteen remembering its own.
+func TestWithPool_AppliesServerSelectionTimeout(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithPool(PoolConfig{
+		MaxPoolSize: 150, ServerSelectionTimeout: 2 * time.Second,
+	})).applyTuning(clientOpts)
+
+	require.NotNil(t, clientOpts.ServerSelectionTimeout)
+	assert.Equal(t, 2*time.Second, *clientOpts.ServerSelectionTimeout)
+}
+
+// Zero means "unset", and the driver reads a zero server-selection timeout as
+// no bound at all — so it must leave the URI/driver value alone rather than
+// being applied literally.
+func TestWithPool_OmitsServerSelectionTimeoutWhenZero(t *testing.T) {
+	clientOpts := options.Client()
+	newConnectConfig(WithPool(PoolConfig{MaxPoolSize: 150})).applyTuning(clientOpts)
+
+	assert.Nil(t, clientOpts.ServerSelectionTimeout)
+}
+
+// Negative is the dangerous typo: the driver reads <= 0 as unbounded, which is
+// the exact hang this setting exists to prevent, so it is refused at load.
+func TestPoolConfig_Validate_RejectsNegativeServerSelectionTimeout(t *testing.T) {
+	err := PoolConfig{MaxPoolSize: 150, ServerSelectionTimeout: -time.Second}.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_SERVER_SELECTION_TIMEOUT")
+}

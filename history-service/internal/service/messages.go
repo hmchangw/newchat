@@ -38,7 +38,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	// Two independent Mongo reads, run concurrently for one RTT. Access errors take
 	// precedence so a "not subscribed" 403 isn't masked by a transient room-times error.
-	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
@@ -47,10 +47,10 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	if before.IsZero() {
 		before = now
 	}
-	// Cap before at lastMsgAt+1ms so year-dead rooms become 1-bucket reads instead of walking from now.
-	if !lastMsgAt.IsZero() && before.After(lastMsgAt) {
-		before = lastMsgAt.Add(time.Millisecond)
-	}
+	// No cap at lastMsgAt: that pointer lags the Cassandra write it is meant to
+	// describe (see walkBounds), so capping here drops rows that already exist.
+	// The clock is the only sound bound, and it still has to be applied.
+	before = clampToCeiling(before, now)
 
 	limit := req.Limit
 	if limit <= 0 {
@@ -63,7 +63,6 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	if err != nil {
 		return nil, err
 	}
-
 	// Issue both the message-page read and the MinUserLastSeenAt read in parallel; receipt failures are non-fatal.
 	var (
 		page          cassrepo.Page[models.Message]
@@ -73,12 +72,8 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 	g.Go(func() error {
 		var pErr error
 		if accessSince == nil {
-			// Clamp createdAt to historyFloor so a client hint can't push the walk further back than configured.
-			historyFloor := now.Add(-s.historyFloor)
-			walkFloor := createdAt
-			if walkFloor.IsZero() || walkFloor.Before(historyFloor) {
-				walkFloor = historyFloor
-			}
+			// Floor only: `before` is the caller's own ceiling, already clamped above.
+			_, walkFloor := s.walkBounds(createdAt, now)
 			page, pErr = s.msgReader.GetMessagesBefore(gctx, roomID, before, walkFloor, pageReq)
 		} else {
 			page, pErr = s.msgReader.GetMessagesBetweenDesc(gctx, roomID, *accessSince, before, pageReq)
@@ -118,12 +113,12 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 	c.WithLogValues("account", account, "room_id", roomID)
 	now := time.Now().UTC()
 
-	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
 
-	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	after := millisToTime(req.After)
 
@@ -220,12 +215,12 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 	}
 
 	now := time.Now().UTC()
-	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
+	createdAt, err := s.resolveRoomTimesOrError(c, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
 
-	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	remaining := limit - 1 // before gets the larger half on odd splits
 	if remaining <= 0 {
@@ -276,8 +271,12 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 	beforeUpper := pivot.Add(time.Millisecond)
 
 	now := time.Now().UTC()
+	// Same clamp as LoadHistory: the pivot is client-supplied, and it is this
+	// read's DESC upper bound. The ASC read below needs none — its ceiling
+	// already comes from walkBounds, so a future pivot simply yields nothing.
+	beforeUpper = clampToCeiling(beforeUpper, now)
 	// No findMessage dependency, so the access check and room-times resolve run concurrently.
-	accessSince, lastMsgAt, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
+	accessSince, createdAt, err := s.checkAccessAndRoomTimes(c, account, roomID, req.Meta, now)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +284,7 @@ func (s *HistoryService) loadSurroundingByTimestamp(c *natsrouter.Context, accou
 		return nil, errcode.Forbidden("timestamp is outside access window", errcode.WithReason(errcode.MessageOutsideAccessWindow))
 	}
 
-	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+	ceiling, floor := s.walkBounds(createdAt, now)
 
 	beforeCount := (limit + 1) / 2
 	afterCount := limit / 2

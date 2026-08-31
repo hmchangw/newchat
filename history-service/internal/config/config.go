@@ -10,7 +10,18 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/roomtimescache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
+
+// WalkCeilingSkewHours is the clock-skew pad the reader adds above `now` when it
+// starts a Cassandra bucket walk (service.clockSkewTolerance is derived from it,
+// and a test there pins the two together). It lives in config rather than beside
+// the walk because the bucket-budget check below is the only thing that can catch
+// a budget too small to cover it, and a validation that carries its own guess at
+// the reader's ceiling is a validation that silently stops matching it.
+const WalkCeilingSkewHours = 1
 
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
 type CassandraConfig struct {
@@ -101,6 +112,38 @@ type Config struct {
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
 
+	// Valkey cluster fronting the shared subauthcache L2. Empty ValkeyAddrs
+	// disables the L2 tier (the L1 subscription cache falls straight through
+	// to Mongo, breaker-guarded).
+	Valkey valkeyutil.Config
+
+	// SubL2 is the shared Valkey L2 retention for subscription authz — the
+	// outage buffer. Long by design (default 90m) so an L2 hit carries the
+	// access decision through a Mongo outage. 0 disables the L2 tier.
+	SubL2 subauthcache.TTLConfig `envPrefix:"HISTORY_"`
+
+	// Breaker guards this service's Mongo reads — the subauthcache loader and the
+	// room repository, each with its own instance off these shared knobs.
+	Breaker mongoutil.BreakerConfig `envPrefix:"HISTORY_"`
+
+	// DEKL2 is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
+	// outage buffer for decrypting history. The in-process DEK cache expires on
+	// a fixed TTL stamped at fetch time, so without this L2 an active room loses
+	// its key partway through a Mongo outage. 0 disables the DEK L2 tier.
+	DEKL2 atrest.TTLConfig
+
+	// DEKBreaker fences the Mongo DEK fetch, kept separate from the subscription
+	// breaker so the two failure signals never reset each other. The knobs live
+	// in pkg/atrest with the tier they configure — message-worker fences the
+	// same collection.
+	DEKBreaker atrest.BreakerConfig
+
+	// RoomTimesL2 is the Valkey L2 retention for a room's last confirmed
+	// createdAt, which floors the Cassandra bucket walk. Unlike the other tiers
+	// this one is never read while Mongo is healthy, so its TTL governs only how
+	// long a room stays cheap to read *during* an outage.
+	// 0 disables it, leaving the walk as wide as the configured history floor.
+	RoomTimesL2 roomtimescache.TTLConfig
 	// User profile cache, fronting both account lookups: the batch that resolves
 	// legacy members_removed display names, and reactions' single-account read,
 	// whose name is denormalized into the persisted ReactorInfo — so the TTL
@@ -190,6 +233,65 @@ func validate(cfg *Config) error {
 		return err
 	}
 	if err := cfg.Guard.Validate(); err != nil {
+		return err
+	}
+	if cfg.Pool.ServerSelectionTimeout <= 0 {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT must be > 0, got %s", cfg.Pool.ServerSelectionTimeout)
+	}
+	// A server-selection bound at or above the request budget cannot do its job:
+	// the handler deadline fires first, so the read never returns an error and
+	// the fail-open paths that depend on one never run. RequestTimeout == 0 means
+	// unbounded, so there is no budget to undercut.
+	if cfg.Guard.RequestTimeout > 0 && cfg.Pool.ServerSelectionTimeout >= cfg.Guard.RequestTimeout {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT (%s) must be less than REQUEST_TIMEOUT (%s), "+
+			"otherwise a stalled MongoDB consumes the whole request budget instead of failing open",
+			cfg.Pool.ServerSelectionTimeout, cfg.Guard.RequestTimeout)
+	}
+	// The bucket walk is contiguous and stops after MessageReadMaxBuckets, and
+	// since the ceiling became the clock rather than the room's last message, an
+	// idle room spends that budget crossing empty buckets before reaching data.
+	// A budget too small to span the history floor makes an old room's read stop
+	// early and return an EMPTY page — and LoadHistory pages by `before` = oldest
+	// returned row, so an empty page carries no continuation and the client
+	// cannot advance. That is silent history loss, so refuse to start instead.
+	//
+	// The budget must cover the walk the READER performs, which is wider than the
+	// history floor in two ways. It starts at now+WalkCeilingSkewHours, not now;
+	// and buckets are absolute time windows, so where that span falls relative to
+	// a boundary decides how many partitions it touches. A span of S hours over a
+	// W-hour window touches at most floor(S/W)+2 partitions — +1 for the partial
+	// bucket at each end. Sizing on S alone passes configurations whose walk
+	// exhausts the budget one partition short of the floor, and only near a
+	// boundary, which is the worst way to find out.
+	//
+	// The positive guards are for callers that build a Config directly; at
+	// startup main's checkConfig has already rejected a non-positive value for
+	// all three, so this relational check cannot be skipped by zeroing one.
+	if cfg.MessageBucketHours > 0 && cfg.MessageReadMaxBuckets > 0 && cfg.MessageHistoryFloorDays > 0 {
+		spanHours := WalkCeilingSkewHours + cfg.MessageHistoryFloorDays*24
+		if needBuckets := spanHours/cfg.MessageBucketHours + 2; cfg.MessageReadMaxBuckets < needBuckets {
+			return fmt.Errorf(
+				"MESSAGE_READ_MAX_BUCKETS (%d) is short of the %d buckets a worst-case walk needs: "+
+					"MESSAGE_HISTORY_FLOOR_DAYS (%d) plus the %dh walk skew spans %dh, which at "+
+					"MESSAGE_BUCKET_HOURS (%d) touches up to %d partitions; a history read would stop "+
+					"before the floor and return an empty page the client cannot page past",
+				cfg.MessageReadMaxBuckets, needBuckets, cfg.MessageHistoryFloorDays,
+				WalkCeilingSkewHours, spanHours, cfg.MessageBucketHours, needBuckets)
+		}
+	}
+	if cfg.SubL2.TTL < 0 {
+		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2.TTL)
+	}
+	if err := cfg.Breaker.Validate("HISTORY_"); err != nil {
+		return err
+	}
+	if cfg.RoomTimesL2.TTL < 0 {
+		return fmt.Errorf("ROOM_TIMES_L2_TTL must be >= 0, got %s", cfg.RoomTimesL2.TTL)
+	}
+	if cfg.DEKL2.TTL < 0 {
+		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2.TTL)
+	}
+	if err := cfg.DEKBreaker.Validate(); err != nil {
 		return err
 	}
 	return nil

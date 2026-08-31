@@ -79,7 +79,7 @@ func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+	assert.Empty(t, cfg.Valkey.Addrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
 }
 
 func TestConfig_ValkeyAddrsParsed(t *testing.T) {
@@ -90,8 +90,8 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
-	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.Valkey.Addrs)
+	assert.Equal(t, "hunter2", cfg.Valkey.Password)
 }
 
 func TestConfig_MentionableLimits(t *testing.T) {

@@ -117,7 +117,7 @@ func BuildBotRoomFixtures(p *BotRoomPreset, seed int64, siteID string) (Fixtures
 					User:     model.SubscriptionUser{ID: m.ID, Account: m.Account},
 					RoomID:   roomID,
 					SiteID:   siteID,
-					Roles:    []model.Role{model.RoleMember},
+					Roles:    []model.Role{model.RoleUser},
 					JoinedAt: now,
 				})
 			}

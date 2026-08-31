@@ -10,9 +10,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/badgecache"
@@ -28,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
@@ -116,9 +115,10 @@ type config struct {
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
-	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
+	// membership, role or history-restriction write; empty disables both (clear
+	// hooks and busts become no-ops, and the subauthcache TTL reconciles).
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
 	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
@@ -219,7 +219,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
 	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
@@ -333,32 +333,25 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
-	// no-ops (nil-checked in handler.go).
+	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
+	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap adds tracing+metrics in place, mirroring
-		// pkg/valkeyutil's instrumentCluster.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	var subValkey valkeyutil.Client
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+		// The same connection backs best-effort subauthcache L2 invalidation
+		// after a membership, role or history-restriction write. One pool serves
+		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
+		// the bust a no-op that the L2 TTL reconciles.
+		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
-		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
@@ -369,19 +362,17 @@ func main() {
 			if msgID != "" {
 				opts = append(opts, jetstream.WithMsgID(msgID))
 			}
-			_, err := js.PublishMsg(ctx, msg, opts...)
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if _, err := js.PublishMsg(ctx, msg, opts...); err != nil {
+				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+				publishMetrics.Failure(ctx, destination, operation, err)
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		},
 		func(ctx context.Context, subj string, data []byte) error {
-			err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+				publishMetrics.Failure(ctx, destination, operation, err)
 				return fmt.Errorf("publish core to %q: %w", subj, err)
 			}
 			return nil
@@ -392,6 +383,7 @@ func main() {
 	)
 	handler.dekProvisioner = dekProvisioner
 	handler.badge = badge
+	handler.valkey = subValkey
 	handler.graphClient = graphClient
 	handler.directoryClient = directoryClient
 	handler.teamsMeetingStore = store
@@ -401,7 +393,8 @@ func main() {
 	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
 	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
 
-	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard)
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -430,6 +423,7 @@ func main() {
 			}
 			return nil
 		},
+		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil

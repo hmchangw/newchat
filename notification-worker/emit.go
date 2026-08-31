@@ -87,6 +87,6 @@ type jsPublisher struct {
 
 func (p *jsPublisher) PublishMsg(ctx context.Context, msg *nats.Msg) error {
 	_, err := p.js.PublishMsg(ctx, msg)
-	p.metrics.Attempt(ctx, natsmetrics.DestinationPush, natsmetrics.OperationPushPublish, err)
+	p.metrics.Failure(ctx, natsmetrics.DestinationPush, natsmetrics.OperationPushPublish, err)
 	return err
 }

@@ -1,0 +1,525 @@
+package userstore
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
+)
+
+var alice = model.User{ID: "u-alice", Account: "alice", EngName: "Alice", SiteID: "site-a"}
+
+func TestL2Store_MissPopulatesBothKeys(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	got, err := s.FindUserByAccount(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, &alice, got)
+	require.Equal(t, 1, inner.calls)
+
+	// Both key spaces must be populated from one fetch, so a later by-ID lookup
+	// is a hit rather than another Mongo round-trip.
+	assert.True(t, vk.Has(accountKey("alice")))
+	assert.True(t, vk.Has(idKey("u-alice")))
+}
+
+func TestL2Store_HitSkipsTheStore(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	_, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	require.Equal(t, 1, inner.calls)
+
+	got, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	assert.Equal(t, &alice, got)
+	assert.Equal(t, 1, inner.calls, "a warm entry must not reach the store")
+}
+
+func TestL2Store_StaleEntrySurvivesStoreOutageViaTTLSlide(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	_, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+
+	// Age the entry past the refresh window, then break the store. The refresh
+	// must fail open: keep serving the cached user and re-arm its deadline so it
+	// outlives an outage longer than the TTL.
+	now = now.Add(59 * time.Second)
+	inner.err = errors.New("mongo down")
+	inner.user = nil
+
+	got, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err, "a warm entry must survive the source being down")
+	assert.Equal(t, &alice, got)
+	assert.Positive(t, vk.Calls().Expire, "the deadline must be re-armed, not left to expire mid-outage")
+}
+
+// hookStore fails every call, running onCall first — used to evict the entry
+// between the L2 read and the TTL slide, which is exactly the window a real
+// bust can land in.
+type hookStore struct {
+	UserStore
+	onCall func()
+}
+
+func (h *hookStore) FindUserByID(context.Context, string) (*model.User, error) {
+	h.onCall()
+	return nil, errors.New("mongo down")
+}
+
+func TestL2Store_SlideUsesExpireSoItCannotResurrect(t *testing.T) {
+	vk := valkeyfake.New()
+	now := time.Now()
+	ctx := context.Background()
+
+	// Warm the entry through a healthy store first.
+	warm := newL2StoreWithClock(&countingStore{user: &alice}, vk, time.Minute, func() time.Time { return now })
+	_, err := warm.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	require.True(t, vk.Has(idKey("u-alice")))
+
+	// Now age it past the refresh window and fail the refresh, with the entry
+	// evicted mid-refresh. EXPIRE must no-op on the absent key; a SET-based
+	// slide would write the stale user back and un-delete a busted record.
+	evicting := &hookStore{onCall: func() {
+		_ = vk.Del(ctx, idKey("u-alice"), accountKey("alice"))
+	}}
+	s := newL2StoreWithClock(evicting, vk, time.Minute, func() time.Time { return now })
+	now = now.Add(59 * time.Second)
+
+	got, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err, "the caller still gets the record it read")
+	assert.Equal(t, &alice, got)
+	assert.Positive(t, vk.Calls().Expire, "the slide must have been attempted")
+	assert.False(t, vk.Has(idKey("u-alice")), "a slide must never resurrect an evicted entry")
+}
+
+func TestL2Store_ColdMissDuringOutageStillFails(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{err: errors.New("mongo down")}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	_, err := s.FindUserByID(context.Background(), "nobody")
+	require.Error(t, err, "an uncached user cannot be invented")
+}
+
+func TestL2Store_NotFoundIsNotCached(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{err: fmt.Errorf("find user u1: %w", ErrUserNotFound)}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	_, err := s.FindUserByID(context.Background(), "u1")
+	require.ErrorIs(t, err, ErrUserNotFound)
+	assert.Empty(t, vk.Keys(), "absence must not be cached: it would outlive the user being created")
+}
+
+func TestL2Store_FindUsersByAccounts_ReturnsPartialHitsOnStoreError(t *testing.T) {
+	vk := valkeyfake.New()
+	bob := model.User{ID: "u-bob", Account: "bob"}
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	// Warm alice only.
+	_, err := s.FindUserByAccount(ctx, "alice")
+	require.NoError(t, err)
+
+	inner.err = errors.New("mongo down")
+	inner.user = &bob
+
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice", "bob"})
+	require.Error(t, err, "the caller must learn the lookup degraded")
+	require.Len(t, got, 1, "the cached half must still come back")
+	assert.Equal(t, "alice", got[0].Account)
+}
+
+func TestL2Store_FindUsersByAccounts_OnlyFetchesMisses(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	_, err := s.FindUserByAccount(ctx, "alice")
+	require.NoError(t, err)
+	inner.calls = 0
+	inner.lastAccounts = nil
+
+	_, err = s.FindUsersByAccounts(ctx, []string{"alice", "bob"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bob"}, inner.lastAccounts, "cached accounts must not be re-fetched")
+}
+
+func TestL2Store_ValkeyDownFallsThroughToStore(t *testing.T) {
+	vk := valkeyfake.New()
+	vk.FailGet(errors.New("valkey down"))
+	vk.FailSet(errors.New("valkey down"))
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	got, err := s.FindUserByAccount(context.Background(), "alice")
+	require.NoError(t, err, "a broken cache must never fail a request the store can serve")
+	assert.Equal(t, &alice, got)
+}
+
+func TestL2Store_NilClientIsPassThrough(t *testing.T) {
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, nil, time.Minute)
+
+	got, err := s.FindUserByID(context.Background(), "u-alice")
+	require.NoError(t, err)
+	assert.Equal(t, &alice, got)
+	assert.Equal(t, 1, inner.calls)
+}
+
+func TestL2Store_BustRemovesBothKeys(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	_, err := s.FindUserByAccount(ctx, "alice")
+	require.NoError(t, err)
+	require.Len(t, vk.Keys(), 2)
+
+	Bust(ctx, vk, "u-alice", "alice")
+	assert.Empty(t, vk.Keys(), "both key spaces must be dropped or one serves a stale user")
+	// Both key spaces go in one call. They carry no hash tag and so hash to
+	// different cluster slots, which a multi-key DEL would reject — the client
+	// pipelines one DEL per key instead, which is not this package's concern.
+	require.Len(t, vk.DelBatches(), 1)
+	assert.Equal(t, []string{idKey("u-alice"), accountKey("alice")}, vk.DelBatches()[0])
+}
+
+// A caller that supplies only one identifier must issue exactly one Del, not an
+// empty one alongside it.
+func TestBust_SingleIdentifier_IssuesOneDel(t *testing.T) {
+	vk := valkeyfake.New()
+	Bust(context.Background(), vk, "", "alice")
+	require.Len(t, vk.DelBatches(), 1)
+	assert.Equal(t, []string{accountKey("alice")}, vk.DelBatches()[0])
+}
+
+func TestL2Store_StaleEntryEvictedWhenUserGenuinelyGone(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	_, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	require.Len(t, vk.Keys(), 2)
+
+	// ErrUserNotFound is a healthy answer, not an outage: the record is really
+	// gone, so it must be evicted now rather than served until the TTL lapses.
+	now = now.Add(59 * time.Second)
+	inner.err = fmt.Errorf("find user u-alice: %w", ErrUserNotFound)
+	inner.user = nil
+
+	_, err = s.FindUserByID(ctx, "u-alice")
+	require.ErrorIs(t, err, ErrUserNotFound)
+	assert.Empty(t, vk.Keys(), "a deleted user must not linger under either key")
+}
+
+func TestL2Store_SuccessfulRefreshRewritesAndResetsTheWindow(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	_, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+
+	// Past the refresh window: re-validate and pick up the change a missed bust
+	// would otherwise hide until the TTL.
+	now = now.Add(59 * time.Second)
+	renamed := model.User{ID: "u-alice", Account: "alice", EngName: "Alice Renamed", SiteID: "site-a"}
+	inner.user = &renamed
+
+	got, err := s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Renamed", got.EngName)
+	require.Equal(t, 2, inner.calls)
+
+	// The rewrite stamps a fresh CachedAt, so the next read is inside the window
+	// again and serves without another round-trip.
+	got, err = s.FindUserByID(ctx, "u-alice")
+	require.NoError(t, err)
+	assert.Equal(t, "Alice Renamed", got.EngName)
+	assert.Equal(t, 2, inner.calls, "a just-refreshed entry must not re-validate again")
+}
+
+func TestL2Store_FindUsersByAccounts_UsesOneBatchRead(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	accounts := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		accounts = append(accounts, fmt.Sprintf("user-%d", i))
+	}
+	_, err := s.FindUsersByAccounts(ctx, accounts)
+	require.NoError(t, err)
+
+	// Mention count is driven by message content, so a per-key read would put a
+	// serialized round-trip on the persist path for every account named.
+	assert.Equal(t, 1, vk.Calls().MGet, "the whole account set must be fetched in one batch")
+	assert.Equal(t, 0, vk.Calls().Get, "no per-account Get may remain on this path")
+	assert.Equal(t, 50, len(vk.MGetKeys()))
+}
+
+func TestL2Store_FindUsersByAccounts_DedupesKeysBeforeFetching(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	_, err := s.FindUsersByAccounts(context.Background(), []string{"a", "b", "a", "b", "a"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, len(vk.MGetKeys()), "a repeated mention must not be fetched twice")
+}
+
+func TestL2Store_FindUsersByAccounts_BatchReadFailureFallsThroughToStore(t *testing.T) {
+	vk := valkeyfake.New()
+	// FailMGet, not FailGet: this path reads through MGet, and a fake that let a
+	// Get failure stand in for a batch failure would pass without ever failing
+	// the read it names.
+	vk.FailMGet(errors.New("valkey down"))
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	got, err := s.FindUsersByAccounts(context.Background(), []string{"alice"})
+	require.NoError(t, err, "a broken cache must not fail a lookup the store can serve")
+	require.Len(t, got, 1)
+	assert.Equal(t, "alice", got[0].Account)
+}
+
+func TestL2Store_FindUsersByAccounts_MixedHitsPreserveOrderAndCompleteness(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &countingStore{user: &alice}
+	s := NewL2Store(inner, vk, time.Minute)
+	ctx := context.Background()
+
+	_, err := s.FindUserByAccount(ctx, "alice")
+	require.NoError(t, err)
+
+	bob := model.User{ID: "u-bob", Account: "bob"}
+	inner.user = &bob
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice", "bob"})
+	require.NoError(t, err)
+
+	accounts := make([]string, 0, len(got))
+	for _, u := range got {
+		accounts = append(accounts, u.Account)
+	}
+	assert.ElementsMatch(t, []string{"alice", "bob"}, accounts,
+		"a cached account and a fetched one must both come back")
+	assert.Equal(t, []string{"bob"}, inner.lastAccounts, "only the miss goes to the store")
+}
+
+func TestL2Store_FindUsersByAccounts_RejectsUnusableEntries(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "malformed json", raw: "{not json"},
+		{name: "json null", raw: "null"},
+		{name: "envelope with no user", raw: `{"cachedAt":123}`},
+		{name: "user with empty id", raw: `{"user":{"account":"alice"},"cachedAt":123}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			vk := valkeyfake.New()
+			vk.Seed(accountKey("alice"), tc.raw, time.Hour)
+			inner := &countingStore{user: &alice}
+			s := NewL2Store(inner, vk, time.Minute)
+
+			got, err := s.FindUsersByAccounts(context.Background(), []string{"alice"})
+			require.NoError(t, err)
+
+			// An unusable entry must degrade to a miss and be re-fetched, never be
+			// served as a half-populated user.
+			require.Len(t, got, 1)
+			assert.Equal(t, "u-alice", got[0].ID)
+			assert.Equal(t, []string{"alice"}, inner.lastAccounts, "the bad entry must fall through to the store")
+		})
+	}
+}
+
+// bulkStore answers a bulk lookup per account, so a test can assert which
+// accounts were re-validated and model an account that no longer exists.
+type bulkStore struct {
+	UserStore
+	users        map[string]model.User
+	err          error
+	calls        int
+	lastAccounts []string
+}
+
+func (b *bulkStore) FindUsersByAccounts(_ context.Context, accounts []string) ([]model.User, error) {
+	b.calls++
+	b.lastAccounts = append([]string(nil), accounts...)
+	if b.err != nil {
+		return nil, b.err
+	}
+	out := make([]model.User, 0, len(accounts))
+	for _, a := range accounts {
+		if u, ok := b.users[a]; ok {
+			out = append(out, u)
+		}
+	}
+	return out, nil
+}
+
+func TestL2Store_FindUsersByAccounts_StaleHitSurvivesAnOutageViaTTLSlide(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &bulkStore{users: map[string]model.User{"alice": alice}}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	_, err := s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	require.Zero(t, vk.Calls().Expire)
+
+	// Past the refresh window with the source down. The refresh must fail open:
+	// keep serving the cached user and re-arm its deadline, so a record read
+	// only through mentions outlives an outage longer than its TTL instead of
+	// lapsing one TTL after its last populate.
+	now = now.Add(59 * time.Second)
+	inner.err = errors.New("mongo down")
+
+	// The degraded answer is partial-hits-plus-error, the same contract the
+	// misses path already has: mention.Resolve consumes the users and lets
+	// message-worker decide what the error means.
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.Error(t, err, "the caller must learn the lookup degraded")
+	require.Len(t, got, 1, "a warm entry must survive the source being down")
+	assert.Equal(t, "u-alice", got[0].ID)
+	assert.Positive(t, vk.Calls().Expire, "the deadline must be re-armed, not left to expire mid-outage")
+}
+
+func TestL2Store_FindUsersByAccounts_StaleHitRevalidatesWhileTheSourceIsHealthy(t *testing.T) {
+	vk := valkeyfake.New()
+	renamed := model.User{ID: "u-alice", Account: "alice", EngName: "Alice Renamed", SiteID: "site-a"}
+	inner := &bulkStore{users: map[string]model.User{"alice": renamed}}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	vk.Seed(accountKey("alice"), mustEncodeCachedUser(t, &alice, now.Add(-59*time.Second)), time.Hour)
+
+	// Sliding alone would keep an obsolete record alive for as long as it keeps
+	// being mentioned, because a slide does not advance CachedAt. While the
+	// source can answer, a stale entry must be re-resolved — it rides the same
+	// batch as the misses, so it costs no extra round-trip.
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Alice Renamed", got[0].EngName, "a stale entry must be re-resolved, not just re-armed")
+	assert.Equal(t, []string{"alice"}, inner.lastAccounts, "the stale account must join the refresh batch")
+
+	// The rewrite restamps CachedAt, so the next read is a fresh hit.
+	inner.calls = 0
+	got, err = s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "Alice Renamed", got[0].EngName)
+	assert.Zero(t, inner.calls, "the refresh must restamp CachedAt, not leave the entry stale forever")
+}
+
+func TestL2Store_FindUsersByAccounts_StaleHitEvictedWhenUserGenuinelyGone(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &bulkStore{users: map[string]model.User{}} // healthy, and alice is gone
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	vk.Seed(accountKey("alice"), mustEncodeCachedUser(t, &alice, now.Add(-59*time.Second)), time.Hour)
+
+	// The source answered and did not know this account. That is a deletion, not
+	// an outage, so the entry must go now rather than at the TTL.
+	got, err := s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	assert.Empty(t, got, "a deleted user must not keep being served from cache")
+	assert.False(t, vk.Has(accountKey("alice")), "a confirmed absence must evict the entry")
+}
+
+func TestL2Store_FindUsersByAccounts_FreshHitDoesNotSlideOrRefetch(t *testing.T) {
+	vk := valkeyfake.New()
+	inner := &bulkStore{users: map[string]model.User{"alice": alice}}
+	now := time.Now()
+	s := newL2StoreWithClock(inner, vk, time.Minute, func() time.Time { return now })
+	ctx := context.Background()
+
+	_, err := s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	inner.calls = 0
+
+	// A mention set is attacker-influenced in size, so an entry with most of its
+	// life left must cost neither a Valkey write nor a source round-trip.
+	now = now.Add(time.Second)
+	_, err = s.FindUsersByAccounts(ctx, []string{"alice"})
+	require.NoError(t, err)
+	assert.Zero(t, vk.Calls().Expire, "a fresh bulk hit must cost no Valkey write")
+	assert.Zero(t, inner.calls, "a fresh bulk hit must not reach the source")
+}
+
+func mustEncodeCachedUser(t *testing.T, u *model.User, cachedAt time.Time) string {
+	t.Helper()
+	raw, err := json.Marshal(cachedUser{User: *u, CachedAt: cachedAt.UnixMilli()})
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// A bulk fill must cost one write round trip, not one per user (nor two, since
+// each user occupies both key spaces). Mention lists are sized by the sender
+// and sit on the message hot path, so a serialized loop here is a chain of
+// round trips at exactly the wrong moment.
+func TestL2Store_FindUsersByAccounts_FillsInOneRoundTrip(t *testing.T) {
+	vk := valkeyfake.New()
+	users := make([]model.User, 0, 25)
+	for i := range cap(users) {
+		id := strconv.Itoa(i)
+		users = append(users, model.User{ID: "u" + id, Account: "acct" + id})
+	}
+	inner := &countingStore{users: users}
+	s := NewL2Store(inner, vk, time.Minute)
+
+	accounts := make([]string, 0, len(users))
+	for _, u := range users {
+		accounts = append(accounts, u.Account)
+	}
+
+	got, err := s.FindUsersByAccounts(context.Background(), accounts)
+	require.NoError(t, err)
+	require.Len(t, got, len(users))
+
+	require.Len(t, vk.MSetBatches(), 1, "one bulk write for the whole batch")
+	assert.Len(t, vk.MSetBatches()[0], 2*len(users), "both key spaces for every user, in that one call")
+	assert.Zero(t, vk.Calls().Set, "no per-key Set may leak onto the bulk path")
+	for _, u := range users {
+		assert.True(t, vk.Has(idKey(u.ID)))
+		assert.True(t, vk.Has(accountKey(u.Account)))
+	}
+}

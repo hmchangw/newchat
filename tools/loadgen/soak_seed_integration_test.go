@@ -626,7 +626,7 @@ func insertRoomServiceCreatedRoom(
 
 	documents := make([]any, 0, len(accounts))
 	for i, account := range accounts {
-		roles := []model.Role{model.RoleMember}
+		roles := []model.Role{model.RoleUser}
 		if i == 0 {
 			roles = []model.Role{model.RoleOwner}
 		}

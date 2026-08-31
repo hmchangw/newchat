@@ -169,7 +169,8 @@ type RoomStore interface {
 	OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error)
 	// SetOwnerRole atomically grants (makeOwner=true) or revokes (makeOwner=false)
 	// the owner role on the subscription keyed by (roomID, account) via a single
-	// FindOneAndUpdate. Other roles (e.g. member) are retained. Stamps rolesUpdatedAt
+	// FindOneAndUpdate. Other roles are retained, with the legacy "member" spelling
+	// rewritten to "user" on the way through. Stamps rolesUpdatedAt
 	// so the origin doc carries the same high-water mark the federated event publishes
 	// (inbox-worker guards remote applies against it). Returns the updated
 	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.

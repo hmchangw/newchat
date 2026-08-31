@@ -31,8 +31,7 @@ func uploadStack(t *testing.T) string {
 
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
-	store.EXPECT().IsMember(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
-	store.EXPECT().GetRoomSiteID(gomock.Any(), gomock.Any()).Return("site1", nil).AnyTimes()
+	store.EXPECT().MemberSiteID(gomock.Any(), gomock.Any(), gomock.Any()).Return("site1", true, nil).AnyTimes()
 
 	h := NewHandler(store, drive.NewClient(&drive.Config{URL: driveSrv.URL, Token: "tok"}), &fakeS3{},
 		0, 1, 0, 200<<20, newMediaTypeFilter("", "image/svg+xml"), testCacheMaxAge, true, &fakeDrive{})

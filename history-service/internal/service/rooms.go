@@ -116,21 +116,18 @@ func (s *HistoryService) fillLazyPreviews(
 	return ctx.Err()
 }
 
-// walkBoundsFromRow derives the walk's bounds from the batched read directly. The row IS
-// the room document, so a zero lastMsgAt there is what Mongo says, not an unknown to go
-// re-read: routing it through RoomMeta made resolveRoomTimes fetch the same document
-// again, once per never-messaged room per request (#291). walkBounds already ceilings a
-// zero lastMsgAt at now+skew, which is the same walk that second read produced.
-func walkBoundsFromRow(rt mongorepo.RoomTimes) (lastMsgAt, createdAt time.Time) {
-	return rt.LastMsgAt, rt.CreatedAt
-}
-
 // resolvePreview resolves one room the lazy way, through the cache when installed.
 // The cache is positives-only, so empty and degraded walks re-resolve rather than cache.
 func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt mongorepo.RoomTimes, now time.Time) (models.PreviewMessage, bool) {
-	lastMsgAt, createdAt := walkBoundsFromRow(rt)
+	// Straight off the batched read: the row IS the room document, so what it holds is
+	// what Mongo says, not an unknown to go re-read — routing it through RoomMeta made
+	// resolveRoomTimes fetch the same document again, once per never-messaged room per
+	// request (#291). rt.LastMsgAt is deliberately dropped: it bounds a Cassandra walk at
+	// neither end (see walkBounds), and the row supplying it first-hand does not make it
+	// any less lagging.
+	times := rt.CreatedAt
 	load := func(ctx context.Context) (models.PreviewMessage, bool, error) {
-		w := s.walkForPreview(ctx, roomID, lastMsgAt, createdAt, now)
+		w := s.walkForPreview(ctx, roomID, times, now)
 		if w.State == previewFound {
 			s.warmBackPreview(ctx, roomID, &w, now)
 		}
@@ -198,21 +195,32 @@ func (w *previewWalk) EventPreview() *models.PreviewMessage {
 	return &w.Preview
 }
 
-// roomLastPreviewMessage walks back from lastMsgAt for the latest eligible message.
+// roomLastPreviewMessage resolves one room's latest eligible preview message at read time.
+// meta, when non-nil, is a caller/batch-resolved room-times hint that lets resolveRoomTimes
+// skip its own Mongo read (see resolveRoomMetaHints / resolveRoomTimes); pass nil to always
+// resolve fresh (previewAfterMutation's contract). It walks backward from the clock ceiling
+// in pages, skipping ineligible messages.
 func (s *HistoryService) roomLastPreviewMessage(ctx context.Context, roomID string, meta *models.RoomMeta, now time.Time) previewWalk {
-	lastMsgAt, createdAt, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
+	times, err := s.resolveRoomTimesOrError(ctx, roomID, meta, now)
 	if err != nil {
 		slog.WarnContext(ctx, "rooms.get room degraded", "room_id", roomID,
 			"request_id", natsutil.RequestIDFromContext(ctx), "error", err)
 		return previewWalk{State: previewDegraded}
 	}
-	return s.walkForPreview(ctx, roomID, lastMsgAt, createdAt, now)
+	return s.walkForPreview(ctx, roomID, times, now)
 }
 
 // walkForPreview is roomLastPreviewMessage with the room's times already in hand, so a
 // caller that just read the room document does not read it again.
-func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, lastMsgAt, createdAt, now time.Time) previewWalk {
-	ceiling, floor := s.walkBounds(lastMsgAt, createdAt, now)
+func (s *HistoryService) walkForPreview(ctx context.Context, roomID string, createdAt time.Time, now time.Time) previewWalk {
+	// Deliberately NOT narrowed when the room times came from the fail-open path.
+	// A truncated walk that finds nothing returns previewEmpty, and previewEmpty
+	// is destructive on this path — previewAfterMutation clears the stored preview
+	// on it. Narrowing would turn "Mongo is down and this room is quiet" into
+	// "this room has no messages" and wipe a good preview. The batch reader cannot
+	// reach a degraded walk at all (RoomsGet errors on a failed batched read
+	// rather than walking blind), so there is no amplification left to bound here.
+	ceiling, floor := s.walkBounds(createdAt, now)
 	before := ceiling.Add(time.Millisecond)
 
 	// The first row of the first page, eligible or not: the id to invalidate against.

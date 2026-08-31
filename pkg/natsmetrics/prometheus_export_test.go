@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -53,19 +54,26 @@ func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T)
 	require.NoError(t, c.Track(ctx, msg, EventCreated, 5).Ack())
 
 	p := m.Publisher("s1")
-	p.Attempt(ctx, DestinationCanonical, OperationCanonicalPublish, nil)
+	// A real failure, not nil: Failure returns before recording on a nil error,
+	// so the nil call left chat_nats_publish_failures out of the exposition
+	// entirely and this guard silently stopped covering it.
+	p.Failure(ctx, DestinationCanonical, OperationCanonicalPublish, nats.ErrTimeout)
 	p.Request(ctx, OperationPresenceLookup, time.Millisecond, nil)
 	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather must succeed — a failure here is the /metrics 500")
 
-	sawChatNats := false
+	// The RPC families do not carry the chat_nats_ prefix — that is the point of
+	// adopting the semantic convention — so a prefix filter would have excluded
+	// the two newest families from the guard that exists to catch this.
+	covered := map[string]bool{}
 	for _, mf := range families {
-		if !strings.HasPrefix(mf.GetName(), "chat_nats_") {
+		name := mf.GetName()
+		if !strings.HasPrefix(name, "chat_nats_") && !strings.HasPrefix(name, "rpc_") {
 			continue
 		}
-		sawChatNats = true
+		covered[name] = true
 		for _, metric := range mf.GetMetric() {
 			values := map[string][]string{}
 			for _, lp := range metric.GetLabel() {
@@ -78,5 +86,16 @@ func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T)
 				"family %s must carry the resource-derived service_name exactly once", mf.GetName())
 		}
 	}
-	require.True(t, sawChatNats, "expected chat_nats_* families in exposition")
+
+	// Naming the families explicitly, so a family that stops being exported
+	// fails here instead of quietly leaving the guard with nothing to check.
+	for _, family := range []string{
+		"chat_nats_consumer_loop_up",
+		"chat_nats_consumer_messages_total",
+		"chat_nats_publish_failures_total",
+		"rpc_client_call_duration_seconds",
+		"rpc_server_call_duration_seconds",
+	} {
+		assert.Truef(t, covered[family], "%s must be in the exposition for this guard to mean anything", family)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/pwhash"
 	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/sessioncache"
 	"github.com/hmchangw/chat/pkg/sessiontoken"
 )
 
@@ -121,10 +122,12 @@ func (h *Handler) handleLogin(c *gin.Context) {
 	}
 
 	if h.cfg.SessionsMaxPerAccount > 0 {
-		if _, err := h.sessions.DeleteBeyondCap(ctx, u.Account, h.cfg.SessionsMaxPerAccount); err != nil {
+		evicted, err := h.sessions.DeleteBeyondCap(ctx, u.Account, h.cfg.SessionsMaxPerAccount)
+		if err != nil {
 			// Eviction is best-effort — log but don't fail the login.
 			slog.WarnContext(ctx, "evict sessions failed", "error", err)
 		}
+		sessioncache.BustMany(ctx, h.valkey, evicted)
 	}
 
 	slog.InfoContext(ctx, "admin login", "login_outcome", "ok", "account", req.Username)
