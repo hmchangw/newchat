@@ -74,3 +74,31 @@ Routes live only in `routes.go`; `GET /healthz` + `/readyz` exposed; request-ID 
 - `low` — Validate `BcryptCost ∈ [4,31]` and `SessionsMaxPerAccount > 0`; replace `main.go:79-81`'s `os.Exit` with a wrapped return.
 - `nitpick` — Move `gin.Recovery()` to the first `r.Use`; inject Valkey via a `withValkey` option.
 
+---
+
+## 4. Test coverage — 2 / 5
+
+Coverage is **68.9% (1055 statements)**, below the §4 80% floor, so the dimension is floored at 2. The suite is structurally excellent — the shortfall is concentrated exactly where it hurts.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | 68.9%, under the §4 80% merge floor | `coverage_by_service.txt:30` |
+| high | **Every `ShouldBindJSON` malformed-body → 400 branch in the service is uncovered** — all five. Systematic, not incidental: the tests always hand in well-formed structs, so a binding-tag regression (a field flipped to `binding:"required"`) would ship silently **on every mutating admin endpoint** | `handler.go:383`, `:456`, `:674`; `permissions.go:143`, `:462` |
+| medium | Two mutating-path store-error branches uncovered: `DeactivateAndRevoke` → `ErrUserNotFound` → 404, and non-conflict `CreateUser` failure → 500. Only the conflict sibling is tested, so **the `errors.Is` discrimination itself is never exercised** | `handler.go:485`, `:428` |
+| medium | `store_mongo.go` is **0% in the unit profile** (all 19 methods). The integration suite covers most of it, but `GetUserForAuth` and `Ping` appear in **neither** — and `Ping` is the sole dependency of `/readyz`, so the readiness probe's real failure mode is untested end-to-end | `store_mongo.go:186`, `:581`; `handler.go:657` |
+| medium | **No test asserts the routes→middleware wiring.** `registerRoutes` reads 100% only because `client_update_test.go` executes it; nothing fails if a future route is hung off `r` instead of the `admin` group and **ships unauthenticated**. `requireAdmin` itself is well tested in isolation, which makes the wiring the only unguarded link | `routes.go:17-31`; `middleware_test.go:34` |
+| medium | `pwhash.Hash` failure → 500 uncovered at all three sites, despite being **trivially forceable**: `Config.BcryptCost` is injected and bcrypt rejects cost > 31 | `handler.go:396`, `:687`; `login.go:189` |
+| low | The `seen[acct]` dedup branch — an applicant/approver repeating a subject account — is never taken, so the documented "not reported twice" contract is unverified | `permissions.go:213`, contract at `:205-209` |
+| low | Best-effort/degraded branches uncovered: audit-write failure logging, HR bootstrap marshal failure, fanout envelope marshal failure, on-duty RPC `reply == nil`. `roomRPC` is an injected interface, so the nil-reply case is one fake away | `handler.go:209`, `:234`, `:266`; `room_onduty.go:101` |
+| nitpick | Multipart relay error paths in the client-update proxy are uncovered, leaving `buildUploadBody` at 82.1%; each leaks a `b.Close()` obligation if mis-edited | `client_update.go:259`, `:265`, `:275`, `:308` |
+
+**Verified, not assumed:** the integration suite is fully compliant — `//go:build integration`, `package main`, `TestMain` via `testutil.RunTestsWithPrewarm(m, EnsureMongoReplicaSet, EnsureNATS)`, containers exclusively from `pkg/testutil` with no inline `GenericContainer`. Mocks are mockgen-generated and unedited. `publish` and `roomRPC` are injected fields, so no unit test touches NATS. No `time.Sleep`, no package-level mutable test state, no order dependence. Tests are densely table-driven (27 subtests in `handler_test.go`, 26 in `permissions_test.go`), and `router_test.go:18` is a genuinely high-value regression guard on the fanout-deadline invariant.
+
+### Recommendations
+- `high` — Add one table-driven `TestHandler_MalformedBody` covering all five bind sites with truncated JSON, wrong-typed field and empty body; assert 400 + `errcode.AuthMissingFields`.
+- `medium` — Cover the `errors.Is(err, ErrUserNotFound)` → 404 vs generic → 500 split at both sites; these are the branches that decide what an operator sees during an incident.
+- `medium` — Add integration coverage for `GetUserForAuth` (inactive/missing/valid) and `Ping`, plus a `/readyz` test asserting the degraded response when `Ping` fails.
+- `medium` — Add a routes-wiring test that walks `gin.Engine.Routes()` and asserts every `/v1/admin/*` path returns 401 without a bearer token — cheap, and it closes the only gap `middleware_test.go` cannot see.
+- `medium` — Set `BcryptCost: 32` in a subtest to drive the three `pwhash.Hash` 500 paths.
+- `low` — Use a `roomRequester` fake returning `(nil, nil)`; target `permissions.go:213` and the `client_update.go` multipart paths — these plus the above are worth roughly the 11-point shortfall without vanity padding.
+
