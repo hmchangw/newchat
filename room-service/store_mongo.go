@@ -853,6 +853,7 @@ func (s *MongoStore) attachAppNames(ctx context.Context, roomID string, members 
 		}
 		if name, ok := appByAssistant[members[i].Member.Account]; ok {
 			members[i].Member.AppName = name
+			members[i].Member.Name = name // deprecated alias; see RoomMemberEntry.Name
 		}
 	}
 	return nil

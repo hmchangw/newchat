@@ -1252,9 +1252,11 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		assert.Equal(t, "Alice Wang", human.EngName, "human member must have EngName from users")
 		assert.Equal(t, "愛麗絲", human.ChineseName, "human member must have ChineseName from users")
 		assert.Empty(t, human.AppName, "human member must NOT have AppName set")
+		assert.Empty(t, human.Name, "human member must NOT have the name alias set")
 
 		bot := byAccount["weather.bot"]
 		assert.Equal(t, "Weather App", bot.AppName, "bot member must have AppName from apps")
+		assert.Equal(t, "Weather App", bot.Name, "bot member must carry the deprecated name alias with the same value")
 		assert.Empty(t, bot.SectName, "bot has no user doc → no sectName")
 		assert.Empty(t, bot.EngName, "bot member must NOT have EngName")
 		assert.Empty(t, bot.ChineseName, "bot member must NOT have ChineseName")
