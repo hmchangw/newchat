@@ -51,8 +51,6 @@ for future siblings (`.silent`, `.priority`) without restructuring the stream.
     "type": "c",
     "sender": { "account": "bob", "userId": "u-bob", "displayName": "Bob Chen 陳大寶" },
     "threadMessageId": "",
-    "fileName": "",
-    "fileType": "",
     "parentRoomId": "",
     "pushTime": "2026-05-28T00:00:00Z",
     "alsoSendToChannel": false
@@ -77,6 +75,7 @@ Field notes:
 
   Names come from the `users` collection through an LRU+TTL cache (`pkg/userstore`, `USER_CACHE_SIZE` / `USER_CACHE_TTL`), bounded by `MENTION_NAMES_TIMEOUT` and gated by `MENTION_NAMES_ENABLED`. A renamed user can therefore show a stale name for up to `USER_CACHE_TTL`. The lookup runs once per message, only when the content has mentions **and** at least one recipient survived the filters, and it **fails open**: a Mongo error or timeout sends the unsubstituted body rather than dropping the push. Substitution is not idempotent or reversible — consumers must treat `body` as display text, not as a parseable mention source.
 - **`data.type`** is the short room type: `"c"` channel, `"d"` DM/botDM, `"p"` discussion.
+- **`data.fileName` / `data.fileType`** carry the push file info of the message's **first decodable attachment** — `Attachment.Title` (file name) and its MIME `fileType`. Both are omitted from the payload (`omitempty`) when the message has no attachment or no blob decodes — the example above is a text message, so neither key appears. Malformed blobs are skipped, so a malformed first attachment falls through to the next one.
 - **`data.sender`** is a `Participant` carrying `account`, `userId`, and `displayName`. **`displayName` is pre-composed by `message-gatekeeper`** at canonical-message write time via `pkg/displayfmt.CombineWithFallback(engName, chineseName, account)` (same helper already used by `room-worker/sysmsg.go`, `room-service/store_mongo.go`, and reaction rendering — one source of truth for display formatting across the system). The composition happens once per message regardless of downstream consumer count and never on the push hot path; push-service renders `sender.displayName` verbatim. Empty `displayName` (legacy in-flight canonical messages predating the field) falls back to `sender.account` in `notification-worker`. `engName` / `chineseName` are deliberately not propagated on the push event since the composed string is the only render-time input.
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
 - **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.

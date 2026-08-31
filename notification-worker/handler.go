@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -72,6 +73,21 @@ type Handler struct {
 // safe-by-default as long as they join IsSystemMessageType (the single membership list).
 func isNotifiable(msgType string) bool {
 	return !model.IsSystemMessageType(msgType)
+}
+
+// attachmentFileInfo returns the push file info (title, MIME type) of the first
+// decodable attachment; both empty when the message carries none. Malformed blobs
+// are skipped, matching DecodeAttachments' lenient decode — the skipped count is
+// discarded because a push carrying no file info is the intended degraded result.
+// Decodes one blob at a time so reading the first entry never materializes the rest.
+func attachmentFileInfo(attachments [][]byte) (fileName, fileType string) {
+	for i := range attachments {
+		atts, _ := cassandra.DecodeAttachments(attachments[i : i+1])
+		if len(atts) != 0 {
+			return atts[0].Title, atts[0].FileType
+		}
+	}
+	return "", ""
 }
 
 func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one-time constructor arg
@@ -273,6 +289,7 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	}
 
 	now := time.Now().UTC()
+	fileName, fileType := attachmentFileInfo(msg.Attachments)
 	// Template carries fields shared across every batch — only ID and Accounts change per batch.
 	pushEvt := model.PushNotificationEvent{
 		RoomID: msg.RoomID,
@@ -284,6 +301,8 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			Type:              shortRoomType(roomType),
 			Sender:            sender,
 			ThreadMessageID:   msg.ThreadParentMessageID,
+			FileName:          fileName,
+			FileType:          fileType,
 			PushTime:          now.Format(time.RFC3339),
 			AlsoSendToChannel: msg.TShow,
 		},
