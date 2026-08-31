@@ -185,3 +185,23 @@ Genuinely performance-engineered on the live add path — concurrent input loads
 - `medium` — Add projections to `GetRoom`, `GetSubscription`, `FindDMSubscriptionPair` — starting with `GetRoom`, the add-member hot path.
 - `low` — Add the four `$lookup` justification comments and consider replacing `GetOrgMembersWithIndividualStatus`'s two per-user subqueries with two batched reads joined in Go.
 
+---
+
+## 8. Prioritized action list
+
+| # | Sev | Action | Dimension | Evidence | Why |
+|---|-----|--------|-----------|----------|-----|
+| 1 | `high` | Guard `UpdateRoomName` with a monotonic `nameUpdatedAt` high-water mark, and make the post-commit tail of `processRoomRename` best-effort | Integration | `handler.go:2311`, `:2409`; `store_mongo.go:767` | **Permanent data divergence.** A redelivered rename re-applies a stale name to `rooms` while the guarded subscription write refuses to follow — the two documents disagree forever, with no heal path. The code's own comment identifies the hazard, then does the unsafe thing 17 lines later. |
+| 2 | `high` | Give `mockPublisher` a failure seam, then test every `federate()` failure branch and `HandleJetStreamMsg` | Test coverage | `mock_publisher_test.go:19-25`; `handler.go:238-278` | One missing seam makes **all** federation-failure and Ack/Nak paths untestable — including the NAK that keeps an ordered `member_added` from being lost. Highest coverage value per unit of effort. |
+| 3 | `high` | Replace `ListByRoom` with the projected `GetSubscriptionAccounts` on the rename path | Performance | `handler.go:2353` | A rename on a 10k-member channel currently pulls 10k full documents to build a list of strings. One-line fix, large constant-factor win. |
+| 4 | `medium` | Gate the DM-create RPC registration on `cfg.Mode == "default"` | Architecture / Integration | `main.go:283-285` | A Teams-migration pod silently serves **live, user-facing** DM creation on the shared queue group; a batch job saturating its Mongo pool degrades DM creation fleet-wide. |
+| 5 | `high` | Split `handler.go` by flow and decompose `processAddMembers` into named stages | Maintainability | `handler.go:834`, `:1` | 476 lines in one function inside 2,625 in one file, mirrored by a 7,920-line test. Pure file moves first, then staged decomposition — this is what makes items 1–2 safe to land. |
+| 6 | `medium` | Add an `InProgress()` heartbeat around long handlers, or split the Teams batch to one chat per message | Performance | `handler.go:562`; `teamsroomcreate.go:33` | `msg.InProgress()` appears nowhere in the repo; a slow org-removal or Teams batch exceeds `AckWait` and is redelivered **concurrently with itself**. |
+| 7 | `medium` | Extract one `emitMembershipChange` helper and one `federationSeed` function to replace the five copied relay blocks | Maintainability | `handler.go:542`, `:755`, `:1297`, `:1877`, `:2514` | Five copies of dedup-seed composition; a change to any one of them silently diverges the others. |
+| 8 | `medium` | Extend `ApplyMemberCountDelta` to the removal paths | Performance | `handler.go:420`, `:634` | Every single removal pays two full `CountDocuments` over the room when the delta is exactly known. |
+| 9 | `medium` | Rebuild `deploy/teams/` from the default deploy with only `MODE` overridden | Maintainability / Integration | `deploy/teams/docker-compose.yml:10` | A diverged fork that drops `ROOM_KEY_RETIRED_TTL` — the very knob `CLAUDE.md` requires identical across three services — plus the entire at-rest encryption block. |
+| 10 | `medium` | Replace the 22 discarded `json.Marshal` errors and the `mustMarshal` misnomer | Code quality | `handler.go:187`…`:1898`, `:1347` | A marshal regression currently publishes an **empty body** rather than failing; `mustMarshal` promises a guarantee it does not provide. |
+
+### Verdict
+
+**Ship-capable, with item 1 fixed first.** The federation design here is sound and the OUTBOX partitioning is exactly right — this service gets the hard distributed-systems parts correct. What it lacks is the *safety net*: item 1 is a real, permanent data divergence that the code already knows about; item 2 is why nobody would notice items like it. The maintainability score of 2 is the leading indicator — at 476 lines per function and five copies of the relay, the next correctness fix is disproportionately likely to introduce the following one.
