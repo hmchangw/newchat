@@ -129,3 +129,32 @@ Statement-weighted coverage is **57.2% (1317/2301 statements)** — below the `C
 - `medium` — Assert the log-and-continue fan-out failures by injecting a failing `publishCore` — the publish function is already a struct field, so this needs no new seam.
 - `low` — Replace the 500 ms responder `time.Sleep` with a channel the test closes after asserting the deadline, and move the embedded-NATS tests behind the `integration` tag.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+Internally disciplined — WHY-comments, centralized sentinels, real helpers like `federateOne`/`boundedReply`, no dead code — but the service has outgrown the flat single-file layout, and dependency injection is now half-constructor, half-mutation.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | `handler.go` is 2,677 lines registering **31 RPCs across ~10 unrelated domains** in one file and one type: room CRUD, membership + roles, room E2E keys, read floors, read receipts, threads, chatlist sections, room-app tabs/command menus, org/mentionable directory, Teams calling | `handler.go:127-155` |
+| high | Hybrid DI: `NewHandler` takes 13 positional args, then 11 more dependencies are assigned by field mutation in `main`. Nothing at compile time forces those 11 — a forgotten `handler.mentionableMaxLimit` silently yields a 0 limit *despite* the startup validation at `main.go:193`. The comments openly state the reason is churn avoidance, not design | `handler.go:102`, `:52-54`, `:97-99`; `main.go:373-383` |
+| medium | `RoomStore` is one 47-method interface backed by a 2,125-line `MongoStore`; every test double pays for all 47 (`mock_store_test.go`, 42 KB). It splits along the same seams as the handler — the last of which is already proven by the separate `TeamsMeetingStore` | `store.go:61-284`, `:330` |
+| medium | Duplicated toggle skeleton: `muteToggle`, `favoriteToggle` and `moveChat` repeat the same seven steps verbatim; only mute adds the badge-cache branch | `handler.go:2203`, `:2280`, `:2340` |
+| medium | Thread and non-thread read-floor fan-out are parallel near-copies; the DM pair is line-for-line identical apart from the payload builder and log keys, so a change to fan-out semantics must be made twice | `handler.go:1501`, `:1512`, `:1539` vs `:1890`, `:1902`, `:1913` |
+| medium | The "resolve home site → marshal → federate if remote" block is inlined at 7 call sites; `federateOne` abstracts the publish but not the preamble that actually repeats | `handler.go:839`, `:1440`, `:1743`, `:2272`, `:2324`, `:2457`, `:2506` |
+| medium | `handler_test.go` is 8,171 lines / 251 test funcs and `integration_test.go` 4,827 / 78 — navigation and merge-conflict cost scales with the handler file it mirrors. `handler_teams.go` + its test already prove the per-domain split works here | — |
+| low | `main()` is 261 lines with eight sequential validate-and-`os.Exit` blocks before any wiring; the validation half is mechanical and testable if lifted out | `main.go:165-425` |
+| low | `enrichRoomMembersStages` is a 65-line inline BSON aggregation DSL with two `$lookup`s — the hardest thing in the service to modify safely — and it carries **no `// $lookup justification:` comment**, which `CLAUDE.md` requires when touching a `$lookup` site | `store_mongo.go:683-747` |
+
+For scale context: room-service's production code is 6,460 lines, on par with `user-service` (6,965) and `history-service` (7,998) — both of which use the **sanctioned** sub-package layout for exactly this "larger request/reply surface" case. room-service qualifies but stays flat.
+
+### Recommendations
+- `high` — Split `handler.go` along its existing domain seams into `handler_room.go`, `handler_member.go`, `handler_read.go`, `handler_thread.go`, `handler_chatlist.go`, `handler_roomapp.go`, `handler_key.go`, keeping `Register` in `handler.go` and mirroring the `handler_teams.go` precedent. Pure file moves, no behaviour change — do this **before** the deeper refactor.
+- `high` — Then adopt the sanctioned sub-package layout (`config/`, `service/`, `mongorepo/`, `service/mocks/`).
+- `high` — Replace the 13-arg `NewHandler` + 11 field mutations with a `HandlerDeps` struct validated once in the constructor, so an unset dependency is a construction error rather than a silent zero value.
+- `medium` — Extract `toggleSubscriptionFlag(...)` to collapse mute/favorite/move-chat, and `federateToUserHome(...)` to absorb the 7 repeated preambles.
+- `medium` — Unify the thread/non-thread fan-out behind one publisher parameterized by payload builder and log fields; the DM path should exist once.
+- `medium` — Split `RoomStore` into per-domain interfaces sharing the one `MongoStore`; split `store_mongo.go` to match and regenerate mocks per interface.
+- `low` — Lift the eight `main()` validation blocks into `validate(cfg) error`; add the missing `$lookup` justification comment.
+
