@@ -1576,7 +1576,10 @@ func TestHistoryService_EditMessage_ResolvesAndPersistsMentions(t *testing.T) {
 
 // A user-lookup failure degrades: the edit still succeeds, persisting no
 // individual mentions rather than failing the whole edit.
-func TestHistoryService_EditMessage_MentionLookupError_StillEdits(t *testing.T) {
+// A mention-lookup failure must fail the edit closed — persisting a partial or
+// empty mention set would overwrite (or clear) the stored mentions and lose
+// them permanently. No write, no publish; a retry resolves cleanly.
+func TestHistoryService_EditMessage_MentionLookupError_FailsClosed(t *testing.T) {
 	svc, msgs, subs, rooms, pub, _, users, _ := newServiceWithRoomMock(t)
 	c := testContext()
 
@@ -1599,15 +1602,13 @@ func TestHistoryService_EditMessage_MentionLookupError_StillEdits(t *testing.T) 
 		Return(nil, errors.New("mongo down")).
 		Times(1)
 
-	// Degrade: no individual mentions resolved, but the edit persists and publishes.
-	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), hydrated, "hey @bob", []model.Participant(nil), gomock.Any()).
-		Return(nil)
-	pub.EXPECT().Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).Return(nil)
+	// No persist, no publish — the edit fails before either.
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
 	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "msg-1", NewMsg: "hey @bob"})
-	require.NoError(t, err)
-	require.NotNil(t, resp)
+	require.Error(t, err)
+	require.Nil(t, resp)
 }
 
 // .updated is a full-doc replace: it must carry attachments and card,

@@ -521,12 +521,12 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 	}
 
 	// Re-resolve @mentions from the edited content so the persisted row, the
-	// canonical event and search-sync all reflect the post-edit mentions.
-	// Degrade on lookup error (mirrors broadcast-worker): a mention we can't
-	// resolve drops to plain text, the edit still lands.
+	// canonical event and search-sync all reflect the post-edit mentions. Fail
+	// closed on a lookup error: a partial/empty set would be written over (or
+	// clear) the stored mentions, permanently losing them. A retry resolves clean.
 	resolved, err := mention.Resolve(c, req.NewMsg, s.users.FindUsersByAccounts)
 	if err != nil {
-		slog.WarnContext(c, "resolving edited mentions", "error", err, "room_id", roomID, "message_id", req.MessageID)
+		return nil, fmt.Errorf("resolve edited mentions for %s: %w", req.MessageID, err)
 	}
 
 	editedAt := time.Now().UTC()
