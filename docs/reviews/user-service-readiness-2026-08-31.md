@@ -49,3 +49,27 @@ Zero `fmt.Println`/`log.Println`. All 58 `slog` sites use scalar structured k/v 
 - `low` — Re-run `make sast-vuln` and the registry packs from a network-permitted runner before shipping.
 - `nitpick` — Route the two `threadunread.go` fan-outs through `fanOutChunks` so all per-site RPC concurrency obeys one knob; export `service.BadgeCache` and delete `main.go`'s structural copy.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Boundaries are unusually disciplined — every interface is consumer-defined, compile-time assertions guard drift, subjects come from `pkg/subject`, shutdown order is correct — but a re-declared shared Mongo pool knob, a duplicated unexported interface, and a synchronous non-durable cross-site fan-out keep it off 5.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | The HTTP Mongo client **re-declares `mongoutil.PoolConfig`'s knobs as three hand-written fields** instead of mounting the shared type with `envPrefix`. The justifying comment is *factually wrong*: it claims the tags "are fixed to the `MONGO_` prefix and cannot be reused", but `pkg/mongoutil/poolconfig.go:11-13` states the tags carry the full prefix precisely so a prefixed field works, and `CLAUDE.md` gives `Breaker mongoutil.BreakerConfig` + `envPrefix:"HISTORY_"` as the sanctioned form. **The concrete cost is a dropped knob**: `ServerSelectionTimeout` is only applied via `WithPool`, so the HTTP pool silently keeps the driver's 30 s default — the exact hang `poolconfig.go:33-40` exists to prevent, on the transport that serves the client-facing sidebar | `config/config.go:47-55`, `:196-198`; `main.go:137-144` |
+| medium | Cross-site fan-out is a **synchronous, sequential, best-effort** JetStream publish inside the request handler: one blocking `PublishMsg` PubAck per destination, errors logged and swallowed. N remote sites add N × cross-gateway RTT to every mutation under a 15 s `HANDLER_TIMEOUT`, and a down peer permanently loses that site's replica. `CLAUDE.md` sanctions user-service as a direct publisher, so this is a documented gap rather than a rule break — but **the settings replica drives remote `notification-worker` push decisions**, so a lost event means a remote site keeps pushing muted notifications until the user next touches settings. This is the case OUTBOX was introduced for | `service/status.go:106-123`; `service/settings.go:143-160`; `service/chatlist.go:202-220`; `publisher/publisher.go:26-31` |
+| medium | `badgeCache` is declared unexported in `service` yet is a constructor parameter of the exported `service.New`, forcing `main` to keep a hand-maintained structural copy whose own comment admits the workaround. Nothing fails the build if the two drift | `service/service.go:91-104`, `:159`; `main.go:63-70` |
+| medium | `service.New` takes 14 positional dependencies plus variadic options, and `main` calls it **twice** with the argument list duplicated — the second call silently omits `WithPageBudget`. No compiler help on ordering between same-typed params (`pub, clientPub EventPublisher`) | `main.go:210-211`, `:217-222` |
+| medium | `ALL_SITE_IDS` defaults to empty with **no validation and no startup log**, and `Load` never checks it or that `SiteID` is a member. An empty value makes every federation loop a silent no-op: federation is off with zero signal, while `SITE_ID` is correctly `notEmpty` | `config/config.go:70`, `:210-280` |
+| low | No `bootstrap.go` / `Bootstrap` field despite publishing to JetStream. Behaviourally **correct** — it only ever publishes to remote INBOX lanes, which `inbox-worker` owns and this service must never create — but the gap deserves an explicit comment | `main.go:126` |
+| low | Cohesion drift: `service/enrich_test.go` (846 lines) has no `enrich.go`; the fan-out/enrichment engine it tests lives inside `service/subscriptions.go:225-544` | — |
+| nitpick | `startHTTPServer` (~60 lines of listener wiring) sits in `main.go` while `httpserver.go` holds only the 12-line `newHTTPServer` | `main.go:328-404` |
+
+### Recommendations
+- `high` — Replace `HTTPConfig`'s three pool fields and `validateMongoPool` with `Pool mongoutil.PoolConfig \`envPrefix:"HTTP_"\``; env names are unchanged, `Validate()` replaces the local copy, and the HTTP client picks up the 2 s `ServerSelectionTimeout` it currently lacks.
+- `medium` — Route the settings and chatlist inbox events through the local OUTBOX (`outbox.Publish`), adding each type to exactly one `pkg/outbox` partition set; keep status direct if the LWW argument is judged sufficient. At minimum, fan out concurrently under the existing `MaxSiteFanout` semaphore instead of serially.
+- `medium` — Export `service.BadgeCache` and delete the structural copy; collapse `service.New`'s dependency list into a named `service.Deps` struct and build the two instances by overriding one `Deps`.
+- `medium` — Validate in `config.Load` that `SiteID` appears in `AllSiteIDs` when non-empty, and log the resolved peer list at startup so a federation-disabled deploy is visible.
+- `low` — Extract `service/subscriptions.go`'s enrichment engine into `service/enrich.go`; add a comment at `main.go:126` recording why no `bootstrapStreams` exists.
+
