@@ -44,3 +44,28 @@ Disciplined, heavily-reasoned Go with correct `jsretry`/`errcode` worker tiering
 - `low` — Wrap the four bare returns; handle or comment the three marshal discards — at `messages.go:376` return the error and let `BuildAction` Ack-drop it as poison.
 - `low` — Move `Add`, `Flush` and `MessageCount` into `handler_test.go` as unexported helpers, or delete them.
 
+---
+
+## 3. Architecture — 4 / 5
+
+Boundaries, consumer-defined interfaces, DI, `pkg/stream`/`pkg/subject` discipline and shutdown order are all correct, and the INBOX/HR non-ownership rule is genuinely honoured — but it is honoured by **untested inline code in a 618-line `main.go` that skips the mandated `bootstrapStreams` helper.**
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | Stream bootstrap is written **inline in `main()`** instead of the mandated `bootstrapStreams(ctx, js, siteID, enabled)` helper. §6: "via the service's `bootstrapStreams` helper, **never inline**". Twelve sibling services have the file; this one does not | `main.go:310-323` |
+| high | **The "never create INBOX/HR" invariant is enforced by two locals compared by name inside `main()`, and no test asserts it.** A grep of every `*_test.go` finds no reference to `Bootstrap`, `inboxName` or `hrName`. The service's most load-bearing architectural rule is unexecutable by a unit test and **silently breakable by anyone adding a sixth collection who forgets to extend the skip list**. Ownership is a property *of the collection*, not of `main` | `main.go:306-314` |
+| medium | `main.go` (618 lines) carries the consumer loop, the flush pipeline, adapters and helpers — not just wiring. §1 scopes `main.go` to config parsing, wiring, startup and shutdown | `main.go:438-618` |
+| medium | `ADMIN_ACCT_PREFIX` re-declared per service rather than mounted from `pkg/model`, which owns `SetPlatformAdminAccountPrefix`. The identical tag + `envDefault:"p_admin"` is copy-pasted into **≥5 services** — and **a prefix mismatch mis-classifies platform admins** | `main.go:98-99`; `pkg/model/user.go:126` |
+| medium | **A third JetStream consumer pattern**: a `Fetch()` polling loop plus `flushPipeline`, neither `cons.Messages()`+semaphore nor `cons.Consume()`. The design is sound (ES bulk needs batch-shaped delivery, and `PIPELINE_DEPTH` + `checkBatchAckCoupling` bound it deliberately), but `CLAUDE.md` sanctions only two patterns and this service ships neither; `MAX_WORKERS` does not exist here at all | `main.go:498-569`; `consumer_source.go:102-104` |
+| low | MongoDB is connected **unconditionally**, but `db` is consumed only in `Mode=teams` — default-mode pods take a hard `os.Exit(1)` startup dependency, plus a connection pool, on a database they never read | `main.go:198-205` vs `:219` |
+| low | Store file naming drifts: the Mongo implementation is `teams_user_store.go`, not `store_mongo.go`. (`store.go` correctly holds only the ES `Store`, and the interface is consumer-defined at `messages.go:35`, which is right) | `teams_user_store.go:1` |
+| nitpick | `Handler.Add` is a production-exported wrapper used only by tests | `handler.go:79-81` |
+
+### Recommendations
+- `high` — Add `search-sync-worker/bootstrap.go` with `bootstrapStreams(ctx, js, siteID, enabled, collections)` matching the sibling signature, move the loop out of `main()`, and unit-test it against a fake `streamManager`.
+- `high` — **Move ownership onto the abstraction**: add `OwnsStream() bool` (or a `BootstrapPolicy`) to the `Collection` interface, returning `false` for `inboxMemberCollection` and `spotlightOrgCollection`. Then assert per-collection in a table test that no INBOX/HR stream is ever passed to `CreateOrUpdateStream`. This makes the invariant **travel with new collections** instead of with a name list in `main`.
+- `medium` — Extract `consumer.go` (`runConsumer`, `consumerTuning`, `flushPipeline`, `checkBatchAckCoupling`) and `adapters.go`, leaving `main.go` at wiring + shutdown.
+- `medium` — Promote the admin-prefix knob into `pkg/model` as a mounted config and delete the five per-service redeclarations in one PR.
+- `medium` — Amend `CLAUDE.md` §"JetStream Consumer Pattern" to name a third sanctioned **batch/bulk-sink** pattern (Fetch + bounded flush pipeline) and cite this service, or restate why it is exempt — right now the rule and the fleet disagree.
+- `low` — Gate the Mongo connect on `cfg.Mode == "teams"`; unexport or delete `Handler.Add`.
+
