@@ -348,11 +348,10 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
 		// Self-heal a key-absent room instead of silently skipping the fan-out
-		// (which left the new member unable to decrypt with no retry). Mirrors the
-		// create path's mint; going-forward-only — see keyPairOrHeal.
+		// (new member couldn't decrypt, no retry). See keyPairOrHeal.
 		pair, err := h.keyPairOrHeal(c, roomID)
 		if err != nil {
-			return nil, fmt.Errorf("get room key: %w", err)
+			return nil, err
 		}
 		h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
 			RoomID:     roomID,

@@ -1006,10 +1006,8 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 	// pair cannot go stale between here and the fan-out below.
 	var pair *roomkeystore.VersionedKeyPair
 	if len(subs) > 0 {
-		// A key-absent room here would otherwise permanently fail the "added"
-		// fan-out, leaving the new member unable to decrypt with no retry. Instead
-		// self-heal: mint a fresh key for the (never-keyed) room. Going-forward-only
-		// — see keyPairOrHeal.
+		// Self-heal a key-absent room instead of permanently failing the "added"
+		// fan-out (new member couldn't decrypt, no retry). See keyPairOrHeal.
 		var err error
 		pair, err = h.keyPairOrHeal(ctx, req.RoomID)
 		if err != nil {
