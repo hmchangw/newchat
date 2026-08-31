@@ -102,3 +102,28 @@ Statement-weighted coverage is **53.2% (1223/2300)** — below the §4 60% criti
 - `medium` — Stub a `history.GetThreadList` error so the degrade branch runs, asserting the page returns degraded rather than erroring; add a `historyclient.GetThreadList` unit test mirroring `RoomsGet`.
 - `low` — Table-test `oidcValidator`'s unconfigured-issuer return, and assert `RegisterHandlers` registers the expected subject set against a fake router.
 
+---
+
+## 5. Maintainability — 3 / 5
+
+The sub-package decomposition is coherent and the comment discipline exemplary (WHY not WHAT; zero TODOs, zero dead code), but the cross-site fan-out pattern has been hand-copied five times **with drift**, and two 850-line files plus a 14-positional-argument constructor make adding one dependency or one federated endpoint a multi-site edit.
+
+| Sev | Finding | Evidence |
+|-----|---------|----------|
+| high | The per-site fan-out/degrade pattern is implemented **five separate times**, all doing "spawn per site, log `… site degraded`, mark failed, `wg.Wait()`" — and the copies **have already drifted**: `threadunread.go:58` is the only one with **no `s.fanout()` semaphore**, so it spawns one goroutine per owning site unbounded, silently ignoring `MAX_SITE_FANOUT`. A bug fixed in one copy will not reach the other four; one already missed the bound | `service/subscriptions.go:491`, `:812`; `service/threads.go:219`; `service/threadunread.go:58`, `:145` |
+| medium | `service.New` takes 14 positional dependencies plus `*config.Config` and is called twice; the two calls **already diverge** — only the NATS instance gets `WithPageBudget`, with no comment saying the HTTP instance intentionally skips trimming | `service/service.go:180`; `main.go:220`, `:228` |
+| medium | `service/subscriptions.go` (874 lines) carries five unrelated concerns: handlers, page clamping, NATS-payload split-retry, preview truncation, room-info mapping. **The tests have already split along seams the production code lacks** — `enrich_test.go` (846 lines) and `threadfit_test.go` (182) have no `enrich.go`/`threadfit.go` counterpart | `service/subscriptions.go:56`, `:107`, `:364-431`, `:433-475`, `:590-644` |
+| medium | Three near-identical degrading wrappers over `GetAppsByAssistants` and two over `GetHRInfoByAccounts`, differing only in the log string; the distinct-name collectors are likewise duplicated | `service/subscriptions.go:162`, `:176`, `:191`; `service/threads.go:279`, `:293`, `:308`; `service/prioritycontacts.go:93` |
+| medium | `mongorepo/subscriptions.go` (850 lines) is a repository **and** a query planner: ~250 lines of in-Go sorting/paging/cache policy share a file with the raw pipeline builders | `mongorepo/subscriptions.go:386`, `:413`, `:443`, `:477`, `:492` |
+| medium | `CLAUDE.md` requires an inline `// $lookup justification:` on any `$lookup` you touch. `apps.go:92` and `threadsubscriptions.go:48` have one; **the four in `subscriptions.go` do not**, despite that file being heavily reworked | `mongorepo/subscriptions.go:96`, `:151`, `:673`, `:723` |
+| low | `service.badgeCache` is unexported, forcing a structural copy in `main.go`. It is the **only** dependency absent from the compile-time assertion block at `main.go:44`, so a method added to one copy fails at the `service.New` call site rather than at the interface | `service/service.go:91`; `main.go:65` |
+| nitpick | Four one-type client packages sit alongside the sanctioned set plus seven root `package main` files — the widest package surface of any service here | — |
+
+### Recommendations
+- `high` — Add `service/fanout.go` with one generic `forEachSite[T](ctx, sites, fanout, call) ([]T, []string)` returning results plus `UnavailableSites`; migrate all five call sites. **This alone fixes the unbounded goroutine spawn** at `threadunread.go:58`.
+- `medium` — Replace `service.New`'s 14 positional parameters with a `service.Deps` struct; the two construction sites then differ only by the fields they intentionally override.
+- `medium` — Split `service/subscriptions.go` into `subscriptions.go` (handlers), `enrich.go` (the file `enrich_test.go` already assumes) and `payloadsplit.go`.
+- `medium` — Collapse the app/HR/priority-contact lookup wrappers into two helpers taking a `label string` for the degradation log, and one shared `distinctNamesByRoomType` collector.
+- `medium` — Move the list-planning functions out of `mongorepo/subscriptions.go` into `mongorepo/listplan.go`; add the four missing `$lookup` justification comments.
+- `low` — Export `service.BadgeCache`, delete the mirror interface, and add it to the assertion block.
+
