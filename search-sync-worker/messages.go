@@ -36,20 +36,23 @@ type teamsUserResolver interface {
 	ResolveIdentities(ctx context.Context, teamsUserIDs []string) (map[string]teamsIdentity, error)
 }
 
-// messageCollection implements Collection for message search sync; streamCfg + consumerName are
-// parameterized so one type consumes user, bot, or Teams-migration canonical streams. syncFrom is
-// the legacy-replay cutoff (zero disables it).
+// messageCollection implements Collection for message search sync; streamCfg, filterSubjs +
+// consumerName are parameterized so one type consumes user, bot, or Teams-migration canonical
+// streams. syncFrom is the legacy-replay cutoff (zero disables it).
 type messageCollection struct {
 	indexPrefix string
 	siteID      string // for .teams.batch index docs (the normal path reads evt.SiteID per message)
 	syncFrom    time.Time
 	devMode     bool
-	// teamsOnly switches this collection to the Teams-migration-only wiring: it binds
-	// MESSAGES-TEAMS instead of a canonical stream, filters to only the teams batch
-	// subject, and skips the template/mapping pushes the primary (user) collection
-	// already owns for the same indexPrefix.
-	teamsOnly      bool
-	streamCfg      func(siteID string) jetstream.StreamConfig
+	// teamsOnly switches this collection to the Teams-migration-only wiring: it decodes
+	// batch envelopes instead of single MessageEvents, and skips the template/mapping
+	// pushes the primary (user) collection already owns for the same indexPrefix.
+	teamsOnly bool
+	streamCfg func(siteID string) jetstream.StreamConfig
+	// filterSubjs is set alongside streamCfg so a collection's consumer filter cannot drift
+	// off the stream it binds — a filter outside the stream's interest fails consumer
+	// creation at startup, which exits the service.
+	filterSubjs    func(siteID string) []string
 	consumerName   string
 	parentResolver parentCreatedAtResolver
 	// teamsUsers resolves migrated senders' account + user _id; nil on collections that
@@ -66,6 +69,7 @@ func newMessageCollection(indexPrefix, siteID string, syncFrom time.Time, devMod
 		syncFrom:     syncFrom,
 		devMode:      devMode,
 		streamCfg:    userMessagesStreamCfg,
+		filterSubjs:  userMessageFilterSubjects,
 		consumerName: "message-sync",
 	}
 }
@@ -76,6 +80,7 @@ func newBotMessageCollection(indexPrefix string, devMode bool) *messageCollectio
 		indexPrefix:  indexPrefix,
 		devMode:      devMode,
 		streamCfg:    botMessagesStreamCfg,
+		filterSubjs:  botMessageFilterSubjects,
 		consumerName: "bot-message-sync",
 	}
 }
@@ -92,6 +97,7 @@ func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messag
 		devMode:      devMode,
 		teamsOnly:    true,
 		streamCfg:    teamsMessagesStreamCfg,
+		filterSubjs:  teamsMessageFilterSubjects,
 		consumerName: "message-sync-teams",
 	}
 }
@@ -111,6 +117,23 @@ func teamsMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
 }
 
+// Single-token message events (created/updated/deleted/...); the teams batch subject
+// lives on its own stream (see newTeamsMessageCollection).
+func userMessageFilterSubjects(siteID string) []string {
+	return []string{subject.MsgCanonicalMessageWildcard(siteID)}
+}
+
+// bot-message-handler and bot-room-service publish only .created onto
+// BOT-MESSAGES-CANONICAL; bot-message-worker binds the same leaf.
+func botMessageFilterSubjects(siteID string) []string {
+	return []string{subject.BotCanonicalCreated(siteID)}
+}
+
+// Own stream (MESSAGES-TEAMS), own subject — no message wildcard here.
+func teamsMessageFilterSubjects(siteID string) []string {
+	return []string{subject.MsgTeamsCanonicalBatch(siteID)}
+}
+
 func (c *messageCollection) StreamConfig(siteID string) jetstream.StreamConfig {
 	return c.streamCfg(siteID)
 }
@@ -120,13 +143,7 @@ func (c *messageCollection) ConsumerName() string {
 }
 
 func (c *messageCollection) FilterSubjects(siteID string) []string {
-	if c.teamsOnly {
-		// Own stream (MESSAGES-TEAMS), own subject — no message wildcard here.
-		return []string{subject.MsgTeamsCanonicalBatch(siteID)}
-	}
-	// Single-token message events (created/updated/deleted/...); the teams batch
-	// subject now lives on a separate stream (see newTeamsMessageCollection).
-	return []string{subject.MsgCanonicalMessageWildcard(siteID)}
+	return c.filterSubjs(siteID)
 }
 
 func (c *messageCollection) TemplateName() string {

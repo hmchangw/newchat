@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -619,7 +620,8 @@ func TestMessageCollection_FilterSubjects(t *testing.T) {
 	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, user.FilterSubjects("site-a"))
 
 	bot := newBotMessageCollection("msgs-v1", false)
-	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
+	assert.Equal(t, []string{"chat.bot.canonical.site-a.created"}, bot.FilterSubjects("site-a"),
+		"the bot collection binds BOT-MESSAGES-CANONICAL, which carries only chat.bot.canonical.{siteID}.>")
 
 	teams := newTeamsMessageCollection("msgs-v1", "site-a", false)
 	assert.Equal(t, []string{"chat.teams.msg.canonical.site-a.batch"}, teams.FilterSubjects("site-a"))
@@ -628,6 +630,59 @@ func TestMessageCollection_FilterSubjects(t *testing.T) {
 	pattern, body := teams.MappingUpdate()
 	assert.Empty(t, pattern)
 	assert.Nil(t, body)
+}
+
+// subjectMatches reports whether a NATS subject matches a filter pattern, per the
+// server's token rules: "*" matches exactly one token, ">" matches one or more
+// trailing tokens.
+func subjectMatches(pattern, subj string) bool {
+	pt := strings.Split(pattern, ".")
+	st := strings.Split(subj, ".")
+	for i, tok := range pt {
+		if tok == ">" {
+			return i < len(st)
+		}
+		if i >= len(st) {
+			return false
+		}
+		if tok != "*" && tok != st[i] {
+			return false
+		}
+	}
+	return len(pt) == len(st)
+}
+
+// A consumer's filter subject must be a subset of its own stream's interest, or
+// CreateOrUpdateConsumer fails at startup and the service exits. This guards the whole
+// class: any collection whose stream and filter drift apart fails here, not at rollout.
+func TestMessageCollection_FilterSubjectsAreOnTheirOwnStream(t *testing.T) {
+	const siteID = "site-a"
+	tests := []struct {
+		name string
+		coll *messageCollection
+	}{
+		{"user", newMessageCollection("msgs-v1", siteID, time.Time{}, false)},
+		{"bot", newBotMessageCollection("msgs-v1", false)},
+		{"teams", newTeamsMessageCollection("msgs-v1", siteID, false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streamSubjects := tt.coll.StreamConfig(siteID).Subjects
+			require.NotEmpty(t, streamSubjects)
+			for _, filter := range tt.coll.FilterSubjects(siteID) {
+				matched := false
+				for _, streamSubj := range streamSubjects {
+					if subjectMatches(streamSubj, filter) {
+						matched = true
+						break
+					}
+				}
+				assert.True(t, matched,
+					"filter %q is not carried by stream %q (subjects %v)",
+					filter, tt.coll.StreamConfig(siteID).Name, streamSubjects)
+			}
+		})
+	}
 }
 
 // fakeTeamsUserResolver returns a fixed id→identity map (nil error).
