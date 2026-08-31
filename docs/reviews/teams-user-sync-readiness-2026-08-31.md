@@ -138,3 +138,24 @@ The service publishes no NATS events and registers no client-facing handler, so 
 - `low` — add an integration assertion that a `teams-user-sync` upsert preserves an existing `from` watermark, pinning the `omitempty` behaviour the two services silently depend on.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+Projections, batching and pagination are all done correctly, but the HR join queries an unindexed field once per page, and the run has no upstream backoff.
+
+### Findings
+- `high` — `HRUsers` filters `hr_employee` on `account`, which has **no index anywhere in the repo** — `teams-user-sync/store_mongo.go:73-75`
+  `hr_employee._id` is the derived `employeeId` (`teams-hr-sync/transform/transform.go:47-50`, `hr-sync-worker/store.go:56-59`), so `account` is an unindexed secondary field. No `EnsureIndexes`/`Indexes()` call exists in `hr-sync-worker`, `teams-hr-sync` or this service, and `docker-local/compose.deps.yaml:45-47` confirms there is no init hook. Every page therefore drives a `COLLSCAN` over the full employee collection — at a 100k-user directory and `$top=500` that is ~200 full scans per run.
+- `medium` — no upstream throttle backoff on the directory walk (see D5) — `pkg/msgraph/msgraph.go:706-718`. Performance consequence: a run aborted at page 190 of 200 has done ~190 collection scans and 190 bulk writes and still reports failure, and the retry repeats all of it.
+- `medium` — one log record per HR-unmatched user inside the hot loop — `teams-user-sync/handler.go:106`. In a directory whose guests have no HR rows, this is the dominant allocation and I/O cost of the run.
+- `low` — the pipeline is strictly serial: Graph fetch → `ExistingIDs` → `HRUsers` → `UpsertTeamsUsers`, with the next page's fetch blocked behind the previous page's three Mongo round-trips — `teams-user-sync/handler.go:43-45`. Acceptable for a nightly job; it is the first thing to change if the run outgrows its window.
+
+**Verified clean:** both reads carry explicit precise projections — `{"_id":1}` (`store_mongo.go:58`) and the exact four HR fields (`store_mongo.go:75`) — with no whole-document fetch; no `$lookup` anywhere; writes are a single batched `BulkUpsertByID` per page, not per-user (`store_mongo.go:86-88`); both stores short-circuit on empty input before touching Mongo (`store_mongo.go:53-55`, `:70-72`); pagination follows Graph's `@odata.nextLink` with the origin pinned against token exfiltration (`pkg/msgraph/msgraph.go:680-687`); pool sizing is explicit and validated, with the doc noting the 2× ceiling this two-client service incurs (`pkg/mongoutil/poolconfig.go:22-23`); and there is no `time.Sleep`, no goroutine (hence no leak path), and no `Nak`/`NakWithDelay` surface at all — this service consumes no JetStream, so the `pkg/jsretry` and `USING TIMESTAMP` rules do not apply.
+
+### Recommendations
+- `high` — create an index on `hr_employee.account` (non-unique) via a new `EnsureIndexes` on this service's store, or in `hr-sync-worker` as the collection's owner; this is the single highest-value change in the audit.
+- `medium` — adopt `getThrottled` for the users walk so a 429 costs a backoff rather than the whole run's work.
+- `medium` — move `handler.go:106` off the per-user hot loop (Debug, or first-N).
+- `low` — if run duration becomes a constraint, overlap the next Graph page fetch with the current page's Mongo work behind a bounded worker count rather than raising `GRAPH_PAGE_SIZE`.
