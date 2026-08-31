@@ -122,3 +122,74 @@ func TestActiveSubscription_DecodesFromFullSubscriptionDocument(t *testing.T) {
 	assert.Equal(t, sub.ThreadUnread, row.ThreadUnread)
 	assert.Nil(t, row.LastMsgAt, "lastMsgAt is added by the rooms join, never stored on the subscription")
 }
+
+// lookupSubPipeline returns the sub-pipeline of the single $lookup in pipeline.
+func lookupSubPipeline(t *testing.T, pipeline bson.A) bson.A {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		spec, ok := m["$lookup"].(bson.M)
+		if !ok {
+			continue
+		}
+		sub, ok := spec["pipeline"].(bson.A)
+		require.True(t, ok, "$lookup must use a sub-pipeline, not a plain foreignField join")
+		return sub
+	}
+	t.Fatal("no $lookup stage in pipeline")
+	return nil
+}
+
+// projectedKeys returns the inclusion keys of the first $project in pipeline, sorted.
+func projectedKeys(t *testing.T, pipeline bson.A) []string {
+	t.Helper()
+	for _, stage := range pipeline {
+		m, ok := stage.(bson.M)
+		if !ok {
+			continue
+		}
+		proj, ok := m["$project"].(bson.M)
+		if !ok {
+			continue
+		}
+		keys := []string{}
+		for k, v := range proj {
+			if k == "_id" && v == 0 {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatal("no $project stage in pipeline")
+	return nil
+}
+
+// The badge pipeline keeps exactly one room field (lastMsgAt), so its rooms join
+// must fetch exactly that. Reusing the list path's 11-field enrichment
+// materializes ten fields per joined room — including the encKey blob — that the
+// terminal $project then discards, once per account in a notification batch.
+func TestActiveSubscriptionPipeline_JoinsOnlyLastMsgAt(t *testing.T) {
+	r := &SubscriptionRepo{}
+
+	sub := lookupSubPipeline(t, r.activeSubscriptionPipeline("alice", 100))
+
+	assert.Equal(t, []string{"lastMsgAt"}, projectedKeys(t, sub),
+		"the badge join must project only the room field the terminal $project keeps")
+}
+
+// The join must not carry the E2E key into the working set: it is the largest
+// field in the enrichment set and the badge count never reads it.
+func TestActiveSubscriptionPipeline_JoinOmitsRoomKey(t *testing.T) {
+	r := &SubscriptionRepo{}
+
+	sub := lookupSubPipeline(t, r.activeSubscriptionPipeline("alice", 100))
+
+	for _, k := range projectedKeys(t, sub) {
+		assert.NotContains(t, k, "encKey", "the badge join must not fetch the room E2E key")
+	}
+}

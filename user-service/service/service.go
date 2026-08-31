@@ -159,7 +159,11 @@ type UserService struct {
 	// at 20 KB, but not a 400-row page at 400 of them.
 	previewChars int
 	// maxFanout bounds concurrent enrichment RPCs per request (MAX_SITE_FANOUT).
-	maxFanout       int
+	maxFanout int
+	// badgeFanout bounds concurrent per-account badge seeds in one batch
+	// (MAX_BADGE_SEED_FANOUT). Each seed holds a Mongo connection for the unread
+	// aggregate and fans out its own cross-site RPCs, so the two bounds multiply.
+	badgeFanout     int
 	maxApps         int
 	defaultApps     int
 	maxAccountNames int
@@ -201,6 +205,7 @@ func New(subs SubscriptionRepository, users UserRepository, apps AppRepository, 
 		roomBatchChunk:   cfg.RoomBatchChunk,
 		previewChars:     cfg.PreviewContentChars,
 		maxFanout:        cfg.MaxSiteFanout,
+		badgeFanout:      cfg.MaxBadgeSeedFanout,
 		defaultLimit:     cfg.DefaultSubscriptionLimit,
 		maxApps:          cfg.MaxAppsLimit,
 		defaultApps:      cfg.DefaultAppsLimit,
@@ -225,6 +230,19 @@ func (s *UserService) fanout() int {
 		return defaultSiteFanout
 	}
 	return s.maxFanout
+}
+
+// defaultBadgeSeedFanout is the fallback when badgeFanout is unset.
+const defaultBadgeSeedFanout = 8
+
+// badgeSeedFanout is the per-batch bound on concurrent account seeds. It
+// normalises a non-positive value for the same reason fanout does: the
+// semaphore sized by it sends before spawning its receiver.
+func (s *UserService) badgeSeedFanout() int {
+	if s.badgeFanout < 1 {
+		return defaultBadgeSeedFanout
+	}
+	return s.badgeFanout
 }
 
 // RegisterHandlers wires all UserService endpoints onto the router.

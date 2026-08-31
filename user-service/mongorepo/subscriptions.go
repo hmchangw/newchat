@@ -823,9 +823,39 @@ func (r *SubscriptionRepo) activeSubscriptionPipeline(account string, limit int)
 	if limit > 0 {
 		pipeline = append(pipeline, bson.M{"$limit": int64(limit)})
 	}
-	pipeline = append(pipeline, roomsEnrichStages()...)
+	pipeline = append(pipeline, activeRoomsEnrichStages()...)
 	pipeline = append(pipeline, bson.M{"$project": activeSubscriptionProjection()})
 	return pipeline
+}
+
+// activeRoomsEnrichStages is the badge path's rooms join. It deliberately does NOT
+// reuse roomsEnrichStages: the badge count reads exactly one room field, so joining
+// the list path's eleven (the encKey blob among them) would materialize ten per
+// joined room for the terminal $project to discard — once per account in a
+// notification batch. A cross-site subscription has no local room document and,
+// as in the list path, simply yields no lastMsgAt.
+func activeRoomsEnrichStages() bson.A {
+	return bson.A{
+		// $lookup justification: the unread test compares the room's lastMsgAt
+		// against the subscription's own lastSeenAt, so both sides must meet
+		// somewhere. Composing app-side would add a second round trip per account
+		// — an $in over the whole active set — on a path that already runs once
+		// per account in a notification batch. The $limit above caps the join at
+		// maxSubs rows, and the correlated $expr matches on the rooms _id index.
+		// The cross-site half of this same computation necessarily uses the
+		// separate-query shape (GetRoomsMeta), there being no local room document.
+		bson.M{"$lookup": bson.M{
+			"from": roomsCollection,
+			"let":  bson.M{"rid": "$roomId"},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$eq": bson.A{"$_id", "$$rid"}}}},
+				bson.M{"$project": bson.M{"_id": 0, "lastMsgAt": 1}},
+			},
+			"as": "room",
+		}},
+		bson.M{"$unwind": bson.M{"path": "$room", "preserveNullAndEmptyArrays": true}},
+		bson.M{"$addFields": bson.M{"lastMsgAt": "$room.lastMsgAt"}},
+	}
 }
 
 // GetActiveSubscriptions returns the active set for the unread count, capped before the join.
