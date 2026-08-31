@@ -79,3 +79,35 @@ Boundaries, DI and the store interface are exemplary and the MaxDeliver=-1/owner
 - `low` — Add the `//go:generate mockgen` directive to `store.go` and either generate `mock_store_test.go` or amend CLAUDE.md to sanction hand stubs for order-asserting flush tests.
 - `low` — Pass `wiring.CanonicalStream.Subjects` into `bootstrapStreams` instead of the consumer wildcard.
 - `low` — Promote the `DeliverNew` choice into `pkg/stream` as a named option (mirroring `WithUnlimitedRedelivery`) so the delivery-policy invariant remains owned by one package.
+
+---
+
+## 4. Test coverage — 2 / 5
+
+Statement coverage is 65.9%, below the CLAUDE.md §4 80% floor (capping this dimension at 2), but the shortfall is almost entirely unwired `main()` — the tested logic is unusually high-quality, with the coalescer, watermark filters and MaxDeliver=-1 settle semantics all pinned by named regression tests.
+
+### Findings
+- `high` — Coverage is **65.9% (279 stmts)**, under the 80% floor mandated by CLAUDE.md §4 — `roomlist-worker/main.go:65`
+  95 uncovered statements; **83 of them are inside `main()`** (lines 65–222), which is pure wiring. Excluding `main()`, the service is at **93.9%** — this is not vanity coverage, but the number as reported does not merge.
+- `medium` — `requestSelfShutdown` is 0% covered — `roomlist-worker/main.go:265-274`
+  This is the mechanism that turns a dead consume loop into a pod restart (the only actor that can rebuild the iterator). Every test substitutes a recorder for `consumeState.onUnexpectedStop` (`consumeloop_test.go:227`, `:246`), so the real SIGTERM raise and its two `slog.Error` fallbacks never execute. It is testable: install `signal.Notify` on a buffered channel in-test and assert delivery.
+- `medium` — A **transient** failure in the third write stage (`subscription mentions`) is untested; that early return is uncovered — `roomlist-worker/flush.go:176-178`
+  `failWith["mentions"]` is only ever set to `permanentWriteErr(9)` (`flush_test.go:119`); transient failures are only injected on `"rooms"` (`:106`, `:131`). If that `if err != nil { return }` were deleted, `permanentErrs` would be empty and the batch would return `flushOutcome{}` → **Ack**, silently dropping mention badges on a Mongo blip, and the suite would stay green. Stages 1 and 2 have the guard tested; stage 3 does not.
+- `medium` — No integration test exercises the JetStream side of the MaxDeliver=-1 contract — `roomlist-worker/integration_test.go:64`
+  `flushOne` drives the real flusher against real Mongo, but always the happy path; redelivery, Nak-with-backoff, and the poison-batch Ack-drop (`classifyFlushErr`) are proven only against `stubStore`. Nothing tests that a real `mongo.BulkWriteException` from a live server carries the codes `permanentMongoCodes` (`flush.go:216-227`) expects — the allow-list is asserted only against hand-built exceptions (`flush_test.go:71-78`), so a driver-version change in `BulkWriteException.ErrorCodes()` would flip poison batches to infinite retry undetected.
+- `low` — `flushNow`'s zero-timeout fallback to `flushloop.DefaultFinalTimeout` is uncovered — `roomlist-worker/flush.go:78-80`
+  Every `newFlusher(store, 0, 0)` test has budget 0, so the early-drain path never fires; the bound that keeps an early drain from running unbounded is never exercised.
+- `low` — No `mock_store_test.go`; `Store` has no `//go:generate mockgen` directive, contrary to CLAUDE.md §1/§4 — `roomlist-worker/store.go:7-10`
+  Hand-written stubs are used instead. The deviation is documented in-code and defensible (order and context-cancellation assertions), but it is a stated-rule deviation, and `stubStore` (`flush_test.go:21`) has an unsynchronised `order`/`rooms` write path (`:44-47`) that `-race` only tolerates because flushes are sequential.
+- `nitpick` — `pretouchJSON` (`roomlist-worker/pretouch.go:16`) and `NewMongoStore` (`store_mongo.go:23`) are 0% in the unit profile; `NewMongoStore` and the `BulkAdvanceLastSeen`/`BulkSetMentions` loop bodies (`store_mongo.go:149-153`, `:160-164`) *are* covered by the integration suite, which the profile excludes.
+
+## Positive signal (not findings)
+Table-driven with descriptive subtest names throughout (`main_test.go:40`, `flush_test.go:289`, `handler_test.go:14`); no `t.Parallel`, no package-level mutable state, `captureLogs` restores `slog.Default` via `t.Cleanup` (`consumeloop_test.go:305`); no real DB/NATS in unit tests (`fakeIterator`, `fakeJetstreamMsg`); integration file carries `//go:build integration`, `TestMain(m){testutil.RunTests(m)}`, and `testutil.MongoDB` with no inline containers. The same-millisecond `NewerRow` tie is pinned in both directions at unit *and* integration level (`batch_test.go:58`, `integration_test.go:161`), and the mixed permanent/transient join invariant has a named guard (`flush_test.go:158`).
+
+### Recommendations
+- `high` — Close the gap with targeted tests, not bulk: the three below plus a small `main()` extraction (move the post-config wiring into a `run(cfg) error`) would clear 80% without diluting the suite.
+- `medium` — Add `TestFlusher_TransientMentionsFailureNaks`: `failWith{"mentions": errors.New("connection refused")}`, assert the held messages are Nak'd, not Ack'd.
+- `medium` — Add `TestRequestSelfShutdown_RaisesSIGTERM`: register `signal.Notify` on a buffered channel, call `requestSelfShutdown()`, assert receipt within a bounded select.
+- `medium` — Add an integration test that drives a real `BulkWriteException` (e.g. a `DocumentValidationFailure` via a JSON-schema-validated `rooms` collection, or a duplicate `_id`) through `classifyFlushErr`, asserting it classifies permanent — pinning the allow-list against the real driver.
+- `low` — Add `TestFlusher_FlushNowWithoutTimeoutUsesTheDefaultBound`: construct with `flushTimeout: 0`, call `flushNow`, assert the store saw a deadline.
+- `low` — Either add the `//go:generate mockgen` directive and a generated `mock_store_test.go`, or note the stub exception in `store.go` as an explicit, reviewed departure; also guard `stubStore.order`/`rooms` with the existing mutex.
