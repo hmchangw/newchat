@@ -153,17 +153,8 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
-		return
-	}
-
-	siteID, err := h.store.GetRoomSiteID(ctx, roomID)
-	if err != nil {
-		if errIsRoomNotFound(err) {
-			errhttp.Write(ctx, c, errcode.NotFound("room not found"))
-			return
-		}
-		errhttp.Write(ctx, c, fmt.Errorf("get room: %w", err))
+	siteID, ok := h.requireMembership(ctx, c, roomID, user.Account)
+	if !ok {
 		return
 	}
 
@@ -238,17 +229,8 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
-		return
-	}
-
-	siteID, err := h.store.GetRoomSiteID(ctx, roomID)
-	if err != nil {
-		if errIsRoomNotFound(err) {
-			errhttp.Write(ctx, c, errcode.NotFound("room not found"))
-			return
-		}
-		errhttp.Write(ctx, c, fmt.Errorf("get room: %w", err))
+	siteID, ok := h.requireMembership(ctx, c, roomID, user.Account)
+	if !ok {
 		return
 	}
 
@@ -369,7 +351,7 @@ func (h *Handler) downloadFrom(c *gin.Context, dc driveClient) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
+	if _, ok := h.requireMembership(ctx, c, roomID, user.Account); !ok {
 		return
 	}
 
@@ -420,7 +402,7 @@ func (h *Handler) HandleDownloadMinioS3File(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, up.RID, user.Account) {
+	if _, ok := h.requireMembership(ctx, c, up.RID, user.Account); !ok {
 		return
 	}
 
@@ -446,21 +428,22 @@ func (h *Handler) HandleDownloadMinioS3File(c *gin.Context) {
 }
 
 // requireMembership verifies the account is a member of roomID, writing the
-// appropriate error response and returning false when it is not (or on a store
-// error). Both room-scoped handlers gate on this.
-func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID, account string) bool {
-	member, err := h.store.IsMember(ctx, roomID, account)
+// appropriate error response and returning ok=false when it is not (or on a
+// store error). On success it also returns the room's home siteID from the
+// subscription — the local source that exists even for cross-site rooms.
+func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID, account string) (string, bool) {
+	siteID, member, err := h.store.MemberSiteID(ctx, roomID, account)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("check room membership: %w", err))
-		return false
+		return "", false
 	}
 	if !member {
 		errhttp.Write(ctx, c, errcode.Forbidden(
 			fmt.Sprintf("user %s is not in room %s", account, roomID),
 			errcode.WithReason(errcode.RoomNotMember)))
-		return false
+		return "", false
 	}
-	return true
+	return siteID, true
 }
 
 // preprocessFiles runs the per-file size/extension/open checks. Rejected files
