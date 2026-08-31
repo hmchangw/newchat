@@ -22,8 +22,8 @@
 
 | | |
 |---|---|
-| **Status** | Draft — for review |
-| **Net change** | **2 instruments to add, 1 label to widen, 2 already exist, 1 to drop.** Only one addition has a measurable hot-path cost, and it is bounded and plumbing-shaped, not per-recipient. **SLO-1a is computable today with no code change** as an *approximate* indicator — see §1A |
+| **Status** | Rationale only — superseded on every implementation detail by [`p2-implementation-task.md`](p2-implementation-task.md) |
+| **Net change** | **Four instrument families to add, one already exists, one to drop.** Two additions carry a measurable hot-path cost and both are benchmarked. SLO-1a has an *approximate, attempt-based* indicator today with no code change — it is **not** a hard gate, and P2 does not make it one (see the G4 note in [`execution-priority-plan.md`](execution-priority-plan.md)) |
 | **Not in scope** | Anything that needs a JetStream advisory consumer — see §6 |
 
 ---
@@ -36,251 +36,38 @@ them are already done and one should be dropped.
 | Roadmap piece | Reality | Action |
 |---|---|---|
 | gatekeeper `messages_canonical_published_total{broadcast_path}` | `message_gatekeeper_messages_total{result="accepted"}` is close but is a *handler-outcome* counter recorded after the reply, not at the publish site, and it carries no fan-out label | **Add a dedicated counter at the publish site** — decided in [`p2-implementation-task.md`](p2-implementation-task.md) §4.1 |
-| message-worker persisted numerator | **Already exists** as `message_worker_persistence_total{message_kind,result}` (`message-worker/nats_metrics.go:46`, recorded at `handler.go:190,193,204,207`) | **Nothing** — §1B |
-| broadcast-worker `broadcast_channel_enqueue_total` | #337's `broadcast_worker_recipient_deliveries_total` is close but counts per publish target | **Add**, one counter — §1C |
-| broadcast-worker `broadcast_channel_enqueue_age_seconds` | Absent, and the handler cannot see the message | **Add** + plumbing — §1D |
-| `broadcast_channel_enqueue_age_invalid_total{reason}` | Absent | **Add** — free — §1E |
-| gatekeeper build→publish diagnostic | Explicitly unscored; #337's `rpc.server.call.duration` already answers the question | **Drop** — §1F |
+| message-worker persisted numerator | **Already exists** as `message_worker_persistence_total{message_kind,result}` (`message-worker/nats_metrics.go:46`, recorded at `handler.go:190,193,204,207`) | **Nothing** — [task §8](p2-implementation-task.md) |
+| broadcast-worker `broadcast_channel_enqueue_total` | #337's `broadcast_worker_recipient_deliveries_total` is close but counts per publish target | **Add**, one counter — [task §4.2](p2-implementation-task.md) |
+| broadcast-worker `broadcast_channel_enqueue_age_seconds` | Absent, and the handler cannot see the message | **Add** + plumbing — [task §5.3](p2-implementation-task.md) |
+| `broadcast_channel_enqueue_age_invalid_total{reason}` | Absent | **Add** — free — [task §5.2](p2-implementation-task.md) |
+| gatekeeper build→publish diagnostic | Explicitly unscored; #337's `rpc.server.call.duration` already answers the question | **Drop** |
 
 ---
 
-## 1. The instruments
+## 1–2. Instrument designs and per-instrument costs — removed
 
-### A. The J1 denominator — message-gatekeeper · **needs a dedicated, `broadcast_path`-labelled counter**
+This document used to carry a per-instrument design (§1 A–F) and a per-message
+cost table (§2). Both encoded the pre-contract design and are gone: §1A derived
+the `broadcast_path` label from a `sub.RoomType` field that does not exist and
+recommended widening the existing counter; §1D threaded the stream timestamp as
+an explicit parameter; §2 scored SLO-1a as "computable today, no code change",
+which is true only of an approximate attempt-based indicator and was being read
+as a finished result.
 
-**The counter is already there.** `message_gatekeeper_messages_total{result, reason}`
-records `resultAccepted` at `message-gatekeeper/handler.go:218` — after the
-canonical `PublishMsg` succeeded and the client reply was sent. That is exactly
-"a canonical message was accepted", which is the J1 denominator.
+**The live design is [`p2-implementation-task.md`](p2-implementation-task.md)**
+(§3 placement and classification, §4 the counters, §5 the age histogram), under
+[`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract".
 
-**Consequence: SLO-1a is computable today, with no code change.** See §1B and §4.
+What survives from §2 and is worth keeping in mind while implementing:
 
-**What is missing is only the fan-out slice.** SLO-1b and SLO-2 count the
-`room_subject` path only, and the counter has no `broadcast_path` label.
-
-**Label derivation is free — no new I/O.** Everything needed is in hand at that
-line:
-
-```go
-switch {
-case req.ThreadParentMessageID != "" && !req.TShow: // mirrors shouldUseThreadFanOut
-    path = "thread"
-case sub.RoomType == model.RoomTypeChannel:
-    path = "room_subject"
-default:
-    path = "dm"
-}
-```
-
-- `sub` comes from `GetSubscription` (`handler.go:376`), already called and
-  cache-absorbed; `model.Subscription` carries `RoomType`
-  (`pkg/model/subscription.go:33`).
-- `req.ThreadParentMessageID` and `req.TShow` are on the request
-  (`pkg/model/message.go:64,71`).
-
-**Do not reach for `GetRoomMeta` to build this label.** The handler deliberately
-*skips* that fetch on the thread-reply and owner/admin-bypass paths
-(`handler.go:394-396`, "Both bypasses skip the Room fetch entirely"). Adding a
-Mongo read to label a counter would put I/O on the send path in order to measure
-the send path.
-
-**The classification must mirror broadcast-worker's dispatch, not the room type.**
-`shouldUseThreadFanOut` is `ThreadParentMessageID != "" && !TShow`
-(`broadcast-worker/handler.go:220`) and is checked **first**, before the room-type
-switch. A channel thread reply with `TShow=false` is a channel room that routes to
-per-account thread fan-out, so a `room_type="channel"` denominator would count a
-message that never reaches `publishChannelEvent` — depressing SLO-1b and SLO-2
-with messages they do not own.
-
-**Two ways to carry the label; pick one deliberately.**
-
-| | *(superseded — the choice was made: a dedicated counter, [`p2-implementation-task.md`](p2-implementation-task.md) §4.1)* | |
-|---|---|---|
-| New instruments | 0 | 1 |
-| Series | `accepted` currently pairs only with `reason="none"`, so adding 3 paths turns 1 series into 3 — total goes 32 → 34 | 32 unchanged + 3 |
-| Semantics | One counter carries a business outcome *and* a routing dimension | Business outcomes stay one counter; the SLO denominator is a single-purpose series |
-| Registry entry | Amend the existing one | One new entry naming its reader |
-
-Recommendation: **widen the existing counter** unless a reviewer objects to mixing
-the two concerns. It adds no instrument, the cardinality delta is two series, and
-the SLO queries filter on `result="accepted"` anyway. Build the label only for the
-`accepted` key — the other results have no fan-out route and must not gain one.
-
-**Cost either way.** No extra work at all: the counter is already incremented on
-this line, and the label value comes from data already in registers. The only
-change is which precomputed option is looked up.
-
-### B. SLO-1a numerator — message-worker · **already exists, do nothing**
-
-`message_worker_persistence_total{message_kind, result}` already records
-`success`/`error` at every persist site, for both the thread and non-thread
-paths. Paired with A:
-
-```promql
-sum by (site) (rate(message_worker_persistence_total{result="success"}[28d]))
-/
-sum by (site) (rate(messages_canonical_published_total[28d]))
-```
-
-Denominator is the **all-paths** total (persistence covers every message),
-unlike 1b/2 which take the `room_subject` slice only.
-
-**Known approximation, already declared.** The counter records one outcome per
-*attempt*, so a JetStream redelivery that eventually succeeds counts twice. This
-is exactly the "approximate (lag-enforced)" status `sli-slo.md` §0.1 assigns to
-every v1 async ratio; the primary enforcement signal remains consumer lag. Making
-it exact needs the outcome ledger (P7), not a new counter here.
-
-**The only action is documentation:** `sli-slo.md` §8 should stop listing this as
-outstanding work — and §1 should move SLO-1a from 🔧 to ✅ (approximate), because
-paired with §1A's existing denominator the ratio is computable on `main` today.
-
-**One filter is mandatory.** message-worker also persists `system` and
-`teams_migration` messages, which reach MESSAGES-CANONICAL from history-service
-mutations and room-worker system events rather than through the gatekeeper. Without
-`message_kind=~"user|thread_reply"` the numerator counts messages the denominator
-never saw.
-
----
-
-### C. `broadcast_channel_enqueue_total{outcome}` — broadcast-worker · **add**
-
-The SLO-1b numerator. `result` is `ok` | `failed`.
-
-**Why #337's counter cannot be used directly**, even though it is very close.
-`broadcast_worker_recipient_deliveries_total{room_kind="channel", …}` already
-isolates the right messages — `publishChannelEvent` stamps `roomChannel`
-(`handler.go:1060`) while `publishToThreadAccounts` stamps `roomThread`
-(`:1254`), so thread replies are correctly excluded without any label change.
-
-The problem is the **unit**. `publishRoomEvent` loops over
-`subject.RoomEventTargets(...)` (`handler.go:1063`), which returns **one or two**
-subjects — a room inside its cross-site flip grace window dual-publishes to the
-global and local namespaces (`pkg/subject/subject.go:454`). The delivery counter
-increments once per target, so for those rooms the numerator exceeds the
-denominator and the ratio goes above 1. An SLI needs **one outcome per logical
-message**; loadgen's own recipient observer already makes exactly this
-distinction ("treats one global and one local copy of the same logical room
-event as one delivery").
-
-**Site.** `publishChannelEvent`, once, after the target loop returns, carrying
-the aggregate result. One `Add` per canonical channel message — not per
-recipient, not per target. Two series.
-
-**What it does and does not mean.** `nc.PublishMsg` on Core NATS is
-fire-and-forget: `ok` means the message entered the local client's send buffer,
-not that a server confirmed it. The metric name says `enqueue` for that reason.
-A full reconnect buffer *does* return an error synchronously, so that drop is
-counted as `failed`; an accepted-then-lost publish during a disconnect is not
-countable here at all and is covered by the connection-risk counters
-(`chat_nats_client_connected` / `_connection_events_total`, which #337 wired).
-
----
-
-### D. `broadcast_channel_enqueue_age_seconds` — broadcast-worker · **add, and this is the one with a real cost**
-
-The SLO-2 numerator: age ≤ 1 s is good, later is bad, no upper sanity cap.
-
-**Origin.** `msg.Metadata().Timestamp` — the JetStream metadata store timestamp,
-set by the stream-server leader when MESSAGES-CANONICAL persisted the message.
-It is deliberately **not** `evt.Timestamp`, which gatekeeper stamps before its
-own quote/parent/user lookups and would fold gatekeeper processing time into the
-broadcast SLO.
-
-**The 1 s bound is exactly measurable — check this before writing the code.**
-Use `o11y.DefaultLatencyBuckets()`, the same set #337 pinned for the RPC
-families: `{.005 .01 .025 .05 .1 .25 .5 1 2.5 5 10}`. `1` is a real boundary, so
-the numerator is an exact `le="1"` bucket read rather than an interpolation —
-the problem that forced SLO-5 from 300 ms to 250 ms does not arise here.
-
-**The cost, stated plainly.** `Handler.HandleMessage(ctx, data []byte)` receives
-only bytes (`handler.go:156`); the `jetstream.Msg` stays in the consume loop. And
-`msg.Metadata()` is not free — it parses the `$JS.ACK.…` reply subject and
-allocates a metadata struct. The repo already treats it as a hot-path cost: the
-flow-log block in `broadcast-worker/main.go:436` is gated *specifically* so that
-`msg.Metadata()` is skipped when the log level is off, with a comment saying so.
-
-**Plumbing — parse once, in the loop.**
-
-1. In `broadcastProcessor`, call `msg.Metadata()` once and keep the timestamp.
-2. Pass it to the handler as an **explicit parameter**, not through `context`. A
-   ctx value costs a map allocation on write and an interface assertion on read,
-   and this value is required rather than optional — a parameter says that and is
-   cheaper.
-3. The existing flow-log branch then **reuses** the parsed value instead of
-   parsing again. On flow-log-enabled runs this is strictly cheaper than today.
-
-**Three things not to do:**
-
-- **Do not sample the histogram.** SLO-2 is an event ratio over *all* valid
-  events; a sampled numerator cannot be divided by a full denominator.
-- **Do not derive the age from `evt.Timestamp`** to avoid the parse. That is a
-  different, earlier, unbounded origin — the SLO would measure something else.
-- **Do not pre-optimize the parse.** Measure it at your target rate first, with
-  the same benchmark discipline #337 used. If `Metadata()` shows up, the fallback
-  is to pull just the timestamp token out of the reply subject without building
-  the struct — but only on evidence.
-
-**Cross-process clock contract.** The age subtracts a stream-server clock from
-broadcast-worker's clock. It only means something with NTP/chrony on every node
-and skew monitoring alerting above ~100 ms (10% of the bound).
-
----
-
-### E. `broadcast_channel_enqueue_age_invalid_total{reason}` — broadcast-worker · **add, effectively free**
-
-`reason` is `missing_metadata` | `negative_age`. Two series.
-
-It only increments when the *measurement* is broken — a missing or zero metadata
-timestamp, or an age below zero (worker clock behind the stream-server clock).
-Zero cost on the normal path.
-
-It is not optional bookkeeping: `sli-slo.md` §2 makes these samples **fail-closed**
-— kept in the denominator, excluded from the good numerator — and any nonzero
-rate fails a load-test hard gate, because SLO-2 cannot be certified while the
-measurement itself is broken. Without this counter that state is invisible.
-
----
-
-### F. gatekeeper build→publish diagnostic · **drop**
-
-The roadmap asks for a same-process monotonic duration from message-build start
-to canonical publish. Reasons not to build it now:
-
-- It is **explicitly unscored** — a diagnostic that explains a bad SLO-2, not an
-  SLI.
-- #337 already put `rpc.server.call.duration` on the gatekeeper's handler, which
-  answers "how long did the gatekeeper take" for the same request.
-- It would be a second histogram on the busiest RPC path in the system, to
-  explain a number that is already visible.
-
-Revisit only if SLO-2 starts missing *and* the RPC histogram does not explain
-why. That is the honest trigger for adding a diagnostic: a question you actually
-have and cannot answer.
-
----
-
-## 2. Cost summary
-
-Per canonical message, with #337's recorder discipline applied (nil-collapse when
-`O11Y_ENABLED=false`: 3.27 ns / 0 allocs; warm option lookup ~9.6 ns / 0 allocs).
-
-| Instrument | Fires | Added work per message | New series |
-|---|---|---|---|
-| A J1 denominator | already incremented per accepted send | **none** — one extra label value on an existing add | +2 |
-| B `message_worker_persistence_total` | — | **none, exists** | 0 |
-| — SLO-1a as a whole | — | **none — computable today** | 0 |
-| C `broadcast_channel_enqueue_total` | once per canonical **channel** message | 1 counter add | 2 |
-| D `broadcast_channel_enqueue_age_seconds` | once per canonical **channel** message | 1 histogram record **+ one `msg.Metadata()` parse per consumed message** | 1 histogram (11 buckets) |
-| E `_age_invalid_total` | only on a broken reading | ~0 | 2 |
-
-**Everything except D's metadata parse is noise** next to what those paths already
-do — the gatekeeper's cache-absorbed Mongo reads, broadcast-worker's user lookup
-and room-meta read. D's parse is the one line item worth benchmarking, and the
-plumbing that enables it makes the existing flow-log path cheaper.
-
-None of these is per-recipient. That is the property that keeps them safe in a
-5 000-member room.
+- With #337's recorder discipline, a recording call costs ~3.27 ns / 0 allocs
+  when `O11Y_ENABLED=false` collapses it, and a warm option lookup ~9.6 ns / 0
+  allocs. Counter adds are noise next to what these paths already do.
+- **The two costs that are not noise are the two the task brief benchmarks**: an
+  unconditional room-meta lookup in the gatekeeper (cache-fronted, but not free)
+  and an unconditional `msg.Metadata()` parse in broadcast-worker.
+- **None of these instruments is per-recipient.** That is the property that keeps
+  them safe in a 5 000-member room, and it is the one thing not to trade away.
 
 ---
 
@@ -299,12 +86,14 @@ None of these is per-recipient. That is the property that keeps them safe in a
 - **A redelivery counter.** #337 deleted `chat.nats.consumer.redeliveries`
   deliberately and the reasoning holds. Do not reintroduce it as a substitute for
   §6.
-- **The build→publish diagnostic** (§1F).
-- **Sampling on D.**
+- **The build→publish diagnostic** — `rpc.server.call.duration` already answers it.
+- **Sampling on the age histogram** — unless its benchmark says otherwise, in which case it is a decision for the owner, not a silent trade.
 
 Every instrument added here must appear in `docs/specs/o11y/nats-metrics-contract.md`
-next to *what reads it*, or the `pkg/obs` registry test fails. For these four the
-reader is named: the SLO-1a/1b/2 recording rules, and the load-test hard gate.
+next to *what reads it*, or the `pkg/obs` registry test fails. For these the reader
+is named: the SLO-1a/1b/2 recording rules. **Not a hard gate** — see G4 in
+[`execution-priority-plan.md`](execution-priority-plan.md) for why an
+attempt-based numerator cannot be one.
 
 ---
 
@@ -393,7 +182,8 @@ holds", and the two stale numbers in the failure doc should be corrected.
 
 **What still needs watching, and how to see it without advisories.** An outage
 *longer than the budget* does still end in terminal drops. `msg.Metadata()`
-carries `NumDelivered`, and §1D's plumbing parses that metadata anyway — so a
+carries `NumDelivered`, and the age histogram's plumbing parses that metadata
+anyway ([task §5.3](p2-implementation-task.md)) — so a
 bounded counter of "settled at delivery attempt ≥ N" costs nothing extra and
 shows how close messages are getting to the cap. It does not prove a drop, and it
 must not be sold as proving one; it is a leading indicator, and it is entirely in

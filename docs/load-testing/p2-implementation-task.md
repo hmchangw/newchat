@@ -31,9 +31,13 @@ room-meta lookup unconditional (§3.2), P2b makes a JetStream metadata parse
 unconditional (§5.4). Neither is free, neither is obviously expensive, and
 neither should be merged on an assertion.
 
-**Two things P2a does not deliver, and they belong in the PR body**: SLO-1b's
-ratio can exceed 1 under redelivery (§4.2), and a `broadcast_path="unknown"`
-rate above a small fraction makes SLO-1b INCONCLUSIVE for that window (§3.3).
+**Three things P2a does not deliver, and they belong in the PR body**: SLO-1b's
+ratio can exceed 1 under redelivery (§4.2); **any non-zero `broadcast_path="unknown"`
+makes SLO-1b/2 INCONCLUSIVE** for that window unless the worst case is shown to
+pass (§3.3); and **none of this makes any of the three a hard gate** — every
+numerator is consumer-side and attempt-based, so a lost message and a
+double-processed one cancel. Calibration-ready, not gate-ready; a real gate needs
+P7's logical-outcome ledger.
 
 ---
 
@@ -60,7 +64,8 @@ These are not preferences. A PR that violates one gets sent back.
    whose values are enumerated in a package-level slice, so a typo is a compile
    error. `.semgrep/metrics.yml` has a cardinality rule as well.
 6. **No new store calls, no new network calls, no new allocations on the hot
-   path** beyond what §5 explicitly budgets and benchmarks. This is a stated
+   path** beyond the two this brief explicitly budgets and benchmarks — the
+   room-meta lookup in §3.2 and the metadata parse in §5.4. Nothing else. This is a stated
    requirement from the owner: instrumentation that costs throughput defeats its
    own purpose.
 7. **Update the docs in the same PR**: `docs/specs/o11y/nats-metrics-contract.md`
@@ -143,19 +148,54 @@ overstated the cost:
   it is to widen the room-meta cache, or to emit `unknown` for the bypass path
   and record the resulting blind spot. Bring the numbers and let the owner choose.
 
-### 3.3 Fail open, and count the failures
+### 3.3 Fail open, and make `unknown` a hard validity rule
 
 A metric must never fail a message. If `GetRoomMeta` returns an error on a path
 that would otherwise not have called it, **label the message `unknown` and carry
 on** — the same fail-open stance `handler.go:422` already takes for the
 large-room cap.
 
-`unknown` is not a silent bucket. It is a validity signal: SLO-1b's denominator
-is the `room_subject` slice, so a message misfiled as `unknown` is silently
-removed from it. **Alert on it, and make it a run-validity check** — if
-`unknown` exceeds a small fraction of the total during a measurement run, SLO-1b
-is INCONCLUSIVE for that run, exactly as an unmarkable `t2` makes SLO-1a
-INCONCLUSIVE. Put that in the runbook's §6 gate when this lands.
+**`unknown` is not in the contract yet, and adding it is a contract change.**
+`common/sli-slo.md:171-185` closes the label at `room_subject | thread | dm`.
+This brief adds a fourth value, so **P2a must land the contract amendment in the
+same PR** and get the contract owner's sign-off — not slip it in as an
+implementation detail.
+
+**Why it needs a rule and not a note.** `unknown` biases SLO-1b in the *green*
+direction: a genuine channel message whose room-meta lookup failed leaves the
+`room_subject` denominator entirely, while the enqueue that follows it still
+increments the numerator. A Mongo blip therefore *raises* the measured ratio at
+exactly the moment the system is degraded.
+
+**The rule, and it is executable:**
+
+> **Any non-zero `unknown` in a measurement window makes SLO-1b and SLO-2
+> `INCONCLUSIVE` for that window.**
+
+Zero, not "a small fraction" — an earlier revision of this brief wrote the latter
+and it is not a rule, because it names no number, no denominator and no window.
+Zero needs neither.
+
+**One escape hatch, and it must be shown, not asserted.** If `unknown` is
+non-zero, the window may still be reported *if* the worst case still passes:
+recompute the ratio with every `unknown` message counted as a `room_subject`
+message whose enqueue **failed** — the maximum damage it could have done — and
+report that number instead. If the worst case passes, so does the truth. If it
+does not, the window is `INCONCLUSIVE`.
+
+```promql
+# worst-case SLO-1b for a window in which unknown > 0
+sum(increase(broadcast_channel_enqueue_total{outcome="ok"}[$w]))
+/
+( sum(increase(messages_canonical_published_total{broadcast_path="room_subject"}[$w]))
++ sum(increase(messages_canonical_published_total{broadcast_path="unknown"}[$w])) )
+```
+
+**This rule has three homes and P2a must update all three:** the label set and
+the rule in `common/sli-slo.md`; the validity gate in
+[`first-slo-run-runbook.md`](first-slo-run-runbook.md) §6, beside the backlog and
+dispatch-ratio checks; and any SLO-1b/2 recording rule, which must carry the
+worst-case denominator rather than the bare `room_subject` slice.
 
 ---
 
@@ -236,13 +276,28 @@ drafts of this brief and of the spec used both, and the contract wins.
 `publishChannelEvent` (`broadcast-worker/handler.go:1048`) currently ends at
 `:1067` with `return h.publishRoomEvent(...)`. Capture the error, record, return:
 
+**Do not wrap only the final publish.** `publishChannelEvent` has **two earlier
+returns** — `encryptRoomEvent` failing at `handler.go:1054` and `sonic.Marshal`
+failing at `:1058`. An earlier revision of this brief captured only the error
+from `publishRoomEvent`, so those two paths would record nothing: they would
+break the "exactly one outcome per call" criterion, and — worse — they are real
+enqueue failures that would silently leave SLO-1b's numerator, biasing the ratio
+*green* on the encryption path.
+
+Use a named return and a `defer`, so a future early return cannot escape it
+either:
+
 ```go
-err := h.publishRoomEvent(ctx, meta.ID, meta.CrossSite, meta.CrossSiteAt, payload, "channel event")
-h.metrics.RecordChannelEnqueue(ctx, enqueueOutcomeFor(err))
-return err
+func (h *Handler) publishChannelEvent(...) (err error) {
+    defer func() { h.metrics.RecordChannelEnqueue(ctx, enqueueOutcomeFor(err)) }()
+    ...
+}
 ```
 
 Do **not** classify the error further; that is a different metric.
+
+**Test all three failure points**, not just the publish: encryption failure,
+marshal failure, and publish failure each record exactly one `outcome="failed"`.
 
 **The denominator match is exact, and worth verifying rather than assuming.**
 `publishChannelEvent` has exactly one caller — `handleCreated` at
@@ -360,10 +415,20 @@ Check every box. Each is verifiable, not a judgement call.
       broadcast-worker's dispatch branch agree, case for case (§4.1)
 - [ ] A `GetRoomMeta` failure yields `broadcast_path="unknown"` and **does not
       fail the message**
+- [ ] The `unknown` label value and the zero-tolerance validity rule are added to
+      **`common/sli-slo.md`** (a contract change — get the owner's sign-off) **and**
+      to the runbook's §6 validity gate, in this PR (§3.3)
+- [ ] Any SLO-1b/2 recording rule carries the **worst-case denominator**
+      (`room_subject` + `unknown`), not the bare slice
 - [ ] `broadcast_channel_enqueue_total{outcome}` records exactly one value per
       `publishChannelEvent` call, `ok` / `failed` — the label name and values from
       `common/sli-slo.md:188`, not `result`/`accepted`
+- [ ] `RecordChannelEnqueue` fires on **all three** failure points via a named
+      return + `defer` — encryption, marshal, publish — not only the publish
 - [ ] A test fails if `publishChannelEvent` gains a second caller
+- [ ] Every family a live smoke check cannot produce (`_duplicate_total`,
+      `_age_invalid_total`, `broadcast_path="unknown"`) is pinned by a unit test
+      asserting its exact series name and label values (§7)
 - [ ] Every label is a closed Go enum enumerated in a package-level slice
 - [ ] Attribute sets are precomputed in the constructor and looked up at the
       recording site — no `metric.WithAttributes` in any recording function
@@ -404,10 +469,25 @@ make sast
 ```
 
 Then, against a local stack (`deploy/docker-compose.yml`, `BOOTSTRAP_STREAMS=true`),
-send one channel message and confirm on the services' o11y endpoints that all
-four series appear with the expected label values. **A metric that compiles but
-never appears in `/metrics` is the normal failure here** — otelprom only exports
-an instrument once a data point has been recorded.
+check the services' o11y endpoints. **A metric that compiles but never appears in
+`/metrics` is the normal failure here** — otelprom exports an instrument only once
+a data point has been recorded for it.
+
+**One happy-path message does not exercise all five families.** Plan for that:
+
+| Family | Appears from | How to make it appear |
+|---|---|---|
+| `messages_canonical_published_total{broadcast_path}` | any send | one channel message → `room_subject`; one thread reply → `thread`; one DM → `dm` |
+| `broadcast_channel_enqueue_total{outcome="ok"}` | a channel message | as above |
+| `broadcast_channel_enqueue_age_seconds` (P2b) | a channel message | as above |
+| `messages_canonical_publish_duplicate_total` | **never on a happy path** | replay the same message with the same `CanonicalDedupID` inside the stream's dedup window |
+| `broadcast_channel_enqueue_age_invalid_total{reason}` (P2b) | **never on a happy path** | not reproducible against a healthy broker — cover it in unit tests and check the **series name and label values** by unit-test assertion rather than by scraping |
+| `broadcast_path="unknown"` | **never on a happy path** | fault-inject a `GetRoomMeta` error in a unit test |
+
+The rule: **every family a live smoke check cannot produce must be pinned by a
+unit test that asserts its exact name and label values.** Otherwise a typo in a
+rarely-taken branch is discovered by an operator staring at an empty panel during
+an incident.
 
 ---
 
