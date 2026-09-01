@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -21,6 +23,17 @@ import (
 // so it does not track the public client leg's server timeouts. Overrides
 // restyutil's 30s default, which large streamed bodies blow through.
 const driveTimeout = 5 * time.Minute
+
+// Drive's per-file upload modes and the markers that identify a name conflict
+// in its per-file result. Both are matched case-insensitively — Drive's casing
+// is not contractual, and the status arrives spelled either way.
+const (
+	modeNormal   = "Normal"
+	modeKeepBoth = "KeepBoth"
+
+	statusFailure  = "failure"
+	conflictMarker = "file conflict"
+)
 
 // MultipartFile is an opened multipart file plus its name, ready to upload.
 type MultipartFile struct {
@@ -72,12 +85,78 @@ func (c *Client) GetBaseURLFromRoomOrigin(origin string) string {
 	return c.baseURL
 }
 
-// UploadGroupImages uploads files to a Drive group in one bulk multipart call.
+// UploadGroupImages uploads files to a Drive group in one bulk multipart call,
+// then re-sends any file Drive rejected as a name conflict under KeepBoth.
+//
+// Drive reports conflicts per file inside a 200 response, so the retry is
+// scoped to exactly those entries: files that uploaded on the first attempt are
+// never sent again, which is what keeps a KeepBoth retry from storing a second
+// copy of them. Retried once only — a KeepBoth upload has no name to collide
+// with, so a repeat would only burn the bytes again.
+//
+// A retry that never lands leaves the first attempt's results standing rather
+// than failing the whole batch: the successes are real, and the conflicting
+// entries stay per-file failures marked as retried, with the cause logged
+// server-side rather than handed to the client.
+func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
+	results, err := c.uploadBulk(userID, username, email, groupID, origin, files, modeNormal)
+	if err != nil {
+		return nil, err
+	}
+
+	conflicts := conflictedIndexes(results, len(files))
+	if len(conflicts) == 0 {
+		return results, nil
+	}
+
+	retryFiles := make([]MultipartFile, 0, len(conflicts))
+	for _, i := range conflicts {
+		retryFiles = append(retryFiles, files[i])
+	}
+	retried, err := c.uploadBulk(userID, username, email, groupID, origin, retryFiles, modeKeepBoth)
+	if err != nil {
+		// Logged here because returning a nil error means no boundary handler
+		// will. The client is told only that the retry ran — the Drive status
+		// and body snippet stay server-side.
+		slog.Error("drive keepboth retry failed",
+			"error", err, "groupId", groupID, "files", len(retryFiles))
+		for _, i := range conflicts {
+			results[i].Error = fmt.Sprintf("%s; %s retry failed", results[i].Error, modeKeepBoth)
+		}
+		return results, nil
+	}
+	for n, i := range conflicts {
+		if n < len(retried) {
+			results[i] = retried[n]
+		}
+	}
+	return results, nil
+}
+
+// conflictedIndexes returns the positions of the results Drive failed with a
+// name conflict. An entry past the end of what was sent is skipped: there is no
+// file to re-upload for it, whatever it says.
+func conflictedIndexes(results []UploadGroupImageResponse, sent int) []int {
+	var conflicts []int
+	for i, r := range results {
+		if i >= sent {
+			break
+		}
+		if strings.EqualFold(r.Status, statusFailure) &&
+			strings.Contains(strings.ToLower(r.Error), conflictMarker) {
+			conflicts = append(conflicts, i)
+		}
+	}
+	return conflicts
+}
+
+// uploadBulk performs one bulk multipart call with every file under mode.
 // userID/userName/email are sent as form fields; each file is attached with the
 // indexed naming convention files[i].file / files[i].fileName / files[i].mode.
 // The body is streamed (see buildStreamedBody), so memory does not scale with
-// upload size.
-func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
+// upload size, and a caller may run it twice over the same files — each build
+// rewinds them.
+func (c *Client) uploadBulk(userID, username, email, groupID, origin string, files []MultipartFile, mode string) ([]UploadGroupImageResponse, error) {
 	fields := []formField{
 		{"userId", userID},
 		{"userName", username},
@@ -86,7 +165,7 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 	for i, f := range files {
 		fields = append(fields,
 			formField{fmt.Sprintf("files[%d].fileName", i), f.Filename},
-			formField{fmt.Sprintf("files[%d].mode", i), "Normal"})
+			formField{fmt.Sprintf("files[%d].mode", i), mode})
 	}
 	body, err := buildStreamedBody(fields, files)
 	if err != nil {

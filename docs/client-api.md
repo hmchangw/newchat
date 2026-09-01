@@ -525,7 +525,9 @@ Uses the [§6](#6-error-envelope-reference) envelope. HTTP statuses:
 
 Uploads one or more images for a room on behalf of the authenticated user. Each
 file is validated independently and the response reports per-file
-success/failure in a single `200` (partial success).
+success/failure in a single `200` (partial success). A file whose name already
+exists in the room is re-uploaded automatically as a separate copy, so a name
+conflict is reported as a success rather than a failure.
 
 #### Request
 
@@ -552,7 +554,7 @@ success/failure in a single `200` (partial success).
 |---|---|---|
 | `name` | string | The file name. |
 | `status` | string | `success` for an uploaded file, `failure` for a rejected one. |
-| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, or `failed to open file`. |
+| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, `failed to open file`, or the storage backend's own message. A name conflict whose automatic re-upload also failed is suffixed `; KeepBoth retry failed`. |
 | `relativePath` | string | Present on success: path to download the file via the GET endpoint below, including the `drive_host` query param. |
 
 ```json
@@ -592,7 +594,8 @@ A whole-request failure (not a per-file rejection) uses the
 **Reply:** synchronous HTTP response
 
 Uploads a single file (image/audio/video/document) for a room on behalf of the
-authenticated user and stores it in Drive. Returns a render-ready
+authenticated user and stores it in Drive. A file whose name already exists in
+the room is stored automatically as a separate copy. Returns a render-ready
 [Attachment](#attachment) the client uses to compose a `msg.send` (§4). This is a
 pure-HTTP endpoint — it does **not** publish a message.
 
