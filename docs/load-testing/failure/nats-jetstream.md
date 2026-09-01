@@ -69,10 +69,20 @@ Terminal results per operation, and what each one licenses you to say:
 
 NATS-specific reading traps:
 
-- **A terminal drop is invisible to the ledger unless advisories are
-  collected.** `MaxDeliver` exhaustion produces an advisory, not an error the
-  producer sees. Without it, an exhausted message and a message still being
-  retried look the same from consumer pending alone.
+- **A terminal drop is invisible from *consumer pending* alone** — an exhausted
+  message and one still being retried both leave pending at zero eventually. It
+  is **not** invisible outright, and an earlier revision of this bullet said it
+  was. Three signals, three jobs:
+  - **The loadgen ledger / a read-back** decides the business outcome: the
+    message is absent (`missing_after_deadline`) or it is not. This is the loss
+    claim.
+  - **`chat_nats_terminal_failures_total{reason="max_deliver"}`** covers the
+    handler-error exhaustion path — the handler returned an error on its final
+    delivery. It is on `main` today.
+  - **Max-delivery advisories** add broker-side **attribution** (which consumer
+    stopped delivering) and the un-acked paths the app counter cannot see (crash,
+    hang, `AckWait`). They are **not** a loss claim: a handler that completed its
+    side effect and then lost its Ack still produces one.
 - **Redelivery is normal.** At-least-once means duplicates are expected; only
   a duplicate *business effect* is a violation. That is what the recipient
   observer's cardinality check exists to separate.

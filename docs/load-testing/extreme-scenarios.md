@@ -92,8 +92,13 @@ real cost by the full thread length.
 **Test.** Seed threads of 100 / 1k / 5k / 20k / 100k replies at 0% and 10%
 soft-delete density; ramp reply-send against each. Measure reply-add p95/p99,
 `cassandra.query.attempts`, coordinator read latency, tombstones-scanned, and the
-rate of 15 s scan timeouts → `MaxDeliver` exhaustion (via max-delivery advisories).
-Report the thread length at which p99 crosses the SLO bound and the length at
+rate of 15 s scan timeouts → `MaxDeliver` exhaustion. **Measure that exhaustion
+with `chat_nats_terminal_failures_total{reason="max_deliver"}` on message-worker
+plus a Cassandra read-back of the seeded reply IDs** — this is the handler-error
+path, so the app counter sees it and the read-back decides whether the reply is
+actually missing. Max-delivery advisories are **optional attribution here, not
+required evidence**; the stream is the platform team's and is not available to
+us. Report the thread length at which p99 crosses the SLO bound and the length at
 which replies start dropping. Isolated keyspace.
 
 ---

@@ -27,17 +27,17 @@
 > | Prefix | Means | Lives in |
 > |---|---|---|
 > | **PRE-n** | A precondition for *this run* — an operator step, checked off before the run starts | this document, §1 |
->
-> **Watch for the collision.** `PRE-n` and `P<n>` are different things and both
-> appear in this document: `P4` and `P7` in §8 and §5 are **instrumentation
-> tiers**, not preconditions. An earlier revision of this file renamed some of
-> them by mistake.
 > | **Gn** | A **gate** — external work (infra, product, app) that blocks one or more items in the programme, with a named owner | [`execution-priority-plan.md`](execution-priority-plan.md) §"Gate backlog" |
 > | **P1 / P2 / P3** | An **instrumentation priority tier** — how urgent a piece of missing telemetry is | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md), [`slo-measurement-map.md`](slo-measurement-map.md) |
 >
 > The ones this run actually waits on: **G1** (isolated site — same thing as
 > PRE-3), **G2** (workload shape — same thing as PRE-7), **G6** (backlog
 > observer — the enabler PRE-4 needs).
+>
+> **Watch for the collision.** `PRE-n` and `P<n>` are different things and both
+> appear in this document: the `P4` in §8 and the `P7` in §5 are
+> **instrumentation tiers**, not preconditions. An earlier revision of this file
+> renamed some of them by mistake.
 
 | # | Precondition | Owner | Note |
 |---|---|---|---|
