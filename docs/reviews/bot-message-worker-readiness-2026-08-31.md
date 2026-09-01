@@ -118,3 +118,22 @@ Subject, stream and consumer wiring are exactly right, but the Cassandra write-t
 - `high` — make `countAndSetParentTcount` non-fatal for the commit (Ack the create and retry the tcount SET separately), or move it ahead of the commit, so a post-commit failure cannot replay the create.
 - `high` — correct the CLAUDE.md bot-message-worker paragraph: the retry window is 12.6 min via `jsretry.DefaultBackoff`, and the thread path *does* have a post-commit failure point.
 - `medium` — convert the inline encrypted `null` bindings into separate unpinned `stripLegacyPlaintext*` UPDATE statements before pinning anything.
+
+---
+
+## 7. Performance — 3 / 5
+
+Retry discipline, batching and worker-pool sizing are correct, but every bot thread reply triggers a full unbounded partition scan inside the ack window.
+
+### Findings
+- `high` — each thread reply runs `threadcount.Count`, a full scan of `thread_messages_by_thread` for that thread with no LIMIT — `store_cassandra.go:250`, `pkg/threadcount/threadcount.go:41-44`. Cost grows linearly with thread length, runs synchronously in the handler, and with `MAX_WORKERS=100` (`main.go:39,152`) up to 100 such scans run concurrently against Cassandra.
+- `high` — the scan's own 15s backstop (`pkg/threadcount` `scanTimeout`) plus the batch write can approach the 30s `AckWait` default (`pkg/stream/consumer.go:19`), so a long thread risks un-acked redelivery — which then replays an unpinned create (see D5).
+- `medium` — the unbounded dispatcher goroutine has no termination guarantee tied to shutdown (`main.go:154-167`); after `iter.Stop()` a goroutine parked on `sem <-` is neither drained nor counted (see D2).
+- `low` — `bucket.Of(msg.CreatedAt)` is recomputed inline per statement in the thread paths (`store_cassandra.go:178,233`) rather than hoisted as in `SaveMessage` (`:70`); trivial, but inconsistent.
+- Compliant: no bare `Nak()`/`NakWithDelay(0)` anywhere — the only settle is `jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, …)` (`handler.go:45`); `cc.BackOff` is never hardcoded, it comes from `stream.DurableConsumerDefaults` (`main.go:206`); writes are `UnloggedBatch` so the denormalized pair shares one round trip (`store_cassandra.go:72,113,149,201`); the sole Mongo use is the at-rest DEK collection behind `ATREST_ENABLED` with a justified `primaryPreferred` read preference (`main.go:46-49,130-131`) — no unprojected finds, no `$lookup`.
+
+### Recommendations
+- `high` — bound or cache the thread count: maintain `tcount` as a counter/derived value, or cap the scan and fall back, so per-reply cost is O(1) rather than O(thread length).
+- `high` — raise `CONSUMER_ACK_WAIT` above the worst-case scan+write, or call `msg.InProgress()` while the scan runs, so a long thread cannot trigger redelivery of a committed create.
+- `medium` — track the dispatcher goroutine in the WaitGroup so shutdown cannot close the Cassandra session under it.
+- `low` — hoist `s.bucket.Of(msg.CreatedAt)` to a local in both thread paths.
