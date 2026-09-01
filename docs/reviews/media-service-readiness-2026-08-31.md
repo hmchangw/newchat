@@ -164,3 +164,35 @@ Functions are small, naming is consistent and the comments are genuinely WHY-ori
 - `low` — Add a one-line `// drive.members keeps a bespoke envelope for the external drive client; see docs/…-drive-members-endpoint-design.md` above `writeDriveError`, or migrate it to `errhttp` if the external contract permits.
 - `low` — Delete `blobInfo.ETag`, or start using it as the `serveStored` validator; carrying an unread field invites a future reader to trust it.
 - `nitpick` — Move the `EIDCache*` checks into a `func (c *config) validate() error` alongside `Pool.Validate()`/`Guard.Validate()`, and pull the Gin/HTTP wiring out of `run()` into `newHTTPServer(cfg, h, sessions, sdk)`.
+
+---
+
+## 6. Integration — 4 / 5
+
+Cross-service contracts are clean where the strict rules bind — subject builders used exclusively, docs and both derived views match the emoji RPCs, and the service publishes no events at all — but the undocumented, non-standard `drive.members` endpoint and the missing MinIO bucket fail-fast leave real integration gaps.
+
+**docs/client-api.md obligation: BINDS.** `media-service` registers two `chat.user.…` handlers — `chat.user.{account}.request.emoji.{siteID}.list` and `.delete` (`media-service/emoji_nats.go:69-70` via `pkg/subject/subject.go:1068,1081`). Both are documented (`docs/client-api.md:6147-6248`) and both derived views are in sync (`docs/client-api/request-reply.md:2201-2246`); `docs/client-api/events.md` correctly has no entry (no events emitted). Reason strings match the `errcode` constants exactly (`emoji_delete_disabled`, `emoji_shortcode_reserved`, `wrong_cluster`, `not_admin` — `pkg/errcode/codes_emoji.go:8,12`, `codes_avatar.go:7`, `codes_admin.go:5`). Federation rules (OUTBOX partition, INBOX lanes, `Timestamp` at publish sites, `BOOTSTRAP_STREAMS`, msgbucket, `ROOM_KEY_RETIRED_TTL`) are **vacuous here**: no `Publish`, no JetStream, no stream config (`grep Publish|jetstream` over `media-service/*.go` → only `natsmetrics` and `idgen.ResolveRequestID`).
+
+### Findings
+- `medium` — MinIO bucket is never probed at startup; `newMinioBlobStore` binds the name blind — `media-service/minio.go:34`, `media-service/main.go:82-86`
+  `pkg/minioutil/minio.go:128` explicitly documents `BucketExists`/`NewBucket` as "the bucket-scoped fail-fast hook", and no service in the repo calls it. A wrong `MINIO_BUCKET` starts cleanly, `/healthz` returns 200, and every avatar/emoji `PUT` and stored-blob `GET` 500s at runtime — the exact "fail fast on config" case CLAUDE.md §Configuration calls for.
+- `medium` — `GET /api/v1/drive.members` is a client-facing HTTP endpoint absent from `docs/client-api.md` §7 — `media-service/routes.go:15`, `media-service/drive.go:54`
+  §7 documents the other four routes (avatar GET ×2, avatar PUT, emoji GET/PUT); this one is missing entirely. The strict CLAUDE.md rule covers only `chat.user.*` and auth-service HTTP, so this is a convention gap rather than a rule breach — but it is an unauthenticated endpoint exposing room name/type and user identity to an external "drive" integration with no written contract.
+- `medium` — `drive.members` bypasses `pkg/errcode`/`errhttp` with a bespoke `{success, error, errorType}` envelope — `media-service/drive.go:32-48,60-95`
+  CLAUDE.md: "Use `pkg/errcode` for ALL client-facing errors; reply via … `errhttp.Write`". These four `errorType` strings (`MISSING_PARAMETER`, `ROOM_NOT_FOUND`, `ACCOUNT_NOT_FOUND`, `INTERNAL_ERROR`) are a second, undocumented error vocabulary that no `codes_*.go` file owns. If it exists to match a legacy consumer, that needs an inline justification.
+- `medium` — stale cross-service contract claim: `custom_emojis` is documented as read by the `pkg/emoji` validator, which does not read Mongo — `pkg/model/custom_emoji.go:6-7`, `media-service/store.go:36-37`
+  `pkg/emoji/emoji.go` exposes only `Canonicalize`/`CanonicalizeReaction`/`IsStandard` — no collection access — and reactions validate format only (`docs/client-api.md:3916`, `history-service/internal/service/reactions_test.go:117`). The comments overstate the blast radius of `emoji.delete` and would mislead the next change to the collection.
+- `low` — ETag wire inconsistency: stored ETags are unquoted, the generated default is quoted — `media-service/handler.go:46-47`, `media-service/avatar.go:530`, `media-service/minio.go:59`
+  minio-go strips the quotes (`minio-go/v7@v7.2.0/utils.go:48-51`), so the `ETag` response header for stored blobs is not the RFC 9110 quoted-string form, while `defaultETag` emits `"v1-…"`. `If-None-Match` echo still matches, but a normalizing CDN/proxy can break it. The docs mirror the split: bot-upload shows `"etag": "\"9b2cf...\""` (`docs/client-api.md:7089`) while emoji upload/list show unquoted (`:7166`, `:6183`) — same code path, two documented shapes.
+- `nitpick` — `Avatar` lookup fetches the whole document with no projection — `media-service/store_mongo.go:109`
+  Every other find in the file projects precisely (`:39,55,71,84,96,142,155,203`).
+- `nitpick` — `avatars`/`custom_emojis` `_id`s are deterministic composites (`"bot:"+account`, `"{siteID}:{shortcode}"`) rather than `pkg/idgen` — `media-service/upload.go:82`, `media-service/emoji_upload.go:240`
+  Defensible (same rationale as `BuildDMRoomID`: no separate dedup needed) but neither entity appears in CLAUDE.md's primary-key enumeration.
+
+### Recommendations
+- `medium` — Probe the bucket at startup: call `client.BucketExists(ctx, cfg.MinioBucket)` in `run()` right after `minioutil.Connect` and return a wrapped error, or widen `minioutil.NewBucket` to cover binary blobs so the hook is actually used.
+- `medium` — Add a `### GET /api/v1/drive.members` subsection to `docs/client-api.md` §7 (query params `roomId`/`accountName`, the `{success,data:{members,count,roomName,roomType}}` body, the four `errorType` values) and note its auth model, or restrict it to an internal listener.
+- `medium` — Either migrate `drive.members` to `errhttp.Write` + `errcode`, or add an inline comment at `drive.go:32` naming the legacy consumer that pins the bespoke envelope.
+- `medium` — Correct the `custom_emojis` reader comments in `pkg/model/custom_emoji.go:6-7` and `media-service/store.go:36-37`: the collection currently has no in-repo reader besides media-service.
+- `low` — Pick one ETag shape (quote on emit, in `setImageCacheHeaders`) and fix the bot-upload example at `docs/client-api.md:7089` so the two upload endpoints document the same format.
+- `nitpick` — Add the projection to `store_mongo.go:109` (`minioKey`, `etag`, `contentType`).
