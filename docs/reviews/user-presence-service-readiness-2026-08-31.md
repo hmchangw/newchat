@@ -137,3 +137,33 @@ Positives worth preserving: `sync/reconcile.go` is at **100%** with genuine degr
 - `medium` — Switch all four Valkey integration files to `testutil.SharedValkeyCluster(t)` + `t.Cleanup(func(){ testutil.FlushValkey(t) })` and delete the self-refuting justification comment.
 - `medium` — Add integration coverage for `ActiveAccounts` (write two connections, drop one, assert sweep-index membership) — it is the sync's contract with the store.
 - `low` — Extract `main()` into `run(cfg Config) error` + a `validate(cfg) error`, mirroring `sync/main.go`, and table-test the six positivity checks and the read-preference parse.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Small, well-factored files with unusually good WHY-comments, but the `sync/` sibling binary silently re-declares shared Valkey/presence knobs that the main binary owns, one comment asserts a compile-time guarantee that does not exist, and a config knob is parsed and validated but never read.
+
+### Findings
+- `high` — `sync/` re-declares `VALKEY_ADDRS`/`VALKEY_PASSWORD` and dials `redis.NewClusterClient` directly instead of mounting `valkeyutil.Config` + `ConnectRaw` — `user-presence-service/sync/main.go:30-31`, `sync/main.go:91-93`. CLAUDE.md §6 Configuration forbids re-declaring a shared knob per service; `presencestore/store.go:185-190` states the rule explicitly ("exactly the duplication valkeyutil exists to end") and the sibling binary in the same directory breaks it. It also loses the instrumentation the main binary deliberately buys.
+- `high` — `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` defaults are literally duplicated in two files (`main.go:42,44` = 45s/5m; `sync/main.go:24-25` = 45s/5m) and `sync/deploy/docker-compose.yml:8-23` sets neither, while `deploy/docker-compose.yml:20,23` parameterizes both. Both processes run the same `computeLua` against the same keys, so an operator override moves the service's staleness window and leaves the sync pruning on 45s. Two writers, one keyspace, two sources of truth.
+- `medium` — `PresenceConfig.HeartbeatInterval` is parsed, range-validated and logged, but no code path reads it — `main.go:41`, `:92`, `:99`; the only other reference is `deploy/docker-compose.yml:19`. Dead config that reads as an enforced knob.
+- `medium` — the compile-time assertion comment is false: "including SetExternal" — `main.go:65-67`, but `PresenceStore` (`store.go:470-498`) declares no `SetExternal`. `presencestore.Store.SetExternal` (`presencestore/store.go:267`) is constrained only by `sync`'s own `externalApplier` (`sync/store.go:183-185`). The comment claims a guard that the type system is not providing.
+- `medium` — `Hello`/`Ping`/`Activity`/`Bye` are four copies of one 13-line shape (validate account+connID → store call → publish-on-change) — `handler.go:250-313`. Adding a fifth connection event means a fifth copy; a fix to the validation branch means four edits.
+- `medium` — the same store is integration-tested twice, from two packages, with two near-identical harnesses: `newTestStore` (`integration_test.go:22-26`, package `main`) and `newStore` (`presencestore/integration_test.go:19-23`, package `presencestore`), and the precedence ladder is asserted in both (`integration_test.go:129` vs `presencestore/integration_test.go:47-82`). The root file tests a type its package does not own.
+- `medium` — status strings are duplicated as Lua literals with no compile-time link to `model.PresenceStatus` — `presencestore/store.go:95-109` (`'offline'`, `'away'`, `'in-call'`, `'busy'`, `'appear_offline'`) vs `pkg/model/presence.go:22-28`. Renaming a constant compiles clean and breaks the ladder at runtime; only the integration suite catches it.
+- `low` — the store computes its own wall clock (`presencestore/store.go:231`) while `Handler` and `Sweeper` both take an injectable `now` (`handler.go:234`, `sweeper.go:516`). The inconsistent seam is why every staleness/deadline behavior needs a container.
+- `low` — vendor leakage into the generic store: the key is `:azure` (`presencestore/store.go:23`) and `KEYS[4]=azure` (`:67,:88-92`) while the API surface calls it "external" (`SetExternal`, `externalScript`). Two names for one concept.
+- `low` — magic `Count: 500` sweep page size, unnamed and un-tunable, beside a configurable `BatchMax` — `presencestore/store.go:320`.
+- `nitpick` — `run` silently swallows reply-shape mismatches via unchecked assertions (`changed, _ := res[0].(int64)`) — `presencestore/store.go:209-211`; arity is checked at `:206` but element types degrade to zero values.
+- `nitpick` — "per review" comments reference an out-of-band conversation a future reader cannot retrieve — `presencestore/store.go:50-51`, `:259`.
+- `nitpick` — redundant per-iteration loop-var copy `site, accounts := site, accounts` (`handler.go:397`); dead since Go 1.22, and `go.mod` is on 1.25.13.
+
+### Recommendations
+- `high` — Replace `sync`'s ad-hoc Valkey config+dial with `Valkey valkeyutil.Config` + `valkeyutil.ConnectRaw`, and move `StaleThreshold`/`ConnsTTL` into a single exported `presencestore.Config` (env tags declared once) that both binaries mount, per CLAUDE.md §6.
+- `high` — Set `PRESENCE_STALE_THRESHOLD` and `PRESENCE_CONNS_TTL` in `sync/deploy/docker-compose.yml` from the same `${...}` vars as the service compose, so local dev cannot diverge.
+- `medium` — Delete `HeartbeatInterval` (and its validation branch), or wire it into a served client-config reply; do not keep a knob that only exists to be validated.
+- `medium` — Either add `SetExternal(ctx, account, status, ttl)` to `PresenceStore` or correct the `main.go:65-67` comment. Prefer correcting the comment: `sync` legitimately owns that seam via `externalApplier`.
+- `medium` — Collapse the four connection handlers into one generic helper over a `connRequest` interface (`ConnectionID() string`, already satisfied by `model.Hello/Ping/Activity/ByeRequest`), leaving four two-line registrations; convert `handler_test.go:64-153` to one table.
+- `medium` — Move all store integration tests into `presencestore/` (they already have a `TestMain` there) and delete `user-presence-service/integration_test.go`, keeping `handler_test.go` mock-only.
+- `low` — Generate the Lua status literals from `pkg/model` constants (`fmt.Sprintf` the script tail once at init), or add a unit test asserting each literal equals its `model.PresenceStatus`.
