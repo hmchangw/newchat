@@ -82,3 +82,41 @@ Boundaries are genuinely good — narrow consumer-defined `RoomStore`/`RoomKeySt
 - `medium` — Add `//go:generate mockgen` to `store.go` for `RoomStore` and `RoomKeyStore`, generate `mock_store_test.go`, and migrate `fakeStore`/`fakeKeyStore` onto it.
 - `low` — Move `sysmsgPub` (and ideally `valkey`) into `newHandler`'s parameter list so the wiring is checked by the compiler.
 - `low` — Introduce a one-method `keySender` interface in `handler.go` so `fanOutKey`'s per-recipient failure path is unit-testable.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is 49.0% (410 stmts) — below the 60% CLAUDE.md floor, so the dimension is floored at 1; the remove/key-rotation suite is genuinely good, but the whole Mongo store, the identity gate, and every DM/create error path have zero coverage.
+
+### Findings
+- `critical` — 49.0% statement coverage (410 stmts), far under the CLAUDE.md §4 80% floor and under 60% — `scratchpad/pr/coverage_by_service.txt`
+- `high` — the entire Mongo layer is 0%: `InsertRoom`, `FindRoom`, `FindUser`, `participantBSON` have neither unit nor integration tests — `bot-room-service/store_mongo.go:47,71,150,193`
+  `integration_test.go` covers only `EnsureIndexes`/`UpsertSubscription`/`DeleteSubscription`/`ListRoomMemberAccounts`. The `ErrDuplicate`/`ErrNotFound` sentinels every handler branches on are produced only by the hand-written fake, so nothing proves `mongo.IsDuplicateKeyError`/`ErrNoDocuments` actually map to them.
+- `high` — `parseIdentity`'s three rejection branches are all 0% — `bot-room-service/handler.go:696,701,705`
+  This is the identity gate for all five bot RPCs; missing header, malformed JSON, and empty id/account (all `errcode.BotInvalidHeader`) are untested, as is every caller's error return (`handler.go:104,183,298`).
+- `high` — the "room already exists" path is untested end to end: `ErrDuplicate → errcode.Conflict(BotRoomExists)` is 0% — `bot-room-service/handler.go:206-210`
+  Paired with `InsertRoom` at 0%, the idempotent-retry contract for create-room has no coverage at any layer.
+- `high` — every `handleDMEnsure` error path is 0% — `bot-room-service/handler.go:107-114,117-122,138-140,155-157,171-173`
+  Uncovered: `BotContentInvalid` (empty target), `BotCannotDMSelf`, `BotDMTargetNotFound`, both subscription-upsert failures, and the remote-target federation failure — i.e. the whole non-happy half of a client-facing RPC.
+- `medium` — no mockgen infrastructure: `store.go` has no `//go:generate mockgen` directive and there is no `mock_store_test.go`; the service uses hand-written fakes — `bot-room-service/store.go:11`, `bot-room-service/roomkey_test.go:11-13`
+  CLAUDE.md §4 mandates `go.uber.org/mock` generated mocks in `mock_store_test.go`; the comment acknowledges the deviation rather than fixing it.
+- `medium` — shared mutable state across tests: package-level `testKeyStore` / `testKeySender` wrapping one `&fakePublisher{}` that appends into shared slices — `bot-room-service/roomkey_test.go:76-79,54-62`
+  Violates "no shared mutable state between tests"; unsynchronized slice appends would race the moment any test adds `t.Parallel()`.
+- `medium` — effectively no table-driven tests: 1 `t.Run` across ~53 test functions — `bot-room-service/handler_test.go` (0 `t.Run`), `handler_remove_federation_test.go`, `bustsub_test.go`
+  CLAUDE.md requires table-driven handler tests "covering all documented scenarios"; `parseIdentity`'s three variants and the create/get validation matrix are textbook tables.
+- `medium` — `Register` is 0%, so nothing asserts the five subjects/patterns — `bot-room-service/handler.go:87-98`
+  `handleAdd`/`handleRemove` read `c.Params.Get("roomID")` (`handler.go:289,397`); if the token in `pkg/subject/bot.go:55` drifts, both silently return `BadRequest` and no test fails.
+- `medium` — `jsPublishAdapter.PublishWithMsgID` is 0% — `bot-room-service/sysmsg.go:26-31`
+  The `jetstream.WithMsgID` dedup that `emitSysmsg` relies on to "defeat double-emit on retry" is unverified in unit *and* integration tests.
+- `low` — `loadRoomAndAssertOwner`'s `FindRoom` failure (both `BotRoomNotFound` and infra) is 0% — `bot-room-service/handler.go:641-645`; `roomTypeToModel`'s `roomTypeDM → RoomTypeBotDM` case is 0% — `handler.go:379-380`; `handleCreate`'s self-in-`Members` dedup `continue` is 0% — `handler.go:240-241`; `rotateAndFanOut`'s "list survivors" failure is 0% — `handler.go:590-592`.
+- `nitpick` — `parsePeers` is 0% despite being a pure function — `bot-room-service/main.go:172-185`; `ALL_SITE_IDS` self-exclusion and blank-token trimming are unverified.
+
+### Recommendations
+- `critical` — Add integration tests for `InsertRoom` (duplicate `_id` → `ErrDuplicate`), `FindRoom`/`FindUser` (miss → `ErrNotFound`, and the projected field set incl. `createdByBot`/`lastMsgAt`), and assert the `rooms.u` shape `participantBSON` writes, since inbox-worker/room-service read `u._id`/`u.account`.
+- `high` — Table-drive `parseIdentity` over its three rejections, asserting the `errcode` category and `BotInvalidHeader` reason; then add one error-path case per handler for the `parseIdentity` return.
+- `high` — Cover `handleDMEnsure` fully: empty target, self-DM, target-not-found, both upsert failures, and remote-target federation failure (assert `BotCannotDMSelf`/`BotDMTargetNotFound` reasons, which clients branch on).
+- `high` — Cover create-room's `ErrDuplicate → BotRoomExists` conflict and the `BotUnsupported` orgs rejection (`handler.go:189-192`), plus `BotMemberNotFound` in the seed loop (`handler.go:244-250`).
+- `medium` — Replace the hand-written `fakeStore`/`fakeKeyStore` with `mockgen` output in `mock_store_test.go` and add the `//go:generate mockgen` directive to `store.go`, per CLAUDE.md.
+- `medium` — Delete the package-level `testKeyStore`/`testKeySender`; construct doubles per test (or per subtest) so state cannot leak.
+- `medium` — Add a `Register` test that drives a router and asserts all five subjects resolve, including that the add/remove patterns bind `roomID`; add an integration test for `PublishWithMsgID` proving a repeat `msgID` is deduped by JetStream.
