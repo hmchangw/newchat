@@ -124,3 +124,40 @@ At **56.5% (545 stmts)** botplatform-service is below CLAUDE.md Section 4's 60% 
 - `high` — Make routing assertable: have the fake forwarder record `siteID`, and add cases where `FindForBot`/`FindDMForBot` return `SiteID: "site-b"` (remote), `model.ErrSubscriptionNotFound` (→403 for room, →`Ensure` then local site for DM), and a generic error (→500).
 - `high` — Add integration tests for `mongoSubscriptionStore` using `testutil.MongoDB(t, …)`: hit, miss→`ErrSubscriptionNotFound`, DM lookup via `BuildDMRoomID`, and projection-only fields.
 - `medium` — Fill the login/rate-limit/idempotency error branches listed above; each is a two-line table case against mocks already in place.
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Small, well-organized, unusually well-commented service (comments genuinely say WHY), let down by a staged handler assembly, a duplicated-and-diverged forwarder, and two config knobs that do nothing.
+
+### Findings
+- `medium` — `handler` is assembled in three stages: `newHandler(st, &cfg)` sets only store/cfg, then `h.subs`, `h.forwarder`, `h.dmEnsurer` are poked in afterwards — `/home/user/newchat/botplatform-service/main.go:105`, `:114`, `:116`. Nothing (compiler or constructor) forces those three to be set, and every bot handler dereferences them unguarded (`bot_handlers.go:41`, `:51`, `:78`). Adding a sixth dependency means remembering a fourth assignment site; a missed one is a nil-panic on the first bot request, not a startup failure. CLAUDE.md ("Handler structs hold dependencies injected via constructor") wants all five in `newHandler`.
+
+- `medium` — `forwardRoomMgmt` hardcodes `15*time.Second` and ignores the `f.timeout` field the constructor was given — `/home/user/newchat/botplatform-service/bot_forwarder.go:75` vs the field set at `:35`. So `newBotForwarder(nc, 3*time.Second)` (`main.go:114`) silently configures only half the forwarder, and the room-mgmt budget is unreachable from config while its twin — the DM-ensure 15s — *is* a constructor argument (`main.go:116`). Two identical magic numbers, one injectable, one not.
+
+- `medium` — `forward` (`bot_forwarder.go:106-156`) and `forwardRoomMgmt` (`:57-92`) are ~85% the same code: nil-session guard, `BotIdentity` marshal, `natsutil.NewMsg` + nil-header dance, header set, `WithTimeout`, the identical timeout/`nats.ErrTimeout` → `errcode.Unavailable` branch, and the identical `errcode.Parse` reconstruction. They differ only in three headers, the timeout, one error string, and whether the reply is decoded. `dm_ensurer.go:35-74` is a *third* copy of the same skeleton. Any change to bot RPC framing (a new header, a trace attribute, a retry) must be made in three places.
+
+- `low` — `BCRYPT_COST` is validated at startup (`main.go:44`) and never read again; `verifyPassword` delegates to `pwhash.Verify(stored, plaintext)` with no cost parameter (`handler.go:227`). The knob is documented in `config.go:36` as load-bearing but is inert — an operator tuning it gets nothing.
+
+- `low` — `DevMode` (`config.go:57`) has exactly one reference in the whole service: its own declaration. Dead config.
+
+- `low` — the generic access-log middleware hardcodes three handler-specific keys — `login_outcome`, `validate_outcome`, `bot_account` (`middleware.go:34-36`) — always emitted, usually empty. Every new endpoint with an outcome dimension edits shared middleware; the list only grows.
+
+- `low` — request bodies are read and re-encoded three times per bot call: `botIdempotency` `io.ReadAll` + restore (`middleware_idempotency.go:60-67`), `bindStrict` `io.ReadAll` + decode (`bot_handlers.go:193`), then each handler re-marshals the decoded struct back to bytes (`bot_handlers.go:46`, `:87`, `:112`, `:160`) — four copies of the same five-line `json.Marshal` + `errcode.Internal("re-marshal bot request", …)` block. `bindStrict` already holds the validated raw bytes and could return them.
+
+- `low` — unknown-field detection is a substring match on `encoding/json`'s error text: `strings.Contains(msg, "unknown field")` (`bot_handlers.go:211`). Brittle against a stdlib message change, and it silently downgrades to `BotContentInvalid` rather than `BotUnknownField` if it ever shifts. (CLAUDE.md's "never compare errors by string" is aimed at `errors.Is`, but this is the same fragility.)
+
+- `nitpick` — the variable holding a `*json.SyntaxError` is named `unknownErr` (`bot_handlers.go:205`), which reads as the unknown-field case it is not.
+
+- `nitpick` — stale comment: `// ValkeyAddrs seeds …` describes a field named `Valkey` (`config.go:42`); and `// Reuses model.model.ErrSubscriptionNotFound` (`subscription_store.go:17`) has a duplicated package qualifier.
+
+No file exceeds 260 production lines, no function exceeds ~50, and the file layout matches CLAUDE.md's per-service organization exactly — size and complexity are not a problem here.
+
+### Recommendations
+- `medium` — Make `newHandler(store, cfg, subs, forwarder, dmEnsurer)` take all five dependencies and delete the three post-construction assignments in `main.go:105-116`; move the NATS connect above handler construction to allow it.
+- `medium` — Extract the shared RPC skeleton into one unexported `botForwarder.request(ctx, sess, subj, timeout, headers, body) ([]byte, error)` covering nil-session, identity header, timeout classification and `errcode.Parse`; have `forward`, `forwardRoomMgmt` and `natsDMEnsurer.Ensure` call it. Give `botForwarder` a second `roomMgmtTimeout` field fed from config so `15s` stops being a literal in two files.
+- `low` — Either wire `BcryptCost` into the hash path or delete it plus its startup validation (`main.go:44`, `config.go:37`); same for `DevMode`.
+- `low` — Have `bindStrict` return the validated `[]byte` alongside the decoded struct and forward those bytes, removing all four re-marshal blocks.
+- `low` — Replace the three named outcome keys in `accessLogMiddleware` with a single `c.Set("outcome", …)` (plus `bot_account` kept as identity), so new endpoints don't edit the middleware.
+- `nitpick` — Fix the `unknownErr` name and the two stale comments; add a fixture-backed test around `bindStrict`'s unknown-field branch so a stdlib text change fails a test rather than degrading an error code in production.
