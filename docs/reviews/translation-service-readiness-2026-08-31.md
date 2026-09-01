@@ -107,3 +107,22 @@ The refactor I would actually do: extract `readStream(r io.Reader) (merged strin
 - `nitpick` — Promote `ApplyWiki` to config or document why it is pinned false.
 
 ---
+
+---
+
+## 6. Integration — 4 / 5
+
+Contract discipline is strong — subject builders throughout, and `docs/client-api.md` plus both derived views are accurate and in sync — with only a model-tag deviation and one undocumented operational knob.
+
+### Findings
+- Verified correct: the client-facing subject is built by `subject.TranslateRequestPattern` (`main.go:117`), never `fmt.Sprintf`; `pkg/subject/subject.go:1792-1800` matches `docs/client-api.md:6264` and `docs/client-api/request-reply.md:2330` exactly; the error table (`docs/client-api.md:6313-6319`) enumerates every code the handler and translator can actually produce — `empty_text` (`handler.go:27`), `unsupported_lang` (`handler.go:34`), `upstream_unavailable` (`translator_stream.go:101,116,158`), `rate_limited` (`translator_stream.go:110`), saturation `unavailable`, and `internal`. `docs/client-api/events.md` correctly carries no translate entry — the service emits no events.
+- Not applicable and correctly absent: no JetStream stream, no INBOX/OUTBOX participation, no `outbox.Publish` partition membership to check, no Cassandra/`msgbucket`, no `pkg/idgen` IDs, no `ROOM_KEY_RETIRED_TTL`. The event-`Timestamp` rule does not bind: `TranslateRequest`/`TranslateResult` are request/reply payloads, not NATS events.
+- `low` — `pkg/model/translation.go:11,20` violates the CLAUDE.md §3 "both `json` and `bson` tags" rule (repeated from D1 as it is a cross-service contract type).
+- `low` — `MAX_CONCURRENCY` is a client-visible behaviour (it produces the `unavailable`/"service busy" reply documented at `docs/client-api.md:6316`) but the knob and its default appear in no deploy artifact: `translation-service/deploy/docker-compose.yml` sets only `TRANSLATION_BACKEND=mock`, and the stream-backend env (`TRANSLATION_ENDPOINT`, `TRANSLATION_ACCESS_TOKEN_URL`, `TRANSLATION_J1_TOKEN_FILE`) is documented nowhere in the repo.
+
+### Recommendations
+- `low` — Add the full env surface (with defaults) to the service's `deploy/` as commented-out entries, so operators can see `MAX_CONCURRENCY`, `TRANSLATION_HTTP_TIMEOUT`, `TRANSLATION_TOKEN_SKEW`.
+- `low` — Resolve the `bson`-tag deviation in CLAUDE.md or in `pkg/model/translation.go`.
+- `nitpick` — When `REQUEST_TIMEOUT` is added (D2), document the resulting timeout `unavailable` case in the §3.6 error table and in `docs/client-api/request-reply.md`.
+
+---
