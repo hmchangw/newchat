@@ -104,3 +104,22 @@ At 63 + 125 lines with trivial complexity, single responsibilities and WHY-style
 - `low` — extract `consume(ctx, iter, h, maxWorkers)`; it pays for itself the moment jobguard/logctx/metrics are added.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+Stream, subject and event-contract wiring are fully compliant — no raw `fmt.Sprintf` subjects, `Timestamp` set at the publish site — but the correlation context that links this service to its producer is dropped at the boundary.
+
+### Findings
+- `medium` — trace/request-ID chain breaks here: `notification-worker` publishes with `logctx`-propagated headers and reads them back with `logctx.ConsumeContext` (`notification-worker/main.go:368`); this service ignores `msg.Headers()` entirely, so a push cannot be correlated back to the message that caused it — `push-notification-service/handler.go:28-52`
+- `low` — no staleness guard on the contract's own `Timestamp`: under `DefaultBackoff` a parked event can be delivered ~12 min late and is still dispatched as a live push; the handler never reads `evt.Timestamp` — `push-notification-service/handler.go:36`, `pkg/model/push.go:13`
+- `low` — the pipeline/stream contract is untested end-to-end here; `pkg/stream/pipeline_test.go:49-61` pins the wiring values, but nothing in this service verifies it actually binds to `PUSH-NOTIFICATION-{siteID}` / `chat.server.notification.push.{siteID}.>` — `push-notification-service/main.go:63-68`
+- Verified clean: subjects come from `pkg/stream.Resolve` → `pkg/subject` (`pkg/stream/pipeline.go:60-67`), never hand-built; `MODE` is validated at env-parse time by `Pipeline.UnmarshalText` (`pkg/stream/pipeline.go:18-26`); `PushNotificationEvent.Timestamp` is set with `now.UnixMilli()` at the publish site (`notification-worker/handler.go:291,309`); no INBOX/OUTBOX participation, so no partition-membership risk; no `chat.user.*` handler and no HTTP route, so `docs/client-api.md` needs no entry — the mute/priority semantics it does document are enforced upstream in `notification-worker` (`docs/client-api.md:4871-4874`).
+
+### Recommendations
+- `medium` — adopt `logctx.ConsumeContext` at the loop and stamp `request_id` on dispatch logs.
+- `low` — drop (or downgrade to a data-only push) events older than a configurable age, using `evt.Timestamp`.
+- `low` — assert the resolved stream/filter pair in the new integration test for both `user` and `bot` modes.
+
+---
