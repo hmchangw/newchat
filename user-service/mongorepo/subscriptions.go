@@ -41,10 +41,16 @@ type SubscriptionRepo struct {
 	// showTeamsAccounts (SHOW_TEAMS_ROOM_ACCOUNTS) allowlists accounts that see
 	// Teams rooms even when showTeamsRoom is false.
 	showTeamsAccounts map[string]bool
-	// rooms backs the list path's batched reads: sort keys and page data. The
-	// collection belongs to room-service; we only name it.
-	rooms    *mongo.Collection
-	sortKeys *sortKeyCache
+	// rooms backs the page baseline read, which both seeds the sort-key cache and
+	// produces the row's user-visible room fields. The collection belongs to
+	// room-service; we only name it.
+	rooms *mongo.Collection
+	// roomsSecondary serves the sort-key read alone — the one rooms read whose $in
+	// is sized by the account's whole subscription set rather than by the page, and
+	// one whose value the cache already lets lag by its TTL. resolveSortKeys
+	// documents what a replica adds on top of that.
+	roomsSecondary *mongo.Collection
+	sortKeys       *sortKeyCache
 }
 
 // NewSubscriptionRepo builds a SubscriptionRepo over db. sortKeyCacheSize and
@@ -53,6 +59,7 @@ type SubscriptionRepo struct {
 func NewSubscriptionRepo(db *mongo.Database, sortKeyCacheSize int, sortKeyCacheTTL time.Duration, opts ...Option) *SubscriptionRepo {
 	s := applyOptions(opts)
 	col := db.Collection(subscriptionsCollection)
+	roomsCol := db.Collection(roomsCollection)
 	subscriptions := mongoutil.NewCollection[model.Subscription](col)
 	enriched := mongoutil.NewCollection[model.EnrichedSubscription](col)
 	active := mongoutil.NewCollection[models.ActiveSubscription](col)
@@ -64,7 +71,8 @@ func NewSubscriptionRepo(db *mongo.Database, sortKeyCacheSize int, sortKeyCacheT
 		activeSecondary:        active.WithReadPreference(s.readPref),
 		showTeamsRoom:          s.showTeamsRoom,
 		showTeamsAccounts:      s.showTeamsAccounts,
-		rooms:                  db.Collection(roomsCollection),
+		rooms:                  roomsCol,
+		roomsSecondary:         mongoutil.CollectionWithReadPreference(roomsCol, s.readPref),
 		sortKeys:               newSortKeyCache(sortKeyCacheSize, sortKeyCacheTTL),
 	}
 }
@@ -265,9 +273,11 @@ func dedupeStrings(in []string) []string {
 //  4. Two reads sized to the page: its rooms and its full subscription
 //     documents. Only rows that made the page are fetched in full.
 //
-// Only the ordering may lag, by up to the cache TTL. A cached key that falls
-// outside the window is re-read first, and the fresh room read drops any room
-// soft-deleted meanwhile.
+// Only the ordering may lag, by up to the cache TTL plus the replication lag of
+// the secondary the sort-key read is served from. Whether a subscription appears
+// is decided by the two subscription reads, which keep the client preference. A
+// cached key that falls outside the window is re-read first, and the fresh room
+// read drops any room soft-deleted meanwhile.
 func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
 	var zero mongoutil.OffsetPageHasMore[model.EnrichedSubscription]
 	match := bson.M{"u.account": account}
@@ -294,8 +304,9 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 	if f := r.originFilter(account); f != nil {
 		match["origin"] = f
 	}
-	// All primary: the list must show a subscription the caller just changed,
-	// and the page's rows come from fresh room reads. Only sort keys may lag.
+	// Both subscription reads keep the client preference: they decide whether a row
+	// appears at all, and the list must show a subscription the caller just changed.
+	// Only the sort-key read is routed to a secondary.
 	cur, err := r.subscriptions.Raw().Find(ctx, match,
 		options.Find().SetProjection(subscriptionLiteProjection()))
 	if err != nil {
@@ -483,8 +494,17 @@ func fillBatchSize(need, collected, candidates int64) int64 {
 //
 // A cached key outside the activity window is treated as a miss and read again.
 // lastMsgAt only moves forward, so a key that passes the window is still in it,
-// but one that fails may have just gone stale. Ordering may lag the TTL;
-// whether a room appears at all may not.
+// but one that fails may have just gone stale. Ordering may lag the TTL; whether
+// a subscription appears at all is not decided here — except under a withinDays
+// window, which drops undated rows.
+//
+// This read is served from a secondary (roomsSecondary), so its absences are not
+// authoritative: a room created within the replica's lag reads as absent, and the
+// Missing caching below then holds that verdict for the TTL. Undated rows sort
+// last, so the visible cost is a just-created room at the bottom of the sidebar
+// until the entry expires — or, under a window, out of it. The page baseline read
+// keeps the primary preference and writes the real key back for any such room that
+// reaches the page.
 //
 // Rooms the read doesn't return are cached as Missing, so rooms owned by another
 // site aren't queried on every list. Those are never re-read — there is no local
@@ -511,7 +531,7 @@ func (r *SubscriptionRepo) resolveSortKeys(ctx context.Context, subs []subLite, 
 	if len(misses) == 0 {
 		return keys, nil
 	}
-	cur, err := r.rooms.Find(ctx, bson.M{"_id": bson.M{"$in": misses}},
+	cur, err := r.roomsSecondary.Find(ctx, bson.M{"_id": bson.M{"$in": misses}},
 		options.Find().SetProjection(bson.M{"lastMsgAt": 1, "lastUserMsgAt": 1, "createdAt": 1}))
 	if err != nil {
 		return nil, fmt.Errorf("find room sort keys: %w", err)
