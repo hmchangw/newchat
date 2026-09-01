@@ -95,3 +95,24 @@ Good: `package main` tests, `go.uber.org/mock` mocks unedited and up to date (`G
 - `medium` — have the integration test call `startSiteConsumer`/`buildConsumerConfig` rather than a copy.
 
 ---
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Nine small files with genuinely good WHY-comments; the drag is a README that misdescribes the contract and wiring duplicated between production and test.
+
+### Findings
+- `medium` — README is the published contract for "an external persister can replace this worker" (`README.md:14-15`) and two of its three rows are wrong (see D1). A replacement implementation built from it would filter on a `source` field that does not exist.
+- `medium` — `store.go:56-57` says "`_id` = employeeId … keys the upsert", but `BulkUpsert` is documented as "$set per item (MERGE not REPLACE)" (`pkg/mongoutil/collection.go:181`), and the nine `IOrg` fields are `omitempty` (`pkg/model/teams_employee.go:6-15`). An employee moving out of a department leaves the old `sectName`/`deptName` in `hr_employee` forever — no code path clears them.
+- `low` — the consumer wiring exists twice (`main.go:116-134` and `integration_test.go:30-50`) and has already diverged (no `jobguard`, different consumer settings in the copy).
+- `nitpick` — `handler.go:22-59` repeats unmarshal → empty-check → store-call three times; readable today, but a fourth subject makes a small generic helper worthwhile.
+
+Positives: no file over 146 lines, no function over ~30, no dead code, comments explain WHY (`main.go:113-115`, `store.go:66-68`, `store.go:80-82`, `store.go:100-101`) rather than restating WHAT.
+
+### Recommendations
+- `medium` — rewrite the README table from the code (`_id = employeeId`, unqualified account delete) or implement the documented `source` scoping.
+- `medium` — decide merge-vs-replace explicitly for `hr_employee`; if org fields must be clearable, drop `omitempty` on `IOrg` or use `ReplaceOne`.
+- `low` — export `startSiteConsumer` wiring for reuse by the integration test.
+
+---
