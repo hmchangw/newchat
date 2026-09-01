@@ -103,3 +103,26 @@ Quality is otherwise strong: tests are `package main` (`handler_test.go:1`), tab
 - `low` — Make `deepCard` (`handler_test.go:64-67`) a function rather than a package-level `var`; its `json.RawMessage` is a shared mutable slice across tests.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Six small files, comments that explain *why* rather than restate *what*, no dead code and no duplicated logic; the one structural weakness is a path contract that two parts of the service define differently.
+
+### Findings
+- `medium` — the write contract and the read contract disagree on path shape: `validateCard` requires exactly three segments, while the cache and list are explicitly "generic over depth" and serve any depth — `tcard-service/handler.go:190-193` vs `cache.go:151`, `cache.go:184-192`
+  A two-segment card can be stored out-of-band, cached, listed and served, but can never be validated. Adding a depth rule later means touching both, and nothing links them.
+- `low` — the key-filtering rule is expressed twice, once as a Mongo exclusion projection and once as a `switch` in `docToCard`, and the two lists must stay in sync by hand — `tcard-service/store_mongo.go:40-42` and `store_mongo.go:83`
+  The comment at `:38-39` says the projection is bandwidth-only and `docToCard` is the correctness guarantee, which is the right split; a shared `var storageOnlyKeys = []string{"_id", "migratedAt"}` would make it structurally true.
+- `low` — `cardCache.List` is 60 lines carrying four responsibilities (prefix match, folder dedup, exact-path detection, three-way sort) — `tcard-service/cache.go:161-221`
+  It is the only function in the service that needs a second read to follow.
+- `nitpick` — `listResponse` repeats the HTTP status inside the JSON body — `tcard-service/handler.go:29-33`
+  Legacy-shaped; harmless, but it makes the response schema untypeable against the other two payloads.
+
+### Recommendations
+- `medium` — Hoist the path rule into one predicate (`validCardPath(path string) error` in `semver.go` or a new `path.go`) and call it from both `validateCard` and, at minimum, a startup assertion or the skip path in `ListCards`.
+- `low` — Extract the sort comparator from `List` into `func lessCardEntry(a, b cardEntry) bool`; that alone takes `List` from 60 lines to ~40 and makes the mixed-semver case directly unit-testable (see D3).
+- `low` — Share the storage-only key list between the projection and `docToCard`.
+
+---
