@@ -19,9 +19,9 @@ import { listUsers, listAudit, listPermissions } from '@/api'
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // Default the runtime flag on so the pre-existing Permissions-tab tests keep
-  // exercising the section; the gating tests below override it.
-  window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true' }
+  // Default both deploy gates on so the pre-existing Permissions/Updates tab
+  // tests keep exercising those sections; the gating tests below override them.
+  window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true', UPDATES_ENABLED: 'true' }
   useAuth.mockReturnValue({
     session: { authToken: 'tok', account: 'root', siteId: 'site-1' },
     logout: vi.fn(),
@@ -113,5 +113,33 @@ describe('AppShell permissions gating', () => {
     window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true' }
     render(<AppShell />)
     expect(screen.getByRole('button', { name: 'Permissions' })).toBeInTheDocument()
+  })
+})
+
+describe('AppShell updates gating', () => {
+  it('hides the Updates tab when the runtime flag is absent', () => {
+    window.__APP_CONFIG__ = {}
+    render(<AppShell />)
+    expect(screen.queryByRole('button', { name: 'Updates' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Users' })).toBeInTheDocument()
+  })
+
+  it('hides the Updates tab when the runtime flag is not the string "true"', () => {
+    window.__APP_CONFIG__ = { UPDATES_ENABLED: 'false' }
+    render(<AppShell />)
+    expect(screen.queryByRole('button', { name: 'Updates' })).toBeNull()
+  })
+
+  it('shows the Updates tab when the runtime flag is "true"', () => {
+    window.__APP_CONFIG__ = { UPDATES_ENABLED: 'true' }
+    render(<AppShell />)
+    expect(screen.getByRole('button', { name: 'Updates' })).toBeInTheDocument()
+  })
+
+  it('gates Updates independently of Permissions', () => {
+    window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true', UPDATES_ENABLED: 'false' }
+    render(<AppShell />)
+    expect(screen.getByRole('button', { name: 'Permissions' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Updates' })).toBeNull()
   })
 })
