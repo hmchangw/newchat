@@ -116,3 +116,25 @@ Positives: no file over 146 lines, no function over ~30, no dead code, comments 
 - `low` — export `startSiteConsumer` wiring for reuse by the integration test.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+Correct stream/consumer plumbing and no client-facing surface to document, but the subject's site token and the payload's `siteId` are both discarded, and two of three event types carry no event timestamp.
+
+### Findings
+- `high` — `IHRSyncEmployeeQuitBatch.SiteID` (`pkg/model/teams_employee.go:61`) is unmarshalled and **never used**: `handler.go:53` passes only `batch.Accounts`, and `QuitTeamsEmployees` deletes `{"account": {"$in": accounts}}` with no `siteId` predicate (`store.go:112-114`). The publisher sends every site's quits to the single central subject with the site in the body (`teams-hr-sync/publisher.go:67-68`), so a departure at site-b deletes that account's `hr_employee` row regardless of which site it belongs to.
+- `medium` — CLAUDE.md requires every `pkg/model` NATS event struct to carry `Timestamp int64` set at the publish site. `employees.upsert` and `users.upsert` are bare arrays of `IEmployeeWithChange`/`IUserWithChange` (`pkg/model/teams_employee.go:45-54`) with no event timestamp, and the publish sites set none (`teams-hr-sync/publisher.go:38,50`). Only the quit batch complies (`publisher.go:68`, `time.Now().UTC().UnixMilli()`).
+- `medium` — routing uses `strings.HasSuffix` on the raw subject (`handler.go:23,34,45`) while `pkg/subject` already owns these subjects (`pkg/subject/subject.go:1769,1775,1783`). The site token is never compared, so a message from any site's stream is applied identically, and `chat.hr.x.anything.employees.upsert` would match.
+- `low` — `integration_test.go:98,99,135` hardcode `"chat.hr.site-a.employees.upsert"` etc. instead of the `subject.OrgSyncEmployeesUpsert`/`OrgSyncUsersUpsert`/`EmployeesQuit` builders, so a builder change would not fail this test.
+
+Correct: stream name/subjects from `stream.OrgSyncStream` (`main.go:117`, `bootstrap.go:29`), durable consumer named after the service (`main.go:29,143`), `natsutil.DecodePayload` matching the publisher's zstd framing, request-ID stamping via `logctx.ConsumeContext` (`main.go:124`). No `chat.user.*` handler and no HTTP route beyond `/healthz`, so `docs/client-api.md` is correctly untouched; no OUTBOX/INBOX/Cassandra/`idgen` entity-format surface applies, and the one id it mints is `idgen.GenerateUUIDv7()` (`store.go:84`).
+
+### Recommendations
+- `high` — scope the quit delete by `siteId` (from `batch.SiteID`) — or state in code why cross-site account deletion is intended.
+- `medium` — add an event-level `Timestamp` to the two upsert payloads (wrapper struct) and set it at `teams-hr-sync/publisher.go:38,50`.
+- `medium` — route on `subject.OrgSync*` builders (compare full subject) instead of suffix matching.
+- `low` — use the builders in the integration test.
+
+---
