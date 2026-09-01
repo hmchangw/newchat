@@ -126,3 +126,24 @@ Six small files, comments that explain *why* rather than restate *what*, no dead
 - `low` — Share the storage-only key list between the projection and `docToCard`.
 
 ---
+
+---
+
+## 6. Integration — 4 / 5
+
+Most of this dimension is genuinely not applicable — the service publishes no events, owns no stream and does no federation — and what remains (Mongo contract, ID handling, HTTP surface) is correct except that the client-facing HTTP contract is documented nowhere.
+
+### Findings
+- `medium` — the three client-facing HTTP endpoints have no contract document anywhere in `docs/` — `tcard-service/routes.go:8-12`; the only mentions of the service in `docs/` are implementation plans (`docs/superpowers/plans/2026-07-14-tcard-service.md`, `docs/superpowers/plans/2026-08-27-mongodb-read-preference-availability.md`)
+  CLAUDE.md's `docs/client-api.md` mandate covers `chat.user.…` NATS subjects and `auth-service` HTTP routes, so this is *not* a rule violation — but the response shapes (`refreshResponse`, `listResponse`, the raw-JSON template body, the 400/404/409/503 matrix) are a real cross-team contract with no written form.
+- `low` — the wildcard route makes the version delimiter part of the URL grammar with no shared parser: the client must construct `{path}@{version}.template.json` and the service splits on the last `@` — `tcard-service/handler.go:72-93`
+  A path containing `@` is rejected on write (`handler.go:187-189`) but tolerated on read by design; that asymmetry is only discoverable by reading both functions.
+
+Confirmed non-applicable or correct, no finding: no NATS connection, subjects, streams, consumers or `pkg/model` event structs exist in this service, so `pkg/subject` builders, `Timestamp` at the publish site, INBOX/OUTBOX lanes, `outbox.Publish` partition membership, `pkg/jsretry`, `pkg/msgbucket` and `ROOM_KEY_RETIRED_TTL` are all out of scope. IDs are not generated here — `_id` is supplied by the out-of-band writer and deliberately dropped (`store_mongo.go:83`), so no `pkg/idgen` format rule applies. The `(path, _tcardVersion)` unique index is created at startup and proven idempotent by integration test (`store_mongo.go:25-33`, `integration_test.go:86-104`), and `mongoutil.EnsureIndexWithRepair` is the repo's shared helper.
+
+### Recommendations
+- `medium` — Add a short `docs/tcard-api.md` (or a §in `docs/client-api.md` if the frontend treats it as one surface) with the field tables and status matrix for the three endpoints, in the existing client-api style.
+- `low` — Publish the `{path}@{version}.template.json` grammar as one exported helper used by both the handler and any Go client, so the `@`-in-path asymmetry lives in one place.
+- `low` — State in that doc that `/validate` is advisory and does not reserve a version (see D2), so callers do not treat a 200 as a write lock.
+
+---
