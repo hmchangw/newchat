@@ -50,3 +50,26 @@ Idiomatic, well-commented, `slog`-clean and errcode-correct throughout; the only
 - `low` — Keep `_id` in the projection and log it in the skip warning at `store_mongo.go:60` (it is already dropped from the payload in `docToCard`, so nothing leaks).
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook conformance to the repo's Gin-service shape — consumer-defined store, constructor DI, typed `caarlos0/env` config, `pkg/shutdown.Wait`, shared knobs mounted as named fields — undercut by two unauthenticated endpoints and a validate/write split that leaves the service authoritative for reads but with no write path.
+
+### Findings
+- `high` — `POST /api/v1/cards/refresh` and `POST /api/v1/cards/validate` have no authentication or authorization; `registerRoutes` attaches no guard and `main.go` installs no auth middleware — `tcard-service/routes.go:8-10`, `main.go:110-117`
+  `refresh` is an unauthenticated trigger for an unbounded full-collection Mongo scan. The repo already has the pattern for this (`admin-service/routes.go:17` groups mutating routes behind `requireAdmin`).
+- `medium` — `/validate` is advisory only: it checks "highest version" against an in-memory snapshot and then writes nothing, and the code itself documents that cards arrive out-of-band — `tcard-service/handler.go:163-168`
+  Two authors validate the same version concurrently and both pass; the only real guard is the unique index at `store_mongo.go:26-29`, whose duplicate-key error the client never sees because this service does not do the insert. The endpoint's contract is weaker than it appears.
+- `low` — `MONGO_READ_PREFERENCE` is re-declared per service (19 copies, with divergent `envDefault`s) rather than owned by `mongoutil` and mounted as a named field — `tcard-service/main.go:40`, e.g. `portal-service/main.go:62`, `upload-service/main.go:57`
+  Fleet-wide, not a tcard defect, and the differing defaults are deliberate policy; noted because CLAUDE.md §6 names exactly this shape as the cause of divergent shared-key config.
+
+Confirmed conformant, no finding: consumer-owned `CardStore` with only `ListCards` (`store.go:29-32`); `NewCardHandler` constructor DI (`handler.go:44`); file organization matches CLAUDE.md exactly; `MONGO_URI` marked `required`, everything else defaulted, `Pool mongoutil.PoolConfig` / `HTTP ginutil.TimeoutConfig` mounted as named fields (`main.go:27-44`); middleware order identical to `portal-service/main.go:150-157`; `pkg/shutdown.Wait` with a 25s budget under the 30s grace period (`main.go:136-147`). The service touches no NATS, so `BOOTSTRAP_STREAMS`, `pkg/stream`, and the INBOX/OUTBOX ownership rules do not apply.
+
+### Recommendations
+- `high` — Put `/refresh` and `/validate` behind an authorization guard modelled on `admin-service`'s `requireAdmin` group, or document the ingress ACL that fronts them.
+- `medium` — Decide the ownership question: either give tcard-service the write path (`POST /register` was planned and removed — see `handler_test.go:491`) so validate-and-insert is atomic against the unique index, or demote `/validate` to a lint endpoint and say so in its response.
+- `low` — Raise `MONGO_READ_PREFERENCE` into `mongoutil` as a named config field with per-service `envDefault` set at the mount point.
+
+---
