@@ -93,3 +93,45 @@ Compliance confirmed (no finding): flat repo-root service with the mandated file
 - `low` — Move `blobStore` (+ `blobInfo`, `errBlobNotFound`) into `store.go` so mockgen generates its mock and the interface sits with its consumer.
 - `low` — Rename `avatarStore`, or split the two drive-probe methods into a `memberStore`, so the interface names match the seams.
 - `nitpick` — Reorder middleware to `requestID → accessLog → Recovery`, and move `srv.Shutdown` ahead of the NATS drain.
+
+---
+
+## 4. Test coverage — 2 / 5
+
+Unit coverage is **70.0% (614 stmts)** — below the CLAUDE.md Section 4 floor, so the score is floored at 2; the quality of what *is* tested is genuinely strong (handler/upload/serve/drive/middleware layers are at 95–100% with real error-path assertions), and almost the entire deficit is the Mongo/MinIO/`main.go` layers.
+
+### Findings
+- `high` — Unit coverage 70.0% (614 stmts), under the 80% floor — `media-service/store_mongo.go:27`
+  Per-file breakdown from the profile: `store_mongo.go` 84 stmts @ 0%, `main.go` 69 @ 0%, `minio.go` 18 @ 0%; those three account for 171 of the 184 uncovered statements. Excluding them, the business logic is ~97% covered (430/443). The number is a build-tag artifact, not vanity coverage — but the floor is the floor.
+
+- `medium` — `UserByAccount` and `RoomMember` have **no integration test at all**; their Mongo filters/projections are only ever mocked — `media-service/store_mongo.go:81`, `media-service/store_mongo.go:94`
+  `integration_test.go` covers `EmployeeID`/`BotSite`/`RoomSite`/`Avatar`/`SetBotAvatar` and `emoji_integration_test.go` covers the emoji CRUD, but neither touches these two. `drive_test.go:82-180` mocks them exhaustively, so a wrong field name or projection in the `drive.members` probe (the membership authorization decision) would pass every test in the repo.
+
+- `medium` — the second, decompression-bomb hardening layer of `validateEmojiImage` is never exercised — `media-service/emoji_upload.go:76`
+  Uncovered blocks are `73.51,75.3` (post-`image.Decode` error / format disagreement) and `76.59,78.3` (decoded-bounds check). `TestEmojiUpload_OversizeDimensions_400` (`emoji_upload_test.go:128`) only trips the *header* check at `:68`. The comment at `emoji_upload.go:55-60` explicitly frames the decoded-bounds check as the defence against a header that lies about its dimensions — that is the branch with zero tests.
+
+- `medium` — `run()` is monolithic, so its five startup guards are unreachable from tests (0%) — `media-service/main.go:45`, `media-service/main.go:48`
+  `EID_CACHE_CAPACITY <= 0` / `EID_CACHE_TTL <= 0` are fail-fast guards for a value that is passed straight to `lru.NewLRU` (`cache.go:29`); `config_test.go:183` only calls `cfg.Pool.Validate()` / `cfg.Guard.Validate()` directly and never the composed check. Extracting a `validate(cfg) error` would make all five testable without touching wiring.
+
+- `low` — `handler_test.go` is 25 near-identical single-scenario functions over two handlers rather than table-driven, contrary to "prefer table-driven tests when testing multiple input/output variations of the same logic" — `media-service/handler_test.go:107-344`
+  Names (`TestEndpoint1_…`, `TestEndpoint2_…`) also don't follow the `Test<Type>_<Method>_<Scenario>` convention and don't say which handler is under test.
+
+- `low` — `minioBlobStore` error paths untested despite being trivially fakeable — `media-service/minio.go:41`, `media-service/minio.go:47`
+  `client` is the `minioutil.ObjectStore` **interface**, yet the only tests are integration happy paths (`integration_test.go:111,131`, `emoji_integration_test.go:108`). The `GetObject` failure, the non-`NoSuchKey` `Stat` failure, and the `PutObject`/`RemoveObject` wrap paths are all uncovered — a unit fake would close them with no container.
+
+- `low` — the "missing principal" defensive branches in both role middlewares are uncovered — `media-service/middleware_auth.go:68`, `media-service/middleware_auth.go:91` (and `sessionFromContext`'s nil return, `:20`)
+  These fire only if a route is registered without `requireSession`; a `registerRoutes` mis-wiring is exactly what they exist to catch, and `TestRegisterRoutes_AuthWiring` (`middleware_auth_test.go:188`) doesn't reach them.
+
+- `nitpick` — real-time `time.Sleep(60ms)` drives the TTL-expiry assertion — `media-service/cache_test.go:115`
+  Not goroutine synchronization (the singleflight tests use channels correctly), but it is load-flaky in the same way as the two `pkg/` tests flagged in GLOBAL_PREP.
+
+Compliance is otherwise clean: one `TestMain` calling `testutil.RunTestsWithPrewarm` (`integration_test.go:20`), all containers from `pkg/testutil` with no inline `testcontainers.GenericContainer`, `//go:build integration` on both integration files, tests in `package main`, per-test `gomock.NewController(t)` with no package-level mutable state, generated `mock_store_test.go` unedited, `blobStore` injected as an interface so no unit test touches real infra.
+
+### Recommendations
+- `high` — Close the floor with the two integration gaps first: add `TestMongoStore_UserByAccount` and `TestMongoStore_RoomMember` to `integration_test.go` (hit/miss + inactive-user), which also validates the projections behind the membership check.
+- `medium` — Add a `validateEmojiImage` unit table covering a GIF/PNG whose decoded bounds exceed `maxDim` while the header claims smaller, plus a truncated body that passes `DecodeConfig` but fails `Decode`.
+- `medium` — Extract `validateConfig(cfg *config) error` from `main.go:36-56` and table-test all five guards; `run()` then holds only wiring.
+- `low` — Add `minio_test.go` with a fake `minioutil.ObjectStore` covering `GetObject` error, `Stat` non-`NoSuchKey` error, `NoSuchKey` → `errBlobNotFound`, and `PutObject`/`RemoveObject` failures (~18 stmts, no container).
+- `low` — Collapse `handler_test.go`'s room- and account-avatar cases into two tables keyed on scenario name, and rename `TestEndpoint1/2_*` to `TestHandler_HandleAccountAvatar_*` / `TestHandler_HandleRoomAvatar_*`.
+- `low` — Cover the nil-principal branches by mounting `requireAdmin()`/`requireBotSelfOrAdmin()` on a bare `gin.New()` without `requireSession` and asserting the 500 envelope.
+- `nitpick` — Replace the `cache_test.go:115` sleep with a 1ns TTL plus an explicit `lru.Get` miss assertion, or drive expiry via an injectable clock.
