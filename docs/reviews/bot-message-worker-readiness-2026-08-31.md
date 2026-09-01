@@ -81,3 +81,22 @@ Coverage is **13.6%** (206 statements) — the lowest in the fleet and far below
 - `high` — port `message-worker/store_cassandra_writetime_test.go` to pin the plaintext-pinned / encrypted-unpinned rule here once D5 is fixed.
 - `high` — unit-test `bootstrapStreams` both branches with a fake `streamManager`.
 - `medium` — replace `fakeStore` with a generated mock and table-drive the handler scenarios.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Small, readable and well-commented, but `store_cassandra.go` is four near-duplicate hand-written column lists that have already drifted from the `message-worker` original they were copied from.
+
+### Findings
+- `medium` — 10 INSERT statements across four methods repeat the same column lists with only encryption/thread variations — `store_cassandra.go:73-92, 114-133, 150-181, 202-236`. Adding one column means editing up to 10 statements; nothing in the package prevents missing one, and no test would catch it (D3).
+- `medium` — the handler hand-rolls the permanent/transient split that `jsretry.Settle` already implements — `handler.go:35-51` vs `pkg/jsretry/jsretry.go:93,118-140`. The only reason for the fork is the `permanentErrorTotal` increment, which is itself unreachable (D1).
+- `medium` — this service is a fork of `message-worker`'s write path that no longer tracks it: `message-worker` gained `writeTS`/`USING TIMESTAMP` (`message-worker/store_cassandra.go:82-119`) and `stripLegacyPlaintext*` (`:144-146`, `:226,236`); neither propagated here. The duplication is the mechanism of the drift, not a side effect.
+- `low` — `metrics.go` holds a single counter that no reachable code path increments (`metrics.go:9`).
+- `low` — comments are WHY-shaped and genuinely useful (`main.go:46-49, 104-105`; `store_cassandra.go:99, 244-245`) — comment discipline is not a problem here.
+
+### Recommendations
+- `medium` — extract the shared column list/binder into one builder per target table (`messages_by_room`, `messages_by_id`, `thread_messages_by_thread`) taking a plaintext-vs-encrypted variant, collapsing 10 statements to 3.
+- `medium` — after making permanent errors reachable, replace the hand-rolled branch with `jsretry.Settle` plus a metric hook, or move the counter into `jsretry`.
+- `low` — extract `pkg/`-level shared helpers for `toSender`/`toMentionSet`/`buildCassandraMessage`, which duplicate `message-worker` equivalents.
+- `low` — add a README noting this service intentionally mirrors `message-worker`'s write path, so future changes there get mirrored.
