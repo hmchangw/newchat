@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
@@ -144,6 +145,12 @@ type PreviewCache interface {
 	Invalidate(roomID string)
 }
 
+// DegradationReader reports whether this site's message history is still catching
+// up after a persistence outage. *histdegrade.CachedReader satisfies it.
+type DegradationReader interface {
+	DegradedSince(ctx context.Context, siteID string) (*int64, error)
+}
+
 // Option configures optional HistoryService dependencies.
 type Option func(*HistoryService)
 
@@ -158,6 +165,15 @@ func WithPreviewCache(pc PreviewCache) Option {
 // rather than refused by the broker.
 func WithPageBudget(b pagefit.Budget) Option {
 	return func(s *HistoryService) { s.pageBudget = b }
+}
+
+// WithDegradation installs the history-degraded marker reader. Without it,
+// history responses never carry incompleteSince. The site is not a parameter: it
+// comes from cfg in New, so this option cannot install a reader bound to a different
+// site than the one the handlers register under — a mismatch that would read another
+// site's marker and surface as permanent silent healthiness.
+func WithDegradation(r DegradationReader) Option {
+	return func(s *HistoryService) { s.degradation = r }
 }
 
 // HistoryService handles message history queries and mutations. Transport-agnostic.
@@ -189,6 +205,10 @@ type HistoryService struct {
 	// still be bounded while MongoDB is unreachable. Never nil — a disabled
 	// deployment gets a no-op, so the read path needs no nil check.
 	roomTimes RoomTimesCache
+	// degradation reports whether this site's history is still catching up
+	// after a persistence outage; nil leaves incompleteSince off every response.
+	degradation DegradationReader
+	siteID      string
 }
 
 // RoomTimesCache remembers a room's last confirmed lastMsgAt/createdAt so the
@@ -244,6 +264,7 @@ func New(
 		apps:               apps,
 		historyFloor:       time.Duration(cfg.MessageHistoryFloorDays) * 24 * time.Hour,
 		largeRoomThreshold: cfg.LargeRoomThreshold,
+		siteID:             cfg.SiteID,
 		maxPinnedPerRoom:   cfg.MaxPinnedPerRoom,
 		pinEnabled:         cfg.PinEnabled,
 		roomTimes:          nopRoomTimesCache{},
@@ -257,6 +278,22 @@ func New(
 		opt(s)
 	}
 	return s
+}
+
+// incompleteSince reports the degraded-since timestamp to stamp on a history
+// response, or nil when history is healthy. A marker-read failure degrades to nil
+// rather than failing the read: the marker is an advisory hint, and losing it must
+// never turn a working history read into an error.
+func (s *HistoryService) incompleteSince(ctx context.Context) *int64 {
+	if s.degradation == nil {
+		return nil
+	}
+	since, err := s.degradation.DegradedSince(ctx, s.siteID)
+	if err != nil {
+		slog.WarnContext(ctx, "history degraded marker read failed", "error", err, "site", s.siteID)
+		return nil
+	}
+	return since
 }
 
 // Close stops the background preview writer and waits for its queue to drain. Call once
