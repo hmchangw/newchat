@@ -70,6 +70,35 @@ type SearchConfig struct {
 	RecentWindow            time.Duration `env:"RECENT_WINDOW"              envDefault:"8760h"`
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
+	// HR/App cache knobs size the pod-local L1 caches fronting the enrichment
+	// lookups in enrich.go. A non-positive size or TTL disables that cache.
+	// The TTL is the worst-case staleness of an HR name or an app name in a
+	// search result, and the worst-case delay before a newly-created user or
+	// app stops rendering as a bare account name.
+	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"130000"`
+	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"24h"`
+	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1000"`
+	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"24h"`
+}
+
+// Validate rejects a positive-but-tiny cache TTL. expirable.LRU derives its
+// reaper tick as ttl/100 and passes it to time.NewTicker, which panics on zero
+// in a goroutine nothing recovers — so an operator typo like "50ns" would crash
+// the process at startup instead of failing cleanly here. Zero stays legal: it
+// is the documented disable switch.
+func (c *SearchConfig) Validate() error {
+	for _, k := range []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"SEARCH_HR_CACHE_TTL", c.HRCacheTTL},
+		{"SEARCH_APP_CACHE_TTL", c.AppCacheTTL},
+	} {
+		if k.ttl > 0 && k.ttl < minCacheTTL {
+			return fmt.Errorf("%s must be 0 (disabled) or at least %s, got %s", k.name, minCacheTTL, k.ttl)
+		}
+	}
+	return nil
 }
 
 // Config is the root service config. Note that ES and Search share the
@@ -138,6 +167,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Search.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
@@ -224,7 +257,22 @@ func main() {
 		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
-	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
+
+	// The cache fronts only the account-keyed enrichment lookups; enrich.go
+	// sees the same MongoStore either way. Built once here — expirable.LRU's
+	// reaper goroutine lives for the process.
+	cachedMongo := newCachedMongoStore(mongoStore, cacheConfig{
+		HRSize:  cfg.Search.HRCacheSize,
+		HRTTL:   cfg.Search.HRCacheTTL,
+		AppSize: cfg.Search.AppCacheSize,
+		AppTTL:  cfg.Search.AppCacheTTL,
+	})
+	slog.Info("enrichment caches configured",
+		"enabled", cachedMongo != mongoStore,
+		"hr_size", cfg.Search.HRCacheSize, "hr_ttl", cfg.Search.HRCacheTTL,
+		"app_size", cfg.Search.AppCacheSize, "app_ttl", cfg.Search.AppCacheTTL)
+
+	handler := newHandler(store, cachedMongo, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,
 		MaxDocCounts:            cfg.Search.MaxDocCounts,
