@@ -85,3 +85,23 @@ Textbook layering for a small Gin service — consumer-owned store interface, co
 - `low` — cover `cache.go:92-94` by cancelling ctx while `ListEmployees` is blocked.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Small, well-factored, and unusually well-commented (WHY not WHAT); the one structural smell is startup-config parsing living in `handler.go`.
+
+### Findings
+- `medium` — `handler.go` (363 lines) hosts two functions that are pure startup config and are never called by any handler: `parseSiteURLs` (`portal-service/handler.go:34`) and `parseOTELBaseURL` (`:62`), both invoked only from `run()` (`main.go:92`, `:97`). Their tests are correspondingly the tail of `handler_test.go` (`:511`, `:671`, `:698`), which dilutes the handler test file.
+- `low` — `run()` is 117 lines doing config, obs, Mongo, cache, HTTP, and shutdown (`portal-service/main.go:80-197`). Near the limit for one function; the obs+Mongo+store block (`:106-125`) is the natural extraction.
+- `low` — duplicated site lookup (see D2) is the one piece of copy-paste logic.
+- `nitpick` — `cacheRetryInterval` is a hardcoded const (`main.go:27`) while its sibling `CacheRefreshInterval` is env-driven (`main.go:54`); the retry cadence is the one you actually want to tune during a Mongo incident.
+- No dead code, no leaky abstractions, no `utils`-style packages. Comment discipline is exemplary — `cache.go:14-22` and `store_mongo.go:39-41` explain the atomic-swap rationale and the users-primary join, not the syntax.
+
+### Recommendations
+- `medium` — move `siteURL`, `parseSiteURLs`, `settingsResponse`, and `parseOTELBaseURL` into a new `config.go` with a matching `config_test.go`; `handler.go` drops to ~250 lines of request handling only.
+- `low` — extract `func connectStore(ctx, cfg, sdk) (*mongoDirectoryStore, *mongo.Client, error)` from `run()`.
+- `low` — promote `cacheRetryInterval` to `PORTAL_CACHE_RETRY_INTERVAL` with `envDefault:"30s"`.
+
+---
