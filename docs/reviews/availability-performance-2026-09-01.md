@@ -432,3 +432,43 @@ Compounding it: **`roomsubcache` has no L1 and is read once per message.** Its o
 - `notification-worker` narrows settings and presence lookups to *surviving candidates* rather than all members, and `LARGE_ROOM_THRESHOLD=500` restricts pushes in big rooms to mentioned users.
 - `roomlist-worker`'s mention budget is **derived** (`4 × MaxAckPending`) rather than a free-standing knob.
 - `broadcast-worker`'s preview writer sheds bodies rather than blocking — the correct trade, and its 20,000 rooms/s shed threshold sits far above the site ceiling in §9.1.
+
+---
+
+## 10. Prioritized action list
+
+Ordered by blast radius ÷ effort. Items 1–4 are the availability chain that answers the original question; 5–8 are the journey cliffs; 9–11 are ceilings you will hit as you grow.
+
+| # | Sev | Action | File | Why here |
+|---|---|---|---|---|
+| 1 | `critical` | **Make `inbox-worker`'s membership enqueue non-blocking** — `select` on the send vs. a NAK-and-continue, or shard the lane by `hash(roomID)` (ordering is only required per room+account) | `inbox-worker/main.go:971` | **Found by 6 of 9 lenses.** A blocking send from the pump goroutine stops *all* cross-site state for the site, then silently drops after ~6.3 min. One `select` statement. |
+| 2 | `critical` | **Reconcile `history-service`'s 10 s budget with its callers' 2 s**, and stop NAKing on a downstream that is *shedding* — route `Unavailable`/`TooManyRequests` onto a backpressure schedule, or soft-fail | `history-service/internal/config/config.go:82`; `broadcast-worker/handler.go:1398-1410`, `main.go:539` | **This is the outage you asked about.** The 5× asymmetry converts a brownout into a capacity collapse; the 18-delivery retry budget then aims the load at the service that is already failing. Fix both halves or neither helps. |
+| 3 | `critical` | **Give `message-gatekeeper` a reply-on-exhaustion path and panic containment** — reply `Unavailable` when `IsFinalDeliveryFromContext` is true, and wrap the handler in `jobguard.Run` | `message-gatekeeper/handler.go:234`, `main.go:229-233` | MESSAGES has **one consumer**, so its 1000-slot budget is the site's entire send capacity, and today a dropped send is **completely silent to the sender**. The missing `jobguard` means one malformed payload stops all sends for ~15 min. |
+| 4 | `critical` | **Include the event type in the dedup ID**, and set an explicit `Duplicates` window ≥15 min | `pkg/natsutil/request_id.go:149`; `pkg/stream/stream.go` | Silent, permanent data loss today: **departed Teams members are never removed at their home site.** The window fix closes the duplicate-amplification half. |
+| 5 | `high` | **Switch the four hot-path services to `valkeyutil.ConnectOptional`** | `message-gatekeeper/main.go:137`, `broadcast-worker/main.go:193`, `notification-worker/main.go:148`, `room-worker/main.go:182` | A Valkey outage is harmless until **any** pod restarts, then ingestion, fan-out, notifications and membership CrashLoopBackOff together. `message-worker` already does this, with the justification written out. Four one-line changes. |
+| 6 | `high` | **Give `outbox-worker` a per-peer worker budget; classify deterministic publish rejections as `Permanent`; add `natsmetrics` to both federation workers** | `outbox-worker/main.go:114`, `handler.go:63` | **Found by 5 of 9.** The shared pool defeats the isolation the design paid for; the missing `Permanent` classification lets one unforwardable event wedge a peer's membership lane *forever*; and the whole federation path is currently **unmonitored**. |
+| 7 | `high` | **Overlap the two enrichment phases in `subscription.list`, and align the client timeout with the server budget** | `user-service/service/subscriptions.go:240-244`; `chat-frontend/.../asyncJob.ts:207` | One slow peer blanks the sidebar **including local rooms**, and the client abandons at 5 s work the server spends 15 s on. The phases are independent for the local site. |
+| 8 | `high` | **Bound `rooms.get`'s lazy work per request; stop discarding the preview batch on a failed flush; back-pressure warm-back instead of dropping it** | `history-service/internal/service/rooms.go:81-117`; `broadcast-worker/preview_writer.go:148-161`; `warmback.go:118` | 5,000 partition reads behind a 5 s deadline is an outage amplifier, not a degradation mode — and the two mechanisms that create and sustain the cold rooms are both silent. |
+| 9 | `high` | **Extract `roomlist-worker`'s `consumeState` into `pkg/` and wire it into every worker's health check** | `roomlist-worker/main.go:262-303` | Every other worker reports Ready while consuming nothing. The correct implementation, including the self-SIGTERM so the final flush drains, is already written — it just was not propagated. |
+| 10 | `high` | **Set `PoolSize` explicitly in `valkeyutil`, sized from the caller's `MAX_WORKERS`; add an L1 in front of `roomsubcache`** | `pkg/valkeyutil/valkey.go:111`; `pkg/roomsubcache/lookup.go:123` | ~10 Valkey connections against 100 workers is the real per-pod ceiling on the normal warm path, and it is a library default nobody chose. The `roomsubcache` single-slot hot key rides on the same connections. |
+| 11 | `high` | **Derive the ack budget from the target rate, and add a startup check coupling `PullMaxMessages × replicas` to `MaxAckPending`** — in `pkg/stream`, so all six workers inherit it. Make `search-sync-worker`'s existing check **fail**, not warn | `roomlist-worker/main.go:50`; `pkg/stream/consumer.go` | The ~3,300 msg/s site ceiling and the ~5-pod scaling wall are both invisible from any single service, and the second one means **adding pods silently stops helping**. `search-sync-worker`'s shipped defaults already fail their own check. |
+| 12 | `medium` | **Fix the LWT re-stamp and the per-reply partition scan; set `LOCAL_SERIAL`** | `message-worker/store_cassandra.go:464-484`; `pkg/threadcount/count.go:41`; `pkg/cassutil/cass.go:73` | O(N²) per thread, two Paxos rounds per reply, and — because `SerialConsistency` is unset repo-wide — **cross-DC Paxos on every thread reply.** |
+
+### Sequencing
+
+**This week:** 1, 3, 5 — three small, local changes that remove a site-wide stall, a silent-drop path, and a latent multi-service crash-loop.
+**Next:** 2, 4, 6 — the amplification loop and the two federation data-loss paths. Item 2 needs both halves in one change.
+**Then:** 7–12.
+
+**Before any load test:** items 9 and 6's metrics half. Running a load test against a fleet where a dead consumer reports Ready and the federation path emits nothing will produce numbers you cannot interpret.
+
+---
+
+## 11. What this audit cannot tell you
+
+Stated plainly so none of the above is over-read:
+
+1. **Nothing here was measured.** Every latency and every ceiling is **derived** from configured defaults and round-trip counts in the source. The arithmetic and its assumptions are written out so you can check them, but a p50 estimate is not a p50. The `docs/load-testing/` SLOs exist — items 9–11 are the instrumentation you need before those numbers mean anything.
+2. **Stream retention and limits are absent from the repo by design** (CLAUDE.md assigns them to ops/IaC). So the one mechanism that *could* genuinely exhaust the broker — unbounded stream growth behind a parked consumer — **is unverifiable from this code and must be checked against your IaC.** That is the one place where your original "NATS goes down" framing may still be literally right, and this audit cannot settle it.
+3. **The retry hypothesis was tested, not assumed.** The finding that retries saturate consumer admission budget rather than the broker is a *correction* to the stated premise, reached independently and confirmed against the code. If your production incident showed broker-level symptoms, point 2 is where to look next.
+4. **Nine agents, cross-checked but not exhaustive.** Convergence (§2) raises confidence on five findings; a single-lens finding is one careful read, not a proof. Every claim reproduced in this report was re-verified by hand against the source — but claims in the per-lens reports that did not make it here were not.
