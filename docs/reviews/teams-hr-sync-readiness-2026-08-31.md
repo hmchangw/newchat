@@ -113,3 +113,25 @@ No dead code, no oversized file (largest is `main.go` at 250 lines), no function
 - `low` — Delete `ORG_TYPE` from the compose file and the "ponytail" note from the package comment.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+Subjects and IDs go through the right builders, but the two upsert event structs carry no `Timestamp` and a partial publish permanently drops half the feed.
+
+### Findings
+- `high` — A partial publish loses the users half forever. `publishSync` publishes `employees.upsert` first and `users.upsert` second (`publisher.go:38` then :50); `hr-sync-worker` applies them as independent subjects (`hr-sync-worker/handler.go:23,34`). If the second publish fails, the employee rows are already persisted, so the next run's diff finds them equal (`differ.go:34`) and never re-emits the users. This contradicts `main.go:38-39`'s claim that "a lost publish self-heals".
+- `medium` — CLAUDE.md: "Every NATS event struct in `pkg/model` must include a `Timestamp int64`". `IEmployeeWithChange` and `IUserWithChange` — both published as JetStream payloads (`publisher.go:38,50`) — have none (`pkg/model/teams_employee.go:45-54`). Only the quit batch has one, and it is set correctly at the publish site via `time.Now().UTC().UnixMilli()` (`publisher.go:68`).
+- `medium` — The diff's equality test is whole-struct (`differ.go:34`) and the projection includes `_id` (`store_mongo.go:39` derives it from the `bson:"_id"` tag at `pkg/model/teams_employee.go:32`), while the mapper sets `ID = EmployeeID` (`transform.go:49`). Correctness therefore depends on the downstream writing `_id == employeeId` — enforced nowhere in this service, and the integration test has to stamp it by hand to make the diff work (`integration_test.go:129`). A downstream `_id` change makes every row diff as `update` on every run, republishing the whole org.
+- `low` — `EmployeesQuit(p.central)` passes the central site to a builder documented as "a site's HR feed" (`pkg/subject/subject.go:1778-1783`), so the subject's site token no longer means what its name says. The reason is well argued in-comment (`publisher.go:63-66`), but the builder doc now contradicts its only caller.
+
+Verified compliant: all three subjects come from `pkg/subject` builders, never `fmt.Sprintf` (`publisher.go:38,50,67`); `employeeId` uses `idgen.DeterministicID` → 17-char base62 (`transform.go:68`, `pkg/idgen/idgen.go:86-89,22`), matching the CLAUDE.md channel-room/native-user shape and pinned to `teamsmigrate.EmployeeIDFromGraphID`; the request id is minted with `idgen.GenerateRequestID()` and propagated onto outbound messages via `natsutil.WithRequestID` + `NewMsgEncoded` (`main.go:91-93`, `pkg/natsutil/request_id.go:79-88`). No `chat.user.*` handler and no HTTP route, so `docs/client-api.md` is correctly not in scope. Not an OUTBOX/INBOX participant, so the partition rules do not apply.
+
+### Recommendations
+- `high` — Make the two upserts atomic from the consumer's point of view — publish one combined batch on a single subject, or have the differ re-emit users whenever the stored row lacks a matching user identity.
+- `medium` — Add `Timestamp int64 \`json:"timestamp" bson:"timestamp"\`` to `IEmployeeWithChange`/`IUserWithChange` and set it at `publisher.go:38,50`.
+- `medium` — Exclude `_id` from the diff comparison (compare a projection struct, or clear `ID` on both sides before `!=`) so the producer stops depending on the consumer's key choice.
+- `low` — Rename or re-document `subject.EmployeesQuit` to reflect that it is published on the central site.
+
+---
