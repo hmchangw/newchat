@@ -352,3 +352,83 @@ Two mechanisms create and sustain the cold rooms (both verified by hand):
 - The refusal to use `rooms.lastMsgAt` as a walk ceiling is correct and well-argued — it is written by a separate consumer with `MaxDeliver=-1` and lags without bound; using it would silently hide just-written rows.
 - The startup check on `MESSAGE_READ_MAX_BUCKETS` correctly accounts for the partial partitions at each end and **refuses to start rather than lose history**. It is the most careful capacity check in the repo.
 - Empty pages never claim `hasNext`, which keeps a budget-exhausted walk from wedging the client's pagination.
+
+---
+
+## 8. Journey: cross-site federation
+
+**The SLA the code actually implements:**
+
+| | Healthy | Degraded |
+|---|---|---|
+| **Message crossing sites** | Same-site latency + one WAN hop. **No durability** — the payload is core NATS, not JetStream; a gateway blip loses it silently and recovery is the client's own history fetch | — |
+| **Membership change** | One WAN RTT plus two JetStream store-and-consume hops; tens of ms over same-site. Per-peer ceiling on the ordered lane is **~12 events/s at 80 ms RTT** | Peer down → events park; **recovery = outage length + 5–10 min**, because after ~2.6 min every parked forward is on `DefaultBackoff`'s 10-minute repeating tail. A 30-second blip and a 6-hour outage cost the same recovery tail |
+| **Either end failing** | — | **Dropped after ~6.3 min, silently.** Neither `room-worker` (ROOMS) nor `inbox-worker` (INBOX) applies an outage budget; both keep `MaxDeliver=6` |
+
+That last row is the structural one: **OUTBOX runs `MaxDeliver=-1` explicitly so a peer down for an hour never drops a federated event — and both ends of that path drop at 6 deliveries.** The unlimited-redelivery guarantee covers only the middle hop.
+
+### 8.1 Two silent-data-loss paths
+
+**The Teams dedup collision** (verified). `natsutil.InboxDedupID` composes the `Nats-Msg-Id` as `requestID + ":" + destSiteID` — **no event type**. A single Teams batch calls `federateJoinedAtRefresh`, then `federateTeamsMembership(added)`, then `federateTeamsMembership(removed)` — same peer, same request context, **identical msg-ID**. JetStream drops the 2nd and 3rd. **Departed Teams members are never removed at their home site.** The `payloadSeed` that would disambiguate is a fallback used only when the request ID is empty, and `room-worker/main.go:415-425` guarantees one always exists. The three internal-lane publishes collide identically, so `search-sync` loses two of three too.
+
+**The rename/add race.** `isMembershipSubject` matches only `member_added`/`member_removed` — **`room_renamed` is not on the sequential lane.** It is dispatched into the wide fan-out pool while `member_added` queues on the single-worker channel. `UpdateSubscriptionNamesForRoom` is an `UpdateMany` on `roomId` that matches **zero** documents before the subscription exists, and `handleMemberAdded` writes `Name` from the event's captured `RoomName` while never setting `nameUpdatedAt`. A rename that wins the race leaves the new remote member **permanently on the old room name** — the exact failure `outbox.OrderedEventTypes` exists to prevent, reintroduced one hop later.
+
+### 8.2 Dedup windows are wrong in both directions
+
+**`Duplicates` is never set on any stream** (verified — zero occurrences in `pkg/stream`), so the JetStream default of **2 minutes** applies, while every retry tail is **10 minutes**.
+
+- *Inside* the window, colliding IDs silently drop distinct events (§8.1).
+- *Outside* it, a redelivery on the 3rd/4th rung duplicates at the destination — and one duplicate canonical event costs a **second full pass through all five MESSAGES-CANONICAL consumers**: extra Cassandra write, extra full room fan-out to every connected client, extra roomlist write, extra push batch, extra ES index.
+
+Today's handlers are `$max`/`$setOnInsert`/`$lt`-guarded, so duplicates are benign — but that is timing luck, not design.
+
+### 8.3 Five event types bypass OUTBOX entirely
+
+`user_status`, `settings`, `chatlist`, `permissions` and `account_updated` publish straight to the remote INBOX from inside the request path, `O(peers)` per request, failures logged and swallowed, and `admin-service` passes an **empty msg-ID** (no dedup at all). None is in `outbox.ConcurrentEventTypes`/`OrderedEventTypes`, so they *cannot* be routed through the retried lane, and no reconciliation exists.
+
+---
+
+## 9. The capacity model
+
+### 9.1 The binding constraint: ~3,300–4,000 msg/s per site, unliftable by adding pods
+
+`roomlist-worker` holds messages **un-acked** until the flush carrying their intents lands. Steady-state in-flight = `rate × (FLUSH_INTERVAL + flush duration)`, bounded by `MaxAckPending`:
+
+```
+1000 / (0.25s + ~0.05s)  ≈  3,300 msg/s
+```
+
+**`MaxAckPending` is enforced server-side per durable consumer, shared by every pod bound to it** — so two pods each running their own 250 ms ticker still divide one 1000-message budget. Its own compose file states the coupling in a comment (*"CONSUMER_MAX_ACK_PENDING must exceed FLUSH_INTERVAL x peak message rate"* — verified) but **nothing derives the value.**
+
+This leads the next hot-path constraint by roughly two orders of magnitude: `message-gatekeeper` holds a message for one PubAck (~1 ms), giving it a comparable-budget ceiling near 10⁶/s.
+
+### 9.2 Horizontal scaling stops at ~5 pods
+
+All six `MAX_WORKERS` workers use `PullMaxMessages(2 × MaxWorkers)` = **200** at the default. Buffered-but-unprocessed messages are *delivered*, so they consume `MaxAckPending`:
+
+```
+1000 / 200  =  5 pods before prefetch alone exhausts the budget
+```
+
+The 6th pod's workers idle while its buffer starves. Worker-side the same arithmetic gives 10 pods. **No service couples `MAX_WORKERS` to `CONSUMER_MAX_ACK_PENDING`, and no validation warns** — except `search-sync-worker`, which checks exactly this shape and only **warns**, and whose shipped code defaults **fail their own check** (`(2+1) × 500 = 1500 > 1000`; the local compose repairs it by pinning 1500).
+
+### 9.3 The per-pod ceiling nobody set
+
+`valkeyutil.dialCluster` builds `redis.ClusterOptions` with **only `Addrs` and `Password`** (verified — no `PoolSize`). go-redis v9 defaults *cluster* pools to `5 × GOMAXPROCS` — half the standalone default — and Go 1.25 makes `GOMAXPROCS` container-aware. **On a 2-CPU pod that is 10 connections against 100 workers: a 10× oversubscription**, with a 4 s pool timeout behind it.
+
+Whenever a cache tier is warm and Mongo is untouched — i.e. the normal case — **this is the real binding constraint per pod**, and it is set by a library default nobody chose.
+
+Compounding it: **`roomsubcache` has no L1 and is read once per message.** Its own comment says so. Every notifiable message pulls the room's whole member blob from **one cluster slot** in both `notification-worker` and `broadcast-worker`. A 1000-member room at 10 msg/s draws ~2.8 MB/s off that single slot, and each multi-hundred-KB `GET` occupies one of those ~10 connections for its full duration. Cluster sharding gives no relief — it is one key.
+
+### 9.4 Storage ceilings
+
+- `messages_by_room` exceeds the 100 MB partition guideline at roughly **6,700 messages/day sustained in one room** — reachable for a busy 1,000-member channel.
+- `thread_messages_by_thread` is partitioned by `thread_room_id` **alone, with no bucket**, on default STCS compaction, and no cap on thread reply count exists anywhere in the repo. **One unbounded partition per thread**, and §5.2's per-reply full scan walks it.
+
+### 9.5 Verified sound
+
+- Channel fan-out is O(1) publishes in both room size and peer count; `@all` is a room-level pointer, not N per-member intents.
+- `room-worker` buckets accounts by destination and emits **one** federation event per site carrying the account list — O(sites), not O(sites × accounts).
+- `notification-worker` narrows settings and presence lookups to *surviving candidates* rather than all members, and `LARGE_ROOM_THRESHOLD=500` restricts pushes in big rooms to mentioned users.
+- `roomlist-worker`'s mention budget is **derived** (`4 × MaxAckPending`) rather than a free-standing knob.
+- `broadcast-worker`'s preview writer sheds bodies rather than blocking — the correct trade, and its 20,000 rooms/s shed threshold sits far above the site ceiling in §9.1.
