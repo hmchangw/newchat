@@ -109,3 +109,24 @@ Positives worth recording: largest file is 207 lines (`version.go`); largest fun
 - `nitpick` — consider collapsing `loadObject`/`streamObject` into one function returning `(cachedBlob, io.ReadCloser, blobInfo, error)` to drop the double `Stat`.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+The service has no NATS, JetStream, Mongo or Cassandra surface, so most of the integration checklist is inapplicable; its one real cross-service contract — the `admin-service` upload relay — is broken by an unenforced timeout assumption.
+
+### Findings
+- `high` — the contract with `admin-service` is violated at the read side: `admin-service` budgets a full artifact upload at `CLIENT_UPDATE_UPLOAD_TIMEOUT` (default **10m**, `admin-service/config.go:81`) and this service's `HTTP_WRITE_TIMEOUT` is correspondingly 10m (`config.go:40`) — but the *upload* is the read direction, and `ReadTimeout` is hardcoded to **30s** (`client-update-service/main.go:80`). See D6 for the mechanism.
+- `medium` — `UPLOAD_MAX_BYTES` (`config.go:47`, default 2147483648) and `CLIENT_UPDATE_MAX_UPLOAD_BYTES` (`admin-service/config.go:86`, default 2147483648) are two independently-declared knobs that must agree; nothing validates them, so raising one alone turns a relayed upload into an opaque 400 at the far end.
+- `low` — the shared dev credential is coupled by convention only: `UPLOAD_TOKENS=admin-service:${CLIENT_UPDATE_TOKEN:-…}` (`client-update-service/deploy/docker-compose.yml:29-35`) against `CLIENT_UPDATE_TOKEN` (`admin-service/config.go:69`); the account-name prefix is duplicated as a literal on this side.
+
+Not applicable / verified N/A: no `pkg/subject` usage (no NATS subjects are constructed anywhere in the service — no raw `fmt.Sprintf` subject drift possible); no JetStream consumer, no `pkg/stream`, no `bootstrap.go` — correct, since the service publishes and consumes nothing; no OUTBOX/INBOX participation, so the `pkg/outbox` partition rule and the `chat.outbox.{siteID}.{destSiteID}.{eventType}` subject shape do not apply; no `pkg/model` event structs, so the `Timestamp int64` publish-site rule does not apply; no Mongo/Cassandra, so `MESSAGE_BUCKET_HOURS`, `ROOM_KEY_RETIRED_TTL` and `pkg/idgen` entity-format rules do not apply (the only `idgen` uses are `IsValidUUID`/`GenerateRequestID` for the correlation ID, `middleware.go:69-71`, which matches the CLAUDE.md §3 36-char hyphenated UUID rule). `docs/client-api.md` is correctly untouched: this service registers no `chat.user.` subject and is not `auth-service`, so the §5 documentation trigger does not fire.
+- `low` — the object key namespace `chat.go/chat-versions/` is a bare local constant (`version.go:21`); no other service references it, so the download URL→object mapping is undiscoverable from outside this file.
+
+### Recommendations
+- `high` — make the read deadline configurable and default it to `HTTP_WRITE_TIMEOUT` (see D6), restoring the documented `admin-service` constraint.
+- `medium` — validate the byte caps at the boundary: either derive both from one operator-facing knob, or have `admin-service` surface a 413 that names both limits.
+- `low` — export the object prefix as a documented constant (or a tiny `pkg/` type shared with `admin-service`), so the relay and the store agree by construction rather than by string.
+
+---
