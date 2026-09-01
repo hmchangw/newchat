@@ -9,6 +9,11 @@ services:
       - OTEL_SERVICE_NAME=push-notification-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
       - NATS_URL=${NATS_URL:-nats://nats:4222}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (stream readiness, consumer bind, dual-lane drain) still runs.
+      # Placement is not asserted here — a single-server NATS reports no cluster.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
       - MODE=user
