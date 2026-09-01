@@ -43,3 +43,24 @@ Idiomatic, well-wrapped errors and clean structured `slog` with no secret/body l
 - `low` — collapse `HandleJetStreamMsg`'s branch to `jsretry.Settle(ctx, msg, …, err)`, keeping only the unmarshal ack-drop.
 
 ---
+
+---
+
+## 3. Architecture — 2 / 5
+
+The shape is right (constructor DI, consumer-owned `Dispatcher` interface, `pkg/stream` wiring, `pkg/shutdown`), but the production binary ships a log-only dispatcher that acks and discards every push, and the consume loop has neither panic recovery nor a failure signal.
+
+### Findings
+- `high` — production wiring injects `LogDispatcher{}`, the only implementation; it logs and returns nil, so every push event is acked and dropped and no APNs/FCM call exists anywhere in the service — `push-notification-service/main.go:61`, `handler.go:54-63`
+- `high` — no panic guard: the per-message goroutine calls the handler directly, outside any recovery. Every other JetStream worker wraps it in `jobguard.Run` (`broadcast-worker`, `message-worker`, `notification-worker`, `inbox-worker`, `outbox-worker`, `roomlist-worker`, `hr-sync-worker`, `search-sync-worker`) — an unrecovered panic kills the process and crash-loops on redelivery — `push-notification-service/main.go:84-87`
+- `high` — the consume loop returns silently on any `iter.Next()` error with no log, metric, or health impact; the health probe only reports NATS connection status, so the pod stays "healthy" while consuming nothing. `notification-worker/main.go:346` records `LoopFailed` here — `push-notification-service/main.go:78-81`, `:91-93`
+- `medium` — no `Bootstrap bootstrapConfig` / `bootstrapStreams` helper, so the service cannot stand up against a fresh NATS and never verifies its input stream exists; `notification-worker/bootstrap.go:33-40` creates `PUSH-NOTIFICATION-{siteID}` as its *output*. Mitigated (not excused) by `CreateOrUpdateConsumer` failing fast on a missing stream — `push-notification-service/main.go:21-31`, `:65`
+- `low` — no consumer/domain metrics at all despite `obs.Init`; every comparable worker instruments via `pkg/natsmetrics` — `push-notification-service/main.go:47,65-89`
+
+### Recommendations
+- `high` — implement a real APNs/FCM dispatcher behind the existing `Dispatcher` interface, or make the log-only mode an explicit, alarmed config flag so ops cannot ship it unknowingly.
+- `high` — wrap the handler call in `jobguard.Run`.
+- `high` — log + `natsmetrics` on loop exit and fail the health probe once the loop is dead.
+- `medium` — add `bootstrap.go` with the standard `bootstrapStreams(ctx, js, siteID, enabled)` no-op-when-disabled helper, verifying the push stream when disabled.
+
+---
