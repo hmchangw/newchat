@@ -9,15 +9,12 @@ import (
 )
 
 func TestFormatAddedSingle(t *testing.T) {
-	got := formatAddedSingle(
-		&model.User{EngName: "Alice", ChineseName: "愛麗絲"},
-		"Bob 鮑勃",
-	)
+	got := formatAddedSingle("Alice 愛麗絲", "Bob 鮑勃")
 	assert.Equal(t, `"Alice 愛麗絲" added "Bob 鮑勃" to the chatroom`, got)
 }
 
 func TestFormatAddedCounts(t *testing.T) {
-	alice := &model.User{EngName: "Alice", ChineseName: "愛麗絲"}
+	alice := "Alice 愛麗絲"
 	cases := []struct {
 		name         string
 		people, orgs int
@@ -38,7 +35,7 @@ func TestFormatAddedCounts(t *testing.T) {
 }
 
 func TestAddedContent(t *testing.T) {
-	alice := &model.User{EngName: "Alice", ChineseName: "愛"}
+	alice := "Alice 愛"
 	lookup := func(a string) string {
 		if a == "bob" {
 			return "Bob 鮑"
@@ -77,15 +74,12 @@ func TestWithoutAccount(t *testing.T) {
 }
 
 func TestFormatRemovedUser(t *testing.T) {
-	got := formatRemovedUser(
-		&model.User{EngName: "Alice", ChineseName: "愛"},
-		"Bob 鮑勃",
-	)
+	got := formatRemovedUser("Alice 愛", "Bob 鮑勃")
 	assert.Equal(t, `"Alice 愛" removed "Bob 鮑勃" from the chatroom`, got)
 }
 
 func TestFormatRemovedOrg(t *testing.T) {
-	got := formatRemovedOrg(&model.User{EngName: "Alice", ChineseName: "愛"}, "Engineering", "", "orgX")
+	got := formatRemovedOrg("Alice 愛", "Engineering", "", "orgX")
 	assert.Equal(t, `"Alice 愛" removed "Engineering" from the chatroom`, got)
 }
 
@@ -149,10 +143,7 @@ func TestFormatLeft_FallsBackToAccount(t *testing.T) {
 }
 
 func TestFormatAddedSingle_SingleNameSide(t *testing.T) {
-	got := formatAddedSingle(
-		&model.User{EngName: "Alice"},
-		"鮑勃",
-	)
+	got := formatAddedSingle("Alice", "鮑勃")
 	assert.Equal(t, `"Alice" added "鮑勃" to the chatroom`, got)
 }
 
@@ -172,7 +163,6 @@ func TestDisplayOrg(t *testing.T) {
 }
 
 func TestFormatRemovedOrg_Fallbacks(t *testing.T) {
-	alice := &model.User{EngName: "Alice", ChineseName: "愛"}
-	assert.Equal(t, `"Alice 愛" removed "Eng 工程部" from the chatroom`, formatRemovedOrg(alice, "Eng", "工程部", "orgX"))
-	assert.Equal(t, `"Alice 愛" removed "orgX" from the chatroom`, formatRemovedOrg(alice, "", "", "orgX"))
+	assert.Equal(t, `"Alice 愛" removed "Eng 工程部" from the chatroom`, formatRemovedOrg("Alice 愛", "Eng", "工程部", "orgX"))
+	assert.Equal(t, `"Alice 愛" removed "orgX" from the chatroom`, formatRemovedOrg("Alice 愛", "", "", "orgX"))
 }

@@ -388,10 +388,9 @@ func (h *Handler) appNameLookup(ctx context.Context, botAccount string) (string,
 	return app.Name, nil
 }
 
-// memberDisplayName renders a sys-msg member's name, substituting the registered app
-// name for a bot account. Only member-side names are bot-aware — the requester keeps
-// displayName() unchanged.
-func (h *Handler) memberDisplayName(ctx context.Context, u *model.User) string {
+// botAwareName renders a sys-msg participant's name (member or requester),
+// substituting the registered app name for a bot account.
+func (h *Handler) botAwareName(ctx context.Context, u *model.User) string {
 	return preview.BotAwareDisplayName(ctx, h.appName, u.EngName, u.ChineseName, u.Account)
 }
 
@@ -535,9 +534,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp))
 	var content string
 	if isSelfLeave {
-		content = formatLeft(h.memberDisplayName(ctx, &user.User))
+		content = formatLeft(h.botAwareName(ctx, &user.User))
 	} else {
-		content = formatRemovedUser(requester, h.memberDisplayName(ctx, &user.User))
+		content = formatRemovedUser(h.botAwareName(ctx, requester), h.botAwareName(ctx, &user.User))
 	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
@@ -744,7 +743,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMemberRemoved,
-		Content:     formatRemovedOrg(requester, name, tcName, req.OrgID),
+		Content:     formatRemovedOrg(h.botAwareName(ctx, requester), name, tcName, req.OrgID),
 		SysMsgData:  sysMsgPayload,
 		CreatedAt:   now,
 	}
@@ -1260,9 +1259,9 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			sysMsgData, _ := json.Marshal(membersAdded)
 			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) string {
+			content := addedContent(h.botAwareName(ctx, requester), sysIndividuals, req.Orgs, func(a string) string {
 				if u, ok := userMap[a]; ok {
-					return h.memberDisplayName(ctx, &u)
+					return h.botAwareName(ctx, &u)
 				}
 				return ""
 			})
@@ -1974,9 +1973,9 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 	if err != nil {
 		return errcode.MarshalFailed("members_added sys data", err)
 	}
-	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) string {
+	content := addedContent(h.botAwareName(ctx, requester), req.ResolvedUsers, req.ResolvedOrgs, func(a string) string {
 		if u, ok := userByAccount[a]; ok {
-			return h.memberDisplayName(ctx, u)
+			return h.botAwareName(ctx, u)
 		}
 		return ""
 	})
@@ -2361,7 +2360,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	requesterLabel := req.Account
 	if requester != nil {
-		requesterLabel = displayName(requester)
+		requesterLabel = h.botAwareName(ctx, requester)
 	}
 	msg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_renamed"),
