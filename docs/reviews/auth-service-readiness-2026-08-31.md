@@ -104,3 +104,33 @@ Not findings: middleware order matches every peer Gin service; `/healthz` presen
 - `medium` — Correct `docs/superpowers/spec.md:307` and the plan doc to describe an HTTP token-exchange service, so no future reader wires `$SYS.REQ.USER.AUTH` against it.
 - `low` — Unexport `AuthHandler`/`NewAuthHandler`/`TokenValidator`/`Option`/`With*` to `handler`/`newHandler`/`tokenValidator`, and add `//go:generate mockgen` for the two consumer interfaces to replace the hand-written fakes.
 - `low` — Promote the botplatform client timeout to an env-tagged field so it can be tuned against `pkg/botauth`'s 10s ceiling.
+
+---
+
+## 4. Test coverage — 2 / 5
+
+Handler-level tests are genuinely strong (table-driven, error-path-first, reason-code assertions, no-leak checks), but 61.9% statement coverage sits below the CLAUDE.md Section 4 floor and the uncovered remainder is exactly the wrong half: all of `run()`'s credential/key-material validation plus the botplatform account-guard branches — so the dimension is floored at 2.
+
+### Findings
+- `high` — Coverage is **61.9% (176 stmts)**, below the CLAUDE.md Section 4 80% floor — `auth-service/handler.go`, `auth-service/main.go`
+  Not vanity-percentage failure: `handler.go` is ~93% (107/115); the shortfall is `main.go` `run()` at **0.0% (61 stmts)**.
+- `high` — `run()` is untested and contains the service's only key-material guards: signing key must be account-type (`auth-service/main.go:63`), `AUTH_ACCOUNT_PUB_KEY` must be a valid account key (`auth-service/main.go:66`), and OIDC issuer/audiences required when `DEV_MODE=false` (`auth-service/main.go:91`).
+  A regression here mints JWTs under the wrong issuer, or silently boots prod in dev mode where `handleDevAuth` mints an unauthenticated JWT for any `account` (`auth-service/handler.go:278`). None of this is reachable from a test because config parse, key parse, OIDC dial and HTTP serve are one unsplittable function.
+- `high` — The botplatform branch's two account guards are uncovered: empty `p.Account` (`auth-service/handler.go:240`) and `EncodeAccount` output failing `IsValidAccountToken` (`auth-service/handler.go:248`).
+  These are the privilege-escalation guards — a principal with an empty or `.`/`*`/`>`-bearing account would otherwise be stamped into `account:<x>` and substituted into the scoped signing-key subject template. The SSO twins of both *are* covered (`handler_test.go:553` missing-account, `handler_test.go:571` invalid-format), so the omission is asymmetric, not systematic.
+- `medium` — `integration_test.go` starts no container and touches no real dependency: it wires `fakeValidator` (`auth-service/integration_test.go:205`) into `httptest`, duplicating `TestHandleAuth_ValidToken`. Consequently the real `pkg/oidc` validator — JWKS fetch, signature verification, `aud`/`iss` checks, expiry → `ErrTokenExpired` — is exercised **nowhere** in this service, despite `auth-service/deploy/keycloak/realm-export.json` already providing a realm to run against.
+  `TestMain` correctly calls `testutil.RunTests(m)` (`integration_test.go:244`), so the harness is in place; only the dependency is missing.
+- `medium` — `handleSession`'s JWT-signing failure path (`auth-service/handler.go:257`) has no test, though its SSO and dev-mode twins do (`handler_test.go:826`, `handler_test.go:449`). The bot path is the one that returns a *different* account string (`natsAccount`) to the signer, so it is not covered by transitivity.
+- `low` — `GET /readyz` is registered (`auth-service/routes.go:14`) but no test hits it; `TestHandleHealth` (`handler_test.go:477`) covers only `/healthz`. `registerRoutes` reads 100% covered purely because the route table is executed, not the route.
+- `low` — `TLS_SKIP_VERIFY` (`auth-service/main.go:36`, wired at `:99`) disables issuer TLS verification and has zero coverage — it is only reachable through the untested `run()`.
+- `nitpick` — Doubles are hand-written (`fakeValidator` `handler_test.go:31`, `fakeBPValidator` `handler_test.go:633`) rather than `go.uber.org/mock`, which CLAUDE.md Section 4 mandates. Defensible here — there is no `store.go` and both interfaces are single-method — but there is no `//go:generate mockgen` directive anywhere in the service, so the deviation is undeclared.
+- `nitpick` — `cryptoRandFloat`'s `rand.Reader` failure branch (`auth-service/handler.go:124`) is uncovered and unreachable without a reader seam; the 66.7% on that function is noise, not risk.
+
+### Recommendations
+- `high` — Extract the pure, testable parts of `run()` into functions unit-testable in `package main`: `validateKeys(cfg) (nkeys.KeyPair, error)` covering `main.go:59-68`, and `buildHandler(cfg, ...) (*AuthHandler, error)` covering the dev-mode/OIDC-required fork at `main.go:87-106`. Table-drive with a bad seed, a user-type seed, a non-account `AUTH_ACCOUNT_PUB_KEY`, and `DEV_MODE=false` with empty issuer/audiences. This alone lifts the service over 80% and puts the tests where the credential risk is.
+- `high` — Add the three missing `handleSession` cases with `errtest.AssertReason`: principal with `Account: ""` → 401 `AuthInvalidToken`; principal with `Account: "a*b"` (and one with a bare `>`), asserting 400 **and** that no JWT is returned; and a non-account signing key → 500 asserting the body omits `"generating NATS token"`, mirroring `handler_test.go:826`.
+- `medium` — Make `integration_test.go` earn its build tag: stand up the existing Keycloak realm, construct a real `pkgoidc.NewValidator`, and assert the four rejection paths (bad signature, wrong `aud`, wrong `iss`, expired → `ErrTokenExpired` → 401 `AuthTokenExpired`). Follow the CLAUDE.md rule — if Keycloak is used by ≥2 packages it belongs in `pkg/testutil` as `Keycloak(t)`/`EnsureKeycloak()`/`TerminateKeycloak()`; otherwise inline `testcontainers.GenericContainer` with a stored ref and `t.Cleanup(c.Terminate)`.
+- `medium` — Delete the fake-validator happy path from `integration_test.go` once the real one lands; it is a byte-for-byte duplicate of the covered `TestHandleAuth_ValidToken` and inflates apparent integration coverage.
+- `low` — Add a `/readyz` request test asserting 200 and the response shape, so the route is covered rather than merely registered.
+- `low` — Either add `//go:generate mockgen` for `TokenValidator`/`BotplatformValidator`, or add a one-line comment in `handler_test.go` recording why hand-written fakes are used, so the Section 4 deviation is explicit.
+- `nitpick` — Inject the randomness source into `cryptoRandFloat` (or accept the 66.7%) rather than leaving an untestable error branch; `WithRandFloat` already establishes the seam pattern at `handler.go:92`.
