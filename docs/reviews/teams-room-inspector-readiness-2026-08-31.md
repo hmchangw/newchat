@@ -100,3 +100,19 @@ No dead code, no duplicated logic inside the service, no file that has outgrown 
 ### Recommendations
 - `low` — the `pkg/teamsmigrate` extraction above is the single refactor worth doing; it removes the only hand-synced invariant.
 - `nitpick` — assert `verifyRequestBodyMaxBytes` covers a max-size batch of realistic Graph ids in the boundary test recommended in D3.
+
+---
+
+## 6. Integration — 4 / 5
+
+No NATS surface at all, so most integration law is N/A; the HTTP contract with `teams-room-verify` is genuinely shared via `pkg/model` except for the endpoint path.
+
+### Findings
+- `medium` — the endpoint path is a bare literal at both ends with no shared constant: `routes.go:9` (`/internal/teams/rooms/verify`) vs `teams-room-verify/client.go:13`. The batch cap *is* shared (`pkg/model/teams.go:110` ← `handler.go:17`), which shows the pattern was available and not applied to the path.
+- `low` — `handler_test.go:69` asserts "results must come back in request order", but the consumer matches by chat id (`teams-room-verify/runner.go:128-137`), so the test pins a stronger contract than either side needs; the ordering guarantee is documented (`pkg/model/teams.go:138-140`), so keep it, but know it is now load-bearing only for humans.
+
+Verified correct: absence from `docs/client-api.md` is by design and documented — the subject is not `chat.user.…` and this is not an `auth-service` route (`pkg/model/teams.go:100-102`); no `pkg/subject`, stream, OUTBOX/INBOX, `Timestamp`-on-event, `msgbucket` or `ROOM_KEY_RETIRED_TTL` obligations apply; ids come from `pkg/idgen`, not ad-hoc (`handler.go:68`); the `SiteID` echo guard is honoured by the caller (`main.go:35-37` ↔ `runner.go:121-124`).
+
+### Recommendations
+- `medium` — move the path to `pkg/model/teams.go` (e.g. `TeamsRoomVerifyPath`) and reference it from `routes.go:9` and `teams-room-verify/client.go:13`.
+- `low` — leave the ordering assertion, but add a comment that the consumer keys by chat id so a future reorder is not read as a breaking change.
