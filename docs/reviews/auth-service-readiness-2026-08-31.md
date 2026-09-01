@@ -63,3 +63,44 @@ Idiomatic, tightly-commented Go with correct `errcode` tiering and verified-clea
 - `low` — Use `errors.Is(err, http.ErrServerClosed)` at `main.go:147`, and move `<-shutdownDone` / `obsShutdown` onto both exit paths.
 - `low` — Attach the bind error via `errcode.WithCause(err)` at `handler.go:140` and give the three reason-less 400s `errcode.AuthInvalidRequest`.
 - `low` — Re-run `make sast` (govulncheck included) from a network-permitted runner before shipping; this service's OIDC/JWT dependency set is the highest-value CVE surface in the repo.
+
+---
+
+## 3. Architecture — 3 / 5
+
+Clean DI (constructor + functional options), consumer-side interfaces, correct file layout and fail-fast on NKey secrets — undercut by a guaranteed panic path in the dev branch, an unguarded auth-bypass mode compiled into the production binary, and a shared timeout knob the rest of the fleet mounts but this service does not.
+
+### Findings
+- `high` — Dev mode wires a `nil` `TokenValidator`, but `HandleAuth` still routes a token-carrying dev request into `handleSSO`, which dereferences it — `auth-service/main.go:89` / `auth-service/handler.go:338`.
+  The doc comment at `handler.go:301-302` asserts the opposite ("A dev-mode request carrying a token still validates normally"). Any `DEV_MODE=true` deployment receiving an `ssoToken` panics; `gin.Recovery()` converts it to a 500. No test covers it — `handler_test.go:369` is the only dev-mode+validator case and it injects a real fake.
+
+- `high` — The auth-bypass branch ships in the production binary, gated only by a boolean env var — `auth-service/handler.go:446-455`, selected at `auth-service/main.go:87`.
+  `handleDevAuth` mints a signed, scoped NATS user JWT from a fully client-supplied `req.Account` with no token, no issuer, no validation. The single `slog.Warn` at `main.go:88` is the only signal; there is no build tag, no separate binary, and no startup refusal when the real signing key/account key look production-shaped. `envDefault:"false"` is the sole thing between a config typo and fleet-wide impersonation.
+
+- `medium` — Service boundary contradicts its documented identity: repo docs describe `auth-service` as the NATS `auth_callout` service (`docs/superpowers/spec.md:307`, `docs/superpowers/plans/2026-03-19-plan-02-auth-service.md:5`), but the shipped service is HTTP-only (`auth-service/routes.go:14-17`) and mints JWTs out-of-band.
+  Only `docs/superpowers/specs/2026-06-05-seamless-nats-jwt-refresh-design.md:18` records the correction; the primary spec still misdescribes the boundary.
+
+- `medium` — The shared per-request timeout knob `ginutil.TimeoutConfig` is not mounted, unlike its sibling Gin services — `auth-service/main.go:111-117` vs `tcard-service/main.go:116` and `botplatform-service/config.go:31`.
+  Handlers therefore run with no context deadline, and the layering has zero headroom: `pkg/oidc/oidc.go:64` uses a 10s client timeout against a 10s `WriteTimeout` (`auth-service/main.go:125`), so a slow JWKS refresh trips the socket timeout at the same instant the upstream call would have returned.
+
+- `medium` — `BOTPLATFORM_URL` has no `envDefault` and no `required`, so a missing value degrades silently at request time into a 503 rather than failing fast at startup — `auth-service/main.go:43,78` / `auth-service/handler.go:391-393`.
+  CLAUDE.md requires `envDefault` for non-critical config and fail-fast for the rest; this is neither. An operator who forgets it gets a working `/healthz` and a permanently broken bot/admin login path.
+
+- `low` — Handler surface is exported from `package main`, against "export only what other packages consume" and the repo's own convention (`media-service/handler.go:16,24`, `botplatform-service/handler.go:23,46` use unexported `handler`/`newHandler`) — `auth-service/handler.go:231,272,195,225,243`.
+
+- `low` — No `//go:generate mockgen` anywhere in the service; both consumer interfaces are doubled by hand-written fakes in `handler_test.go`, against CLAUDE.md Section 4's `go.uber.org/mock` mandate — `auth-service/handler.go:195,225`.
+
+- `low` — Botplatform client timeout is a bare literal with no env knob, and disagrees with the layer beneath it (`pkg/botauth/botauth.go:36` sets a 10s ceiling the 5s resty timeout always pre-empts) — `auth-service/main.go:79`.
+
+- `nitpick` — `err != http.ErrServerClosed` compares by value instead of `errors.Is`, and the early return skips `<-shutdownDone`, stranding the shutdown goroutine on a bind failure — `auth-service/main.go:147-150`.
+
+Not findings: middleware order matches every peer Gin service; `/healthz` present per CLAUDE.md; `pkg/subject` builders used rather than `fmt.Sprintf` (`handler.go:357,415-416`); no JetStream usage, so `BOOTSTRAP_STREAMS`/`bootstrap.go` are correctly absent; `pkg/shutdown.Wait` used with the documented HTTP ordering.
+
+### Recommendations
+- `high` — Guard `handleSSO` on `h.validator == nil` (or make `NewAuthHandler` reject `nil` validator when `devMode` is false and short-circuit dev-mode SSO to a 400), and add the `DEV_MODE=true` + `ssoToken` regression test that currently does not exist.
+- `high` — Move `handleDevAuth` behind a `//go:build dev` file so the branch is not linked into release images; failing that, refuse startup when `DEV_MODE=true` and the signing key/account key are not the local-dev pair.
+- `medium` — Mount `HTTP ginutil.TimeoutConfig` on `config` and register `cfg.HTTP.Middleware()`, matching `tcard-service`/`botplatform-service`; raise `WriteTimeout` above the 10s OIDC client timeout.
+- `medium` — Make `BOTPLATFORM_URL` an explicit deployment decision: either `required`, or a `SESSION_AUTH_ENABLED` flag validated at startup, so the 503 branch is unreachable by misconfiguration.
+- `medium` — Correct `docs/superpowers/spec.md:307` and the plan doc to describe an HTTP token-exchange service, so no future reader wires `$SYS.REQ.USER.AUTH` against it.
+- `low` — Unexport `AuthHandler`/`NewAuthHandler`/`TokenValidator`/`Option`/`With*` to `handler`/`newHandler`/`tokenValidator`, and add `//go:generate mockgen` for the two consumer interfaces to replace the hand-written fakes.
+- `low` — Promote the botplatform client timeout to an env-tagged field so it can be tuned against `pkg/botauth`'s 10s ceiling.
