@@ -112,7 +112,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	t.Run("debug rung emits flow published AND debug decision breadcrumbs", func(t *testing.T) {
 		rec.reset()
 		req := newReq()
-		_, err := h.processMessage(admitRung("debug"), account, roomID, siteID, &req)
+		_, err := h.processMessage(admitRung("debug"), account, roomID, siteID, &req, false)
 		require.NoError(t, err)
 		assert.True(t, rec.has(logctx.LevelFlow, "gatekeeper published to canonical"), "flow breadcrumb present at debug (cumulative)")
 		assert.True(t, rec.has(slog.LevelDebug, "gatekeeper subscription resolved"), "debug decision breadcrumb present")
@@ -121,7 +121,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	t.Run("flow rung emits the flow breadcrumb but no debug lines", func(t *testing.T) {
 		rec.reset()
 		req := newReq()
-		_, err := h.processMessage(admitRung("flow"), account, roomID, siteID, &req)
+		_, err := h.processMessage(admitRung("flow"), account, roomID, siteID, &req, false)
 		require.NoError(t, err)
 		assert.True(t, rec.has(logctx.LevelFlow, "gatekeeper published to canonical"))
 		assert.False(t, rec.hasLevel(slog.LevelDebug), "debug lines suppressed at flow rung")
@@ -130,7 +130,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 	t.Run("unadmitted context emits nothing below INFO", func(t *testing.T) {
 		rec.reset()
 		req := newReq()
-		_, err := h.processMessage(context.Background(), account, roomID, siteID, &req)
+		_, err := h.processMessage(context.Background(), account, roomID, siteID, &req, false)
 		require.NoError(t, err)
 		assert.False(t, rec.hasLevel(logctx.LevelFlow))
 		assert.False(t, rec.hasLevel(slog.LevelDebug))
@@ -140,7 +140,7 @@ func TestHandler_processMessage_DebugBreadcrumbs(t *testing.T) {
 		rec.reset()
 		req := newReq()
 		req.Content = "SUPER-SECRET-BODY-DO-NOT-LOG"
-		_, err := h.processMessage(admitRung("debug"), account, roomID, siteID, &req)
+		_, err := h.processMessage(admitRung("debug"), account, roomID, siteID, &req, false)
 		require.NoError(t, err)
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
