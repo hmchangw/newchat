@@ -17,26 +17,33 @@ import (
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
-var (
-	natsOnce      sync.Once
-	natsContainer testcontainers.Container
-	natsStopProc  func()
-	natsURL       string
-	natsInitErr   error
-)
+// natsInstance is one process-shared JetStream server. Two exist: the primary
+// and the buddy that NATSPair hands out, so a service holding a home and a
+// buddy connection can be exercised end to end. They share this type so the
+// image, flags, wait strategy and teardown cannot drift apart — a buddy that
+// quietly kept the old startup behaviour would fail in ways that look like the
+// failover code's fault.
+type natsInstance struct {
+	name      string // used in error text only
+	once      sync.Once
+	container testcontainers.Container
+	stopProc  func()
+	url       string
+	initErr   error
+}
 
-// JetStream is enabled unconditionally so consumers that publish/consume
-// through streams (search-sync-worker, inbox-worker, etc.) Just Work
-// against the shared NATS instance. Consumers that only use core NATS
-// request/reply pay nothing extra — JS is dormant until used.
+// ensure starts the server once. It prefers a `nats-server -js` subprocess when
+// the binary is on PATH and falls back to a testcontainers NATS container.
 //
-// Backing instance is either a `nats-server -js` subprocess (when the
-// binary is on PATH) or a testcontainers NATS container.
-func ensureNATS() (string, error) {
-	natsOnce.Do(func() {
+// JetStream is enabled unconditionally so consumers that publish/consume
+// through streams (search-sync-worker, inbox-worker, etc.) Just Work. Consumers
+// that only use core NATS request/reply pay nothing extra — JS is dormant until
+// used.
+func (n *natsInstance) ensure() (string, error) {
+	n.once.Do(func() {
 		if u, stop, err := startNATSBinary(); err == nil {
-			natsURL = u
-			natsStopProc = stop
+			n.url = u
+			n.stopProc = stop
 			return
 		}
 		ctx := context.Background()
@@ -45,20 +52,42 @@ func ensureNATS() (string, error) {
 			testcontainers.WithWaitStrategy(wait.ForLog("Server is ready").WithStartupTimeout(60*time.Second)),
 		)
 		if err != nil {
-			natsInitErr = fmt.Errorf("start nats: %w", err)
+			n.initErr = fmt.Errorf("start %s nats: %w", n.name, err)
 			return
 		}
 		url, err := c.ConnectionString(ctx)
 		if err != nil {
 			_ = c.Terminate(ctx)
-			natsInitErr = fmt.Errorf("get nats url: %w", err)
+			n.initErr = fmt.Errorf("get %s nats url: %w", n.name, err)
 			return
 		}
-		natsContainer = c
-		natsURL = url
+		n.container = c
+		n.url = url
 	})
-	return natsURL, natsInitErr
+	return n.url, n.initErr
 }
+
+// terminate stops the server (subprocess or container). Best-effort, idempotent.
+func (n *natsInstance) terminate() {
+	if n.stopProc != nil {
+		n.stopProc()
+		n.stopProc = nil
+		return
+	}
+	if n.container == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := n.container.Terminate(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "terminate %s nats: %v\n", n.name, err)
+	}
+	n.container = nil
+}
+
+var natsPrimary = &natsInstance{name: "shared"}
+
+func ensureNATS() (string, error) { return natsPrimary.ensure() }
 
 // NATS returns the URL of a process-shared NATS container with JetStream
 // enabled.
@@ -77,19 +106,4 @@ func EnsureNATS() error { _, err := ensureNATS(); return err }
 
 // TerminateNATS stops the shared NATS instance (subprocess or
 // container). Best-effort, idempotent.
-func TerminateNATS() {
-	if natsStopProc != nil {
-		natsStopProc()
-		natsStopProc = nil
-		return
-	}
-	if natsContainer == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := natsContainer.Terminate(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "terminate shared nats: %v\n", err)
-	}
-	natsContainer = nil
-}
+func TerminateNATS() { natsPrimary.terminate() }
