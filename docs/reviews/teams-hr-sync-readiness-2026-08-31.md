@@ -66,3 +66,26 @@ Verified compliant: no stream creation anywhere (`deploy/docker-compose.yml` com
 - `low` — Note the handler-less layout exception in `README.md` so the next reviewer does not read it as drift.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+**57.5% (266 statements)** — below the 60% line, so per CLAUDE.md §4 this is a `critical` finding with the score floored at 1; the whole direct-write path is at 0%.
+
+### Findings
+- `critical` — 57.5% statement coverage, below both the 60% floor and the 80% merge gate — `coverage_by_service.txt`.
+- `critical` — **Every `WriteStore` method is 0.0%**: `UpsertEmployees` (`write_store.go:44`), `UpsertUserIdentities` (:62), `QuitTeamsEmployees` (:98), `newMongoWriteStore` (:37). The two guards whose own comments describe data corruption — the empty-`employeeId` skip ("would match every other keyless row and clobber it", `write_store.go:68-71`) and the empty-`models` no-op that avoids `mongo.ErrEmptySlice` (:89-91) — have zero tests. `integration_test.go` covers stream mode only; there is no direct-mode integration test at all.
+- `high` — `integration_test.go:162` asserts `"only the teams-sourced departure quits; the legacy row never does"`, but the test never inserts a legacy row (the only inserts are the run-1 docs at :132) and the store has no source filter. The assertion message documents behavior the test does not exercise — false confidence.
+- `medium` — Uncovered error branches that matter: the quit-write failure in `directEmitter.emit` (`emitter.go:70-72`, function at 83.3%), `publishZstd`'s marshal failure (`publisher.go:78-79`, 75%), and `ListTeamsEmployees`'s find error (`store_mongo.go:59-61`, 0% in the unit profile).
+- `low` — Package-level shared `zstdTestDecoder` at `publisher_test.go:17` is mutable state shared across tests; safe in practice but against the independence rule.
+
+Quality is otherwise strong: table-driven with descriptive subtests (`config_test.go:66-99`, `differ_test.go:20`), `package main`, generated mocks (`mock_store_test.go`, `mock_write_store_test.go`), publish injected as a field so no NATS is needed (`publisher.go:18`, `main_test.go:53`), `//go:build integration` + `TestMain(m){testutil.RunTests(m)}` (`integration_test.go:1,165`), containers from `testutil.MongoDB`/`testutil.NATS` (:73-74).
+
+### Recommendations
+- `critical` — Add a direct-mode integration test (`testutil.MongoDB`) asserting: employees upsert keyed on `_id == employeeId`, identity-only `$set` leaving a pre-existing `roles`/`password` field untouched, empty-`employeeId` rows skipped, and all-empty input writing nothing.
+- `high` — Either add a source discriminator and filter on it in `ListTeamsEmployees`, or delete the misleading assertion message at `integration_test.go:162` and insert a real foreign row to prove whichever behavior is intended.
+- `medium` — Add table cases for the three uncovered error branches (`emitter.go:70`, `publisher.go:78`, `store_mongo.go:59`).
+- `low` — Move `zstdTestDecoder` construction inside the test that uses it.
+
+---
