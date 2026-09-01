@@ -31,10 +31,10 @@ func (s coverageStats) meets(minimum float64) bool {
 
 func readCoverageProfile(
 	reader io.Reader,
-	include string,
+	includes []string,
 	excludes map[string]struct{},
 ) (coverageStats, error) {
-	if include == "" {
+	if len(includes) == 0 {
 		return coverageStats{}, fmt.Errorf("coverage include pattern is required")
 	}
 	scanner := bufio.NewScanner(reader)
@@ -64,7 +64,7 @@ func readCoverageProfile(
 			)
 		}
 		source := strings.ReplaceAll(fields[0][:separator], "\\", "/")
-		if !strings.Contains(source, include) {
+		if !matchesAny(source, includes) {
 			continue
 		}
 		if _, excluded := excludes[path.Base(source)]; excluded {
@@ -97,10 +97,33 @@ func readCoverageProfile(
 	if stats.total == 0 {
 		return coverageStats{}, fmt.Errorf(
 			"coverage include pattern %q matched no statements",
-			include,
+			strings.Join(includes, ","),
 		)
 	}
 	return stats, nil
+}
+
+func matchesAny(source string, includes []string) bool {
+	for _, include := range includes {
+		if strings.Contains(source, include) {
+			return true
+		}
+	}
+	return false
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(value string) error {
+	if value == "" {
+		return errors.New("include pattern cannot be empty")
+	}
+	*f = append(*f, value)
+	return nil
 }
 
 type stringSetFlag map[string]struct{}
@@ -125,7 +148,8 @@ func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("coveragecheck", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	profilePath := fs.String("profile", "", "Go coverage profile")
-	include := fs.String("include", "", "source path substring to include")
+	var includes stringListFlag
+	fs.Var(&includes, "include", "source path substring to include; repeatable")
 	minimum := fs.Float64("min", 0, "minimum statement coverage percentage")
 	excludes := make(stringSetFlag)
 	fs.Var(excludes, "exclude", "source base filename to exclude; repeatable")
@@ -147,14 +171,14 @@ func run(args []string, stdout io.Writer) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	stats, err := readCoverageProfile(file, *include, excludes)
+	stats, err := readCoverageProfile(file, includes, excludes)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(
 		stdout,
 		"coverage include=%q covered=%d total=%d percent=%.2f required=%.2f\n",
-		*include,
+		strings.Join(includes, ","),
 		stats.covered,
 		stats.total,
 		stats.percent(),

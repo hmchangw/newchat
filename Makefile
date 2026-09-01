@@ -149,7 +149,7 @@ SOAK_COVERAGE_PROFILE ?= coverage-loadgen-soak.out
 coverage-loadgen-soak:
 	go test -race -tags integration -run Soak -coverprofile=$(SOAK_COVERAGE_PROFILE) ./tools/loadgen/...
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -min 80
-	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -exclude soak_main.go -exclude soak_store.go -min 90
+	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/userread/ -exclude soak_main.go -exclude soak_store.go -min 90
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/internal/soak/ -min 90
 
 # Regenerate all mocks via go generate

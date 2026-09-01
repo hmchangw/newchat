@@ -1,4 +1,4 @@
-package main
+package userread
 
 import (
 	"context"
@@ -9,7 +9,76 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
+
+const soakRequestTimeout = 5 * time.Second
+
+type soakTopology = soaktopology.Topology
+type soakRPCAction = soakrpc.Action
+type soakRPCClient = soakrpc.Client
+type soakRPCRequest = soakrpc.Request
+
+const (
+	soakRetrySafe = soakrpc.RetrySafe
+
+	soakRPCUserMe                  = soakrpc.ActionUserMe
+	soakRPCUserProfileGet          = soakrpc.ActionUserProfileGet
+	soakRPCUserStatusGet           = soakrpc.ActionUserStatusGet
+	soakRPCUserSettingsGet         = soakrpc.ActionUserSettingsGet
+	soakRPCUserChatlistGet         = soakrpc.ActionUserChatlistGet
+	soakRPCUserPriorityContacts    = soakrpc.ActionUserPriorityContacts
+	soakRPCUserAppsList            = soakrpc.ActionUserAppsList
+	soakRPCUserAppsCategories      = soakrpc.ActionUserAppsCategories
+	soakRPCUserSubscriptionCount   = soakrpc.ActionUserSubscriptionCount
+	soakRPCUserSubscriptionByRoom  = soakrpc.ActionUserSubscriptionByRoom
+	soakRPCUserSubscriptionChannel = soakrpc.ActionUserSubscriptionChannel
+	soakRPCUserSubscriptionDM      = soakrpc.ActionUserSubscriptionDM
+	soakRPCUserThreadList          = soakrpc.ActionUserThreadList
+	soakRPCUserThreadUnread        = soakrpc.ActionUserThreadUnread
+)
+
+type soakSubscriptionListResponse = soakwire.SubscriptionListResponse
+type soakUserNameRequest = soakwire.UserNameRequest
+type soakUserAccountNameRequest = soakwire.UserAccountNameRequest
+type soakUserRoomRequest = soakwire.UserRoomRequest
+type soakUserPageRequest = soakwire.UserPageRequest
+type soakUserChannelsRequest = soakwire.UserChannelsRequest
+type soakUserCountRequest = soakwire.UserCountRequest
+type soakUserEmptyRequest = soakwire.UserEmptyRequest
+type soakUserMeResponse = soakwire.UserMeResponse
+type soakUserStatusResponse = soakwire.UserStatusResponse
+type soakUserSettingsResponse = soakwire.UserSettingsResponse
+type soakUserChatlistResponse = soakwire.UserChatlistResponse
+type soakUserPriorityContactsResponse = soakwire.UserPriorityContactsResponse
+type soakUserAppsResponse = soakwire.UserAppsResponse
+type soakUserAppCategoriesResponse = soakwire.UserAppCategoriesResponse
+type soakUserCountResponse = soakwire.UserCountResponse
+type soakUserDMResponse = soakwire.UserDMResponse
+type soakUserThreadListResponse = soakwire.UserThreadListResponse
+type soakUserThreadUnreadResponse = soakwire.UserThreadUnreadResponse
+
+type soakReadSample struct {
+	Action      soakrpc.Action
+	Latency     time.Duration
+	Messages    int
+	RowsCounted bool
+	ReplyBytes  int
+	ErrorClass  soakrpc.ErrorClass
+	ErrorReason soakrpc.ErrorReason
+	Retries     int
+	Skipped     bool
+}
+
+func (s *soakReadSample) countRows(n int) {
+	s.Messages, s.RowsCounted = n, true
+}
+
+type soakReadSampleRecorder interface {
+	Record(*soakReadSample)
+}
 
 type soakUserReadConfig struct {
 	SiteID         string
@@ -163,7 +232,7 @@ func soakUserRoomPairs(
 	members := make(map[string][]string)
 	for i := range topology.Subscriptions {
 		subscription := &topology.Subscriptions[i]
-		if subscription.RoomType != roomType || !isSoakRoomMember(subscription) ||
+		if subscription.RoomType != roomType || !soaktopology.IsRoomMember(subscription) ||
 			subscription.User.Account == "" {
 			continue
 		}
@@ -203,8 +272,8 @@ func soakUserRoomPairs(
 	return pairs
 }
 
-// soakUserReads is the dispatch table. It is derived from soakUserReadActions
-// so a new action cannot be added to the allowlist without a call to send it.
+// soakUserReads is the dispatch table. Its test keeps it equal to
+// rpc.UserReadActions so a new allowlisted action needs a call to send it.
 func soakUserReads() []soakUserRead {
 	return []soakUserRead{
 		{soakRPCUserMe, (*soakUserReader).Me},
@@ -531,4 +600,20 @@ func (r *soakUserReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}
+}
+
+type Config = soakUserReadConfig
+type Reader = soakUserReader
+type Sample = soakReadSample
+type Recorder = soakReadSampleRecorder
+
+func New(
+	cfg Config,
+	topology *soaktopology.Topology,
+	rpcClient *soakrpc.Client,
+	recorder Recorder,
+	rng *rand.Rand,
+	now func() time.Time,
+) (*Reader, error) {
+	return newSoakUserReader(cfg, topology, rpcClient, recorder, rng, now)
 }
