@@ -75,10 +75,10 @@ type SearchConfig struct {
 	// The TTL is the worst-case staleness of an HR name or an app name in a
 	// search result, and the worst-case delay before a newly-created user or
 	// app stops rendering as a bare account name.
-	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"8192"`
-	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"5m"`
-	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1024"`
-	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"5m"`
+	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"130000"`
+	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"24h"`
+	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1000"`
+	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"24h"`
 }
 
 // Config is the root service config. Note that ES and Search share the

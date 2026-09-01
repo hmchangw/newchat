@@ -37,10 +37,10 @@ Four knobs on `SearchConfig` (`envPrefix:"SEARCH_"`). These are pod-local caches
 
 | Env var | Default |
 |---|---|
-| `SEARCH_HR_CACHE_SIZE` | `8192` |
-| `SEARCH_HR_CACHE_TTL` | `5m` |
-| `SEARCH_APP_CACHE_SIZE` | `1024` |
-| `SEARCH_APP_CACHE_TTL` | `5m` |
+| `SEARCH_HR_CACHE_SIZE` | `130000` |
+| `SEARCH_HR_CACHE_TTL` | `24h` |
+| `SEARCH_APP_CACHE_SIZE` | `1000` |
+| `SEARCH_APP_CACHE_TTL` | `24h` |
 
 None of these names collide with `ESConfig`, which shares the `SEARCH_` prefix (`URL`, `BACKEND`, `USERNAME`, `PASSWORD`, `TLS_SKIP_VERIFY`).
 

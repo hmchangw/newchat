@@ -95,10 +95,10 @@ func TestConfig_EnrichmentCacheKnobs(t *testing.T) {
 		cfg, err := env.ParseAs[Config]()
 
 		require.NoError(t, err)
-		assert.Equal(t, 8192, cfg.Search.HRCacheSize)
-		assert.Equal(t, 5*time.Minute, cfg.Search.HRCacheTTL)
-		assert.Equal(t, 1024, cfg.Search.AppCacheSize)
-		assert.Equal(t, 5*time.Minute, cfg.Search.AppCacheTTL)
+		assert.Equal(t, 130000, cfg.Search.HRCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 1000, cfg.Search.AppCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.AppCacheTTL)
 	})
 
 	t.Run("overrides", func(t *testing.T) {
