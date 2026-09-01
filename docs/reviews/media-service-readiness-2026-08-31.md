@@ -135,3 +135,32 @@ Compliance is otherwise clean: one `TestMain` calling `testutil.RunTestsWithPrew
 - `low` — Collapse `handler_test.go`'s room- and account-avatar cases into two tables keyed on scenario name, and rename `TestEndpoint1/2_*` to `TestHandler_HandleAccountAvatar_*` / `TestHandler_HandleRoomAvatar_*`.
 - `low` — Cover the nil-principal branches by mounting `requireAdmin()`/`requireBotSelfOrAdmin()` on a bare `gin.New()` without `requireSession` and asserting the 500 envelope.
 - `nitpick` — Replace the `cache_test.go:115` sleep with a 1ns TTL plus an explicit `lru.Get` miss assertion, or drive expiry via an injectable clock.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Functions are small, naming is consistent and the comments are genuinely WHY-oriented, but the two upload paths and the string-keyed telemetry contract are copy-paste surfaces that have *already* diverged, and route paths are duplicated across six sites.
+
+### Findings
+- `medium` — The two upload handlers duplicate ~60 lines of identical shape (name validate → `MaxBytesReader`+`ReadAll` → image decode → `blobs.Put` → store upsert → etag/contentType/size/updatedAt response) and have already diverged on hardening: `emoji_upload.go:61-80` does a `image.DecodeConfig` header pre-check (decompression-bomb guard) plus a decoded-bounds cap, while `upload.go:66-70` does a bare `image.Decode` with no pre-check and no dimension cap at all — `upload.go:30`.
+  A hardening fix landed on one path and never reached the sibling; nothing in the code links them.
+- `medium` — The access-log telemetry contract is 35 raw `c.Set("media_kind"/"media_outcome", …)` string literals with no constants and no closed set of outcome values (`handler.go:51-208`, `emoji_serve.go:25-78`, `emoji_upload.go:94-164`). `HandleBotUpload` (`upload.go:30`) and `HandleDriveMembers` (`drive.go:54`) set neither, so `accessLogMiddleware` emits empty `media_kind`/`media_outcome` for those two routes — `middleware.go:57`.
+  The contract is unenforceable by the compiler; a new handler silently opts out.
+- `medium` — Route paths are duplicated between registration and URL construction: `/api/v1/avatar/room/`, `/api/v1/avatar/`, `/api/v1/emoji/` appear in `routes.go:13-20` and again at `handler.go:118`, `handler.go:139`, `handler.go:179`, `emoji_serve.go:43`, `emoji_upload.go:38` — `routes.go:13`.
+  `emojiImagePath` is persisted into every emoji doc's `imageUrl`, so a route rename desyncs stored data as well as live redirects.
+- `low` — `handler.go` is two responsibilities in one file: the shared media-serving helpers (`setImageCacheHeaders`, `serveDefault`, `serveStored`, `redirectCrossCluster` — also used from `emoji_serve.go:59`) and the avatar handlers themselves — `handler.go:41-110`.
+- `low` — A second, hand-rolled error envelope (`{success, error, errorType}` plus four `errType*` constants) lives beside the repo-standard `errcode`/`errhttp` used by every other handler, with no in-code note of why (the rationale exists only in `docs/superpowers/specs/2026-07-17-drive-members-endpoint-design.md`) — `drive.go:32-48`.
+- `low` — Dead field: `blobInfo.ETag` is populated on every blob read but never consumed — all ETag consumers read the Mongo doc's `etag` (`handler.go:75`, `emoji_serve.go:59`) — `minio.go:51`.
+- `nitpick` — `newHandler(store, store, blobs, &cfg)` passes the same value for two adjacent interface params; a future third store makes an argument-order mistake compile cleanly — `main.go:93`.
+- `nitpick` — `run()` is 112 lines covering config validation, four client connections, two routers, HTTP server and shutdown; `EIDCacheCapacity`/`EIDCacheTTL` are validated inline while `Pool`/`Guard` use `.Validate()` — `main.go:46-57`.
+- `nitpick` — The service has outgrown the single-`handler.go` layout in CLAUDE.md §1 (eight production handler/helper files at the flat level) without taking the sanctioned sub-package escape hatch — `media-service/`.
+
+### Recommendations
+- `medium` — Extract a shared `serveUpload` helper (or a small `uploadSpec{maxBytes, maxDim, allowedFormats, key, persist}` struct) covering read-cap → validate-image → `blobs.Put` → persist → respond, and route both `HandleBotUpload` and `HandleEmojiUpload` through it. Make `validateEmojiImage` the single image validator (parameterised by allowed formats and an optional dimension cap) so the avatar path inherits the `DecodeConfig` pre-check.
+- `medium` — Replace the `media_kind`/`media_outcome` literals with typed constants and a single `setOutcome(c, kind, outcome)` helper in one file; call it from `HandleBotUpload` and `HandleDriveMembers` too so every route populates the access log.
+- `medium` — Define the six route paths once as package constants (or path-builder funcs `avatarRoomPath(roomID)`, `emojiPath(shortcode)`) and use them from both `registerRoutes` and every redirect/`imageUrl` construction site.
+- `low` — Split `handler.go` into `serve.go` (cache headers, `serveDefault`, `serveStored`, `redirectCrossCluster` — the helpers emoji also uses) and `avatar.go`'s handler half, so the shared media layer is visibly shared rather than incidentally living next to the avatar handlers.
+- `low` — Add a one-line `// drive.members keeps a bespoke envelope for the external drive client; see docs/…-drive-members-endpoint-design.md` above `writeDriveError`, or migrate it to `errhttp` if the external contract permits.
+- `low` — Delete `blobInfo.ETag`, or start using it as the `serveStored` validator; carrying an unread field invites a future reader to trust it.
+- `nitpick` — Move the `EIDCache*` checks into a `func (c *config) validate() error` alongside `Pool.Validate()`/`Guard.Validate()`, and pull the Gin/HTTP wiring out of `run()` into `newHTTPServer(cfg, h, sessions, sdk)`.
