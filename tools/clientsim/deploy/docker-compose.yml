@@ -1,0 +1,54 @@
+# clientsim overlay — joins the docker-local stack as an external client.
+#
+# Bring up the base stack first (repo root: make up), seed a pool artifact
+# (make -C tools/loadgen/deploy seed PRESET=medium plus --pool-out, see the
+# README one directory up), then:
+#
+#   docker compose -f tools/clientsim/deploy/docker-compose.yml up -d
+#
+# The side issuer is a second auth-service instance in dev mode, sharing the
+# stack's signing key via the generated docker-local/.env. A dev-mint account
+# guard that would bound which accounts it can sign is planned for a separate
+# PR (spec §6.3); until it lands, dev mode signs ANY account, so this overlay
+# is safe ONLY on a throwaway local stack — never on a shared cluster.
+name: clientsim
+
+services:
+  auth-sideissuer:
+    build:
+      context: ../../..
+      dockerfile: auth-service/deploy/Dockerfile
+    env_file:
+      - ../../../docker-local/.env
+    environment:
+      # Overridable: a hardcoded "true" here silently wins over a DEV_MODE=false
+      # an operator set in the env_file above.
+      DEV_MODE: "${CLIENTSIM_DEV_MODE:-true}"
+      PORT: "8080"
+    networks: [chat-local]
+
+  clientsim:
+    build:
+      context: ../../..
+      dockerfile: tools/clientsim/deploy/Dockerfile
+    # loadgen-style: exec the binary manually so one container serves many
+    # differently-parameterised runs.
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      CLIENTSIM_NATS_WS_URL: "ws://chat-local-nats:9222"
+      CLIENTSIM_AUTH_URL: "http://auth-sideissuer:8080"
+      CLIENTSIM_POOL_FILE: "/var/lib/clientsim/pool.json"
+      CLIENTSIM_SITE_ID: "site-local"
+      CLIENTSIM_METRICS_ADDR: ":2112"
+    ports:
+      - "2113:2112"
+    volumes:
+      - clientsim-pool:/var/lib/clientsim
+    networks: [chat-local]
+
+networks:
+  chat-local:
+    external: true
+
+volumes:
+  clientsim-pool:
