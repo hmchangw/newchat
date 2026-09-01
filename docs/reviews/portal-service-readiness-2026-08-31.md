@@ -105,3 +105,25 @@ Small, well-factored, and unusually well-commented (WHY not WHAT); the one struc
 - `low` — promote `cacheRetryInterval` to `PORTAL_CACHE_RETRY_INTERVAL` with `envDefault:"30s"`.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+No NATS surface at all, so the integration risk is entirely the client-facing HTTP contract — and `docs/client-api.md` has drifted from the handler in four places.
+
+### Findings
+- `high` — documented reason never emitted: `docs/client-api.md:414` specifies `500 internal / reason site_unknown` for `POST /api/v1/login`, but `portal-service/handler.go:299` returns a raw error, so the envelope has no `reason`. A frontend branching on it silently falls through to the generic case.
+- `medium` — duplicate section numbering: `### 2.5` appears twice, at `docs/client-api.md:356` (POST /api/v1/login) and `docs/client-api.md:809` (GET /api/settings). The table of contents (`docs/client-api.md:46`) lists only the settings one, so the login endpoint has no TOC entry, and the derived view links to colliding anchors — `docs/client-api/request-reply.md:86` and `:254`.
+- `medium` — the reason index misattributes an error: `docs/client-api.md:6917` says `upstream_unavailable` comes from portal-service `GET /api/userInfo` "(cannot reach home-site botplatform)". `HandleUserInfo`/`resolve` make no outbound call at all (`portal-service/handler.go:156-221`); the emitter is `POST /api/v1/login` (`handler.go:320`, `:304`).
+- `low` — the same index (`docs/client-api.md:6920`) lists `missing_fields` for portal's `GET /api/userInfo` only, but `POST /api/v1/login` also emits it (`portal-service/handler.go:264-266`); §2.5's own table has the row, the index does not.
+- `low` — `/healthz` and `/readyz` (`portal-service/routes.go:9-10`) are undocumented; defensible for infra probes, but worth one line since chat-frontend deployments script against them.
+- Positives: account validation reuses `subject.IsValidAccountToken` rather than an ad-hoc regex (`handler.go:171`), and the request ID is propagated to botplatform via `natsutil.RequestIDHeader` (`handler.go:314`), asserted in tests. No `pkg/subject` string-building, no OUTBOX/INBOX, no `pkg/idgen` usage — none apply here.
+
+### Recommendations
+- `high` — pick one: emit `errcode.BotplatformSiteUnknown` at `handler.go:299`, or delete the `site_unknown` row at `docs/client-api.md:414`. Emitting it is the better fix — the reason already exists and admin/bot clients need to distinguish misconfiguration from a real 500.
+- `medium` — renumber the login section (`docs/client-api.md:356`) to a unique `§2.6` (or renumber settings), add the missing TOC entry, and update the two anchors in `docs/client-api/request-reply.md:86,254` in the same PR — CLAUDE.md requires the derived views not to drift.
+- `medium` — fix the `upstream_unavailable` attribution at `docs/client-api.md:6917` to name `POST /api/v1/login`, and add `POST /api/v1/login` to the `missing_fields` row at `:6920`.
+- `low` — document `/healthz` and `/readyz`, noting `/readyz` returns 503 until the first successful directory load (`handler.go:357-363`).
+
+---
