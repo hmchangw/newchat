@@ -403,7 +403,7 @@ The `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSince` fie
 
 Synchronous: requester not in room, room full, restricted + not owner, bot not
 available (no app record / disabled assistant), user/org not found, unrecognized
-`history.mode` (`history.mode must be "none" or "all"`, `bad_request`).
+`history.mode` (`history.mode must be "none" or "all"`, `bad_request`); `"room not found"` (`not_found`).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -438,7 +438,7 @@ Exactly one of `account` or `orgId` must be set.
 
 Synchronous: neither/both of `account`/`orgId` set; requester not an owner; target is
 last **human** member (bots don't count, and a bot target skips the guard); org member
-cannot leave individually.
+cannot leave individually; `"room not found"` (`not_found`).
 
 **Emits:** [`AsyncJobResult`](events.md#asyncjobresult--async-completion) (`operation: "room.member.remove"` or `"room.member.remove_org"`), [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "removed"` — one per removed account, bots included on their encoded per-user subject), [`room.key`](events.md#roomkey--room-encryption-key-delivery) (channel rooms — key rotated; surviving members receive new event), [`member_left` / `member_removed`](events.md#member_left--member_removed-memberremoveevent) (on `chat.room.{roomID}.event.member`, or `chat.local.room.{roomID}.event.member` for same-site rooms by `crossSite`), `new_message` system message → [events.md](events.md#new_message-roomevent)
 
@@ -465,7 +465,7 @@ cannot leave individually.
 
 #### Errors
 
-Not an owner; target not a member; invalid `newRole`; already owner (promote); bot account cannot be promoted to owner (demote stays allowed); not owner (demote); last-owner guard; org-only member cannot be promoted.
+Not an owner; target not a member; invalid `newRole`; already owner (promote); bot account cannot be promoted to owner (demote stays allowed); not owner (demote); last-owner guard; org-only member cannot be promoted; `"room not found"` (`not_found`).
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "role_updated"` — to the target user only) → [events.md](events.md#subscriptionupdate--membership--state-changes)
 
@@ -551,7 +551,7 @@ See `MemberStatus` schema in [../client-api.md §3.1](../client-api.md#get-membe
 
 #### Errors
 
-`"only room members can perform this action"`, `"limit must be > 0 and <= room user count"`.
+`"only room members can perform this action"`, `"limit must be > 0 and <= room user count"`, `"room not found"`.
 
 **Emits:** None — reply only.
 
@@ -600,7 +600,7 @@ Synchronous RPC. Advances the caller's `lastSeenAt` and clears the per-subscript
 
 #### Errors
 
-`"only room members can perform this action"` (`forbidden`, `not_room_member`).
+`"only room members can perform this action"` (`forbidden`, `not_room_member`), `"room not found"` (`not_found`).
 
 **Emits:** [`subscription.update`](events.md#subscriptionupdate--membership--state-changes) (`action: "read"` — to the reader, non-bot only; not fired on early-return paths), [`message_read`](events.md#message_read-messagereadevent) (floor advance events — only when `Room.MinUserLastSeenAt` changes) → [events.md](events.md)
 

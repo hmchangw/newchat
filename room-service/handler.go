@@ -551,6 +551,9 @@ func (h *Handler) requireMembershipAndGetRoom(ctx context.Context, account, room
 		return nil, fmt.Errorf("check room membership: %w", subErr)
 	}
 	if roomErr != nil {
+		if errors.Is(roomErr, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", roomErr)
 	}
 	return room, nil
@@ -665,6 +668,9 @@ func (h *Handler) removeMember(c *natsrouter.Context, req model.RemoveMemberRequ
 	// Channel-only: DM/botDM removals are not supported.
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -762,6 +768,9 @@ func (h *Handler) updateRole(c *natsrouter.Context, req model.UpdateRoleRequest)
 	}
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -904,6 +913,9 @@ func (h *Handler) addMembers(c *natsrouter.Context, req model.AddMembersRequest)
 	// 3. Get room and guard on type
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
 	if room.Type != model.RoomTypeChannel {
@@ -1411,6 +1423,9 @@ func (h *Handler) messageRead(c *natsrouter.Context) (*model.StatusReply, error)
 		return nil
 	})
 	if err := g.Wait(); err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return nil, errRoomNotFound
+		}
 		return nil, err
 	}
 
@@ -1996,7 +2011,7 @@ func (h *Handler) roomRename(c *natsrouter.Context, req model.RoomRenameRequest)
 
 	room, err := h.store.GetRoom(ctx, roomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errRoomNotFound
 		}
 		return nil, fmt.Errorf("get room: %w", err)
@@ -2068,7 +2083,7 @@ func (h *Handler) roomRestricted(c *natsrouter.Context, req model.RoomRestricted
 
 	room, err := h.store.GetRoom(ctx, req.RoomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errRoomNotFound
 		}
 		return nil, fmt.Errorf("get room: %w", err)
@@ -2523,7 +2538,9 @@ func (h *Handler) authorizeRoomAppRead(ctx context.Context, account, roomID stri
 	}
 	room, err := h.store.GetRoomAppRead(ctx, roomID)
 	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		// Deliberately not errRoomNotFound: a non-member must not learn
+		// whether the room exists.
+		if errors.Is(err, ErrRoomNotFound) {
 			return nil, errAppAccessDenied
 		}
 		return nil, fmt.Errorf("get room for app read: %w", err)

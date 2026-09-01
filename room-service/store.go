@@ -12,7 +12,7 @@ import (
 var (
 	ErrUserNotFound       = errors.New("user not found")                        // GetUser: no matching account
 	ErrAppNotFound        = errors.New("app not found")                         // GetApp: no matching bot account
-	ErrRoomNotFound       = errors.New("room not found")                        // UpdateRoomVisibility: no matching room
+	ErrRoomNotFound       = errors.New("room not found")                        // GetRoom/GetRoomAppRead/UpdateRoomVisibility: no matching room
 	ErrOwnerNotSubscribed = errors.New("owner account is no longer subscribed") // ApplySubscriptionRestriction: owner left
 )
 
@@ -59,6 +59,7 @@ type RoomBotAppEntry struct {
 }
 
 type RoomStore interface {
+	// GetRoom returns ErrRoomNotFound when no room matches; any other error is infra.
 	GetRoom(ctx context.Context, id string) (*model.Room, error)
 	// GetRoomAppRead fetches only _id/type/siteId; same error contract as GetRoom.
 	GetRoomAppRead(ctx context.Context, id string) (*model.Room, error)

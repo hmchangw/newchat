@@ -14,7 +14,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.uber.org/mock/gomock"
 
 	"github.com/hmchangw/chat/pkg/errcode"
@@ -5699,7 +5698,7 @@ func TestHandleRoomRename_Validation(t *testing.T) {
 			newName: "new-name",
 			setupStore: func(s *MockRoomStore) {
 				s.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
-				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, mongo.ErrNoDocuments)
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, fmt.Errorf("room %q: %w", "r1", ErrRoomNotFound))
 			},
 			wantErr: errRoomNotFound,
 		},
@@ -5837,7 +5836,7 @@ func TestHandleRoomRestricted_Validation(t *testing.T) {
 			req:  model.RoomRestrictedRequest{RoomID: "r1", Account: "admin1", Restricted: true},
 			setupStore: func(s *MockRoomStore) {
 				s.EXPECT().GetUser(gomock.Any(), "admin1").Return(&model.User{Account: "admin1", Roles: []model.UserRole{model.UserRoleAdmin}}, nil)
-				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, mongo.ErrNoDocuments)
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, fmt.Errorf("room %q: %w", "r1", ErrRoomNotFound))
 			},
 			wantErr: errRoomNotFound,
 		},
@@ -7110,7 +7109,7 @@ func TestHandler_authorizeRoomAppRead(t *testing.T) {
 						RoomID: "r1",
 					}, nil)
 				s.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-					Return(nil, fmt.Errorf("room %q not found: %w", "r1", mongo.ErrNoDocuments))
+					Return(nil, fmt.Errorf("room %q: %w", "r1", ErrRoomNotFound))
 			},
 			wantErr: errAppAccessDenied,
 		},
@@ -7457,7 +7456,7 @@ func TestHandler_handleGetRoomAppTabs_RoomNotFound(t *testing.T) {
 	store.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
 		Return(&model.Subscription{User: model.SubscriptionUser{Account: "alice"}, RoomID: "r1"}, nil)
 	store.EXPECT().GetRoomAppRead(gomock.Any(), "r1").
-		Return(nil, fmt.Errorf("room %q not found: %w", "r1", mongo.ErrNoDocuments))
+		Return(nil, fmt.Errorf("room %q: %w", "r1", ErrRoomNotFound))
 
 	_, err := h.getRoomAppTabs(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
 	assert.ErrorIs(t, err, errAppAccessDenied)
@@ -8168,4 +8167,100 @@ func TestHandleCreateRoom_BotRequester_BotCounterpart_ChecksAppGate(t *testing.T
 		model.CreateRoomRequest{Users: []string{"helper.bot"}})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errBotNotAvailable))
+}
+
+// A missing room must surface as errRoomNotFound (404) from every RPC that
+// loads one, not as an internal 500. The store signals it with ErrRoomNotFound;
+// these cases pin the mapping at each call site.
+func TestHandler_RoomNotFound_MapsTo404(t *testing.T) {
+	newTestHandler := func(store *MockRoomStore) *Handler {
+		return NewHandler(store, nil, nil, nil, "site-a", 1000, 500, 5*time.Second, 5,
+			func(context.Context, string, []byte, string) error { return nil },
+			nil, nil, 0, subject.RouteGlobal)
+	}
+	notFound := fmt.Errorf("room %q: %w", "r1", ErrRoomNotFound)
+
+	tests := []struct {
+		name       string
+		setupStore func(*MockRoomStore)
+		invoke     func(*Handler) error
+	}{
+		{
+			name: "removeMember",
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, notFound)
+			},
+			invoke: func(h *Handler) error {
+				_, err := h.removeMember(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+					model.RemoveMemberRequest{RoomID: "r1", Account: "alice"})
+				return err
+			},
+		},
+		{
+			name: "updateRole",
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, notFound)
+			},
+			invoke: func(h *Handler) error {
+				_, err := h.updateRole(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+					model.UpdateRoleRequest{RoomID: "r1", Account: "bob", NewRole: model.RoleUser})
+				return err
+			},
+		},
+		{
+			name: "addMembers",
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+					Return(&model.Subscription{RoomID: "r1", Roles: []model.Role{model.RoleOwner}}, nil)
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, notFound)
+			},
+			invoke: func(h *Handler) error {
+				_, err := h.addMembers(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}),
+					model.AddMembersRequest{RoomID: "r1", Users: []string{"bob"}})
+				return err
+			},
+		},
+		{
+			name: "messageRead",
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().GetSubscription(gomock.Any(), "alice", "r1").
+					Return(&model.Subscription{RoomID: "r1"}, nil)
+				s.EXPECT().UpdateSubscriptionRead(gomock.Any(), "r1", "alice", gomock.Any()).
+					Return(0, nil).AnyTimes()
+				s.EXPECT().GetUserSiteID(gomock.Any(), "alice").Return("site-a", nil).AnyTimes()
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, notFound)
+			},
+			invoke: func(h *Handler) error {
+				_, err := h.messageRead(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+				return err
+			},
+		},
+		{
+			name: "listMemberStatuses",
+			setupStore: func(s *MockRoomStore) {
+				s.EXPECT().CheckMembership(gomock.Any(), "alice", "r1").Return(nil)
+				s.EXPECT().GetRoom(gomock.Any(), "r1").Return(nil, notFound)
+			},
+			invoke: func(h *Handler) error {
+				_, err := h.listMemberStatuses(ctxParams(map[string]string{"account": "alice", "roomID": "r1"}))
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockRoomStore(ctrl)
+			tc.setupStore(store)
+
+			err := tc.invoke(newTestHandler(store))
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errRoomNotFound, "a missing room must map to the 404 sentinel, not a 500")
+			var ec *errcode.Error
+			require.ErrorAs(t, err, &ec)
+			assert.Equal(t, errcode.CodeNotFound, ec.Code, "wire code must be not_found")
+		})
+	}
 }
