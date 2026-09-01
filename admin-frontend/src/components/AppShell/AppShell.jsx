@@ -21,7 +21,7 @@ const SECTIONS = [
   },
 ]
 
-// Top-level authed layout: nav to switch Users/Audit, header with signed-in account + logout.
+// Top-level authed layout: nav to switch sections, header with signed-in account + logout.
 export default function AppShell() {
   const { session, logout } = useAuth()
   const [section, setSection] = useState('users')
@@ -31,9 +31,8 @@ export default function AppShell() {
   }
 
   // A section carrying a `gate` is deploy-gated: it exists only where the runtime
-  // config enables it (PERMISSIONS_ENABLED / UPDATES_ENABLED, rendered by nginx
-  // from env). Ungated sections are always present.
-  const sections = SECTIONS.filter((s) => s.gate?.() ?? true)
+  // config enables it (PERMISSIONS_ENABLED / UPDATES_ENABLED, rendered by nginx from env).
+  const sections = SECTIONS.filter((s) => !s.gate || s.gate())
   const { Component } = sections.find((s) => s.key === section) ?? sections[0]
 
   return (

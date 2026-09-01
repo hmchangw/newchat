@@ -45,10 +45,18 @@ describe('runtimeConfig', () => {
     expect(updatesEnabled()).toBe(false)
   })
 
-  it('updatesEnabled reads at call time, independent of permissionsEnabled', async () => {
-    window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true', UPDATES_ENABLED: 'false' }
+  // The nginx-rendered config.js lands before the bundle, but tests flip the flag
+  // after import — so the read must happen per call, not once at module load.
+  it('the gates read window.__APP_CONFIG__ at call time, not at module load', async () => {
     const { permissionsEnabled, updatesEnabled } = await import('./runtimeConfig.js')
-    expect(permissionsEnabled()).toBe(true)
     expect(updatesEnabled()).toBe(false)
+
+    window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true', UPDATES_ENABLED: 'true' }
+    expect(updatesEnabled()).toBe(true)
+    expect(permissionsEnabled()).toBe(true)
+
+    window.__APP_CONFIG__ = { PERMISSIONS_ENABLED: 'true', UPDATES_ENABLED: 'false' }
+    expect(updatesEnabled()).toBe(false)
+    expect(permissionsEnabled()).toBe(true)
   })
 })
