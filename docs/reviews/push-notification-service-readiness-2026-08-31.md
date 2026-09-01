@@ -23,3 +23,23 @@ Coverage is 26.9%, and there is no integration test at all.
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
 | Count | 1 | 6 | 9 | 9 | 2 | **27** |
+
+---
+
+## 2. Go code quality — 3 / 5
+
+Idiomatic, well-wrapped errors and clean structured `slog` with no secret/body leakage, but errors are silently discarded at two ack sites and no log line carries a request ID.
+
+### Findings
+- `medium` — every log line in the service omits `request_id`; the handler never derives a correlation ID from the message, unlike every peer worker (`logctx.ConsumeContext` at `notification-worker/main.go:368`, `natsutil.RequestIDFromContext` throughout `broadcast-worker/handler.go`). Violates CLAUDE.md §3 "Request Logging & Tracing" — `push-notification-service/handler.go:31,38,43,49,58`
+- `medium` — `_ = msg.Ack()` discards the ack error with no comment, twice, while line 48 checks the same call — CLAUDE.md §3 "never ignore errors silently — comment if intentionally discarded" — `push-notification-service/handler.go:33`, `:40`
+- `low` — `HandleJetStreamMsg` hand-rolls the exact ack/permanent/nak decision tree `jsretry.Settle` already owns (`pkg/jsretry/jsretry.go:86-141`), duplicating the `errcode.IsPermanent` branch — `push-notification-service/handler.go:28-52`
+- `low` — SAST audit-coverage gap, environmental not service: gosec and repo-owned semgrep are clean repo-wide; `govulncheck` and the semgrep registry packs could not run (blocked egress) — per `GLOBAL_PREP.md:6-9`
+- `nitpick` — stray blank line inside the config struct — `push-notification-service/main.go:30`
+
+### Recommendations
+- `medium` — call `logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())` in the consume loop and add `request_id` to all five log sites.
+- `medium` — replace the two bare `_ = msg.Ack()` with a checked ack (or one justifying comment each).
+- `low` — collapse `HandleJetStreamMsg`'s branch to `jsretry.Settle(ctx, msg, …, err)`, keeping only the unmarshal ack-drop.
+
+---
