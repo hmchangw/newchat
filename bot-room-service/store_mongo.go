@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 type storeMongo struct {
@@ -31,14 +32,8 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 // writes, and must be invoked once at startup. The rooms and users access here
 // (including the room-key store) is entirely _id-keyed, so neither needs one.
 func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
-	// Mirrors room-service's declaration — same keys AND same unique option, or
-	// whichever service starts second hits IndexOptionsConflict on the shared collection.
-	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure subscriptions (roomId,u.account) unique index: %w", err)
-	}
+	// subscriptions.{roomId,u.account} (unique) is owned by room-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.subs, "roomId_1_u.account_1")
 	// Upsert and delete identify a subscription by u._id — the remove RPC carries
 	// user ids, not accounts — which the unique index above cannot serve.
 	if _, err := s.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
@@ -75,17 +70,18 @@ func (s *storeMongo) InsertRoom(ctx context.Context, room *Room) error {
 
 func (s *storeMongo) FindRoom(ctx context.Context, roomID string) (*Room, error) {
 	var doc struct {
-		ID           string    `bson:"_id"`
-		Type         string    `bson:"t"`
-		Name         string    `bson:"name"`
-		Topic        string    `bson:"topic"`
-		SiteID       string    `bson:"siteId"`
-		CreatedAt    time.Time `bson:"createdAt"`
-		CreatedByBot string    `bson:"createdByBot"`
+		ID           string     `bson:"_id"`
+		Type         string     `bson:"t"`
+		Name         string     `bson:"name"`
+		Topic        string     `bson:"topic"`
+		SiteID       string     `bson:"siteId"`
+		LastMsgAt    *time.Time `bson:"lastMsgAt"`
+		CreatedAt    time.Time  `bson:"createdAt"`
+		CreatedByBot string     `bson:"createdByBot"`
 	}
 	err := s.rooms.FindOne(ctx,
 		bson.M{"_id": roomID},
-		options.FindOne().SetProjection(bson.M{"_id": 1, "t": 1, "name": 1, "topic": 1, "siteId": 1, "createdAt": 1, "createdByBot": 1}),
+		options.FindOne().SetProjection(bson.M{"_id": 1, "t": 1, "name": 1, "topic": 1, "siteId": 1, "lastMsgAt": 1, "createdAt": 1, "createdByBot": 1}),
 	).Decode(&doc)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
@@ -95,7 +91,7 @@ func (s *storeMongo) FindRoom(ctx context.Context, roomID string) (*Room, error)
 	}
 	return &Room{
 		ID: doc.ID, Type: doc.Type, Name: doc.Name, Topic: doc.Topic,
-		SiteID: doc.SiteID, CreatedAt: doc.CreatedAt, CreatedByBot: doc.CreatedByBot,
+		SiteID: doc.SiteID, LastMsgAt: doc.LastMsgAt, CreatedAt: doc.CreatedAt, CreatedByBot: doc.CreatedByBot,
 	}, nil
 }
 
@@ -109,6 +105,8 @@ func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) 
 			"roomId":    sub.RoomID,
 			"u":         bson.M{"_id": sub.UserID, "account": sub.Account, "isBot": sub.IsBot},
 			"siteId":    sub.SiteID,
+			"name":      sub.Name,
+			"roomType":  string(sub.RoomType),
 			"createdAt": sub.CreatedAt,
 		},
 	}
@@ -126,12 +124,27 @@ func (s *storeMongo) UpsertSubscription(ctx context.Context, sub *Subscription) 
 	return res.UpsertedCount > 0, nil
 }
 
-func (s *storeMongo) DeleteSubscription(ctx context.Context, roomID, userID string) (bool, error) {
-	res, err := s.subs.DeleteOne(ctx, bson.M{"roomId": roomID, "u._id": userID})
-	if err != nil {
-		return false, fmt.Errorf("delete subscription (%s,%s): %w", roomID, userID, err)
+// DeleteSubscription deletes and returns the row's account in one round trip.
+// FindOneAndDelete rather than DeleteOne so the caller learns which account it
+// just de-authorized without a second lookup that could fail independently —
+// u.account is exactly the key subauthcache is stored under.
+func (s *storeMongo) DeleteSubscription(ctx context.Context, roomID, userID string) (string, bool, error) {
+	var deleted struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
 	}
-	return res.DeletedCount > 0, nil
+	err := s.subs.FindOneAndDelete(ctx,
+		bson.M{"roomId": roomID, "u._id": userID},
+		options.FindOneAndDelete().SetProjection(bson.M{"u.account": 1, "_id": 0}),
+	).Decode(&deleted)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("delete subscription (%s,%s): %w", roomID, userID, err)
+	}
+	return deleted.User.Account, true, nil
 }
 
 func (s *storeMongo) FindUser(ctx context.Context, userID string) (*model.User, error) {

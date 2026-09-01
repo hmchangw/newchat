@@ -1,0 +1,90 @@
+# Parity rules for gosec checks the internal SAST gate reports as
+# `gosec.G###-1` but that p/golang and p/security-audit do not cover. Without
+# these the repo gate passes while the gate that blocks merges does not.
+#
+# Suppress a justified false positive with BOTH directives, each on its own
+# line directly above the statement (semgrep ignores a rule-id directive
+# appended to another comment):
+#
+#     // #nosec G304 -- reason
+#     // nosemgrep: gosec.G304-1
+rules:
+  - id: gosec.G107-1
+    languages: [go]
+    severity: WARNING
+    message: >
+      HTTP request with a non-literal URL (gosec G107, CWE-918 SSRF). If the
+      URL is a test server's own address or otherwise untainted, suppress with
+      `// #nosec G107 -- reason` plus `// nosemgrep: gosec.G107-1`.
+    patterns:
+      - pattern-either:
+          - pattern: http.Get($URL)
+          - pattern: http.Head($URL)
+          - pattern: http.Post($URL, ...)
+          - pattern: http.PostForm($URL, ...)
+      - pattern-not: http.Get("...")
+      - pattern-not: http.Head("...")
+      - pattern-not: http.Post("...", ...)
+      - pattern-not: http.PostForm("...", ...)
+
+  - id: gosec.G112-1
+    languages: [go]
+    severity: WARNING
+    message: >
+      http.Server without ReadHeaderTimeout (gosec G112, CWE-400 slowloris).
+      Prefer setting ReadHeaderTimeout over suppressing.
+    patterns:
+      # Match the literal itself, so `var`, plain assignment, a return
+      # expression, a struct field and non-pointer values are all covered --
+      # each is just as exposed to slowloris as the `:=` form.
+      - pattern: "http.Server{...}"
+      - pattern-not: "http.Server{..., ReadHeaderTimeout: ..., ...}"
+      - pattern-not: "http.Server{..., ReadTimeout: ..., ...}"
+
+  - id: gosec.G304-1
+    languages: [go]
+    severity: WARNING
+    message: >
+      File opened from a variable path (gosec G304, CWE-22 traversal). If the
+      path is developer-supplied or derived from a trusted fixture, suppress
+      with `// #nosec G304 -- reason` plus `// nosemgrep: gosec.G304-1`.
+    patterns:
+      - pattern-either:
+          - pattern: os.ReadFile($P)
+          - pattern: os.Open($P)
+          - pattern: os.OpenFile($P, ...)
+          - pattern: os.Create($P)
+      - pattern-not: os.ReadFile("...")
+      - pattern-not: os.Open("...")
+      - pattern-not: os.OpenFile("...", ...)
+      - pattern-not: os.Create("...")
+
+  # G601 is obsolete for this module: go.mod requires go 1.25, and since Go
+  # 1.22 each iteration gets a fresh loop variable, so &loopvar cannot alias
+  # across iterations. gosec itself reports nothing here at any confidence.
+  # The rule exists only for parity with the gate, which runs a port that does
+  # not check the language version.
+  - id: gosec.G601-1
+    languages: [go]
+    severity: WARNING
+    message: >
+      Address taken of a range variable (gosec G601, CWE-118). Safe on Go
+      1.22+, where each iteration has its own variable. Suppress with
+      `// #nosec G601 -- reason` plus `// nosemgrep: gosec.G601-1` on the
+      lines directly above the `for ... range` statement.
+    # Anchored on the range statement, not the `&v` expression, so the finding
+    # lands on the same line the gate's gosec port reports. Matching `&$V` alone
+    # put it several lines lower, where a directive placed for the gate did not
+    # sit -- the rule fired for us in a different place than for them.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              for $K, $V := range $C {
+                ...
+                <... &$V ...>
+              }
+          - pattern: |
+              for $V := range $C {
+                ...
+                <... &$V ...>
+              }

@@ -13,6 +13,13 @@ data:
   CASSANDRA_KEYSPACE: {{ .Values.cassandra.keyspace | quote }}
   MESSAGE_BUCKET_HOURS: {{ .Values.cassandra.messageBucketHours | quote }}
   METRICS_ADDR: {{ printf ":%d" (.Values.metrics.port | int) | quote }}
+  PPROF_ADDR: {{ .Values.profiling.pprofAddr | quote }}
+  {{- if .Values.runtime.goMemLimit }}
+  GOMEMLIMIT: {{ .Values.runtime.goMemLimit | quote }}
+  {{- end }}
+  {{- if .Values.runtime.goGC }}
+  GOGC: {{ .Values.runtime.goGC | quote }}
+  {{- end }}
   MAX_IN_FLIGHT: {{ .Values.soak.maxInFlight | quote }}
   SOAK_RUN_ID: {{ .Values.runId | quote }}
   SOAK_ENVIRONMENT: {{ .Values.soak.environment | quote }}
@@ -32,6 +39,38 @@ data:
   SOAK_REACTION_REMOVE_SHARE: {{ .Values.soak.reactionRemoveShare | quote }}
   SOAK_PINNED_LIST_RATE: {{ .Values.soak.pinnedListRate | quote }}
   SOAK_VERIFY_RATE: {{ .Values.soak.verifyRate | quote }}
+  SOAK_MEMBER_MUTATION_RATE: {{ .Values.soak.memberMutationRate | quote }}
+  SOAK_ROOM_MUTATION_RATE: {{ .Values.soak.roomMutationRate | quote }}
+  SOAK_ROOM_READ_RATE: {{ .Values.soak.roomReadRate | quote }}
+  SOAK_USER_READ_RATE: {{ .Values.soak.userReadRate | quote }}
+  {{- if .Values.soak.subscriptionListLimit }}
+  SOAK_SUBSCRIPTION_LIST_LIMIT: {{ .Values.soak.subscriptionListLimit | quote }}
+  {{- end }}
+  {{- if .Values.soak.subscriptionListIncludeLastMessage }}
+  SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE: {{ .Values.soak.subscriptionListIncludeLastMessage | quote }}
+  {{- end }}
+  {{- if .Values.soak.roomZipfS }}
+  SOAK_ROOM_ZIPF_S: {{ .Values.soak.roomZipfS | quote }}
+  {{- end }}
+  {{- if .Values.soak.roomZipfV }}
+  SOAK_ROOM_ZIPF_V: {{ .Values.soak.roomZipfV | quote }}
+  {{- end }}
+  SOAK_SEARCH_READ_RATE: {{ .Values.soak.searchReadRate | quote }}
+  SOAK_SEARCH_SETTLE: {{ .Values.soak.searchSettle | quote }}
+  SOAK_SEARCH_OBSERVER_ENABLED: {{ .Values.searchObserver.enabled | quote }}
+  SOAK_ENCRYPTION_PREFLIGHT: {{ .Values.encryptionPreflight.enabled | quote }}
+  SOAK_ENCRYPTION_PREFLIGHT_TIMEOUT: {{ .Values.encryptionPreflight.timeout | quote }}
+  SOAK_ROOM_CREATE_RATE: {{ .Values.soak.roomCreateRate | quote }}
+  SOAK_ROOM_CREATE_BUDGET: {{ .Values.soak.roomCreateBudget | quote }}
+  SOAK_ROOM_CREATE_SIZE: {{ .Values.soak.roomCreateSize | quote }}
+  SOAK_READ_RECEIPT_RATE: {{ .Values.soak.readReceiptRate | quote }}
+  SOAK_PRESENCE_RATE: {{ .Values.soak.presenceRate | quote }}
+  SOAK_PRESENCE_CONNECTIONS: {{ .Values.soak.presenceConnections | quote }}
+  SOAK_PRESENCE_QUERY_SHARE: {{ .Values.soak.presenceQueryShare | quote }}
+  SOAK_PRESENCE_QUERY_BATCH: {{ .Values.soak.presenceQueryBatch | quote }}
+  SOAK_PRESENCE_SETTLE: {{ .Values.soak.presenceSettle | quote }}
+  SOAK_PRESENCE_TTL: {{ .Values.soak.presenceTTL | quote }}
+  SOAK_MEMBER_QUARANTINE_MAX: {{ .Values.soak.memberQuarantineMax | quote }}
   SOAK_MAX_USERS: {{ .Values.soak.maxUsers | quote }}
   SOAK_ACTIVE_USERS: {{ .Values.soak.activeUsers | quote }}
   SOAK_ROOM_COUNT: {{ .Values.soak.roomCount | quote }}
@@ -50,10 +89,18 @@ data:
   SOAK_RECENT_PER_ROOM: {{ .Values.soak.recentPerRoom | quote }}
   SOAK_RECENT_TOTAL: {{ .Values.soak.recentTotal | quote }}
   SOAK_LEDGER_DIR: {{ ternary .Values.ledger.mountPath "" .Values.ledger.enabled | quote }}
+  SOAK_LEDGER_EPOCH: {{ .Values.ledger.epoch | quote }}
   SOAK_LEDGER_CAPACITY: {{ .Values.ledger.capacity | quote }}
+  SOAK_LEDGER_COMPACT_EVERY: {{ .Values.ledger.compactEvery | quote }}
+  SOAK_LEDGER_MAX_BYTES: {{ .Values.ledger.maxBytes | quote }}
+  SOAK_LEDGER_EXPIRE_BATCH: {{ .Values.ledger.expireBatch | quote }}
+  SOAK_HEAP_PROFILE_DIR: {{ .Values.profiling.heapProfileDir | quote }}
+  SOAK_HEAP_PROFILE_INTERVAL: {{ .Values.profiling.heapProfileInterval | quote }}
+  SOAK_HEAP_PROFILE_KEEP: {{ .Values.profiling.heapProfileKeep | quote }}
   SOAK_RECONCILE_DEADLINE: {{ .Values.ledger.reconcileDeadline | quote }}
   SOAK_RECONCILE_RETRY_INTERVAL: {{ .Values.ledger.reconcileRetryInterval | quote }}
   SOAK_RECONCILE_READ_SHARE: {{ .Values.ledger.reconcileReadShare | quote }}
+  SOAK_ROOM_RECONCILE_READ_SHARE: {{ .Values.ledger.roomReconcileReadShare | quote }}
   SOAK_RECIPIENT_OBSERVER_ENABLED: {{ .Values.recipientObserver.enabled | quote }}
   SOAK_RECIPIENT_OBSERVER_QUEUE: {{ .Values.recipientObserver.queue | quote }}
   SOAK_RECIPIENT_OBSERVER_CONNECTIONS: {{ .Values.recipientObserver.connections | quote }}

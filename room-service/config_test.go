@@ -8,9 +8,29 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// main wires cfg.Pool.Validate / cfg.Guard.Validate; the exhaustive cases live
+// in those packages' tests — these just prove the fields are on config and are
+// validated.
+func TestConfig_DelegatesPoolValidation(t *testing.T) {
+	cfg := config{Pool: mongoutil.PoolConfig{MaxPoolSize: 0}}
+	err := cfg.Pool.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MONGO_MAX_POOL_SIZE")
+}
+
+func TestConfig_DelegatesGuardValidation(t *testing.T) {
+	cfg := config{Guard: natsrouter.GuardConfig{MaxConcurrency: -1}}
+	err := cfg.Guard.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MAX_CONCURRENCY")
+}
 
 func TestLegacyRoomOrigins_UnmarshalText(t *testing.T) {
 	var l legacyRoomOrigins
@@ -59,7 +79,7 @@ func TestConfig_ValkeyDisabledByDefault(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Empty(t, cfg.ValkeyAddrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
+	assert.Empty(t, cfg.Valkey.Addrs, "badge cache must be disabled (no Valkey required) unless VALKEY_ADDRS is set")
 }
 
 func TestConfig_ValkeyAddrsParsed(t *testing.T) {
@@ -70,8 +90,51 @@ func TestConfig_ValkeyAddrsParsed(t *testing.T) {
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.ValkeyAddrs)
-	assert.Equal(t, "hunter2", cfg.ValkeyPassword)
+	assert.Equal(t, []string{"node-1:6379", "node-2:6379"}, cfg.Valkey.Addrs)
+	assert.Equal(t, "hunter2", cfg.Valkey.Password)
+}
+
+func TestConfig_MentionableLimits(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+
+	t.Run("defaults", func(t *testing.T) {
+		// Unset both and restore the caller's env after the subtest so later
+		// tests don't observe defaults instead of their configured values.
+		for _, k := range []string{"MENTIONABLE_DEFAULT_LIMIT", "MENTIONABLE_MAX_LIMIT"} {
+			if v, ok := os.LookupEnv(k); ok {
+				t.Cleanup(func() { _ = os.Setenv(k, v) })
+			} else {
+				t.Cleanup(func() { _ = os.Unsetenv(k) })
+			}
+			require.NoError(t, os.Unsetenv(k))
+		}
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 3, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 50, cfg.MentionableMaxLimit)
+	})
+
+	t.Run("override", func(t *testing.T) {
+		t.Setenv("MENTIONABLE_DEFAULT_LIMIT", "10")
+		t.Setenv("MENTIONABLE_MAX_LIMIT", "200")
+		cfg, err := env.ParseAs[config]()
+		require.NoError(t, err)
+		assert.Equal(t, 10, cfg.MentionableDefaultLimit)
+		assert.Equal(t, 200, cfg.MentionableMaxLimit)
+	})
+
+	// The startup guard (fail-fast in main via validateMentionableLimits) is what
+	// rejects bad values — env parsing itself accepts them. Exercise the guard
+	// directly so this test fails if it is removed or inverted.
+	t.Run("validateMentionableLimits", func(t *testing.T) {
+		require.NoError(t, validateMentionableLimits(3, 50))
+		require.NoError(t, validateMentionableLimits(50, 50)) // default == max is allowed
+		assert.Error(t, validateMentionableLimits(0, 50))     // default not positive
+		assert.Error(t, validateMentionableLimits(-1, 50))
+		assert.Error(t, validateMentionableLimits(3, 0))    // max not positive
+		assert.Error(t, validateMentionableLimits(100, 50)) // default exceeds max
+	})
 }
 
 func TestConfig_BadgeCacheTTL(t *testing.T) {
@@ -101,21 +164,21 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		require.NoError(t, os.Unsetenv("MAX_CONCURRENCY"))
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 256, cfg.MaxConcurrency)
+		assert.Equal(t, 256, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("override", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "64")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 64, cfg.MaxConcurrency)
+		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
 	})
 
 	t.Run("zero_disables", func(t *testing.T) {
 		t.Setenv("MAX_CONCURRENCY", "0")
 		cfg, err := env.ParseAs[config]()
 		require.NoError(t, err)
-		assert.Equal(t, 0, cfg.MaxConcurrency)
+		assert.Equal(t, 0, cfg.Guard.MaxConcurrency)
 	})
 }
 
@@ -159,12 +222,48 @@ func TestConfig_RoomSubjectMode(t *testing.T) {
 	}
 }
 
-func TestConfig_ServiceName(t *testing.T) {
+// The plain collection handles are created without collection options, so they
+// inherit the CLIENT preference. Only 12 of MongoStore's methods use a
+// *Secondary handle; every other read fails during a primary-down incident
+// unless the client itself falls back.
+func TestConfig_ClientReadPreferenceDefault(t *testing.T) {
 	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
 	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
-	t.Setenv("OTEL_SERVICE_NAME", "room-service-canary")
+	t.Setenv("MONGO_CLIENT_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	t.Setenv("MONGO_READ_PREFERENCE", "")
+	require.NoError(t, os.Unsetenv("MONGO_CLIENT_READ_PREFERENCE"))
+	require.NoError(t, os.Unsetenv("MONGO_READ_PREFERENCE"))
 
 	cfg, err := env.ParseAs[config]()
 	require.NoError(t, err)
-	require.Equal(t, "room-service-canary", cfg.ServiceName)
+
+	// The per-collection override keeps its vetted staleness-tolerant setting...
+	assert.Equal(t, "secondaryPreferred", cfg.MongoReadPreference)
+	// ...while every handle without an override now falls back instead of failing.
+	assert.Equal(t, "primaryPreferred", cfg.MongoClientReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
+}
+
+// broadcast-worker encrypts against its own room-key handle while key.get is
+// served from here. If the two disagree about falling back, the producer keeps
+// delivering messages whose keys the consumer cannot fetch. Both read
+// MONGO_KEY_READ_PREFERENCE and must default the same way.
+func TestConfig_KeyReadPreferenceDefault(t *testing.T) {
+	t.Setenv("NATS_URL", "nats://localhost:4222")
+	t.Setenv("SITE_ID", "site-a")
+	t.Setenv("MONGO_URI", "mongodb://localhost:27017")
+	t.Setenv("MONGO_KEY_READ_PREFERENCE", "") // pin cleanup so the host value is restored
+	require.NoError(t, os.Unsetenv("MONGO_KEY_READ_PREFERENCE"))
+
+	cfg, err := env.ParseAs[config]()
+	require.NoError(t, err)
+	assert.Equal(t, "primaryPreferred", cfg.MongoKeyReadPreference)
+
+	rp, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	require.NoError(t, err)
+	assert.Equal(t, readpref.PrimaryPreferredMode, rp.Mode())
 }

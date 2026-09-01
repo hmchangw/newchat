@@ -1,0 +1,190 @@
+name: chat-fed-deps
+
+# Federated counterpart of compose.deps.yaml. Owns everything that is not a Go
+# service: the three networks, the two NATS servers (leafnode-linked pair),
+# the two Valkeys, and the shared datastores.
+#
+# Shared datastores are pulled in with `extends:` rather than copied, so their
+# image pins, healthchecks and volumes stay single-sourced in compose.deps.yaml.
+# `extends` UNIONS the source's networks instead of replacing them, so the
+# inherited `chat-local` key is repointed at chat-site-local below and
+# chat-site-remote is added per service. container_name is overridden because
+# the inherited chat-local-* name would collide with a single-site stack.
+#
+# Start: make fed-deps-up   Stop: make fed-deps-down
+# Cannot run at the same time as the single-site deps stack — both publish the
+# same host ports for the shared datastores.
+
+services:
+  # --- Per-site NATS: standalone JetStream each, joined by a leafnode link ----
+  # Each joins its site network under the alias `nats` so every service keeps
+  # NATS_URL=nats://nats:4222 unchanged, plus chat-federation for the leaf link.
+  nats-site-local:
+    image: nats:2.11-alpine
+    container_name: chat-fed-nats-site-local
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "9222:9222"
+    volumes:
+      - ./nats-site-local.conf:/etc/nats/nats.conf:ro
+      - nats-site-local-data:/data/jetstream
+    command: ["-c", "/etc/nats/nats.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      chat-local: { aliases: [nats] }
+      chat-federation: {}
+
+  nats-site-remote:
+    image: nats:2.11-alpine
+    container_name: chat-fed-nats-site-remote
+    ports:
+      - "4322:4222"
+      - "8322:8222"
+      - "9322:9222"
+    volumes:
+      - ./nats-site-remote.conf:/etc/nats/nats.conf:ro
+      # The spoke authenticates its two leafnode remotes with these: backend.creds
+      # for the chatapp account (chat subjects) and sys.creds for SYS (which is
+      # what lets JetStream start). The hub only listens, so it needs neither.
+      - ./backend.creds:/etc/nats/backend.creds:ro
+      - ./sys.creds:/etc/nats/sys.creds:ro
+      - nats-site-remote-data:/data/jetstream
+    command: ["-c", "/etc/nats/nats.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      chat-site-remote: { aliases: [nats] }
+      chat-federation: {}
+
+  # --- Per-site Valkey -------------------------------------------------------
+  # Twinned rather than shared: keys (presence:{account}:conns, room key pairs)
+  # carry no site prefix. Same single-node cluster-mode entrypoint as
+  # compose.deps.yaml; --cluster-announce-hostname valkey matches the alias.
+  valkey-site-local:
+    image: valkey/valkey:8.1.7-alpine
+    container_name: chat-fed-valkey-site-local
+    ports:
+      - "6379:6379"
+    entrypoint: &valkey-entrypoint
+      - sh
+      - -c
+      - |
+        valkey-server --cluster-enabled yes --cluster-config-file /tmp/nodes.conf --cluster-node-timeout 5000 --cluster-announce-hostname valkey --cluster-preferred-endpoint-type hostname --save '' --appendonly no &
+        until valkey-cli ping > /dev/null 2>&1; do sleep 0.1; done
+        if ! valkey-cli CLUSTER INFO | grep -q 'cluster_slots_assigned:16384'; then
+          valkey-cli CLUSTER ADDSLOTSRANGE 0 16383
+        fi
+        wait
+    healthcheck: &valkey-healthcheck
+      test: ["CMD-SHELL", "valkey-cli CLUSTER INFO | grep 'cluster_state:ok'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      chat-local: { aliases: [valkey] }
+
+  valkey-site-remote:
+    image: valkey/valkey:8.1.7-alpine
+    container_name: chat-fed-valkey-site-remote
+    ports:
+      - "6479:6379"
+    entrypoint: *valkey-entrypoint
+    healthcheck: *valkey-healthcheck
+    networks:
+      chat-site-remote: { aliases: [valkey] }
+
+  # --- Shared datastores, on both site networks ------------------------------
+  mongodb:
+    extends: { file: ./compose.deps.yaml, service: mongodb }
+    container_name: chat-fed-mongodb
+    networks: [chat-site-remote]
+
+  cassandra:
+    extends: { file: ./compose.deps.yaml, service: cassandra }
+    container_name: chat-fed-cassandra
+    networks: [chat-site-remote]
+
+  elasticsearch:
+    extends: { file: ./compose.deps.yaml, service: elasticsearch }
+    container_name: chat-fed-elasticsearch
+    networks: [chat-site-remote]
+
+  minio:
+    extends: { file: ./compose.deps.yaml, service: minio }
+    container_name: chat-fed-minio
+    networks: [chat-site-remote]
+
+  keycloak:
+    extends: { file: ./compose.deps.yaml, service: keycloak }
+    container_name: chat-fed-keycloak
+    networks: [chat-site-remote]
+
+  vault:
+    extends: { file: ./compose.deps.yaml, service: vault }
+    container_name: chat-fed-vault
+    networks: [chat-site-remote]
+
+  # --- One-shots -------------------------------------------------------------
+  # Keyspace-templated schema bootstrap. Every keyspace reference in the .cql
+  # files is `chat.<object>` except a single bare `CREATE KEYSPACE IF NOT
+  # EXISTS chat`, so one sed rule covers all of them and the .cql files stay
+  # byte-identical (CLAUDE.md makes them a mandated mirror of
+  # docs/cassandra_message_model.md). Run once per site with a different
+  # KEYSPACE; the Makefile drives both passes.
+  cassandra-init:
+    image: cassandra:5
+    container_name: chat-fed-cassandra-init
+    profiles: ["init"]
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      - KEYSPACE=${KEYSPACE:-chat}
+    volumes:
+      - ./cassandra/init:/init:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        shopt -s nullglob
+        for f in /init/*.cql; do
+          echo "==> applying $$f as keyspace $${KEYSPACE}"
+          sed "s/\bchat\b/$${KEYSPACE}/g" "$$f" | cqlsh cassandra
+        done
+        echo "Schema initialized for $${KEYSPACE}"
+    networks:
+      - chat-local
+
+  vault-init:
+    extends: { file: ./compose.deps.yaml, service: vault-init }
+    container_name: chat-fed-vault-init
+    networks: [chat-site-remote]
+
+volumes:
+  nats-site-local-data:
+  nats-site-remote-data:
+  mongo-data:
+  cassandra-data:
+  es-data:
+  minio-data:
+
+networks:
+  # `chat-local` is the key every extended service inherits; it points at the
+  # site-local network. chat-site-remote is added explicitly per service.
+  chat-local:
+    name: chat-site-local
+  chat-site-remote:
+    name: chat-site-remote
+  chat-federation:
+    name: chat-federation

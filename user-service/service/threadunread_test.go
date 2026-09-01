@@ -290,3 +290,36 @@ func TestClearAllThreadUnread_ListError(t *testing.T) {
 	_, err := svc.ClearAllThreadUnread(ctx("alice", "site-a"), model.ThreadReadAllRequest{})
 	require.Error(t, err)
 }
+
+// Rows store the room as their own subscriber sees it, so the DM tally reads the
+// stored type directly — a bot's DM with a person is written dm and counts.
+func TestGetThreadUnreadSummary_CountsPerSubscriberDMs(t *testing.T) {
+	tests := []struct {
+		name     string
+		roomType model.RoomType
+		wantDM   bool
+	}{
+		{"a dm row counts", model.RoomTypeDM, true},
+		{"an app room does not", model.RoomTypeBotDM, false},
+		{"a channel is not a direct message", model.RoomTypeChannel, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			ts := mocks.NewMockThreadSubscriptionRepository(ctrl)
+			rc := mocks.NewMockRoomClient(ctrl)
+
+			ts.EXPECT().ListByAccount(gomock.Any(), "weather.bot").Return([]model.ThreadUnreadRow{
+				{ThreadRoomID: "tr1", SiteID: "site-a", RoomType: tt.roomType, LastSeenAt: nil},
+			}, nil)
+			rc.EXPECT().GetThreadRoomInfoBatch(gomock.Any(), "site-a", []string{"tr1"}).
+				Return([]model.ThreadRoomInfo{{ThreadRoomID: "tr1", Found: true, LastMsgAt: 300}}, nil)
+
+			svc := newThreadUnreadService(t, ts, rc)
+			resp, err := svc.GetThreadUnreadSummary(ctx("weather.bot", "site-a"), model.ThreadUnreadSummaryRequest{})
+			require.NoError(t, err)
+			assert.True(t, resp.Unread)
+			assert.Equal(t, tt.wantDM, resp.UnreadDirectMessage)
+		})
+	}
+}

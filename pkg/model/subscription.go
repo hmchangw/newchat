@@ -1,21 +1,71 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
 // ErrSubscriptionNotFound is returned when a subscription lookup finds no matching document.
 var ErrSubscriptionNotFound = errors.New("subscription not found")
 
+// Role is a per-room role carried on a subscription. Values cross the wire
+// normalized: the legacy "member" spelling is rewritten to RoleUser by
+// MarshalJSON/UnmarshalJSON, so clients only ever see "user" and may send
+// either. BSON is deliberately left alone — normalizing storage would rewrite
+// documents behind the reader's back.
 type Role string
 
 const (
 	RoleOwner Role = "owner"
 	// RoleAdmin is recognized by message-gatekeeper's large-room bypass but not yet assignable via role-update RPC.
-	RoleAdmin  Role = "admin"
+	RoleAdmin Role = "admin"
+	// RoleUser is the non-owner role every subscription is created with.
+	RoleUser Role = "user"
+	// RoleMember is the pre-cutover spelling of RoleUser. No writer produces it
+	// any more; it survives on stored subscriptions, so reads normalize it.
 	RoleMember Role = "member"
 )
+
+// NormalizeRole maps the legacy RoleMember spelling onto RoleUser; every other
+// role, known or not, passes through unchanged.
+func NormalizeRole(r Role) Role {
+	if r == RoleMember {
+		return RoleUser
+	}
+	return r
+}
+
+// NormalizeRoles returns roles with every legacy RoleMember rewritten to
+// RoleUser, preserving order. nil in, nil out; the input is never mutated.
+func NormalizeRoles(roles []Role) []Role {
+	if roles == nil {
+		return nil
+	}
+	out := make([]Role, len(roles))
+	for i, r := range roles {
+		out[i] = NormalizeRole(r)
+	}
+	return out
+}
+
+// MarshalJSON emits the normalized role so no client ever sees the legacy
+// "member" left on subscriptions written before the cutover.
+func (r Role) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(NormalizeRole(r)))
+}
+
+// UnmarshalJSON accepts either spelling and stores the normalized one, so a
+// client still sending "member" needs no special case downstream.
+func (r *Role) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("decode role: %w", err)
+	}
+	*r = NormalizeRole(Role(s))
+	return nil
+}
 
 type SubscriptionUser struct {
 	ID      string `json:"id" bson:"_id"`
@@ -105,6 +155,7 @@ type EnrichedSubscription struct {
 	UserCount         int        `json:"-" bson:"userCount,omitempty"`
 	LastMsgAt         *time.Time `json:"-" bson:"lastMsgAt,omitempty"`
 	LastMsgID         string     `json:"-" bson:"lastMsgId,omitempty"`
+	LastUserMsgAt     *time.Time `json:"-" bson:"lastUserMsgAt,omitempty"`
 	LastMentionAllAt  *time.Time `json:"-" bson:"lastMentionAllAt,omitempty"`
 	MinUserLastSeenAt *time.Time `json:"-" bson:"minUserLastSeenAt,omitempty"`
 	AppCount          int        `json:"-" bson:"appCount,omitempty"`
@@ -138,6 +189,14 @@ type SubscriptionRoom struct {
 	// RFC3339 timestamps (*time.Time). The room-service RPC delivers them as epoch
 	// millis; enrichment converts at the seam (the local $lookup baseline already
 	// carries *time.Time).
+	//
+	// LastMsgAt is the room's USER-activity position — the last non-system
+	// message — which is what unread and sidebar ordering key off. The server
+	// coalesces rooms.lastUserMsgAt over rooms.lastMsgAt when building this
+	// object, so the client sees one timestamp and needs no fallback rule of its
+	// own. rooms.lastMsgAt (all messages, the history read ceiling) is internal
+	// and deliberately never reaches the client; see
+	// docs/superpowers/specs/2026-08-26-system-message-unread-ordering-design.md.
 	LastMsgAt        *time.Time `json:"lastMsgAt,omitempty" bson:"-"`
 	LastMsgID        string     `json:"lastMsgId,omitempty" bson:"-"`
 	LastMentionAllAt *time.Time `json:"lastMentionAllAt,omitempty" bson:"-"`
@@ -233,4 +292,56 @@ type BadgeCountBatchRequest struct {
 // (10 renders as "9+"). Accounts whose count could not be computed are absent.
 type BadgeCountBatchResponse struct {
 	Counts map[string]int `json:"counts"`
+}
+
+// IsAppRoom reports whether a row of type t facing counterpart name is an app
+// room — a botDM facing a real ".bot" app.
+func IsAppRoom(t RoomType, name string) bool {
+	return t == RoomTypeBotDM && IsBot(name)
+}
+
+// EffectiveRoomType re-derives a row's type from its counterpart. Rows are
+// written per subscriber, so this is an identity on well-formed data; it exists
+// to correct a corrupt row at the publish boundary.
+func EffectiveRoomType(t RoomType, name string) RoomType {
+	if t == RoomTypeBotDM {
+		return SubscriptionRoomType(name)
+	}
+	return t
+}
+
+// DMRoomType is the room document's type for a two-party DM: botDM when either
+// participant is a ".bot" app. p_admin owns no app, so its DMs are ordinary.
+func DMRoomType(a, b string) RoomType {
+	if IsBot(a) || IsBot(b) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
+
+// SubscriptionRoomType is one row's type — the room as its own subscriber sees
+// it. The two sides of a bot<->human DM therefore differ.
+func SubscriptionRoomType(counterpart string) RoomType {
+	if IsBot(counterpart) {
+		return RoomTypeBotDM
+	}
+	return RoomTypeDM
+}
+
+// SubscriptionRowType is SubscriptionRoomType for DM rows; a channel row keeps
+// the room's type.
+func SubscriptionRowType(roomType RoomType, counterpart string) RoomType {
+	if roomType == RoomTypeDM || roomType == RoomTypeBotDM {
+		return SubscriptionRoomType(counterpart)
+	}
+	return roomType
+}
+
+// CreateRoomType classifies a create-room request: a single counterpart with no
+// name is a DM, and a botDM when either participant is a ".bot" app.
+func CreateRoomType(req *CreateRoomRequest) RoomType {
+	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
+		return DMRoomType(req.RequesterAccount, req.Users[0])
+	}
+	return RoomTypeChannel
 }

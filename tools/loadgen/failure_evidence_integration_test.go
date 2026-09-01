@@ -29,8 +29,8 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 	walPath := filepath.Join(evidenceDirectory, "run.wal")
 	wal, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	contract := newFailureObserverContract(true)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	contract := newFailureObserverContract(true, false)
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: wal, Now: func() time.Time { return now },
 		ObserverContract: &contract,
 	})
@@ -107,7 +107,7 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 
 	reopenedWAL, err := openFailureWAL(walPath)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{
+	recovered, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 4, Journal: reopenedWAL, Now: func() time.Time { return now },
 		ObserverContract: &contract,
 	})
@@ -126,10 +126,10 @@ func TestFailureObservation_AcceptedRecipientHistoryRestart(t *testing.T) {
 		func() time.Time { return now },
 		withSoakFailureRecipientFinalizer(recoveredRecipient),
 	)
-	ran, err := reconciler.Try(context.Background())
+	ran, _, err := reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
-	ran, err = reconciler.Try(context.Background())
+	ran, _, err = reconciler.Try(context.Background())
 	require.NoError(t, err)
 	assert.True(t, ran)
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultUnverified])

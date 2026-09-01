@@ -1,6 +1,13 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/hmchangw/chat/pkg/ginutil"
+	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/sessioncache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
+)
 
 type config struct {
 	Port string `env:"PORT" envDefault:"8080"`
@@ -12,6 +19,16 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	Breaker       mongoutil.BreakerConfig
+	// primaryPreferred, not secondaryPreferred: InsertSession then FindSessionByHash
+	// on the next request is a read-after-write; secondary lag breaks auth after login.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// SessionCache keeps already-authenticated bots working while Mongo is
+	// unreachable. 0 disables the tier. Matches the other L2 tiers at 90m.
+	SessionCache sessioncache.TTLConfig
+
+	Pool mongoutil.PoolConfig
+	HTTP ginutil.TimeoutConfig
 
 	// SessionsMaxPerAccount is the per-user FIFO cap; excess sessions are evicted oldest-first.
 	SessionsMaxPerAccount int `env:"SESSIONS_MAX_PER_ACCOUNT" envDefault:"100"`
@@ -23,8 +40,7 @@ type config struct {
 	NatsCredsFile string `env:"NATS_CREDS_FILE"`
 
 	// ValkeyAddrs seeds the Valkey cluster backing rate-limit + idempotency; empty disables both.
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD"`
+	Valkey valkeyutil.Config
 
 	// BotRateLimitPerCallerPerMin caps requests per bot per 60s window; 0 disables per-caller.
 	BotRateLimitPerCallerPerMin int `env:"BOT_RATE_LIMIT_PER_CALLER_PER_MIN" envDefault:"600"`

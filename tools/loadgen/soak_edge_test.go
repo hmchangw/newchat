@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"testing"
 	"time"
 
@@ -167,13 +167,25 @@ func TestSoakLifecycle_WrapsStoreFailures(t *testing.T) {
 }
 
 func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
-	workload := newSoakWorkload(nil, nil, soakWorkloadActions{}, nil, nil, nil)
+	workload := newSoakWorkload(nil, nil, &soakWorkloadActions{}, nil, nil, nil)
 
 	assert.Equal(t, 256, workload.cfg.MaxInFlight)
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	assert.Len(t, workload.lanes(), 6)
+	// A named set rather than a count: it says which lane went missing, and a
+	// new lane has to be added here deliberately rather than by bumping a
+	// number that carries no meaning.
+	names := make([]string, 0, len(workload.lanes()))
+	for _, lane := range workload.lanes() {
+		names = append(names, lane.name)
+	}
+	assert.ElementsMatch(t, []string{
+		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+		soakFailureLaneMemberMutation, soakFailureLaneRoomMutation,
+		"room_read", "user_read", "search_read",
+		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt, "presence",
+	}, names)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
@@ -181,7 +193,7 @@ func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
 	newSoakWorkload(
 		&workloadConfig,
 		nil,
-		soakWorkloadActions{},
+		&soakWorkloadActions{},
 		nil,
 		nil,
 		nil,
@@ -220,12 +232,12 @@ func TestNewSoakRuntimeSelector_ValidatesInputs(t *testing.T) {
 			topology: &soakTopology{Rooms: []model.Room{{ID: "room-1"}}},
 		},
 		{
-			name: "room without subscribed member",
+			name: "room without usable member",
 			topology: &soakTopology{
 				Rooms: []model.Room{{ID: "room-1"}},
 				Subscriptions: []model.Subscription{{
 					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
+					User:   model.SubscriptionUser{ID: "u-1"},
 				}},
 			},
 			cfg: &cfg,
@@ -243,15 +255,16 @@ func TestNewSoakRuntimeSelector_ValidatesInputs(t *testing.T) {
 func TestNewSoakRuntimeSelector_SelectsOnlyValidMembers(t *testing.T) {
 	cfg := validSoakConfig(t)
 	selector, err := newSoakRuntimeSelector(&soakTopology{
-		Rooms: []model.Room{{ID: "room-1"}},
+		ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+		Rooms:       []model.Room{{ID: "room-1"}},
 		Subscriptions: []model.Subscription{
 			{
-				RoomID: "room-1", IsSubscribed: true,
-				User: model.SubscriptionUser{ID: "u-1", Account: "alice"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
 			},
 			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{ID: "u-2", Account: "bob"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
 			},
 			{
 				RoomID: "room-1", IsSubscribed: true,
@@ -293,7 +306,7 @@ func TestNewSoakRPCClient_DefaultsAndInputFailures(t *testing.T) {
 		Body:   make(chan int),
 	}, nil)
 	require.Error(t, err)
-	assert.Equal(t, soakErrorDecode, result.ErrorClass)
+	assert.Equal(t, soakErrorRequestEncode, result.ErrorClass)
 }
 
 func TestSoakRPCClient_PropagatesResolverAndSleeperFailures(t *testing.T) {
@@ -336,16 +349,18 @@ func TestSoakTimerSleeper_ObservesCancellationAndTimer(t *testing.T) {
 func TestNewSoakMutator_AppliesDefaultsAndFiltersMembers(t *testing.T) {
 	mutator := newSoakMutator(
 		nil,
-		&soakTopology{Subscriptions: []model.Subscription{
-			{
-				RoomID: "room-1", IsSubscribed: true,
-				User: model.SubscriptionUser{Account: "alice"},
-			},
-			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{Account: "bob"},
-			},
-		}},
+		&soakTopology{
+			ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+			Subscriptions: []model.Subscription{
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
+				},
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
+				},
+			}},
 		nil,
 		nil,
 		nil,
@@ -475,8 +490,8 @@ func TestSoakReaderAndVerifier_ApplyDefaultsAndSkipEmptyCatalog(t *testing.T) {
 		soakReadConfig{},
 		&soakTopology{Subscriptions: []model.Subscription{
 			{
-				RoomID: "room-1", IsSubscribed: false,
-				User: model.SubscriptionUser{Account: "ignored"},
+				RoomID: "room-1",
+				User:   model.SubscriptionUser{},
 			},
 		}},
 		catalog,
@@ -570,7 +585,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	expected := soakCatalogMessage{
 		soakCatalogCandidate: soakCatalogCandidate{
 			ID: "message-1", RoomID: "room-1", Author: "alice",
-			Content: "hello",
+			ContentSHA256: soakContentDigest("hello"),
 		},
 		Edited: true,
 	}
@@ -582,7 +597,7 @@ func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*soakVerifyMessage)
-		field  string
+		field  soakVerifyField
 	}{
 		{
 			name: "message ID",
@@ -659,13 +674,14 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 		want  soakVerifyClass
 	}{
 		{class: soakErrorNotFound, want: soakVerifyMissing},
-		{class: soakErrorDecode, want: soakVerifyMalformed},
+		{class: soakErrorRequestEncode, want: soakVerifyMalformed},
+		{class: soakErrorResponseDecode, want: soakVerifyMalformed},
 		{class: soakErrorTimeout, want: soakVerifyRetryable},
 		{class: soakErrorForbidden, want: soakVerifyRPCError},
 	}
 	for _, tt := range tests {
 		result := soakVerifyResult{}
-		classifySoakVerifyRPCError(&result, tt.class)
+		classifySoakVerifyRPCError(&result, tt.class, "")
 		assert.Equal(t, tt.want, result.Class)
 		assert.Equal(t, tt.class, result.RPCErrorClass)
 	}

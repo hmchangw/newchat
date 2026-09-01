@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+
+	"github.com/hmchangw/chat/pkg/displayfmt"
 )
 
 // UserRole is a platform-level role flag on the User record.
@@ -175,17 +177,11 @@ func IsBot(account string) bool {
 }
 
 // DisplayName renders the user's display label for Drive ownership metadata:
-// the account when either name is missing, the English name when both names are
-// identical, otherwise "<engName> <chineseName>".
+// the single present name when only one is set, the account when both are empty,
+// the English name when both names are identical, otherwise "<engName> <chineseName>".
 func (u *User) DisplayName() string {
-	switch {
-	case u == nil:
+	if u == nil {
 		return ""
-	case u.EngName == "" || u.ChineseName == "":
-		return u.Account
-	case u.EngName == u.ChineseName:
-		return u.EngName
-	default:
-		return u.EngName + " " + u.ChineseName
 	}
+	return displayfmt.CombineWithFallback(u.EngName, u.ChineseName, u.Account)
 }

@@ -19,6 +19,8 @@ beforeEach(() => {
   useAuth.mockReturnValue({ logout })
 })
 
+const cleanResult = { user: { account: 'alice' }, syncFailures: [], hrSyncFailed: false }
+
 function fillValidForm() {
   fireEvent.change(screen.getByLabelText(/^account/i), { target: { value: 'alice' } })
   fireEvent.change(screen.getByLabelText(/^password/i), { target: { value: 'hunter2' } })
@@ -52,7 +54,7 @@ describe('CreateUserForm', () => {
   })
 
   it('submits createUser with the form values on valid input', async () => {
-    createUser.mockResolvedValue({ id: 'u-1' })
+    createUser.mockResolvedValue(cleanResult)
     const onCreated = vi.fn()
     render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
     fillValidForm()
@@ -83,5 +85,67 @@ describe('CreateUserForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /create user/i }))
     await waitFor(() => expect(logout).toHaveBeenCalledTimes(1))
     expect(screen.queryByText(/expired/i)).not.toBeInTheDocument()
+  })
+
+  it('closes immediately on a clean result', async () => {
+    createUser.mockResolvedValue(cleanResult)
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalled())
+    expect(screen.queryByText(/sync/i)).toBeNull()
+  })
+
+  // Notice rule: see spec R9 (and the syncResult comment in CreateUserForm.jsx).
+
+  it('closes immediately when only the HR lane failed (direct sync reached every site)', async () => {
+    createUser.mockResolvedValue({ user: { account: 'alice' }, syncFailures: [], hrSyncFailed: true })
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    await waitFor(() => expect(onCreated).toHaveBeenCalled())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows the identity-only partial notice when the direct sync missed sites', async () => {
+    createUser.mockResolvedValue({
+      user: { account: 'alice' },
+      syncFailures: ['site-c'],
+      hrSyncFailed: false,
+    })
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    const alert = await screen.findByRole('alert')
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(alert).toHaveTextContent('site-c')
+    expect(alert).toHaveTextContent(/only .* identity/i)
+    expect(alert).toHaveTextContent(/roles and status/i)
+    expect(alert).toHaveTextContent(/resync/i)
+    fireEvent.click(screen.getByRole('button', { name: /done/i }))
+    expect(onCreated).toHaveBeenCalled()
+  })
+
+  it('shows the both-lanes-failed notice and defers onCreated to Done', async () => {
+    createUser.mockResolvedValue({
+      user: { account: 'alice' },
+      syncFailures: ['site-c'],
+      hrSyncFailed: true,
+    })
+    const onCreated = vi.fn()
+    render(<CreateUserForm authToken="tok" onClose={vi.fn()} onCreated={onCreated} />)
+    fillValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+    await waitFor(() => expect(screen.getByText(/created on this site/i)).toBeInTheDocument())
+    expect(onCreated).not.toHaveBeenCalled()
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('site-c')
+    expect(alert).toHaveTextContent(/did not sync/i)
+    expect(alert).toHaveTextContent(/resync/i)
+    fireEvent.click(screen.getByRole('button', { name: /done/i }))
+    expect(onCreated).toHaveBeenCalled()
   })
 })

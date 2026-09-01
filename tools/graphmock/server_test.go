@@ -38,6 +38,8 @@ func graphReader(srv *httptest.Server) msgraph.GroupReader {
 
 func TestToken(t *testing.T) {
 	_, srv := newTestServer(t)
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	resp, err := http.Post(srv.URL+"/any-tenant/oauth2/v2.0/token", "application/x-www-form-urlencoded", nil)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -102,6 +104,8 @@ func TestFixtureSwap(t *testing.T) {
 	assert.Equal(t, "New", g.DisplayName)
 
 	// GET /__fixtures reflects the swap
+	// #nosec G107 -- requests an in-process test/tool listener URL, not attacker-controlled
+	// nosemgrep: gosec.G107-1
 	cur, err := http.Get(srv.URL + "/__fixtures")
 	require.NoError(t, err)
 	defer cur.Body.Close()

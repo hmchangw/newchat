@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
@@ -29,6 +30,11 @@ import (
 )
 
 const maxContentBytes = 20 * 1024 // 20 KB
+
+// maxVisibleToBytes caps the opaque client-set VisibleTo marker. The value is never
+// interpreted here — the cap is a defensive bound so a client cannot store an unbounded
+// blob on the row.
+const maxVisibleToBytes = 4096
 
 // quotedParentUnavailablePlaceholder is the degraded-mode quoted-parent body used
 // when the authoritative fetch fails transiently. It never persists —
@@ -68,16 +74,31 @@ type Handler struct {
 	// ID) so the link is correct even on the outage path.
 	chatBaseURL string
 	metrics     *gatekeeperMetrics
+	// threadParentRecheckDelay spaces the single re-check of a thread parent that
+	// history reports missing. Zero disables the re-check.
+	threadParentRecheckDelay time.Duration
 }
 
 type gatekeeperHandlerOption func(*gatekeeperHandlerOptions)
 
 type gatekeeperHandlerOptions struct {
-	metrics *gatekeeperMetrics
+	metrics                  *gatekeeperMetrics
+	threadParentRecheckDelay *time.Duration
 }
 
 func withGatekeeperMetrics(metrics *gatekeeperMetrics) gatekeeperHandlerOption {
 	return func(opts *gatekeeperHandlerOptions) { opts.metrics = metrics }
+}
+
+// defaultThreadParentRecheckDelay covers the ordinary MESSAGES-CANONICAL lag
+// between a parent's publish and message-worker's Cassandra write. It is spent
+// only on a send already headed for rejection.
+const defaultThreadParentRecheckDelay = 150 * time.Millisecond
+
+// withThreadParentRecheckDelay overrides the re-check spacing; zero disables the
+// re-check, making a single missing-parent fetch decisive.
+func withThreadParentRecheckDelay(d time.Duration) gatekeeperHandlerOption {
+	return func(opts *gatekeeperHandlerOptions) { opts.threadParentRecheckDelay = &d }
 }
 
 // NewHandler constructs a new Handler with the given dependencies.
@@ -91,18 +112,23 @@ func NewHandler(store Store, users UserGetter, publish publishFunc, reply replyF
 	if opts.metrics == nil {
 		opts.metrics = newGatekeeperMetrics(otel.Meter("message-gatekeeper"))
 	}
+	recheckDelay := defaultThreadParentRecheckDelay
+	if opts.threadParentRecheckDelay != nil {
+		recheckDelay = *opts.threadParentRecheckDelay
+	}
 	return &Handler{
-		store:              store,
-		users:              users,
-		publish:            publish,
-		reply:              reply,
-		siteID:             siteID,
-		parentFetcher:      parentFetcher,
-		largeRoomThreshold: largeRoomThreshold,
-		maxAttachments:     maxAttachments,
-		maxAttachmentBytes: maxAttachmentBytes,
-		chatBaseURL:        chatBaseURL,
-		metrics:            opts.metrics,
+		store:                    store,
+		users:                    users,
+		publish:                  publish,
+		reply:                    reply,
+		siteID:                   siteID,
+		parentFetcher:            parentFetcher,
+		largeRoomThreshold:       largeRoomThreshold,
+		maxAttachments:           maxAttachments,
+		maxAttachmentBytes:       maxAttachmentBytes,
+		chatBaseURL:              chatBaseURL,
+		metrics:                  opts.metrics,
+		threadParentRecheckDelay: recheckDelay,
 	}
 }
 
@@ -169,12 +195,25 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 	// account — so decode here. No-op for every non-bot account.
 	replyData, err := h.processMessage(ctx, requester, roomID, siteID, &req)
 	if err != nil {
-		// Typed *errcode.Error → client-facing validation/permanence: reply + Ack.
+		// Permanent → server-side fault that cannot succeed on redelivery: reply + Ack, counted failed.
+		// Typed *errcode.Error → client-facing validation: reply + Ack, counted rejected.
 		// Bare error (raw fmt.Errorf) → transient infra failure: Nak for redelivery.
 		// errnats.Marshal runs Classify which logs once at category-aware level —
-		// validation branch must NOT also log here. Infra branch owns its log.
+		// the two Ack branches must NOT also log here. Infra branch owns its log.
 		var ee *errcode.Error
-		if errors.As(err, &ee) {
+		if pe, isPermanent := errcode.IsPermanent(err); isPermanent {
+			// A permanent server-side fault (a value that cannot be marshaled) is
+			// undeliverable work, not a client rejection: Ack, because redelivering
+			// identical bytes can only fail identically, but count it as failed so
+			// the rejected series stays a pure client-error signal.
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			h.metrics.Record(ctx, resultFailed, reasonInternal)
+			debugFlowRejected(ctx, req.RequestID, string(pe.Code))
+			h.sendReply(ctx, account, &req, errnats.Marshal(ctx, err))
+			if ackErr := msg.Ack(); ackErr != nil {
+				slog.ErrorContext(ctx, "failed to ack permanent message", "error", ackErr, "request_id", req.RequestID)
+			}
+		} else if errors.As(err, &ee) {
 			// A validation or policy rejection is an ordinary client error, not
 			// undeliverable work: the sender receives an error reply and the
 			// rejection is already counted by message_gatekeeper_messages_total.
@@ -203,9 +242,7 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			// flow terminal for the infra path; the Error line below carries the cause.
 			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
-			if err := msg.Nak(); err != nil {
-				slog.ErrorContext(ctx, "failed to nack message", "error", err, "request_id", req.RequestID)
-			}
+			jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "process message failed (infra)")
 		}
 		return
 	}
@@ -360,6 +397,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		return nil, errcode.BadRequest(fmt.Sprintf("invalid message type %q", req.Type))
 	}
 
+	// VisibleTo is opaque — validate only its size, never its content.
+	if len(req.VisibleTo) > maxVisibleToBytes {
+		return nil, errcode.BadRequest(
+			fmt.Sprintf("visibleTo exceeds maximum size of %d bytes", maxVisibleToBytes),
+			errcode.WithMetadata("maxVisibleToBytes", strconv.Itoa(maxVisibleToBytes), "attempted", strconv.Itoa(len(req.VisibleTo))),
+		)
+	}
+
 	// Verify subscription
 	sub, err := h.store.GetSubscription(ctx, account, roomID)
 	if err != nil {
@@ -384,9 +429,12 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	if !isThreadReply && !bypass {
 		meta, err := h.store.GetRoomMeta(ctx, roomID)
 		if err != nil {
-			return nil, fmt.Errorf("get room meta for %s: %w", roomID, err)
-		}
-		if meta.UserCount > h.largeRoomThreshold {
+			// Fail-open: during a Mongo outage the room-meta read is
+			// unavailable. The large-room cap is a spam/noise control, not an
+			// access control, so allow the post rather than block the send.
+			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap (fail-open)",
+				"request_id", req.RequestID, "room_id", roomID, "error", err)
+		} else if meta.UserCount > h.largeRoomThreshold {
 			slog.Info("send blocked",
 				"reason", string(errcode.MessageLargeRoomPostRestricted),
 				"account", account,
@@ -413,11 +461,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		slog.DebugContext(ctx, "gatekeeper quote resolved", "request_id", req.RequestID, "quoted_id", req.QuotedParentMessageID, "unverified", quotedUnverified)
 	}
 
-	// Resolve the thread parent's createdAt + sender account server-side,
-	// best-effort: a fetch failure ships the event without the values (each
-	// consumer falls back to a store it owns), so a Cassandra outage never blocks
-	// the send path. Both ride the same fetch.
-	threadParentCreatedAt, threadParentSenderAccount := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	// Resolve the thread parent's createdAt + sender account server-side. A
+	// TRANSIENT fetch failure ships the event without the values (each consumer
+	// falls back to a store it owns), so a Cassandra outage never blocks the send
+	// path; a TERMINAL one rejects the send. Both ride the same fetch.
+	threadParentCreatedAt, threadParentSenderAccount, err := h.resolveThreadParent(ctx, account, roomID, siteID, req, quotedSnapshot, quotedUnverified)
+	if err != nil {
+		return nil, err
+	}
 
 	// Compose the sender's render-ready display name once at write time so every
 	// downstream consumer (notification-worker, future search-sync-worker) reads
@@ -456,6 +507,7 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		QuotedParentMessage:          quotedSnapshot,
 		Attachments:                  req.Attachments,
 		Type:                         req.Type,
+		VisibleTo:                    req.VisibleTo,
 	}
 
 	// Publish MessageEvent to MESSAGES-CANONICAL. QuotedParentUnverified rides the
@@ -465,19 +517,30 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	evt := model.MessageEvent{Event: model.EventCreated, Message: msg, SiteID: siteID, Timestamp: now.UnixMilli(), QuotedParentUnverified: quotedUnverified, ThreadParentSenderAccount: threadParentSenderAccount}
 	evtData, err := sonic.Marshal(evt)
 	if err != nil {
-		return nil, fmt.Errorf("marshal message event: %w", err)
+		return nil, errcode.MarshalFailed("message event", err)
 	}
 
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
 	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
+		if errors.Is(err, nats.ErrMaxPayload) {
+			// Rejected client-side before the wire. The caps this handler enforces
+			// (content, attachments) are meant to keep a message under max_payload,
+			// so reaching this is a misconfiguration, not a client error — but the
+			// message can never be published, so reply and drop rather than retry.
+			return nil, errcode.Permanent(errcode.Internal("canonical message exceeds broker max_payload"))
+		}
 		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",
 		"phase", "published", "request_id", req.RequestID, "subject", canonicalSubj, "bytes", len(evtData))
 
-	return sonic.Marshal(msg)
+	replyData, err := sonic.Marshal(msg)
+	if err != nil {
+		return nil, errcode.MarshalFailed("send message reply", err)
+	}
+	return replyData, nil
 }
 
 // resolveThreadParent resolves the thread parent's createdAt and sender account
@@ -493,27 +556,58 @@ func (h *Handler) resolveThreadParent(
 	req *model.SendMessageRequest,
 	quotedSnapshot *cassandra.QuotedParentMessage,
 	quotedUnverified bool,
-) (*time.Time, string) {
+) (*time.Time, string, error) {
 	if req.ThreadParentMessageID == "" {
-		return nil, ""
+		return nil, "", nil
 	}
 	if quotedSnapshot != nil && !quotedUnverified && req.QuotedParentMessageID == req.ThreadParentMessageID {
 		t := quotedSnapshot.CreatedAt.UTC()
-		return &t, quotedSnapshot.Sender.Account
+		return &t, quotedSnapshot.Sender.Account, nil
 	}
 	if h.parentFetcher == nil {
-		return nil, ""
+		return nil, "", nil
 	}
 	snap, err := h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
+	if threadParentMissing(err) && h.threadParentRecheckDelay > 0 {
+		// The parent's Cassandra write belongs to message-worker, a parallel
+		// consumer of MESSAGES-CANONICAL, so a reply sent moments after its parent
+		// can reach here before the parent is readable — a window that widens to
+		// minutes whenever message-worker is backlogged. Re-check once so a send
+		// that is merely racing that write isn't rejected as unresolvable.
+		if werr := waitFor(ctx, h.threadParentRecheckDelay); werr != nil {
+			return nil, "", fmt.Errorf("re-check thread parent %s: %w", req.ThreadParentMessageID, werr)
+		}
+		snap, err = h.parentFetcher.FetchQuotedParent(ctx, account, roomID, siteID, req.ThreadParentMessageID)
+		if err == nil && snap != nil {
+			slog.InfoContext(ctx, "thread parent resolved on re-check; its write was still in flight",
+				"parent_message_id", req.ThreadParentMessageID,
+				"request_id", req.RequestID)
+		}
+	}
 	if err != nil || snap == nil {
+		// Terminal (not_found, forbidden, …): the parent will not resolve for any
+		// downstream consumer either, so reject here. Publishing it would hand
+		// message-worker, broadcast-worker and notification-worker an event each
+		// must retry to MaxDeliver and then drop, holding an ack-pending slot the
+		// whole time. Same tiering as resolveQuoteSnapshot.
+		var ee *errcode.Error
+		if quoteFetchErrIsTerminal(err) && errors.As(err, &ee) {
+			if ee.Code == errcode.CodeNotFound {
+				// Own reason: a bare not_found on msg.send is ambiguous with a
+				// missing room, and the frontend refreshes different state for each.
+				return nil, "", errcode.NotFound("thread parent message not found",
+					errcode.WithReason(errcode.MessageThreadParentNotFound))
+			}
+			return nil, "", ee
+		}
 		slog.WarnContext(ctx, "thread parent resolution failed, publishing without it",
 			"error", err,
 			"parent_message_id", req.ThreadParentMessageID,
 			"request_id", req.RequestID)
-		return nil, ""
+		return nil, "", nil
 	}
 	t := snap.CreatedAt.UTC()
-	return &t, snap.Sender.Account
+	return &t, snap.Sender.Account, nil
 }
 
 // resolveQuoteSnapshot resolves the quoted parent into a snapshot, preferring the
@@ -563,26 +657,18 @@ func (h *Handler) resolveQuoteSnapshot(ctx context.Context, account, roomID, sit
 	return snap, false, nil
 }
 
-// quoteFetchErrIsTerminal reports whether a quoted-parent fetch error is a
-// permanent reason not to quote (reject) vs a transient infra failure (degrade
-// to the placeholder). Only unavailable/internal errcodes and non-errcode infra
-// failures (unmarshal) are transient; every other errcode category (not_found,
-// forbidden, bad_request, …) is terminal. NATS timeout and no-responders arrive
-// as errcode.CodeUnavailable (via natsutil.RequestFailure) and are handled by
-// the unavailable case below, not the non-errcode fallback.
-// history-service collapses a Cassandra read failure to code=internal, so
-// internal is treated as transient here.
+// quoteFetchErrIsTerminal reports whether a parent fetch error is a permanent
+// reason not to proceed (reject) vs a transient infra failure (degrade to the
+// placeholder for a quote, publish without the value for a thread parent).
+// NATS timeout and no-responders arrive as errcode.CodeUnavailable (via
+// natsutil.RequestFailure) and are transient, as is the internal code
+// history-service collapses a Cassandra read failure to.
+//
+// Delegates to errcode.Terminal so this rejection and the Ack-drop the same
+// reply produces in broadcast-worker and notification-worker cannot drift.
 func quoteFetchErrIsTerminal(err error) bool {
-	var ee *errcode.Error
-	if errors.As(err, &ee) {
-		switch ee.Code {
-		case errcode.CodeUnavailable, errcode.CodeInternal:
-			return false
-		default:
-			return true
-		}
-	}
-	return false
+	_, terminal := errcode.Terminal(err)
+	return terminal
 }
 
 // placeholderQuoteSnapshot builds the degraded-mode quoted-parent snapshot for a

@@ -23,7 +23,7 @@ func openSoakFailureObservationLedger(
 	if errors.Is(err, errFailureObserverContractMismatch) || cfg == nil {
 		return nil, false, err
 	}
-	fallback, fallbackErr := newFailureLedger(failureLedgerConfig{
+	fallback, fallbackErr := newFailureLedger(&failureLedgerConfig{
 		Capacity: cfg.LedgerCapacity,
 		Now:      now,
 		Recorder: newFailureLedgerPromRecorder(metrics),
@@ -32,7 +32,9 @@ func openSoakFailureObservationLedger(
 		return nil, false, errors.Join(err, fallbackErr)
 	}
 	fallback.Invalidate("wal")
-	recordFailureObserverConfiguration(metrics, newFailureObserverContract(cfg.RecipientObserverEnabled))
+	recordFailureObserverConfiguration(metrics, newFailureObserverContract(
+		cfg.RecipientObserverEnabled, cfg.SearchObserverEnabled,
+	))
 	return fallback, true, nil
 }
 
@@ -52,6 +54,7 @@ func newSoakFailureObservationRuntime(
 	ledger *failureLedger,
 	metrics *Metrics,
 	queue int,
+	evidenceCapacity int,
 	evidenceDirectory string,
 	now func() time.Time,
 ) *soakFailureObservationRuntime {
@@ -59,7 +62,8 @@ func newSoakFailureObservationRuntime(
 	if !enabled {
 		return runtime
 	}
-	options := make([]failureRecipientObserverOption, 0, 1)
+	options := make([]failureRecipientObserverOption, 0, 2)
+	options = append(options, withFailureRecipientEvidenceCapacity(evidenceCapacity))
 	if evidenceDirectory != "" {
 		options = append(options, withFailureRecipientEvidenceDir(evidenceDirectory))
 	}
@@ -89,6 +93,16 @@ func (r *soakFailureObservationRuntime) StartRecipient(
 	}
 	r.subscriptions = subscriptions
 	return nil
+}
+
+// Evidence exposes the recipient expectation map so the failure sweep can bound
+// it by the same deadline the ledger uses. nil when the observer is off, which
+// ExpireBefore handles.
+func (r *soakFailureObservationRuntime) Evidence() *recipientEvidence {
+	if r == nil || r.recipient == nil {
+		return nil
+	}
+	return r.recipient.evidence
 }
 
 func (r *soakFailureObservationRuntime) Recipient() *failureRecipientObserver {

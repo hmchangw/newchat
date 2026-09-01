@@ -1,6 +1,11 @@
 package mongoutil
 
-import "go.mongodb.org/mongo-driver/v2/mongo/options"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
+)
 
 // WithMaxPoolSize caps the connection pool per server. Unbounded handler
 // concurrency against an uncapped pool (driver default 100) is a common route
@@ -16,6 +21,28 @@ func WithMinPoolSize(n uint64) Option {
 	return func(c *connectConfig) { c.minPoolSize = &n }
 }
 
+// WithMaxIdleTime reaps connections idle this long. The driver's default of 0
+// means never, so a pool that peaked during a burst holds those sockets for the
+// life of the process — and MaxPoolSize is per server, so the total is the cap
+// times the replica-set members the client has talked to.
+func WithMaxIdleTime(d time.Duration) Option {
+	return func(c *connectConfig) { c.maxIdleTime = &d }
+}
+
+// WithWriteConcern binds a client-level write concern. Nil is a no-op, so a
+// caller can pass one through from config without branching.
+//
+// Set it wherever an acknowledgement to something outside MongoDB is issued on
+// the strength of a write having landed — a JetStream Ack after a BulkWrite,
+// say. Without it the concern comes from the connection URI or the cluster's
+// own default, neither of which the service can see, and a w=1 write that a
+// primary failover rolls back is one the worker has already acked and will
+// never redeliver. Left unset the driver sends no concern and the server
+// default applies.
+func WithWriteConcern(wc *writeconcern.WriteConcern) Option {
+	return func(c *connectConfig) { c.writeConcern = wc }
+}
+
 // applyTuning writes the pool settings onto clientOpts. Nil fields are skipped
 // so an unset option never clobbers a URI-provided or default value.
 func (c connectConfig) applyTuning(clientOpts *options.ClientOptions) {
@@ -24,5 +51,14 @@ func (c connectConfig) applyTuning(clientOpts *options.ClientOptions) {
 	}
 	if c.minPoolSize != nil {
 		clientOpts.SetMinPoolSize(*c.minPoolSize)
+	}
+	if c.maxIdleTime != nil {
+		clientOpts.SetMaxConnIdleTime(*c.maxIdleTime)
+	}
+	if c.serverSelectionTimeout != nil {
+		clientOpts.SetServerSelectionTimeout(*c.serverSelectionTimeout)
+	}
+	if c.writeConcern != nil {
+		clientOpts.SetWriteConcern(c.writeConcern)
 	}
 }

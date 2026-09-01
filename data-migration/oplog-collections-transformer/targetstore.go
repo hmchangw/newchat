@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // mongoTargetStore is the new-stack per-site Mongo access the transformer needs: user
@@ -36,7 +37,7 @@ func NewMongoTargetStore(db *mongo.Database) *mongoTargetStore {
 // EnsureIndexes creates the unique index on users.account — the insert-if-absent dedup key.
 // thread_rooms indexes are owned by message-worker and intentionally not touched here.
 func (s *mongoTargetStore) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.users, mongo.IndexModel{
 		Keys:    bson.D{{Key: "account", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {

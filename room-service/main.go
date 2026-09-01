@@ -10,9 +10,7 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	o11yredis "github.com/flywindy/o11y/redis"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/badgecache"
@@ -28,10 +26,10 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
-	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL,required"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"site-local"`
@@ -42,13 +40,31 @@ type config struct {
 	MongoDB           string            `env:"MONGO_DB"                  envDefault:"chat"`
 	MongoUsername     string            `env:"MONGO_USERNAME"            envDefault:""`
 	MongoPassword     string            `env:"MONGO_PASSWORD"            envDefault:""`
-	// MongoReadPreference routes the store's display/list reads to secondaries; the
-	// client stays on primary for authz/dedup/read-after-write.
-	MongoReadPreference      string          `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	MaxRoomSize              int             `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
-	MaxBatchSize             int             `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
-	MemberListTimeout        time.Duration   `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
-	RoomKeyGracePeriod       time.Duration   `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	// MongoReadPreference routes the store's display/list reads to secondaries.
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+	// MongoClientReadPreference covers every handle WITHOUT an explicit override —
+	// plain collections inherit the client. primaryPreferred keeps authz/dedup/
+	// read-after-write on the primary in steady state, but falls back rather than
+	// failing when there is no primary to read from.
+	MongoClientReadPreference string `env:"MONGO_CLIENT_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
+	// so a burst can't open unbounded connections. Env tags already carry the
+	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) so a burst or slow dependency can't saturate the
+	// Mongo pool with unbounded, indefinitely-held work.
+	Guard              natsrouter.GuardConfig
+	MaxRoomSize        int           `env:"MAX_ROOM_SIZE"             envDefault:"1000"`
+	MaxBatchSize       int           `env:"MAX_BATCH_SIZE"            envDefault:"1000"`
+	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
+	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
 	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
@@ -75,6 +91,11 @@ type config struct {
 	GraphProxyURL        string `env:"GRAPH_PROXY_URL" envDefault:""`
 	RoomMembersLimit     int    `env:"ROOM_MEMBERS_LIMIT"       envDefault:"500"`
 	RoomMembersCallLimit int    `env:"ROOM_MEMBERS_CALL_LIMIT"  envDefault:"20"`
+	// Mentionable @-autocomplete page size. Default applies when the client sends
+	// no limit; Max clamps an explicit over-large limit. Both are validated > 0 at
+	// startup and are independent of a room's denormalized member counts.
+	MentionableDefaultLimit int `env:"MENTIONABLE_DEFAULT_LIMIT" envDefault:"3"`
+	MentionableMaxLimit     int `env:"MENTIONABLE_MAX_LIMIT"     envDefault:"50"`
 	// Atrest/Vault drive eager at-rest DEK provisioning at room creation.
 	// When Atrest.Enabled is false the DEK is created lazily by message-worker.
 	Atrest   atrest.Config      // env vars already prefixed ATREST_*
@@ -85,18 +106,31 @@ type config struct {
 	// RoomSubjectMode: same-site room .event namespace — global (default) | dual | local. See pkg/subject.RoomRouteMode.
 	RoomSubjectMode string `env:"ROOM_SUBJECT_MODE" envDefault:"global"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
-	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
+	// membership, role or history-restriction write; empty disables both (clear
+	// hooks and busts become no-ops, and the subauthcache TTL reconciles).
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
 	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE" envDefault:"168h"`
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
-	// disables the cap (unbounded spawn).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
+}
+
+// validateMentionableLimits enforces the mentionable page-size invariants at
+// startup: both bounds positive, and the no-limit default never exceeding the
+// max (otherwise a limit-less request would bypass the configured cap).
+func validateMentionableLimits(defaultLimit, maxLimit int) error {
+	switch {
+	case defaultLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT must be > 0, got %d", defaultLimit)
+	case maxLimit <= 0:
+		return fmt.Errorf("MENTIONABLE_MAX_LIMIT must be > 0, got %d", maxLimit)
+	case defaultLimit > maxLimit:
+		return fmt.Errorf("MENTIONABLE_DEFAULT_LIMIT (%d) must be <= MENTIONABLE_MAX_LIMIT (%d)", defaultLimit, maxLimit)
+	default:
+		return nil
+	}
 }
 
 // legacyRoomOrigin maps a site to its legacy origin URL (incl. scheme).
@@ -137,6 +171,14 @@ func main() {
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid guard config", "error", err)
+		os.Exit(1)
+	}
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -147,6 +189,10 @@ func main() {
 	}
 	if cfg.RestrictedRoomMinMembers <= 0 {
 		slog.Error("invalid RESTRICTED_ROOM_MIN_MEMBERS: must be > 0", "value", cfg.RestrictedRoomMinMembers)
+		os.Exit(1)
+	}
+	if err := validateMentionableLimits(cfg.MentionableDefaultLimit, cfg.MentionableMaxLimit); err != nil {
+		slog.Error("invalid mentionable limits", "error", err)
 		os.Exit(1)
 	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
@@ -164,8 +210,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
@@ -177,19 +223,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	clientReadPref, err := mongoutil.ParseReadPreference(cfg.MongoClientReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo client read preference", "value", cfg.MongoClientReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(clientReadPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("mongo client read preference configured", "readPreference", clientReadPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",
-			"room_key_grace_period", cfg.RoomKeyGracePeriod)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
 		os.Exit(1)
 	}
-	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), cfg.RoomKeyGracePeriod)
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, db, cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
+	if err != nil {
+		slog.Error("open room key store failed", "error", err)
+		os.Exit(1)
+	}
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -207,9 +267,7 @@ func main() {
 	// Bounded timeout so a hung createIndexes surfaces at startup.
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := store.EnsureIndexes(ensureCtx); err != nil {
-		ensureCancel()
-		slog.Error("ensure store indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
 
@@ -264,32 +322,25 @@ func main() {
 		dekProvisioner = atrest.NewCipher(w, atrest.NewMongoDEKStore(dekColl), cfg.Atrest)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
-	// no-ops (nil-checked in handler.go).
+	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
+	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap adds tracing+metrics in place, mirroring
-		// pkg/valkeyutil's instrumentCluster.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	var subValkey valkeyutil.Client
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+		// The same connection backs best-effort subauthcache L2 invalidation
+		// after a membership, role or history-restriction write. One pool serves
+		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
+		// the bust a no-op that the L2 TTL reconciles.
+		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
-		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
 	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
@@ -300,19 +351,17 @@ func main() {
 			if msgID != "" {
 				opts = append(opts, jetstream.WithMsgID(msgID))
 			}
-			_, err := js.PublishMsg(ctx, msg, opts...)
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if _, err := js.PublishMsg(ctx, msg, opts...); err != nil {
+				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+				publishMetrics.Failure(ctx, destination, operation, err)
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		},
 		func(ctx context.Context, subj string, data []byte) error {
-			err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+				publishMetrics.Failure(ctx, destination, operation, err)
 				return fmt.Errorf("publish core to %q: %w", subj, err)
 			}
 			return nil
@@ -323,21 +372,18 @@ func main() {
 	)
 	handler.dekProvisioner = dekProvisioner
 	handler.badge = badge
+	handler.valkey = subValkey
 	handler.graphClient = graphClient
 	handler.directoryClient = directoryClient
 	handler.teamsMeetingStore = store
 	handler.teamsEmailDomain = cfg.TeamsEmailDomain
 	handler.roomMembersLimit = cfg.RoomMembersLimit
 	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
+	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
+	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "room-service", routerOpts...)
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	handler.Register(router)
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -366,6 +412,7 @@ func main() {
 			}
 			return nil
 		},
+		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil

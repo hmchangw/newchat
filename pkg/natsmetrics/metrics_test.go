@@ -96,7 +96,7 @@ func attrs(dp metricdata.DataPoint[int64]) map[string]string {
 
 func TestConsumerLoopGaugeTransitions(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "broadcast-worker", Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "broadcast-worker"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "broadcast-worker"})
 
 	c.LoopStopped(context.Background()) // iterator creation failure must expose zero
 	c.LoopStarted(context.Background())
@@ -127,7 +127,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			c.LoopStarted(context.Background())
 
 			c.LoopFailed(context.Background(), tt.err)
@@ -145,7 +145,7 @@ func TestConsumerLoopFailureUsesBoundedReason(t *testing.T) {
 
 func TestConsumerLoopFailureAfterShutdownDoesNotReportTerminalFailure(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	c.LoopStopped(context.Background())
 
 	c.LoopFailed(context.Background(), jetstream.ErrConsumerDeleted)
@@ -174,7 +174,7 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			tracked := c.Track(context.Background(), tt.msg, EventCreated, 5)
 			_ = tt.dispose(tracked)
 			tracked.Finish(context.Background()) // must not double count
@@ -184,13 +184,6 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 			require.Len(t, points, 1)
 			assert.Equal(t, int64(1), points[0].Value)
 			assert.Equal(t, string(tt.want), attrs(points[0])["outcome"])
-			redeliveries := metricPoints[int64](t, rm, "chat.nats.consumer.redeliveries")
-			if tt.redelivery == 0 {
-				assert.Empty(t, redeliveries)
-			} else {
-				require.Len(t, redeliveries, 1)
-				assert.Equal(t, tt.redelivery, redeliveries[0].Value)
-			}
 			durations := histogramPoints(t, rm, "chat.nats.consumer.processing.duration")
 			require.Len(t, durations, 1)
 			assert.Equal(t, uint64(1), durations[0].Count)
@@ -200,7 +193,7 @@ func TestTrackedMessageDispositionAndRedelivery(t *testing.T) {
 
 func TestTrackedMessageContextAndCancellation(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 5}}, EventCreated, 5)
 	ctx := tracked.Context(context.Background())
 
@@ -223,7 +216,7 @@ func TestTrackedMessageContextAndCancellation(t *testing.T) {
 
 func TestTerminalFailureAndMaxDeliver(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "message-worker", Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "message-worker"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "MESSAGES_CANONICAL_s1", Consumer: "message-worker"})
 
 	permanent := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventUnknown, 5)
 	permanent.MarkTerminal(context.Background(), TerminalPermanent)
@@ -243,41 +236,38 @@ func TestTerminalFailureAndMaxDeliver(t *testing.T) {
 
 func TestPublishAndRequestMetrics(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	p := m.Publisher("notification-worker", "s1")
-	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nil)
-	p.Attempt(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
-	p.Retry(context.Background(), DestinationPush, OperationPushPublish)
+	p := m.Publisher("s1")
+	// A successful publish records nothing; only the failure lands.
+	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nil)
+	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
 	p.Request(context.Background(), OperationPresenceLookup, 25*time.Millisecond, nats.ErrTimeout)
 
 	rm := collect(t, reader)
-	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.attempts"), 2)
-	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.retries"), 1)
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.failures"), 1)
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, "timeout", attrs(requestPoints[0])["outcome"])
-	assert.Len(t, histogramPoints(t, rm, "chat.nats.request.duration"), 1)
+	assert.Equal(t, "timeout", attrsOf(requestPoints[0])["error.type"])
 }
 
 func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	p := m.Publisher("notification-worker", "s1")
-	p.Attempt(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nil)
+	p := m.Publisher("s1")
+	p.Failure(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nats.ErrTimeout)
 	p.Request(context.Background(), Operation("another.dynamic.operation"), time.Millisecond, nil)
 
 	rm := collect(t, reader)
-	publishPoints := metricPoints[int64](t, rm, "chat.nats.publish.attempts")
+	publishPoints := metricPoints[int64](t, rm, "chat.nats.publish.failures")
 	require.Len(t, publishPoints, 1)
 	assert.Equal(t, string(DestinationUnknown), attrs(publishPoints[0])["destination_kind"])
 	assert.Equal(t, string(OperationUnknown), attrs(publishPoints[0])["operation"])
-	requestPoints := metricPoints[int64](t, rm, "chat.nats.requests")
+	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, string(OperationUnknown), attrs(requestPoints[0])["operation"])
+	assert.Equal(t, string(OperationUnknown), attrsOf(requestPoints[0])["rpc.method"])
 }
 
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {
 	var publisher Publisher
-	publisher.Attempt(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
-	publisher.Retry(context.Background(), DestinationPush, OperationPushPublish)
+	publisher.Failure(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
 	publisher.Request(context.Background(), OperationPresenceLookup, time.Millisecond, errors.New("request failed"))
 }
 
@@ -288,7 +278,9 @@ func TestClassifiersAreBounded(t *testing.T) {
 		err  error
 		want PublishOutcome
 	}{
-		{nil, PublishSuccess},
+		// Unreachable through Publisher.Failure, which returns before classifying
+		// a nil error. Pinned so the function stays total.
+		{nil, PublishOtherError},
 		{context.DeadlineExceeded, PublishTimeout},
 		{nats.ErrNoResponders, PublishNoResponders},
 		{nats.ErrDisconnected, PublishDisconnected},

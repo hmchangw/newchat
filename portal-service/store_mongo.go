@@ -8,6 +8,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 type mongoDirectoryStore struct {
@@ -25,7 +27,7 @@ func newMongoDirectoryStore(db *mongo.Database) *mongoDirectoryStore {
 // EnsureIndexes enforces account uniqueness on hr_employee so a buggy HR cron
 // write fails at insert time instead of publishing two home sites for one account.
 func (s *mongoDirectoryStore) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.employees.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.employees, mongo.IndexModel{
 		Keys:    bson.D{{Key: "account", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {

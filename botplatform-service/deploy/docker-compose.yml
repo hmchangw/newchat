@@ -18,8 +18,13 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       - SESSIONS_MAX_PER_ACCOUNT=${SESSIONS_MAX_PER_ACCOUNT:-100}
+      # Keeps already-authenticated bots working while Mongo is unreachable.
+      # Requires VALKEY_ADDRS; 0 disables the tier.
+      - SESSION_CACHE_TTL=${SESSION_CACHE_TTL:-90m}
+      - MONGO_SERVER_SELECTION_TIMEOUT=${MONGO_SERVER_SELECTION_TIMEOUT:-2s}
       - BCRYPT_COST=${BCRYPT_COST:-10}
       - DEV_MODE=${DEV_MODE:-true}
     volumes:

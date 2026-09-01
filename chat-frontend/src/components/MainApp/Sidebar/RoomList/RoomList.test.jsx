@@ -140,6 +140,49 @@ describe('RoomList: section controls', () => {
   })
 })
 
+describe('RoomList: message preview', () => {
+  const preview = { messageId: 'm1', senderName: 'Alice Chen', text: 'hey are we still on' }
+
+  it('renders the sender prefix and snippet in a channel row', () => {
+    setup([section('chats', [summary('r1', { preview })])])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.getByText('Alice Chen:')).toBeInTheDocument()
+    expect(screen.getByText('hey are we still on')).toBeInTheDocument()
+  })
+
+  it('omits the sender prefix in a DM row', () => {
+    setup([
+      section('chats', [summary('r1', { type: 'dm', preview })]),
+    ])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.queryByText('Alice Chen:')).not.toBeInTheDocument()
+    expect(screen.getByText('hey are we still on')).toBeInTheDocument()
+  })
+
+  it('omits the sender prefix in a botDM row', () => {
+    setup([section('chats', [summary('r1', { type: 'botDM', preview })])])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.queryByText('Alice Chen:')).not.toBeInTheDocument()
+    expect(screen.getByText('hey are we still on')).toBeInTheDocument()
+  })
+
+  it('renders the snippet line empty when the room has no preview', () => {
+    setup([section('chats', [summary('r1')])])
+    const { container } = render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    const line = container.querySelector('.room-preview')
+    expect(line).toBeInTheDocument()   // reserved, so the row height is stable
+    expect(line.textContent).toBe('')
+  })
+
+  it('renders the attachment label a preview carries as its text', () => {
+    setup([
+      section('chats', [summary('r1', { preview: { ...preview, text: 'Photo' } })]),
+    ])
+    render(<RoomList selectedRoomId={null} onSelectRoom={vi.fn()} />)
+    expect(screen.getByText('Photo')).toBeInTheDocument()
+  })
+})
+
 describe('RoomList: drag to move', () => {
   it('dragging a chat and dropping on a custom section moves it there', () => {
     setup([
@@ -178,5 +221,24 @@ describe('RoomList: drag to move', () => {
     fireEvent.dragStart(screen.getByText(/# gen/).closest('.room-item'), { dataTransfer })
     fireEvent.drop(screen.getByText(/# proj/).closest('.room-item'))
     expect(actions.moveChatTo).toHaveBeenCalledWith('c1', 'site-A', 'work', 'w1', undefined)
+  })
+})
+
+describe('RoomList: read-position unread (hasUnread)', () => {
+  it('bolds a row with hasUnread even when no live message counter accrued', () => {
+    // A newly added member has unread state from her read position, not from
+    // counted live messages — the row must bold without showing a count chip.
+    setup([section('chats', [summary('c1', { name: 'general', hasUnread: true, unreadCount: 0 })])])
+    render(<RoomList onSelectRoom={vi.fn()} />)
+    const row = screen.getByText(/general/).closest('.room-item')
+    expect(row.className).toContain('room-item-unread')
+    expect(row.querySelector('.room-badge-unread')).toBeNull()
+  })
+
+  it('does not bold a read room', () => {
+    setup([section('chats', [summary('c2', { name: 'quiet', hasUnread: false, unreadCount: 0 })])])
+    render(<RoomList onSelectRoom={vi.fn()} />)
+    const row = screen.getByText(/quiet/).closest('.room-item')
+    expect(row.className).not.toContain('room-item-unread')
   })
 })

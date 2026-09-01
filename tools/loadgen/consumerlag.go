@@ -45,9 +45,16 @@ func withConsumerSamplerNow(now func() time.Time) consumerSamplerOption {
 	return func(sampler *ConsumerSampler) { sampler.now = now }
 }
 
+// consumerDurableRegistry allowlists the durables that may appear as a
+// Prometheus label. A typo has to fail at construction rather than mint an
+// unbounded label, so every sampled consumer is named here explicitly.
 var consumerDurableRegistry = map[string]struct{}{
 	"room-worker": {}, "message-gatekeeper": {}, "message-worker": {},
 	"broadcast-worker": {}, "notification-worker": {},
+	"notification-worker-room-event-invalidate": {},
+	"message-sync":   {},
+	"spotlight-sync": {},
+	"user-room-sync": {},
 }
 
 // NewConsumerSampler constructs a sampler after validating its bounded labels.
@@ -79,7 +86,9 @@ func NewConsumerSampler(
 }
 
 func validConsumerStream(name string) bool {
-	for _, prefix := range []string{"MESSAGES-CANONICAL-", "MESSAGES-", "ROOMS-"} {
+	for _, prefix := range []string{
+		"MESSAGES-CANONICAL-", "MESSAGES-", "ROOMS-", "INBOX-",
+	} {
 		if site, found := strings.CutPrefix(name, prefix); found {
 			return failureRunIDPattern.MatchString(site)
 		}

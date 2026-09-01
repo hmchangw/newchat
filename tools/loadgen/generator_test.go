@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,51 +338,97 @@ func TestGenerator_PoolSaturationCountedAsError(t *testing.T) {
 	assert.Greater(t, saturated, float64(0), "expected saturated counter to increment under pool-full conditions")
 }
 
-func TestGenerator_PacedRunBeatsSingleTickerCeiling(t *testing.T) {
-	// Regression for the single-ticker RPS ceiling: the legacy serial path
-	// (MaxInFlight=0) releases one event per delivered tick, and the runtime
-	// cannot deliver 100k sub-millisecond ticks/sec, so it plateaus far below
-	// target. The batched pacer releases rate*interval events per coarse tick
-	// and must out-dispatch it by a wide margin. A relative comparison (same
-	// process, back to back) cancels host-speed and race-detector overhead.
-	//
-	// Both quantities are ceilings — the *most* each path can dispatch — so we
-	// measure the peak over a few short trials. A single 200ms sample is one
-	// GC pause or scheduler stall away from under-counting, which on a loaded
-	// CI runner can briefly compress the ratio below the margin; taking the
-	// best-of-N cancels those transient dips without changing what is asserted.
-	runAt := func(maxInFlight int) int {
+// dispatchPeak returns the highest number of publishes the generator completes
+// in window over trials short runs, at the given rate and MaxInFlight.
+//
+// Both callers measure a ceiling — the *most* a dispatch path can do — so the
+// peak, not the mean, is the meaningful sample: a single run is one GC pause or
+// scheduler stall away from under-counting.
+func dispatchPeak(t *testing.T, maxInFlight, rate int, window time.Duration, trials int) int {
+	t.Helper()
+	best := 0
+	for i := 0; i < trials; i++ {
 		p, _ := BuiltinPreset("small")
 		f := BuildFixtures(&p, 42, "site-local")
 		rp := &recordingPublisher{}
 		m := NewMetrics()
 		g := NewGenerator(&GeneratorConfig{
 			Preset: &p, Fixtures: f, SiteID: "site-local",
-			Rate: 100000, Inject: InjectFrontdoor,
+			Rate: rate, Inject: InjectFrontdoor,
 			Publisher: rp, Metrics: m, Collector: NewCollector(m, p.Name),
 			MaxInFlight: maxInFlight,
 		}, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		require.NoError(t, g.Run(ctx))
-		return rp.count()
-	}
-	// peakOf returns the highest dispatch count over trials short runs.
-	peakOf := func(maxInFlight, trials int) int {
-		best := 0
-		for i := 0; i < trials; i++ {
-			if c := runAt(maxInFlight); c > best {
-				best = c
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), window)
+		err := g.Run(ctx)
+		cancel()
+		require.NoError(t, err)
+		if c := rp.count(); c > best {
+			best = c
 		}
-		return best
 	}
+	return best
+}
 
-	serial := peakOf(0, 3)   // legacy one-per-tick ceiling
-	paced := peakOf(5000, 3) // batched pacer
-	require.Positive(t, serial)
-	assert.Greater(t, float64(paced), float64(serial)*1.3,
-		"batched pacer (%d) should out-dispatch the serial ticker (%d) at 100k rps", paced, serial)
+const (
+	pacedMeasureRate   = 100_000
+	pacedMeasureWindow = 200 * time.Millisecond
+	pacedMeasureTrials = 3
+)
+
+// The regression that produced the batched pacer: the serial path releases one
+// event per delivered tick, and the runtime cannot deliver a tick per
+// microsecond, so it plateaus far below any high target. This is that property
+// with the timer taken out of it. pacedDispatchRateWithTicks accepts the tick
+// channel, so one tick can be shown to release the whole batch the rate is owed
+// — 200 events here — where a one-per-tick regression releases exactly one.
+//
+// This is the blocking assertion. The comparison against the serial path can
+// only be measured on real timers, and no measurement of it is safe to assert
+// on: the two paths degrade at completely different rates under load, so their
+// ratio has no upper bound to write a threshold against.
+func TestPacedDispatch_ReleasesTheWholeBatchOnOneTick(t *testing.T) {
+	start := time.Unix(0, 0).UTC()
+	pacer := newPacer(pacedMeasureRate, start)
+	require.Equal(t, minEmitInterval, pacer.interval,
+		"a target this high must clamp to the tick floor for a batch to exist")
+	require.Greater(t, pacer.perTick, 1.0)
+
+	var dispatched atomic.Int64
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer close(done)
+		pacedDispatchRateWithTicks(ctx, pacer, ticks, 4096,
+			func(int) {}, func() {},
+			func(context.Context) { dispatched.Add(1) })
+	}()
+
+	// Unbuffered: the send returns only once the dispatch loop has taken the
+	// tick, so cancelling afterwards cannot race ahead of the batch it owes.
+	ticks <- start.Add(pacer.interval)
+	cancel()
+	<-done
+
+	assert.Equal(t, int64(pacer.perTick), dispatched.Load(),
+		"one tick must release the events the rate owes for that interval")
+}
+
+// A measurement, not an assertion. Both counts are host-dependent and the
+// review history of this file is three attempts to find a threshold that holds
+// across machines: a fixed target is reachable on a fast host and unreachable
+// on a slow one, and a target scaled from the serial plateau fails too, because
+// under load the serial ticker collapses far harder than the pool does
+// (observed: plateau 400, paced 8000 — a ratio of 20 where an idle host shows
+// 2.2). The numbers are logged because they are useful when tuning the pacer;
+// the only thing asserted is that both paths dispatched at all.
+func TestGenerator_MeasuresBothDispatchPaths(t *testing.T) {
+	serial := dispatchPeak(t, 0, pacedMeasureRate, pacedMeasureWindow, pacedMeasureTrials)
+	paced := dispatchPeak(t, 5000, pacedMeasureRate, pacedMeasureWindow, pacedMeasureTrials)
+
+	t.Logf("at %d rps over %s: serial=%d paced=%d", pacedMeasureRate, pacedMeasureWindow, serial, paced)
+	require.Positive(t, serial, "the serial ticker dispatched nothing")
+	require.Positive(t, paced, "the batched pacer dispatched nothing")
 }
 
 func TestParseInjectMode(t *testing.T) {

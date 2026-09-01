@@ -2,6 +2,8 @@ package main
 
 import (
 	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"sort"
@@ -24,6 +26,12 @@ const (
 	// asks "can a new reply be attached here?", which is true of a message with
 	// zero replies — precisely the case that has no thread room yet.
 	soakCatalogThreadRead soakCatalogAction = "thread_read"
+	// soakCatalogReadReceipt picks a persisted message to ask "who has read
+	// this?". The caller must address the request as that message's own author:
+	// room-service serves read receipts only to the sender, so any other
+	// identity is refused. This comment previously claimed the opposite, and the
+	// lane it misled failed every request it ever sent.
+	soakCatalogReadReceipt soakCatalogAction = "read_receipt"
 )
 
 type soakClock interface {
@@ -34,14 +42,52 @@ type soakRealClock struct{}
 
 func (soakRealClock) Now() time.Time { return time.Now().UTC() }
 
+// soakCatalogCandidate carries what the catalogue keeps about a message, which
+// deliberately excludes the body. Nothing that reads the catalogue needs it —
+// the verifiers compare by digest and the search probe wants a single term —
+// and at the sizes this runs at the bodies were the largest thing the harness
+// held. Build the content fields with setSoakCatalogContent.
 type soakCatalogCandidate struct {
-	ID               string
-	RoomID           string
-	Author           string
+	ID     string
+	RoomID string
+	Author string
+	// Content is input only. TrackPublished reduces it to the fields below and
+	// then clears it, so a message read back out of the catalogue never carries
+	// a body; compare against ContentSHA256 instead.
 	Content          string
+	ContentSHA256    string
+	ContentLength    int
+	SearchTerm       string
 	CreatedAt        time.Time
 	ThreadParentID   string
 	ThreadReplyLimit int
+}
+
+// setSoakCatalogContent reduces a message body to what the catalogue keeps: the
+// digest the read-back verifiers compare against, its length, and the one term
+// the search-index probe queries with.
+func setSoakCatalogContent(candidate *soakCatalogCandidate, body string) {
+	candidate.ContentSHA256 = soakContentDigest(body)
+	candidate.ContentLength = len(body)
+	candidate.SearchTerm = searchProbeTerm(body)
+}
+
+// reduceContentLocked is the single place a body enters the catalogue. Every
+// path that admits a message goes through it, so none of them can forget to
+// record the digest and leave later read-backs comparing against an empty one.
+func (c *soakCatalog) reduceContentLocked(candidate *soakCatalogCandidate, body string) {
+	setSoakCatalogContent(candidate, body)
+	candidate.Content = ""
+	if !c.retainSearchTerms {
+		candidate.SearchTerm = ""
+	}
+}
+
+// soakContentDigest is the form every read-back comparison uses, so a verifier
+// never has to hold a body to check one.
+func soakContentDigest(body string) string {
+	digest := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(digest[:])
 }
 
 type soakCatalogMessage struct {
@@ -89,10 +135,15 @@ type soakPendingEntry struct {
 }
 
 type soakCatalog struct {
-	perRoomCap   int
-	globalCap    int
-	persistGrace time.Duration
-	clock        soakClock
+	// retainSearchTerms keeps the term the search-index probe queries with. The
+	// soak's bodies are one repeated character with no word boundaries, so that
+	// term is the whole body — the thing this catalogue exists not to hold. It
+	// is kept only when the observer that needs it is configured.
+	retainSearchTerms bool
+	perRoomCap        int
+	globalCap         int
+	persistGrace      time.Duration
+	clock             soakClock
 
 	shards [soakCatalogShardCount]soakCatalogShard
 
@@ -121,6 +172,12 @@ func newSoakCatalog(
 	}
 }
 
+// RetainSearchTerms is set when the search-index observer is configured, which
+// is the only reader that needs the query term.
+func (c *soakCatalog) RetainSearchTerms(retain bool) {
+	c.retainSearchTerms = retain
+}
+
 func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 	if candidate == nil {
 		return fmt.Errorf("published message candidate is required")
@@ -129,6 +186,9 @@ func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 		return fmt.Errorf("published message requires ID, room ID, and author")
 	}
 	tracked := *candidate
+	// Reduce the body here so nothing downstream — not the pending entry, not
+	// the stored one — ever holds it.
+	c.reduceContentLocked(&tracked, tracked.Content)
 	if tracked.ThreadReplyLimit <= 0 {
 		tracked.ThreadReplyLimit = soakThreadReplyHardCap
 	}
@@ -425,7 +485,7 @@ func (c *soakCatalog) MarkEdited(roomID, messageID, content string) bool {
 			return false
 		}
 		entry.edited = true
-		entry.Content = content
+		c.reduceContentLocked(&entry.soakCatalogCandidate, content)
 		return true
 	})
 }
@@ -470,7 +530,7 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 	entry := &soakCatalogEntry{
 		soakCatalogCandidate: soakCatalogCandidate{
 			ID: message.MessageID, RoomID: message.RoomID,
-			Author: message.Sender.Account, Content: message.Msg,
+			Author:    message.Sender.Account,
 			CreatedAt: message.CreatedAt, ThreadParentID: message.ThreadParentID,
 			ThreadReplyLimit: soakThreadReplyHardCap,
 		},
@@ -480,6 +540,7 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		pinned:     true,
 		reactions:  make(map[string]map[string]struct{}),
 	}
+	c.reduceContentLocked(&entry.soakCatalogCandidate, message.Msg)
 	if entry.ThreadParentID == "" {
 		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
 		entry.threadFollowersComplete = false
@@ -665,7 +726,7 @@ func (c *soakCatalog) eligible(
 		// The reply budget is irrelevant here: a full thread is still readable.
 		return entry.ThreadParentID == "" && entry.threadReplies > 0 &&
 			!now.Before(entry.threadReadableAt)
-	case soakCatalogPin, soakCatalogReaction:
+	case soakCatalogPin, soakCatalogReaction, soakCatalogReadReceipt:
 		return true
 	default:
 		return false

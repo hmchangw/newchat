@@ -23,6 +23,8 @@ import (
 
 type memoryFailureJournal struct {
 	events []failureLedgerEvent
+	// refuseNext lets a test reject one append without a separate double.
+	refuseNext bool
 }
 
 type forwardingFailureJournal struct {
@@ -60,6 +62,9 @@ func (j *memoryFailureJournal) Replay() ([]failureLedgerEvent, error) {
 }
 
 func (j *memoryFailureJournal) Append(event *failureLedgerEvent) error {
+	if j.refuseNext {
+		return errors.New("no space left on device")
+	}
 	j.events = append(j.events, *event)
 	return nil
 }
@@ -77,7 +82,7 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: wal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: wal})
 	require.NoError(t, err)
 	op := testFailureOperation("message-v2", now)
 	op.SchemaVersion = 2
@@ -92,7 +97,7 @@ func TestFailureLedger_Version2ReplayAndUnknownVersion(t *testing.T) {
 
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: reopened})
 	require.NoError(t, err)
 	operation, ok := recovered.ClaimDue(now.Add(time.Minute))
 	require.True(t, ok)
@@ -142,7 +147,7 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.wal")
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 2, CompactEvery: 1, Journal: wal, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -155,7 +160,7 @@ func TestFailureLedger_CompactionRestoresTerminalCounters(t *testing.T) {
 
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: reopened})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 	assert.Equal(t, uint64(1), recovered.Snapshot().Results[failureResultGood])
@@ -184,7 +189,7 @@ func TestFailureLedger_ReplayRejectsDuplicateStartedOperation(t *testing.T) {
 		{Type: failureLedgerEventStarted, Operation: operation, At: now},
 		{Type: failureLedgerEventStarted, Operation: operation, At: now},
 	}}
-	_, err := newFailureLedger(failureLedgerConfig{Capacity: 2, Journal: journal})
+	_, err := newFailureLedger(&failureLedgerConfig{Capacity: 2, Journal: journal})
 	assert.ErrorContains(t, err, "already active")
 }
 
@@ -199,17 +204,19 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 
 	wal, err := openFailureWAL(path)
 	require.NoError(t, err)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 3, Journal: wal})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 3, Journal: wal})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("new", now)))
 	require.NoError(t, ledger.Close())
 
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(contents), `"recordType":"header"`)
 	reopened, err := openFailureWAL(path)
 	require.NoError(t, err)
-	recovered, err := newFailureLedger(failureLedgerConfig{Capacity: 3, Journal: reopened})
+	recovered, err := newFailureLedger(&failureLedgerConfig{Capacity: 3, Journal: reopened})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recovered.Close()) })
 	assert.Equal(t, 2, recovered.Snapshot().Active)
@@ -217,7 +224,7 @@ func TestFailureWAL_HeaderlessLegacyIsAtomicallyUpgradedBeforeNewWrites(t *testi
 
 func TestFailureLedger_DownstreamObservationAfterNotSentInvalidatesAccounting(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	require.NoError(t, ledger.Start(testFailureOperation("not-sent", now)))
 	require.NoError(t, ledger.Abandon("not-sent", failureResultNotSent, now))
@@ -416,7 +423,7 @@ func TestFailureRecipientObserver_AppliesManifestDuplicatePolicy(t *testing.T) {
 func TestFailureRecipientObserver_QueueOverflowInvalidatesWithoutBlocking(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics)})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1, Recorder: newFailureLedgerPromRecorder(metrics)})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, metrics, 1, func() time.Time { return now })
 	observer.health.Set(true, now, "subscribed")
@@ -431,7 +438,7 @@ func TestFailureRecipientObserver_QueueOverflowInvalidatesWithoutBlocking(t *tes
 func TestFailureRecipientObserver_ProcessesExactSet(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	op := testFailureOperation("message-1", now)
 	op.SchemaVersion, op.RunID, op.OperationType = 2, "run-1", failureOperationMessageCreate
@@ -495,8 +502,8 @@ func TestFailureRecipientObserver_SubscriptionsAreAttributedAndFlushedBeforeHeal
 	topology := &soakTopology{
 		Rooms: []model.Room{{ID: "channel-1", Type: model.RoomTypeChannel}},
 		Subscriptions: []model.Subscription{
-			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
-			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, IsSubscribed: true, User: model.SubscriptionUser{Account: "bob"}},
+			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "channel-1", RoomType: model.RoomTypeChannel, User: model.SubscriptionUser{Account: "bob"}},
 		},
 	}
 	subscriptions, err := startFailureRecipientSubscriptions(source, topology, observer)
@@ -549,7 +556,7 @@ func TestFailureRecipientObserver_UsesBoundedRecipientConnectionPool(t *testing.
 
 func TestFailureRecipientObserver_RejectsSubscriptionAndMalformedEvidence(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(
 		ledger, NewMetrics(), 2, func() time.Time { return now },
@@ -641,7 +648,7 @@ func TestFailureRecipientObserver_BatchesDurableAnomaliesBeforeReturningPositive
 func TestFailureRecipientObserver_DowngradesPositiveClaimWhenDurabilityBarrierFails(t *testing.T) {
 	now := time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	journal := &recordingFailureRecipientEvidenceJournal{err: assert.AnError}
 	observer := newFailureRecipientObserver(
@@ -663,7 +670,7 @@ func TestFailureRecipientObserver_DowngradesPositiveClaimWhenDurabilityBarrierFa
 
 func TestFailureRecipientObserver_IgnoresUnrelatedRoomEvents(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
 	payload, err := json.Marshal(model.RoomEvent{
@@ -697,7 +704,7 @@ func TestFailureRecipientObserver_RejectsWrongRoomAndEventType(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
-			ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+			ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 			require.NoError(t, err)
 			observer := newFailureRecipientObserver(ledger, NewMetrics(), 2, func() time.Time { return now })
 			observer.health.Set(true, now, "subscribed")
@@ -741,6 +748,8 @@ func TestFailureRecipientObserver_ReplaysDurableMismatchAfterRestart(t *testing.
 	})
 	require.NoError(t, err)
 	first.process(recipientDelivery{recipient: "alice", payload: payload})
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	raw, err := os.ReadFile(filepath.Join(directory, ".recipient-mismatch.raw.jsonl"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(raw), "\n"))
@@ -925,14 +934,13 @@ func TestFailureRecipientConnection_DrainWrapsTimeout(t *testing.T) {
 	assert.ErrorIs(t, err, nats.ErrDrainTimeout)
 }
 
-func TestSoakRuntimeSelector_RecipientSetsExcludeBots(t *testing.T) {
+func TestSoakRuntimeSelector_RecipientSetsUseExistingRowsAndExcludeBots(t *testing.T) {
 	topology := &soakTopology{
 		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},
 		Subscriptions: []model.Subscription{
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "alice"}},
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "borrowed-subscriber"}},
-			{RoomID: "room-1", IsSubscribed: true, User: model.SubscriptionUser{Account: "bot", IsBot: true}},
-			{RoomID: "room-1", IsSubscribed: false, User: model.SubscriptionUser{Account: "departed"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "alice"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "borrowed-subscriber"}},
+			{RoomID: "room-1", User: model.SubscriptionUser{Account: "bot", IsBot: true}},
 		}}
 
 	assert.Equal(t, map[string][]string{"room-1": {"alice", "borrowed-subscriber"}}, soakRecipientSets(topology))

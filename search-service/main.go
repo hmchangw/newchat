@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,11 +35,6 @@ type ESConfig struct {
 	Username      string `env:"USERNAME"         envDefault:""`
 	Password      string `env:"PASSWORD"         envDefault:""`
 	TLSSkipVerify bool   `env:"TLS_SKIP_VERIFY"  envDefault:"false"`
-}
-
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
 }
 
 type NATSConfig struct {
@@ -83,9 +79,9 @@ type SearchConfig struct {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID   string         `env:"SITE_ID,required"`
-	ES       ESConfig       `envPrefix:"SEARCH_"`
-	Valkey   ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID   string   `env:"SITE_ID,required"`
+	ES       ESConfig `envPrefix:"SEARCH_"`
+	Valkey   valkeyutil.Config
 	NATS     NATSConfig     `envPrefix:"NATS_"`
 	Search   SearchConfig   `envPrefix:"SEARCH_"`
 	Mongo    MongoConfig    `envPrefix:"MONGO_"`
@@ -97,10 +93,6 @@ type Config struct {
 	UserRoomIndex     string `env:"USER_ROOM_INDEX,required,notEmpty"`
 	SpotlightIndex    string `env:"SPOTLIGHT_INDEX,required,notEmpty"`
 	SpotlightOrgIndex string `env:"SPOTLIGHT_ORG_INDEX,required,notEmpty"`
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto Elasticsearch/
-	// MongoDB. 0 disables the cap (unbounded spawn).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
 	// ShowTeamsRoom controls whether Teams-migrated rooms/messages (origin
 	// "teams") appear in search results; false hides them (reversible read-time
 	// filter — see pkg/model.OriginTeams).
@@ -108,6 +100,11 @@ type Config struct {
 	// ShowTeamsAccounts allowlists accounts that see Teams rooms/messages even when
 	// ShowTeamsRoom is false — an ops-managed set, comma-separated.
 	ShowTeamsAccounts []string `env:"SHOW_TEAMS_ROOM_ACCOUNTS" envSeparator:","`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE).
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight handlers (MAX_CONCURRENCY) and per-request duration
+	// (REQUEST_TIMEOUT) so a burst can't saturate the Mongo pool.
+	Guard natsrouter.GuardConfig
 }
 
 // teamsAccountSet builds a lookup set from the SHOW_TEAMS_ROOM_ACCOUNTS list, dropping blanks.
@@ -130,6 +127,18 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 	logctx.Configure(cfg.DebugLog)
@@ -174,16 +183,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	valkey, err := valkeyutil.ConnectCluster(ctx, cfg.Valkey.Addrs, cfg.Valkey.Password,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -195,7 +201,7 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -215,9 +221,7 @@ func main() {
 
 	ensureCtx, ensureCancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := mongoStore.ensureIndexes(ensureCtx); err != nil {
-		ensureCancel()
-		slog.Error("ensure mongo indexes failed", "error", err)
-		os.Exit(1)
+		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
 	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
@@ -235,17 +239,13 @@ func main() {
 	})
 	handler.room = newRoomClient(nc)
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto Elasticsearch/MongoDB.
-	// MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "search-service", routerOpts...)
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.New(nc, "search-service",
+		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
 	router.Use(natsrouter.RequestID())
 	router.Use(natsrouter.Recovery())
 	router.Use(natsrouter.Logging())
+	router.Use(cfg.Guard.TimeoutMiddleware()...)
 	handler.Register(router)
 
 	// Health-only listener. All four timeouts guard against hung probes tying

@@ -121,7 +121,7 @@ missing beyond shared cache/key counters.
 | broadcast-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`broadcast_worker_fanout_recipients`**, **`broadcast_worker_recipient_deliveries_total`** | E2E-key hits |
 | notification-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`notification_worker_outcomes_total`** | — |
 | outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
-| search-sync-worker | — | — | — | — | spans (Fetch) | spans | — | bulk actions/flush, index vs delete, ES failures |
+| search-sync-worker | — | — | — | — | spans (Fetch) | spans | **`search_sync_worker_bulk_flush_duration_seconds`, `search_sync_worker_bulk_flush_actions`, `search_sync_worker_bulk_item_failures_total`, `search_sync_worker_messages_total`, `search_sync_worker_parent_resolve_duration_seconds`** (all labeled by `collection`) | (bulk outcomes covered 2026-08-19) |
 | search-service | — | ✅ | ✅ | — | spans | spans | **`search_service_requests_total`, `search_service_request_duration_seconds`, `search_service_es_duration_seconds`** | (well covered after request traffic) |
 | room-service | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | — | room create/join/leave outcomes |
 | room-worker | — | ✅ | ✅ | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total`, `room_key_*_total` | member-add results, roomkey distributions, vault ops |
@@ -138,63 +138,83 @@ The shared consumer, request, and publisher helpers are adopted by
 `message-gatekeeper`, `message-worker`, `broadcast-worker`,
 `notification-worker`, `history-service`, `room-service`, and
 `room-worker` — the seven services in the NATS failure-test scope
-(`docs/load-testing/nats-jetstream-failure-test-plan.md`). Connection
+(`docs/load-testing/failure/nats-jetstream.md`). Connection
 lifecycle metrics are opt-in through `natsutil.ConnectWithMetrics`. Names are
 OTel instrument names; Prometheus renders them with `_` separators and adds
 counter / unit suffixes. An instrument whose name already ends in `_total`
 keeps exactly one — the exporter strips the existing token before appending —
 so `nats_slow_consumer_events_total` exports under that name, not a doubled one.
 
-Consumer and publisher families share a base of `service_name` + `site`; the
-"labels" column lists what each adds on top. Every adopter reads `service_name`
-from `OTEL_SERVICE_NAME` so the label matches the OTel resource, and the bot and
-Teams deployments carry distinct identities while the package instrumentation
-scopes stay stable.
+Consumer and publisher families share a base of `site`; the "labels" column
+lists what each adds on top. Service identity is deliberately **not** an inline
+label: the SDK's Prometheus exporter renders the resource's `service.name`
+(from `OTEL_SERVICE_NAME`) as a constant `service_name` label on every series,
+so queries still slice by `service_name` and the bot and Teams deployments
+still carry distinct identities. An inline `service_name` attribute would
+collide with that constant label and fail the entire scrape — client_golang
+rejects the duplicate label name at gather time and promhttp turns it into an
+HTTP 500 on `/metrics` (this happened; fixed 2026-08-19).
 
 | Instrument | Type | Owner | Labels beyond the base |
 |---|---|---|---|
 | `chat.nats.consumer.loop.up` | up-down counter | `pkg/natsmetrics` | stream, consumer |
 | `chat.nats.consumer.messages` | counter | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
-| `chat.nats.consumer.redeliveries` | counter | `pkg/natsmetrics` | stream, consumer, event_type |
 | `chat.nats.consumer.processing.duration` | histogram (s) | `pkg/natsmetrics` | stream, consumer, event_type, outcome |
 | `chat.nats.terminal.failures` | counter | `pkg/natsmetrics` | stream, consumer, event_type, reason |
-| `chat.nats.publish.attempts` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
-| `chat.nats.publish.retries` | counter | `pkg/natsmetrics` | destination_kind, operation |
-| `chat.nats.requests` | counter | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.duration` | histogram (s) | `pkg/natsmetrics` | operation, outcome |
-| `chat.nats.request.handled` | counter | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
-| `chat.nats.request.handler.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | operation, result |
+| `chat.nats.publish.failures` | counter | `pkg/natsmetrics` | destination_kind, operation, outcome |
+| `rpc.client.call.duration` | histogram (s) | `pkg/natsmetrics` | rpc.system.name, rpc.method, error.type (absent on success) |
+| `rpc.server.call.duration` | histogram (s) | `pkg/natsmetrics` / `pkg/natsrouter` | rpc.system.name, rpc.method, error.type (absent on success) |
 | `chat.nats.client.connected` | up-down counter | `pkg/natsutil` | none — one series per process; value is the live connection count |
 | `chat.nats.client.connection.events` | counter | `pkg/natsutil` | event |
 | `nats_slow_consumer_events_total` | counter | `pkg/natsutil` | subject, queue |
 
-The two `chat.nats.client.*` families are the exception: they carry no
-`service_name` or `site` at all, because they are emitted from the opt-in
-connection helper, which sits below the layer that knows the site. They are
-scoped by the OTel resource instead, so join them through `target_info` rather
-than expecting inline labels. `nats_slow_consumer_events_total` is scoped the
-same way.
+The two RPC families are the one place this repo does not use a `chat.` prefix:
+they implement the OpenTelemetry RPC semantic conventions, so they carry the
+convention's instrument names, unit and labels verbatim (verified against
+`go.opentelemetry.io/otel/semconv/v1.40.0/rpcconv`). `error.type` is conditional
+on failure per the convention, so a successful call carries no error label at
+all.
+
+Bucket boundaries are the one deliberate deviation: these histograms use
+`o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
+(14). The SDK overrides the identical table for `http.server.*` so that p99 is
+directly comparable across services, and an RPC family on different boundaries
+would break exactly that. Interop is unaffected in the part that matters — a
+generic RPC panel still finds and groups these series by name and label; only
+`histogram_quantile`'s interpolation points differ.
+
+The two `chat.nats.client.*` families are the exception: they carry no `site`
+at all, because they are emitted from the opt-in connection helper, which sits
+below the layer that knows the site. They are scoped by the OTel resource
+instead, so join them through `target_info` rather than expecting inline
+labels. `nats_slow_consumer_events_total` is scoped the same way.
 
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
 Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `history_read`,
-`history_mutation`, `room_publish`, `member_publish`, `outbox_publish`. Subject
-families that do not map normalize to `unknown` rather than minting a label.
+`room_mutation`, `member_read`, `member_mutation`, `channel_history`,
+`thread_open`, `history_read`, `history_mutation`, `room_publish`,
+`member_publish`, `outbox_publish`. `channel_history` and `thread_open` are
+deliberately finer than the rest: each is the whole numerator and denominator of
+an SLO (SLO-4 and SLO-5), which the coarse `history_read` cannot serve because it
+also carries scroll, jump, single and batch reads, pinned lists and thread
+parents. Subject families that do not map normalize to `unknown` rather than
+minting a label.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 
-`service_name` and `site` are the exception: they are operator-supplied
-deployment identity, not closed enums, so deployment configuration is what
-constrains their cardinality to the real service and site inventory.
+`site` is the exception: it is operator-supplied deployment identity, not a
+closed enum, so deployment configuration is what constrains its cardinality to
+the real site inventory. (`service_name` is deployment identity too, but it
+arrives as a resource-derived constant label, never as an inline attribute.)
 
 Reconnect-buffer overflow is **not** a connection event: nats.go returns
 `ErrReconnectBufExceeded` synchronously from `publish()` and never routes it
 through `ErrorHandler`, so it is counted as
-`chat_nats_publish_attempts_total{outcome="buffer_full"}`. The full semantics,
-label enums, and the alerts these drive are specified in the NATS failure
-metrics contract under `docs/load-testing/failure-testing/`.
+`chat_nats_publish_failures_total{outcome="buffer_full"}`. The full semantics,
+label enums, and the alerts these drive are specified in the NATS metrics
+contract at `docs/specs/o11y/nats-metrics-contract.md`.
 
 ### 2.2 Services not previously inventoried (2026-08-14)
 
@@ -347,8 +367,8 @@ these exporters there (and to prod IaC) to cover Layer C.
    add to `docker-local/compose.o11y.yaml` + prod. *Infra, not app code.*
 2. **Hot-path domain counters (Layer B).** *Mostly done (2026-08-14).*
    Gatekeeper, message-worker, broadcast, and notification now own domain
-   counters (§2 table). Still open: **search-sync bulk outcomes**, and
-   broadcast's E2E-key hits.
+   counters (§2 table). Search-sync bulk outcomes closed 2026-08-19
+   (`search_sync_worker_*`, §2 table). Still open: broadcast's E2E-key hits.
 3. **ES client metrics (Layer A gap).** The NATS half of this item is closed —
    see §2.1 for the application-side families that replaced it. `searchengine`
    still emits spans but no metrics; decide whether app-side ES latency

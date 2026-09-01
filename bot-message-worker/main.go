@@ -36,15 +36,20 @@ type config struct {
 
 	MessageBucketHours int `env:"MESSAGE_BUCKET_HOURS" envDefault:"360"`
 
-	MaxWorkers int `env:"MAX_WORKERS" envDefault:"100"`
-	MaxDeliver int `env:"MAX_DELIVER" envDefault:"5"`
+	MaxWorkers int                     `env:"MAX_WORKERS" envDefault:"100"`
+	Consumer   stream.ConsumerSettings `envPrefix:"CONSUMER_"`
 
 	MongoURI      string `env:"MONGO_URI"`
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
-	Atrest        atrest.Config
-	Vault         atrest.VaultConfig `envPrefix:"VAULT_"`
+	// ReadPreference: the at-rest DEK collection is this service's only Mongo read.
+	// primaryPreferred, because a stale DEK read cannot diverge ($setOnInsert plus a
+	// re-read comparison) but a primary-only one blocks encryption outright.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool           mongoutil.PoolConfig
+	Atrest         atrest.Config
+	Vault          atrest.VaultConfig `envPrefix:"VAULT_"`
 
 	HealthAddr   string          `env:"HEALTH_ADDR"   envDefault:":8081"`
 	PProfEnabled bool            `env:"PPROF_ENABLED" envDefault:"false"`
@@ -63,6 +68,10 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool config: %w", err)
 	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -92,16 +101,26 @@ func run() error {
 
 	bucket := msgbucket.New(time.Duration(cfg.MessageBucketHours) * time.Hour)
 
+	// Validated unconditionally: parsing only inside the ATREST branch would let a
+	// bad value lie dormant and surface as a crash-loop at a later flag flip.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+
 	var cipher atrest.Cipher
 	var vaultWrapper atrest.KeyWrapperCloser
 	if cfg.Atrest.Enabled {
 		if cfg.MongoURI == "" {
 			return fmt.Errorf("ATREST_ENABLED=true requires MONGO_URI for the DEK collection")
 		}
-		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+		mc, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+			mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+			mongoutil.WithReadPreference(readPref))
 		if err != nil {
 			return fmt.Errorf("connect mongo: %w", err)
 		}
+		slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 		defer mongoutil.Disconnect(ctx, mc)
 		w, err := atrest.NewVaultKeyWrapper(ctx, cfg.Vault)
 		if err != nil {
@@ -120,14 +139,7 @@ func run() error {
 	h := newHandler(store, cfg.SiteID)
 
 	streamCfg := stream.BotMessagesCanonical(cfg.SiteID)
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, jetstream.ConsumerConfig{
-		Durable:       "bot-message-worker",
-		FilterSubject: subject.BotCanonicalCreated(cfg.SiteID),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		MaxDeliver:    cfg.MaxDeliver,
-		BackOff:       []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
-	})
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(cfg.Consumer, cfg.SiteID))
 	if err != nil {
 		return fmt.Errorf("create consumer: %w", err)
 	}
@@ -186,4 +198,13 @@ func run() error {
 		func(dctx context.Context) error { return obsShutdown(dctx) },
 	)
 	return nil
+}
+
+// buildConsumerConfig adds the durable name and filter; everything else comes
+// from ConsumerSettings.
+func buildConsumerConfig(s stream.ConsumerSettings, siteID string) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "bot-message-worker"
+	cc.FilterSubject = subject.BotCanonicalCreated(siteID)
+	return cc
 }

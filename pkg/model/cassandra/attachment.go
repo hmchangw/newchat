@@ -29,7 +29,10 @@ type Attachment struct {
 	ImageType       string           `json:"imageType,omitempty"`
 	ImageSize       int64            `json:"imageSize,omitempty"`
 	ImageDimensions *ImageDimensions `json:"imageDimensions,omitempty"`
-	ImagePreview    string           `json:"imagePreview,omitempty"`
+	// ImagePreview is no longer produced — upload-service stopped generating the
+	// blurred thumbnail. The field stays so messages stored before that change
+	// keep round-tripping their preview through history, search and delivery.
+	ImagePreview string `json:"imagePreview,omitempty"`
 
 	AudioURL  string `json:"audioUrl,omitempty"`
 	AudioType string `json:"audioType,omitempty"`
@@ -44,7 +47,8 @@ type Attachment struct {
 // JSON-encoded Attachment) into typed objects. It is lenient: a malformed blob
 // is skipped and counted (returned as skipped) rather than failing the batch, so
 // one bad row can't break a history load or a live delivery. Returns (nil, 0)
-// for empty input.
+// for empty input. Pre-migration snake_case blobs are converted to the current
+// shape in place — see normalizeAttachment.
 func DecodeAttachments(raw [][]byte) (out []Attachment, skipped int) {
 	if len(raw) == 0 {
 		return nil, 0
@@ -56,6 +60,7 @@ func DecodeAttachments(raw [][]byte) (out []Attachment, skipped int) {
 			skipped++
 			continue
 		}
+		normalizeAttachment(b, &a)
 		out = append(out, a)
 	}
 	return out, skipped

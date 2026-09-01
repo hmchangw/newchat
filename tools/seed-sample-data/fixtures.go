@@ -31,6 +31,8 @@ var seedBaseTime = time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
 // 10, the legacy Rocket.Chat recipe botplatform-service's verifyPassword
 // expects (see botplatform-service/handler.go).
 const (
+	// #nosec G101 -- local dev sample-data seed, not a production credential
+	// nosemgrep: gosec.G101-1
 	demoAdminPassword   = "AdminDev123!"
 	demoAdminBcryptHash = "$2a$10$yqCFQ.M73mHH7yoHAtvHxuc61Q3yktq1TYMyiTTYBsBGPPABSDayK"
 )
@@ -150,19 +152,31 @@ func dmRoom(accountA, accountB string) model.Room {
 	}
 }
 
-// BuildRooms returns the seed room set: 3 local channels, 2 local DMs, 1 remote channel.
+// BuildRooms returns the seed room set: 3 local channels, 2 local DMs, 1 remote
+// channel. r-general, r-eng and r-remote-announce each have members homed at
+// both sites, so they carry CrossSite=true — that flag routes their events onto
+// the global chat.room.{id} lane, the one that crosses the NATS gateway.
 func BuildRooms() []model.Room {
+	general := channelRoom("r-general", "general", siteLocal, false,
+		[]string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi", "ivan"})
+	general.CrossSite = ptrBool(true)
+
+	eng := channelRoom("r-eng", "engineering", siteLocal, true,
+		[]string{"alice", "bob", "carol", "ivan"})
+	eng.CrossSite = ptrBool(true)
+
+	remoteAnnounce := channelRoom("r-remote-announce", "remote-announce", siteRemote, false,
+		[]string{"ivan", "judy", "alice"})
+	remoteAnnounce.CrossSite = ptrBool(true)
+
 	return []model.Room{
-		channelRoom("r-general", "general", siteLocal, false,
-			[]string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi", "ivan"}),
-		channelRoom("r-eng", "engineering", siteLocal, true,
-			[]string{"alice", "bob", "carol", "ivan"}),
+		general,
+		eng,
 		channelRoom("r-design", "design", siteLocal, false,
 			[]string{"frank", "grace", "dave"}),
 		dmRoom("alice", "bob"),
 		dmRoom("carol", "eve"),
-		channelRoom("r-remote-announce", "remote-announce", siteRemote, false,
-			[]string{"ivan", "judy", "alice"}),
+		remoteAnnounce,
 	}
 }
 
@@ -309,6 +323,8 @@ func itoa(i int) string {
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
+func ptrBool(b bool) *bool { return &b }
+
 // BuildRoomsWithLastMsg returns BuildRooms() but with each room's
 // LastMsgAt/LastMsgID populated from the latest message in that room.
 // This is what mongo.go upserts into the rooms collection — not the bare
@@ -424,7 +440,7 @@ var roomOwners = map[string]string{
 // is a member of. DM subscriptions are emitted as plain Subscription rows
 // with Name set to the counterpart's account (matches how dm rooms are
 // labeled on the client). Roles are ["owner"] for the seeded owner of
-// each channel and ["member"] otherwise; DM members get ["member"].
+// each channel and ["user"] otherwise; DM members get ["user"].
 func BuildSubscriptions() []model.Subscription {
 	users := usersByAccount()
 	rooms := BuildRooms()
@@ -433,7 +449,7 @@ func BuildSubscriptions() []model.Subscription {
 		r := &rooms[ri]
 		for i, account := range r.Accounts {
 			u := users[account]
-			roles := []model.Role{model.RoleMember}
+			roles := []model.Role{model.RoleUser}
 			if owner, ok := roomOwners[r.ID]; ok && owner == account {
 				roles = []model.Role{model.RoleOwner}
 			}

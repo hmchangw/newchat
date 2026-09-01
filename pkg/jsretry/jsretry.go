@@ -18,6 +18,7 @@ package jsretry
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -25,6 +26,12 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
+
+// minNakDelay floors every nak delay. A delay of 0 serializes as a bare -NAK,
+// which redelivers instantly and ignores the consumer's BackOff — the one thing
+// this package exists to prevent — so a degenerate schedule still yields a
+// positive delay.
+const minNakDelay = time.Millisecond
 
 // Msg is the subset of the JetStream message API the settle path needs. Both
 // jetstream.Msg and oteljetstream.Msg (which embeds it) satisfy it.
@@ -39,12 +46,29 @@ type Msg interface {
 //
 // DefaultBackoff suits workers whose retries can be spaced generously because
 // the work is not latency-sensitive — enough to ride out a brief Cassandra or
-// Mongo outage without exhausting the consumer's MaxDeliver.
+// Mongo outage without exhausting the consumer's MaxDeliver. The first four
+// entries are Synadia's published reference schedule; the 10m tail extends the
+// budget to 12.6 minutes across MaxDeliver=6.
 var DefaultBackoff = []time.Duration{
 	1 * time.Second,
 	5 * time.Second,
 	30 * time.Second,
 	2 * time.Minute,
+	10 * time.Minute,
+}
+
+// BackpressureBackoff suits workers fronting a downstream that reports it is
+// shedding load (an ES 429, a saturated pool). It skips DefaultBackoff's fast
+// rungs: a backend that just rejected the write needs time to drain, and a
+// one-second retry only feeds the overload that caused the rejection. It then
+// keeps DefaultBackoff's 10m tail, so shedding load never buys a message a
+// *smaller* retry budget than an ordinary failure would have got.
+var BackpressureBackoff = []time.Duration{
+	30 * time.Second,
+	1 * time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
 }
 
 // LowLatencyBackoff suits fan-out / delivery workers where the first retry must
@@ -55,6 +79,8 @@ var LowLatencyBackoff = []time.Duration{
 	1 * time.Second,
 	5 * time.Second,
 	30 * time.Second,
+	2 * time.Minute,
+	10 * time.Minute,
 }
 
 // Settle resolves a processed message and logs the business error once:
@@ -73,6 +99,22 @@ func Settle(ctx context.Context, msg Msg, backoff []time.Duration, err error) {
 // still logs the rare case where the Ack/Nak network call itself fails.
 func SettleQuiet(ctx context.Context, msg Msg, backoff []time.Duration, err error) {
 	settle(ctx, msg, backoff, err, false)
+}
+
+// Nak schedules msg for redelivery after this attempt's jittered backoff delay.
+// Use it where a handler settles its own ack/nak instead of returning an error to
+// Settle; the caller keeps the business-error log, reason labels the redelivery.
+func Nak(ctx context.Context, msg Msg, backoff []time.Duration, reason string) {
+	nak(ctx, msg, backoffFor(msg, backoff), reason)
+}
+
+// nak is the single NakWithDelay path; a failed nak network call is logged even
+// when the caller owns the business-error log.
+func nak(ctx context.Context, msg Msg, delay time.Duration, reason string) {
+	if err := msg.NakWithDelay(delay); err != nil {
+		slog.ErrorContext(ctx, "failed to nak message", "reason", reason,
+			"delay", delay.String(), "error", err, "request_id", natsutil.RequestIDFromContext(ctx))
+	}
 }
 
 func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, logBusiness bool) {
@@ -95,26 +137,98 @@ func settle(ctx context.Context, msg Msg, backoff []time.Duration, err error, lo
 	if logBusiness {
 		slog.ErrorContext(ctx, "message failed — retrying", "error", err, "delay", delay.String(), "request_id", natsutil.RequestIDFromContext(ctx))
 	}
-	if nakErr := msg.NakWithDelay(delay); nakErr != nil {
-		slog.ErrorContext(ctx, "failed to nak message", "error", nakErr, "request_id", natsutil.RequestIDFromContext(ctx))
-	}
+	nak(ctx, msg, delay, "transient failure")
 }
 
 // backoffFor selects the delay for the next redelivery, indexed by how many
 // times the message has already been delivered; the last entry is reused once
-// attempts exceed the schedule. Falls back to the first entry when metadata is
-// unavailable. The uint64 counter is walked rather than converted to int,
-// avoiding any narrowing-overflow concern.
+// attempts exceed the schedule, and the result is jittered. Falls back to the
+// first entry when metadata is unavailable. The uint64 counter is walked rather
+// than converted to int, avoiding any narrowing-overflow concern.
 func backoffFor(msg Msg, backoff []time.Duration) time.Duration {
-	meta, err := msg.Metadata()
-	if err != nil || meta == nil {
-		return backoff[0]
+	if len(backoff) == 0 {
+		return minNakDelay
 	}
+	base := backoff[0]
 	// NumDelivered is 1 on the first delivery, so the i'th redelivery uses
 	// backoff[i]; once attempts exceed the schedule the last entry is reused.
-	d := backoff[0]
-	for i := uint64(1); i < meta.NumDelivered && i < uint64(len(backoff)); i++ {
-		d = backoff[i]
+	if meta, err := msg.Metadata(); err == nil && meta != nil {
+		for i := uint64(1); i < meta.NumDelivered && i < uint64(len(backoff)); i++ {
+			base = backoff[i]
+		}
 	}
-	return d
+	return jitter(base)
+}
+
+// jitter applies AWS "equal jitter": half the base delay plus a random amount up
+// to the other half. Decorrelates a fleet that all parked during one outage —
+// the server-side BackOff cannot do this, it is a literal duration list.
+func jitter(d time.Duration) time.Duration {
+	if d <= minNakDelay {
+		return minNakDelay
+	}
+	half := d / 2
+	// #nosec G404 -- retry jitter, not security-sensitive
+	return half + time.Duration(rand.Int64N(int64(d-half)+1))
+}
+
+// MinWindow returns the SHORTEST total delay a message can accumulate across
+// deliveries redeliveries under schedule — n deliveries means n-1 waits, and
+// the schedule's last entry repeats once attempts run past it.
+//
+// Shortest, not nominal, because jitter is the point. Every wait is drawn from
+// [d/2, d], so a budget sized on the nominal schedule promises roughly twice
+// the window it can actually guarantee. Anything choosing a delivery count to
+// ride out an outage must size against this.
+func MinWindow(schedule []time.Duration, deliveries int) time.Duration {
+	if len(schedule) == 0 || deliveries < 2 {
+		return 0
+	}
+	var window time.Duration
+	for i := range deliveries - 1 {
+		window += minJitter(delayAt(schedule, i))
+	}
+	return window
+}
+
+// delayAt is the "last entry repeats once attempts run past it" rule, in one
+// place: MinWindow and DeliveriesFor both walk a schedule past its end, and two
+// spellings of the tail rule would let the guaranteed window and the delivery
+// count sized against it disagree about what the tail is.
+func delayAt(schedule []time.Duration, i int) time.Duration {
+	return schedule[min(i, len(schedule)-1)]
+}
+
+// minJitter is the floor jitter can return for a base delay, mirroring jitter's
+// own branches so the two cannot drift.
+func minJitter(d time.Duration) time.Duration {
+	if d <= minNakDelay {
+		return minNakDelay
+	}
+	return d / 2
+}
+
+// DeliveriesFor returns the smallest delivery count whose guaranteed window
+// (see MinWindow) covers want. A schedule with a short repeating tail needs a
+// large count — that is real information, not a rounding detail: it means the
+// schedule cannot ride out an outage of that length at any sane budget.
+//
+// Returns 1 for a non-positive want, and 0 for an empty schedule, which can
+// promise nothing.
+func DeliveriesFor(schedule []time.Duration, want time.Duration) int {
+	if len(schedule) == 0 {
+		return 0
+	}
+	if want <= 0 {
+		return 1
+	}
+	var window time.Duration
+	n := 1
+	// Bounded by construction: the last entry repeats, and a schedule whose
+	// entries are all at the minNakDelay floor still advances every iteration.
+	for window < want {
+		window += minJitter(delayAt(schedule, n-1))
+		n++
+	}
+	return n
 }

@@ -16,6 +16,7 @@ services:
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
       - MONGO_DB=${MONGO_DB:-chat}
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - CHAT_BASE_URL=${CHAT_BASE_URL:-http://localhost:3000}
       # User cache fronts users-collection lookups so the per-message sender
       # display-name composition stays off the hot Mongo path. In-process LRU
@@ -23,8 +24,9 @@ services:
       # entries are tiny so per-pod memory stays in the low MB.
       - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}
       - USER_CACHE_TTL=${USER_CACHE_TTL:-5m}
+      - USER_L2_TTL=${USER_L2_TTL:-90m}
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-15m}
+      - ROOM_META_L2_TTL=${ROOM_META_L2_TTL:-90m}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
       # Dev-only X-Debug verbose logging. DEBUG_LOG_PAYLOADS gates full
       # request/reply/consumed body capture (pair with the X-Debug-Payload header).

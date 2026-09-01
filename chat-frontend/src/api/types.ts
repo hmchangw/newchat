@@ -11,8 +11,9 @@
 /** Mirrors model.RoomType. */
 export type RoomType = 'channel' | 'dm' | 'botDM' | 'discussion'
 
-/** Mirrors model.Role. */
-export type Role = 'owner' | 'admin' | 'member'
+/** Mirrors model.Role. The server normalizes the legacy 'member' spelling to
+ *  'user' on every response, so 'member' never arrives on the wire. */
+export type Role = 'owner' | 'admin' | 'user'
 
 /** Mirrors pkg/model.SubscriptionHRInfo — the counterpart's HR record
  *  attached to a DM subscription. All three fields are required strings
@@ -41,6 +42,13 @@ export interface SubscriptionRoom {
   crossSite?: boolean
   userCount?: number
   appCount?: number
+  /** The room's USER-activity position — what unread and sidebar ordering
+   *  are computed from. System events (member added/removed, rename, …)
+   *  never advance it. The server resolves this before serializing, so it
+   *  needs no fallback rule here; on a subscription.update `added` payload
+   *  for a room with no messages yet it is the room's createdAt, so a
+   *  just-added member has something to flag the room unread against.
+   *  Mirrors model.SubscriptionRoom.LastMsgAt. */
   lastMsgAt?: string | null
   lastMsgId?: string
   lastMentionAllAt?: string | null
@@ -48,6 +56,11 @@ export interface SubscriptionRoom {
    *  for initial key bootstrap (same payload as the room.key.get RPC). */
   privateKey?: string
   keyVersion?: number
+  /** The room's latest eligible message. Omitted when the room has no
+   *  message, that site's enrichment degraded, or the request set
+   *  `includeLastMessage: false`. Never present on live
+   *  `subscription.update` events — only on `subscription.list` rows. */
+  previewMessage?: PreviewMessage
 }
 
 /** Mirrors pkg/model.Subscription — the per-user record linking a user
@@ -69,6 +82,15 @@ export interface Subscription {
   lastSeenAt?: string
   hasMention: boolean
   alert: boolean
+  /** Whether the user muted the room. Muted rooms are excluded from the
+   *  unread badge (mirrors user-service's `unreadRooms()`). Always present
+   *  on the wire — `json:"muted"` carries no omitempty. */
+  muted?: boolean
+  /** Parent-message IDs of followed threads in this room with unread
+   *  replies. Mirrors `model.Subscription.ThreadUnread`; omitted from the
+   *  wire (not sent as an empty array) once it drains. A room counts toward
+   *  the unread badge when this is non-empty, even if its messages are read. */
+  threadUnread?: string[]
   /** Whether the user favorited the room. Drives the derived Favorites
    *  section. Optional on the wire (absent = false). */
   favorite?: boolean
@@ -171,6 +193,10 @@ export interface Participant {
   engName?: string
   chineseName?: string
   siteId?: string
+  /** Server-composed render-ready name (engName + chineseName + account
+   *  fallback; a bot sender's is its app name). Prefer it over the raw
+   *  fields. Mirrors model.Participant.DisplayName. */
+  displayName?: string
 }
 
 /** One reactor on a message reaction. Mirrors the wire `reactionUser`
@@ -213,6 +239,29 @@ export interface Attachment {
   /** Client-only: a local object URL for an optimistic just-sent image.
    *  Never arrives from the server; preferred as the <img> src when present. */
   localUrl?: string
+}
+
+/** Mirrors model.PreviewMessage — a room's most-recent eligible message,
+ *  resolved server-side at read time for room-list rendering. Eligible means
+ *  not soft-deleted and not a system message; the server walks back past an
+ *  ineligible tail, so the client never re-implements that rule.
+ *
+ *  Delivered on `subscription.list` rows (`SubscriptionRoom.previewMessage`)
+ *  and refreshed on `message_edited` / `message_deleted` events. */
+export interface PreviewMessage {
+  messageId: string
+  sender: Participant
+  /** On `subscription.list` rows the server has already truncated this to a short
+   *  preview (50 characters by default); on `message_edited` / `message_deleted`
+   *  events it is the full body. The client truncates further for display. */
+  content: string
+  /** RFC3339. */
+  createdAt: string
+  attachments?: Attachment[]
+  mentions?: Participant[]
+  /** Always empty today — the server-side write path has not landed.
+   *  Declared for forward-compat; nothing reads it. */
+  visibleTo?: string
 }
 
 /** Cassandra's QuotedParentMessage shape — what gets embedded on a

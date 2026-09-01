@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"testing"
 	"time"
@@ -97,7 +97,7 @@ func TestSoakSender_TopLevelUsesFrontdoorAndAdmitsOnlyAfterSuccessReply(t *testi
 	assert.Equal(t, 1, catalog.Size())
 	got, ok := catalog.Get("room-1", soakTestMessageID)
 	require.True(t, ok)
-	assert.Equal(t, "hello", got.Content)
+	assert.Equal(t, soakContentDigest("hello"), got.ContentSHA256)
 }
 
 func TestSoakSender_UsesGatekeeperCreatedAtForAcceptedCatalogEntry(t *testing.T) {
@@ -369,7 +369,7 @@ func TestSoakSender_ErrorAndMalformedRepliesRejectPendingCandidate(t *testing.T)
 			name:       "malformed success",
 			reply:      []byte(`{"id":`),
 			wantStatus: soakSendReplyMalformed,
-			wantClass:  soakErrorDecode,
+			wantClass:  soakErrorResponseDecode,
 		},
 		{
 			name:       "wrong message",
@@ -569,7 +569,7 @@ func TestSoakSender_PersistsLifecycleBeforePublishing(t *testing.T) {
 
 func TestSoakSender_LocalPublishFailureBecomesNotSent(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
 	publisher := &soakRecordingPublisher{errors: []error{nats.ErrConnectionClosed}}
@@ -596,7 +596,7 @@ func TestSoakSender_LocalPublishFailureBecomesNotSent(t *testing.T) {
 
 func TestSoakSender_AmbiguousPublishFailureRemainsActive(t *testing.T) {
 	now := time.Date(2026, 8, 15, 1, 2, 3, 0, time.UTC)
-	ledger, err := newFailureLedger(failureLedgerConfig{Capacity: 1})
+	ledger, err := newFailureLedger(&failureLedgerConfig{Capacity: 1})
 	require.NoError(t, err)
 	tracker := newSoakFailureTracker(ledger, 0, time.Minute, func() time.Time { return now })
 	publisher := &soakRecordingPublisher{errors: []error{errors.New("ambiguous publish failure")}}

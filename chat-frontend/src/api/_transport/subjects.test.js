@@ -3,6 +3,7 @@ import {
   userRoomEvent,
   userRoomKey,
   roomEvent,
+  roomThreadEvent,
   memberAdd,
   memberRemove,
   memberRoleUpdate,
@@ -21,6 +22,8 @@ import {
   orgMembers,
   userSubscriptionList,
   userSubscriptionCount,
+  msgSend,
+  msgHistory,
 } from './subjects'
 
 describe('subjects', () => {
@@ -145,3 +148,36 @@ describe('userRoomKey', () => {
   })
 })
 
+
+describe('roomThreadEvent', () => {
+  it('builds the global thread subject when crossSite is true', () => {
+    expect(roomThreadEvent('r1', 'p1', true)).toBe('chat.room.r1.thread.p1.event')
+  })
+
+  it('builds the local thread subject when crossSite is false', () => {
+    expect(roomThreadEvent('r1', 'p1', false)).toBe('chat.local.room.r1.thread.p1.event')
+  })
+
+  // Same fail-safe as roomEvent: only an explicit false routes site-local, so a
+  // room whose locality is unknown still reaches every subscriber.
+  it.each([undefined, null])('routes global when crossSite is %s', (crossSite) => {
+    expect(roomThreadEvent('r1', 'p1', crossSite)).toBe('chat.room.r1.thread.p1.event')
+  })
+})
+
+describe('account handling in subjects', () => {
+  it('uses the account verbatim, without re-normalising it', () => {
+    // auth-service returns the JWT tag value in `user.account`, and that is
+    // what the grant is evaluated against. Re-normalising here would re-derive
+    // Go's lowercasing in JavaScript, which diverges on non-ASCII input — the
+    // Turkish dotted capital I below folds to "i" in Go but "i\u0307" in JS,
+    // so a client-side fold would build a subject no grant matches.
+    expect(msgSend('\u0130User', 'r1', 's1')).toBe('chat.user.\u0130User.room.r1.s1.msg.send')
+    expect(userRoomEvent('HMChang')).toBe('chat.user.HMChang.event.room')
+  })
+
+  it('builds the ordinary lowercase case unchanged', () => {
+    expect(msgSend('alice', 'r1', 's1')).toBe('chat.user.alice.room.r1.s1.msg.send')
+    expect(msgHistory('alice', 'r1', 's1')).toBe('chat.user.alice.request.room.r1.s1.msg.history')
+  })
+})

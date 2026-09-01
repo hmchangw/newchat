@@ -32,10 +32,63 @@ func (p *PermanentError) Is(target error) bool { return target == ErrPermanent }
 
 // IsPermanent reports whether err's chain carries a *PermanentError, returning
 // the wrapped *Error. Returns (nil, false) for any non-permanent error.
+//
+// "Chain" includes every branch of an errors.Join: errors.As walks multi-error
+// trees, so a join holding one permanent error and one transient error reports
+// permanent. A caller that joins errors from several operations and settles a
+// JetStream message on the result must therefore guarantee it never builds such
+// a mixture, or the transient failures are Ack-dropped along with the permanent
+// one — silently, since an Ack looks exactly like success.
 func IsPermanent(err error) (*Error, bool) {
 	var p *PermanentError
 	if errors.As(err, &p) {
 		return p.ec, true
 	}
 	return nil, false
+}
+
+// Terminal reports whether err carries a typed *Error whose outcome cannot
+// change on retry, returning that *Error. Use it in a JetStream worker to
+// decide Ack-drop vs Nak on a REMOTE reply: a not_found/forbidden/bad_request
+// from the service you called reads the same on every redelivery, so retrying
+// it only holds an ack-pending slot until MaxDeliver drops the message anyway.
+//
+// The split is "a fact about THIS message" vs "a state of the world". Facts
+// (not_found, forbidden, bad_request, conflict) are terminal. States are not:
+// Unavailable and Internal because the remote may recover (history-service
+// collapses a Cassandra read failure to internal), TooManyRequests because
+// "retry shortly" must never mean "drop" — that is what jsretry's
+// BackpressureBackoff exists for — and Unauthenticated because a credential
+// problem hits every message at once, so dropping them is mass data loss rather
+// than poison rejection. A non-errcode error is an infra failure (timeout,
+// unmarshal) and is likewise transient.
+//
+// Terminal classifies; it does not wrap. Pair it with Permanent at the call
+// site so the worker keeps its own message and terminal metric:
+//
+//	if ee, terminal := errcode.Terminal(err); terminal {
+//	    return errcode.Permanent(ee)
+//	}
+func Terminal(err error) (*Error, bool) {
+	var ee *Error
+	if !errors.As(err, &ee) {
+		return nil, false
+	}
+	switch ee.Code {
+	case CodeUnavailable, CodeInternal, CodeTooManyRequests, CodeUnauthenticated:
+		return nil, false
+	default:
+		return ee, true
+	}
+}
+
+// MarshalFailed marks a serialization failure non-retryable. Marshaling a fixed
+// struct is deterministic — a value the encoder rejects (a NaN float, an erroring
+// custom marshaler) is rejected identically on every redelivery — so a JetStream
+// worker Ack-drops it instead of spending its MaxDeliver budget on a doomed retry.
+//
+// what names the value being marshaled; the encoder error rides as the cause, so
+// Classify logs it once server-side and it never reaches the client.
+func MarshalFailed(what string, cause error) error {
+	return Permanent(Internal("marshal "+what, WithCause(cause)))
 }

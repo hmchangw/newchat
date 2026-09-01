@@ -400,6 +400,38 @@ func TestMongoStore_RemoveRole_Integration(t *testing.T) {
 	}
 }
 
+// TestMongoStore_BulkRefreshJoinedAt_Integration: refreshes joinedAt on existing
+// (roomId, account) subs while preserving _id, read state and roles; a missing
+// account is a no-op (never inserted).
+func TestMongoStore_BulkRefreshJoinedAt_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	seen := time.Date(2026, 2, 2, 2, 2, 2, 0, time.UTC)
+	stale := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mustInsertSub(t, db, &model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", Roles: []model.Role{model.RoleMember}, JoinedAt: stale, LastSeenAt: &seen,
+	})
+
+	corrected := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	err := store.BulkRefreshJoinedAt(ctx, "r1", map[string]time.Time{
+		"alice": corrected,
+		"ghost": corrected, // no such sub — must be a no-op, never inserted
+	})
+	require.NoError(t, err)
+
+	subs, err := store.ListByRoom(ctx, "r1")
+	require.NoError(t, err)
+	require.Len(t, subs, 1, "no sub inserted for the missing 'ghost' account")
+	assert.Equal(t, corrected, subs[0].JoinedAt.UTC(), "joinedAt refreshed")
+	assert.Equal(t, "s1", subs[0].ID, "_id preserved")
+	require.NotNil(t, subs[0].LastSeenAt)
+	assert.Equal(t, seen, subs[0].LastSeenAt.UTC(), "read state (lastSeenAt) preserved")
+	assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles, "roles preserved")
+}
+
 func TestMongoStore_DeleteSubscription_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
@@ -2389,19 +2421,24 @@ func TestMongoStore_GetApp_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Collection("apps").InsertOne(ctx, model.App{
-		ID:        "app1",
-		Name:      "Helper Bot",
-		Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		ID:          "app1",
+		Name:        "Helper Bot",
+		Description: "helps you",
+		Assistant:   &model.AppAssistant{Enabled: true, Name: "helper.bot"},
+		AppViewURL:  map[string]string{"default": "https://apps.example.com/helper"},
+		Version:     "1.4.0",
 	})
 	require.NoError(t, err)
 
 	app, err := store.GetApp(ctx, "helper.bot")
 	require.NoError(t, err)
-	assert.Equal(t, "Helper Bot", app.Name)
-	// Both projected fields feed appInfo; dropping _id would ship appInfo.id empty.
 	assert.Equal(t, "app1", app.ID)
-	// Not projected despite being in the document — appInfo.assistantName relies on this.
-	assert.Nil(t, app.Assistant)
+	// The projection carries the full AppSubscription field set that feeds the event's appInfo.
+	assert.Equal(t, "Helper Bot", app.Name)
+	assert.Equal(t, "helps you", app.Description)
+	assert.Equal(t, &model.AppAssistant{Enabled: true, Name: "helper.bot"}, app.Assistant)
+	assert.Equal(t, map[string]string{"default": "https://apps.example.com/helper"}, app.AppViewURL)
+	assert.Equal(t, "1.4.0", app.Version)
 
 	_, err = store.GetApp(ctx, "missing.bot")
 	assert.ErrorIs(t, err, ErrAppNotFound)

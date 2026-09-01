@@ -85,8 +85,12 @@ func TestSpotlightCollection_Metadata(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"chat.inbox.site-a.internal.member_added",
 		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.internal.member_joinedat_refreshed",
+		"chat.inbox.site-a.internal.room_renamed",
 		"chat.inbox.site-a.external.member_added",
 		"chat.inbox.site-a.external.member_removed",
+		"chat.inbox.site-a.external.member_joinedat_refreshed",
+		"chat.inbox.site-a.external.room_renamed",
 	}, filters)
 }
 
@@ -151,6 +155,26 @@ func TestSpotlightCollection_BuildAction_MemberAdded(t *testing.T) {
 	assert.Equal(t, "engineering", doc["roomName"])
 	assert.Equal(t, "channel", doc["roomType"])
 	assert.Equal(t, "site-a", doc["siteId"])
+}
+
+func TestSpotlightCollection_BuildAction_JoinedAtRefreshed(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	payload := baseInboxMemberEvent()
+	payload.JoinedAt = time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC).UnixMilli()
+	data := makeInboxMemberEvent(t, model.InboxMemberJoinedAtRefreshed, payload, 2000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	require.Len(t, actions, 1)
+
+	action := actions[0]
+	assert.Equal(t, searchengine.ActionIndex, action.Action, "refresh re-indexes the spotlight doc")
+	assert.Equal(t, "alice_r-eng", action.DocID)
+	assert.Equal(t, int64(2000), action.Version, "refresh's newer timestamp wins the version guard")
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(action.Doc, &doc))
+	assert.Equal(t, "2023-04-05T06:07:08Z", doc["joinedAt"], "joinedAt re-indexed to the corrected value")
+	assert.Equal(t, "engineering", doc["roomName"], "roomName preserved (event carries it)")
 }
 
 func TestSpotlightCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
@@ -386,6 +410,83 @@ func TestSpotlightCollection_BuildAction_BulkRemove(t *testing.T) {
 		assert.Equal(t, int64(67890), action.Version)
 		assert.Nil(t, action.Doc)
 	}
+}
+
+func makeInboxRenameEvent(t *testing.T, typ string, p model.RoomRenamedInboxPayload, ts int64) []byte {
+	t.Helper()
+	payloadData, err := json.Marshal(p)
+	require.NoError(t, err)
+	evt := model.InboxEvent{Type: typ, SiteID: "site-a", DestSiteID: "site-a", Payload: payloadData, Timestamp: ts}
+	data, err := json.Marshal(evt)
+	require.NoError(t, err)
+	return data
+}
+
+func TestSpotlightCollection_BuildByQuery_RoomRenamed(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	data := makeInboxRenameEvent(t, model.InboxRoomRenamed,
+		model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "platform", Timestamp: 5000}, 5000)
+
+	index, body, ok, err := coll.BuildByQuery(data)
+	require.NoError(t, err)
+	require.True(t, ok, "room_renamed must be claimed by the by-query path")
+	assert.Equal(t, "spotlight-site-a-v1-chat", index)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(body, &req))
+	term := req["query"].(map[string]any)["term"].(map[string]any)
+	assert.Equal(t, "r-eng", term["roomId"], "update-by-query must be keyed on roomId")
+	script := req["script"].(map[string]any)
+	assert.Equal(t, "painless", script["lang"])
+	src := script["source"].(string)
+	assert.Contains(t, src, "roomNameUpdatedAt", "script must guard on the LWW clock")
+	assert.Contains(t, src, "params.ts >= stored", "a newer-or-equal rename wins (>= handles same-ms + redelivery)")
+	assert.Contains(t, src, "ctx.op = 'noop'", "a stale rename must no-op")
+	params := script["params"].(map[string]any)
+	assert.Equal(t, "platform", params["name"], "the new room name must ride the script params")
+	assert.EqualValues(t, 5000, params["ts"], "the rename timestamp must ride the script params for the guard")
+}
+
+func TestSpotlightCollection_BuildByQuery_MemberEventFallsThrough(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+	data := makeInboxMemberEvent(t, model.InboxMemberAdded, baseInboxMemberEvent(), 1000)
+
+	index, body, ok, err := coll.BuildByQuery(data)
+	require.NoError(t, err)
+	assert.False(t, ok, "member events fall through to the bulk BuildAction path")
+	assert.Empty(t, index)
+	assert.Nil(t, body)
+}
+
+func TestSpotlightCollection_BuildByQuery_Errors(t *testing.T) {
+	coll := newSpotlightCollection("spotlight-site-a-v1-chat", false)
+
+	t.Run("malformed inbox event", func(t *testing.T) {
+		_, _, ok, err := coll.BuildByQuery([]byte("{invalid"))
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing roomId", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{NewName: "x", Timestamp: 1}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing newName", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{RoomID: "r-eng", Timestamp: 1}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err)
+		assert.False(t, ok)
+	})
+
+	t.Run("missing timestamp", func(t *testing.T) {
+		data := makeInboxRenameEvent(t, model.InboxRoomRenamed, model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "x"}, 1)
+		_, _, ok, err := coll.BuildByQuery(data)
+		assert.Error(t, err, "a rename with no timestamp can't guard ordering — reject it")
+		assert.False(t, ok)
+	})
 }
 
 // Spotlight writes to one fixed index — no additive mapping push at startup.

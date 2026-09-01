@@ -17,9 +17,10 @@ services:
       - CASSANDRA_NUM_CONNS=4
       - MESSAGE_BUCKET_HOURS=360
       - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=chat
       - MAX_WORKERS=100
-      - MAX_DELIVER=5
+      - CONSUMER_MAX_DELIVER=6
       # BOT-MESSAGES-CANONICAL is owned by bot-message-handler; consumer only verifies.
       - BOOTSTRAP_STREAMS=false
     volumes:

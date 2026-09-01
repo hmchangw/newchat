@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
@@ -194,7 +195,7 @@ func (s *MongoStore) GetRoomMeta(ctx context.Context, roomID string) (*model.Roo
 	if err != nil {
 		return nil, err
 	}
-	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount, CrossSite: meta.CrossSite, CrossSiteAt: meta.CrossSiteAt}, nil
+	return &model.Room{ID: meta.ID, Type: meta.Type, Name: meta.Name, SiteID: meta.SiteID, UserCount: meta.UserCount, CrossSite: meta.CrossSite, CrossSiteAt: meta.CrossSiteAt, Restricted: meta.Restricted, ExternalAccess: meta.ExternalAccess}, nil
 }
 
 func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, error) {
@@ -215,7 +216,10 @@ func (s *MongoStore) GetUser(ctx context.Context, account string) (*model.User, 
 func (s *MongoStore) GetApp(ctx context.Context, botAccount string) (*model.App, error) {
 	var a model.App
 	err := s.apps.FindOne(ctx, bson.M{"assistant.name": botAccount},
-		options.FindOne().SetProjection(bson.M{"name": 1, "_id": 1})).Decode(&a)
+		options.FindOne().SetProjection(bson.M{
+			"name": 1, "_id": 1, "description": 1, "assistant": 1, "appViewUrl": 1,
+			"reportUrl": 1, "forumUrl": 1, "userManualUrl": 1, "version": 1, "sponsors": 1,
+		})).Decode(&a)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, ErrAppNotFound
 	}
@@ -230,11 +234,13 @@ func (s *MongoStore) CreateRoom(ctx context.Context, room *model.Room, key *room
 	// encKey field can be attached and the whole thing written in one upsert.
 	raw, err := bson.Marshal(room)
 	if err != nil {
-		return false, fmt.Errorf("marshal room: %w", err)
+		return false, errcode.MarshalFailed("room", err)
 	}
 	var doc bson.M
 	if err := bson.Unmarshal(raw, &doc); err != nil {
-		return false, fmt.Errorf("unmarshal room doc: %w", err)
+		// raw is the bson.Marshal output from the line above: round-tripping our own
+		// bytes cannot fail transiently, so a redelivery can only fail identically.
+		return false, errcode.Permanent(errcode.Internal("unmarshal room doc", errcode.WithCause(err)))
 	}
 	// _id is supplied by the filter; $setOnInsert must not also set it.
 	delete(doc, "_id")
@@ -524,6 +530,27 @@ func (s *MongoStore) BulkCreateSubscriptions(ctx context.Context, subs []*model.
 	opts := options.BulkWrite().SetOrdered(false)
 	if _, err := s.subscriptions.BulkWrite(ctx, models, opts); err != nil {
 		return fmt.Errorf("bulk create %d subscriptions: %w", len(subs), err)
+	}
+	return nil
+}
+
+// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) subs — the
+// Teams migration's self-correction for a member migrated before the
+// createdDateTime fix. joinedAt only: read state, roles and section are left
+// untouched, so this does NOT relax the insert-only contract of
+// BulkCreateSubscriptions (a missing sub is a no-op, not an insert).
+func (s *MongoStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	if len(joinedAtByAccount) == 0 {
+		return nil
+	}
+	models := make([]mongo.WriteModel, 0, len(joinedAtByAccount))
+	for account, joinedAt := range joinedAtByAccount {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
+	}
+	if _, err := s.subscriptions.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk refresh joinedAt for %d subs: %w", len(models), err)
 	}
 	return nil
 }

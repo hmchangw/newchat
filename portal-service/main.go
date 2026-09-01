@@ -61,6 +61,9 @@ type config struct {
 	// offloads the primary.
 	MongoReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
 
+	Pool mongoutil.PoolConfig
+	HTTP ginutil.TimeoutConfig
+
 	// BotLoginEnabled gates portal's bot-role password login. Flip to false
 	// once the dedicated bot-devs client (which talks to botplatform directly)
 	// ships — then bot accounts can no longer log in via chat-frontend.
@@ -78,6 +81,12 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
 	}
 
 	sites, err := parseSiteURLs(cfg.SiteURLs)
@@ -104,7 +113,7 @@ func run() error {
 		return fmt.Errorf("parse mongo read preference %q: %w", cfg.MongoReadPreference, err)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
@@ -112,7 +121,7 @@ func run() error {
 
 	store := newMongoDirectoryStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure directory indexes: %w", err)
+		slog.Warn("ensure directory indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	// Populate the directory cache in the background; /readyz stays
@@ -145,6 +154,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
+	r.Use(cfg.HTTP.Middleware())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

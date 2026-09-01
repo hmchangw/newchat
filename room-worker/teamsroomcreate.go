@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -97,8 +98,9 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 	wantAccounts := make(map[string]struct{}, len(chat.Members))
 	memberSite := make(map[string]string, len(chat.Members)) // account -> home site, for federation
 	var newSubs []*model.Subscription
-	var addedUsers []model.User        // for the room-key fan-out
-	teamsSection := model.SectionTeams // addressable built-in section id for every migrated sub
+	joinedAtFixes := map[string]time.Time{} // existing members whose joinedAt is stale
+	var addedUsers []model.User             // for the room-key fan-out
+	teamsSection := model.SectionTeams      // addressable built-in section id for every migrated sub
 
 	for _, member := range chat.Members {
 		if member.Account == "" {
@@ -109,8 +111,15 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			continue // duplicate account in the batch — already handled
 		}
 		wantAccounts[member.Account] = struct{}{}
-		if _, ok := existingByAccount[member.Account]; ok {
-			continue // already a member — no change
+		if existing, ok := existingByAccount[member.Account]; ok {
+			// Already a member — no add. But self-correct a joinedAt stamped before the
+			// createdDateTime fix: a joinedAt-only refresh, no re-add. A cross-site
+			// member's home-site replica is refreshed via federation (memberSite).
+			if want := chat.CreatedDateTime.UTC(); !existing.JoinedAt.Equal(want) {
+				joinedAtFixes[member.Account] = want
+				memberSite[member.Account] = existing.SiteID
+			}
+			continue
 		}
 		user, err := h.resolveMember(ctx, member.Account, member.ID, member.DisplayName)
 		if err != nil {
@@ -121,11 +130,14 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 		memberSite[member.Account] = user.SiteID
 		// Human members get owner+member so they can admin the migrated room; bot
 		// and platform-admin accounts stay member-only.
-		roles := []model.Role{model.RoleOwner, model.RoleMember}
+		roles := []model.Role{model.RoleOwner, model.RoleUser}
 		if model.IsBot(member.Account) || model.IsPlatformAdminAccount(member.Account) {
-			roles = []model.Role{model.RoleMember}
+			roles = []model.Role{model.RoleUser}
 		}
-		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, acceptedAt)
+		// JoinedAt = the chat's creation time, a meaningful historical value, not the
+		// migration run time (acceptedAt). Teams exposes no per-member add time; this is
+		// uniform per room. Not a history boundary — HistorySharedSince caps that (#302).
+		sub := newSub(idgen.GenerateUUIDv7(), user, room, roles, room.Name, false, chat.CreatedDateTime.UTC())
 		sub.Origin = model.OriginTeams
 		// Land every migrated chat in the built-in "Teams" section by default; the
 		// user re-organizes from there. No section import, no extra write.
@@ -151,10 +163,26 @@ func (h *Handler) reconcileTeamsRoom(ctx context.Context, chat *model.TeamsRoomC
 			return fmt.Errorf("bulk create subs: %w", err)
 		}
 	}
+	if len(joinedAtFixes) > 0 {
+		if err := h.store.BulkRefreshJoinedAt(ctx, room.ID, joinedAtFixes); err != nil {
+			return fmt.Errorf("refresh migrated joinedAt: %w", err)
+		}
+		// Federate the same correction to cross-site members' home-site replicas
+		// (the local room-site copies were just updated above).
+		if err := h.federateJoinedAtRefresh(ctx, room, joinedAtFixes, memberSite, acceptedAt); err != nil {
+			return fmt.Errorf("federate joinedAt refresh: %w", err)
+		}
+	}
 	if len(removed) > 0 {
 		if _, err := h.store.DeleteSubscriptionsByAccounts(ctx, room.ID, removed); err != nil {
 			return fmt.Errorf("delete departed subs: %w", err)
 		}
+		// Bust AFTER the write, one batched round trip: same store method
+		// (DeleteSubscriptionsByAccounts) as processRemoveOrg's live path,
+		// which busts every removed account — a departed member's cached
+		// positive decision must die immediately here too, not linger for
+		// the L2 TTL.
+		subauthcache.BustSubs(ctx, h.valkey, room.ID, removed)
 	}
 
 	added := make([]string, 0, len(newSubs))
@@ -250,17 +278,20 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		return nil
 	}
 	evt := model.InboxMemberEvent{
-		RoomID:    room.ID,
-		RoomName:  room.Name,
-		RoomType:  room.Type,
-		SiteID:    h.siteID,
-		Accounts:  accounts,
+		RoomID:   room.ID,
+		RoomName: room.Name,
+		RoomType: room.Type,
+		SiteID:   h.siteID,
+		Accounts: accounts,
+		// Migrated JoinedAt = the chat's creation time (room.CreatedAt), so the
+		// home-site replica matches the room-site copy instead of defaulting to epoch.
+		JoinedAt:  room.CreatedAt.UnixMilli(),
 		Timestamp: acceptedAt.UnixMilli(),
 		Origin:    model.OriginTeams,
 	}
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal membership event: %w", err)
+		return errcode.MarshalFailed("membership event", err)
 	}
 	// Envelope for the internal lane only — outbox.Publish builds its own below.
 	// Timestamp is acceptedAt, not time.Now(): it becomes the ES external doc
@@ -273,7 +304,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		Timestamp:  acceptedAt.UnixMilli(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal internal inbox envelope: %w", err)
+		return errcode.MarshalFailed("internal inbox envelope", err)
 	}
 	seed := fmt.Sprintf("%s:%s:%d", room.ID, eventType, acceptedAt.UnixMilli())
 	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
@@ -291,11 +322,75 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		siteEvt.Accounts = siteAccounts
 		siteData, err := json.Marshal(siteEvt)
 		if err != nil {
-			return fmt.Errorf("marshal federated membership event (dest %s): %w", destSite, err)
+			return errcode.MarshalFailed("federated membership event", err)
 		}
 		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
 		if err := h.federate(ctx, room.ID, destSite, eventType, siteData, dedupID, acceptedAt.UnixMilli()); err != nil {
 			return fmt.Errorf("federate to %s: %w", destSite, err)
+		}
+	}
+	return nil
+}
+
+// federateJoinedAtRefresh propagates the joinedAt correction beyond the room-site
+// Mongo copy (updated locally): a local internal event so search-sync refreshes the
+// room-site spotlight joinedAt, plus one federated event per cross-site member's
+// home site so their Mongo replica + home-site spotlight match. joinedAt is uniform
+// per room (chat createdDateTime); every apply is a no-op if the target is absent.
+func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room, joinedAtByAccount map[string]time.Time, memberSite map[string]string, acceptedAt time.Time) error {
+	accounts := make([]string, 0, len(joinedAtByAccount))
+	for account := range joinedAtByAccount {
+		accounts = append(accounts, account)
+	}
+	evt := model.InboxMemberEvent{
+		RoomID:    room.ID,
+		RoomName:  room.Name,
+		RoomType:  room.Type,
+		SiteID:    h.siteID,
+		Accounts:  accounts,
+		JoinedAt:  room.CreatedAt.UnixMilli(),
+		Timestamp: acceptedAt.UnixMilli(),
+		Origin:    model.OriginTeams,
+	}
+	seed := fmt.Sprintf("%s:%s:%d", room.ID, model.InboxMemberJoinedAtRefreshed, acceptedAt.UnixMilli())
+
+	allPayload, err := json.Marshal(evt)
+	if err != nil {
+		return errcode.MarshalFailed("joinedAt-refresh event", err)
+	}
+	// Local internal lane → room-site spotlight (inbox-worker doesn't consume it;
+	// the room-site Mongo copy was already updated by the caller).
+	internalData, err := json.Marshal(model.InboxEvent{
+		Type:       model.InboxMemberJoinedAtRefreshed,
+		SiteID:     h.siteID,
+		DestSiteID: h.siteID,
+		Payload:    allPayload,
+		Timestamp:  acceptedAt.UnixMilli(),
+	})
+	if err != nil {
+		return errcode.MarshalFailed("internal joinedAt-refresh envelope", err)
+	}
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberJoinedAtRefreshed), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+		return fmt.Errorf("local inbox joinedAt-refresh publish: %w", err)
+	}
+
+	// Per cross-site home site → replica Mongo (inbox-worker) + home-site spotlight.
+	bySite := make(map[string][]string)
+	for account := range joinedAtByAccount {
+		if site := memberSite[account]; site != "" && site != h.siteID {
+			bySite[site] = append(bySite[site], account)
+		}
+	}
+	for destSite, siteAccounts := range bySite {
+		siteEvt := evt
+		siteEvt.Accounts = siteAccounts
+		payload, err := json.Marshal(siteEvt)
+		if err != nil {
+			return errcode.MarshalFailed("federated joinedAt-refresh event", err)
+		}
+		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
+		if err := h.federate(ctx, room.ID, destSite, model.InboxMemberJoinedAtRefreshed, payload, dedupID, acceptedAt.UnixMilli()); err != nil {
+			return fmt.Errorf("federate joinedAt refresh to %s: %w", destSite, err)
 		}
 	}
 	return nil

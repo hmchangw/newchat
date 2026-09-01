@@ -387,3 +387,67 @@ func TestAdapter_GetIndexMapping(t *testing.T) {
 		assert.Nil(t, mapping)
 	})
 }
+
+func TestAdapter_UpdateByQuery(t *testing.T) {
+	okBody := `{"query":{"term":{"roomId":"r1"}},"script":{"source":"ctx._source.roomName = params.name"}}`
+
+	t.Run("success", func(t *testing.T) {
+		var captured string
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			assert.Equal(t, http.MethodPost, req.Method)
+			assert.Equal(t, "/spotlight-site1/_update_by_query", req.URL.Path)
+			assert.Equal(t, "proceed", req.URL.Query().Get("conflicts"))
+			body, _ := io.ReadAll(req.Body)
+			captured = string(body)
+			return jsonResponse(200, `{"updated":3,"timed_out":false,"failures":[]}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		require.NoError(t, err)
+		assert.JSONEq(t, okBody, captured)
+	})
+
+	t.Run("error status", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(404, `{"error":"index_not_found_exception"}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "404")
+	})
+
+	t.Run("200 with timed_out errors", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(200, `{"timed_out":true,"failures":[]}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "timed out")
+	})
+
+	t.Run("200 with failures errors", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(200, `{"timed_out":false,"failures":[{"cause":{"type":"version_conflict_engine_exception"}}]}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failure")
+	})
+
+	t.Run("200 with version_conflicts errors (Nak + retry)", func(t *testing.T) {
+		ft := &fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			return jsonResponse(200, `{"updated":2,"version_conflicts":1,"timed_out":false,"failures":[]}`), nil
+		}}
+		err := newAdapter(ft).UpdateByQuery(context.Background(), "spotlight-site1", json.RawMessage(okBody))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "version conflict")
+	})
+
+	t.Run("empty index rejected", func(t *testing.T) {
+		a := newAdapter(&fakeTransport{handler: func(req *http.Request) (*http.Response, error) {
+			t.Fatal("no request expected for empty index")
+			return nil, nil
+		}})
+		err := a.UpdateByQuery(context.Background(), "", json.RawMessage(okBody))
+		assert.Error(t, err)
+	})
+}

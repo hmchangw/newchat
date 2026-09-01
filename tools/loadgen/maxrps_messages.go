@@ -27,7 +27,7 @@ var msgErrorReasons = []string{"publish", "marshal", "gatekeeper", "bad_reply", 
 
 // minDrainWindow is the floor for how long a step waits after the generator
 // stops before deciding a publish went unanswered. It doubles the 1 s bound
-// SLO-2 sets for channel broadcast publication (docs/load-testing/system/sli-slo.md
+// SLO-2 sets for channel broadcast publication (docs/load-testing/common/sli-slo.md
 // §1), so an in-flight straggler has room to land and only genuinely dropped
 // deliveries remain in the correlation maps.
 const minDrainWindow = 2 * time.Second

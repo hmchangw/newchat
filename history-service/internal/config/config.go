@@ -9,7 +9,19 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/roomtimescache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
+
+// WalkCeilingSkewHours is the clock-skew pad the reader adds above `now` when it
+// starts a Cassandra bucket walk (service.clockSkewTolerance is derived from it,
+// and a test there pins the two together). It lives in config rather than beside
+// the walk because the bucket-budget check below is the only thing that can catch
+// a budget too small to cover it, and a validation that carries its own guess at
+// the reader's ceiling is a validation that silently stops matching it.
+const WalkCeilingSkewHours = 1
 
 // CassandraConfig holds Cassandra connection settings (env prefix: CASSANDRA_).
 type CassandraConfig struct {
@@ -21,7 +33,8 @@ type CassandraConfig struct {
 	NumConns int `env:"NUM_CONNS" envDefault:"8"`
 }
 
-// MongoConfig holds MongoDB connection settings (env prefix: MONGO_).
+// MongoConfig holds MongoDB connection settings (env prefix: MONGO_). Pool
+// sizing lives in the shared Config.Pool (mongoutil.PoolConfig).
 type MongoConfig struct {
 	URI      string `env:"URI"      required:"true"`
 	DB       string `env:"DB"       envDefault:"chat"`
@@ -30,16 +43,11 @@ type MongoConfig struct {
 	// ReadPreference is the client-level read preference; secondaryPreferred offloads
 	// history reads. DEK reads pin to primary in code regardless.
 	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
-	// MaxPoolSize caps connections per server. This is authoritative — it is
-	// always applied to the client, overriding any maxPoolSize in the URI — so
-	// the pool ceiling is explicit rather than the driver default of 100.
-	// Connections are created lazily and are further gated by MAX_CONCURRENCY
-	// (a handler holds at most one at a time), so this is a generous headroom
-	// ceiling, not a count of connections that get opened. Operators must keep
-	// pods × MaxPoolSize under the cluster's connection limit.
-	MaxPoolSize uint64 `env:"MAX_POOL_SIZE" envDefault:"500"`
-	// MinPoolSize keeps a warm connection floor; 0 lets the pool drain to empty.
-	MinPoolSize uint64 `env:"MIN_POOL_SIZE" envDefault:"0"`
+	// KeyReadPreference covers the at-rest and preview DEK collections. Separate
+	// from the client-wide preference because key freshness matters more, but
+	// primaryPreferred rather than primary: without it, encrypted history cannot be
+	// read at all when there is no primary.
+	KeyReadPreference string `env:"KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
 }
 
 // NATSConfig holds NATS connection settings (env prefix: NATS_).
@@ -50,32 +58,36 @@ type NATSConfig struct {
 
 // Config is the top-level configuration for the history-service.
 type Config struct {
-	ServiceName             string          `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	SiteID                  string          `env:"SITE_ID"                    envDefault:"site-local"`
 	HealthAddr              string          `env:"HEALTH_ADDR"                envDefault:":8081"`
 	PProfEnabled            bool            `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr             string          `env:"METRICS_ADDR"               envDefault:":9090"`
 	Cassandra               CassandraConfig `envPrefix:"CASSANDRA_"`
 	Mongo                   MongoConfig     `envPrefix:"MONGO_"`
-	NATS                    NATSConfig      `envPrefix:"NATS_"`
-	MessageBucketHours      int             `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
-	MessageReadMaxBuckets   int             `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
-	MessageHistoryFloorDays int             `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
-	LargeRoomThreshold      int             `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
-	MaxPinnedPerRoom        int             `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
-	PinEnabled              bool            `env:"PIN_ENABLED"                 envDefault:"true"`
+	Pool                    mongoutil.PoolConfig
+	NATS                    NATSConfig `envPrefix:"NATS_"`
+	MessageBucketHours      int        `env:"MESSAGE_BUCKET_HOURS"        envDefault:"360"`
+	MessageReadMaxBuckets   int        `env:"MESSAGE_READ_MAX_BUCKETS"    envDefault:"122"`
+	MessageHistoryFloorDays int        `env:"MESSAGE_HISTORY_FLOOR_DAYS"  envDefault:"730"`
+	LargeRoomThreshold      int        `env:"LARGE_ROOM_THRESHOLD"        envDefault:"500"`
+	MaxPinnedPerRoom        int        `env:"MAX_PINNED_PER_ROOM"         envDefault:"10"`
+	PinEnabled              bool       `env:"PIN_ENABLED"                 envDefault:"true"`
 
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
-	// MaxConcurrency caps in-flight request handlers so a burst is shed at the
-	// door (ErrUnavailable) instead of piling unbounded work onto MongoDB. 0
-	// disables the cap (unbounded spawn — the previous behavior).
-	MaxConcurrency int `env:"MAX_CONCURRENCY" envDefault:"256"`
-	// RequestTimeout bounds each request handler so a slow MongoDB/Cassandra op
-	// is cancelled and its pooled connection returned instead of held. 0
-	// disables the per-request deadline.
-	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) so a burst or a slow dependency can't saturate
+	// the Mongo pool with unbounded, indefinitely-held work.
+	Guard natsrouter.GuardConfig
+	// MaxResponseBytes caps a paginated reply so it is trimmed to fit rather
+	// than refused by the broker. 0 derives the cap from the broker's
+	// advertised max_payload.
+	MaxResponseBytes int64 `env:"MAX_RESPONSE_BYTES" envDefault:"0"`
+	// PageTrimming trims a paginated reply to the budget. Off returns the page
+	// whole and lets the broker refuse it, so the client falls back to its
+	// response_too_large retry — an escape hatch, not a tuning knob.
+	PageTrimming bool `env:"PAGE_TRIMMING_ENABLED" envDefault:"true"`
 
 	// Subscription access-check cache. Only positive subscriptions are cached,
 	// so the TTL bounds how long revoked access can stay readable. Set size or
@@ -89,10 +101,66 @@ type Config struct {
 	RoomCacheSize int           `env:"HISTORY_ROOM_CACHE_SIZE" envDefault:"50000"`
 	RoomCacheTTL  time.Duration `env:"HISTORY_ROOM_CACHE_TTL"  envDefault:"10s"`
 
-	// Room-list preview cache (resolved last-eligible message per room).
-	// Positives-only; lastMsgAt volatility ⇒ short TTL. Set size or ttl to 0 to disable.
+	// PreviewKeyEpoch selects the site preview DEK (preview:{siteID}:{epoch}).
+	// Must match broadcast-worker, which writes what this service reads: a reader
+	// on another epoch treats the stored preview as absent.
+	PreviewKeyEpoch int `env:"PREVIEW_KEY_EPOCH" envDefault:"1"`
+
+	// Room-list preview cache, fronting rooms.get's lazy fallback only — a room
+	// served from a stored preview never reaches it. Positives-only; lastMsgAt
+	// volatility ⇒ short TTL. Set size or ttl to 0 to disable.
 	PreviewCacheSize int           `env:"HISTORY_PREVIEW_CACHE_SIZE" envDefault:"50000"`
 	PreviewCacheTTL  time.Duration `env:"HISTORY_PREVIEW_CACHE_TTL"  envDefault:"10s"`
+
+	// Valkey cluster fronting the shared subauthcache L2. Empty ValkeyAddrs
+	// disables the L2 tier (the L1 subscription cache falls straight through
+	// to Mongo, breaker-guarded).
+	Valkey valkeyutil.Config
+
+	// SubL2 is the shared Valkey L2 retention for subscription authz — the
+	// outage buffer. Long by design (default 90m) so an L2 hit carries the
+	// access decision through a Mongo outage. 0 disables the L2 tier.
+	SubL2 subauthcache.TTLConfig `envPrefix:"HISTORY_"`
+
+	// Breaker guards this service's Mongo reads — the subauthcache loader and the
+	// room repository, each with its own instance off these shared knobs.
+	Breaker mongoutil.BreakerConfig `envPrefix:"HISTORY_"`
+
+	// DEKL2 is the Valkey L2 retention for Vault-wrapped at-rest DEKs — the
+	// outage buffer for decrypting history. The in-process DEK cache expires on
+	// a fixed TTL stamped at fetch time, so without this L2 an active room loses
+	// its key partway through a Mongo outage. 0 disables the DEK L2 tier.
+	DEKL2 atrest.TTLConfig
+
+	// DEKBreaker fences the Mongo DEK fetch, kept separate from the subscription
+	// breaker so the two failure signals never reset each other. The knobs live
+	// in pkg/atrest with the tier they configure — message-worker fences the
+	// same collection.
+	DEKBreaker atrest.BreakerConfig
+
+	// RoomTimesL2 is the Valkey L2 retention for a room's last confirmed
+	// createdAt, which floors the Cassandra bucket walk. Unlike the other tiers
+	// this one is never read while Mongo is healthy, so its TTL governs only how
+	// long a room stays cheap to read *during* an outage.
+	// 0 disables it, leaving the walk as wide as the configured history floor.
+	RoomTimesL2 roomtimescache.TTLConfig
+	// User profile cache, fronting both account lookups: the batch that resolves
+	// legacy members_removed display names, and reactions' single-account read,
+	// whose name is denormalized into the persisted ReactorInfo — so the TTL
+	// bounds how long a renamed user's reactions are written under the old name.
+	// Unprefixed and 10000/5m to match the six other services that front this
+	// same store, so a fleet-wide USER_CACHE_* change reaches history-service
+	// too. Set size or ttl to 0 to disable.
+	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
+
+	// Background writer that stores walk-resolved previews back onto the room doc,
+	// off the request path. Queue depth is what bounds the memory a burst of cold
+	// rooms can pin; overflow sheds the write, which the next read re-derives.
+	// Non-positive takes the built-in default for either — warm-back is what keeps
+	// the lazy walk from repeating forever, so there is no disable value.
+	PreviewWarmBackWorkers int `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
+	PreviewWarmBackQueue   int `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)
@@ -130,27 +198,101 @@ func validate(cfg *Config) error {
 	if cfg.RoomCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_ROOM_CACHE_TTL must be >= 0, got %s", cfg.RoomCacheTTL)
 	}
+	// Part of a DEK id, so a non-positive value mints a sentinel rotation could
+	// never move forward from.
+	if cfg.PreviewKeyEpoch < 1 {
+		return fmt.Errorf("PREVIEW_KEY_EPOCH must be >= 1, got %d", cfg.PreviewKeyEpoch)
+	}
 	if cfg.PreviewCacheSize < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_SIZE must be >= 0, got %d", cfg.PreviewCacheSize)
 	}
 	if cfg.PreviewCacheTTL < 0 {
 		return fmt.Errorf("HISTORY_PREVIEW_CACHE_TTL must be >= 0, got %s", cfg.PreviewCacheTTL)
 	}
+	if cfg.UserCacheSize < 0 {
+		return fmt.Errorf("USER_CACHE_SIZE must be >= 0, got %d", cfg.UserCacheSize)
+	}
+	if cfg.UserCacheTTL < 0 {
+		return fmt.Errorf("USER_CACHE_TTL must be >= 0, got %s", cfg.UserCacheTTL)
+	}
+	// Non-positive means "take the default" here, not "disable", so only a negative
+	// is rejected — it would otherwise read as an intent the wiring cannot honour.
+	if cfg.PreviewWarmBackWorkers < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_WORKERS must be >= 0, got %d", cfg.PreviewWarmBackWorkers)
+	}
+	if cfg.PreviewWarmBackQueue < 0 {
+		return fmt.Errorf("PREVIEW_WARMBACK_QUEUE must be >= 0, got %d", cfg.PreviewWarmBackQueue)
+	}
 	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference); err != nil {
 		return fmt.Errorf("MONGO_READ_PREFERENCE: %w", err)
 	}
-	// 0 makes the driver treat the pool as unbounded — reject it so the cap stays explicit.
-	if cfg.Mongo.MaxPoolSize < 1 {
-		return fmt.Errorf("MONGO_MAX_POOL_SIZE must be >= 1, got %d", cfg.Mongo.MaxPoolSize)
+	if _, err := mongoutil.ParseReadPreference(cfg.Mongo.KeyReadPreference); err != nil {
+		return fmt.Errorf("MONGO_KEY_READ_PREFERENCE: %w", err)
 	}
-	if cfg.Mongo.MinPoolSize > cfg.Mongo.MaxPoolSize {
-		return fmt.Errorf("MONGO_MIN_POOL_SIZE (%d) must be <= MONGO_MAX_POOL_SIZE (%d)", cfg.Mongo.MinPoolSize, cfg.Mongo.MaxPoolSize)
+	if err := cfg.Pool.Validate(); err != nil {
+		return err
 	}
-	if cfg.MaxConcurrency < 0 {
-		return fmt.Errorf("MAX_CONCURRENCY must be >= 0, got %d", cfg.MaxConcurrency)
+	if err := cfg.Guard.Validate(); err != nil {
+		return err
 	}
-	if cfg.RequestTimeout < 0 {
-		return fmt.Errorf("REQUEST_TIMEOUT must be >= 0, got %s", cfg.RequestTimeout)
+	if cfg.Pool.ServerSelectionTimeout <= 0 {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT must be > 0, got %s", cfg.Pool.ServerSelectionTimeout)
+	}
+	// A server-selection bound at or above the request budget cannot do its job:
+	// the handler deadline fires first, so the read never returns an error and
+	// the fail-open paths that depend on one never run. RequestTimeout == 0 means
+	// unbounded, so there is no budget to undercut.
+	if cfg.Guard.RequestTimeout > 0 && cfg.Pool.ServerSelectionTimeout >= cfg.Guard.RequestTimeout {
+		return fmt.Errorf("MONGO_SERVER_SELECTION_TIMEOUT (%s) must be less than REQUEST_TIMEOUT (%s), "+
+			"otherwise a stalled MongoDB consumes the whole request budget instead of failing open",
+			cfg.Pool.ServerSelectionTimeout, cfg.Guard.RequestTimeout)
+	}
+	// The bucket walk is contiguous and stops after MessageReadMaxBuckets, and
+	// since the ceiling became the clock rather than the room's last message, an
+	// idle room spends that budget crossing empty buckets before reaching data.
+	// A budget too small to span the history floor makes an old room's read stop
+	// early and return an EMPTY page — and LoadHistory pages by `before` = oldest
+	// returned row, so an empty page carries no continuation and the client
+	// cannot advance. That is silent history loss, so refuse to start instead.
+	//
+	// The budget must cover the walk the READER performs, which is wider than the
+	// history floor in two ways. It starts at now+WalkCeilingSkewHours, not now;
+	// and buckets are absolute time windows, so where that span falls relative to
+	// a boundary decides how many partitions it touches. A span of S hours over a
+	// W-hour window touches at most floor(S/W)+2 partitions — +1 for the partial
+	// bucket at each end. Sizing on S alone passes configurations whose walk
+	// exhausts the budget one partition short of the floor, and only near a
+	// boundary, which is the worst way to find out.
+	//
+	// The positive guards are for callers that build a Config directly; at
+	// startup main's checkConfig has already rejected a non-positive value for
+	// all three, so this relational check cannot be skipped by zeroing one.
+	if cfg.MessageBucketHours > 0 && cfg.MessageReadMaxBuckets > 0 && cfg.MessageHistoryFloorDays > 0 {
+		spanHours := WalkCeilingSkewHours + cfg.MessageHistoryFloorDays*24
+		if needBuckets := spanHours/cfg.MessageBucketHours + 2; cfg.MessageReadMaxBuckets < needBuckets {
+			return fmt.Errorf(
+				"MESSAGE_READ_MAX_BUCKETS (%d) is short of the %d buckets a worst-case walk needs: "+
+					"MESSAGE_HISTORY_FLOOR_DAYS (%d) plus the %dh walk skew spans %dh, which at "+
+					"MESSAGE_BUCKET_HOURS (%d) touches up to %d partitions; a history read would stop "+
+					"before the floor and return an empty page the client cannot page past",
+				cfg.MessageReadMaxBuckets, needBuckets, cfg.MessageHistoryFloorDays,
+				WalkCeilingSkewHours, spanHours, cfg.MessageBucketHours, needBuckets)
+		}
+	}
+	if cfg.SubL2.TTL < 0 {
+		return fmt.Errorf("HISTORY_SUB_L2_TTL must be >= 0, got %s", cfg.SubL2.TTL)
+	}
+	if err := cfg.Breaker.Validate("HISTORY_"); err != nil {
+		return err
+	}
+	if cfg.RoomTimesL2.TTL < 0 {
+		return fmt.Errorf("ROOM_TIMES_L2_TTL must be >= 0, got %s", cfg.RoomTimesL2.TTL)
+	}
+	if cfg.DEKL2.TTL < 0 {
+		return fmt.Errorf("ATREST_DEK_L2_TTL must be >= 0, got %s", cfg.DEKL2.TTL)
+	}
+	if err := cfg.DEKBreaker.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

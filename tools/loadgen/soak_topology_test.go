@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,7 +100,7 @@ func TestBuildSoakTopology_ChannelDMSplitMembershipAndRoles(t *testing.T) {
 			assert.False(t, duplicate)
 			dmIDs[room.ID] = struct{}{}
 			for _, sub := range subs {
-				assert.Equal(t, []model.Role{model.RoleMember}, sub.Roles)
+				assert.Equal(t, []model.Role{model.RoleUser}, sub.Roles)
 			}
 		default:
 			t.Fatalf("unexpected room type %q", room.Type)
@@ -182,6 +183,99 @@ func TestBuildSoakTopology_IsDeterministicWithSeededIdentitySource(t *testing.T)
 	require.NoError(t, err)
 
 	assert.Equal(t, a, b)
+}
+
+func TestBuildSoakSubscriptions_LeavesBotDMOnlyFlagUnset(t *testing.T) {
+	members := makeSoakUsers(2, "site-a")
+
+	for _, roomType := range []model.RoomType{model.RoomTypeChannel, model.RoomTypeDM} {
+		t.Run(string(roomType), func(t *testing.T) {
+			subscriptions := buildSoakSubscriptions(
+				&model.Room{ID: "room-1", SiteID: "site-a", Type: roomType, Name: "room"},
+				members,
+				newSequenceSoakIDs(),
+				time.Unix(1, 0),
+			)
+
+			require.Len(t, subscriptions, 2)
+			for i := range subscriptions {
+				assert.False(t, subscriptions[i].IsSubscribed,
+					"channel and DM seed rows must match production membership documents")
+			}
+		})
+	}
+}
+
+func TestIsActiveSoakSubscription_UsesExistingRoomRowsAsMembership(t *testing.T) {
+	active := map[string]struct{}{"u-1": {}}
+
+	tests := []struct {
+		name string
+		sub  *model.Subscription
+		want bool
+	}{
+		{
+			name: "active channel row",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeChannel,
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			name: "active DM row",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeDM,
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			name: "inactive user",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeChannel,
+				User:     model.SubscriptionUser{ID: "u-2", Account: "bob"},
+			},
+		},
+		{
+			// Name carries the counterpart account, as room-worker's newSub
+			// persists it; the soft-toggle gate applies only to app rooms, which
+			// this is because the counterpart is a ".bot" account.
+			name: "unsubscribed app DM",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeBotDM,
+				Name:     "weather.bot",
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+		},
+		{
+			name: "subscribed app DM",
+			sub: &model.Subscription{
+				RoomType:     model.RoomTypeBotDM,
+				Name:         "weather.bot",
+				IsSubscribed: true,
+				User:         model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+		{
+			// A bot's own side of a bot<->human DM is stored botDM with
+			// isSubscribed=false by construction — membership, not a soft toggle.
+			name: "bot's own DM with a human is a member row despite isSubscribed=false",
+			sub: &model.Subscription{
+				RoomType: model.RoomTypeBotDM,
+				Name:     "alice",
+				User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isActiveSoakSubscription(tt.sub, active))
+		})
+	}
 }
 
 func TestBuildSoakTopology_RejectsImpossibleRoomShape(t *testing.T) {

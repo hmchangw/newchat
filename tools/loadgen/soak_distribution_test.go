@@ -13,9 +13,9 @@ import (
 )
 
 func TestSoakRoomPicker_IsReproducibleAndHot(t *testing.T) {
-	a, err := newSoakRoomPicker(42, 1000)
+	a, err := newSoakRoomPicker(42, 1000, soakDefaultRoomZipfS, soakDefaultRoomZipfV)
 	require.NoError(t, err)
-	b, err := newSoakRoomPicker(42, 1000)
+	b, err := newSoakRoomPicker(42, 1000, soakDefaultRoomZipfS, soakDefaultRoomZipfV)
 	require.NoError(t, err)
 
 	const samples = 20000
@@ -36,7 +36,7 @@ func TestSoakRoomPicker_IsReproducibleAndHot(t *testing.T) {
 }
 
 func TestNewSoakRoomPicker_RejectsEmptyRoomSet(t *testing.T) {
-	_, err := newSoakRoomPicker(1, 0)
+	_, err := newSoakRoomPicker(1, 0, soakDefaultRoomZipfS, soakDefaultRoomZipfV)
 	require.Error(t, err)
 }
 

@@ -98,11 +98,14 @@ type RoomStore interface {
 	// Resolves candidates via pkg/pipelines.MatchCandidatesFilter, then (for a
 	// non-empty roomID) subtracts already-subscribed accounts via an indexed read.
 	CountNewMembers(ctx context.Context, orgIDs, directAccounts []string, roomID, excludeAccount string) (int, error)
-	// ListRoomMembers returns the members of roomID. When enrich=true, the
-	// returned RoomMember.Member entries carry display fields populated via
-	// $lookup stages against users and subscriptions. When enrich=false,
-	// display fields are left zero.
-	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, error)
+	// ListRoomMembers returns one page of the members of roomID plus a hasMore
+	// flag: true when at least one row follows the page. A non-nil limit makes
+	// the query over-fetch one row to decide it, trimmed off before returning;
+	// an unlimited request returns everything and hasMore=false. When
+	// enrich=true, the returned RoomMember.Member entries carry display fields
+	// populated via $lookup stages against users and subscriptions. When
+	// enrich=false, display fields are left zero.
+	ListRoomMembers(ctx context.Context, roomID string, limit, offset *int, enrich bool) ([]model.RoomMember, bool, error)
 	// ListOrgMembers returns all users whose sectId OR deptId equals orgID,
 	// projected as OrgMember rows sorted by account ascending. Returns a
 	// RoomInvalidOrg-reason errcode when no users match (treated as "orgId is
@@ -124,9 +127,11 @@ type RoomStore interface {
 	FindExistingAccounts(ctx context.Context, accounts []string) ([]string, error)
 	// UpdateSubscriptionRead sets lastSeenAt on the subscription keyed by
 	// (roomID, account), clearing alert and hasMention (reading the room
-	// dismisses both). Returns model.ErrSubscriptionNotFound (wrapped) when
-	// no subscription matches.
-	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) error
+	// clears both), and returns the number of unread followed threads left on
+	// the subscription AFTER the write — the badge hook's exactness depends on
+	// the post-update value, not on a pre-write snapshot.
+	// Returns model.ErrSubscriptionNotFound when no subscription matches.
+	UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time) (int, error)
 	// ToggleSubscriptionMute atomically flips muted via a single FindOneAndUpdate,
 	// stamping muteUpdatedAt so the origin doc carries the same high-water mark the
 	// federated event publishes (inbox-worker guards remote applies against it).
@@ -164,7 +169,8 @@ type RoomStore interface {
 	OpenSubscription(ctx context.Context, roomID, account string) (*model.Subscription, error)
 	// SetOwnerRole atomically grants (makeOwner=true) or revokes (makeOwner=false)
 	// the owner role on the subscription keyed by (roomID, account) via a single
-	// FindOneAndUpdate. Other roles (e.g. member) are retained. Stamps rolesUpdatedAt
+	// FindOneAndUpdate. Other roles are retained, with the legacy "member" spelling
+	// rewritten to "user" on the way through. Stamps rolesUpdatedAt
 	// so the origin doc carries the same high-water mark the federated event publishes
 	// (inbox-worker guards remote applies against it). Returns the updated
 	// subscription, or model.ErrSubscriptionNotFound (wrapped) when no match.

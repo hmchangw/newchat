@@ -20,7 +20,7 @@ const connMetricsScope = "github.com/hmchangw/chat/pkg/natsutil"
 // client-side message loss — is not reported here: nats.go returns
 // ErrReconnectBufExceeded synchronously from Publish and never routes it
 // through ErrorHandler, so it is counted at the publish boundary instead, as
-// chat.nats.publish.attempts{outcome="buffer_full"}.
+// chat_nats_publish_failures_total{outcome="buffer_full"}.
 //
 // service_name and site are not labels here: they come from the OTel resource
 // that pkg/obs installs, which is also how nats_slow_consumer_events_total is

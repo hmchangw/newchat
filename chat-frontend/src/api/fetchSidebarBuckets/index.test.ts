@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { fetchSidebarBuckets, PAGE_LIMIT, MAX_PAGES } from './index'
+import { fetchSidebarBuckets, subToRoom, PAGE_LIMIT, MAX_PAGES } from './index'
 import type { Nats, DMSubscription } from '../types'
 
 const SUBJECT = 'chat.user.alice.request.user.site-A.subscription.list'
@@ -161,5 +161,82 @@ describe('fetchSidebarBuckets', () => {
     expect(roomsCalls).toHaveLength(MAX_PAGES)
     expect(buckets.channelDmIds).toHaveLength(MAX_PAGES)
     expect(warn).toHaveBeenCalled()
+  })
+})
+
+describe('fetchSidebarBuckets: failure reporting', () => {
+  it('reports no failures when every bucket resolves', async () => {
+    const request = pagingRequest({
+      current: [{ subscriptions: [sub('r1')], hasMore: false }],
+      apps: [{ subscriptions: [], hasMore: false }],
+      rooms: [{ subscriptions: [sub('r1')], hasMore: false }],
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual([])
+  })
+
+  it('names the bucket whose first page rejects', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async (_subject: string, body: Record<string, unknown>) => {
+      if (body.type === 'apps') throw new Error('nats timeout')
+      return { subscriptions: [sub('r1')], hasMore: false }
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual(['apps'])
+  })
+
+  it('names every bucket when the whole bootstrap fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async () => {
+      throw new Error('disconnected')
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures.sort()).toEqual(['apps', 'favorites', 'rooms'])
+  })
+
+  it('marks a bucket degraded when a LATER page rejects', async () => {
+    // The pages already fetched are kept, but a truncated bucket must not be
+    // allowed to delete the rooms its missing pages would have listed.
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async (_subject: string, body: Record<string, unknown>) => {
+      if (body.type !== 'rooms') return { subscriptions: [], hasMore: false }
+      if ((body.offset as number) === 0) return { subscriptions: [sub('r1')], hasMore: true }
+      throw new Error('page 2 died')
+    })
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures).toEqual(['rooms'])
+    expect(buckets.channelDmIds).toEqual(['r1'])
+  })
+
+  it('marks a bucket degraded when the server never clears hasMore', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const request = vi.fn(async () => ({ subscriptions: [sub('r1')], hasMore: true }))
+
+    const buckets = await fetchSidebarBuckets(fakeNats(request))
+
+    expect(buckets.failures.sort()).toEqual(['apps', 'favorites', 'rooms'])
+  }, 20000)
+})
+
+describe('subToRoom', () => {
+  // The server sends ONE activity timestamp, already resolved to user activity.
+  // The client applies no fallback rule of its own — if this ever needs a `??`
+  // chain again, the server-side coalesce has regressed.
+  it('takes the server lastMsgAt verbatim as the summary position', () => {
+    const s = sub('r1', { room: { lastMsgAt: '2026-08-01T00:00:00Z' } })
+    expect(subToRoom(s, 'site-a').lastMsgAt).toBe('2026-08-01T00:00:00Z')
+  })
+
+  it('leaves the position undefined when the room has no activity yet', () => {
+    const s = sub('r1', { room: {} })
+    expect(subToRoom(s, 'site-a').lastMsgAt).toBeUndefined()
   })
 })

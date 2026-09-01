@@ -20,8 +20,12 @@ type RoomStore interface {
 	// UpsertSubscription returns created=true on fresh insert (used to compute newlyAdded diff).
 	UpsertSubscription(ctx context.Context, sub *Subscription) (created bool, err error)
 
-	// DeleteSubscription returns deleted=true when a doc was removed (used for the remove diff).
-	DeleteSubscription(ctx context.Context, roomID, userID string) (deleted bool, err error)
+	// DeleteSubscription returns deleted=true when a doc was removed (used for
+	// the remove diff), along with the deleted row's u.account. The account
+	// comes from the delete itself rather than a follow-up user lookup because
+	// it is what keys the subauthcache entry that must be busted: sourcing it
+	// here means the bust cannot be skipped by a lookup that fails afterwards.
+	DeleteSubscription(ctx context.Context, roomID, userID string) (account string, deleted bool, err error)
 
 	// FindUser enriches the owner Participant on create-room.
 	FindUser(ctx context.Context, userID string) (*model.User, error)
@@ -36,10 +40,14 @@ var (
 	ErrDuplicate = errors.New("bot-room-service: duplicate")
 )
 
-// RoomKeyStore is the narrow room-key store surface bot-room-service needs: Set on create,
-// Get to fan the current key to new members, Rotate/SetWithVersion on remove.
+// RoomKeyStore is the narrow room-key surface bot-room-service needs.
 type RoomKeyStore interface {
+	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
+
+	// SetIfAbsent is the rotate fallback when no current key exists: it installs pair
+	// at version 0 only if the slot is free and returns the key the room then holds.
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 
 	// Get returns the room's current key pair, or roomkeystore.ErrNoCurrentKey if the room has no key (legacy/broken room).
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
@@ -47,18 +55,17 @@ type RoomKeyStore interface {
 	// Rotate is the normal remove-member path: swaps in newPair as the room's current key.
 	// Returns roomkeystore.ErrNoCurrentKey if the key was concurrently deleted mid-rotation.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
-
-	// SetWithVersion is the Rotate-ErrNoCurrentKey fallback: stamps newPair at the caller-supplied version so it matches what was already fanned out to survivors.
-	SetWithVersion(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair, version int) error
 }
 
 // Room is the projection of a rooms doc bot-room-service reads and writes.
 type Room struct {
-	ID           string
-	Type         string
-	Name         string
-	Topic        string
-	SiteID       string
+	ID     string
+	Type   string
+	Name   string
+	Topic  string
+	SiteID string
+	// LastMsgAt rides cross-site member_added; see model.MemberAddEvent.
+	LastMsgAt    *time.Time
 	CreatedAt    time.Time
 	Owner        *Participant
 	CreatedByBot string
@@ -78,11 +85,15 @@ type Participant struct {
 
 // Subscription is the projection of a subscriptions doc bot-room-service upserts/deletes.
 type Subscription struct {
-	ID        string
-	RoomID    string
-	UserID    string
-	Account   string
-	SiteID    string
+	ID      string
+	RoomID  string
+	UserID  string
+	Account string
+	SiteID  string
+	// Name is the counterpart account; RoomType is the room as THIS subscriber
+	// sees it, so the two sides of a bot<->human DM differ.
+	Name      string
+	RoomType  model.RoomType
 	CreatedAt time.Time
 	IsBot     bool
 }

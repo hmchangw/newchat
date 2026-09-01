@@ -35,6 +35,12 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB"       envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME" envDefault:""`
 	MongoPassword string `env:"MONGO_PASSWORD" envDefault:""`
+	// ReadPreference: cards are read by a full scan behind a once-daily cache and
+	// written by nothing in this repo, so replica lag is noise against a 24h TTL.
+	ReadPreference string `env:"MONGO_READ_PREFERENCE" envDefault:"secondaryPreferred"`
+
+	Pool mongoutil.PoolConfig
+	HTTP ginutil.TimeoutConfig
 }
 
 func main() {
@@ -49,6 +55,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
+	}
 
 	refreshAt, err := parseRefreshAt(cfg.CacheRefreshAt)
 	if err != nil {
@@ -62,14 +74,20 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	store := newMongoCardStore(mongoClient.Database(cfg.MongoDB))
 	if err := store.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure cards indexes: %w", err)
+		slog.Warn("ensure cards indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	// Populate the card cache in the background; /readyz stays unavailable
@@ -95,6 +113,7 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
+	r.Use(cfg.HTTP.Middleware())
 	registerRoutes(r, handler)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

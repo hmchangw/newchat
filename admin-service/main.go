@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 func main() {
@@ -26,6 +27,24 @@ func main() {
 		slog.Error("admin-service exited", "error", err)
 		os.Exit(1)
 	}
+}
+
+// applyBaseMiddleware installs admin-service's cross-cutting HTTP middleware.
+// obsMW is the observability chain (empty in tests).
+//
+// It deliberately installs NO blanket per-request timeout. admin-service manages
+// its own per-request deadline: the permission handlers pin requestBudget via
+// withRequestBudget (just under httpWriteTimeout), and the cross-site permission
+// fanout self-limits to min(FanoutTimeout, request deadline). A router timeout
+// shorter than FanoutTimeout — e.g. the fleet's shared 10s REQUEST_TIMEOUT —
+// would silently cap the fanout and abort multi-site permission changes early
+// (see permissions.go:publishPermissionFanout). Keep this timeout-free.
+func applyBaseMiddleware(r *gin.Engine, obsMW []gin.HandlerFunc) {
+	r.Use(ginutil.CORS())
+	r.Use(obsMW...)
+	r.Use(gin.Recovery())
+	r.Use(ginutil.RequestID())
+	r.Use(ginutil.AccessLog())
 }
 
 func run() error {
@@ -47,19 +66,34 @@ func run() error {
 			"site", cfg.SiteID, "all_site_ids", cfg.AllSiteIDs)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	// The upload relay authenticates with a bearer token; over http:// it crosses
+	// the network in the clear. Warned, not rejected — see clientUpdateSendsTokenInClear.
+	if clientUpdateSendsTokenInClear(cfg.ClientUpdateURL) {
+		slog.Warn("CLIENT_UPDATE_URL is http:// — the client-update service-account token is sent unencrypted; use https or an encrypted service mesh outside a trusted network",
+			"site", cfg.SiteID)
+	}
+
+	// Transactions pin primary independently — see storeMongo.withTransaction.
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	db := mongoClient.Database(cfg.MongoDB)
 	st := newStoreMongo(db)
 	if err := st.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure indexes: %w", err)
+		slog.Warn("ensure indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	sessStore := session.NewMongoStore(db)
 	if err := sessStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
+		slog.Warn("ensure session indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
@@ -73,21 +107,36 @@ func run() error {
 	}
 	// PublishMsg (not Publish) so X-Request-ID from ctx rides onto the outgoing
 	// message — same shape as user-service/publisher.
-	publishInbox := func(ctx context.Context, subj string, data []byte) error {
-		if _, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+	publish := func(ctx context.Context, subj string, data []byte, encoding string) error {
+		if _, err := js.PublishMsg(ctx, natsutil.NewMsgEncoded(ctx, subj, data, encoding)); err != nil {
 			return fmt.Errorf("publish inbox event: %w", err)
 		}
 		return nil
 	}
-	h := newHandler(st, sessStore, cfg, nc, publishInbox)
+	uploader := newHTTPVersionUploader(cfg.ClientUpdateURL, cfg.ClientUpdateToken, cfg.ClientUpdateTimeout)
+	h := newHandler(st, sessStore, cfg, nc, publish, withVersionUploader(uploader))
+
+	// Best-effort session-cache invalidation. A connect failure logs and
+	// continues (nil client, every bust a no-op) rather than exiting: this is an
+	// optional tier, not a hard startup dependency — same shape as
+	// bot-room-service and inbox-worker. Without it a revoked token keeps
+	// authenticating from cache until its refresh window elapses.
+	if vk := valkeyutil.ConnectOptional(ctx, cfg.Valkey, "session revocation", valkeyutil.Instrumented(sdk)); vk != nil {
+		h.valkey = vk
+		defer valkeyutil.Disconnect(vk)
+		slog.Info("session revocation invalidation enabled")
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(ginutil.CORS())
-	r.Use(o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
-	r.Use(gin.Recovery())
-	r.Use(ginutil.RequestID())
-	r.Use(ginutil.AccessLog())
+	// Artifacts are streamed on to client-update-service, so nothing needs to stay
+	// resident. Gin's 32 MiB default would cost roughly 3x that per in-flight
+	// upload, because bytes.Buffer doubles as it grows. The trade is disk for RAM:
+	// parts over the cap spool to the OS temp dir (removed when the request ends),
+	// so ephemeral storage must fit the concurrent-upload total.
+	r.MaxMultipartMemory = maxMultipartMemory
+	obsMW := o11ygin.Middleware("admin-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())
+	applyBaseMiddleware(r, obsMW)
 	registerRoutes(r, h, sessStore, cfg.SiteID)
 
 	srv := &http.Server{

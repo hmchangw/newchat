@@ -34,6 +34,7 @@ func newEmojiTestRouter(t *testing.T) (*gin.Engine, *MockavatarStore, *Mockemoji
 		SiteID:               "s1",
 		EmployeePhotoBaseURL: "https://photos.example.com",
 		CacheMaxAgeSeconds:   3600,
+		DefaultAvatarEnabled: true,
 		MinioBucket:          "avatars",
 		ClusterDomains:       clusterDomains{byID: map[string]string{"s2": "https://avatar-s2"}}, // keep the original s2 value — existing avatar tests assert on it
 		MaxUploadBytes:       1048576,

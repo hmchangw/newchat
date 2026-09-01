@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -33,8 +31,9 @@ const imageFormField = "images"
 // fileFormField is the multipart form field carrying the single-endpoint upload.
 const fileFormField = "file"
 
-// defaultUploadContentType is the fallback MIME for the single-file endpoint when
-// the multipart part carries no Content-Type.
+// defaultUploadContentType marks a declared Content-Type as generic (so
+// resolveMediaType knows to look past it) and is the final fallback when
+// nothing else — sniff or extension — can name the file.
 const defaultUploadContentType = "application/octet-stream"
 
 // driveClient is the subset of the Drive client the handlers use.
@@ -43,10 +42,6 @@ type driveClient interface {
 	GetGroupImage(host, groupID, fileID string) (*drive.GetGroupImageResponse, error)
 	GetBaseURLFromRoomOrigin(origin string) string
 }
-
-// previewFunc decodes an image once, returning a base64 preview and the source
-// dimensions; injected for testability.
-type previewFunc func(data []byte, mime string) (string, *model.ImageDimensions, error)
 
 // objectStore streams a stored object by key. Satisfied by *minioObjectStore.
 type objectStore interface {
@@ -64,25 +59,22 @@ type Handler struct {
 	maxImageSize   int64
 	maxFileSize    int64
 	mimeFilter     *mediaTypeFilter
-	preview        previewFunc
-	nowMilli       func() int64
 	cacheMaxAge    int
 
 	setCookiePartitioned bool
 }
 
 // NewHandler wires the handler dependencies. maxImages/maxImageSize gate the image
-// endpoint; maxAttachments/maxFileSize/mimeFilter/preview gate the file endpoint; s3
+// endpoint; maxAttachments/maxFileSize/mimeFilter gate the file endpoint; s3
 // backs the MinIO/S3 download endpoint; cacheMaxAge is its Cache-Control max-age in
 // seconds; setCookiePartitioned gates the Partitioned attribute on HandleSetCookie;
 // legacyDrive serves the /api/v3 download from a separate (legacy) Drive backend.
 func NewHandler(store Store, dc driveClient, s3 objectStore, maxImages, maxAttachments int, maxImageSize, maxFileSize int64,
-	mimeFilter *mediaTypeFilter, preview previewFunc, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
+	mimeFilter *mediaTypeFilter, cacheMaxAge int, setCookiePartitioned bool, legacyDrive driveClient) *Handler {
 	return &Handler{
 		store: store, drive: dc, legacyDrive: legacyDrive, s3: s3, maxImages: maxImages, maxAttachments: maxAttachments,
 		maxImageSize: maxImageSize, maxFileSize: maxFileSize, mimeFilter: mimeFilter,
-		preview: preview, cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
-		nowMilli: func() int64 { return time.Now().UTC().UnixMilli() },
+		cacheMaxAge: cacheMaxAge, setCookiePartitioned: setCookiePartitioned,
 	}
 }
 
@@ -161,23 +153,16 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
-		return
-	}
-
-	siteID, err := h.store.GetRoomSiteID(ctx, roomID)
-	if err != nil {
-		if errIsRoomNotFound(err) {
-			errhttp.Write(ctx, c, errcode.NotFound("room not found"))
-			return
-		}
-		errhttp.Write(ctx, c, fmt.Errorf("get room: %w", err))
+	siteID, ok := h.requireMembership(ctx, c, roomID, user.Account)
+	if !ok {
 		return
 	}
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[imageFormField]
@@ -186,7 +171,7 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 		return
 	}
 
-	results, fileHeaders, origNames := preprocessFiles(files, h.maxImageSize, h.nowMilli())
+	results, fileHeaders := preprocessFiles(files, h.maxImageSize)
 	defer func() {
 		for _, mf := range fileHeaders {
 			_ = mf.File.Close()
@@ -206,9 +191,11 @@ func (h *Handler) HandleUploadImages(c *gin.Context) {
 
 	driveHost := h.drive.GetBaseURLFromRoomOrigin(siteID)
 	for i, resp := range responses {
+		// The name we sent is the source of truth (Drive echoes it on success and
+		// returns an empty name on a per-file failure).
 		name := resp.File.Filename
-		if i < len(origNames) {
-			name = origNames[i]
+		if i < len(fileHeaders) {
+			name = fileHeaders[i].Filename
 		}
 		item := uploadResultItem{Name: name, Status: resp.Status, Error: resp.Error}
 		if resp.Status == driveStatusSuccess {
@@ -242,23 +229,16 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
-		return
-	}
-
-	siteID, err := h.store.GetRoomSiteID(ctx, roomID)
-	if err != nil {
-		if errIsRoomNotFound(err) {
-			errhttp.Write(ctx, c, errcode.NotFound("room not found"))
-			return
-		}
-		errhttp.Write(ctx, c, fmt.Errorf("get room: %w", err))
+	siteID, ok := h.requireMembership(ctx, c, roomID, user.Account)
+	if !ok {
 		return
 	}
 
 	form, err := c.MultipartForm()
 	if err != nil {
-		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data"))
+		// Cause distinguishes a read deadline or client disconnect from a genuinely
+		// non-multipart request; it is logged server-side, never sent to the client.
+		errhttp.Write(ctx, c, errcode.BadRequest("request must be multipart/form-data", errcode.WithCause(err)))
 		return
 	}
 	files := form.File[fileFormField]
@@ -276,48 +256,41 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 		return
 	}
 
-	// Normalize the (client-controlled) declared type: lowercase + strip params so
-	// the filter and the image branch see a clean value.
-	mime := normalizeMediaType(fh.Header.Get("Content-Type"))
-	if mime == "" {
-		mime = defaultUploadContentType
-	}
-	if !h.mimeFilter.allowed(mime) {
-		errhttp.Write(ctx, c, errcode.BadRequest("file type is not allowed"))
-		return
-	}
-
-	// Images are buffered once (for preview + dimensions) and the same bytes are
-	// reused for the Drive upload, so the file is read exactly once. Non-image
-	// types are streamed straight to Drive without buffering (a large video must
-	// not be held in memory).
-	var data []byte
-	var driveFile multipart.File
-	if strings.HasPrefix(mime, "image/") {
-		if data, err = readMultipartFile(fh); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("read uploaded file: %w", err))
-			return
-		}
-		driveFile = bytesFile{bytes.NewReader(data)}
-	} else if driveFile, err = fh.Open(); err != nil {
+	// The upload is handed to the resolver, the header read and Drive as a reader,
+	// so the file is never held in memory whatever its type or size.
+	driveFile, err := fh.Open()
+	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("open uploaded file: %w", err))
 		return
 	}
 	defer driveFile.Close()
 
-	// Build the preview + dimensions BEFORE the Drive upload so a preview failure
-	// can't leave an orphaned Drive file. data is non-nil only for images.
-	var preview string
-	var dims *model.ImageDimensions
-	if data != nil {
-		if preview, dims, err = h.preview(data, mime); err != nil {
-			errhttp.Write(ctx, c, fmt.Errorf("build image preview: %w", err))
-			return
-		}
+	// The declared Content-Type is a client-controlled hint — browsers send
+	// application/octet-stream for any file the OS cannot type — so the real type
+	// comes from the bytes and the name. Filtering THAT rather than the declared
+	// value is what stops a blacklisted upload arriving under a generic label.
+	mime, err := resolveMediaType(fh.Header.Get("Content-Type"), fh.Filename, driveFile)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("resolve uploaded file media type: %w", err))
+		return
+	}
+	if !h.mimeFilter.allowed(mime) {
+		errhttp.Write(errcode.WithLogValues(ctx, "media_type", mime), c,
+			errcode.BadRequest("file type is not allowed"))
+		return
+	}
+
+	// Read the dimensions BEFORE the Drive upload so a read failure can't leave an
+	// orphaned Drive file. imageDimensions rewinds driveFile for us and no-ops on
+	// a non-image MIME, so the caller needs no image check of its own.
+	dims, err := imageDimensions(driveFile, mime)
+	if err != nil {
+		errhttp.Write(ctx, c, fmt.Errorf("read image dimensions: %w", err))
+		return
 	}
 
 	responses, err := h.drive.UploadGroupImages(user.Account, user.DisplayName(), user.Email, roomID, siteID,
-		[]drive.MultipartFile{{File: driveFile, Filename: uniqueName(fh.Filename, h.nowMilli(), 0)}})
+		[]drive.MultipartFile{{File: driveFile, Filename: fh.Filename}})
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("upload file to drive: %w", err))
 		return
@@ -337,7 +310,7 @@ func (h *Handler) HandleUploadFile(c *gin.Context) {
 	meta := fileMeta{id: obj.FileID, name: fh.Filename, mime: mime, size: obj.FileSize}
 	url := fileURL(roomID, obj.FileID, h.drive.GetBaseURLFromRoomOrigin(siteID))
 
-	att := buildAttachment(meta, c.PostForm("description"), url, preview, dims)
+	att := buildAttachment(meta, c.PostForm("description"), url, dims)
 	c.JSON(http.StatusOK, gin.H{"success": true, "attachments": []model.Attachment{att}})
 }
 
@@ -378,7 +351,7 @@ func (h *Handler) downloadFrom(c *gin.Context, dc driveClient) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, roomID, user.Account) {
+	if _, ok := h.requireMembership(ctx, c, roomID, user.Account); !ok {
 		return
 	}
 
@@ -429,7 +402,7 @@ func (h *Handler) HandleDownloadMinioS3File(c *gin.Context) {
 		return
 	}
 
-	if !h.requireMembership(ctx, c, up.RID, user.Account) {
+	if _, ok := h.requireMembership(ctx, c, up.RID, user.Account); !ok {
 		return
 	}
 
@@ -455,31 +428,29 @@ func (h *Handler) HandleDownloadMinioS3File(c *gin.Context) {
 }
 
 // requireMembership verifies the account is a member of roomID, writing the
-// appropriate error response and returning false when it is not (or on a store
-// error). Both room-scoped handlers gate on this.
-func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID, account string) bool {
-	member, err := h.store.IsMember(ctx, roomID, account)
+// appropriate error response and returning ok=false when it is not (or on a
+// store error). On success it also returns the room's home siteID from the
+// subscription — the local source that exists even for cross-site rooms.
+func (h *Handler) requireMembership(ctx context.Context, c *gin.Context, roomID, account string) (string, bool) {
+	siteID, member, err := h.store.MemberSiteID(ctx, roomID, account)
 	if err != nil {
 		errhttp.Write(ctx, c, fmt.Errorf("check room membership: %w", err))
-		return false
+		return "", false
 	}
 	if !member {
 		errhttp.Write(ctx, c, errcode.Forbidden(
 			fmt.Sprintf("user %s is not in room %s", account, roomID),
 			errcode.WithReason(errcode.RoomNotMember)))
-		return false
+		return "", false
 	}
-	return true
+	return siteID, true
 }
 
 // preprocessFiles runs the per-file size/extension/open checks. Rejected files
 // become failure result items; accepted files become MultipartFiles whose open
-// handles the caller is responsible for closing. Each accepted file is uploaded
-// under a unique name (timestamp + accepted-file index, so neither re-uploads
-// across requests nor duplicate names within a batch collide in Drive); origNames
-// lists the caller-facing originals in send order so the response can show them
-// (Drive echoes the unique name, and an empty name on a per-file failure).
-func preprocessFiles(files []*multipart.FileHeader, maxSize, milli int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile, origNames []string) {
+// handles the caller is responsible for closing. Files keep their original name
+// (Drive addresses them by FileID).
+func preprocessFiles(files []*multipart.FileHeader, maxSize int64) (results []uploadResultItem, fileHeaders []drive.MultipartFile) {
 	for _, fh := range files {
 		if fh.Size > maxSize {
 			results = append(results, uploadResultItem{Name: fh.Filename, Status: statusFailure, Error: "file size exceeds limit"})
@@ -494,32 +465,9 @@ func preprocessFiles(files []*multipart.FileHeader, maxSize, milli int64) (resul
 			results = append(results, uploadResultItem{Name: fh.Filename, Status: statusFailure, Error: "failed to open file"})
 			continue
 		}
-		fileHeaders = append(fileHeaders, drive.MultipartFile{File: f, Filename: uniqueName(fh.Filename, milli, len(origNames))})
-		origNames = append(origNames, fh.Filename)
+		fileHeaders = append(fileHeaders, drive.MultipartFile{File: f, Filename: fh.Filename})
 	}
-	return results, fileHeaders, origNames
-}
-
-// readMultipartFile opens, reads, and closes a multipart file header's content.
-func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
-	f, err := fh.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}
-
-// uniqueName inserts a millisecond timestamp and a per-batch index before the
-// file extension so uploads get distinct Drive object names:
-// "photo.png" -> "photo_1719312000000_0.png". The timestamp separates re-uploads
-// across requests; the index separates duplicate filenames within a single batch
-// (which are processed in the same millisecond). A name with no extension just
-// gets the suffix appended. Extension detection follows filepath.Ext semantics.
-func uniqueName(name string, milli int64, i int) string {
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	return fmt.Sprintf("%s_%d_%d%s", base, milli, i, ext)
+	return results, fileHeaders
 }
 
 // contentDisposition builds an attachment Content-Disposition value. A non-empty
@@ -531,10 +479,3 @@ func contentDisposition(name string) string {
 	encodedName := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 	return fmt.Sprintf("attachment; filename*=UTF-8''%s", encodedName)
 }
-
-// bytesFile adapts a *bytes.Reader (Read/ReadAt/Seek) to multipart.File by adding
-// a no-op Close, so already-buffered image bytes can be handed to Drive without
-// re-reading the upload.
-type bytesFile struct{ *bytes.Reader }
-
-func (bytesFile) Close() error { return nil }

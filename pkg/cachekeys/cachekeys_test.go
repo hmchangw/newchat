@@ -17,8 +17,8 @@ func TestBuilders_ExactStrings(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"room meta", RoomMeta("r123"), "room:{r123}:meta"},
-		{"room subs", RoomSubs("r123"), "room:v3:r123:subs"},
+		{"room meta", RoomMeta("r123"), "room:{r123}:meta:v3"},
+		{"room subs", RoomSubs("r123"), "room:v4:r123:subs"},
 		{"presence conns", PresenceConns("alice"), "presence:{alice}:conns"},
 		{"presence manual", PresenceManual("alice"), "presence:{alice}:manual"},
 		{"presence status", PresenceStatus("alice"), "presence:{alice}:status"},
@@ -31,6 +31,14 @@ func TestBuilders_ExactStrings(t *testing.T) {
 		{"search restricted rooms", SearchRestrictedRooms("alice"), "searchservice:restrictedrooms:alice"},
 		{"badge set", BadgeSet("alice"), "badge:{alice}"},
 		{"badge fresh marker", BadgeFresh("alice"), "badge:fresh:{alice}"},
+		{"room meta legacy", RoomMetaLegacy("r123"), "room:{r123}:meta"},
+		{"room subs legacy", RoomSubsLegacy("r123"), "room:v3:r123:subs"},
+		{"room times", RoomTimes("r123"), "roomtimes:{r123}"},
+		{"user by id", UserByID("u1"), "user:id:u1"},
+		{"user by account", UserByAccount("alice"), "user:acct:alice"},
+		{"subscription auth", SubAuth("r123", "alice"), "sub:{r123}:alice:v2"},
+		{"session", Session("h1"), "session:h1:v2"},
+		{"room dek", RoomDEK("r123"), "dek:{r123}:v2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,8 +51,8 @@ func TestBuilders_ExactStrings(t *testing.T) {
 // argument: an empty ID yields a structurally valid but meaningless key.
 // Callers are responsible for rejecting empty IDs upstream.
 func TestBuilders_EmptyArgument(t *testing.T) {
-	assert.Equal(t, "room:{}:meta", RoomMeta(""))
-	assert.Equal(t, "room:v3::subs", RoomSubs(""))
+	assert.Equal(t, "room:{}:meta:v3", RoomMeta(""))
+	assert.Equal(t, "room:v4::subs", RoomSubs(""))
 	assert.Equal(t, "idem:", BotIdempotency(""))
 }
 
@@ -68,6 +76,14 @@ func TestClassify(t *testing.T) {
 		{"search restricted", SearchRestrictedRooms("alice"), "searchrestrictedrooms"},
 		{"badge set", BadgeSet("alice"), "badge"},
 		{"badge fresh marker", BadgeFresh("alice"), "badge.fresh"},
+		{"room meta legacy", RoomMetaLegacy("r123"), "roommeta.legacy"},
+		{"room subs legacy", RoomSubsLegacy("r123"), "roomsubs.legacy"},
+		{"room times", RoomTimes("r123"), "roomtimes"},
+		{"user by id", UserByID("u1"), "user.id"},
+		{"user by account", UserByAccount("alice"), "user.account"},
+		{"subscription auth", SubAuth("r123", "alice"), "subauth"},
+		{"session", Session("h1"), "session"},
+		{"room dek", RoomDEK("r123"), "dek"},
 		{"badge-like but unknown suffix", "badge:{alice}:nope", Unclassified},
 		{"unknown prefix", "somethingnew:abc", Unclassified},
 		{"empty key", "", Unclassified},
@@ -86,9 +102,12 @@ func TestClassify(t *testing.T) {
 // ambiguity in the keyspace: roommetacache hash-tags its room ID and
 // roomsubcache does not, so both live under a "room:" prefix.
 func TestClassify_HashTaggedAndUntaggedRoomKeysDoNotCollide(t *testing.T) {
-	assert.Equal(t, "roommeta", Classify("room:{r1}:meta"))
-	assert.Equal(t, "roomsubs", Classify("room:v3:r1:subs"))
+	assert.Equal(t, "roommeta", Classify("room:{r1}:meta:v3"))
+	assert.Equal(t, "roomsubs", Classify("room:v4:r1:subs"))
 	assert.NotEqual(t, Classify(RoomMeta("r1")), Classify(RoomSubs("r1")))
+	// The legacy generations inherit the same split, so a bust that clears both
+	// cannot silently be attributed to one cache.
+	assert.NotEqual(t, Classify(RoomMetaLegacy("r1")), Classify(RoomSubsLegacy("r1")))
 }
 
 // TestClassify_BadgeSetAndMarkerDoNotCollide guards the second real ambiguity
@@ -98,6 +117,31 @@ func TestClassify_BadgeSetAndMarkerDoNotCollide(t *testing.T) {
 	assert.Equal(t, "badge", Classify("badge:{alice}"))
 	assert.Equal(t, "badge.fresh", Classify("badge:fresh:{alice}"))
 	assert.NotEqual(t, Classify(BadgeSet("alice")), Classify(BadgeFresh("alice")))
+}
+
+// TestClassify_VersionedAndLegacyGenerationsDoNotCollide covers the pattern
+// that repeats across this registry: a cache that bumped its schema version
+// keeps the previous generation addressable so a rolling deploy can still bust
+// it. Each generation reports under its own label — a legacy lane you cannot
+// see on the breakdown is one you cannot confirm has drained before deleting.
+func TestClassify_VersionedAndLegacyGenerationsDoNotCollide(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		legacy  string
+	}{
+		{"room meta", RoomMeta("r1"), RoomMetaLegacy("r1")},
+		{"room subs", RoomSubs("r1"), RoomSubsLegacy("r1")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NotEqual(t, tc.current, tc.legacy, "generations must differ on the wire")
+			assert.NotEqual(t, Classify(tc.current), Classify(tc.legacy),
+				"generations must report under distinct labels")
+			assert.NotEqual(t, Unclassified, Classify(tc.current))
+			assert.NotEqual(t, Unclassified, Classify(tc.legacy))
+		})
+	}
 }
 
 // TestKeyspaces_SampleMatchesExactlyOne is the invariant that keeps Classify

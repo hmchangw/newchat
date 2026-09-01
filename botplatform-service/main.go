@@ -14,6 +14,7 @@ import (
 
 	o11ygin "github.com/flywindy/o11y/gin"
 
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -43,24 +44,64 @@ func run() error {
 	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
 		return fmt.Errorf("BCRYPT_COST must be in [4, 31], got %d", cfg.BcryptCost)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate mongo pool: %w", err)
+	}
+	if err := cfg.Breaker.Validate(""); err != nil {
+		return fmt.Errorf("validate mongo breaker: %w", err)
+	}
+	if err := cfg.HTTP.Validate(); err != nil {
+		return fmt.Errorf("validate http timeout: %w", err)
+	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 
 	db := mongoClient.Database(cfg.MongoDB)
 	sessionStore := session.NewMongoStore(db)
 	if err := sessionStore.EnsureIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure session indexes: %w", err)
+		slog.Warn("ensure session indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
-	st := newStoreMongo(db)
-	subStore := newMongoSubscriptionStore(db)
+	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency, and leaves
+	// session validation reading Mongo on every bot request (dev only; prod must
+	// supply). Connected before the stores so the session cache can use it.
+	valkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		return fmt.Errorf("connect valkey: %w", err)
+	}
+	if valkey != nil {
+		slog.Info("bot rate-limit + idempotency enabled",
+			"per_caller_per_min", cfg.BotRateLimitPerCallerPerMin,
+			"global_per_min", cfg.BotRateLimitGlobalPerMin,
+			"msg_ttl", cfg.BotIdempotencyMsgTTL,
+			"room_mgmt_ttl", cfg.BotIdempotencyRoomMgmtTTL,
+		)
+		slog.Info("bot session L2 cache enabled", "ttl", cfg.SessionCache.TTL)
+	} else {
+		slog.Warn("bot rate-limit + idempotency DISABLED — VALKEY_ADDRS is empty (dev only)")
+	}
+
+	// One breaker for every Mongo read in this service: they are all evidence
+	// about the same fact — is Mongo reachable — so they share a failure budget
+	// rather than each re-learning the outage.
+	mongoBreaker := cfg.Breaker.New(ctx, "mongo",
+		circuitbreaker.WithFailurePredicate(mongoBreakerFailure))
+	st := newStoreMongo(db, mongoBreaker, valkey, cfg.SessionCache.TTL)
+	subStore := newMongoSubscriptionStore(db, mongoBreaker)
 	h := newHandler(st, &cfg)
 	h.subs = subStore
 
@@ -74,35 +115,16 @@ func run() error {
 	// 15s DM-ensure timeout (room-mgmt budget) — first-DM creates room + federates member_added.
 	h.dmEnsurer = newNATSDMEnsurer(nc.NatsConn(), cfg.SiteID, 15*time.Second)
 
-	// Empty VALKEY_ADDRS silently disables rate-limit + idempotency (dev only; prod must supply).
-	var valkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			return fmt.Errorf("connect valkey: %w", err)
-		}
-		slog.Info("bot rate-limit + idempotency enabled",
-			"per_caller_per_min", cfg.BotRateLimitPerCallerPerMin,
-			"global_per_min", cfg.BotRateLimitGlobalPerMin,
-			"msg_ttl", cfg.BotIdempotencyMsgTTL,
-			"room_mgmt_ttl", cfg.BotIdempotencyRoomMgmtTTL,
-		)
-	} else {
-		slog.Warn("bot rate-limit + idempotency DISABLED — VALKEY_ADDRS is empty (dev only)")
-	}
-
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(ginutil.CORS())
 	r.Use(o11ygin.Middleware("botplatform-service", sdk.TracerProvider(), sdk.MeterProvider(), obs.PublicIngressPropagator(), o11ygin.WithSkipPaths())...)
 	r.Use(gin.Recovery())
 	r.Use(ginutil.RequestID())
+	r.Use(cfg.HTTP.Middleware())
 	r.Use(accessLogMiddleware())
 	registerRoutes(r, h)
-	registerBotRoutes(r, sessionStore, valkey, &cfg, h)
+	registerBotRoutes(r, valkey, &cfg, h)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.Port),

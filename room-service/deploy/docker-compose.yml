@@ -20,6 +20,8 @@ services:
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_KEY_READ_PREFERENCE=${MONGO_KEY_READ_PREFERENCE:-primaryPreferred}
+      - MONGO_CLIENT_READ_PREFERENCE=${MONGO_CLIENT_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
@@ -30,6 +32,7 @@ services:
       # Room keys live in the MongoDB rooms collection; this grace window keeps a
       # rotated-out previous key valid for decrypt.
       - ROOM_KEY_GRACE_PERIOD=${ROOM_KEY_GRACE_PERIOD:-24h}
+      - ROOM_KEY_RETIRED_TTL=${ROOM_KEY_RETIRED_TTL:-30m}
       # Microsoft Teams integration. The deep-link RPCs (calls/room, calls/user)
       # only need TEAMS_EMAIL_DOMAIN; the meetings RPC needs the Azure app creds
       # below and reports not-configured until they are set (live test only).

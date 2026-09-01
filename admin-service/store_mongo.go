@@ -9,8 +9,10 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/session"
 )
 
@@ -30,28 +32,13 @@ func newStoreMongo(db *mongo.Database) *storeMongo {
 
 // EnsureIndexes creates required indexes idempotently.
 func (s *storeMongo) EnsureIndexes(ctx context.Context) error {
-	// Matches botplatform's auto-named "account_1" unique index for idempotency on the shared collection.
-	_, err := s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "account", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
-		return fmt.Errorf("create users account index: %w", err)
-	}
+	// users.account (unique) is owned by user-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.users, "account_1")
 
-	// Backs SearchUsers, whose only non-regex predicate is siteId: no other service
-	// declares a siteId-prefixed index on the shared users collection, so without
-	// this both the count and the paged find scan every user document. account
-	// trails so the unfiltered count is answered from the index alone (a q-filtered
-	// one still fetches, since engName/chineseName aren't in the key).
-	_, err = s.users.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "account", Value: 1}},
-	})
-	if err != nil {
-		return fmt.Errorf("create users siteId_account index: %w", err)
-	}
-
-	_, err = s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
+	// No owned users index: SearchUsers spans every site (spec R7, collection
+	// scan — acceptable at admin-console scale), and the remaining by-account
+	// equality lookups are unique point-reads via account_1 above.
+	_, err := s.adminAudit.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "siteId", Value: 1}, {Key: "timestamp", Value: -1}},
 	})
 	if err != nil {
@@ -121,8 +108,15 @@ var userProjection = bson.M{
 	"active":                1,
 }
 
-func (s *storeMongo) SearchUsers(ctx context.Context, siteID, q string, page, limit int) ([]model.User, int64, error) {
-	filter := bson.M{"siteId": siteID}
+// fanoutProjection is the post-write read-back: exactly the fields
+// fanoutUserAccount publishes. Never include services/password.
+var fanoutProjection = bson.M{"_id": 1, "account": 1, "siteId": 1,
+	"engName": 1, "chineseName": 1, "roles": 1, "active": 1}
+
+// SearchUsers spans every site: the admin console lists cross-site replicas
+// too (read-only there — mutations stay home-site-scoped).
+func (s *storeMongo) SearchUsers(ctx context.Context, q string, page, limit int) ([]model.User, int64, error) {
+	filter := bson.M{}
 	if q != "" {
 		// Escape so the query is matched as a literal substring, not a regex
 		// pattern — prevents metacharacter injection and ReDoS-style DoS.
@@ -214,7 +208,7 @@ func (s *storeMongo) CreateUser(ctx context.Context, u *model.User) error {
 	return nil
 }
 
-func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) error {
+func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fields UserUpdate) (*model.User, error) {
 	set := bson.M{}
 	if fields.EngName != nil {
 		set["engName"] = *fields.EngName
@@ -229,7 +223,7 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 		set["active"] = *fields.Active
 	}
 	if len(set) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	filter := bson.M{"account": account, "siteId": siteID}
@@ -238,21 +232,30 @@ func (s *storeMongo) UpdateUser(ctx context.Context, siteID, account string, fie
 	// active=false to DeactivateAndRevoke instead so the user-flag flip
 	// and session-purge run in one Mongo transaction. UpdateUser stays
 	// non-transactional for the remaining patch fields (roles, names).
-	result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": set})
-	if err != nil {
-		return fmt.Errorf("update user: %w", err)
+	res := s.users.FindOneAndUpdate(ctx, filter, bson.M{"$set": set},
+		options.FindOneAndUpdate().SetReturnDocument(options.After).SetProjection(fanoutProjection))
+	var u model.User
+	if err := res.Decode(&u); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("update user: %w", err)
 	}
-	if result.MatchedCount == 0 {
-		return ErrUserNotFound
-	}
-	return nil
+	return &u, nil
 }
 
 // withTransaction runs fn inside a Mongo multi-document transaction. Requires a
 // replica-set deployment (production, and the RS container in integration tests).
 // The driver retries fn on transient transaction errors.
 func (s *storeMongo) withTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	sess, err := s.users.Database().Client().StartSession()
+	// The session — and therefore the transaction — inherits the CLIENT read
+	// preference, and MongoDB rejects a non-primary one inside a transaction.
+	// SessionOptionsBuilder has no SetDefaultReadPreference in driver v2, so the
+	// transaction options are the seam. Pinning here keeps the client free to
+	// prefer a secondary for ordinary reads.
+	sess, err := s.users.Database().Client().StartSession(
+		options.Session().SetDefaultTransactionOptions(
+			options.Transaction().SetReadPreference(readpref.Primary())))
 	if err != nil {
 		return fmt.Errorf("start session: %w", err)
 	}
@@ -299,24 +302,33 @@ func (s *storeMongo) UpdateUserPasswordAndRevoke(ctx context.Context, siteID, ac
 
 // DeactivateAndRevoke atomically sets active=false on the user and
 // deletes every session for the account, so a disabled account can't keep a
-// live token. Requires a replica set.
-func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) error {
+// live token. Requires a replica set. Returns the post-write doc projected to
+// the fanout fields.
+func (s *storeMongo) DeactivateAndRevoke(ctx context.Context, siteID, account string) (*model.User, error) {
 	filter := bson.M{"account": account, "siteId": siteID}
 
-	return s.withTransaction(ctx, func(ctx context.Context) error {
-		result, err := s.users.UpdateOne(ctx, filter, bson.M{"$set": bson.M{"active": false}})
-		if err != nil {
+	var updated *model.User
+	err := s.withTransaction(ctx, func(ctx context.Context) error {
+		res := s.users.FindOneAndUpdate(ctx, filter, bson.M{"$set": bson.M{"active": false}},
+			options.FindOneAndUpdate().SetReturnDocument(options.After).SetProjection(fanoutProjection))
+		var u model.User
+		if err := res.Decode(&u); err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return ErrUserNotFound
+			}
 			return fmt.Errorf("deactivate user: %w", err)
-		}
-		if result.MatchedCount == 0 {
-			return ErrUserNotFound
 		}
 		sessions := s.users.Database().Collection(session.Collection)
 		if _, err := sessions.DeleteMany(ctx, filter); err != nil {
 			return fmt.Errorf("revoke sessions: %w", err)
 		}
+		updated = &u
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // auditProjection returns all audit entry fields.

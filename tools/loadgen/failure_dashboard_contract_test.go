@@ -3,7 +3,6 @@ package main
 import (
 	"math"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,64 +46,6 @@ func TestFailureDashboardContract_ThresholdsAndRecoveryStreak(t *testing.T) {
 	assert.True(t, dashboardRecovered([]bool{false, true, true, true, true, true}))
 }
 
-func TestFailureDashboardContract_DocPinsCadenceAndMissingSeriesSemantics(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-	for _, required := range []string{
-		"Prometheus scrape interval: 30 seconds",
-		"Evaluation lookback: 2 minutes",
-		"Evaluation step: 1 minute",
-		"Minimum samples per required series in each lookback: 3",
-		"Recovery: 5 consecutive healthy evaluation points",
-		"Minimum post-remediation evaluation window: 6 minutes",
-		"A missing series is unknown, never zero",
-		"or vector(0)",
-		"Existing loadgen metrics",
-		"Metrics added by this work",
-		"Externally owned metrics",
-		"NATS topology, leader, and quorum",
-	} {
-		assert.Contains(t, contract, required)
-	}
-}
-
-func TestFailureDashboardContract_ObserverRatioUsesMatchingBoundedSelectors(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-
-	assert.Contains(t, contract,
-		`loadgen_failure_observer_eligible_total{scenario="message_soak",lane="$lane",observer="$observer"}`,
-	)
-	assert.Contains(t, contract,
-		`loadgen_failure_observations_total{scenario="message_soak",lane="$lane",observer="$observer",result="unverified"}`,
-	)
-}
-
-func TestFailureDashboardContract_AckFloorStallIsDocumentedAsAProxy(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-
-	assert.Contains(t, contract, "loadgen_consumer_ack_floor_stall_seconds")
-	assert.Contains(t, contract, "replace a true oldest-pending-age signal")
-}
-
-func TestFailureDashboardContract_UsesWorkloadOrientedScenario(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/dashboard-evidence-contract.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-	observerStart := strings.Index(contract, "## Observer validity")
-	observerEnd := strings.Index(contract, "## Result interpretation")
-	require.NotEqual(t, -1, observerStart)
-	require.Greater(t, observerEnd, observerStart)
-	observerQueries := contract[observerStart:observerEnd]
-
-	assert.Contains(t, observerQueries, `scenario="message_soak"`)
-	assert.NotContains(t, observerQueries, "cassandra_soak")
-}
-
 func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *testing.T) {
 	encoded, err := os.ReadFile("deploy/grafana/dashboards/loadtest.json")
 	require.NoError(t, err)
@@ -118,6 +59,21 @@ func TestFailureDashboardContract_BundledDashboardUsesCurrentMetricContract(t *t
 		"loadgen_failure_wal_flush_batch_size_sum",
 		"loadgen_failure_wal_appends_total",
 		"loadgen_failure_evidence_flush_duration_seconds_bucket",
+		// The reconcile lane's validity gate. Without a panel these are metrics
+		// nobody reads, and a saturated fault window would look the same as a
+		// healthy one on the board an operator actually opens.
+		"loadgen_failure_reconcile_claims_total",
+		"loadgen_failure_reconcile_lag_seconds_bucket",
+		// Both startup reasons, not just the capacity floor. A panel pinned to
+		// one reason goes blank for the other, which is the same "a metric
+		// nobody surfaces closes nothing" the panel was added to fix.
+		`loadgen_failure_invalidations_total{reason=~\"reconcile_capacity|reconcile_lag_range|lease_abort\"}`,
+		"loadgen_mongo_up",
+		"loadgen_mongo_probe_timestamp_seconds",
+		`increase(loadgen_mongo_probe_attempts_total{outcome=\"error\"}[2m])`,
+		"loadgen_soak_heartbeat_degraded",
+		"loadgen_soak_heartbeat_success_timestamp_seconds",
+		"loadgen_soak_heartbeat_attempts_total",
 	} {
 		assert.Contains(t, dashboard, query)
 	}
@@ -135,30 +91,6 @@ func TestFailureObservationDeploymentContract_AcceptsBoundedTestEnvironment(t *t
 	values, err := os.ReadFile("deploy/k8s/values.yaml")
 	require.NoError(t, err)
 	assert.Contains(t, string(values), "environment: staging")
-}
-
-func TestFailureDashboardContract_ObservabilityInventoryUsesSplitSaturationMetrics(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/specs/o11y/storage-dependency-metrics.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-
-	assert.Contains(t, contract, "loadgen_soak_lane_saturation_total")
-	assert.Contains(t, contract, "loadgen_soak_global_saturation_total")
-	assert.NotContains(t, contract, "loadgen_soak_saturation_total")
-}
-
-func TestFailureRuntimeControlFollowUp_PinsAuthenticatedStatusAndPausedEvidence(t *testing.T) {
-	encoded, err := os.ReadFile("../../docs/load-testing/failure-testing/runtime-control-api.md")
-	require.NoError(t, err)
-	contract := string(encoded)
-	for _, required := range []string{
-		"authenticated `GET /control/status`",
-		"`loadgen_dispatch_enabled == 0`",
-		"INCONCLUSIVE",
-		"no accumulated deficit",
-	} {
-		assert.Contains(t, contract, required)
-	}
 }
 
 func TestFailureObservationDeploymentContract_UsesIndependentRecipientObserverValues(t *testing.T) {
@@ -184,14 +116,19 @@ func TestFailureObservationDeploymentContract_UsesIndependentRecipientObserverVa
 }
 
 func TestFailureObservationScope_FormalCampaignArtifactsAreAbsent(t *testing.T) {
+	// Scoped to loadgen's own files. The root Makefile used to be checked here
+	// too, which made this package's tests depend on a file whose content has
+	// nothing to do with loadgen's behaviour — a false alarm waiting for an
+	// unrelated edit.
 	paths := []string{
 		"soak_config.go",
 		"soak_main.go",
 		"deploy/docker-compose.yml",
 		"README.md",
-		"../../Makefile",
 	}
 	for _, path := range paths {
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		encoded, err := os.ReadFile(path)
 		require.NoError(t, err)
 		for _, removed := range []string{

@@ -1,0 +1,198 @@
+rules:
+  - id: metrics-no-per-call-attribute-set
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: >
+      Build the attribute set once and look it up, do not construct one per
+      recording call. attribute.NewSet sorts and allocates every time (measured
+      264ns/192B against 9.6ns/0B for a map lookup), and recording paths run
+      per message, per recipient or per failed item — the "cold path" argument
+      fails exactly when the incident you are measuring is happening. Precompute
+      the closed label combinations into a map keyed by your enum, the way
+      pkg/natsmetrics and search-sync-worker/metrics.go do.
+    paths:
+      exclude:
+        - "**/*_test.go"
+        # data-migration/oplog-* are one-shot batch tools, not always-on
+        # services: they are run under supervision for a migration window and
+        # their metrics are read live during that window. The allocation
+        # argument is about sustained production load, which they never carry.
+        #
+        # Leading slash anchors this to the repo-root directory, which is the
+        # only one that exists. Semgrepignore v2 will read an unanchored
+        # "data-migration/**" as anchored anyway and warns about the ambiguity,
+        # so say which one is meant.
+        - "/data-migration/**"
+    # Taint mode, for the same reason the cardinality rule uses it: an option
+    # hoisted into a local one line above the call is still built per call, and
+    # the structural form could not see it.
+    #
+    #     opt := metric.WithAttributes(attribute.String("site", site))
+    #     c.Add(ctx, 1, opt)
+    #
+    # I found that hole in this rule myself, while fixing search-service's
+    # fallback, and left it open — closing it is the point of the taint form.
+    #
+    # Taint is intraprocedural, which is exactly the line worth drawing:
+    # constructing the option in the same function that records is per-call;
+    # building it in a constructor and looking it up here is the pattern this
+    # rule wants, and that stays silent because the source is somewhere else.
+    #
+    # Observe still needs its own sink — its signature is
+    # Observe(value, ...ObserveOption) with no context — and an observable
+    # callback runs once per collection interval for the life of the process,
+    # so an inline set there costs the same in a shape that is easy to miss.
+    #
+    # attribute.NewSet is a source in its own right, not only when nested
+    # directly inside WithAttributeSet. It is the expensive half — the sort and
+    # the allocation are there, the option wrapper is free — so the flow has to
+    # be followed from the set itself:
+    #
+    #     set := attribute.NewSet(attribute.String("site", site))
+    #     opt := metric.WithAttributeSet(set)
+    #     c.Add(ctx, 1, opt)
+    #
+    # With only the nested spelling as a source, splitting it across locals took
+    # the whole flow out of reach, and so did the single-local form.
+    pattern-sources:
+      - pattern-either:
+          - pattern: metric.WithAttributes(...)
+          - pattern: attribute.NewSet(...)
+    #
+    # The sinks match the option in any argument position, not just as the last
+    # or only one. Add/Record/Observe are variadic, and a call that passes a
+    # precomputed option alongside a freshly built one is exactly the mixed
+    # shape where the fresh one still costs per call:
+    #
+    #     c.Add(ctx, 1, precomputed, metric.WithAttributes(...))
+    #
+    # A fixed-position sink misses both orderings. focus-metavariable narrows
+    # the finding back onto the option itself so the report points at the
+    # argument that is built per call rather than at the whole call.
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $C.Add($CTX, $N, ..., $OPT, ...)
+              - pattern: $C.Record($CTX, $V, ..., $OPT, ...)
+              - pattern: $C.Observe($V, ..., $OPT, ...)
+          - focus-metavariable: $OPT
+
+  - id: metrics-no-unbounded-label
+    mode: taint
+    languages: [go]
+    severity: ERROR
+    message: >
+      This identifier is unbounded — one metric series per room, account, user,
+      message or subject will grow without limit and take the metrics backend
+      with it. Identity belongs on the log line and the span next to the call,
+      where high cardinality is free. If you need to slice the metric, add a
+      closed enum instead (see bulkStatusLabel in search-sync-worker, or the
+      label enums in pkg/natsmetrics).
+    paths:
+      exclude:
+        - "**/*_test.go"
+    # Taint mode, not a structural pattern. The earlier form could only see a
+    # constructor nested directly inside the option call, so one hop through a
+    # local broke it:
+    #
+    #     kv := attribute.String("room_id", roomID)
+    #     c.Add(ctx, 1, metric.WithAttributes(kv))
+    #
+    # That is not an evasion anyone writes deliberately — it is what you write
+    # when the key is chosen by a branch — and search-service shipped exactly
+    # that shape past a full repo scan. Taint follows the value to the sink and
+    # subsumes the direct case, so the whole fixture suite still holds.
+    #
+    # Findings land on the sink rather than the constructor, which is the more
+    # useful location: the defect is an unbounded attribute reaching a metric
+    # option, and the sink is where it arrives.
+    pattern-sinks:
+      - pattern-either:
+          - pattern: metric.WithAttributes(...)
+          - pattern: attribute.NewSet(...)
+    pattern-sources:
+      # A generated semantic-convention key constant. There is no string literal
+      # at the call site at all — semconv.UserIDKey.String(v) carries the key in
+      # the identifier — so a rule that only reads literals is blind to the
+      # whole semconv surface, which is exactly where an identity key is most
+      # likely to be reached for.
+      #
+      # The name is matched with the same camel identity shape the key regex
+      # uses, minus the trailing Key. That is what keeps this from forbidding
+      # the namespace: ErrorTypeKey and HTTPRequestMethodKey carry no identity
+      # root in tail position and stay out, and boundedSemconvKeys holds them.
+      - patterns:
+          - pattern: $PKG.$KEYNAME.$CTOR(...)
+          - metavariable-regex:
+              metavariable: $KEYNAME
+              regex: ^[A-Za-z0-9]*(?:Room|Account|User|Message|Msg|Thread|Device|Session|Recipient|Request|Trace|Doc|Span|Tenant|Org|Run|Inbox|Pod)(?:[uU]?[iI][dD])?Key$
+      - patterns:
+          # $CTOR, not String: an int room id opens exactly as many series as a
+          # string one. attribute.Key("k").String(v) is the same attribute built
+          # the other way round, and reads as deliberate enough that review waves
+          # it past.
+          # attribute.Key("k") is a source on its own, not only when the .String
+          # is chained onto it. Hoisting the key into a variable —
+          #
+          #     key := attribute.Key("room_id")
+          #     kv := key.String(v)
+          #
+          # left nothing for the chained pattern to match, and taint had no
+          # entry point because the Key call itself was not a source. It is now,
+          # and taint carries through the method call on the tainted key.
+          - pattern-either:
+              - pattern: attribute.$CTOR("$KEY", $V)
+              - pattern: attribute.Key("$KEY")
+          - metavariable-regex:
+              metavariable: $KEY
+              # Three shapes, all drawn from the contract's forbidden-label list:
+              #
+              #   1. An identity root with an optional Id / _id / UID / _uid tail,
+              #      under any number of namespace qualifiers.
+              #      The tail is optional because attribute.String("room", roomID) is
+              #      the same one-series-per-room growth as ("roomId", roomID), and
+              #      the bare key slipped past the earlier form of this rule.
+              #      The qualifier prefix is there because this branch used to be
+              #      anchored at the start of the key, and OTel semconv namespaces
+              #      everything: it saw user.id but not messaging.message.id, which
+              #      is the spelling actually reached for. The qualifier segments
+              #      are consumed only up to an identity root, so what follows the
+              #      root still has to be an id tail — http.request.method and
+              #      messaging.batch.message_count keep passing, and
+              #      boundedQualifiedKeys is what holds that.
+              #      A camel hump qualifies just as well as a separator, and the
+              #      first version of this prefix required [._], so the
+              #      Go-idiomatic spelling of the very same key —
+              #      destinationRoomID — walked past a rule that caught
+              #      destination_room_id. The camel branch demands a Capitalised
+              #      root, which is what stops it degenerating into "any key
+              #      ending in a root word": destinationKind, userAgent, runInfo
+              #      and recipientCount carry no capitalised root and stay out,
+              #      and boundedCamelKeys holds that.
+              #   2. Anything ending in Subject or subject, however it is qualified.
+              #      The contract forbids both "inbox subject" and "arbitrary
+              #      destination subject", and the key is nearly always qualified —
+              #      inboxSubject, dest_subject, destinationInboxSubject,
+              #      messaging.destination.subject. An earlier form of this branch
+              #      allowed only one all-lowercase qualifier, so the multiword and
+              #      multi-segment spellings walked past it. Nothing bounded ends in
+              #      subject, so the leading .* costs no false positives.
+              #   3. index, which is an Elasticsearch index name.
+              #
+              #   4. Raw error text and stack traces, the last two entries on that
+              #      list. Bounded *classifications* of an error are allowed and must
+              #      keep passing: error_type, errorType, reason, outcome, result and
+              #      status all fall outside the pattern by construction.
+              #
+              # run is here for run_id specifically. A bounded run_info metric
+              # describing scenario and traffic profile is allowed by the contract
+              # and does not match, because run_info is not run + an id tail.
+              #
+              # Every separator is [._] rather than _, because OTel semconv spells
+              # these keys dotted — user.id, session.id, error.stack — and this
+              # repo already carries semconv attributes elsewhere, so the dotted
+              # form is the one most likely to be reached for. Widening the
+              # separator does not widen what matches: the tails are still a closed
+              # set, so error.type, user.agent and org.name stay outside it.
+              regex: ^(?:(?:[A-Za-z0-9]+[._])*(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)|[A-Za-z0-9]*(?:Room|Account|User|Message|Request|Trace|Doc|Span|Session|Device|Tenant|Org|Run|Recipient|Inbox|Pod))(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$

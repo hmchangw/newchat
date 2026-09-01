@@ -244,6 +244,10 @@ func (s *HistoryService) buildThreadItems(c *natsrouter.Context, rows []mongorep
 			ms := row.LastSeenAt.UTC().UnixMilli()
 			item.LastSeenAt = &ms
 		}
+		// Both bodies ship pre-marshaled, so decode here: the raw blob column is
+		// json:"-" and only DecodedAttachments reaches the client.
+		decodeMessageAttachments(c, &parent)
+		decodeMessageAttachments(c, &last)
 		parentJSON, err := json.Marshal(&parent)
 		if err != nil {
 			slog.WarnContext(c, "thread-list: marshaling parent message, skipping row",

@@ -12,6 +12,10 @@ type SpotlightDoc struct {
 	RoomType    string    `json:"roomType"    es:"keyword"`
 	SiteID      string    `json:"siteId"      es:"keyword"`
 	JoinedAt    time.Time `json:"joinedAt"    es:"date"`
+	// RoomNameUpdatedAt is the event-millis under which RoomName is valid — the
+	// LWW clock a room_renamed update-by-query guards on so an out-of-order rename
+	// can't overwrite a newer name. Stamped = the member/rename event timestamp.
+	RoomNameUpdatedAt int64 `json:"roomNameUpdatedAt" es:"long"`
 	// Origin marks provenance (e.g. model.OriginTeams for Teams-migrated
 	// rooms); empty for natively-created rooms. Filtered by search-service
 	// when SHOW_TEAMS_ROOM is false.
@@ -20,13 +24,14 @@ type SpotlightDoc struct {
 
 // SpotlightFields is the minimal, source-agnostic input to NewSpotlightDoc.
 type SpotlightFields struct {
-	UserAccount string
-	RoomID      string
-	RoomName    string
-	RoomType    string
-	SiteID      string
-	JoinedAt    time.Time
-	Origin      string
+	UserAccount       string
+	RoomID            string
+	RoomName          string
+	RoomType          string
+	SiteID            string
+	JoinedAt          time.Time
+	RoomNameUpdatedAt int64
+	Origin            string
 }
 
 // NewSpotlightDoc builds the ES document for the spotlight index from f.

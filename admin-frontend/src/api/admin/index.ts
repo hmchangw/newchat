@@ -2,7 +2,7 @@
 // responses throw `AsyncJobError` via `parseHttpEnvelopeError`.
 
 import { ADMIN_SERVICE_URL } from '@/lib/runtimeConfig'
-import { parseHttpEnvelopeError } from '@/api'
+import { AsyncJobError, envelopeErrorFromBody, parseHttpEnvelopeError } from '@/api'
 
 /** Admin-facing user projection (mirrors admin-service's `userView` — never the bcrypt hash);
  * `normalizeUser` fills defaults for the server's `omitempty` fields. */
@@ -208,20 +208,68 @@ export async function getUser(authToken: string, account: string): Promise<Admin
   return normalizeUser(raw)
 }
 
-/** @throws {AsyncJobError} on a non-2xx response (e.g. `account_exists`). */
-export async function createUser(authToken: string, input: CreateUserInput): Promise<AdminUser> {
-  const raw = await adminFetch<UserViewWire>(authToken, 'POST', '/users', input)
-  return normalizeUser(raw)
+export interface CreateUserResult {
+  user: AdminUser
+  syncFailures: string[]
+  hrSyncFailed: boolean
 }
 
-/** Applies a partial update; resolves to `void` (server replies `{status:"ok"}`, not the user) —
- * follow up with `getUser` if you need the fresh record. */
+/** @throws {AsyncJobError} on a non-2xx response (e.g. `account_exists`). A 2xx
+ * with `syncFailures`/`hrSyncFailed` means the account committed locally but
+ * some cross-site replication did not land — the caller must show it. */
+export async function createUser(
+  authToken: string,
+  input: CreateUserInput,
+): Promise<CreateUserResult> {
+  const raw = await adminFetch<UserViewWire & { syncFailures?: string[]; hrSyncFailed?: boolean }>(
+    authToken,
+    'POST',
+    '/users',
+    input,
+  )
+  return {
+    user: normalizeUser(raw),
+    syncFailures: raw.syncFailures ?? [],
+    hrSyncFailed: raw.hrSyncFailed ?? false,
+  }
+}
+
+export interface UpdateUserResult {
+  syncFailures: string[]
+}
+
+/** Applies a partial update. A 2xx with `syncFailures` committed locally but
+ * did not reach those sites — the caller must show it. The server replies
+ * `{status:"ok"}`, not the user — follow up with `getUser` for the fresh record. */
 export async function updateUser(
   authToken: string,
   account: string,
   patch: UpdateUserPatch,
-): Promise<void> {
-  await adminFetch<{ status: string }>(authToken, 'PATCH', `/users/${encodeURIComponent(account)}`, patch)
+): Promise<UpdateUserResult> {
+  const raw = await adminFetch<{ status: string; syncFailures?: string[] }>(
+    authToken,
+    'PATCH',
+    `/users/${encodeURIComponent(account)}`,
+    patch,
+  )
+  return { syncFailures: raw.syncFailures ?? [] }
+}
+
+export interface ResyncUserResult {
+  syncFailures: string[]
+  hrSyncFailed: boolean
+}
+
+/** Re-delivers the current account state on both sync lanes (durable HR
+ * bootstrap + direct snapshot to every remote site). Re-delivery only — the
+ * server writes nothing. Home-site accounts only; foreign replicas 404. */
+export async function resyncUser(authToken: string, account: string): Promise<ResyncUserResult> {
+  const raw = await adminFetch<{
+    status: string
+    syncFailures?: string[]
+    hrSyncFailed?: boolean
+  }>(authToken, 'POST', `/users/${encodeURIComponent(account)}/resync`)
+  return { syncFailures: raw.syncFailures ?? [], hrSyncFailed: raw.hrSyncFailed ?? false }
 }
 
 /** Sets a new password; sent over the wire as `password` (admin-service's json tag). */
@@ -313,4 +361,102 @@ export async function listPermissions(
     limit: params.limit,
   })
   return adminFetch<ListPermissionsResponse>(authToken, 'GET', `/permissions${qs}`)
+}
+
+/**
+ * Uploads a client update artifact pair. Unlike every other call here this uses
+ * `XMLHttpRequest`, because `fetch` cannot report upload progress and these
+ * artifacts are large enough that a silent UI would look hung.
+ *
+ * @throws {AsyncJobError} on a non-2xx response or a transport failure.
+ */
+/** Client-side ceiling for one artifact upload.
+ *
+ * Budgets must be ordered client-update-service < admin relay < browser. The XHR
+ * timer starts before the request reaches admin-service, so an equal budget lets
+ * the browser abort a publication the backend has already committed and report
+ * "upload timed out" for an upload that succeeded. This is admin-service's
+ * CLIENT_UPDATE_UPLOAD_TIMEOUT default plus a margin for the upstream response,
+ * the audit write and response transit.
+ *
+ * A deployment that raises CLIENT_UPDATE_UPLOAD_TIMEOUT above the backend
+ * default must raise this too — the frontend cannot read that setting today. */
+export const UPLOAD_TIMEOUT_MARGIN_MS = 2 * 60 * 1000
+export const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000 + UPLOAD_TIMEOUT_MARGIN_MS
+
+export function uploadClientVersion(
+  authToken: string,
+  configFile: File,
+  executeFile: File,
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const form = new FormData()
+  form.append('configFile', configFile)
+  form.append('executeFile', executeFile)
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${ADMIN_SERVICE_URL}/v1/admin/client-updates`)
+    xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
+    // Content-Type is deliberately unset: the browser writes the multipart
+    // boundary, and overriding it produces a body the server cannot parse.
+    // Without this, timeout defaults to 0 (never) and xhr.ontimeout below can
+    // never fire, so a stalled upload leaves the promise pending and the Upload
+    // button disabled forever.
+    xhr.timeout = UPLOAD_TIMEOUT_MS
+
+    if (onProgress) {
+      xhr.upload.onprogress = (e: ProgressEvent) => {
+        if (!e.lengthComputable || !e.total) return
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve()
+        return
+      }
+      reject(uploadEnvelopeError(xhr.status, xhr.responseText))
+    }
+    xhr.onerror = () => reject(new AsyncJobError('upload failed: could not reach the server'))
+    xhr.onabort = () => reject(new AsyncJobError('upload was aborted'))
+    xhr.ontimeout = () => reject(new AsyncJobError('upload timed out'))
+
+    // Without this an admin who leaves the console mid-upload keeps the request,
+    // both backend connections and the selected files alive for minutes, and
+    // returning can start a second invisible upload alongside the first.
+    if (signal) {
+      // Reject explicitly rather than leaning on xhr.abort(): a request that was
+      // opened but never sent fires no abort event, so relying on the handler
+      // above would leave this promise — and the console's Upload button —
+      // pending forever.
+      if (signal.aborted) {
+        xhr.abort()
+        reject(new AsyncJobError('upload was aborted'))
+        return
+      }
+      const onAbort = () => xhr.abort()
+      signal.addEventListener('abort', onAbort, { once: true })
+      // Detach on every terminal path so a long-lived controller does not retain
+      // this listener (and the xhr it closes over) after the request settles.
+      xhr.onloadend = () => signal.removeEventListener('abort', onAbort)
+    }
+
+    xhr.send(form)
+  })
+}
+
+/** Builds an `AsyncJobError` from an XHR error body. The envelope shape itself is owned by
+ * `envelopeErrorFromBody`; only the JSON parse differs, since XHR gives text rather than a Response. */
+function uploadEnvelopeError(status: number, responseText: string): AsyncJobError {
+  const fallback = `upload failed with status ${status}`
+  let body: unknown
+  try {
+    body = JSON.parse(responseText)
+  } catch {
+    body = undefined
+  }
+  return envelopeErrorFromBody(body, fallback)
 }

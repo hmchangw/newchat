@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,6 +86,7 @@ type soakMutationSample struct {
 	Action        soakRPCAction
 	Latency       time.Duration
 	ErrorClass    soakErrorClass
+	ErrorReason   soakErrorReason
 	Retries       int
 	Skipped       bool
 	TargetMissing bool
@@ -212,6 +213,7 @@ func (m *soakMutator) Edit(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body: soakEditMessageRequest{
 				MessageID: message.ID,
 				NewMsg:    content,
@@ -225,16 +227,16 @@ func (m *soakMutator) Edit(
 		return m.missing(outcome, latency), nil
 	}
 	if err != nil {
-		m.recordResult(outcome, latency, result.ErrorClass, false)
+		m.recordResult(outcome, latency, result.ErrorClass, result.ErrorReason, false)
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
 		err = newSoakAssertionError("edit returned a different message ID")
-		m.recordResult(outcome, latency, soakErrorAssertion, false)
+		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
 		return outcome, err
 	}
 	m.catalog.MarkEdited(roomID, message.ID, content)
-	m.recordResult(outcome, latency, "", false)
+	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
@@ -258,6 +260,7 @@ func (m *soakMutator) Delete(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakDeleteMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -268,16 +271,16 @@ func (m *soakMutator) Delete(
 		return m.missing(outcome, latency), nil
 	}
 	if err != nil {
-		m.recordResult(outcome, latency, result.ErrorClass, false)
+		m.recordResult(outcome, latency, result.ErrorClass, result.ErrorReason, false)
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
 		err = newSoakAssertionError("delete returned a different message ID")
-		m.recordResult(outcome, latency, soakErrorAssertion, false)
+		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
 		return outcome, err
 	}
 	m.catalog.MarkDeleted(roomID, message.ID)
-	m.recordResult(outcome, latency, "", false)
+	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
@@ -332,6 +335,7 @@ func (m *soakMutator) pin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakPinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -342,15 +346,15 @@ func (m *soakMutator) pin(
 		return m.missing(outcome, latency), nil
 	}
 	if err != nil {
-		m.recordResult(outcome, latency, result.ErrorClass, false)
+		m.recordResult(outcome, latency, result.ErrorClass, result.ErrorReason, false)
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		m.recordResult(outcome, latency, soakErrorAssertion, false)
+		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
 		return outcome, newSoakAssertionError("pin returned a different message ID")
 	}
 	m.catalog.SetPinned(roomID, message.ID, true)
-	m.recordResult(outcome, latency, "", false)
+	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
@@ -370,6 +374,7 @@ func (m *soakMutator) unpin(
 				roomID,
 				m.cfg.SiteID,
 			),
+			Account: message.Author, RoomID: roomID,
 			Body:    soakUnpinMessageRequest{MessageID: message.ID},
 			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		},
@@ -380,15 +385,15 @@ func (m *soakMutator) unpin(
 		return m.missing(outcome, latency), nil
 	}
 	if err != nil {
-		m.recordResult(outcome, latency, result.ErrorClass, false)
+		m.recordResult(outcome, latency, result.ErrorClass, result.ErrorReason, false)
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		m.recordResult(outcome, latency, soakErrorAssertion, false)
+		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
 		return outcome, newSoakAssertionError("unpin returned a different message ID")
 	}
 	m.catalog.SetPinned(roomID, message.ID, false)
-	m.recordResult(outcome, latency, "", false)
+	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
@@ -412,6 +417,7 @@ func (m *soakMutator) React(
 	request := soakRPCRequest{
 		Action:  soakRPCReact,
 		Subject: subject.MsgReact(actor.Account, roomID, m.cfg.SiteID),
+		Account: actor.Account, RoomID: roomID,
 		Body: soakReactMessageRequest{
 			MessageID: message.ID,
 			Shortcode: soakReactionShortcode,
@@ -466,7 +472,7 @@ func (m *soakMutator) React(
 		return m.missing(outcome, latency), nil
 	}
 	if err != nil {
-		m.recordResult(outcome, latency, result.ErrorClass, false)
+		m.recordResult(outcome, latency, result.ErrorClass, result.ErrorReason, false)
 		return outcome, err
 	}
 	if !result.AmbiguityResolved &&
@@ -474,7 +480,7 @@ func (m *soakMutator) React(
 			response.Shortcode != soakReactionShortcode ||
 			(response.Action != model.ReactionActionAdded &&
 				response.Action != model.ReactionActionRemoved)) {
-		m.recordResult(outcome, latency, soakErrorAssertion, false)
+		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
 		return outcome, newSoakAssertionError(
 			"reaction response did not identify a valid state transition",
 		)
@@ -491,7 +497,7 @@ func (m *soakMutator) React(
 		actor.Account,
 		actual == model.ReactionActionAdded,
 	)
-	m.recordResult(outcome, latency, "", false)
+	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
@@ -581,6 +587,7 @@ func (m *soakMutator) readReactionState(
 			roomID,
 			m.cfg.SiteID,
 		),
+		Account: account, RoomID: roomID,
 		Body:      soakGetMessageByIDRequest{MessageID: messageID},
 		Timeout:   m.cfg.RequestTimeout,
 		RetryMode: soakRetrySafe,
@@ -601,6 +608,7 @@ func (m *soakMutator) readReactionState(
 	return false, nil
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (m *soakMutator) callMutation(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -656,6 +664,7 @@ func (m *soakMutator) missing(
 		outcome,
 		latency,
 		soakErrorMutationTargetMissing,
+		"",
 		true,
 	)
 	return outcome
@@ -663,7 +672,7 @@ func (m *soakMutator) missing(
 
 func (m *soakMutator) skip(outcome soakMutationOutcome) soakMutationOutcome {
 	outcome.Skipped = true
-	m.recordResult(outcome, 0, "", false)
+	m.recordResult(outcome, 0, "", "", false)
 	return outcome
 }
 
@@ -671,13 +680,15 @@ func (m *soakMutator) recordResult(
 	outcome soakMutationOutcome,
 	latency time.Duration,
 	class soakErrorClass,
+	reason soakErrorReason,
 	targetMissing bool,
 ) {
 	if m.recorder == nil {
 		return
 	}
 	m.recorder.Record(soakMutationSample{
-		Action: outcome.Action, Latency: latency, ErrorClass: class,
+		Action: outcome.Action, Latency: latency,
+		ErrorClass: class, ErrorReason: reason,
 		Retries: outcome.Retries, Skipped: outcome.Skipped,
 		TargetMissing: targetMissing,
 	})

@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { PAGE_LIMIT } from '@/api'
 import { NatsContext } from '../NatsContext/NatsContext'
-import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription } from './RoomEventsContext'
+import { RoomEventsProvider, useRoomEvents, useRoomSummaries, useSidebarSections, useSubscription, useUnreadCount } from './RoomEventsContext'
 import { BUFFER_MODE } from './reducer'
 // jumpToMessage / resetToLiveTail tests — see suite below
 
@@ -23,6 +23,11 @@ let currentRoomKeysMock = {
 vi.mock('@/context/RoomKeysContext', () => ({
   useRoomKeys: () => currentRoomKeysMock,
 }))
+
+// The provider now write-throughs its subscription state to localStorage and
+// hydrates from it on mount. Without this, one test's persisted sidebar would
+// warm-start the next one's provider.
+beforeEach(() => window.localStorage.clear())
 
 /** Turn an inline "room-shaped" fixture into a subscription record that
  *  the new bootstrap (3 subscription RPCs) returns. The real user-service
@@ -82,6 +87,18 @@ function EventsProbe({ roomId }) {
       <div data-testid="messages">{messages.map((m) => m.id).join(',')}</div>
       <div data-testid="loaded">{String(hasLoadedHistory)}</div>
       <div data-testid="error">{historyError ?? ''}</div>
+    </div>
+  )
+}
+
+function PreviewProbe() {
+  const sections = useSidebarSections()
+  const rooms = sections.flatMap((s) => s.rooms)
+  return (
+    <div data-testid="previews">
+      {rooms
+        .map((r) => `${r.id}=${r.preview ? `${r.preview.senderName}|${r.preview.text}` : ''}`)
+        .join(';')}
     </div>
   )
 }
@@ -208,6 +225,138 @@ describe('RoomEventsProvider', () => {
       expect(captured[i]).toBe(captured[0])
     }
     await waitFor(() => expect(nats.request).toHaveBeenCalled())
+  })
+
+  describe('sidebar previews', () => {
+    // A channel room whose subscription.list row carries a seeded preview.
+    const seededSub = () => ({
+      ...roomToSub({ id: 'g1', name: 'General', type: 'channel', siteId: 'site-A', userCount: 3 }),
+      room: {
+        userCount: 3,
+        lastMsgAt: '2026-08-14T10:00:00Z',
+        previewMessage: {
+          messageId: 'm1',
+          sender: { account: 'alice', displayName: 'Alice Chen' },
+          content: 'original body',
+          createdAt: '2026-08-14T10:00:00Z',
+        },
+      },
+    })
+
+    function setup() {
+      const request = vi.fn().mockImplementation((subject, payload) => {
+        if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+          return Promise.resolve({ subscriptions: [seededSub()] })
+        return Promise.resolve({ subscriptions: [] })
+      })
+      const handlers = new Map()
+      const subscribe = vi.fn().mockImplementation((subject, cb) => {
+        handlers.set(subject, cb)
+        return { unsubscribe: vi.fn() }
+      })
+      return { nats: mockNats({ request, subscribe }), handlers, subscribe }
+    }
+
+    it('seeds the sidebar preview from subscription.list', async () => {
+      const { nats, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|original body')
+      )
+    })
+
+    it('refreshes the preview from a message_edited event', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_edited',
+          roomId: 'g1',
+          messageId: 'm1',
+          newContent: 'edited body',
+          editedAt: '2026-08-14T15:00:00Z',
+          previewMessage: {
+            messageId: 'm1',
+            sender: { account: 'alice', displayName: 'Alice Chen' },
+            content: 'edited body',
+            createdAt: '2026-08-14T15:00:00Z',
+          },
+        })
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|edited body')
+      )
+    })
+
+    it('refreshes the preview for an encrypted edit carrying no plaintext body', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      // No `newContent` — the mutation itself is dropped, but the sidebar
+      // snippet must still refresh from the plaintext previewMessage.
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_edited',
+          roomId: 'g1',
+          messageId: 'm1',
+          encryptedNewContent: { version: 1, nonce: 'n', ciphertext: 'c' },
+          editedAt: '2026-08-14T15:00:00Z',
+          previewMessage: {
+            messageId: 'm1',
+            sender: { account: 'alice', displayName: 'Alice Chen' },
+            content: 'server-side plaintext',
+            createdAt: '2026-08-14T15:00:00Z',
+          },
+        })
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|server-side plaintext')
+      )
+    })
+
+    it('clears the preview when the displayed message is deleted and none follows', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_deleted',
+          roomId: 'g1',
+          messageId: 'm1',
+          deletedBy: 'alice',
+          deletedAt: '2026-08-14T16:00:00Z',
+        })
+      })
+      await waitFor(() => expect(screen.getByTestId('previews').textContent).toBe('g1='))
+    })
+
+    it('keeps the preview when a different message is deleted', async () => {
+      const { nats, handlers, subscribe } = setup()
+      render(wrap(<PreviewProbe />, nats))
+      await waitFor(() => expect(subscribe).toHaveBeenCalled())
+      await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+
+      act(() => {
+        handlers.get('chat.room.g1.event')({
+          type: 'message_deleted',
+          roomId: 'g1',
+          messageId: 'm-someone-else',
+          deletedBy: 'alice',
+          deletedAt: '2026-08-14T16:00:00Z',
+        })
+      })
+      // Give any dispatch a chance to land before asserting nothing changed.
+      await act(async () => { await Promise.resolve() })
+      expect(screen.getByTestId('previews').textContent).toBe('g1=Alice Chen|original body')
+    })
   })
 })
 
@@ -1935,5 +2084,307 @@ describe('stale-session guards (generation counter)', () => {
     } finally {
       currentRoomKeysMock = prevMock
     }
+  })
+})
+
+describe('RoomEventsProvider message.read visibility gating', () => {
+  beforeEach(() => vi.clearAllMocks())
+  // Restore the property only — firing the event here would drive a
+  // mark-read in a still-mounted provider outside act().
+  afterEach(() => defineVisibility('visible'))
+
+  /** jsdom exposes document.visibilityState as a read-only getter, so drive
+   *  it by redefining the property. */
+  function defineVisibility(state) {
+    Object.defineProperty(document, 'visibilityState', { value: state, configurable: true })
+  }
+
+  /** Redefine + fire the event, as a real minimize / restore does. */
+  function setVisibility(state) {
+    defineVisibility(state)
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+
+  function readSubjectFor(roomId, siteId = 'site-A') {
+    return `chat.user.alice.request.room.${roomId}.${siteId}.message.read`
+  }
+
+  function setupWithRooms(rooms) {
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const ROOMS = [
+    { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+  ]
+
+  function newMessage(handlers, id) {
+    handlers.get('chat.room.g1.event')({
+      type: 'new_message',
+      roomId: 'g1',
+      message: { id, roomId: 'g1', sender: { account: 'bob' }, content: 'hi', createdAt: '2026-04-17T12:00:00Z' },
+    })
+  }
+
+  async function mountWithActiveRoom(nats, handlers) {
+    let setActive
+    function Probe() {
+      const { setActiveRoom } = useRoomSummaries()
+      setActive = setActiveRoom
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+    act(() => { setActive('g1') })
+  }
+
+  it('does NOT fire message.read for an active-room message while the document is hidden', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+
+      setVisibility('hidden')
+      request.mockClear()
+
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+
+      const subjects = request.mock.calls.map((c) => c[0])
+      expect(subjects.some((s) => s.endsWith('.message.read'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does NOT fire a pending trailing message.read when the document goes hidden mid-debounce', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+      request.mockClear()
+
+      // Arrives while visible, so the trailing read is scheduled…
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+      // …but the window is minimized before it fires.
+      setVisibility('hidden')
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+
+      const subjects = request.mock.calls.map((c) => c[0])
+      expect(subjects.some((s) => s.endsWith('.message.read'))).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fires message.read once for the active room when the document becomes visible again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { nats, request, handlers } = setupWithRooms(ROOMS)
+      await mountWithActiveRoom(nats, handlers)
+
+      setVisibility('hidden')
+      act(() => { newMessage(handlers, 'm1') })
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+      request.mockClear()
+
+      setVisibility('visible')
+
+      // waitFor is act-wrapped, so the ROOM_READ_SYNCED dispatch that
+      // markRoomRead resolves into is settled before the assertion lands.
+      await waitFor(() => {
+        const reads = request.mock.calls.filter((c) => c[0] === readSubjectFor('g1'))
+        expect(reads).toHaveLength(1)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('RoomEventsProvider unread badge is RPC-free', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('does NOT issue subscription.count when a message arrives', async () => {
+    // The core regression guard for the client-side fold: the badge used to
+    // refetch subscription.count on every received message.
+    const rooms = [
+      { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+      { id: 'g2', name: 'random', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+    ]
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    const nats = mockNats({ request, subscribe })
+
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g2.event')).toBe(true))
+
+    act(() => {
+      handlers.get('chat.room.g2.event')({
+        type: 'new_message',
+        roomId: 'g2',
+        message: { id: 'm1', roomId: 'g2', sender: { account: 'bob' }, content: 'hi', createdAt: '2026-08-19T12:00:00Z' },
+      })
+    })
+
+    const subjects = request.mock.calls.map((c) => c[0])
+    expect(subjects.some((s) => s.endsWith('.subscription.count'))).toBe(false)
+    // …and the badge still counts the room, folded locally.
+    await waitFor(() => expect(badge).toBe(1))
+  })
+})
+
+describe('RoomEventsProvider resync', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function setup(roomsByCall) {
+    let call = 0
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms') {
+        const rooms = roomsByCall[Math.min(call++, roomsByCall.length - 1)]
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      }
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const R1 = [{ id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null }]
+  const R2 = [
+    { id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+    { id: 'g2', name: 'later', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null },
+  ]
+
+  it('refetches the sidebar buckets and picks up a room the client had missed', async () => {
+    const { nats, request } = setup([R1, R2])
+    let resync
+    let summaries
+    function Probe() {
+      const ctx = useRoomSummaries()
+      resync = ctx.resync
+      summaries = ctx.summaries
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(summaries.map((s) => s.id)).toEqual(['g1']))
+
+    const before = request.mock.calls.filter((c) => c[0].endsWith('.subscription.list')).length
+    await act(async () => { await resync() })
+
+    const after = request.mock.calls.filter((c) => c[0].endsWith('.subscription.list')).length
+    expect(after).toBeGreaterThan(before)
+    await waitFor(() => expect(summaries.map((s) => s.id).sort()).toEqual(['g1', 'g2']))
+  })
+
+  it('subscribes to room events for a channel discovered by the resync', async () => {
+    const { nats, handlers } = setup([R1, R2])
+    let resync
+    function Probe() {
+      resync = useRoomSummaries().resync
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.room.g1.event')).toBe(true))
+    expect(handlers.has('chat.room.g2.event')).toBe(false)
+
+    await act(async () => { await resync() })
+
+    expect(handlers.has('chat.room.g2.event')).toBe(true)
+  })
+})
+
+describe('RoomEventsProvider thread-unread badge wiring', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  function setup(rooms) {
+    const request = vi.fn().mockImplementation((subject, payload) => {
+      if (subject.endsWith('.subscription.list') && payload?.type === 'rooms')
+        return Promise.resolve({ subscriptions: rooms.map(roomToSub) })
+      if (subject.endsWith('.subscription.list')) return Promise.resolve({ subscriptions: [] })
+      return Promise.resolve({})
+    })
+    const handlers = new Map()
+    const subscribe = vi.fn().mockImplementation((subject, cb) => {
+      handlers.set(subject, cb)
+      return { unsubscribe: vi.fn() }
+    })
+    return { nats: mockNats({ request, subscribe }), request, handlers }
+  }
+
+  const ROOMS = [{ id: 'g1', name: 'general', type: 'channel', siteId: 'site-A', userCount: 3, lastMsgAt: null }]
+
+  function threadReply(handlers, { sender }) {
+    handlers.get('chat.user.alice.event.room')({
+      type: 'new_message',
+      roomId: 'g1',
+      message: {
+        id: 'r1', roomId: 'g1', sender: { account: sender }, content: 'reply',
+        threadParentMessageId: 'p1', createdAt: '2026-08-19T12:00:00Z',
+      },
+    })
+  }
+
+  it('counts a room with an unread thread reply, with no thread panel open', async () => {
+    // fanThreadReply short-circuits when no ThreadEvents consumer is
+    // registered; the badge must update regardless.
+    const { nats, handlers } = setup(ROOMS)
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.user.alice.event.room')).toBe(true))
+    expect(badge).toBe(0)
+
+    act(() => { threadReply(handlers, { sender: 'bob' }) })
+
+    await waitFor(() => expect(badge).toBe(1))
+  })
+
+  it('does not count the user own thread reply', async () => {
+    const { nats, handlers } = setup(ROOMS)
+    let badge
+    function Probe() {
+      badge = useUnreadCount()
+      return null
+    }
+    render(wrap(<Probe />, nats))
+    await waitFor(() => expect(handlers.has('chat.user.alice.event.room')).toBe(true))
+
+    act(() => { threadReply(handlers, { sender: 'alice' }) })
+
+    await waitFor(() => expect(badge).toBe(0))
   })
 })

@@ -10,17 +10,17 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	o11yredis "github.com/flywindy/o11y/redis"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/badgecache"
-	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
+	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -28,27 +28,37 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
-	NatsURL       string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID        string                  `env:"SITE_ID"         envDefault:"default"`
-	MongoURI      string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB       string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword string                  `env:"MONGO_PASSWORD"  envDefault:""`
-	MaxWorkers    int                     `env:"MAX_WORKERS"     envDefault:"100"`
-	Consumer      stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap     bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr    string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled  bool                    `env:"PPROF_ENABLED" envDefault:"false"`
+	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID"         envDefault:"default"`
+	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	Pool          mongoutil.PoolConfig
+	MaxWorkers    int `env:"MAX_WORKERS"     envDefault:"100"`
+	// RoomSubCache memoizes the room-membership check on the activity-refresh
+	// lane, which would otherwise cost a Mongo read per broadcast message.
+	// Either value non-positive disables it.
+	RoomSubCacheSize int                     `env:"ROOM_SUB_CACHE_SIZE" envDefault:"50000"`
+	RoomSubCacheTTL  time.Duration           `env:"ROOM_SUB_CACHE_TTL"  envDefault:"5m"`
+	Consumer         stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap        bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr       string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled     bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 	// ValkeyAddrs seeds the Valkey cluster backing the badge cache
-	// (pkg/badgecache); empty disables it (clear hooks become no-ops).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS" envDefault:"" envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	// (pkg/badgecache) and best-effort subauthcache L2 invalidation after a
+	// federated role_updated/member_removed write; empty disables both (clear
+	// hooks and busts become no-ops, and the subauthcache TTL reconciles). A
+	// connect failure logs and continues rather than exiting — both are
+	// optional cache tiers, not hard dependencies.
+	Valkey valkeyutil.Config
 	// BadgeCacheTTL bounds how long a badge set survives without a refresh.
 	// Keep identical across all badge-cache writers.
 	BadgeCacheTTL time.Duration `env:"BADGE_CACHE_TTL" envDefault:"24h"`
@@ -56,10 +66,67 @@ type config struct {
 
 // mongoInboxStore implements InboxStore using MongoDB.
 type mongoInboxStore struct {
-	subCol       *mongo.Collection
-	roomCol      *mongo.Collection
-	userCol      *mongo.Collection
-	threadSubCol *mongo.Collection
+	subCol        *mongo.Collection
+	roomCol       *mongo.Collection
+	userCol       *mongo.Collection
+	threadSubCol  *mongo.Collection
+	remoteRoomCol *mongo.Collection
+}
+
+// remoteRoomsCollection stores model.RemoteRoom. Deliberately NOT rooms: that
+// one is room-service's and its readers assume complete documents (members,
+// encKey, counts), which a federated peer cannot supply. Migration's room_sync
+// does replicate whole rooms here, so a migrated room can hold both and a
+// reader spanning the two must prefer rooms.
+const remoteRoomsCollection = "remote_rooms"
+
+// HasRoomSubscription reports whether any subscription for roomID exists here.
+// Served by the (roomId, u.account) unique index as a prefix scan; projected to
+// _id and capped at one doc since only existence matters.
+func (s *mongoInboxStore) HasRoomSubscription(ctx context.Context, roomID string) (bool, error) {
+	err := s.subCol.FindOne(ctx, bson.M{"roomId": roomID},
+		options.FindOne().SetProjection(bson.M{"_id": 1})).Err()
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, mongo.ErrNoDocuments):
+		return false, nil
+	default:
+		return false, fmt.Errorf("check room subscription %q: %w", roomID, err)
+	}
+}
+
+// DeleteRemoteRoomActivity drops a remote room's ordering row. Absent row is
+// not an error — the room may never have had one.
+func (s *mongoInboxStore) DeleteRemoteRoomActivity(ctx context.Context, roomID string) error {
+	if _, err := s.remoteRoomCol.DeleteOne(ctx, bson.M{"_id": roomID}); err != nil {
+		return fmt.Errorf("delete remote room activity %q: %w", roomID, err)
+	}
+	return nil
+}
+
+// UpsertRemoteRoomActivity advances a remote room's position under $max, so
+// out-of-order delivery can never regress it. $setOnInsert carries the
+// immutable identity so a first touch creates the row complete.
+func (s *mongoInboxStore) UpsertRemoteRoomActivity(ctx context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	filter := bson.M{"_id": roomID}
+	update := bson.M{
+		"$max":         bson.M{"lastMsgAt": lastMsgAt},
+		"$setOnInsert": bson.M{"siteId": siteID},
+	}
+	opts := options.UpdateOne().SetUpsert(true)
+	if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("upsert remote room activity %q: %w", roomID, err)
+		}
+		// Two concurrent first-touches. Unlike UpsertRoom, whose guard lives in
+		// the filter, this one filters on _id alone — so a duplicate says
+		// nothing about which value is newer. Retry; the row exists now.
+		if _, err := s.remoteRoomCol.UpdateOne(ctx, filter, update, opts); err != nil {
+			return fmt.Errorf("upsert remote room activity %q (retry after duplicate key): %w", roomID, err)
+		}
+	}
+	return nil
 }
 
 func (s *mongoInboxStore) CreateSubscription(ctx context.Context, sub *model.Subscription) error {
@@ -272,6 +339,34 @@ func (s *mongoInboxStore) UpdateUserChatlist(ctx context.Context, account string
 	return nil
 }
 
+// UpsertUserAccount — see the InboxStore interface comment for why this one
+// upserts when the other user_* appliers do not.
+func (s *mongoInboxStore) UpsertUserAccount(ctx context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error {
+	roles := e.Roles
+	if roles == nil {
+		roles = []model.UserRole{}
+	}
+	filter := bson.M{"account": e.Account, "$or": bson.A{
+		bson.M{"accountUpdatedAt": bson.M{"$exists": false}},
+		bson.M{"accountUpdatedAt": bson.M{"$lte": updatedAt}},
+	}}
+	update := bson.M{
+		"$setOnInsert": bson.M{"_id": e.ID, "siteId": e.SiteID},
+		"$set": bson.M{"engName": e.EngName, "chineseName": e.ChineseName,
+			"roles": roles, "active": e.Active, "accountUpdatedAt": updatedAt},
+	}
+	_, err := s.userCol.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		// Doc exists: a newer snapshot (stale → retry matches nothing) or the
+		// HR lane's insert raced ours (no watermark → retry applies).
+		_, err = s.userCol.UpdateOne(ctx, filter, update)
+	}
+	if err != nil {
+		return fmt.Errorf("upsert user account for %q: %w", e.Account, err)
+	}
+	return nil
+}
+
 // BulkCreateSubscriptions inserts the supplied subs idempotently. Each is
 // keyed by (roomId, u.account) and written via $setOnInsert so an existing
 // sub (from a previous delivery, or with read-state already accumulated) is
@@ -290,6 +385,25 @@ func (s *mongoInboxStore) BulkCreateSubscriptions(ctx context.Context, subs []*m
 	opts := options.BulkWrite().SetOrdered(false)
 	if _, err := s.subCol.BulkWrite(ctx, models, opts); err != nil {
 		return fmt.Errorf("bulk upsert subscriptions: %w", err)
+	}
+	return nil
+}
+
+// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) replicas — the
+// Teams migration's cross-site joinedAt correction. joinedAt only; a missing
+// replica leaves MatchedCount 0 and is a silent no-op (no insert).
+func (s *mongoInboxStore) BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	if len(joinedAtByAccount) == 0 {
+		return nil
+	}
+	models := make([]mongo.WriteModel, 0, len(joinedAtByAccount))
+	for account, joinedAt := range joinedAtByAccount {
+		models = append(models, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"roomId": roomID, "u.account": account}).
+			SetUpdate(bson.M{"$set": bson.M{"joinedAt": joinedAt}}))
+	}
+	if _, err := s.subCol.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false)); err != nil {
+		return fmt.Errorf("bulk refresh joinedAt for %d replicas: %w", len(models), err)
 	}
 	return nil
 }
@@ -408,7 +522,7 @@ func (s *mongoInboxStore) UpdateSubscriptionOpen(ctx context.Context, roomID, ac
 	return nil
 }
 
-func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error) {
 	filter := bson.M{
 		"roomId":    roomID,
 		"u.account": account,
@@ -418,34 +532,54 @@ func (s *mongoInboxStore) UpdateSubscriptionRead(ctx context.Context, roomID, ac
 		},
 	}
 	update := bson.M{"$set": bson.M{"lastSeenAt": lastSeenAt, "alert": alert}}
-	res, err := s.subCol.UpdateOne(ctx, filter, update)
+	var out struct {
+		ThreadUnread []string `bson:"threadUnread"`
+	}
+	opts := options.FindOneAndUpdate().
+		SetProjection(bson.D{{Key: "threadUnread", Value: 1}}).
+		SetReturnDocument(options.After)
+	err := s.subCol.FindOneAndUpdate(ctx, filter, update, opts).Decode(&out)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		// Either the subscription is missing (NAK to retry) or the order guard
+		// rejected a stale event (a no-op, not a failure).
+		return false, 0, s.naksIfSubscriptionMissing(ctx, account, roomID)
+	}
 	if err != nil {
-		return fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
+		return false, 0, fmt.Errorf("update subscription read for %q in room %q: %w", account, roomID, err)
 	}
-	if res.MatchedCount == 0 {
-		return s.naksIfSubscriptionMissing(ctx, account, roomID)
-	}
-	return nil
+	return true, len(out.ThreadUnread), nil
 }
 
-// ensureIndexes creates the unique index on (threadRoomId, userAccount) used by
-// UpsertThreadSubscription. The shape matches what room-service, message-worker,
-// and history-service create so every service that touches thread_subscriptions
-// agrees on the natural key. userAccount is the stable cross-site identity;
-// userId is site-local, so keying on it would let federated upserts miss
-// existing documents and collide on this unique index.
-func (s *mongoInboxStore) ensureIndexes(ctx context.Context) error {
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// Mirrors message-worker's threadStoreMongo.EnsureIndexes; the index may not
-	// exist (fresh deploy / test container), so ignore all errors.
-	_ = s.threadSubCol.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
+// ensureIndexes verifies the thread_subscriptions (threadRoomId, userAccount)
+// unique index that UpsertThreadSubscription relies on. The index is owned by
+// room-service (which also drops the legacy threadRoomId_1_userId_1 index); this
+// worker only warns if it is missing, never creates it — a divergent spec would
+// crashloop the shared collection, and a missing index must not take the worker down.
+func (s *mongoInboxStore) ensureIndexes(ctx context.Context) {
+	mongoutil.WarnMissingIndexes(ctx, s.threadSubCol, "threadRoomId_1_userAccount_1")
+	// SetSubscriptionMentions filters on (roomId, u.account); without this index
+	// the federated badge write collscans the shared subscriptions collection.
+	mongoutil.WarnMissingIndexes(ctx, s.subCol, "roomId_1_u.account_1")
+	// users.account (unique, owned by user-service): UpsertUserAccount's E11000
+	// retry branch — the stale-event-vs-HR-race disambiguator — only fires when
+	// account uniqueness is index-enforced.
+	mongoutil.WarnMissingIndexes(ctx, s.userCol, "account_1")
+}
 
-	if _, err := s.threadSubCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
+// SetSubscriptionMentions flags the accounts' subscriptions as mentioned. The
+// guard is $not/$gte rather than $lt so a never-read subscription (missing
+// lastSeenAt) still matches — plain $lt would skip the missing field (#467).
+func (s *mongoInboxStore) SetSubscriptionMentions(ctx context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	_, err := s.subCol.UpdateMany(ctx,
+		bson.M{
+			"roomId":     roomID,
+			"u.account":  bson.M{"$in": accounts},
+			"lastSeenAt": bson.M{"$not": bson.M{"$gte": msgCreatedAt}},
+		},
+		bson.M{"$set": bson.M{"hasMention": true}},
+	)
+	if err != nil {
+		return fmt.Errorf("set subscription mentions for room %s: %w", roomID, err)
 	}
 	return nil
 }
@@ -533,7 +667,7 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 				"roles": bson.M{"$cond": bson.M{
 					"if":   bson.M{"$eq": bson.A{"$u.account", ownerAccount}},
 					"then": bson.A{string(model.RoleOwner)},
-					"else": bson.A{string(model.RoleMember)},
+					"else": bson.A{string(model.RoleUser)},
 				}},
 			}}},
 		}
@@ -548,6 +682,34 @@ func (s *mongoInboxStore) ApplySubscriptionRestriction(ctx context.Context, room
 		return fmt.Errorf("apply visibility (flags only): %w", err)
 	}
 	return nil
+}
+
+// ListSubscriptionAccountsByRoom returns the accounts subscribed to roomID on
+// this site's local replica. Callers only read the subscriber account, so
+// project just that field — mirrors room-service's ListSubscriptionsByRoom.
+func (s *mongoInboxStore) ListSubscriptionAccountsByRoom(ctx context.Context, roomID string) ([]string, error) {
+	cursor, err := s.subCol.Find(ctx,
+		bson.M{"roomId": roomID},
+		options.Find().SetProjection(bson.M{"_id": 0, "u.account": 1}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: find: %w", roomID, err)
+	}
+	var docs []struct {
+		User struct {
+			Account string `bson:"account"`
+		} `bson:"u"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("list subscription accounts for room %q: decode: %w", roomID, err)
+	}
+	accounts := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if d.User.Account != "" {
+			accounts = append(accounts, d.User.Account)
+		}
+	}
+	return accounts, nil
 }
 
 // threadReadGuard adds the order-safety clause to a thread-subscription filter:
@@ -647,6 +809,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
@@ -660,22 +827,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 	db := mongoClient.Database(cfg.MongoDB)
 	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
+		subCol:        db.Collection("subscriptions"),
+		roomCol:       db.Collection("rooms"),
+		userCol:       db.Collection("users"),
+		threadSubCol:  db.Collection("thread_subscriptions"),
+		remoteRoomCol: db.Collection(remoteRoomsCollection),
 	}
-	if err := store.ensureIndexes(ctx); err != nil {
-		slog.Error("ensure indexes failed", "error", err)
-		os.Exit(1)
-	}
+	store.ensureIndexes(ctx)
 
 	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
 	if err != nil {
@@ -703,36 +868,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Empty VALKEY_ADDRS disables the badge cache — the clear hooks become
-	// no-ops (nil-checked in handler.go).
+	// Empty VALKEY_ADDRS disables the badge cache and the subauthcache L2 bust
+	// — both become no-ops (nil-checked in handler.go).
 	var badge badgeCache
-	var valkeyClient *redis.ClusterClient
-	if len(cfg.ValkeyAddrs) > 0 {
-		valkeyClient = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:    cfg.ValkeyAddrs,
-			Password: cfg.ValkeyPassword,
-		})
-		// o11yredis.Wrap adds tracing+metrics in place, mirroring
-		// pkg/valkeyutil's instrumentCluster.
-		if _, err := o11yredis.Wrap(valkeyClient, sdk.TracerProvider(), sdk.MeterProvider()); err != nil {
-			slog.Error("instrument valkey client failed", "error", err)
-			os.Exit(1)
-		}
-		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := valkeyClient.Ping(pingCtx).Err()
-		cancel()
-		if err != nil {
-			slog.Error("valkey connect failed", "error", err)
-			os.Exit(1)
-		}
+	var subValkey valkeyutil.Client
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect failed", "error", err)
+		os.Exit(1)
+	}
+	if valkeyClient != nil {
 		badge = badgecache.New(valkeyClient, cfg.BadgeCacheTTL, badgecache.DefaultMaxCount)
-		slog.Info("badge cache enabled", "ttl", cfg.BadgeCacheTTL)
+		// The same connection backs best-effort subauthcache L2 invalidation
+		// after a federated role_updated/member_removed write. One pool serves
+		// both tiers; an empty VALKEY_ADDRS leaves subValkey nil, which makes
+		// the bust a no-op that the L2 TTL reconciles.
+		subValkey = valkeyutil.WrapClusterClient(valkeyClient)
+		slog.Info("badge cache and subauth L2 invalidation enabled", "ttl", cfg.BadgeCacheTTL)
 	} else {
-		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
+		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
-	handler := NewHandler(store)
+	handler := NewHandler(store, WithRoomSubCache(cfg.RoomSubCacheSize, cfg.RoomSubCacheTTL))
 	handler.badge = badge
+	handler.valkey = subValkey
+	slog.Info("room-sub cache configured", "size", cfg.RoomSubCacheSize, "ttl", cfg.RoomSubCacheTTL)
+
+	// Core-NATS queue subscriber for the cross-site room-activity refresh. Not on
+	// INBOX by design: the signal is coalesced, idempotent and $max-guarded, so it
+	// needs no persistence or ordering, and keeping it off the stream stops a
+	// high-rate hint competing for retention with membership events that do need
+	// both. Fire-and-forget — a failure self-heals on the room's next message.
+	activitySub, err := nc.QueueSubscribe(ctx, subject.RoomActivity(cfg.SiteID), "inbox-worker",
+		func(msgCtx context.Context, msg *nats.Msg) {
+			actCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
+			if err := handler.HandleRoomActivity(actCtx, msg.Data); err != nil {
+				slog.WarnContext(actCtx, "apply room activity refresh failed", "error", err)
+			}
+		})
+	if err != nil {
+		slog.Error("subscribe room-activity failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Two-lane pull pattern over the single INBOX external consumer:
 	//
@@ -767,26 +944,8 @@ func main() {
 		// redelivery. On panic it Acks (poison drop).
 		jobguard.Run(m.msg, func() {
 			msg := m.msg
-			handlerCtx, _ := natsutil.StampRequestID(m.ctx, msg.Headers(), msg.Subject())
-			if err := handler.HandleEvent(handlerCtx, msg.Data()); err != nil {
-				// Permanent failures (poison messages) Ack so JetStream stops
-				// redelivering; transient infra errors Nak for redelivery.
-				if _, isPermanent := errcode.IsPermanent(err); isPermanent {
-					slog.Warn("permanent event failure — dropping (Ack)", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-					if err := msg.Ack(); err != nil {
-						slog.Error("failed to ack permanent message", "error", err)
-					}
-					return
-				}
-				slog.Error("handle event failed", "error", err, "request_id", natsutil.RequestIDFromContext(handlerCtx))
-				if err := msg.Nak(); err != nil {
-					slog.Error("failed to nak message", "error", err)
-				}
-				return
-			}
-			if err := msg.Ack(); err != nil {
-				slog.Error("failed to ack message", "error", err)
-			}
+			handlerCtx, _ := logctx.ConsumeContext(m.ctx, msg.Headers(), msg.Subject(), msg.Data())
+			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleEvent(handlerCtx, msg.Data()))
 		})
 	}
 
@@ -849,8 +1008,11 @@ func main() {
 				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
 			}
 		},
+		// Unsubscribe before the drain so no refresh arrives after the store closes.
+		func(_ context.Context) error { return activitySub.Unsubscribe() },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
+		// Closes the pool shared by the badge cache and the subauthcache bust.
 		func(ctx context.Context) error {
 			if valkeyClient == nil {
 				return nil

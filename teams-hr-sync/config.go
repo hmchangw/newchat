@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 // config is teams-hr-sync's environment configuration. The binary runs
@@ -39,6 +41,8 @@ type config struct {
 	MongoReadUsername string `env:"MONGO_READ_USERNAME" envDefault:""`
 	MongoReadPassword string `env:"MONGO_READ_PASSWORD" envDefault:""`
 	MongoReadDB       string `env:"MONGO_READ_DB" envDefault:"chat"`
+	// Pool caps the MongoDB connection pool for the read and direct-write clients.
+	Pool mongoutil.PoolConfig
 
 	NatsURL       string `env:"NATS_URL,required,notEmpty"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`

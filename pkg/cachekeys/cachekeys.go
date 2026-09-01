@@ -71,8 +71,17 @@ func (k Keyspace) build(id string) string {
 // The registry. Every Valkey keyspace in the system appears exactly once.
 // Builders below are the only supported way to construct these keys.
 var (
+	// roomMeta carries pkg/roommetacache's stored-shape version. roomMetaLegacy
+	// is the unversioned generation that predates it: only invalidation touches
+	// it, because a rolling deploy can still have a binary serving from it. Each
+	// reports under its own label — a legacy lane you cannot see on the
+	// breakdown is one you cannot confirm has drained before deleting it.
 	roomMeta = Keyspace{
-		Name: "roommeta", Prefix: "room:{", Suffix: "}:meta", Variable: true,
+		Name: "roommeta", Prefix: "room:{", Suffix: "}:meta:v3", Variable: true,
+		Sample: "room:{r1}:meta:v3",
+	}
+	roomMetaLegacy = Keyspace{
+		Name: "roommeta.legacy", Prefix: "room:{", Suffix: "}:meta", Variable: true,
 		Sample: "room:{r1}:meta",
 	}
 	// roomSubs is deliberately un-hash-tagged, unlike roomMeta. The two are
@@ -87,7 +96,13 @@ var (
 	// on. Bumping it strands the previous version's keys in the unclassified
 	// bucket until their TTL expires — expected, and short-lived.
 	roomSubs = Keyspace{
-		Name: "roomsubs", Prefix: "room:v3:", Suffix: ":subs", Variable: true,
+		Name: "roomsubs", Prefix: "room:v4:", Suffix: ":subs", Variable: true,
+		Sample: "room:v4:r1:subs",
+	}
+	// roomSubsLegacy is the pre-envelope (bare []Member) generation. Same
+	// rolling-deploy reasoning as roomMetaLegacy: invalidation must clear both.
+	roomSubsLegacy = Keyspace{
+		Name: "roomsubs.legacy", Prefix: "room:v3:", Suffix: ":subs", Variable: true,
 		Sample: "room:v3:r1:subs",
 	}
 	presenceConns = Keyspace{
@@ -141,6 +156,36 @@ var (
 		Name: "badge.fresh", Prefix: "badge:fresh:{", Suffix: "}", Variable: true,
 		Sample: "badge:fresh:{alice}",
 	}
+
+	roomTimes = Keyspace{
+		Name: "roomtimes", Prefix: "roomtimes:{", Suffix: "}", Variable: true,
+		Sample: "roomtimes:{r1}",
+	}
+	// pkg/userstore's L2 addresses one user two ways — by id and by account —
+	// so a user resolved through both paths is stored twice. Separate labels
+	// keep that duplication visible rather than folding it into one number.
+	userByID = Keyspace{
+		Name: "user.id", Prefix: "user:id:", Variable: true,
+		Sample: "user:id:u1",
+	}
+	userByAccount = Keyspace{
+		Name: "user.account", Prefix: "user:acct:", Variable: true,
+		Sample: "user:acct:alice",
+	}
+	// subAuth's variable segment spans two values ({roomID}:account), so the
+	// pattern is anchored on the version suffix rather than a single id.
+	subAuth = Keyspace{
+		Name: "subauth", Prefix: "sub:{", Suffix: ":v2", Variable: true,
+		Sample: "sub:{r1}:alice:v2",
+	}
+	session = Keyspace{
+		Name: "session", Prefix: "session:", Suffix: ":v2", Variable: true,
+		Sample: "session:h1:v2",
+	}
+	roomDEK = Keyspace{
+		Name: "dek", Prefix: "dek:{", Suffix: "}:v2", Variable: true,
+		Sample: "dek:{r1}:v2",
+	}
 )
 
 // registry is the classification order. Fixed keyspaces precede variable ones
@@ -161,6 +206,14 @@ var registry = []Keyspace{
 	searchRestrictedRooms,
 	badgeFresh,
 	badgeSet,
+	roomMetaLegacy,
+	roomSubsLegacy,
+	roomTimes,
+	userByID,
+	userByAccount,
+	subAuth,
+	session,
+	roomDEK,
 }
 
 // Keyspaces returns every registered keyspace. The returned slice is a copy,
@@ -230,3 +283,32 @@ func BadgeSet(account string) string { return badgeSet.build(account) }
 // the BadgeSet contents are accurate. Same {account} hash tag as BadgeSet so
 // the scripts addressing both stay on one slot.
 func BadgeFresh(account string) string { return badgeFresh.build(account) }
+
+// RoomMetaLegacy is the unversioned predecessor of RoomMeta. Only invalidation
+// should build it; reads and writes use RoomMeta.
+func RoomMetaLegacy(roomID string) string { return roomMetaLegacy.build(roomID) }
+
+// RoomSubsLegacy is the pre-envelope predecessor of RoomSubs, same rule:
+// invalidation only.
+func RoomSubsLegacy(roomID string) string { return roomSubsLegacy.build(roomID) }
+
+// RoomTimes is the key for a room's cached time bounds (pkg/roomtimescache).
+func RoomTimes(roomID string) string { return roomTimes.build(roomID) }
+
+// UserByID is the L2 key for a user record addressed by id (pkg/userstore).
+func UserByID(id string) string { return userByID.build(id) }
+
+// UserByAccount is the L2 key for a user record addressed by account name.
+func UserByAccount(account string) string { return userByAccount.build(account) }
+
+// SubAuth is the key for one account's cached authorization on one room
+// (pkg/subauthcache). The {roomID} hash tag colocates a room's entries.
+func SubAuth(roomID, account string) string { return subAuth.build(roomID + "}:" + account) }
+
+// Session is the key for a cached session, addressed by its token hash
+// (pkg/sessioncache). The hash is already opaque; no raw token reaches a key.
+func Session(hash string) string { return session.build(hash) }
+
+// RoomDEK is the L2 key for a room's cached data encryption key (pkg/atrest).
+// The value is the wrapped DEK, never plaintext.
+func RoomDEK(roomID string) string { return roomDEK.build(roomID) }

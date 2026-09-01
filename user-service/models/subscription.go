@@ -1,6 +1,10 @@
 package models
 
-import "github.com/hmchangw/chat/pkg/model"
+import (
+	"time"
+
+	"github.com/hmchangw/chat/pkg/model"
+)
 
 // SubscriptionListRequest is the body of subscription.list.
 // Type ∈ {current, rooms, apps}. UpdatedWithinDays nil ⇒ no age filter.
@@ -67,4 +71,18 @@ type CountRequest struct {
 // CountResponse is returned by subscription.count.
 type CountResponse struct {
 	Count int `json:"count"`
+}
+
+// ActiveSubscription is the badge path's row: the five fields unreadRooms reads.
+// A field absent here is a field GetActiveSubscriptions does not fetch.
+type ActiveSubscription struct {
+	RoomID       string     `json:"roomId"                 bson:"roomId"`
+	SiteID       string     `json:"siteId"                 bson:"siteId"`
+	LastSeenAt   *time.Time `json:"lastSeenAt,omitempty"   bson:"lastSeenAt,omitempty"`
+	ThreadUnread []string   `json:"threadUnread,omitempty" bson:"threadUnread,omitempty"`
+	// Joined from the room; nil for a cross-site sub or a room with no messages.
+	LastMsgAt *time.Time `json:"lastMsgAt,omitempty" bson:"lastMsgAt,omitempty"`
+	// Joined from the room like LastMsgAt; the unread reference is
+	// LastUserMsgAt ?? LastMsgAt.
+	LastUserMsgAt *time.Time `json:"lastUserMsgAt,omitempty" bson:"lastUserMsgAt,omitempty"`
 }

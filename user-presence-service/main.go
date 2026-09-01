@@ -10,12 +10,14 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-presence-service/presencestore"
 )
 
@@ -24,16 +26,14 @@ type NATSConfig struct {
 	CredsFile string `env:"CREDS_FILE" envDefault:""`
 }
 
-type ValkeyConfig struct {
-	Addrs    []string `env:"ADDRS,required" envSeparator:","`
-	Password string   `env:"PASSWORD"        envDefault:""`
-}
-
 type MongoConfig struct {
 	URI      string `env:"URI,required"`
 	DB       string `env:"DB" envDefault:"chat"`
 	Username string `env:"USERNAME"`
 	Password string `env:"PASSWORD"`
+	// ReadPreference routes staleness-tolerant reads to secondaries per read site;
+	// the client stays on primary for dedup/read-after-write.
+	ReadPreference string `env:"READ_PREFERENCE" envDefault:"secondaryPreferred"`
 }
 
 type PresenceConfig struct {
@@ -46,13 +46,20 @@ type PresenceConfig struct {
 }
 
 type Config struct {
-	SiteID        string         `env:"SITE_ID,required"`
-	UserCacheSize int            `env:"USER_CACHE_SIZE" envDefault:"10000"`
-	UserCacheTTL  time.Duration  `env:"USER_CACHE_TTL"  envDefault:"5m"`
-	NATS          NATSConfig     `envPrefix:"NATS_"`
-	Valkey        ValkeyConfig   `envPrefix:"VALKEY_"`
+	SiteID        string        `env:"SITE_ID,required"`
+	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
+	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
+	NATS          NATSConfig    `envPrefix:"NATS_"`
+	Valkey        valkeyutil.Config
 	Mongo         MongoConfig    `envPrefix:"MONGO_"`
 	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
+
+	// Pool caps the Mongo connection pool. RequestTimeout bounds each handler so
+	// a slow op frees its connection. No concurrency cap: the presence routes are
+	// fire-and-forget (RegisterVoid), which admission control would silently drop
+	// under saturation — so this service takes only the timeout knob.
+	Pool           mongoutil.PoolConfig
+	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT" envDefault:"10s"`
 }
 
 // Compile-time guarantee that the extracted store satisfies the daemon's
@@ -63,6 +70,20 @@ func main() {
 	cfg, err := env.ParseAs[Config]()
 	if err != nil {
 		slog.Error("parse config", "error", err)
+		os.Exit(1)
+	}
+	// Presence state lives entirely in Valkey, so this service cannot start
+	// without one.
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid pool config", "error", err)
+		os.Exit(1)
+	}
+	if cfg.RequestTimeout < 0 {
+		slog.Error("invalid REQUEST_TIMEOUT", "value", cfg.RequestTimeout)
 		os.Exit(1)
 	}
 	// Fail fast on non-positive tunables: a zero/negative SweepInterval panics
@@ -92,16 +113,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := presencestore.NewValkeyStore(
-		presencestore.ClusterConfig{Addrs: cfg.Valkey.Addrs, Password: cfg.Valkey.Password},
-		cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL,
-	)
+	// Dialed through valkeyutil rather than presencestore's own ClusterConfig so
+	// this service's Valkey commands carry the same instrumentation and dial
+	// policy as every other service's. Presence IS the datastore here, so an
+	// uninstrumented client is the one worth least having.
+	valkeyClient, err := valkeyutil.ConnectRaw(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
+	store := presencestore.NewValkeyStoreFromClient(valkeyClient, cfg.Presence.StaleThreshold, cfg.Presence.ConnsTTL)
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.Mongo.ReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo read preference", "value", cfg.Mongo.ReadPreference, "error", err)
+		os.Exit(1)
+	}
+
+	mongoClient, err := mongoutil.Connect(ctx, cfg.Mongo.URI, cfg.Mongo.Username, cfg.Mongo.Password,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -115,7 +145,7 @@ func main() {
 	}
 	slog.Info("user-cache enabled", "size", cfg.UserCacheSize, "ttl", cfg.UserCacheTTL)
 
-	nc, err := natsutil.Connect(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NATS.URL, cfg.NATS.CredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
@@ -128,7 +158,17 @@ func main() {
 	peer := NewNATSPeerPresenceClient(nc.NatsConn(), cfg.Presence.PeerTimeout)
 	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
-	router := natsrouter.Default(nc, "user-presence-service", natsrouter.WithSiteID(cfg.SiteID))
+	// No admission cap here: Hello/Ping/Activity/Bye are fire-and-forget
+	// (RegisterVoid), and under a saturated concurrency semaphore those are
+	// silently dropped (no reply, no redelivery) — a reconnect storm would lose
+	// presence updates and strand users online/offline. Only the per-request
+	// timeout is applied.
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.Default(nc, "user-presence-service",
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
+	if cfg.RequestTimeout > 0 {
+		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+	}
 	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)

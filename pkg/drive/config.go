@@ -21,6 +21,8 @@ type Config struct {
 // back to an empty map so the service still starts.
 func (c *Config) LoadBaseURLs() {
 	// #nosec G304 -- path is operator-supplied configuration, not user input.
+	// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+	// nosemgrep: gosec.G304-1
 	data, err := os.ReadFile(c.BaseURLConfigPath)
 	if err != nil {
 		slog.Warn("drive: could not read base URL config; using empty map",

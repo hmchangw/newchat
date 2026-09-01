@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"time"
 
@@ -39,16 +39,32 @@ type soakReadConfig struct {
 }
 
 type soakReadSample struct {
-	Action     soakRPCAction
-	Latency    time.Duration
-	Messages   int
-	ErrorClass soakErrorClass
-	Retries    int
-	Skipped    bool
+	Action  soakRPCAction
+	Latency time.Duration
+	// Messages is what the read came back with; ReplyBytes is what it weighed
+	// on the wire. Latency alone cannot tell a slow page from a large one.
+	//
+	// RowsCounted separates a real row count from the two things that share
+	// this field but are not one: a constant (get_message_by_id always returns
+	// one) and a server-side total (subscription.count reports the user's whole
+	// count, not rows in the reply). Set it through countRows, never by hand.
+	Messages    int
+	RowsCounted bool
+	ReplyBytes  int
+	ErrorClass  soakErrorClass
+	ErrorReason soakErrorReason
+	Retries     int
+	Skipped     bool
+}
+
+// countRows records how many rows the reply carried and marks the sample as
+// one loadgen_soak_rows may observe.
+func (s *soakReadSample) countRows(n int) {
+	s.Messages, s.RowsCounted = n, true
 }
 
 type soakReadSampleRecorder interface {
-	Record(soakReadSample)
+	Record(*soakReadSample)
 }
 
 type soakReadOutcome struct {
@@ -163,13 +179,15 @@ func (r *soakReader) LoadHistory(
 				roomID,
 				r.cfg.SiteID,
 			),
+			Account: account, RoomID: roomID,
 			Body: request, Timeout: r.cfg.RequestTimeout,
 			RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCLoadHistory, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -178,31 +196,32 @@ func (r *soakReader) LoadHistory(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCLoadHistory, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if len(response.Messages) == 0 {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 
 		oldest := oldestSoakMessageMillis(response.Messages)
 		if before != nil && oldest >= *before {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"LoadHistory page did not make timestamp progress",
 			)
 		}
 		if oldest == math.MinInt64 {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"LoadHistory oldest timestamp cannot advance",
 			)
 		}
 		nextBefore := oldest - 1
 		before = &nextBefore
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
@@ -232,6 +251,7 @@ func (r *soakReader) GetThreadMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCGetThread,
 			Subject: subject.MsgThread(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakGetThreadMessagesRequest{
 				ThreadMessageID: parent.ID,
 				Cursor:          cursor,
@@ -240,9 +260,10 @@ func (r *soakReader) GetThreadMessages(
 			Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCGetThread, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -250,22 +271,23 @@ func (r *soakReader) GetThreadMessages(
 		outcome.Messages += len(response.Messages)
 		sample := soakReadSample{
 			Action: soakRPCGetThread, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 		if !advanceSoakCursor(cursor, response.NextCursor, seen) {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"GetThreadMessages cursor did not make progress",
 			)
 		}
 		seen[response.NextCursor] = struct{}{}
 		cursor = response.NextCursor
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
@@ -292,23 +314,25 @@ func (r *soakReader) GetMessageByID(
 	result, latency, err := r.call(ctx, soakRPCRequest{
 		Action:  soakRPCGetMessage,
 		Subject: subject.MsgGet(account, roomID, r.cfg.SiteID),
+		Account: account, RoomID: roomID,
 		Body:    soakGetMessageByIDRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response)
 	if err != nil {
-		r.record(soakReadSample{
+		r.record(&soakReadSample{
 			Action: soakRPCGetMessage, Latency: latency,
-			ErrorClass: result.ErrorClass, Retries: result.Retries,
+			ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+			Retries: result.Retries,
 		})
 		return outcome, err
 	}
 	sample := soakReadSample{
 		Action: soakRPCGetMessage, Latency: latency,
-		Messages: 1, Retries: result.Retries,
+		Messages: 1, ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if response.MessageID != message.ID {
 		sample.ErrorClass = soakErrorAssertion
-		r.record(sample)
+		r.record(&sample)
 		return outcome, newSoakAssertionError(
 			"GetMessageByID returned a different message ID",
 		)
@@ -316,7 +340,7 @@ func (r *soakReader) GetMessageByID(
 	outcome.Pages = 1
 	outcome.Messages = 1
 	outcome.MessageID = response.MessageID
-	r.record(sample)
+	r.record(&sample)
 	return outcome, nil
 }
 
@@ -337,6 +361,7 @@ func (r *soakReader) ListPinnedMessages(
 		result, latency, err := r.call(ctx, soakRPCRequest{
 			Action:  soakRPCPinnedList,
 			Subject: subject.MsgPinnedList(account, roomID, r.cfg.SiteID),
+			Account: account, RoomID: roomID,
 			Body: soakListPinnedMessagesRequest{
 				Cursor: cursor,
 				Limit:  r.cfg.PageLimit,
@@ -344,9 +369,10 @@ func (r *soakReader) ListPinnedMessages(
 			Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 		}, &response)
 		if err != nil {
-			r.record(soakReadSample{
+			r.record(&soakReadSample{
 				Action: soakRPCPinnedList, Latency: latency,
-				ErrorClass: result.ErrorClass, Retries: result.Retries,
+				ErrorClass: result.ErrorClass, ErrorReason: result.ErrorReason,
+				Retries: result.Retries,
 			})
 			return outcome, err
 		}
@@ -359,26 +385,28 @@ func (r *soakReader) ListPinnedMessages(
 		}
 		sample := soakReadSample{
 			Action: soakRPCPinnedList, Latency: latency,
-			Messages: len(response.Messages), Retries: result.Retries,
+			Messages: len(response.Messages), RowsCounted: true, ReplyBytes: result.ReplyBytes,
+			Retries: result.Retries,
 		}
 		if !response.HasNext {
-			r.record(sample)
+			r.record(&sample)
 			return outcome, nil
 		}
 		if !advanceSoakCursor(cursor, response.NextCursor, seen) {
 			sample.ErrorClass = soakErrorAssertion
-			r.record(sample)
+			r.record(&sample)
 			return outcome, newSoakAssertionError(
 				"ListPinnedMessages cursor did not make progress",
 			)
 		}
 		seen[response.NextCursor] = struct{}{}
 		cursor = response.NextCursor
-		r.record(sample)
+		r.record(&sample)
 	}
 	return outcome, nil
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (r *soakReader) call(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -391,11 +419,11 @@ func (r *soakReader) call(
 
 func (r *soakReader) skip(outcome soakReadOutcome) soakReadOutcome {
 	outcome.Skipped = true
-	r.record(soakReadSample{Action: outcome.Action, Skipped: true})
+	r.record(&soakReadSample{Action: outcome.Action, Skipped: true})
 	return outcome
 }
 
-func (r *soakReader) record(sample soakReadSample) {
+func (r *soakReader) record(sample *soakReadSample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}

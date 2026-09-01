@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -31,37 +32,100 @@ const (
 	soakRPCReadBack    soakRPCAction = "read_back"
 	soakRPCMarkRead    soakRPCAction = "mark_read"
 	soakRPCScroll      soakRPCAction = "scroll_history"
+
+	soakRPCMemberAdd        soakRPCAction = "member_add"
+	soakRPCMemberRemove     soakRPCAction = "member_remove"
+	soakRPCRoomRename       soakRPCAction = "room_rename"
+	soakRPCMuteToggle       soakRPCAction = "mute_toggle"
+	soakRPCRoomCreate       soakRPCAction = "room_create"
+	soakRPCMemberList       soakRPCAction = "member_list"
+	soakRPCRoomsInfo        soakRPCAction = "rooms_info"
+	soakRPCSubscriptionList soakRPCAction = "subscription_list"
+	soakRPCRoomStateRead    soakRPCAction = "room_state_read"
+	soakRPCMessageRead      soakRPCAction = "message_read"
+	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
+	soakRPCPresenceQuery    soakRPCAction = "presence_query"
+
+	soakRPCSearchMessages soakRPCAction = "search_messages"
+	soakRPCSearchRooms    soakRPCAction = "search_rooms"
+	// soakRPCSearchIndexProbe is the evidence query, kept on its own label so
+	// its latency and error rate never blend into the read lane's.
+	soakRPCSearchIndexProbe soakRPCAction = "search_index_probe"
+
+	// The user-service read lane. Every one of these is read-only, so they
+	// carry latency and outcome only and never enter the evidence ledger.
+	soakRPCUserMe                  soakRPCAction = "user_me"
+	soakRPCUserProfileGet          soakRPCAction = "user_profile_get"
+	soakRPCUserStatusGet           soakRPCAction = "user_status_get"
+	soakRPCUserSettingsGet         soakRPCAction = "user_settings_get"
+	soakRPCUserChatlistGet         soakRPCAction = "user_chatlist_get"
+	soakRPCUserPriorityContacts    soakRPCAction = "user_priority_contacts"
+	soakRPCUserAppsList            soakRPCAction = "user_apps_list"
+	soakRPCUserAppsCategories      soakRPCAction = "user_apps_categories"
+	soakRPCUserSubscriptionCount   soakRPCAction = "user_subscription_count"
+	soakRPCUserSubscriptionByRoom  soakRPCAction = "user_subscription_by_room"
+	soakRPCUserSubscriptionChannel soakRPCAction = "user_subscription_channels"
+	soakRPCUserSubscriptionDM      soakRPCAction = "user_subscription_dm"
+	soakRPCUserThreadList          soakRPCAction = "user_thread_list"
+	soakRPCUserThreadUnread        soakRPCAction = "user_thread_unread"
 )
+
+// soakUserReadActions is every action the user-service read lane dispatches. It
+// is the single source for both the allowlist and the lane's own dispatch
+// table, so an action can never be allowlisted without being sent.
+var soakUserReadActions = []soakRPCAction{
+	soakRPCUserMe, soakRPCUserProfileGet, soakRPCUserStatusGet,
+	soakRPCUserSettingsGet, soakRPCUserChatlistGet, soakRPCUserPriorityContacts,
+	soakRPCUserAppsList, soakRPCUserAppsCategories,
+	soakRPCUserSubscriptionCount, soakRPCUserSubscriptionByRoom,
+	soakRPCUserSubscriptionChannel, soakRPCUserSubscriptionDM,
+	soakRPCUserThreadList, soakRPCUserThreadUnread,
+}
 
 func validSoakRPCAction(action soakRPCAction) bool {
 	switch action {
 	case soakRPCSend, soakRPCThreadReply, soakRPCLoadHistory, soakRPCLoadNext,
 		soakRPCGetThread, soakRPCGetMessage, soakRPCReact, soakRPCEdit,
 		soakRPCDelete, soakRPCPin, soakRPCUnpin, soakRPCPinnedList,
-		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll:
+		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll,
+		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
+		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
+		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead,
+		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery,
+		soakRPCSearchMessages, soakRPCSearchRooms, soakRPCSearchIndexProbe:
 		return true
 	default:
-		return false
+		return slices.Contains(soakUserReadActions, action)
 	}
 }
 
 type soakErrorClass string
 
 const (
-	soakErrorTimeout               soakErrorClass = "timeout"
-	soakErrorNoResponder           soakErrorClass = "no_responder"
-	soakErrorDisconnected          soakErrorClass = "disconnected"
-	soakErrorUnavailable           soakErrorClass = "unavailable"
-	soakErrorInternal              soakErrorClass = "internal"
-	soakErrorNotFound              soakErrorClass = "not_found"
-	soakErrorForbidden             soakErrorClass = "forbidden"
-	soakErrorBadRequest            soakErrorClass = "bad_request"
-	soakErrorConflict              soakErrorClass = "conflict"
-	soakErrorDecode                soakErrorClass = "decode"
+	soakErrorTimeout      soakErrorClass = "timeout"
+	soakErrorNoResponder  soakErrorClass = "no_responder"
+	soakErrorDisconnected soakErrorClass = "disconnected"
+	soakErrorUnavailable  soakErrorClass = "unavailable"
+	soakErrorInternal     soakErrorClass = "internal"
+	soakErrorNotFound     soakErrorClass = "not_found"
+	soakErrorForbidden    soakErrorClass = "forbidden"
+	soakErrorBadRequest   soakErrorClass = "bad_request"
+	soakErrorConflict     soakErrorClass = "conflict"
+	// soakErrorRequestEncode is a body that never reached the wire; it is the
+	// only decode-shaped failure a mutation may treat as proven not-sent.
+	soakErrorRequestEncode soakErrorClass = "request_encode"
+	// soakErrorResponseDecode means the server replied and the reply could not
+	// be parsed. The request was delivered, so any effect it had is real.
+	soakErrorResponseDecode        soakErrorClass = "response_decode"
 	soakErrorAssertion             soakErrorClass = "assertion"
 	soakErrorAmbiguous             soakErrorClass = "ambiguous"
 	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
 	soakErrorResponseTooLarge      soakErrorClass = "response_too_large"
+	// soakErrorCanceled is the run itself going away, not the site failing.
+	// Folding it into internal would spike a server-fault class at every
+	// shutdown; leaving it empty made the recorder count the operation as a
+	// success, because the outcome is derived from the class alone.
+	soakErrorCanceled soakErrorClass = "canceled"
 )
 
 func validSoakErrorClass(class soakErrorClass) bool {
@@ -69,8 +133,10 @@ func validSoakErrorClass(class soakErrorClass) bool {
 	case soakErrorTimeout, soakErrorNoResponder, soakErrorDisconnected,
 		soakErrorUnavailable, soakErrorInternal, soakErrorNotFound,
 		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
-		soakErrorDecode, soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing, soakErrorResponseTooLarge:
+		soakErrorRequestEncode, soakErrorResponseDecode,
+		soakErrorAssertion, soakErrorAmbiguous,
+		soakErrorMutationTargetMissing, soakErrorResponseTooLarge,
+		soakErrorCanceled:
 		return true
 	default:
 		return false
@@ -95,11 +161,72 @@ func parseSoakErrorEnvelope(data []byte) error {
 	return parsed
 }
 
-// soakReasonResponseTooLarge mirrors the reason in pkg/natsutil's oversize
-// reply envelope. Declared here rather than in pkg/errcode so this change stays
-// inside tools/loadgen; if a named constant is ever added upstream, this should
-// become an alias for it.
-const soakReasonResponseTooLarge errcode.Reason = "response_too_large"
+// soakReasonResponseTooLarge aliases the platform reason carried by the
+// oversize reply envelope, so the harness cannot drift from the wire contract.
+const soakReasonResponseTooLarge = errcode.ResponseTooLarge
+
+// soakErrorReason is the service-supplied errcode reason, kept beside the
+// collapsed class because the two forbidden answers a soak read can get need
+// opposite responses: "not_subscribed" means the harness verified with an
+// account the membership lane had already removed, "outside_access_window"
+// means that account rejoined and its own older message now predates its
+// history window.
+type soakErrorReason string
+
+// soakErrorReasonUnknown absorbs any reason not listed below. errcode's own
+// registry lives in a _test.go file and cannot be imported, so this list is
+// maintained here; the unknown bucket counting up is the signal to extend it.
+const soakErrorReasonUnknown soakErrorReason = "unknown"
+
+var soakKnownErrorReasons = map[errcode.Reason]soakErrorReason{
+	errcode.MessageNotSubscribed:           soakErrorReason(errcode.MessageNotSubscribed),
+	errcode.MessageOutsideAccessWindow:     soakErrorReason(errcode.MessageOutsideAccessWindow),
+	errcode.MessageLargeRoomPostRestricted: soakErrorReason(errcode.MessageLargeRoomPostRestricted),
+	errcode.PinDisabled:                    soakErrorReason(errcode.PinDisabled),
+	errcode.PinLimitReached:                soakErrorReason(errcode.PinLimitReached),
+	errcode.PinRoomTooLarge:                soakErrorReason(errcode.PinRoomTooLarge),
+	errcode.RoomMaxSizeReached:             soakErrorReason(errcode.RoomMaxSizeReached),
+	errcode.RoomNotMember:                  soakErrorReason(errcode.RoomNotMember),
+	errcode.RoomNotOwner:                   soakErrorReason(errcode.RoomNotOwner),
+	errcode.RoomLastOwnerCannotLeave:       soakErrorReason(errcode.RoomLastOwnerCannotLeave),
+	errcode.RoomLastMemberCannotRemove:     soakErrorReason(errcode.RoomLastMemberCannotRemove),
+	errcode.RoomTargetNotMember:            soakErrorReason(errcode.RoomTargetNotMember),
+	errcode.RoomNonChannelOperation:        soakErrorReason(errcode.RoomNonChannelOperation),
+	errcode.RoomReadReceiptsUnavailable:    soakErrorReason(errcode.RoomReadReceiptsUnavailable),
+	errcode.RoomUserNotFound:               soakErrorReason(errcode.RoomUserNotFound),
+	errcode.RoomSelfDM:                     soakErrorReason(errcode.RoomSelfDM),
+	errcode.UserSubscriptionNotFound:       soakErrorReason(errcode.UserSubscriptionNotFound),
+	soakReasonResponseTooLarge:             soakErrorReason(soakReasonResponseTooLarge),
+}
+
+func validSoakErrorReason(reason soakErrorReason) bool {
+	if reason == "" || reason == soakErrorReasonUnknown {
+		return true
+	}
+	for _, known := range soakKnownErrorReasons {
+		if reason == known {
+			return true
+		}
+	}
+	return false
+}
+
+// classifySoakRPCReason returns the reason the service tagged the failure with,
+// or "" when the error carries no errcode envelope (a transport timeout has no
+// reason to report).
+func classifySoakRPCReason(err error) soakErrorReason {
+	if err == nil {
+		return ""
+	}
+	var envelope *errcode.Error
+	if !errors.As(err, &envelope) || envelope.Reason == "" {
+		return ""
+	}
+	if known, ok := soakKnownErrorReasons[envelope.Reason]; ok {
+		return known
+	}
+	return soakErrorReasonUnknown
+}
 
 func classifySoakRPCError(err error) soakErrorClass {
 	if err == nil {
@@ -111,6 +238,9 @@ func classifySoakRPCError(err error) soakErrorClass {
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 		return soakErrorTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return soakErrorCanceled
 	}
 	if errors.Is(err, nats.ErrNoResponders) {
 		return soakErrorNoResponder
@@ -191,8 +321,13 @@ func (soakTimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type soakRPCRequest struct {
-	Action           soakRPCAction
-	Subject          string
+	Action  soakRPCAction
+	Subject string
+	// Account and RoomID identify the request in the failure log. A metric
+	// label cannot hold them (unbounded), so this is the only place a reader
+	// learns which account to grep the server's logs for.
+	Account          string
+	RoomID           string
 	Body             any
 	Timeout          time.Duration
 	RetryMode        soakRetryMode
@@ -200,9 +335,14 @@ type soakRPCRequest struct {
 }
 
 type soakRPCResult struct {
-	Attempts          int
-	Retries           int
+	Attempts int
+	Retries  int
+	// ReplyBytes is the wire size of a SUCCESSFUL reply. A transport failure
+	// has nothing to size and an oversize failure carries only the compact
+	// envelope, so both leave it zero rather than reporting a tiny page.
+	ReplyBytes        int
 	ErrorClass        soakErrorClass
+	ErrorReason       soakErrorReason
 	AmbiguityResolved bool
 }
 
@@ -245,28 +385,65 @@ func newSoakRPCClient(
 	}
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) Call(
 	ctx context.Context,
 	request soakRPCRequest,
 	response any,
 ) (soakRPCResult, error) {
 	var result soakRPCResult
+	// carry stamps the request identity onto every failure leaving this
+	// function, so the lane logger above does not have to thread it through.
+	// Declared before the first guard: a context that died before the wire is
+	// still a failure the operator has to be able to place.
+	carry := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return &soakRequestError{
+			Action: request.Action, Subject: request.Subject,
+			Account: request.Account, RoomID: request.RoomID,
+			Class: result.ErrorClass, Reason: result.ErrorReason,
+			Attempts: result.Attempts, Retries: result.Retries,
+			err: err,
+		}
+	}
 	if err := ctx.Err(); err != nil {
-		return result, err
+		result.ErrorClass = classifySoakRPCError(err)
+		return result, carry(soakInterruptedError(request.Action, err, nil))
 	}
 	if !validSoakRPCAction(request.Action) {
 		result.ErrorClass = soakErrorInternal
-		return result, fmt.Errorf("invalid soak RPC action %q", request.Action)
+		return result, carry(fmt.Errorf("invalid soak RPC action %q", request.Action))
 	}
 	body, err := json.Marshal(request.Body)
 	if err != nil {
-		result.ErrorClass = soakErrorDecode
-		return result, fmt.Errorf("marshal %s request: %w", request.Action, err)
+		result.ErrorClass = soakErrorRequestEncode
+		return result, carry(fmt.Errorf("marshal %s request: %w", request.Action, err))
 	}
 
+	// The failure that sent the last attempt back for a retry. A cancellation
+	// stops the retrying without explaining anything, so both exits below name
+	// this too — otherwise the message contradicts the class kept with it.
+	var lastRequestErr error
 	for attempt := 1; attempt <= c.retry.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			// Only when no attempt reached the wire. Once one has failed, that
+			// failure is why the operation failed and the cancellation merely
+			// ended the retrying — overwriting it would erase a timeout whose
+			// effect on the server is unknown.
+			if result.ErrorClass == "" {
+				result.ErrorClass = classifySoakRPCError(err)
+			}
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
+		}
+		if attempt > 1 {
+			// Counted here rather than after the backoff: a run torn down
+			// between the two would otherwise report a retry that never
+			// reached the transport. Retries stays Attempts-1.
+			result.Retries++
 		}
 		result.Attempts++
 		reply, requestErr := c.transport.Request(
@@ -281,24 +458,29 @@ func (c *soakRPCClient) Call(
 		if requestErr == nil {
 			if response != nil {
 				if err := json.Unmarshal(reply, response); err != nil {
-					result.ErrorClass = soakErrorDecode
-					return result, fmt.Errorf("decode %s response: %w", request.Action, err)
+					result.ErrorClass = soakErrorResponseDecode
+					return result, carry(fmt.Errorf("decode %s response: %w", request.Action, err))
 				}
 			}
 			result.ErrorClass = ""
+			result.ErrorReason = ""
+			result.ReplyBytes = len(reply)
 			return result, nil
 		}
 
 		class := classifySoakRPCError(requestErr)
 		result.ErrorClass = class
+		result.ErrorReason = classifySoakRPCReason(requestErr)
 		retry, resolved, resolveErr := c.shouldRetryAmbiguous(ctx, request, class)
 		if resolveErr != nil {
 			result.ErrorClass = classifySoakRPCError(resolveErr)
-			return result, fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr)
+			result.ErrorReason = classifySoakRPCReason(resolveErr)
+			return result, carry(fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr))
 		}
 		if resolved {
 			result.AmbiguityResolved = true
 			result.ErrorClass = ""
+			result.ErrorReason = ""
 			return result, nil
 		}
 		if request.RetryMode != soakRetryAmbiguous {
@@ -307,32 +489,37 @@ func (c *soakRPCClient) Call(
 		if !retry {
 			if request.RetryMode == soakRetryAmbiguous && transientSoakError(class) {
 				result.ErrorClass = soakErrorAmbiguous
-				return result, fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr)
+				return result, carry(fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr))
 			}
-			return result, fmt.Errorf("%s request failed: %w", request.Action, requestErr)
+			return result, carry(fmt.Errorf("%s request failed: %w", request.Action, requestErr))
 		}
 		if attempt == c.retry.MaxAttempts {
-			return result, fmt.Errorf(
+			// wraps plain sentinels in loadgen internals, not *errcode.Error; the one-per-chain invariant does not apply
+			// nosemgrep: errcode-no-multi-wrap-errcode
+			return result, carry(fmt.Errorf(
 				"%w: %s: %w",
 				errSoakRetryExhausted,
 				request.Action,
 				requestErr,
-			)
+			))
 		}
 
+		lastRequestErr = requestErr
 		delay := c.backoff(result.Retries)
 		if err := c.sleeper.Sleep(ctx, delay); err != nil {
-			return result, fmt.Errorf("wait to retry %s: %w", request.Action, err)
+			return result, carry(
+				soakInterruptedError(request.Action, err, lastRequestErr),
+			)
 		}
-		result.Retries++
 	}
 
-	return result, fmt.Errorf(
+	return result, carry(fmt.Errorf(
 		"RPC retry loop exited unexpectedly: %w",
 		errSoakRetryExhausted,
-	)
+	))
 }
 
+//nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
 func (c *soakRPCClient) shouldRetryAmbiguous(
 	ctx context.Context,
 	request soakRPCRequest,
@@ -349,6 +536,20 @@ func (c *soakRPCClient) shouldRetryAmbiguous(
 		return false, false, err
 	}
 	return retryNeeded, !retryNeeded, nil
+}
+
+// soakInterruptedError names both halves of an interrupted request: why the
+// operation failed, and why it stopped being retried. Reporting only the
+// cancellation would leave the message disagreeing with the error class, which
+// is kept from the attempt that actually reached the wire.
+func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error {
+	if lastErr == nil {
+		return fmt.Errorf("%s interrupted: %w", action, cancelErr)
+	}
+	// wraps plain sentinels in loadgen internals, not *errcode.Error; the one-per-chain invariant does not apply
+	// nosemgrep: errcode-no-multi-wrap-errcode
+	return fmt.Errorf("%s retry interrupted: %w: last attempt: %w",
+		action, cancelErr, lastErr)
 }
 
 func transientSoakError(class soakErrorClass) bool {

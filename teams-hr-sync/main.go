@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.opentelemetry.io/otel/propagation"
@@ -49,6 +48,9 @@ func run() error {
 	}
 	if cfg.HRSyncMode != modeStream && cfg.HRSyncMode != modeDirect {
 		return fmt.Errorf("HR_SYNC_MODE must be %q or %q, got %q", modeStream, modeDirect, cfg.HRSyncMode)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("invalid mongo pool config: %w", err)
 	}
 	// DIRECT_WRITE_URI has no env "required" tag because it's conditional on
 	// mode — env doesn't support cross-field required, so enforce it here.
@@ -124,7 +126,7 @@ func run() error {
 // runStreamMode connects the diff-state Mongo read + JetStream, then runs the
 // existing publish-a-delta pipeline. Behavior unchanged from pre-mode-flag.
 func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string) (runStats, error) {
-	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword)
+	readClient, err := mongoutil.ConnectRead(ctx, cfg.MongoReadURI, cfg.MongoReadUsername, cfg.MongoReadPassword, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return runStats{}, fmt.Errorf("connect mongo read client: %w", err)
 	}
@@ -159,7 +161,7 @@ func runStreamMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 // diff-state store, never NATS) and writes the full collected set straight
 // through the WriteStore.
 func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, mapper transform.Mapper, groups []syncGroup, siteOverrides map[string]string) (runStats, error) {
-	writeClient, err := mongoutil.Connect(ctx, cfg.DirectWriteURI, cfg.DirectWriteUsername, cfg.DirectWritePassword)
+	writeClient, err := mongoutil.Connect(ctx, cfg.DirectWriteURI, cfg.DirectWriteUsername, cfg.DirectWritePassword, mongoutil.WithPool(cfg.Pool))
 	if err != nil {
 		return runStats{}, fmt.Errorf("connect mongo direct-write client: %w", err)
 	}
@@ -172,19 +174,10 @@ func runDirectMode(ctx context.Context, cfg *config, graph msgraph.GroupReader, 
 	return runDirectSync(ctx, graph, mapper, emit, groups, siteOverrides, cfg.GraphPageSize)
 }
 
-// jetStreamPublish is the JetStream publishFunc main wires in. natsutil.NewMsg
-// returns a nil Header when ctx carries no request-id (the one-shot-job case),
-// so guard before setting the encoding header.
+// jetStreamPublish is the JetStream publishFunc main wires in.
 func jetStreamPublish(js jetstream.JetStream) publishFunc {
 	return func(ctx context.Context, subj string, data []byte, encoding string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if encoding != "" {
-			if msg.Header == nil {
-				msg.Header = nats.Header{}
-			}
-			msg.Header.Set(natsutil.HeaderNatsEncoding, encoding)
-		}
-		_, err := js.PublishMsg(ctx, msg)
+		_, err := js.PublishMsg(ctx, natsutil.NewMsgEncoded(ctx, subj, data, encoding))
 		return err
 	}
 }

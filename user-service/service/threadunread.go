@@ -145,7 +145,7 @@ func (s *UserService) ClearAllThreadUnread(c *natsrouter.Context, _ model.Thread
 	failed := make([]bool, len(sites))
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxSiteFanout)
+	sem := make(chan struct{}, s.fanout())
 	for i, site := range sites {
 		if c.Err() != nil {
 			failed[i] = true

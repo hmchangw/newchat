@@ -22,7 +22,7 @@ import (
 // reason matching, and construct fresh *Error values via the named
 // constructors when a caller needs a wrapped message or extra metadata.
 var (
-	errInvalidRole           = errcode.BadRequest("invalid role: must be owner or member")
+	errInvalidRole           = errcode.BadRequest("invalid role: must be owner or user")
 	errOnlyOwners            = errcode.Forbidden("only owners can update roles", errcode.WithReason(errcode.RoomNotOwner))
 	errOnlyOwnersCanRemove   = errcode.Forbidden("only owners can remove members", errcode.WithReason(errcode.RoomNotOwner))
 	errOnlyOwnersCanAddToRes = errcode.Forbidden("only owners can add members to a restricted room", errcode.WithReason(errcode.RoomNotOwner))
@@ -50,9 +50,8 @@ var (
 	errEmptyCreateRequest = errcode.BadRequest("request must include at least one of users, orgs, channels, or name")
 	errBotInChannel       = errcode.BadRequest("bots cannot be added to a channel", errcode.WithReason(errcode.RoomBotInChannel))
 	errBotNotAvailable    = errcode.NotFound("bot not available", errcode.WithReason(errcode.RoomBotNotAvailable))
-	// Bots hold plain member roles only.
+	// Bots hold the plain user role only.
 	errBotCannotBeOwner    = errcode.BadRequest("bots cannot be room owners", errcode.WithReason(errcode.RoomBotCannotBeOwner))
-	errInvalidUserData     = errcode.BadRequest("user is missing required name fields")
 	errChannelNameRequired = errcode.BadRequest("channel name is required")
 	errChannelNameTooLong  = errcode.BadRequest("channel name must be at most 100 characters")
 
@@ -74,7 +73,7 @@ var (
 
 	// Sentinels for member.statuses + subscription.mentionable limit validation.
 	errMemberStatusesLimitInvalid = errcode.BadRequest("limit must be > 0 and <= room user count")
-	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0 and <= room user count + app count")
+	errMentionableLimitInvalid    = errcode.BadRequest("limit must be > 0")
 
 	// errRoomKeyAbsent is returned when the requested key version is not held
 	// by the key store (either the current key is missing or the historical
@@ -106,7 +105,8 @@ var (
 	// caller is neither a room member nor a platform admin; Internal when a
 	// reply would exceed the negotiated NATS max_payload.
 	errAppAccessDenied  = errcode.Forbidden("not authorized to access this room's apps", errcode.WithReason(errcode.RoomNotMember))
-	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size")
+	errResponseTooLarge = errcode.Internal("response payload exceeds maximum size",
+		errcode.WithReason(errcode.ResponseTooLarge))
 )
 
 // platformAdminRegex matches the platform-admin pseudo-account by its configured
@@ -169,20 +169,6 @@ func dedup(items []string) []string {
 		}
 	}
 	return result
-}
-
-// determineRoomType classifies a post-strip request; caller must guarantee non-empty input.
-// A single-user DM whose counterpart is a bot (".bot") or the "p_admin" platform-admin
-// pseudo-account is a botDM — the same union enforced by the channel-membership guards
-// (filterBots, errBotInChannel). A QA "p_" counterpart is an ordinary user, so it is a regular DM.
-func determineRoomType(req *model.CreateRoomRequest) model.RoomType {
-	if req.Name == "" && len(req.Orgs) == 0 && len(req.Channels) == 0 && len(req.Users) == 1 {
-		if model.IsBot(req.Users[0]) || model.IsPlatformAdminAccount(req.Users[0]) {
-			return model.RoomTypeBotDM
-		}
-		return model.RoomTypeDM
-	}
-	return model.RoomTypeChannel
 }
 
 // contextWithMemberListTimeout returns a derived context bounded by the

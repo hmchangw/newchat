@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 )
 
 var (
@@ -37,24 +38,16 @@ func newThreadStoreMongo(db *mongo.Database) *threadStoreMongo {
 
 // EnsureIndexes creates the unique indexes required by the thread store.
 func (s *threadStoreMongo) EnsureIndexes(ctx context.Context) error {
-	if _, err := s.threadRooms.Indexes().CreateOne(ctx, mongo.IndexModel{
+	if err := mongoutil.EnsureIndexWithRepair(ctx, s.threadRooms, mongo.IndexModel{
 		Keys:    bson.D{{Key: "parentMessageId", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}); err != nil {
 		return fmt.Errorf("ensure thread_rooms parentMessageId index: %w", err)
 	}
 
-	// Best-effort: drop the legacy (threadRoomId, userId) unique index so the new
-	// (threadRoomId, userAccount) index can be created without a key conflict.
-	// The collection or index may not exist (fresh deploy / test container) — ignore all errors.
-	_ = s.threadSubscriptions.Indexes().DropOne(ctx, "threadRoomId_1_userId_1") //nolint:errcheck
-
-	if _, err := s.threadSubscriptions.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	}); err != nil {
-		return fmt.Errorf("ensure thread_subscriptions (threadRoomId,userAccount) index: %w", err)
-	}
+	// thread_subscriptions.{threadRoomId,userAccount} (unique) is owned by room-service
+	// (which also drops the legacy threadRoomId_1_userId_1 index); verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, s.threadSubscriptions, "threadRoomId_1_userAccount_1")
 
 	return nil
 }

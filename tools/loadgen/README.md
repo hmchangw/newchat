@@ -40,7 +40,7 @@ too slow":
 | 7 services (static) | `:9090` | hand-rolled counters, incl. `search_service_requests_total{type,status}` |
 | `cadvisor` | `:8080` | per-container CPU/memory |
 
-Consumer backlog matters most: per `docs/load-testing/system/sli-slo.md` §0.1 and §7 it
+Consumer backlog matters most: per `docs/load-testing/common/sli-slo.md` §0.1 and §7 it
 is the *primary* enforcement signal for every async SLO, because the event
 ratios behind those SLOs are approximate until the outcome ledger lands. A run
 where latency looks fine but `num_pending` climbs monotonically is a run that
@@ -132,7 +132,45 @@ intent before publish, observes the gatekeeper result, and consumes existing
 read-lane slots to reconcile every ledger-admitted message through
 `GetMessageByID`. Fault injection remains external and does not change the
 configured traffic profile. See
-[`docs/load-testing/loadgen-failure-observation.md`](../../docs/load-testing/loadgen-failure-observation.md).
+[`docs/load-testing/loadgen/observation.md`](../../docs/load-testing/loadgen/observation.md).
+
+The same run also drives room and member traffic: `member_mutation` cycles
+paired add/remove operations over a reusable per-room candidate ring,
+`room_mutation` alternates renames and mute toggles over a fixed room pool,
+`room_read` covers member list, rooms-info batch, subscription list and the
+read-receipt list (who has read a given message — a read, tracked by no ledger),
+and
+`room_create` adds rooms at a low rate until `SOAK_ROOM_CREATE_BUDGET` is
+spent. Every mutation is journaled before it is sent and reconciled through the
+room-service RPC with a MongoDB primary read as the authoritative arbiter.
+Mutations are never resent, and only a request proven not to have left the
+process is recorded as `not_sent`.
+
+The `read_receipt` lane is a mutation, not that read: it marks a room as read
+and is journaled. The subscription cursor only moves forward,
+so the lane journals the previously confirmed cursor as a baseline and the
+observer compares two server-written timestamps — loadgen's clock never enters
+the verdict. `user_read` covers user-service's read surface — me, profile, settings,
+status, chatlist, priority contacts, apps, the four subscription reads, and the
+two thread reads — dispatched uniformly rather than weighted like a real
+client, so each path gets enough samples in a fault window to be
+interpretable. `search_read` drives message and room search. Room queries use tokens the seeded
+room names carry and return real hits; message bodies are generated filler with
+no word boundaries, so message queries match nothing by construction and measure
+the request path and an empty result set — which is what the lane is for, since
+it exists to show whether search-service still answers during a fault. `presence` publishes
+hello/ping/activity/bye and periodically re-queries presence-service in
+batches. It is intentionally outside the ledger:
+core NATS publishes are buffered during an outage, so only the query answer is
+evidence, and comparison is suppressed while a signal is still settling
+(`SOAK_PRESENCE_SETTLE`) or old enough for the connection TTL
+(`SOAK_PRESENCE_TTL`) to have legitimately expired it.
+
+The evidence journal is identified by `SOAK_LEDGER_EPOCH` rather than the run
+ID alone: the run ID owns the seeded topology, the epoch owns the journal, so
+an image whose ledger contract changed starts a fresh journal without a
+re-seed. Earlier journals are retained, never replayed, and counted in
+`loadgen_failure_abandoned_journals`.
 
 Persistent WAL writes use a 10 ms bounded group-commit window. A pre-publish
 intent waits for the shared fsync barrier; later lifecycle records flush on the
@@ -225,6 +263,16 @@ past `SOAK_PERSIST_GRACE`. When `SOAK_LEDGER_DIR` is configured, unresolved
 message observations are independently restored from the persistent WAL and
 continue reconciling after restart.
 
+If heartbeat renewal reaches the lease safety boundary, loadgen cancels every
+lane and gives in-flight actions half of `SOAK_HEARTBEAT_INTERVAL` to drain.
+Normal SIGTERM and duration completion still drain without that bound. A lane
+that misses the lease-risk bound is logged by name and count, and the ledger is
+invalidated with `lease_abort`; the affected evidence is **INCONCLUSIVE** and
+the process proceeds to exit rather than letting teardown's lease become stale
+while traffic may still be active. That final invalidation write is also
+bounded; if the WAL itself stalls, loadgen logs that the record may not be
+durable and exits to preserve the lease fence.
+
 Run must have access to MongoDB, NATS, message-gatekeeper, message-worker, and
 history-service. Cassandra credentials are not used by normal Run A traffic.
 They are required only when teardown is explicitly configured to truncate an
@@ -259,7 +307,7 @@ Run A environment variables:
 | `SOAK_RUN_DURATION` | `72h` | Total wall-clock duration in `duration` mode; ignored in `continuous` mode. |
 | `SOAK_WARMUP` | `30s` | Per-process warm-up excluded from operation totals. |
 | `SOAK_HEARTBEAT_INTERVAL` | `30s` | Mongo lifecycle lease renewal interval while load is active. |
-| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold. |
+| `SOAK_HEARTBEAT_STALE_AFTER` | `2m` | Teardown blocks a running manifest until its heartbeat is older than this threshold; must be at least `2 * SOAK_HEARTBEAT_INTERVAL + 5s`. |
 | `SOAK_SEND_RATE` | `100` | Top-level plus thread sends per second. |
 | `SOAK_READ_RATE` | `700` | Mixed history reads per second. |
 | `SOAK_THREAD_SHARE` | `0.10` | Fraction of sends attempted as thread replies. |
@@ -784,7 +832,7 @@ at the same threshold as `err%` (`--slo-error-rate`), because from the
 sender's side a reply that never comes is no better than an error reply.
 
 They are counted and gated separately rather than summed, mirroring the way
-`docs/load-testing/system/sli-slo.md` §2 scores persistence (SLO-1a) and publication
+`docs/load-testing/common/sli-slo.md` §2 scores persistence (SLO-1a) and publication
 (SLO-1b) as independent ratios: one send has two deliverables, so a fully
 dropped message would otherwise be counted twice against a denominator that
 counted it once. The CSV carries `missing_replies`, `missing_broadcasts`,
@@ -865,7 +913,7 @@ loadgen teardown --workload=history --preset=history-medium
 ### Login workload (`--workload=login`)
 
 Drives `POST /api/v1/auth` on auth-service so **SLO-3** — *successful login
-within 1 s / eligible login attempts* (`docs/load-testing/system/sli-slo.md` §3) — can
+within 1 s / eligible login attempts* (`docs/load-testing/common/sli-slo.md` §3) — can
 be measured under load. Every other workload connects to NATS with a
 pre-provisioned creds file (`NATS_CREDS_FILE`) and never touches the HTTP auth
 leg, which is why auth was the one already-measurable SLO no workload could
@@ -906,7 +954,7 @@ that looks like a service failure.
 ### Search workload (`--workload=search`)
 
 Drives search-service's request/reply endpoints so **SLO-7** — *search returns
-ok / eligible search requests* (`docs/load-testing/system/sli-slo.md` §5) — can be
+ok / eligible search requests* (`docs/load-testing/common/sli-slo.md` §5) — can be
 measured under load.
 
 ```bash
@@ -1206,7 +1254,7 @@ run:
   reads as "no service errors".
 
   Enabling it needs a uniform per-service error counter first. The intended
-  source is the natsrouter middleware in `docs/load-testing/system/sli-slo.md` §8 P1
+  source is the natsrouter middleware in `docs/load-testing/common/sli-slo.md` §8 P1
   (`rpc_server_duration_seconds{subject_pattern, errcode_category}`); once it
   ships, point `serviceErrorCounterName` at it and fill `svcURLs` in
   `prodEnvFactory.Build`. A scrape that cannot find the family now fails with

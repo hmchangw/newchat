@@ -256,3 +256,30 @@ func TestEncMeta_JSON(t *testing.T) {
 	in := EncMeta{Nonce: []byte{1, 2, 3}}
 	roundTrip(t, in)
 }
+
+// Truncated marks a row the server blanked because it alone exceeded the reply
+// budget. It must reach the client (so a placeholder can be rendered) and stay
+// absent on every ordinary row.
+func TestMessage_TruncatedJSON(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		data, err := json.Marshal(Message{MessageID: "m1", RoomID: "r1", Truncated: true})
+		require.NoError(t, err)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(data, &got))
+		assert.Equal(t, true, got["truncated"])
+
+		var back Message
+		require.NoError(t, json.Unmarshal(data, &back))
+		assert.True(t, back.Truncated)
+	})
+
+	t.Run("omitted when false", func(t *testing.T) {
+		data, err := json.Marshal(Message{MessageID: "m1", RoomID: "r1"})
+		require.NoError(t, err)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(data, &got))
+		assert.NotContains(t, got, "truncated")
+	})
+}

@@ -4,7 +4,7 @@
 # tell "the service is too slow" apart from "the harness is too slow":
 #
 #   :7777  prometheus-nats-exporter — JetStream consumer backlog. Per
-#          docs/load-testing/system/sli-slo.md §0.1/§7 backlog growth is the *primary*
+#          docs/load-testing/common/sli-slo.md §0.1/§7 backlog growth is the *primary*
 #          enforcement signal for every async SLO (1a/1b/2/6/9); the event
 #          ratios are secondary because they are approximate today.
 #   :2112  o11y SDK metrics off every microservice (Docker SD, same shape as

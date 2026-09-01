@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ import (
 // newSvcRawHistory builds a service exposing the history mock WITHOUT newSvc's
 // permissive RoomsGet default, so last-message enrichment tests can set an exact
 // RoomsGet expectation (result or error).
-func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockHistoryClient) {
+func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionRepository, *mocks.MockRoomClient, *mocks.MockHistoryClient) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -33,8 +34,8 @@ func newSvcRawHistory(t *testing.T) (*UserService, *mocks.MockSubscriptionReposi
 	presence := mocks.NewMockPresenceClient(ctrl)
 	pub := mocks.NewMockEventPublisher(ctrl)
 	threadSubs := mocks.NewMockThreadSubscriptionRepository(ctrl)
-	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, BadgeCountCap: 10}
-	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, nil, nil, nil, cfg), subs, history
+	cfg := &config.Config{SiteID: "site-a", AllSiteIDs: []string{"site-a", "site-b"}, MaxSubscriptionLimit: 1000, DefaultSubscriptionLimit: 40, MaxAppsLimit: 100, DefaultAppsLimit: 20, MaxAccountNames: 100, BadgeCountCap: 10, RoomBatchChunk: 100, MaxSiteFanout: 8}
+	return New(subs, users, apps, threadSubs, rooms, history, presence, pub, pub, &fakeBadgeCache{}, nil, nil, nil, cfg), subs, rooms, history
 }
 
 func TestListSubscriptions_Types(t *testing.T) {
@@ -639,7 +640,7 @@ func TestCountUnread_Happy(t *testing.T) {
 	// No CountActiveSubscriptions expectation — the unread path must not fetch the total.
 	// LOCAL sub: lastMsgAt is on the $lookup baseline — counted with NO RPC.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}}, nil)
+		Return([]models.ActiveSubscription{{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &newer}}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -657,11 +658,11 @@ func TestCountUnread_FailedSiteSkipped(t *testing.T) {
 	newer := time.UnixMilli(200).UTC()
 	// One LOCAL unread (counted from the baseline) + one CROSS-SITE sub whose site's RPC fails.
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}, // local unread
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen}},                    // cross-site, site fails
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &newer}, // local unread
+			{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen},                    // cross-site, site fails
 		}, nil)
-	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).Return(nil, errors.New("down"))
+	failingRoomClient(rooms, "site-b")
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -673,9 +674,9 @@ func TestCountUnread_PartialFailureCountsHealthySites(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := int64(200)
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen}}, // healthy site, unread
-		{Subscription: model.Subscription{RoomID: "rc1", SiteID: "site-c", LastSeenAt: &seen}}, // failing site, skipped
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen}, // healthy site, unread
+		{RoomID: "rc1", SiteID: "site-c", LastSeenAt: &seen}, // failing site, skipped
 	}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
 		Return([]model.RoomInfo{{RoomID: "rb1", Found: true, LastMsgAt: &newer}}, nil)
@@ -700,11 +701,11 @@ func TestCountUnread_MultiSite(t *testing.T) {
 	seen := time.UnixMilli(100).UTC()
 	newerT := time.UnixMilli(200).UTC()
 	newer := int64(200)
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "ra1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newerT}, // local unread (baseline)
-		{Subscription: model.Subscription{RoomID: "ra2", SiteID: "site-a", LastSeenAt: &seen}},                     // local read (no lastMsgAt)
-		{Subscription: model.Subscription{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen}},
-		{Subscription: model.Subscription{RoomID: "rb2", SiteID: "site-b", LastSeenAt: &seen}},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "ra1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &newerT}, // local unread (baseline)
+		{RoomID: "ra2", SiteID: "site-a", LastSeenAt: &seen},                     // local read (no lastMsgAt)
+		{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen},
+		{RoomID: "rb2", SiteID: "site-b", LastSeenAt: &seen},
 	}, nil)
 	// Only the CROSS-SITE site is RPC'd; local rows are counted from the baseline.
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"rb1", "rb2"})).
@@ -722,9 +723,9 @@ func TestCountUnread_AllRead(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(300).UTC()
 	older := time.UnixMilli(100).UTC() // older than seen → not unread
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
-		{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-a", LastSeenAt: &seen}}, // no lastMsgAt → read
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &older},
+		{RoomID: "r2", SiteID: "site-a", LastSeenAt: &seen}, // no lastMsgAt → read
 	}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 	yes := true
@@ -745,7 +746,7 @@ func TestCountUnread_AllRead(t *testing.T) {
 func TestCountUnread_GateOff_NoCacheRead(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	yes := true
 	_, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -753,7 +754,8 @@ func TestCountUnread_GateOff_NoCacheRead(t *testing.T) {
 }
 
 // TestCountUnread_CacheFirst_Fresh: gate on + fresh marker → served from the
-// cache with no repo call and no reseed.
+// cache with no repo call and no reseed. A fresh marker means the set was
+// verified against Mongo within BADGE_MARKER_TTL, so no re-verification is due.
 func TestCountUnread_CacheFirst_Fresh(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	svc.badgeCacheFirst = true
@@ -783,17 +785,16 @@ func TestCountUnread_CacheFirst_FreshZero(t *testing.T) {
 }
 
 // TestCountUnread_CacheFirst_Stale_Computes: gate on + stale → today's
-// compute-from-Mongo path, which reseeds (writing the marker).
+// compute-from-Mongo path, which reseeds (writing the marker). A stale marker
+// here stands in for BADGE_MARKER_TTL expiry: the marker is stamped only by
+// Seed/Reseed and never refreshed by bumps, so its TTL is what bounds how long
+// this recompute-and-reseed self-heal can be deferred.
 func TestCountUnread_CacheFirst_Stale_Computes(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	svc.badgeCacheFirst = true
 	badge := svc.badge.(*fakeBadgeCache) // count defaults to (0, false) — stale
-	seen := time.UnixMilli(100).UTC()
-	newer := time.UnixMilli(200).UTC()
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer},
-		}, nil)
+		Return([]models.ActiveSubscription{localUnreadSub("alice", "r1", "site-a")}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -805,7 +806,7 @@ func TestCountUnread_CacheFirst_Stale_Computes(t *testing.T) {
 func TestCountUnread_EmptyActive(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{}, nil)
+		Return([]models.ActiveSubscription{}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
 	require.NoError(t, err)
@@ -819,9 +820,9 @@ func TestUnreadRooms_ContextCancelled_SkipsRPC(t *testing.T) {
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(200).UTC()
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &newer}, // local unread
-			{Subscription: model.Subscription{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen}},                    // cross-site, must be skipped
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &newer}, // local unread
+			{RoomID: "r2", SiteID: "site-b", LastSeenAt: &seen},                    // cross-site, must be skipped
 		}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
@@ -829,46 +830,134 @@ func TestUnreadRooms_ContextCancelled_SkipsRPC(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.SetContext(cancelled)
-	ids, err := svc.unreadRooms(c, "alice")
+	ids, degraded, err := svc.unreadRooms(c, "alice")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"r1"}, ids, "cross-site site skipped on cancel; local unread still counts")
+	assert.True(t, degraded, "a cancelled fan-out must never be treated as complete")
 }
 
-func TestUnreadRooms_CrossSiteDeletedRoomNotCounted(t *testing.T) {
-	// A cross-site room soft-deleted at its origin still comes back Found=true with a
-	// stale lastMsgAt over the RPC; it must NOT inflate the unread count — the list
-	// path surfaces it room-less, and the badge must agree.
+// TestUnreadRooms_ContextCancelledMultiSite_AllSitesDegraded extends the single-site
+// cancellation case to 2+ cross-sites, so the break path's degradation-marking runs
+// over a slice with more than one element (len(sites) > 1) instead of the degenerate
+// single-element case where "mark just the current index" and "mark the current index
+// through the end of the slice" are indistinguishable by construction (index 0 is both
+// the first and the last element). Deliberately uses an already-cancelled context
+// (rather than cancelling mid-flight from inside a GetRoomsMeta stub): sites is derived
+// from map iteration order (crossBySite is a map) and the launch loop's semaphore does
+// not block for a handful of sites, so an in-flight cancel races the loop's own
+// per-iteration c.Err() checks against goroutine scheduling with no way to pin which
+// site's stub runs first — not deterministic, and not fixable without either sleeping
+// (forbidden) or adding synchronization the production code doesn't have. Cancelling up
+// front instead makes the very first loop iteration observe c.Err() != nil before any
+// goroutine is launched, deterministically exercising the multi-element branch of the
+// break-path marking with zero reliance on scheduling.
+func TestUnreadRooms_ContextCancelledMultiSite_AllSitesDegraded(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	seen := time.UnixMilli(100).UTC()
-	stale := int64(200) // newer than seen → WOULD count if the Del- room weren't skipped
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen}},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return(
+		[]models.ActiveSubscription{
+			crossSiteSub("r1", "site-b"),
+			crossSiteSub("r2", "site-c"),
+			crossSiteSub("r3", "site-d"),
 		}, nil)
-	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
-		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
-	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	c := ctx("alice", "site-a")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.SetContext(cancelled)
+
+	ids, degraded, err := svc.unreadRooms(c, "alice")
 	require.NoError(t, err)
-	assert.Empty(t, ids, "a soft-deleted cross-site room must not be counted as unread")
+	assert.Empty(t, ids, "no cross-site can be counted once the context is already cancelled")
+	assert.True(t, degraded, "a cancelled fan-out across multiple sites must never be cached as complete")
 }
 
-func TestUnreadRooms_CrossSiteDeletedRoomThreadNotCounted(t *testing.T) {
-	// A soft-deleted cross-site room must not become a thread candidate either — its
-	// stale ThreadUnread must not resurrect it via the thread phase.
+// Absence, not the name, is what excludes a cross-site room from the unread count:
+// a room the remote site reports Found=false contributes nothing.
+func TestUnreadRooms_CrossSiteNotFoundRoomNotCounted(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
-	seen := time.UnixMilli(100).UTC()
-	stale := int64(50) // older than seen → read at the message level
+	newer := int64(200) // newer than seen → WOULD count if the room resolved
 	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
-		Return([]model.EnrichedSubscription{
-			{Subscription: model.Subscription{RoomID: "rd", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}},
-		}, nil)
+		Return([]models.ActiveSubscription{crossSiteSub("rd", "site-b")}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
-		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &stale}}, nil)
+		Return([]model.RoomInfo{{RoomID: "rd", Found: false, LastMsgAt: &newer}}, nil)
 
-	ids, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
 	require.NoError(t, err)
-	assert.Empty(t, ids, "a soft-deleted cross-site room's ThreadUnread must not count")
+	assert.Empty(t, ids, "an unresolvable cross-site room must not be counted as unread")
+	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
+}
+
+// A not-found cross-site room must not become a thread candidate either — its stale
+// ThreadUnread must not resurrect it via the thread phase.
+func TestUnreadRooms_CrossSiteNotFoundRoomThreadNotCounted(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	older := int64(50) // older than seen → read at the message level
+	sub := crossSiteSub("rd", "site-b")
+	sub.ThreadUnread = []string{"p1"}
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{sub}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
+		Return([]model.RoomInfo{{RoomID: "rd", Found: false, LastMsgAt: &older}}, nil)
+
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	require.NoError(t, err)
+	assert.Empty(t, ids, "an unresolvable cross-site room's ThreadUnread must not count")
+	assert.False(t, degraded, "a successful RPC that simply excludes the room is not degraded")
+}
+
+// The room name carries no meaning in the unread count: a resolvable room counts on
+// its timestamps alone, whatever it is called.
+func TestUnreadRooms_CrossSiteRoomNameIsNotAFilter(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	newer := int64(200) // newer than seen → counts
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{crossSiteSub("rd", "site-b")}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.Any()).
+		Return([]model.RoomInfo{{RoomID: "rd", Found: true, Name: "Del-secret", LastMsgAt: &newer}}, nil)
+
+	ids, degraded, err := svc.unreadRooms(ctx("alice", "site-a"), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rd"}, ids, "a resolvable room counts regardless of its name")
+	assert.False(t, degraded)
+}
+
+// A failing cross-site RPC still yields a best-effort count, but nothing may be
+// written to the cache — a partial set must never be stamped as verified.
+func TestCountSubscriptions_Degraded_NoReseed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	rooms := mocks.NewMockRoomClient(ctrl)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+	svc.rooms = rooms
+	failingRoomClient(rooms, "site-b")
+
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1000).Return(
+		[]models.ActiveSubscription{crossSiteSub("r-remote", "site-b")}, nil)
+
+	unread := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &unread})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count, "the unreachable site's rooms drop out")
+	assert.Empty(t, badge.reseedCalls, "a degraded compute must not stamp the marker")
+}
+
+// The non-degraded path is unchanged: it still writes through to the cache.
+func TestCountSubscriptions_NotDegraded_StillReseeds(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	subs := mocks.NewMockSubscriptionRepository(ctrl)
+	badge := &fakeBadgeCache{}
+	svc := newBadgeService(t, subs, badge)
+
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", 1000).Return(
+		[]models.ActiveSubscription{localUnreadSub("alice", "r1", "site-a")}, nil)
+
+	unread := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &unread})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count)
+	assert.Equal(t, []string{"alice"}, badge.reseedCalls)
 }
 
 // TestCountUnread_ReadRoomBumpedByUnreadThread: a message-read room whose subscription
@@ -878,8 +967,8 @@ func TestCountUnread_ReadRoomBumpedByUnreadThread(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}, LastMsgAt: &older},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}, LastMsgAt: &older},
 	}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -893,8 +982,8 @@ func TestCountUnread_AlreadyUnreadRoomNotDoubleCounted(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	newer := time.UnixMilli(300).UTC()
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}, LastMsgAt: &newer},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1"}, LastMsgAt: &newer},
 	}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -908,8 +997,8 @@ func TestCountUnread_MultipleUnreadThreadsCountOnce(t *testing.T) {
 	svc, subs, _, _, _, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1", "p2", "p3"}}, LastMsgAt: &older},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, ThreadUnread: []string{"p1", "p2", "p3"}, LastMsgAt: &older},
 	}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -924,8 +1013,8 @@ func TestCountUnread_CrossSiteReadRoomBumpedByThread(t *testing.T) {
 	svc, subs, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
 	older := int64(50)
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}}},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-b", LastSeenAt: &seen, ThreadUnread: []string{"p1"}},
 	}, nil)
 	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", []string{"r1"}).
 		Return([]model.RoomInfo{{RoomID: "r1", Found: true, LastMsgAt: &older}}, nil)
@@ -943,8 +1032,8 @@ func TestCountUnread_MutedRoomThreadExcluded(t *testing.T) {
 	seen := time.UnixMilli(100).UTC()
 	older := time.UnixMilli(50).UTC()
 	// Only the unmuted, read r1 (no threads) is returned.
-	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]model.EnrichedSubscription{
-		{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, LastMsgAt: &older},
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastMsgAt: &older},
 	}, nil)
 	yes := true
 	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
@@ -991,7 +1080,7 @@ func TestCount_UnreadFalse(t *testing.T) {
 }
 
 func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1011,10 +1100,10 @@ func TestListSubscriptions_LastMessage_Populated(t *testing.T) {
 
 // enrichLastMessage must build a hint from each room's already-resolved
 // LastMsgAt (set by enrichLocal before this runs) so history-service can skip
-// its own room-times read; a room with no Room object (soft-deleted) must
-// contribute no hint entry.
+// its own room-times read; a room with no resolved LastMsgAt contributes no
+// hint entry.
 func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	lastMsgAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	storeSubs := []model.EnrichedSubscription{
 		{
@@ -1022,9 +1111,9 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 			RoomName:     "General", UserCount: 3, LastMsgAt: &lastMsgAt,
 		},
 		{
-			// Soft-deleted: buildLocalRoom returns nil Room, so no hint for r2.
-			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "old-room", RoomType: model.RoomTypeChannel},
-			RoomName:     "Del-old-room",
+			// No messages yet: nil LastMsgAt ⇒ no hint for r2.
+			Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-a", Name: "quiet-room", RoomType: model.RoomTypeChannel},
+			RoomName:     "Quiet",
 		},
 	}
 	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
@@ -1035,16 +1124,17 @@ func TestListSubscriptions_LastMessage_HintsFromResolvedRoom(t *testing.T) {
 
 	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
 	require.NoError(t, err)
-	require.Len(t, resp.Subscriptions, 2, "a local soft-deleted sub is kept with no Room, not dropped")
+	require.Len(t, resp.Subscriptions, 2)
 	room1 := resp.Subscriptions[0].Base().Room
 	require.NotNil(t, room1)
 	room2 := resp.Subscriptions[1].Base().Room
-	assert.Nil(t, room2, "soft-deleted local room has no Room object")
+	require.NotNil(t, room2, "a room with no messages still gets a room object")
+	assert.Nil(t, room2.LastMsgAt)
 }
 
 // includeLastMessage:false skips the rooms.get RPC entirely.
 func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
-	svc, subs, _ := newSvcRawHistory(t)
+	svc, subs, _, _ := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1062,7 +1152,7 @@ func TestListSubscriptions_LastMessage_SkippedWhenExcluded(t *testing.T) {
 }
 
 func TestListSubscriptions_LastMessage_SiteDegrades(t *testing.T) {
-	svc, subs, history := newSvcRawHistory(t)
+	svc, subs, _, history := newSvcRawHistory(t)
 	storeSubs := []model.EnrichedSubscription{{
 		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel},
 		RoomName:     "General", UserCount: 3,
@@ -1091,8 +1181,7 @@ func TestBuildLocalRoom_CrossSite(t *testing.T) {
 
 func TestApplyRoomInfo_CrossSite(t *testing.T) {
 	sub := &model.Subscription{}
-	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
-	assert.False(t, drop)
+	applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan", CrossSite: ptrBool(true)})
 	require.NotNil(t, sub.Room)
 	require.NotNil(t, sub.Room.CrossSite)
 	assert.True(t, *sub.Room.CrossSite)
@@ -1104,8 +1193,366 @@ func TestApplyRoomInfo_CrossSite(t *testing.T) {
 // frontend's `?? true` default resolves it to global (fail-safe).
 func TestApplyRoomInfo_CrossSite_Nil(t *testing.T) {
 	sub := &model.Subscription{}
-	drop := applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
-	assert.False(t, drop)
+	applyRoomInfo(sub, &model.RoomInfo{Found: true, Name: "chan"})
 	require.NotNil(t, sub.Room)
 	assert.Nil(t, sub.Room.CrossSite)
+}
+
+// Page bounds are parameters because HTTP and NATS have different ceilings.
+func TestListSubscriptionsFor_AppliesSuppliedPageBounds(t *testing.T) {
+	tests := []struct {
+		name                   string
+		reqLimit, reqOffset    int
+		defaultLimit, maxLimit int
+		wantLimit, wantOffset  int64
+	}{
+		{"omitted limit takes the caller's default", 0, 0, 40, 400, 40, 0},
+		{"explicit limit passes through", 200, 0, 40, 400, 200, 0},
+		{"limit clamps to the caller's max", 5000, 0, 40, 400, 400, 0},
+		{"negative offset floors at zero", 200, -5, 40, 400, 200, 0},
+		{"offset passes through", 200, 400, 40, 400, 200, 400},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, subs, _, _, rooms, _, _ := newSvc(t)
+			var got mongoutil.OffsetPageRequest
+			subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, _, _ string, _ bool, _ *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+					got = page
+					return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, nil
+				})
+			rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+			_, err := svc.ListSubscriptionsFor(context.Background(), "alice",
+				models.SubscriptionListRequest{Type: "current", Limit: tc.reqLimit, Offset: tc.reqOffset},
+				tc.defaultLimit, tc.maxLimit)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantLimit, got.Limit)
+			assert.Equal(t, tc.wantOffset, got.Offset)
+		})
+	}
+}
+
+// Validation lives in the shared core, so both transports inherit it.
+func TestListSubscriptionsFor_ValidatesRequest(t *testing.T) {
+	negative := -1
+	tests := []struct {
+		name string
+		req  models.SubscriptionListRequest
+	}{
+		{"unknown type", models.SubscriptionListRequest{Type: "bogus"}},
+		{"empty type", models.SubscriptionListRequest{Type: ""}},
+		{"negative updatedWithinDays", models.SubscriptionListRequest{Type: "rooms", UpdatedWithinDays: &negative}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, _, _, _, _, _, _ := newSvc(t)
+			_, err := svc.ListSubscriptionsFor(context.Background(), "alice", tc.req, 40, 400)
+			requireCode(t, err, errcode.CodeBadRequest)
+		})
+	}
+}
+
+// The NATS handler must keep its own configured bounds, not the HTTP ones.
+func TestListSubscriptions_NATSHandlerUsesServiceBounds(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	var got mongoutil.OffsetPageRequest
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _, _ string, _ bool, _ *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
+			got = page
+			return mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{}, nil
+		})
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	_, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(40), got.Limit, "SUBSCRIPTION_DEFAULT_LIMIT")
+}
+
+// A deadline that fires during enrichment must fail the request rather than
+// return a page whose rooms are indistinguishable from deleted ones.
+func TestListSubscriptionsFor_DeadlineDuringEnrichmentFails(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	requireCode(t, err, errcode.CodeUnavailable)
+}
+
+// The shutdown drain cancels handlers whose clients are still connected, so that
+// caller would otherwise receive a partially enriched page as 200.
+func TestListSubscriptionsFor_ShutdownCancellationFails(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil).AnyTimes()
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrShuttingDown)
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	requireCode(t, err, errcode.CodeUnavailable)
+}
+
+// A client that hung up is gone; turning that into a 503 would log an ERROR per
+// abandoned request during exactly the reconnect burst this endpoint serves.
+func TestListSubscriptionsFor_ClientCancellationIsNotAServerError(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-b"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := svc.ListSubscriptionsFor(ctx, "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	require.NoError(t, err)
+}
+
+// The happy path must not be tripped by the deadline guard.
+func TestListSubscriptionsFor_LiveContextSucceeds(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{
+			Data: []model.EnrichedSubscription{
+				{Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a"}},
+			},
+		}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.ListSubscriptionsFor(context.Background(), "alice",
+		models.SubscriptionListRequest{Type: "current"}, 40, 400)
+
+	require.NoError(t, err)
+	assert.Len(t, resp.Subscriptions, 1)
+}
+
+// The last-message fan-out must not spend batch budget on subs with no Room: the
+// fan-in discards any preview the reply carries for them, so their ids only crowd
+// the 100-id cap. A site left with none emits no chunk, which is what skips its RPC.
+func TestRequestableBySite_SkipsRoomlessSubs(t *testing.T) {
+	withRoom := func(id, site string) model.EnrichedSubscription {
+		return model.EnrichedSubscription{Subscription: model.Subscription{RoomID: id, SiteID: site, Room: &model.SubscriptionRoom{}}}
+	}
+	roomless := func(id, site string) model.EnrichedSubscription {
+		return model.EnrichedSubscription{Subscription: model.Subscription{RoomID: id, SiteID: site}}
+	}
+
+	tests := []struct {
+		name string
+		subs []model.EnrichedSubscription
+		size int
+		want [][]string // roomIDs per emitted chunk
+	}{
+		{
+			name: "roomless subs are dropped from the batch",
+			subs: []model.EnrichedSubscription{withRoom("r1", "site-a"), roomless("r2", "site-a"), withRoom("r3", "site-a")},
+			size: 100,
+			want: [][]string{{"r1", "r3"}},
+		},
+		{
+			name: "a site with only roomless subs emits no chunk at all",
+			subs: []model.EnrichedSubscription{roomless("r1", "site-a"), roomless("r2", "site-a")},
+			size: 100,
+			want: nil,
+		},
+		// Chunk boundaries must fall on requestable rooms, not raw rows: counting the
+		// dropped id would split a batch that fits into two RPCs.
+		{
+			name: "chunking counts only requestable rooms",
+			subs: []model.EnrichedSubscription{withRoom("r1", "site-a"), roomless("r2", "site-a"), withRoom("r3", "site-a")},
+			size: 2,
+			want: [][]string{{"r1", "r3"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			idxBySite := map[string][]int{}
+			for i := range tc.subs {
+				idxBySite[tc.subs[i].SiteID] = append(idxBySite[tc.subs[i].SiteID], i)
+			}
+			jobs := planChunks(tc.subs, []string{"site-a"}, requestableBySite(tc.subs, idxBySite), tc.size)
+			got := make([][]string, 0, len(jobs))
+			for _, j := range jobs {
+				got = append(got, j.roomIDs)
+			}
+			if tc.want == nil {
+				assert.Empty(t, got, "no requestable room must mean no chunk, hence no RPC")
+				return
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// End-to-end counterpart: a site whose subs all lack a Room issues no rooms.get at
+// all. buildLocalRoom always returns a room for a LOCAL sub, so an unresolved
+// CROSS-SITE room is how a sub ends up room-less.
+func TestListSubscriptions_LastMessage_AllRoomless_SkipsRPC(t *testing.T) {
+	svc, subs, rooms, _ := newSvcRawHistory(t)
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s2", RoomID: "r2", SiteID: "site-b", Name: "gone-room", RoomType: model.RoomTypeChannel},
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
+		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
+	// No history.RoomsGet EXPECT — the mock ctrl fails if it is called.
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	assert.Nil(t, resp.Subscriptions[0].Base().Room)
+}
+
+// A system event bumps lastMsgAt but not lastUserMsgAt; a member who has read
+// the room must not be counted, while a newly added member (no lastSeenAt) is.
+func TestCountUnread_SystemBumpDoesNotCount(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userAt := time.UnixMilli(100).UTC() // read
+	sysAt := time.UnixMilli(300).UTC()  // newer system bump
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, LastUserMsgAt: &userAt, LastMsgAt: &sysAt},
+		}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resp.Count, "system bump past the read position must not count")
+}
+
+func TestCountUnread_NewlyAddedMemberCounts(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	frozen := time.UnixMilli(100).UTC() // freeze pinned the pre-system position
+	sysAt := time.UnixMilli(300).UTC()
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).
+		Return([]models.ActiveSubscription{
+			{RoomID: "r1", SiteID: "site-a", LastUserMsgAt: &frozen, LastMsgAt: &sysAt}, // no LastSeenAt
+		}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count, "a never-read subscription counts whenever the room has any user-activity reference")
+}
+
+// Cross-site rooms follow the same rule via RoomInfo.lastUserMsgAt, falling
+// back to lastMsgAt for peers that predate the field.
+func TestCountUnread_CrossSiteSystemBumpDoesNotCount(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userMs, sysMs := int64(100), int64(300)
+	subs.EXPECT().GetActiveSubscriptions(gomock.Any(), "alice", gomock.Any()).Return([]models.ActiveSubscription{
+		{RoomID: "rb1", SiteID: "site-b", LastSeenAt: &seen},
+		{RoomID: "rb2", SiteID: "site-b", LastSeenAt: &seen},
+	}, nil)
+	rooms.EXPECT().GetRoomsMeta(gomock.Any(), "site-b", gomock.InAnyOrder([]string{"rb1", "rb2"})).
+		Return([]model.RoomInfo{
+			{RoomID: "rb1", Found: true, LastUserMsgAt: &userMs, LastMsgAt: &sysMs}, // read; system bump ignored
+			{RoomID: "rb2", Found: true, LastMsgAt: &sysMs},                         // legacy peer: lastMsgAt rules
+		}, nil)
+	yes := true
+	resp, err := svc.CountSubscriptions(ctx("alice", "site-a"), models.CountRequest{Unread: &yes})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resp.Count, "rb1 read (user activity older than seen); rb2 unread via legacy fallback")
+}
+
+// List path counterpart: a LOCAL sub's hasUnread must compare lastSeenAt against
+// lastUserMsgAt (the system bump on lastMsgAt is ignored), and the wire room
+// object must carry lastUserMsgAt through to the client.
+func TestListSubscriptions_LocalUnread_PrefersLastUserMsgAt(t *testing.T) {
+	svc, subs, _, _, _, _, _ := newSvc(t)
+	seen := time.UnixMilli(200).UTC()
+	userAt := time.UnixMilli(100).UTC()
+	sysAt := time.UnixMilli(300).UTC()
+	storeSubs := []model.EnrichedSubscription{{
+		Subscription: model.Subscription{ID: "s1", RoomID: "r1", SiteID: "site-a", Name: "general", RoomType: model.RoomTypeChannel, LastSeenAt: &seen},
+		RoomName:     "General", LastUserMsgAt: &userAt, LastMsgAt: &sysAt,
+	}}
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: storeSubs}, nil)
+	resp, err := svc.ListSubscriptionsFor(context.Background(), "alice", models.SubscriptionListRequest{Type: "current"}, 40, 400)
+	require.NoError(t, err)
+	require.Len(t, resp.Subscriptions, 1)
+	base := resp.Subscriptions[0].Base()
+	assert.False(t, base.HasUnread, "system bump past the read position must not count as unread")
+	require.NotNil(t, base.Room)
+	require.NotNil(t, base.Room.LastMsgAt)
+	assert.Equal(t, userAt, *base.Room.LastMsgAt,
+		"the wire carries ONE activity timestamp: lastMsgAt is the coalesced user-activity value, not the raw ceiling")
+}
+
+// Rows carry the type their own subscriber sees, so the split reads RoomType
+// directly.
+func TestDistinctListNames_SplitsAppRoomsFromDMs(t *testing.T) {
+	subs := []model.EnrichedSubscription{
+		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "weather.bot"}},
+		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "alice"}},       // bot's own row, normalized
+		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "p_admin_ops"}}, // p_admin DM, normalized
+		{Subscription: model.Subscription{RoomType: model.RoomTypeDM, Name: "bob"}},
+		{Subscription: model.Subscription{RoomType: model.RoomTypeChannel, Name: "general"}},
+		{Subscription: model.Subscription{RoomType: model.RoomTypeBotDM, Name: "weather.bot"}}, // dup
+	}
+
+	bots, dms := distinctListNames(subs)
+
+	assert.Equal(t, []string{"weather.bot"}, bots, "only real apps drive the app lookup")
+	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms, "every DM drives the HR lookup")
+}
+
+// Subscriptions written before the role cutover still store the legacy "member"
+// spelling; every user-service read must hand the client "user" instead.
+func TestListSubscriptions_LegacyMemberRoleSerializesAsUser(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().AggregateSubscriptions(gomock.Any(), "alice", "current", false, gomock.Any(), gomock.Any()).
+		Return(mongoutil.OffsetPageHasMore[model.EnrichedSubscription]{Data: []model.EnrichedSubscription{
+			{Subscription: model.Subscription{ID: "s1", RoomID: "r1", RoomType: model.RoomTypeChannel, Roles: []model.Role{model.RoleMember}}},
+		}}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.ListSubscriptions(ctx("alice", "site-a"), models.SubscriptionListRequest{Type: "current"})
+	require.NoError(t, err)
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"roles":["user"]`)
+	assert.NotContains(t, string(body), `"member"`)
+}
+
+func TestGetByRoomID_LegacyMemberRoleSerializesAsUser(t *testing.T) {
+	svc, subs, _, _, rooms, _, _ := newSvc(t)
+	subs.EXPECT().GetSubscriptionByRoomID(gomock.Any(), "alice", "r1").
+		Return(&model.EnrichedSubscription{Subscription: model.Subscription{
+			ID: "s1", RoomID: "r1", RoomType: model.RoomTypeChannel, Roles: []model.Role{model.RoleMember, model.RoleOwner},
+		}}, nil)
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+
+	resp, err := svc.GetByRoomID(ctx("alice", "site-a"), models.GetByRoomIDRequest{RoomID: "r1"})
+	require.NoError(t, err)
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"roles":["user","owner"]`)
 }

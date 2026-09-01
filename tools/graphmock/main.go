@@ -35,6 +35,8 @@ func run() error {
 	}
 	s := &server{}
 	if cfg.FixturesPath != "" {
+		// #nosec G304 -- developer-supplied path in dev tooling, not attacker-controlled
+		// nosemgrep: gosec.G304-1
 		raw, err := os.ReadFile(cfg.FixturesPath)
 		if err != nil {
 			return fmt.Errorf("read fixtures: %w", err)

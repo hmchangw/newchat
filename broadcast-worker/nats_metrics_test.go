@@ -76,7 +76,7 @@ func TestHandler_PublishToThreadAccounts_RecordsFanoutScenarios(t *testing.T) {
 			h := NewHandler(nil, nil, pub, nil, nil, false, subject.RouteGlobal, withBroadcastMetrics(metrics))
 			ctx := context.Background()
 			consumer := natsmetrics.New(mp.Meter("shared")).Consumer(natsmetrics.ConsumerConfig{
-				ServiceName: "broadcast-worker", Site: "site-a", Stream: "MESSAGES_CANONICAL_site-a", Consumer: "broadcast-worker",
+				Site: "site-a", Stream: "MESSAGES_CANONICAL_site-a", Consumer: "broadcast-worker",
 			})
 			consumer.LoopStarted(ctx)
 			tracked := consumer.Track(ctx, stubJSMsg{subject: "chat.msg.canonical.site-a.created"}, natsmetrics.EventCreated, 5)
@@ -136,4 +136,90 @@ func TestBroadcastMetrics_Record_NilReceiverIsSafe(t *testing.T) {
 	var metrics *broadcastMetrics
 	metrics.Fanout(context.Background(), roomChannel, natsmetrics.EventCreated, 1)
 	metrics.Delivery(context.Background(), roomChannel, natsmetrics.EventCreated, nil)
+}
+
+func TestBroadcastMetrics_ThreadViewPublishFailed(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	m := newBroadcastMetrics(mp.Meter("test"))
+
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated)
+	// An unclassified event must collapse onto the bounded "unknown" series.
+	m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventType("dynamic-event"))
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+
+	byEvent := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "broadcast_worker_thread_view_publish_failures_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "counter must collect as an int64 sum")
+			for _, dp := range sum.DataPoints {
+				event, found := dp.Attributes.Value("event_type")
+				require.True(t, found, "every point carries event_type")
+				byEvent[event.AsString()] += dp.Value
+			}
+		}
+	}
+	assert.Equal(t, map[string]int64{"created": 2, "unknown": 1}, byEvent)
+}
+
+// A nil metrics value must be inert, not panic the publish path.
+func TestBroadcastMetrics_ThreadViewPublishFailed_NilSafe(t *testing.T) {
+	var m *broadcastMetrics
+	assert.NotPanics(t, func() { m.ThreadViewPublishFailed(context.Background(), natsmetrics.EventCreated) })
+}
+
+// The metrics toggle is only real if a nil *broadcastMetrics survives
+// NewHandler. It did not: the constructor could not tell "explicitly disabled"
+// from "option not supplied", so it rebuilt the instruments against the global
+// meter and O11Y_ENABLED=false still paid for domain metrics on every publish.
+//
+// Wrapping is asserted alongside the field because the recorder reads the
+// context for its labels before the nil guard inside Delivery returns, so a
+// disabled handler that still wraps has not stopped doing the work.
+func TestNewHandler_MetricsToggle(t *testing.T) {
+	tests := []struct {
+		name        string
+		options     []handlerOption
+		wantMetrics bool
+	}{
+		{
+			name:        "explicitly disabled stays disabled",
+			options:     []handlerOption{withBroadcastMetrics(nil)},
+			wantMetrics: false,
+		},
+		{
+			name:        "option omitted keeps the default instruments",
+			options:     nil,
+			wantMetrics: true,
+		},
+		{
+			name: "explicit metrics are used as given",
+			options: []handlerOption{
+				withBroadcastMetrics(newBroadcastMetrics(sdkmetric.NewMeterProvider().Meter("test"))),
+			},
+			wantMetrics: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub := &mockPublisher{}
+			h := NewHandler(nil, nil, pub, nil, nil, false, subject.RouteGlobal, tt.options...)
+
+			if !tt.wantMetrics {
+				assert.Nil(t, h.metrics, "disabled metrics must not be rebuilt")
+				assert.Same(t, pub, h.pub, "a disabled handler must not wrap the publisher in a recorder")
+				return
+			}
+			require.NotNil(t, h.metrics)
+			assert.IsType(t, &broadcastMetricPublisher{}, h.pub, "an enabled handler must record deliveries")
+		})
+	}
 }

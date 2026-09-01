@@ -35,6 +35,10 @@ type Message struct {
 	QuotedParentMessage          *cassandra.QuotedParentMessage `json:"quotedParentMessage,omitempty"          bson:"quotedParentMessage,omitempty"`
 	PinnedAt                     *time.Time                     `json:"pinnedAt,omitempty"                     bson:"pinnedAt,omitempty"`
 	PinnedBy                     *Participant                   `json:"pinnedBy,omitempty"                     bson:"pinnedBy,omitempty"`
+	// VisibleTo is an opaque, client-set visibility marker: set on send, persisted,
+	// and surfaced on history reads and the room-list preview. The backend never
+	// filters delivery, reads, or previews on it — the client interprets visibility.
+	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomRenamedSysData is the JSON payload stored in Message.SysMsgData
@@ -73,6 +77,10 @@ type SendMessageRequest struct {
 	// MessageTypeImportant; message-gatekeeper rejects any system type or unknown
 	// value so a client can't inject a system event. Empty = a normal message.
 	Type string `json:"type,omitempty"`
+	// VisibleTo is an opaque, client-set visibility marker copied verbatim onto the
+	// canonical Message. message-gatekeeper caps its size but never interprets it;
+	// the backend stores and surfaces it without filtering on it.
+	VisibleTo string `json:"visibleTo,omitempty"`
 }
 
 // SenderDisplayName returns the canonical render-ready name for the message's
@@ -84,6 +92,28 @@ func (m *Message) SenderDisplayName() string {
 		return m.UserDisplayName
 	}
 	return m.UserAccount
+}
+
+// IsHiddenThreadReply reports whether the message is a thread reply that does
+// not also appear in the room's main timeline.
+//
+// It lives here because it classifies the message, not any one service's
+// routing: broadcast-worker skips channel fan-out for these, roomlist-worker
+// skips the room pointer and mention badge, and notification-worker skips the
+// room-wide push. Those three must agree on which messages exist in the
+// channel — a reply that fans out but never moves lastMsgAt, or a mention badge
+// with no visible message, is what disagreement looks like — and agreeing by
+// three textual copies is how that drifts.
+func (m *Message) IsHiddenThreadReply() bool {
+	return IsHiddenThreadReply(m.ThreadParentMessageID, m.TShow)
+}
+
+// IsHiddenThreadReply is the rule behind the method, exposed for consumers that
+// decode a narrow projection of a message rather than the whole type (see
+// roomlist-worker). Keeping one definition is the point: the services that branch
+// on this must agree on which messages exist in the channel.
+func IsHiddenThreadReply(threadParentMessageID string, tShow bool) bool {
+	return threadParentMessageID != "" && !tShow
 }
 
 // RoomTimeHint is an optional caller-supplied walk-bounds hint (UTC millis) for a
@@ -103,11 +133,13 @@ type RoomsGetRequest struct {
 	Hints map[string]RoomTimeHint `json:"hints,omitempty"`
 }
 
-// PreviewMessage is a room's most-recent eligible message, resolved at read time and
-// enriched for the room-list preview. Content is the full message body; the client
-// truncates for display. Sender/mentions carry render-ready wire Participants (a bot
-// sender's displayName is its app name). Shared wire type: history-service's rooms.get
-// RPC produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
+// PreviewMessage is a room's most-recent eligible message, enriched for the room-list
+// preview. Content is a snippet capped at preview.MaxContentRunes (500 runes) — no longer
+// the full body, so user-service's PREVIEW_CONTENT_CHARS truncation now narrows an
+// already-capped snippet. Sender/mentions carry render-ready wire Participants (a bot
+// sender's displayName is its app name). Shared wire type: history-service's rooms.get RPC
+// produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
+// It is never stored — the room doc holds the split PreviewMeta + sealed body instead.
 type PreviewMessage struct {
 	MessageID   string                 `json:"messageId"`
 	Sender      Participant            `json:"sender"`
@@ -115,10 +147,25 @@ type PreviewMessage struct {
 	CreatedAt   time.Time              `json:"createdAt"`
 	Attachments []cassandra.Attachment `json:"attachments,omitempty"`
 	Mentions    []Participant          `json:"mentions,omitempty"`
-	// VisibleTo is surfaced now; its write-path (populating the column) is a separate
-	// follow-up, so it's empty until that lands.
+	// VisibleTo is the message's opaque visibility marker, surfaced verbatim so the
+	// client can interpret it. A message with a non-empty VisibleTo is still previewed —
+	// the backend does not filter previews on it (the client honours the scope).
 	VisibleTo string `json:"visibleTo,omitempty"`
 	// TODO(#106): forwardSource — wired after the Forwarded snapshot merges.
+}
+
+// PreviewMeta is the plaintext half of a stored room preview: precisely the fields
+// Cassandra leaves unencrypted, so persisting them makes no new classification. The
+// user-authored half is sealed into Room.PreviewCiphertext. Storage-only — clients
+// always receive a PreviewMessage.
+type PreviewMeta struct {
+	MessageID string        `json:"messageId"           bson:"messageId"`
+	Sender    Participant   `json:"sender"              bson:"sender"`
+	CreatedAt time.Time     `json:"createdAt"           bson:"createdAt"`
+	Mentions  []Participant `json:"mentions,omitempty"  bson:"mentions,omitempty"`
+	// VisibleTo is visibility metadata, so it rides the plaintext meta half alongside
+	// messageId/sender — never the sealed body — and is surfaced on the preview verbatim.
+	VisibleTo string `json:"visibleTo,omitempty" bson:"visibleTo,omitempty"`
 }
 
 // RoomsGetResponse maps each requested roomId that has a resolvable last message to

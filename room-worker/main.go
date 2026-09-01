@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/atrest"
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
@@ -34,15 +35,22 @@ type config struct {
 	// Mode selects which stream/consumer this pod binds: "default" runs the ROOMS
 	// member/create/rename ops; "teams" runs the Teams-migration room-create batch
 	// off ROOMS-TEAMS. Two deploys of the same binary, gated by env only.
-	Mode              string                  `env:"MODE"            envDefault:"default"`
-	ServiceName       string                  `env:"OTEL_SERVICE_NAME" envDefault:"unknown-service"`
-	NatsURL           string                  `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
-	NatsCredsFile     string                  `env:"NATS_CREDS_FILE" envDefault:""`
-	SiteID            string                  `env:"SITE_ID"         envDefault:"site-local"`
-	MongoURI          string                  `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
-	MongoDB           string                  `env:"MONGO_DB"        envDefault:"chat"`
-	MongoUsername     string                  `env:"MONGO_USERNAME"  envDefault:""`
-	MongoPassword     string                  `env:"MONGO_PASSWORD"  envDefault:""`
+	Mode          string `env:"MODE"            envDefault:"default"`
+	NatsURL       string `env:"NATS_URL"        envDefault:"nats://localhost:4222"`
+	NatsCredsFile string `env:"NATS_CREDS_FILE" envDefault:""`
+	SiteID        string `env:"SITE_ID"         envDefault:"site-local"`
+	MongoURI      string `env:"MONGO_URI"       envDefault:"mongodb://localhost:27017"`
+	MongoDB       string `env:"MONGO_DB"        envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"  envDefault:""`
+	MongoPassword string `env:"MONGO_PASSWORD"  envDefault:""`
+	// Pool caps the Mongo connection pool (MONGO_MAX_POOL_SIZE/MONGO_MIN_POOL_SIZE)
+	// so a burst can't open unbounded connections. Env tags already carry the
+	// MONGO_ prefix, so this stays a top-level field (never under envPrefix:"MONGO_").
+	Pool mongoutil.PoolConfig
+	// Guard bounds in-flight request handlers (MAX_CONCURRENCY) and per-request
+	// duration (REQUEST_TIMEOUT) for the serverCreateDM RPC so a burst can't
+	// saturate the Mongo pool with unbounded, indefinitely-held work.
+	Guard             natsrouter.GuardConfig
 	MaxWorkers        int                     `env:"MAX_WORKERS"        envDefault:"100"`
 	KeyFanoutWorkers  int                     `env:"KEY_FANOUT_WORKERS" envDefault:"32"` // see defaultKeyFanoutWorkers in handler.go
 	UserCacheSize     int                     `env:"USER_CACHE_SIZE"    envDefault:"10000"`
@@ -59,6 +67,13 @@ type config struct {
 	// Grace window during which a rotated-out previous key remains valid for decrypt.
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD" envDefault:"24h"`
 
+	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
+	RoomKeyRetiredTTL time.Duration `env:"ROOM_KEY_RETIRED_TTL" envDefault:"30m"`
+	// MongoKeyReadPreference covers room keys and the retired-key archive. Must
+	// match broadcast-worker's: it encrypts against its own handle while key.get is
+	// served from here, and the two must not disagree about falling back.
+	MongoKeyReadPreference string `env:"MONGO_KEY_READ_PREFERENCE" envDefault:"primaryPreferred"`
+
 	// MemberCountReconcileTTL bounds how often the add-member hot path runs a
 	// full O(room) recompute of userCount/appCount. Between recomputes the
 	// counts are maintained incrementally ($inc by the actual delta); a full
@@ -68,8 +83,7 @@ type config struct {
 
 	// Valkey backs best-effort room-meta L2 cache invalidation. Optional: when
 	// VALKEY_ADDRS is empty the bust is a no-op (the L2 TTL reconciles).
-	ValkeyAddrs    []string `env:"VALKEY_ADDRS"    envSeparator:","`
-	ValkeyPassword string   `env:"VALKEY_PASSWORD" envDefault:""`
+	Valkey valkeyutil.Config
 
 	// Atrest/Vault drive eager at-rest DEK provisioning for synchronously-created
 	// DM rooms. When Atrest.Enabled is false the DEK is created lazily by message-worker.
@@ -98,17 +112,20 @@ func main() {
 		slog.Error("invalid config", "MODE", cfg.Mode, "reason", `must be "default" or "teams"`)
 		os.Exit(1)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid guard config", "error", err)
+		os.Exit(1)
+	}
 
 	if err := model.SetPlatformAdminAccountPrefix(cfg.AdminAcctPrefix); err != nil {
 		slog.Error("invalid ADMIN_ACCT_PREFIX", "error", err)
 		os.Exit(1)
 	}
 
-	if cfg.RoomKeyGracePeriod <= 0 {
-		slog.Error("ROOM_KEY_GRACE_PERIOD must be a positive duration",
-			"room_key_grace_period", cfg.RoomKeyGracePeriod)
-		os.Exit(1)
-	}
 	roomRouteMode, err := subject.ParseRoomRouteMode(cfg.RoomSubjectMode)
 	if err != nil {
 		slog.Error("invalid ROOM_SUBJECT_MODE", "error", err)
@@ -124,8 +141,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
@@ -138,7 +155,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -149,18 +167,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	keyStore := roomkeystore.NewMongoStore(mongoClient.Database(cfg.MongoDB).Collection("rooms"), cfg.RoomKeyGracePeriod)
+	keyReadPref, err := mongoutil.ParseReadPreference(cfg.MongoKeyReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo key read preference", "value", cfg.MongoKeyReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
+	keyStore, err := roomkeystore.OpenMongo(ctx, mongoClient.Database(cfg.MongoDB), cfg.RoomKeyGracePeriod, cfg.RoomKeyRetiredTTL,
+		roomkeystore.WithKeyReadPreference(keyReadPref))
+	if err != nil {
+		slog.Error("open room key store failed", "error", err)
+		os.Exit(1)
+	}
 
-	var metaValkey valkeyutil.Client
-	if len(cfg.ValkeyAddrs) > 0 {
-		metaValkey, err = valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-			valkeyutil.WithObservability(sdk),
-			valkeyutil.WithRequireParentSpan(true),
-		)
-		if err != nil {
-			slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)
-			os.Exit(1)
-		}
+	metaValkey, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
+	if err != nil {
+		slog.Error("valkey connect (room-meta L2 invalidation) failed", "error", err)
+		os.Exit(1)
+	}
+	if metaValkey != nil {
 		slog.Info("room-meta L2 invalidation enabled")
 	}
 
@@ -215,20 +240,23 @@ func main() {
 	}
 	handler := NewHandler(store, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
 		msg := natsutil.NewMsg(ctx, subj, data)
-		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+		// Classify only when a publish fails: this closure runs on every room
+		// event and PublishLabelsFromSubject allocates.
+		recordFailure := func(err error) {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Failure(ctx, destination, operation, err)
+		}
 		if msgID == "" {
 			// Ephemeral client-delivery — core NATS, not persisted.
-			err := nc.PublishMsg(ctx, msg)
-			publishMetrics.Attempt(ctx, destination, operation, err)
-			if err != nil {
+			if err := nc.PublishMsg(ctx, msg); err != nil {
+				recordFailure(err)
 				return fmt.Errorf("publish to %q: %w", subj, err)
 			}
 			return nil
 		}
 		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
-		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-		publishMetrics.Attempt(ctx, destination, operation, err)
-		if err != nil {
+		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
+			recordFailure(err)
 			return fmt.Errorf("publish to %q: %w", subj, err)
 		}
 		return nil
@@ -239,13 +267,12 @@ func main() {
 	handler.publishUsers = func(ctx context.Context, users []model.IUserWithChange) error {
 		data, err := json.Marshal(users)
 		if err != nil {
-			return fmt.Errorf("marshal user identity fanout: %w", err)
+			return errcode.MarshalFailed("user identity fanout", err)
 		}
 		subj := subject.OrgSyncUsersUpsert(cfg.SiteID)
-		_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
-		destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-		publishMetrics.Attempt(ctx, destination, operation, err)
-		if err != nil {
+		if _, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
+			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
+			publishMetrics.Failure(ctx, destination, operation, err)
 			return fmt.Errorf("publish user identity fanout: %w", err)
 		}
 		return nil
@@ -254,8 +281,8 @@ func main() {
 	handler.valkey = metaValkey
 	handler.reconcileTTL = cfg.MemberCountReconcileTTL
 
-	router := natsrouter.New(nc, "room-worker", natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
@@ -263,7 +290,7 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Site:   cfg.SiteID,
 		Stream: streamCfg.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
@@ -395,6 +422,11 @@ func runJobWithRecovery(msgCtx context.Context, handler jobProcessor, msg jetstr
 	// stable X-Request-ID still defeat dedup upstream (room-service mints a fresh
 	// ID each attempt); the boundary no longer rejects them. See
 	// docs/error-handling.md §3a.
+	// Deliberately not logctx.ConsumeContext, which every other stream consumer
+	// uses: room-service always stamps an id on ROOMS, and downstream dedup keys
+	// derive from it, so a missing one is an error here rather than the quiet
+	// mint StampRequestID performs. Admission and capture below are identical —
+	// keep them in step with ConsumeContext if that grows a fourth step.
 	inbound := ""
 	if h := msg.Headers(); h != nil {
 		inbound = h.Get(natsutil.RequestIDHeader)

@@ -15,9 +15,13 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/timeutil"
+	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 // Rocket.Chat-legacy single-char rooms.t values.
@@ -62,6 +66,10 @@ type handler struct {
 	now        func() time.Time
 	newMsgID   func() string
 	newUUIDv7  func() string
+	// valkey is the L2 (Valkey) client used only to invalidate subauthcache
+	// entries after a member removal. nil disables invalidation (best-effort).
+	// Set post-construction, mirroring room-worker/room-service/inbox-worker.
+	valkey valkeyutil.Client
 }
 
 func newHandler(store RoomStore, siteID string, allSiteIDs []string, pub outboxPublisher,
@@ -126,12 +134,24 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 		},
 		CreatedByBot: ident.ID,
 	}
-	if err := h.store.InsertRoom(c, room); err != nil && !errors.Is(err, ErrDuplicate) {
-		return nil, fmt.Errorf("insert dm room: %w", err)
+	if err := h.store.InsertRoom(c, room); err != nil {
+		if !errors.Is(err, ErrDuplicate) {
+			return nil, fmt.Errorf("insert dm room: %w", err)
+		}
+		// The DM id is deterministic, so a duplicate means this room already
+		// exists and may carry history — take its position rather than federating
+		// nil and leaving the target unable to order it.
+		if existing, findErr := h.store.FindRoom(c, roomID); findErr == nil {
+			room.LastMsgAt = existing.LastMsgAt
+		} else {
+			slog.WarnContext(c, "read existing dm room failed; federating without an activity position",
+				"room_id", roomID, "error", findErr)
+		}
 	}
 	if _, err := h.store.UpsertSubscription(c, &Subscription{
 		ID: h.newUUIDv7(), RoomID: roomID, UserID: ident.ID, Account: ident.Account,
 		SiteID: h.siteID, CreatedAt: createdAt, IsBot: true,
+		Name: target.Account, RoomType: model.SubscriptionRoomType(target.Account),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert bot dm subscription: %w", err)
 	}
@@ -141,13 +161,14 @@ func (h *handler) handleDMEnsure(c *natsrouter.Context, req BotDMEnsureRequest) 
 		if _, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: target.ID, Account: target.Account,
 			SiteID: h.siteID, CreatedAt: createdAt,
+			Name: ident.Account, RoomType: model.SubscriptionRoomType(ident.Account),
 		}); err != nil {
 			return nil, fmt.Errorf("upsert target dm subscription: %w", err)
 		}
 	} else {
 		// DM member_added carries roomType=botDM + RequesterAccount=bot so the target names the subscription after the counterparty; subscription-only, no rooms doc.
 		if err := h.federateMemberAdded(c, roomID, target.ID, target.Account, target.SiteID, createdAt,
-			model.RoomTypeBotDM, "", ident.Account); err != nil {
+			model.RoomTypeBotDM, "", ident.Account, room.LastMsgAt); err != nil {
 			return nil, err
 		}
 	}
@@ -192,6 +213,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 	if _, err := h.store.UpsertSubscription(c, &Subscription{
 		ID: h.newUUIDv7(), RoomID: roomID, UserID: ident.ID, Account: ident.Account,
 		SiteID: h.siteID, CreatedAt: createdAt, IsBot: true,
+		Name: room.Name, RoomType: model.RoomTypeChannel,
 	}); err != nil {
 		return nil, fmt.Errorf("upsert owner subscription: %w", err)
 	}
@@ -230,6 +252,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 		if _, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: u.ID, Account: u.Account,
 			SiteID: u.SiteID, CreatedAt: createdAt,
+			Name: room.Name, RoomType: model.RoomTypeChannel,
 		}); err != nil {
 			return nil, fmt.Errorf("upsert member subscription: %w", err)
 		}
@@ -238,7 +261,7 @@ func (h *handler) handleCreate(c *natsrouter.Context, req BotCreateRoomRequest) 
 		// Channel-shape event; RoomName names the subscription at the target.
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			if err := h.federateMemberAdded(c, roomID, u.ID, u.Account, u.SiteID, createdAt,
-				model.RoomTypeChannel, req.Name, ident.Account); err != nil {
+				model.RoomTypeChannel, req.Name, ident.Account, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -279,10 +302,25 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 	if err != nil {
 		return nil, err
 	}
+	// A DM is exactly two participants; mirrors room-service's channel-only guard.
+	if room.Type != roomTypeChannel {
+		return nil, errcode.BadRequest("cannot add members to a non-channel room",
+			errcode.WithReason(errcode.RoomNonChannelOperation))
+	}
 
 	created := h.now()
 	added := []string{}
 	newAccounts := []string{}
+
+	// Resolve (and heal) the room key BEFORE committing any subscription: a key
+	// failure after a member is committed would strand them keyless, since a retry
+	// sees them as a dup (newlyAdded=false) and the fan-out below skips them.
+	// Mirrors room-worker's key-before-commit ordering. See keyPairOrHeal.
+	pair, err := h.keyPairOrHeal(c, roomID)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, userID := range req.UserIDs {
 		u, err := h.store.FindUser(c, userID)
 		if err != nil {
@@ -295,6 +333,7 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		newlyAdded, err := h.store.UpsertSubscription(c, &Subscription{
 			ID: h.newUUIDv7(), RoomID: roomID, UserID: u.ID, Account: u.Account,
 			SiteID: u.SiteID, CreatedAt: created,
+			Name: room.Name, RoomType: model.RoomTypeChannel,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("upsert subscription: %w", err)
@@ -309,30 +348,20 @@ func (h *handler) handleAdd(c *natsrouter.Context, req BotMembersBatchRequest) (
 		if u.SiteID != "" && u.SiteID != h.siteID {
 			roomType := roomTypeToModel(room.Type)
 			if err := h.federateMemberAdded(c, roomID, u.ID, u.Account, u.SiteID, created,
-				roomType, room.Name, ident.Account); err != nil {
+				roomType, room.Name, ident.Account, room.LastMsgAt); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	// Fan out the room's current key only to newly-subscribed accounts — duplicate adds already
+	// Fan out the pre-resolved key only to newly-subscribed accounts — duplicate adds already
 	// have it from their original add; the key isn't re-rotated for adds (mirrors room-worker.buildAndFanOutRoomKey).
 	if len(newAccounts) > 0 {
-		pair, err := h.keyStore.Get(c, roomID)
-		if err != nil {
-			if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-				// Legacy/broken room with no key: nothing to fan out, not fatal.
-				slog.WarnContext(c, "no current key on add-member; skip fan-out", "roomID", roomID)
-			} else {
-				return nil, fmt.Errorf("get room key: %w", err)
-			}
-		} else {
-			h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
-				RoomID:     roomID,
-				Version:    pair.Version,
-				PrivateKey: pair.KeyPair.PrivateKey,
-			}, "fan out room key on add failed")
-		}
+		h.fanOutKey(c, roomID, newAccounts, model.RoomKeyEvent{
+			RoomID:     roomID,
+			Version:    pair.Version,
+			PrivateKey: pair.KeyPair.PrivateKey,
+		}, "fan out room key on add failed")
 	}
 
 	// Skip sysmsg on all-dup batches (true no-op: no message, no OUTBOX event).
@@ -355,6 +384,14 @@ func roomTypeToModel(t string) model.RoomType {
 }
 
 // ----- remove-members ------------------------------------------------------
+
+// memberRemoval is one removal awaiting its cross-site publish, held between the
+// delete loop and the federation pass so the room-key rotation can run between them.
+type memberRemoval struct {
+	userID     string
+	account    string
+	destSiteID string
+}
 
 func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest) (*BotRemoveResponse, error) { //nolint:gocritic // hugeParam: natsrouter contract
 	roomID := c.Params.Get("roomID")
@@ -382,38 +419,115 @@ func (h *handler) handleRemove(c *natsrouter.Context, req BotMembersBatchRequest
 	}
 
 	removed := []string{}
+	removedAccounts := []string{}
+	// Collected in the loop and published after the rotation below, so a failed
+	// publish cannot skip it. See the rotation comment for why that ordering is
+	// load-bearing rather than cosmetic.
+	// Every user in the batch can queue one now that federation no longer waits on
+	// the delete, so the exact bound is known here.
+	pendingFederations := make([]memberRemoval, 0, len(req.UserIDs))
+	// Deferred, not called at the end of the loop: every path out of here from
+	// this point on has already committed subscription deletes, so the cached
+	// positive subauthcache decisions must die on the error paths too. A
+	// federation failure that returned before the bust would leave every account
+	// in the batch still passing authorization for the rest of the L2 TTL. One
+	// round trip for the whole set — the {roomID} hash tag keeps the keys in one
+	// slot — and BustSubs no-ops on an empty set.
+	defer func() { subauthcache.BustSubs(c, h.valkey, roomID, removedAccounts) }()
+	// Deferred for the same reason as the bust above, and it has to be: a
+	// mid-batch error on a LATER user returns before the explicit rotation
+	// below, with earlier deletes already committed. The retry cannot repair
+	// that — those deletes report wasThere=false next time, so `removed` can
+	// come back empty and the rotation is then skipped for good, leaving an
+	// already-removed member holding a key that opens every future message.
+	// Best effort and logged rather than returned: this only runs on a path
+	// that is already failing, and the caller's error must not be replaced.
+	rotated := false
+	defer func() {
+		if rotated || len(removed) == 0 {
+			return
+		}
+		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			slog.ErrorContext(c, "room key rotation after a failed bot removal did not complete; removed members may still hold a working key",
+				"error", err, "roomID", roomID, "removed", len(removed))
+		}
+	}()
 	for _, userID := range req.UserIDs {
-		wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
+		// The account comes from the delete itself, so the bust below cannot be
+		// skipped by the enrichment lookup failing. It is the same value
+		// UpsertSubscription wrote into subscriptions.u.account at add-time,
+		// which is what subauthcache.SubKey is keyed on.
+		// The destination is resolved BEFORE the delete, because the user doc is
+		// the only place it lives: the subscription's own siteId is the ROOM's
+		// site, and its u sub-document carries just _id/account/isBot. Resolving
+		// first means a lookup failure aborts before anything is committed, so a
+		// retry re-runs the whole removal; resolving afterwards would delete the
+		// row and only then discover it cannot address the remote site.
+		u, err := h.store.FindUser(c, userID)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			// The user doc is genuinely gone, not unreachable: there is no remote
+			// site to notify, so the local removal proceeds with no federation.
+			u = nil
+		case err != nil:
+			return nil, fmt.Errorf("resolve removal destination for user %s: %w", userID, err)
+		}
+
+		account, wasThere, err := h.store.DeleteSubscription(c, roomID, userID)
 		if err != nil {
 			return nil, fmt.Errorf("delete subscription: %w", err)
 		}
+
+		// Queued whether or not THIS call did the deleting. A first call that
+		// committed the delete and then failed on its publish leaves the member
+		// still subscribed on their home site, and every retry reports
+		// wasThere=false — so gating the federation here means nothing ever
+		// repairs it. Republishing is safe: the dedup id is derived only from
+		// (roomID, userID, destSiteID), so JetStream drops it where the first
+		// publish landed and accepts it where it did not.
+		if u != nil && u.SiteID != "" && u.SiteID != h.siteID {
+			pendingFederations = append(pendingFederations, memberRemoval{userID: u.ID, account: u.Account, destSiteID: u.SiteID})
+		}
+
 		if !wasThere {
-			// Duplicate remove is a no-op.
+			// Duplicate remove: nothing was de-authorized here, so nothing local
+			// follows — no bust, no rotation, no second system message. Only the
+			// federation above, which is idempotent at the destination.
 			continue
 		}
 		removed = append(removed, userID)
-
-		u, err := h.store.FindUser(c, userID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// User doc is gone (best-effort federation is fine).
-				continue
-			}
-			// Transient store error — local removal already committed but federation would be lost;
-			// log for an operator and don't fail the outer op (matches sysmsg best-effort semantics).
-			slog.WarnContext(c, "bot-room-service find user for federation failed",
-				"userID", userID, "roomID", roomID, "error", err)
-			continue
-		}
-		if u.SiteID != "" && u.SiteID != h.siteID {
-			if err := h.federateMemberRemoved(c, roomID, u.ID, u.Account, u.SiteID); err != nil {
-				return nil, err
-			}
+		if account != "" {
+			removedAccounts = append(removedAccounts, account)
 		}
 	}
 	// Only rotate when at least one subscription was actually deleted — a no-op remove must not rotate the room key (matches user pipeline).
+	//
+	// Rotation runs BEFORE the federation publishes, for the same reason the
+	// subauthcache bust above is deferred: by here the deletes are committed, and
+	// the retry cannot repair anything. It re-runs with wasThere=false on every
+	// user, so `removed` is empty, so it skips the rotation too — permanently.
+	// Federating first and returning on its failure therefore leaves the removed
+	// member holding a key that still opens every future message in the room,
+	// with nothing that ever rotates it. Rotating first downgrades that to the
+	// stranded-federation gap this handler already documents: the remote site
+	// still shows them subscribed, but they cannot read anything new.
 	if len(removed) > 0 {
+		// Set only AFTER the call succeeds. Returning the error here does not
+		// hand the problem to the caller's retry — that retry finds every
+		// committed delete reporting wasThere=false, so `removed` comes back
+		// empty and the rotation is skipped for good. This request is the last
+		// moment anything still knows a key must be rotated, so a failure must
+		// fall through to the deferred net for one more attempt rather than
+		// suppress it. A second rotation on an already-rotated key costs a spare
+		// version, which retired_room_keys expires; not rotating at all leaves a
+		// removed member reading every future message.
 		if err := h.rotateAndFanOut(c, roomID); err != nil {
+			return nil, err
+		}
+		rotated = true
+	}
+	for _, f := range pendingFederations {
+		if err := h.federateMemberRemoved(c, roomID, f.userID, f.account, f.destSiteID); err != nil {
 			return nil, err
 		}
 	}
@@ -445,8 +559,32 @@ func (h *handler) fanOutKey(ctx context.Context, roomID string, accounts []strin
 	}
 }
 
-// rotateAndFanOut fans the new key to survivors BEFORE committing via Rotate, so they hold
-// v+1 before broadcast-worker encrypts under it; no-current-key rooms just Set a fresh v1.
+// keyPairOrHeal returns the room's current key, minting and persisting a fresh
+// key when the room has none (legacy / never-keyed). Going-forward-only: it
+// unblocks new members but does NOT recover history a lost key had encrypted.
+// RecordKeyAbsent fires on the mint so ops can spot a lost-key event. SetIfAbsent
+// converges concurrent minters on a single v0 key. Mirrors the create path's mint.
+func (h *handler) keyPairOrHeal(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error) {
+	pair, err := h.keyStore.Get(ctx, roomID)
+	if err != nil && !errors.Is(err, roomkeystore.ErrNoCurrentKey) {
+		return nil, fmt.Errorf("get room key: %w", err)
+	}
+	if pair != nil {
+		return pair, nil
+	}
+	roomkeymetrics.RecordKeyAbsent(ctx, "")
+	fresh, err := roomkeystore.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generate room key: %w", err)
+	}
+	committed, err := h.keyStore.SetIfAbsent(ctx, roomID, *fresh)
+	if err != nil {
+		return nil, fmt.Errorf("store room key: %w", err)
+	}
+	return committed, nil
+}
+
+// rotateAndFanOut commits before fan-out; a predicted current+1 mislabels keys when removals race.
 func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 	survivors, err := h.store.ListRoomMemberAccounts(ctx, roomID)
 	if err != nil {
@@ -463,29 +601,14 @@ func (h *handler) rotateAndFanOut(ctx context.Context, roomID string) error {
 		return fmt.Errorf("generate new key: %w", err)
 	}
 
-	if currentPair == nil {
-		slog.WarnContext(ctx, "no current key on remove-member; skip fan-out", "roomID", roomID)
-		if _, err := h.keyStore.Set(ctx, roomID, *newPair); err != nil {
-			return fmt.Errorf("store new key (no prior): %w", err)
-		}
-		return nil
+	committed, err := roomkeystore.CommitRotation(ctx, h.keyStore, roomID, currentPair, newPair)
+	if err != nil {
+		return err
 	}
 
-	predictedVersion := currentPair.Version + 1
 	h.fanOutKey(ctx, roomID, survivors,
-		model.RoomKeyEvent{RoomID: roomID, Version: predictedVersion, PrivateKey: newPair.PrivateKey},
+		model.RoomKeyEvent{RoomID: roomID, Version: committed.Version, PrivateKey: committed.KeyPair.PrivateKey},
 		"fan out rotated key failed")
-
-	if _, err := h.keyStore.Rotate(ctx, roomID, *newPair); err != nil {
-		if errors.Is(err, roomkeystore.ErrNoCurrentKey) {
-			// Fan-out already committed survivors to predictedVersion; persist at the same version so broadcast-worker reads under the key clients hold.
-			if setErr := h.keyStore.SetWithVersion(ctx, roomID, *newPair, predictedVersion); setErr != nil {
-				return fmt.Errorf("store new key (fallback): %w", setErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("rotate key: %w", err)
-	}
 	return nil
 }
 
@@ -530,8 +653,9 @@ func (h *handler) loadRoomAndAssertOwner(ctx context.Context, roomID string, ide
 
 // federateMemberAdded relays member_added to a remote site's inbox-worker.
 // For DM/botDM the target names the subscription from RequesterAccount; for channels, from RoomName.
+// lastMsgAt is nil for a room with no messages yet (both creation paths).
 func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, account, destSiteID string, at time.Time,
-	roomType model.RoomType, roomName, requesterAccount string,
+	roomType model.RoomType, roomName, requesterAccount string, lastMsgAt *time.Time,
 ) error {
 	payload, err := json.Marshal(model.MemberAddEvent{
 		Type:             "member_added",
@@ -542,6 +666,7 @@ func (h *handler) federateMemberAdded(ctx context.Context, roomID, userID, accou
 		SiteID:           h.siteID,
 		Accounts:         []string{account},
 		JoinedAt:         at.UnixMilli(),
+		LastMsgAt:        timeutil.TimeToMillis(lastMsgAt),
 		Timestamp:        at.UnixMilli(),
 	})
 	if err != nil {

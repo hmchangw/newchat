@@ -39,16 +39,17 @@ type sideStoreCounts struct {
 
 // writeSideStores writes every seeded room key into its room document (via
 // roomkeystore.Set against MongoDB) and every restricted-rooms cache entry (via
-// valkeyutil.Client.Set with restrictedCacheTTL).
-func writeSideStores(ctx context.Context, keys roomkeystore.RoomKeyStore, client valkeyutil.Client) (sideStoreCounts, error) {
+// valkeyutil.Client.Set with restrictedCacheTTL), scoped to site's rows — or
+// every row, when site is empty (the single-site path).
+func writeSideStores(ctx context.Context, keys roomkeystore.RoomKeyStore, client valkeyutil.Client, site string) (sideStoreCounts, error) {
 	var c sideStoreCounts
-	for _, k := range BuildRoomKeys() {
+	for _, k := range scopeToSite(BuildRoomKeys(), site, roomKeyHomeSite) {
 		if _, err := keys.Set(ctx, k.RoomID, k.KeyPair); err != nil {
 			return c, fmt.Errorf("set room key for %s: %w", k.RoomID, err)
 		}
 		c.RoomKeys++
 	}
-	for _, e := range BuildRestrictedCache() {
+	for _, e := range scopeToSite(BuildRestrictedCache(), site, restrictedCacheHomeSite) {
 		payload, err := restrictedCachePayload(e)
 		if err != nil {
 			return c, fmt.Errorf("encode restricted cache for %s: %w", e.Account, err)

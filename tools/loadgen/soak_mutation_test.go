@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"testing"
 	"time"
@@ -41,7 +41,7 @@ func TestSoakMutator_EditAndDeleteUseOriginalSender(t *testing.T) {
 			wantSubject: subject.MsgEdit("alice", "room-1", "site-1"),
 			assertState: func(t *testing.T, message soakCatalogMessage) {
 				assert.True(t, message.Edited)
-				assert.Equal(t, "updated", message.Content)
+				assert.Equal(t, soakContentDigest("updated"), message.ContentSHA256)
 			},
 		},
 		{

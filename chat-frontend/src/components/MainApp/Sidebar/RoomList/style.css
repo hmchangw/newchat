@@ -53,6 +53,36 @@
   color: var(--text-primary);
 }
 
+.room-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.room-item-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Always occupies a line, whether or not it has content — a room with no
+   preview must not render a shorter row. */
+.room-preview {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.4;
+  min-height: 1.4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-preview-sender {
+  color: var(--text-secondary);
+}
+
 .room-name {
   flex: 1;
   min-width: 0;

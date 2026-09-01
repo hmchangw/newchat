@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
+	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -37,8 +38,8 @@ func TestNotificationWorker_CacheBackedFanOut(t *testing.T) {
 	seedSubscriptions(t, ctx, subCol)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
+	lookup := roomsubcache.NewLookup(cache, loader, time.Minute)
 
 	nc, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -214,8 +215,8 @@ func TestMongoMemberLoader_Load_HistorySharedSince(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loader := &mongoMemberLoader{col: col, users: db.Collection("users")}
-	got, err := loader.Load(ctx, "rX")
+	loader := roomsubcache.NewMongoLoader(col, db.Collection("users"))
+	got, err := loader(ctx, "rX")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
@@ -269,8 +270,8 @@ func TestMongoMemberLoader_Load_HomeSiteFromUsers(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	got, err := loader.Load(ctx, "rH")
+	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
+	got, err := loader(ctx, "rH")
 	require.NoError(t, err)
 	require.Len(t, got, 3)
 
@@ -318,8 +319,8 @@ func TestNotificationWorker_BadgeRPCs_GroupByUsersHomeSite(t *testing.T) {
 	require.NoError(t, err)
 
 	cache := roomsubcache.NewValkeyCache(valkeyutil.WrapClusterClient(valkeyClient))
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	lookup := newCachedMemberLookup(cache, loader.Load, time.Minute)
+	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
+	lookup := roomsubcache.NewLookup(cache, loader, time.Minute)
 
 	badge := &fakeBadgeClient{resp: map[string]map[string]int{
 		"site-a": {"bob": 2},
@@ -467,4 +468,62 @@ func TestMongoUserSettings_FailsOpenOnReadError_Integration(t *testing.T) {
 	got, err := s.Snapshot(cancelCtx, []string{"muted-user", "partial-user"})
 	require.NoError(t, err, "Snapshot must never return an error, even when the read fails")
 	assert.Empty(t, got, "a failed read yields an empty map so every account defaults to push")
+}
+
+func TestUserMentionNames_Resolve_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_mention_names")
+	ctx := context.Background()
+	usersCol := db.Collection("users")
+
+	_, err := usersCol.InsertMany(ctx, []any{
+		bson.M{"_id": "u-alice", "account": "alice", "engName": "Alice Wang", "chineseName": "愛麗絲"},
+		bson.M{"_id": "u-bob", "account": "bob", "engName": "Bob Chen"},
+		bson.M{"_id": "u-carol", "account": "carol", "chineseName": "凱蘿"},
+		bson.M{"_id": "u-dave", "account": "dave"},
+	})
+	require.NoError(t, err)
+
+	r := newUserMentionNames(userstore.NewMongoStore(usersCol), 5*time.Second)
+	got, err := r.Resolve(ctx, []string{"alice", "bob", "carol", "dave", "ghost"})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{
+		"alice": "Alice Wang 愛麗絲",
+		"bob":   "Bob Chen",
+		"carol": "凱蘿",
+	}, got, "a user with neither name and an unknown account are both absent, keeping their raw @token")
+}
+
+func TestUserMentionNames_PushBodySubstitution_Integration(t *testing.T) {
+	db := testutil.MongoDB(t, "notification_worker_mention_body")
+	ctx := context.Background()
+	usersCol := db.Collection("users")
+
+	_, err := usersCol.InsertMany(ctx, []any{
+		bson.M{"_id": "u-bob", "account": "bob", "engName": "Bob Chen", "chineseName": "陳大寶"},
+	})
+	require.NoError(t, err)
+
+	members := &stubMembers{out: map[string][]roomsubcache.Member{
+		"r1": {{ID: "alice", Account: "alice"}, {ID: "bob", Account: "bob"}},
+	}}
+	emit := &recordingEmitter{}
+	h := NewHandler(HandlerDeps{
+		Members:            members,
+		Followers:          &stubFollowers{},
+		Parent:             stubParent{},
+		Presence:           noopPresenceSnapshotter{},
+		Hook:               noopVetoer{},
+		Emitter:            emit,
+		MentionNames:       newUserMentionNames(userstore.NewMongoStore(usersCol), 5*time.Second),
+		LargeRoomThreshold: 500,
+	})
+
+	require.NoError(t, h.HandleMessage(ctx, msgEvent(&model.Message{
+		ID: "m1", RoomID: "r1", UserID: "alice", UserAccount: "alice",
+		Content: "@all ping @bob and @ghost", CreatedAt: time.Now(),
+	})))
+
+	require.Len(t, emit.emitted, 1)
+	assert.Equal(t, "All ping Bob Chen 陳大寶 and @ghost", emit.emitted[0].Body)
 }

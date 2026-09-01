@@ -476,3 +476,38 @@ func TestBuildHREmployees_DirectoryFieldsPopulated(t *testing.T) {
 func TestBuildHREmployees_DeterministicAcrossCalls(t *testing.T) {
 	assert.Equal(t, BuildHREmployees(), BuildHREmployees())
 }
+
+// A room with members homed at more than one site must carry CrossSite=true:
+// that is what routes its events onto the global chat.room.{id} lane, which is
+// the lane that crosses the NATS gateway.
+func TestBuildRooms_CrossSiteFlagMatchesMembership(t *testing.T) {
+	userSite := userSiteByAccount()
+
+	for _, r := range BuildRooms() {
+		sites := map[string]struct{}{}
+		for _, account := range r.Accounts {
+			sites[userSite[account]] = struct{}{}
+		}
+		spansSites := len(sites) > 1
+
+		if spansSites {
+			require.NotNil(t, r.CrossSite, "room %s spans sites and needs CrossSite set", r.ID)
+			assert.True(t, *r.CrossSite, "room %s spans sites", r.ID)
+			continue
+		}
+		assert.Nil(t, r.CrossSite, "room %s is single-site and should stay unclassified", r.ID)
+	}
+}
+
+func TestBuildRooms_KnownCrossSiteRooms(t *testing.T) {
+	byID := map[string]model.Room{}
+	for _, r := range BuildRooms() {
+		byID[r.ID] = r
+	}
+
+	for _, id := range []string{"r-general", "r-eng", "r-remote-announce"} {
+		require.NotNil(t, byID[id].CrossSite, "%s", id)
+		assert.True(t, *byID[id].CrossSite, "%s", id)
+	}
+	assert.Nil(t, byID["r-design"].CrossSite, "r-design is all site-local")
+}

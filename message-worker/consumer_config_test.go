@@ -7,6 +7,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -14,8 +15,11 @@ import (
 func TestBuildConsumerConfig(t *testing.T) {
 	t.Run("propagates settings", func(t *testing.T) {
 		cc := buildConsumerConfig(stream.ConsumerSettings{
-			AckWait:       30 * time.Second,
-			MaxDeliver:    5,
+			AckWait: 30 * time.Second,
+			// The symbol, not a literal: the default moved 5→6 when main added
+			// exponential backoff, and a literal here silently stopped matching
+			// it, so the outage budget was no longer being applied under test.
+			MaxDeliver:    stream.DefaultMaxDeliver,
 			MaxWaiting:    512,
 			MaxAckPending: 1000,
 		}, "default", "site-a")
@@ -24,7 +28,8 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.Equal(t, 1000, cc.MaxAckPending)
 		assert.Equal(t, jetstream.AckExplicitPolicy, cc.AckPolicy)
 		assert.Equal(t, 30*time.Second, cc.AckWait)
-		assert.Equal(t, 5, cc.MaxDeliver)
+		assert.Equal(t, jsretry.DeliveriesFor(jsretry.DefaultBackoff, stream.OutageRetryWindow), cc.MaxDeliver,
+			"a consumer left at the package default gets the budget derived from the schedule it settles with")
 		assert.Equal(t, 512, cc.MaxWaiting)
 		assert.Equal(t, jetstream.DeliverAllPolicy, cc.DeliverPolicy)
 	})

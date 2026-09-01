@@ -60,3 +60,30 @@ func decryptClientMessage(t *testing.T, data []byte, key *roomkeystore.Versioned
 	require.NoError(t, json.Unmarshal([]byte(plaintext), &msg))
 	return evt, &msg
 }
+
+func decryptEditedContent(t *testing.T, raw json.RawMessage, key *roomkeystore.VersionedKeyPair) string {
+	t.Helper()
+	var env roomcrypto.EncryptedMessage
+	require.NoError(t, json.Unmarshal(raw, &env))
+	require.Equal(t, key.Version, env.Version)
+	plaintext, err := decryptForTest(&env, key.KeyPair.PrivateKey)
+	require.NoError(t, err)
+	return plaintext
+}
+
+// testMentionRequestID stands in for the X-Request-ID that message-gatekeeper
+// stamps on every canonical event, which is what the mention dedup ID is keyed on.
+const testMentionRequestID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+
+// unwrapOutbox peels an OUTBOX publish back to the federated payload:
+// OutboxEvent.Envelope -> InboxEvent.Payload -> the typed inner event.
+func unwrapOutbox(t *testing.T, data []byte) (model.OutboxEvent, model.InboxEvent, model.SubscriptionMentionEvent) {
+	t.Helper()
+	var relay model.OutboxEvent
+	require.NoError(t, json.Unmarshal(data, &relay))
+	var envelope model.InboxEvent
+	require.NoError(t, json.Unmarshal(relay.Envelope, &envelope))
+	var evt model.SubscriptionMentionEvent
+	require.NoError(t, json.Unmarshal(envelope.Payload, &evt))
+	return relay, envelope, evt
+}

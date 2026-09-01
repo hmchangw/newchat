@@ -32,11 +32,13 @@ var soakAllErrorClasses = [...]soakErrorClass{
 	soakErrorForbidden,
 	soakErrorBadRequest,
 	soakErrorConflict,
-	soakErrorDecode,
+	soakErrorRequestEncode,
+	soakErrorResponseDecode,
 	soakErrorAssertion,
 	soakErrorAmbiguous,
 	soakErrorMutationTargetMissing,
 	soakErrorResponseTooLarge,
+	soakErrorCanceled,
 }
 
 type soakOperationOutcome string
@@ -63,7 +65,16 @@ type soakOperationSample struct {
 	Latency       time.Duration
 	Retries       int
 	ErrorClass    soakErrorClass
+	ErrorReason   soakErrorReason
 	TargetMissing bool
+	// RowsCounted marks the samples whose Rows is a real count of what the reply
+	// carried. Only those may be observed: a mutation has no rows at all, and a
+	// read whose count is a constant or a server-side total is not reporting
+	// rows either. An empty page is a real answer, which is why the gate is this
+	// flag and not a non-zero count.
+	RowsCounted bool
+	ReplyBytes  int
+	Rows        int
 }
 
 type soakFixedHistogram struct {
@@ -168,6 +179,9 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 	if sample.ErrorClass != "" && !validSoakErrorClass(sample.ErrorClass) {
 		return fmt.Errorf("invalid soak error label %q", sample.ErrorClass)
 	}
+	if !validSoakErrorReason(sample.ErrorReason) {
+		return fmt.Errorf("invalid soak error reason label %q", sample.ErrorReason)
+	}
 	phase := "measured"
 	if sample.At.Before(c.warmupDeadline) {
 		phase = "warmup"
@@ -224,22 +238,44 @@ func (c *SoakCollector) Record(sample *soakOperationSample) error {
 			string(sample.Outcome),
 			phase,
 		).Inc()
-		if phase == "measured" {
-			if sample.Retries > 0 {
-				c.metrics.SoakRetries.WithLabelValues(action).Add(
-					float64(sample.Retries),
-				)
-			}
-			if sample.ErrorClass != "" {
-				c.metrics.SoakErrors.WithLabelValues(
+		// Failures and retries count in both phases: a process that keeps
+		// restarting spends most of its life warming up, and gating them on
+		// "measured" leaves the run that most needs diagnosing reporting almost
+		// nothing. Latency stays measured-only — a warm-up sample is taken
+		// against cold caches and would bias every percentile the run reports.
+		if sample.Retries > 0 {
+			c.metrics.SoakRetries.WithLabelValues(action, phase).Add(
+				float64(sample.Retries),
+			)
+		}
+		if sample.ErrorClass != "" {
+			c.metrics.SoakErrors.WithLabelValues(
+				action,
+				string(sample.ErrorClass),
+				phase,
+			).Inc()
+			if sample.ErrorReason != "" {
+				c.metrics.SoakErrorReasons.WithLabelValues(
 					action,
 					string(sample.ErrorClass),
+					string(sample.ErrorReason),
+					phase,
 				).Inc()
 			}
+		}
+		if phase == "measured" {
 			if sample.Latency > 0 {
 				c.metrics.SoakRPCLatency.WithLabelValues(action).Observe(
 					sample.Latency.Seconds(),
 				)
+			}
+			if sample.Outcome == soakOutcomeSucceeded && sample.RowsCounted {
+				if sample.ReplyBytes > 0 {
+					c.metrics.SoakReplyBytes.WithLabelValues(action).Observe(
+						float64(sample.ReplyBytes),
+					)
+				}
+				c.metrics.SoakRows.WithLabelValues(action).Observe(float64(sample.Rows))
 			}
 			if sample.TargetMissing {
 				c.metrics.SoakMutationTargetMissing.Inc()
@@ -261,6 +297,9 @@ func (c *SoakCollector) RecordVerification(
 	if !validSoakVerifyClass(result.Class) {
 		return fmt.Errorf("invalid soak verification class %q", result.Class)
 	}
+	if !validSoakVerifyField(result.Field) {
+		return fmt.Errorf("invalid soak verification field %q", result.Field)
+	}
 	c.mu.Lock()
 	if c.verifications[result.Action] == nil {
 		c.verifications[result.Action] = make(map[soakVerifyClass]uint64)
@@ -271,6 +310,7 @@ func (c *SoakCollector) RecordVerification(
 		c.metrics.SoakVerifications.WithLabelValues(
 			string(result.Action),
 			string(result.Class),
+			string(result.Field),
 		).Inc()
 	}
 	return nil

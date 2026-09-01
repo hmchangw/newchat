@@ -26,10 +26,13 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/roommetacache"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 type publishedMsg struct {
@@ -179,6 +182,8 @@ func TestHandler_ProcessRemoveMember_BotTarget_RotatesAndSubUpdate(t *testing.T)
 	// Rotation now runs for a bot removal too — the survivor fan-out reads accounts.
 	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
 	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u1", Account: requester, SiteID: siteID, EngName: "Alice"}, nil)
+	// Removed member is a bot: sys-msg content resolution looks up its app name.
+	store.EXPECT().GetApp(gomock.Any(), botAcct).Return(nil, ErrAppNotFound)
 
 	var published []publishedMsg
 	h := NewHandler(store, siteID, func(_ context.Context, subj string, data []byte, _ string) error {
@@ -219,7 +224,7 @@ func TestHandler_ProcessRemoveMember_SelfLeave_DualMembership(t *testing.T) {
 			ChineseName: "愛",
 		},
 		HasOrgMembership: true,
-		Roles:            []model.Role{model.RoleMember},
+		Roles:            []model.Role{model.RoleUser},
 	}
 
 	// Only DeleteRoomMember(individual) called — no subscription delete, no events,
@@ -340,7 +345,7 @@ func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted(t *testing.T) {
 			userResult := &UserWithMembership{
 				User:             model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛"},
 				HasOrgMembership: true,
-				Roles:            []model.Role{model.RoleOwner, model.RoleMember},
+				Roles:            []model.Role{model.RoleOwner, model.RoleUser},
 			}
 
 			gomock.InOrder(
@@ -500,7 +505,7 @@ func TestHandler_ProcessAddMembers(t *testing.T) {
 			for _, s := range subs {
 				assert.Equal(t, "site-a", s.SiteID)
 				assert.Equal(t, model.RoomTypeChannel, s.RoomType)
-				assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+				assert.Equal(t, []model.Role{model.RoleUser}, s.Roles)
 				require.NotNil(t, s.HistorySharedSince)
 				assert.Equal(t, s.JoinedAt, *s.HistorySharedSince)
 			}
@@ -1341,7 +1346,12 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	}
 	h := NewHandler(store, "site-a", publish, testKeyStore, testKeySender, subject.RouteGlobal)
 
+	// GetRoomMeta is served from roommetacache.Meta, which has no LastMsgAt
+	// field — the real store can never return one here. Mirroring that exactly
+	// is the point: the activity position must come from the full-room read, so
+	// a regression that reads it off the meta view fails this test.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", CrossSite: ptrBool(false)}, nil)
+	roomLastMsgAt := time.UnixMilli(1735689500000).UTC()
 	// bob is the direct add; carol joins via org expansion only (not in req.Users).
 	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string{"eng"}, []string{"bob"}, "r1").
 		Return([]AddMemberCandidate{{Account: "bob", SiteID: "site-a"}, {Account: "carol", SiteID: "site-b"}}, nil)
@@ -1360,7 +1370,7 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 		})
 	// Room already tracks individuals → no first-org backfill.
 	store.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(true, nil)
-	expectGetRoom(store, "r1", "eng")
+	expectGetRoom(store, "r1", "eng", roomLastMsgAt)
 	store.EXPECT().BulkCreateRoomMembers(gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, members []*model.RoomMember) error {
 			return nil
@@ -1431,6 +1441,13 @@ func TestHandler_ProcessAddMembers_WithOrgs_RoomEventMembersEnrichment(t *testin
 	var relayEvt model.MemberAddEvent
 	require.NoError(t, json.Unmarshal(relayEnv.Payload, &relayEvt))
 	assert.Equal(t, []string{"carol"}, relayEvt.Accounts, "the cross-site lane keeps the destination-site accounts")
+
+	// The destination site holds no rooms doc for r1, so the cross-site copy
+	// carries the room's activity position to seed its chat-list ordering.
+	require.NotNil(t, relayEvt.LastMsgAt, "cross-site member_added carries the room's activity position")
+	assert.Equal(t, roomLastMsgAt.UnixMilli(), *relayEvt.LastMsgAt)
+	assert.Nil(t, evt.LastMsgAt, "stripped from the room-scoped (frontend) copy, like accounts")
+	assert.Nil(t, internalEvt.LastMsgAt, "the same-site INBOX lane has a local rooms doc and needs no seed")
 }
 
 func TestHandler_ProcessAddMembers_OrgWithNoUsersFallsBackToOrgID(t *testing.T) {
@@ -1831,7 +1848,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteRoomMemberError(t *testing.T) {
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1854,7 +1871,7 @@ func TestHandler_ProcessRemoveIndividual_DualDemoteError(t *testing.T) {
 		Return(&UserWithMembership{
 			User:             model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
 			HasOrgMembership: true,
-			Roles:            []model.Role{model.RoleOwner, model.RoleMember},
+			Roles:            []model.Role{model.RoleOwner, model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1879,7 +1896,7 @@ func TestHandler_ProcessRemoveIndividual_DeleteSubscriptionError(t *testing.T) {
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -1905,7 +1922,7 @@ func TestHandler_ProcessRemoveIndividual_ReconcileMemberCountsError(t *testing.T
 		GetUserWithMembership(gomock.Any(), "r1", "alice").
 		Return(&UserWithMembership{
 			User:  model.User{ID: "u1", Account: "alice", EngName: "Alice", ChineseName: "愛"},
-			Roles: []model.Role{model.RoleMember},
+			Roles: []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().
 		DeleteRoomMember(gomock.Any(), "r1", model.RoomMemberIndividual, "u1").
@@ -2785,21 +2802,23 @@ func TestResolveRoomName(t *testing.T) {
 	}
 }
 
-func TestDetermineRoomTypeFromPayload(t *testing.T) {
+func TestCreateRoomType(t *testing.T) {
 	tests := map[string]struct {
 		req  model.CreateRoomRequest
 		want model.RoomType
 	}{
-		"single human user → DM":                       {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
-		"single .bot user → botDM":                     {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
-		"single platform-admin pseudo-account → botDM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeBotDM},
-		"single QA p_ user → regular DM":               {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
-		"named → channel":                              {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
-		"multi-user → channel":                         {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
+		"single human user → DM":   {model.CreateRoomRequest{Users: []string{"bob"}}, model.RoomTypeDM},
+		"single .bot user → botDM": {model.CreateRoomRequest{Users: []string{"helper.bot"}}, model.RoomTypeBotDM},
+		// p_admin is human-operated and has no app document; mirrors room-service.
+		"single platform-admin pseudo-account → regular DM": {model.CreateRoomRequest{Users: []string{"p_adminsiteA"}}, model.RoomTypeDM},
+		"bot requester with a human counterpart → botDM":    {model.CreateRoomRequest{RequesterAccount: "weather.bot", Users: []string{"alice"}}, model.RoomTypeBotDM},
+		"single QA p_ user → regular DM":                    {model.CreateRoomRequest{Users: []string{"p_qa1"}}, model.RoomTypeDM},
+		"named → channel":                                   {model.CreateRoomRequest{Name: "team", Users: []string{"p_qa1"}}, model.RoomTypeChannel},
+		"multi-user → channel":                              {model.CreateRoomRequest{Users: []string{"bob", "carol"}}, model.RoomTypeChannel},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, determineRoomTypeFromPayload(&tc.req))
+			assert.Equal(t, tc.want, model.CreateRoomType(&tc.req))
 		})
 	}
 }
@@ -3380,7 +3399,7 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 	// finishCreateRoom calls resolveSubUpdateCounterpart per sub; the human sub has
 	// Name="helper.bot" (RoomTypeBotDM), so GetApp is invoked once.
 	// Assistant left nil to match the real store's {"name":1} projection.
-	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil)
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}, nil)
 
 	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-1").Return(nil)
 
@@ -3417,8 +3436,9 @@ func TestProcessCreateRoom_BotDM_HasIsSubscribed(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Helper Bot", humanEvt.RoomName)
-	// ...and the app it is now talking to, so the client renders the row without a refetch.
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-helper", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	// ...and the full app it is now talking to (same shape subscription.list nests),
+	// so the client renders the row without a refetch.
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-helper", Name: "Helper Bot", Description: "helps you", Assistant: &model.AppAssistant{Enabled: true, Name: "helper.bot"}}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo)
 
 	// bot (helper.bot) subscription.update must carry the human's display name,
@@ -3488,7 +3508,7 @@ func TestProcessCreateRoom_Channel_BuildsSubsAndMembers(t *testing.T) {
 	assert.Equal(t, "Deal Team", ownerSub.Name)
 
 	memberSub := capturedSubs[1]
-	assert.Equal(t, []model.Role{model.RoleMember}, memberSub.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, memberSub.Roles)
 
 	// 4 room_members: 2 individuals (bob+carol) + 1 org + 1 owner (alice)
 	require.Len(t, capturedMembers, 4)
@@ -3646,9 +3666,14 @@ func TestProcessCreateRoom_Channel_NoRoomKeyEvent(t *testing.T) {
 
 // expectGetRoom stubs the fan-out room re-read tolerantly (0+ calls) so tests
 // not asserting on the event room view stay independent of the read.
-func expectGetRoom(s *MockSubscriptionStore, roomID, name string) {
-	s.EXPECT().GetRoom(gomock.Any(), roomID).
-		Return(&model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}, nil).AnyTimes()
+// expectGetRoom stubs the full-room re-read. An optional lastMsgAt sets the
+// room's activity position, which the cross-site MemberAddEvent carries.
+func expectGetRoom(s *MockSubscriptionStore, roomID, name string, lastMsgAt ...time.Time) {
+	room := &model.Room{ID: roomID, Name: name, Type: model.RoomTypeChannel, SiteID: "site-a"}
+	if len(lastMsgAt) > 0 {
+		room.LastMsgAt = &lastMsgAt[0]
+	}
+	s.EXPECT().GetRoom(gomock.Any(), roomID).Return(room, nil).AnyTimes()
 }
 
 // assertNoRoomKeyPublished pins the no-separate-room.key invariant on the accounts' key subjects.
@@ -5116,10 +5141,16 @@ func TestProcessAddMembers_NoRoomKeyEventOnAdd(t *testing.T) {
 	assert.Equal(t, 0, pub.publishCount())
 }
 
-func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
+// TestProcessAddMembers_SelfHealsWhenKeyMissing: a key-absent room no longer
+// permanently fails the "added" fan-out. Instead the worker mints a fresh key
+// (SetIfAbsent) and proceeds, so the new member gets a usable key inline —
+// going-forward-only, but no silent drop.
+func TestProcessAddMembers_SelfHealsWhenKeyMissing(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockStore := NewMockSubscriptionStore(ctrl)
 	keyStore := NewMockRoomKeyStore(ctrl)
+	pub := &mockPublisher{}
+	publish := func(_ context.Context, subj string, data []byte, _ string) error { return pub.Publish(subj, data) }
 
 	mockStore.EXPECT().GetRoomMeta(gomock.Any(), "r1").Return(&model.Room{
 		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a",
@@ -5133,19 +5164,79 @@ func TestProcessAddMembers_PermanentErrorWhenKeyMissing(t *testing.T) {
 		ID: "u_alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛",
 	}, nil)
 	mockStore.EXPECT().HasAnyRoomMembers(gomock.Any(), "r1").Return(false, nil)
-	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing
+	keyStore.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil) // key missing → heal
+	mintedKey := roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x07}, 32)}
+	keyStore.EXPECT().SetIfAbsent(gomock.Any(), "r1", gomock.Any()).
+		Return(&roomkeystore.VersionedKeyPair{Version: 0, KeyPair: mintedKey}, nil)
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	mockStore.EXPECT().ApplyMemberCountDelta(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	mockStore.EXPECT().GetRoom(gomock.Any(), "r1").Return(&model.Room{
+		ID: "r1", Name: "deal team", Type: model.RoomTypeChannel, SiteID: "site-a", UserCount: 2,
+	}, nil)
 
-	h := NewHandler(mockStore, "site-a", func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, keyStore, roomkeysender.NewSender(&mockPublisher{}), subject.RouteGlobal)
+	h := NewHandler(mockStore, "site-a", publish, keyStore, roomkeysender.NewSender(pub), subject.RouteGlobal)
 
 	req := model.AddMembersRequest{
 		RoomID: "r1", RequesterAccount: "alice", Users: []string{"charlie"}, Timestamp: 1,
 	}
 	data, _ := json.Marshal(req)
 	ctx := natsutil.WithRequestID(context.Background(), "0193abcd-0193-7abc-89ab-0193abcd0012")
-	err := h.processAddMembers(ctx, data)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, errPermanent))
-	assert.True(t, errors.Is(err, errRoomKeyAbsent), "absent key must satisfy errRoomKeyAbsent sentinel")
+	require.NoError(t, h.processAddMembers(ctx, data))
+
+	var evt model.SubscriptionUpdateEvent
+	found := false
+	for _, p := range subscriptionUpdates(pub.published()) {
+		if p.subj == subject.SubscriptionUpdate("charlie") {
+			require.NoError(t, json.Unmarshal(p.data, &evt))
+			found = true
+		}
+	}
+	require.True(t, found, "subscription.update must publish for the healed member")
+	require.NotNil(t, evt.Subscription.Room.PrivateKey, "minted key must ride the added event")
+	assert.Equal(t, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x07}, 32)), *evt.Subscription.Room.PrivateKey)
+	require.NotNil(t, evt.Subscription.Room.KeyVersion)
+	assert.Equal(t, 0, *evt.Subscription.Room.KeyVersion)
+}
+
+// TestKeyPairOrHeal covers the heal helper directly: a present key is returned
+// untouched (no re-mint — idempotent on redelivery), an absent key is minted via
+// SetIfAbsent, and an infra Get error is a transient failure (no mint).
+func TestKeyPairOrHeal(t *testing.T) {
+	noop := func(_ context.Context, _ string, _ []byte, _ string) error { return nil }
+
+	t.Run("present key returned without minting", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		present := &roomkeystore.VersionedKeyPair{Version: 3, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x01}, 32)}}
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(present, nil)
+		// No SetIfAbsent expectation — a mint here would fail the test.
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		got, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.NoError(t, err)
+		assert.Same(t, present, got)
+	})
+
+	t.Run("absent key minted via SetIfAbsent", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		minted := &roomkeystore.VersionedKeyPair{Version: 0, KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0x02}, 32)}}
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(nil, nil)
+		ks.EXPECT().SetIfAbsent(gomock.Any(), "r1", gomock.Any()).Return(minted, nil)
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		got, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.NoError(t, err)
+		assert.Same(t, minted, got)
+	})
+
+	t.Run("infra Get error is transient, no mint", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ks := NewMockRoomKeyStore(ctrl)
+		ks.EXPECT().Get(gomock.Any(), "r1").Return(nil, errors.New("mongo down"))
+		h := NewHandler(NewMockSubscriptionStore(ctrl), "site-a", noop, ks, testKeySender, subject.RouteGlobal)
+		_, err := h.keyPairOrHeal(context.Background(), "r1")
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, errPermanent), "infra error must be transient (NAK), not a permanent drop")
+	})
 }
 
 // TestProcessAddMembers_TransientErrorWhenValkeyFails verifies that a non-nil
@@ -5650,6 +5741,45 @@ func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 	assert.Equal(t, `"Alice 愛" added "U1 一" to the chatroom`, sysMsg.Content)
 }
 
+// Single added individual is a bot: Content substitutes the registered app name.
+func TestHandler_ProcessAddMembers_Content_SingleBot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	roomID := "r1"
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
+		Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
+	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{"helper.bot"}, roomID).
+		Return([]AddMemberCandidate{{Account: "helper.bot"}}, nil)
+	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{ID: "bot_id", Account: "helper.bot", SiteID: "site-a"}}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").
+		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
+	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
+	expectGetRoom(store, roomID, "Chan")
+	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+
+	req := model.AddMembersRequest{
+		RoomID: roomID, RequesterID: "u_a", RequesterAccount: "alice",
+		Users: []string{"helper.bot"}, Timestamp: 1,
+	}
+	data, _ := json.Marshal(req)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	require.NoError(t, h.processAddMembers(ctx, data))
+
+	sysMsg := findSysMsg(t, published, "site-a", "members_added")
+	assert.True(t, strings.HasSuffix(sysMsg.Content, `added "Helper Bot" to the chatroom`))
+}
+
 // B2: len(subs)>=2 → multi form.
 func TestHandler_ProcessAddMembers_Content_Multi(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -5907,7 +6037,7 @@ func TestHandler_ProcessRemoveIndividual_SelfLeave_Content(t *testing.T) {
 		Return(&UserWithMembership{
 			User:             model.User{ID: "u_b", Account: "bob", SiteID: "site-a", EngName: "Bob", ChineseName: "鮑"},
 			HasOrgMembership: false,
-			Roles:            []model.Role{model.RoleMember},
+			Roles:            []model.Role{model.RoleUser},
 		}, nil)
 	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_b").Return(nil)
 	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "bob").Return(int64(1), nil)
@@ -5960,6 +6090,108 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 	assert.Equal(t, "alice", sysMsg.UserAccount)
 	assert.Equal(t, "u_a", sysMsg.UserID, "forced removal sets sender to requester")
 	assert.Equal(t, `"Alice 愛" removed "Bob 鮑" from the chatroom`, sysMsg.Content)
+}
+
+// Removed member is a bot: Content substitutes the registered app name for the
+// raw bot account. The requester side stays composed-name as always.
+func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotContent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	roomID := "r1"
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+		Return(&UserWithMembership{
+			User: model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+		}, nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").
+		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}, keyStore: testKeyStore, keySender: testKeySender}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: "helper.bot", Timestamp: 1}
+	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+	sysMsg := findSysMsg(t, published, "site-a", "member_removed")
+	assert.Equal(t, `"Alice 愛" removed "Helper Bot" from the chatroom`, sysMsg.Content)
+}
+
+// Self-leave by a bot: Content uses the registered app name when GetApp resolves it,
+// and degrades to the composed name / raw account (bot has no EngName/ChineseName, so
+// it falls all the way back to the account) when GetApp misses or errors. An infra
+// error is — unlike ErrAppNotFound, which is silent — logged, but the flow still
+// succeeds end to end either way.
+func TestHandler_ProcessRemoveIndividual_SelfLeave_BotContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupApp    func(store *MockSubscriptionStore)
+		wantContent string
+	}{
+		{
+			name: "app found",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+			},
+			wantContent: `"Helper Bot" left the chatroom`,
+		},
+		{
+			name: "app not found",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, ErrAppNotFound)
+			},
+			wantContent: `"helper.bot" left the chatroom`,
+		},
+		{
+			name: "app lookup error",
+			setupApp: func(store *MockSubscriptionStore) {
+				store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(nil, fmt.Errorf("mongo timeout"))
+			},
+			wantContent: `"helper.bot" left the chatroom`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			expectThreadCleanupAny(store)
+
+			roomID := "r1"
+			store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
+				Return(&UserWithMembership{
+					User:  model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
+					Roles: []model.Role{model.RoleUser},
+				}, nil)
+			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
+			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
+			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+			tt.setupApp(store)
+
+			var published []publishedMsg
+			h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, keyStore: testKeyStore, keySender: testKeySender}
+			h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+
+			req := model.RemoveMemberRequest{RoomID: roomID, Requester: "helper.bot", Account: "helper.bot", Timestamp: 1}
+			require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+			sysMsg := findSysMsg(t, published, "site-a", "member_left")
+			assert.Equal(t, tt.wantContent, sysMsg.Content)
+		})
+	}
 }
 
 // C3: org remove with every member also having individual subs (toRemove empty)
@@ -6303,53 +6535,160 @@ func TestHandler_ProcessAddMembers_HasAnyRoomMembersError_FailsClosed(t *testing
 // TestRequireDedupRequestID retired — the strict X-Request-ID gate now lives in
 // pkg/natsrouter.RequireRequestID (see TestRequireRequestID_* there).
 
-// TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion pins the
-// contract that when Rotate returns ErrNoCurrentKey (Valkey lost the key between
-// Get and Rotate), the fallback calls SetWithVersion at predictedVersion
-// (currentPair.Version+1) rather than Set (which would stamp v0), preventing the
-// version mismatch that would render the next encrypted message undecryptable.
-func TestHandler_RotateAndFanOut_ErrNoCurrentKey_UsesPredictedVersion(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	mockKeys := NewMockRoomKeyStore(ctrl)
+// keyEventRecorder captures published RoomKeyEvents; fanOutKey is concurrent, hence the mutex.
+type keyEventRecorder struct {
+	mu     sync.Mutex
+	events []model.RoomKeyEvent
+}
 
-	// currentPair simulates the key the handler fetched before calling rotateAndFanOut.
-	currentPair := &roomkeystore.VersionedKeyPair{
-		Version: 4,
-		KeyPair: roomkeystore.RoomKeyPair{
-			PrivateKey: bytes.Repeat([]byte{0xAA}, 32),
-		},
+func (r *keyEventRecorder) Publish(_ string, data []byte) error {
+	var evt model.RoomKeyEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return err
 	}
-	// predictedVersion = currentPair.Version + 1 = 5
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, evt)
+	return nil
+}
 
-	// Step 1: Rotate fails with ErrNoCurrentKey — Valkey lost the current key
-	// between Get (which returned currentPair) and Rotate.
-	gomock.InOrder(
-		mockKeys.EXPECT().
-			Rotate(gomock.Any(), "test-room", gomock.Any()).
-			Return(0, roomkeystore.ErrNoCurrentKey),
-		// Step 2: fallback must write at predictedVersion=5, NOT at v0 via Set.
-		// If the bug were present (Set called instead), gomock would raise
-		// "unexpected call to Set" because Set is not expected here.
-		mockKeys.EXPECT().
-			SetWithVersion(gomock.Any(), "test-room", gomock.Any(), 5).
-			Return(nil),
-	)
+func (r *keyEventRecorder) captured() []model.RoomKeyEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]model.RoomKeyEvent(nil), r.events...)
+}
 
+// newRotateTestHandler wires a Handler to mockKeys and a recording key sender.
+func newRotateTestHandler(t *testing.T, ctrl *gomock.Controller, mockKeys *MockRoomKeyStore) (*Handler, *keyEventRecorder) {
+	t.Helper()
+	rec := &keyEventRecorder{}
 	h := &Handler{
 		store:     NewMockSubscriptionStore(ctrl),
 		siteID:    "site-a",
 		keyStore:  mockKeys,
-		keySender: testKeySender,
+		keySender: roomkeysender.NewSender(rec),
 		publish: func(_ context.Context, _ string, _ []byte, _ string) error {
 			return nil
 		},
 	}
+	return h, rec
+}
 
-	// Call rotateAndFanOut directly — it is unexported but lives in package main,
-	// so the test (same package) can call it without test infrastructure.
-	// Pass an empty survivors slice: no fan-out side effects needed for this test.
-	err := h.rotateAndFanOut(context.Background(), "test-room", currentPair, nil)
-	require.NoError(t, err)
+func TestHandler_RotateAndFanOut_FansOutStoreAssignedVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// The store assigns 7, not the predicted 6: fanning out 6 would label these
+	// bytes with a version the store gave to a different key.
+	var committed []byte
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (int, error) {
+			committed = pair.PrivateKey
+			return 7, nil
+		})
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 7, events[0].Version,
+		"fan-out must carry the version the store assigned, never current+1")
+	require.NotEmpty(t, committed)
+	assert.Equal(t, committed, events[0].PrivateKey,
+		"survivors must receive exactly the bytes the store committed")
+}
+
+func TestHandler_RotateAndFanOut_ErrNoCurrentKey_AdoptsSetIfAbsentVersion(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	// Key vanished between Get and Rotate: the v0 fallback lost the set-if-absent
+	// race here, so the winner's bytes — not the local pair — must reach survivors.
+	winner := bytes.Repeat([]byte{0xBB}, 32)
+	var offeredPriv []byte
+	gomock.InOrder(
+		mockKeys.EXPECT().
+			Rotate(gomock.Any(), "test-room", gomock.Any()).
+			Return(0, roomkeystore.ErrNoCurrentKey),
+		mockKeys.EXPECT().
+			SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error) {
+				offeredPriv = pair.PrivateKey
+				return &roomkeystore.VersionedKeyPair{
+					Version: 0,
+					KeyPair: roomkeystore.RoomKeyPair{PrivateKey: winner},
+				}, nil
+			}),
+	)
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 4,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.NoError(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+
+	events := rec.captured()
+	require.Len(t, events, 1)
+	assert.Equal(t, 0, events[0].Version, "the set-if-absent fallback adopts version 0")
+	assert.Equal(t, winner, events[0].PrivateKey,
+		"the fallback must fan out the store's post-image bytes, not the locally generated pair")
+	require.NotEmpty(t, offeredPriv)
+	assert.NotEqual(t, offeredPriv, events[0].PrivateKey,
+		"the locally generated pair lost the race and must never reach survivors")
+}
+
+// Without an authoritative post-image the committed bytes are unknown, and handing
+// survivors an unconfirmed key is the failure this ordering exists to prevent.
+func TestHandler_RotateAndFanOut_SetIfAbsentFailure_FansOutNothing(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{name: "store errors", err: errors.New("mongo down"), wantMsg: "store room key"},
+		{name: "room gone", err: roomkeystore.ErrRoomNotFound, wantMsg: "store room key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockKeys := NewMockRoomKeyStore(ctrl)
+			mockKeys.EXPECT().SetIfAbsent(gomock.Any(), "test-room", gomock.Any()).Return(nil, tc.err)
+
+			h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+
+			err := h.rotateAndFanOut(context.Background(), "test-room", nil, []string{"alice"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+			assert.Empty(t, rec.captured(), "an unconfirmed key must never reach survivors")
+		})
+	}
+}
+
+func TestHandler_RotateAndFanOut_StoreFailureFansOutNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockKeys := NewMockRoomKeyStore(ctrl)
+
+	mockKeys.EXPECT().
+		Rotate(gomock.Any(), "test-room", gomock.Any()).
+		Return(0, errors.New("mongo down"))
+
+	h, rec := newRotateTestHandler(t, ctrl, mockKeys)
+	currentPair := &roomkeystore.VersionedKeyPair{
+		Version: 5,
+		KeyPair: roomkeystore.RoomKeyPair{PrivateKey: bytes.Repeat([]byte{0xAA}, 32)},
+	}
+
+	require.Error(t, h.rotateAndFanOut(context.Background(), "test-room", currentPair, []string{"alice"}))
+	assert.Empty(t, rec.captured(), "a failed rotation must not hand survivors a phantom key")
 }
 
 // Dept-first tiebreak: on overlap (org membership reachable via both sect and
@@ -6727,6 +7066,50 @@ func TestProcessRoomRename_PublishesRoomRenamedEvent(t *testing.T) {
 	assert.Positive(t, renamed.Timestamp)
 }
 
+// The same-site search feed (internal INBOX lane) must carry room_renamed so
+// search-sync re-indexes the spotlight room name even when there are no remote
+// members — mirrors the member_added/removed internal publish.
+func TestProcessRoomRename_PublishesInternalSearchFeed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store := NewMockSubscriptionStore(ctrl)
+
+	const roomID, newName = "r1", "renamed"
+	requestID := testRequestID
+	ts := int64(1700000000000)
+
+	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "alice").Return(&model.User{Account: "alice"}, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
+
+	var feed [][]byte
+	publish := func(_ context.Context, subj string, data []byte, _ string) error {
+		if subj == subject.InboxInternal("site-a", model.InboxRoomRenamed) {
+			feed = append(feed, data)
+		}
+		return nil
+	}
+
+	h := &Handler{store: store, siteID: "site-a", publish: publish}
+	ctx := natsutil.WithRequestID(context.Background(), requestID)
+	body, _ := json.Marshal(model.RenameRoomRequest{RoomID: roomID, NewName: newName, Account: "alice", Timestamp: ts})
+
+	require.NoError(t, h.processRoomRename(ctx, body))
+
+	require.Len(t, feed, 1, "same-site search feed must carry exactly one room_renamed")
+	var evt model.InboxEvent
+	require.NoError(t, json.Unmarshal(feed[0], &evt))
+	assert.Equal(t, model.InboxRoomRenamed, evt.Type)
+	assert.Equal(t, "site-a", evt.SiteID)
+	var p model.RoomRenamedInboxPayload
+	require.NoError(t, json.Unmarshal(evt.Payload, &p))
+	assert.Equal(t, roomID, p.RoomID)
+	assert.Equal(t, newName, p.NewName)
+	assert.Equal(t, ts, p.Timestamp)
+}
+
 // Test 7: Happy path no remote sites.
 func TestProcessRoomRename_HappyPathNoRemoteSites(t *testing.T) {
 	ctrl := gomock.NewController(t)
@@ -7000,34 +7383,13 @@ func TestProcessRoomRename_GetRoomFails_FallsBackToGlobal(t *testing.T) {
 
 // --- bustRoomMeta tests ---
 
-type fakeBustClient struct {
-	dels   []string
-	delErr error
-}
-
-func (f *fakeBustClient) Get(context.Context, string) (string, error) { return "", nil }
-func (f *fakeBustClient) Set(context.Context, string, string, time.Duration) error {
-	return nil
-}
-func (f *fakeBustClient) Del(_ context.Context, keys ...string) error {
-	f.dels = append(f.dels, keys...)
-	return f.delErr
-}
-func (f *fakeBustClient) Close() error { return nil }
-
-// SetNX / IncrEx satisfy valkeyutil.Client but are unused here; panic on any call.
-func (f *fakeBustClient) SetNX(context.Context, string, string, time.Duration) (bool, error) {
-	panic("fakeBustClient.SetNX not implemented")
-}
-func (f *fakeBustClient) IncrEx(context.Context, string, time.Duration) (int64, error) {
-	panic("fakeBustClient.IncrEx not implemented")
-}
-
 func TestHandler_bustRoomMeta_CallsDel(t *testing.T) {
-	fake := &fakeBustClient{}
+	fake := valkeyfake.New()
 	h := &Handler{valkey: fake}
 	h.bustRoomMeta(context.Background(), "r123")
-	assert.Equal(t, []string{roommetacache.MetaKey("r123")}, fake.dels)
+	// Both key generations: the unversioned key is the one deployed binaries
+	// write, and a rolling deploy runs both.
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.DeletedKeys())
 }
 
 func TestHandler_bustRoomMeta_NilClient_NoPanic(t *testing.T) {
@@ -7036,11 +7398,121 @@ func TestHandler_bustRoomMeta_NilClient_NoPanic(t *testing.T) {
 }
 
 func TestHandler_bustRoomMeta_FailOpen(t *testing.T) {
-	fake := &fakeBustClient{delErr: errors.New("valkey down")}
+	fake := valkeyfake.New()
+	fake.FailDel(errors.New("valkey down"))
 	h := &Handler{valkey: fake}
 	assert.NotPanics(t, func() { h.bustRoomMeta(context.Background(), "r123") })
 	// The Del was attempted (error swallowed inside BustMeta), not skipped.
-	assert.Equal(t, []string{roommetacache.MetaKey("r123")}, fake.dels)
+	assert.ElementsMatch(t, []string{roommetacache.MetaKey("r123"), "room:{r123}:meta"}, fake.DeletedKeys())
+}
+
+// --- bustSub tests ---
+
+// --- bustSubs (batched) tests ---
+
+// TestHandler_ProcessRemoveIndividual_BustsSubL2 covers the security-critical
+// case: a removed member's subauthcache L2 entry must die immediately, not
+// linger for the 90m TTL letting them keep sending/reading.
+func TestHandler_ProcessRemoveIndividual_BustsSubL2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+	expectThreadCleanupAny(store)
+
+	const (
+		roomID  = "room-1"
+		account = "alice"
+		siteID  = "site-a"
+	)
+	userResult := &UserWithMembership{
+		User:             model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛"},
+		HasOrgMembership: false,
+	}
+	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil)
+	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, account).Return(int64(1), nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+
+	fake := valkeyfake.New()
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	h.valkey = fake
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	assert.Contains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, account), "removed member's subauthcache L2 entry must be busted")
+}
+
+// TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted_BustsSubL2 covers
+// the role-change case: a demoted owner's cached Roles (drives
+// canBypassLargeRoomCap in the gatekeeper) must not survive the demotion.
+func TestHandler_ProcessRemoveMember_DualMembership_OwnerDemoted_BustsSubL2(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID  = "room-1"
+		account = "alice"
+		siteID  = "site-a"
+	)
+	userResult := &UserWithMembership{
+		User:             model.User{ID: "u1", Account: account, SiteID: siteID, EngName: "Alice", ChineseName: "愛"},
+		HasOrgMembership: true,
+		Roles:            []model.Role{model.RoleOwner, model.RoleMember},
+	}
+	gomock.InOrder(
+		store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, account).Return(userResult, nil),
+		store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u1").Return(nil),
+		store.EXPECT().RemoveRole(gomock.Any(), account, roomID, model.RoleOwner).Return(nil),
+	)
+
+	fake := valkeyfake.New()
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	h.valkey = fake
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: account, Account: account, Timestamp: 1, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	assert.Contains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, account), "demoted dual-member's subauthcache L2 entry must be busted")
+}
+
+// TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount covers the
+// bulk-removal path: every account that actually lost membership must be
+// busted, and only those accounts (eve survives via individual membership).
+func TestHandler_ProcessRemoveOrg_BustsSubL2ForEachRemovedAccount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockSubscriptionStore(ctrl)
+
+	const (
+		roomID    = "room-1"
+		orgID     = "org-1"
+		requester = "alice"
+		siteID    = "site-a"
+	)
+	orgMembers := []OrgMemberStatus{
+		{Account: "carol", SiteID: siteID, Name: "Engineering", HasIndividualMembership: false},
+		{Account: "dave", SiteID: siteID, Name: "Engineering", HasIndividualMembership: false},
+		{Account: "eve", SiteID: siteID, Name: "Engineering", HasIndividualMembership: true},
+	}
+	store.EXPECT().GetOrgMembersWithIndividualStatus(gomock.Any(), roomID, orgID).Return(orgMembers, nil)
+	store.EXPECT().DeleteSubscriptionsByAccounts(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(int64(2), nil)
+	store.EXPECT().PullThreadFollowers(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
+	store.EXPECT().DeleteThreadSubscriptions(gomock.Any(), roomID, gomock.InAnyOrder([]string{"carol", "dave"})).Return(nil)
+	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberOrg, orgID).Return(nil)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetUser(gomock.Any(), requester).Return(&model.User{ID: "u_alice", Account: requester, SiteID: siteID, EngName: "Alice", ChineseName: "愛"}, nil)
+
+	fake := valkeyfake.New()
+	h := NewHandler(store, siteID, func(_ context.Context, _ string, _ []byte, _ string) error { return nil }, testKeyStore, testKeySender, subject.RouteGlobal)
+	h.valkey = fake
+	req := model.RemoveMemberRequest{RoomID: roomID, Requester: requester, OrgID: orgID, Timestamp: 1000, RoomType: model.RoomTypeChannel}
+	data, _ := json.Marshal(req)
+	require.NoError(t, h.processRemoveMember(context.Background(), data))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey(roomID, "carol"), subauthcache.SubKey(roomID, "dave")},
+		"the removed accounts' subauthcache L2 entries must be busted")
+	assert.NotContains(t, fake.DeletedKeys(), subauthcache.SubKey(roomID, "eve"), "the surviving member must not be busted")
 }
 
 func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
@@ -7055,7 +7527,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 		setupMock func(s *MockSubscriptionStore)
 		want      string
 		wantHR    *model.CounterpartHRInfo
-		wantApp   *model.CounterpartAppInfo
+		wantApp   *model.AppSubscription
 	}{
 		{
 			name: "channel uses sub.Name and carries no counterpart",
@@ -7094,14 +7566,13 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 			wantHR:  &model.CounterpartHRInfo{Account: "dave"},
 		},
 		{
-			// Assistant nil as in production; assistantName comes from the queried account.
 			name: "botDM resolves app name and appInfo",
 			sub:  model.Subscription{RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 			setupMock: func(s *MockSubscriptionStore) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}),
 		},
 		{
 			// The bot IS in userByAccount in production (FindUsersByAccounts returns it),
@@ -7125,7 +7596,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-9", Name: "Helper Bot"}, nil)
 			},
 			want:    "Helper Bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-9", Name: "Helper Bot", AssistantName: "helper.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-9", Name: "Helper Bot"}),
 		},
 		{
 			name: "botDM GetApp infra error falls back to bot account and omits appInfo",
@@ -7142,7 +7613,7 @@ func TestHandler_resolveSubUpdateCounterpart(t *testing.T) {
 				s.EXPECT().GetApp(gomock.Any(), "nameless.bot").Return(&model.App{ID: "app-3", Name: ""}, nil)
 			},
 			want:    "nameless.bot",
-			wantApp: &model.CounterpartAppInfo{ID: "app-3", Name: "", AssistantName: "nameless.bot"},
+			wantApp: model.AppSubscriptionFromApp(&model.App{ID: "app-3", Name: ""}),
 		},
 		{
 			name:    "botDM bot-side sub resolves human from map",
@@ -7285,7 +7756,7 @@ func TestServerCreateDM_DM_SetsCounterpartHRInfo(t *testing.T) {
 	assert.Nil(t, bobEvt.AppInfo)
 }
 
-func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
+func TestServerCreateDM_BotDM_SetsAppInfo(t *testing.T) {
 	h, store, capture := newSyncDMTestHandler(t)
 
 	requester := &model.User{ID: "u-alice", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛麗絲"}
@@ -7297,7 +7768,6 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}, RoomType: model.RoomTypeBotDM, Name: "helper.bot"},
 		&model.Subscription{User: model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"}, RoomType: model.RoomTypeBotDM, Name: "alice"},
 		nil)
-	// Assistant left nil to match the real store's {"name":1} projection.
 	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{ID: "app-1", Name: "Helper Bot"}, nil)
 
 	req := model.SyncCreateDMRequest{RoomType: model.RoomTypeBotDM, RequesterAccount: "alice", OtherAccount: "helper.bot"}
@@ -7306,7 +7776,7 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 	// Human side sees the app; bot side sees the human.
 	humanEvt := decodeSubUpdate(t, capture.captured, "alice")
-	assert.Equal(t, &model.CounterpartAppInfo{ID: "app-1", Name: "Helper Bot", AssistantName: "helper.bot"}, humanEvt.AppInfo)
+	assert.Equal(t, model.AppSubscriptionFromApp(&model.App{ID: "app-1", Name: "Helper Bot"}), humanEvt.AppInfo)
 	assert.Nil(t, humanEvt.HRInfo, "bot counterpart carries no hrInfo")
 
 	botEvt := decodeSubUpdate(t, capture.captured, "helper.bot")
@@ -7316,11 +7786,13 @@ func TestServerCreateDM_BotDM_SetsCounterpartAppInfo(t *testing.T) {
 
 func TestSubscriptionRoomFor(t *testing.T) {
 	lastMsg := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	lastUserMsg := time.Date(2026, 6, 28, 11, 0, 0, 0, time.UTC)
 	mention := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
 	floor := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
 	room := &model.Room{
 		ID: "r1", Name: "eng", Type: model.RoomTypeChannel, SiteID: "site-a",
 		UserCount: 3, AppCount: 1, LastMsgAt: &lastMsg, LastMsgID: "m123",
+		LastUserMsgAt:    &lastUserMsg,
 		LastMentionAllAt: &mention, MinUserLastSeenAt: &floor, CrossSite: ptrBool(false),
 	}
 
@@ -7336,7 +7808,8 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.False(t, *got.CrossSite)
 		assert.Equal(t, 3, got.UserCount)
 		assert.Equal(t, 1, got.AppCount)
-		assert.Equal(t, &lastMsg, got.LastMsgAt)
+		assert.Equal(t, &lastUserMsg, got.LastMsgAt,
+			"the wire carries ONE activity timestamp: the coalesced user-activity value, not the raw ceiling")
 		assert.Equal(t, "m123", got.LastMsgID)
 		assert.Equal(t, &mention, got.LastMentionAllAt)
 		assert.Equal(t, &floor, got.MinUserLastSeenAt)
@@ -7354,13 +7827,238 @@ func TestSubscriptionRoomFor(t *testing.T) {
 		assert.Equal(t, "eng", got.Name)
 	})
 
-	t.Run("nil time fields and nil CrossSite pass through", func(t *testing.T) {
-		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2}
+	t.Run("fresh room pins lastMsgAt to createdAt", func(t *testing.T) {
+		// The added event outruns broadcast-worker's freeze: for a brand-new room
+		// neither lastMsgAt nor lastUserMsgAt exists yet, so the event must carry
+		// the same reference the freeze will persist (createdAt) — without it the
+		// added member's client has nothing to flag the room unread against.
+		created := time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
+		bare := &model.Room{ID: "r2", Name: "fresh", SiteID: "site-a", UserCount: 2, CreatedAt: created}
 		got := subscriptionRoomFor(bare, nil)
 		assert.Nil(t, got.CrossSite)
-		assert.Nil(t, got.LastMsgAt)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(created), "no messages at all ⇒ reference pins to createdAt, matching the freeze")
 		assert.Nil(t, got.LastMentionAllAt)
 		assert.Nil(t, got.MinUserLastSeenAt)
 		assert.Empty(t, got.LastMsgID)
 	})
+
+	t.Run("pre-freeze room falls back to the room's lastMsgAt", func(t *testing.T) {
+		created := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+		pre := &model.Room{
+			ID: "r3", Name: "legacy", SiteID: "site-a", UserCount: 2,
+			LastMsgAt: &lastMsg, LastMsgID: "m9", CreatedAt: created,
+		}
+		got := subscriptionRoomFor(pre, nil)
+		require.NotNil(t, got.LastMsgAt)
+		assert.True(t, got.LastMsgAt.Equal(lastMsg), "no lastUserMsgAt yet ⇒ pre-system position, matching the freeze")
+	})
+}
+
+// TestActorSubscriptionIsPreRead: whoever performs the creation has, by
+// definition, already seen the room, so their own subscription carries
+// lastSeenAt from the start. Without it their client flags the brand-new room
+// unread the moment they switch away — the room always ships a non-nil
+// user-activity reference (createdAt), and an absent read position reads as
+// "never opened". Members they invited get no lastSeenAt: the room IS new to
+// them, which is what makes an added member's room unread.
+func TestActorSubscriptionIsPreRead(t *testing.T) {
+	at := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	requester := &model.User{ID: "u-alice", Account: "alice"}
+	other := &model.User{ID: "u-bob", Account: "bob"}
+	bot := &model.User{ID: "u-helper", Account: "helper.bot"}
+	room := &model.Room{ID: "r1", SiteID: "site-a", Type: model.RoomTypeDM, CreatedAt: at}
+
+	t.Run("dm: initiator pre-read, counterpart unread", func(t *testing.T) {
+		subs := buildDMPairSubs(requester, other, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "the initiator has seen the DM she just opened")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Nil(t, subs[1].LastSeenAt, "the counterpart has not seen it")
+	})
+
+	t.Run("botDM: initiator pre-read", func(t *testing.T) {
+		subs := buildDMPairSubs(requester, bot, room, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt)
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+	})
+
+	t.Run("self-DM: sole member is pre-read", func(t *testing.T) {
+		sub := buildSelfDMSub(requester, room, at)
+		require.NotNil(t, sub.LastSeenAt)
+		assert.True(t, sub.LastSeenAt.Equal(at))
+	})
+
+	t.Run("channel: creator pre-read, invited members unread", func(t *testing.T) {
+		channel := &model.Room{ID: "r2", SiteID: "site-a", Type: model.RoomTypeChannel, Name: "eng", CreatedAt: at}
+		subs := buildChannelSubs(requester, []model.User{*other}, channel, at)
+		require.Len(t, subs, 2)
+		require.NotNil(t, subs[0].LastSeenAt, "creator")
+		assert.True(t, subs[0].LastSeenAt.Equal(at))
+		assert.Equal(t, []model.Role{model.RoleOwner}, subs[0].Roles)
+		assert.Nil(t, subs[1].LastSeenAt, "invited member starts unread")
+		assert.Equal(t, []model.Role{model.RoleUser}, subs[1].Roles)
+	})
+}
+
+// The frontend files a sidebar row by Subscription.RoomType, taken from this
+// event as well as from subscription.list. The bot's own copy of a bot<->human
+// DM must therefore carry the effective type, or a freshly created DM lands in
+// the App section until the next refetch — and the human's copy of the same
+// room must still say botDM, since the two sides classify independently.
+func TestPublishSubscriptionAdded_StampsEffectiveRoomType(t *testing.T) {
+	tests := []struct {
+		name        string
+		account     string
+		counterpart string
+		wantType    model.RoomType
+	}{
+		{"bot's own copy of its DM with a human", "weather.bot", "alice", model.RoomTypeDM},
+		{"human's copy of the same room", "alice", "weather.bot", model.RoomTypeBotDM},
+		{"a p_admin DM is an ordinary DM to both sides", "alice", "p_adminsiteA", model.RoomTypeDM},
+		{"bot's DM with another bot stays an app room", "weather.bot", "sales.bot", model.RoomTypeBotDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			// Only an app room reaches the app lookup; a human counterpart must not.
+			if model.IsAppRoom(model.RoomTypeBotDM, tt.counterpart) {
+				store.EXPECT().GetApp(gomock.Any(), tt.counterpart).
+					Return(nil, ErrAppNotFound).AnyTimes()
+			}
+
+			var published []publishedMsg
+			h := NewHandler(store, "site-a", func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, testKeyStore, testKeySender, subject.RouteGlobal)
+
+			sub := &model.Subscription{
+				ID: "s1", RoomID: "r1", SiteID: "site-a", Name: tt.counterpart,
+				RoomType: model.RoomTypeBotDM,
+				User:     model.SubscriptionUser{ID: "u1", Account: tt.account},
+			}
+			h.publishSubscriptionAdded(context.Background(), []*model.Subscription{sub}, nil, nil, 1, "req-1")
+
+			require.Len(t, published, 1)
+			assert.Equal(t, subject.SubscriptionUpdate(tt.account), published[0].subj)
+			var evt model.SubscriptionUpdateEvent
+			require.NoError(t, json.Unmarshal(published[0].data, &evt))
+			assert.Equal(t, tt.wantType, evt.Subscription.RoomType)
+			assert.Equal(t, tt.counterpart, evt.Subscription.Name,
+				"the stamp must not disturb the raw counterpart account")
+		})
+	}
+}
+
+// Each row stores the room as ITS OWN subscriber sees it, so the two sides of a
+// bot<->human DM differ. The room doc keeps a single type.
+func TestBuildDMPairSubs_PerSubscriberRoomType(t *testing.T) {
+	tests := []struct {
+		name             string
+		requester, other string
+		roomType         model.RoomType
+		wantRequester    model.RoomType
+		wantOther        model.RoomType
+	}{
+		{"user creates a DM with a bot", "alice", "weather.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeDM},
+		{"bot creates a DM with a user", "weather.bot", "alice", model.RoomTypeBotDM, model.RoomTypeDM, model.RoomTypeBotDM},
+		{"two humans", "alice", "bob", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+		{"two bots", "weather.bot", "sales.bot", model.RoomTypeBotDM, model.RoomTypeBotDM, model.RoomTypeBotDM},
+		{"platform admin", "alice", "p_adminsiteA", model.RoomTypeDM, model.RoomTypeDM, model.RoomTypeDM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requester := &model.User{ID: "u_" + tt.requester, Account: tt.requester}
+			other := &model.User{ID: "u_" + tt.other, Account: tt.other}
+			room := &model.Room{ID: "r1", SiteID: "site-A", Type: tt.roomType}
+
+			subs := buildDMPairSubs(requester, other, room, time.Now().UTC())
+
+			require.Len(t, subs, 2)
+			assert.Equal(t, tt.other, subs[0].Name, "requester's row names the counterpart")
+			assert.Equal(t, tt.wantRequester, subs[0].RoomType)
+			assert.Equal(t, tt.requester, subs[1].Name, "counterpart's row names the requester")
+			assert.Equal(t, tt.wantOther, subs[1].RoomType)
+		})
+	}
+}
+
+// Only a row facing a real app is soft-unsubscribable; the bot's own row is not.
+func TestBuildDMPairSubs_IsSubscribed(t *testing.T) {
+	room := &model.Room{ID: "r1", SiteID: "site-A", Type: model.RoomTypeBotDM}
+	subs := buildDMPairSubs(
+		&model.User{ID: "u_a", Account: "alice"},
+		&model.User{ID: "u_w", Account: "weather.bot"}, room, time.Now().UTC())
+
+	assert.True(t, subs[0].IsSubscribed, "alice initiated and faces an app")
+	assert.False(t, subs[1].IsSubscribed, "the bot faces a person")
+
+	// The initiator faces an app here too, so only its own row is subscribed.
+	botPair := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_s", Account: "sales.bot"}, room, time.Now().UTC())
+	assert.True(t, botPair[0].IsSubscribed)
+	assert.False(t, botPair[1].IsSubscribed)
+
+	// The initiator faces a person: nobody is subscribed, Alice included.
+	botFirst := buildDMPairSubs(
+		&model.User{ID: "u_w", Account: "weather.bot"},
+		&model.User{ID: "u_a", Account: "alice"}, room, time.Now().UTC())
+	assert.False(t, botFirst[0].IsSubscribed)
+	assert.False(t, botFirst[1].IsSubscribed, "Alice never asked for this app")
+}
+
+// isSubscribed marks a person's deliberate subscription to an app, so only the
+// initiator's own row can carry it. A bot opening the DM must not subscribe
+// Alice to itself.
+func TestProcessCreateRoom_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
+	h, mockStore, _ := newCreateRoomTestHandler(t)
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+
+	bot := &model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-A"}
+	alice := &model.User{ID: "u_alice", Account: "alice", EngName: "Alice A", SiteID: "site-A"}
+
+	mockStore.EXPECT().GetUser(gomock.Any(), "helper.bot").Return(bot, nil)
+	mockStore.EXPECT().GetUser(gomock.Any(), "alice").Return(alice, nil)
+	mockStore.EXPECT().CreateRoom(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil)
+
+	var capturedSubs []*model.Subscription
+	mockStore.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, subs []*model.Subscription) error {
+			capturedSubs = subs
+			return nil
+		})
+	mockStore.EXPECT().FindDMSubscriptionPair(gomock.Any(), gomock.Any(), "helper.bot").
+		DoAndReturn(func(_ context.Context, _, _ string) (*model.Subscription, *model.Subscription, error) {
+			return capturedSubs[0], capturedSubs[1], nil
+		})
+	// Alice's row faces the bot, so the update fan-out resolves the app once.
+	mockStore.EXPECT().GetApp(gomock.Any(), "helper.bot").
+		Return(&model.App{ID: "app-helper", Name: "Helper Bot"}, nil).AnyTimes()
+	mockStore.EXPECT().ReconcileMemberCounts(gomock.Any(), "room-bot-2").Return(nil)
+
+	body := makeCreateRoomBody(t, &model.CreateRoomRequest{
+		RoomID: "room-bot-2", RequesterAccount: "helper.bot",
+		Users:     []string{"alice"},
+		Timestamp: time.Now().UnixMilli(),
+	})
+	require.NoError(t, h.processCreateRoom(ctx, body))
+
+	require.Len(t, capturedSubs, 2)
+	byAccount := map[string]*model.Subscription{}
+	for _, s := range capturedSubs {
+		byAccount[s.User.Account] = s
+	}
+
+	// The bot initiated, so its own row faces a person: a plain dm, unsubscribed.
+	assert.Equal(t, model.RoomTypeDM, byAccount["helper.bot"].RoomType)
+	assert.False(t, byAccount["helper.bot"].IsSubscribed)
+
+	// Alice's row still faces an app, but she never asked for it.
+	assert.Equal(t, model.RoomTypeBotDM, byAccount["alice"].RoomType)
+	assert.False(t, byAccount["alice"].IsSubscribed,
+		"only setAppSubscription initiated by Alice may set isSubscribed")
 }

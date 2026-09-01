@@ -75,8 +75,9 @@ func TestPublishSync_AllThreeBatches(t *testing.T) {
 	assert.Equal(t, model.IChangeTypeNewHire, users[0].ChangeType)
 
 	// quit batches in sorted site order
-	assert.Equal(t, "chat.hr.site-a.employees.quit", got[2].subj)
-	assert.Equal(t, "chat.hr.site-b.employees.quit", got[3].subj)
+	// both quit batches publish on the CENTRAL subject; the site rides the payload
+	assert.Equal(t, "chat.hr.central.employees.quit", got[2].subj)
+	assert.Equal(t, "chat.hr.central.employees.quit", got[3].subj)
 	var qb model.IHRSyncEmployeeQuitBatch
 	got[2].decode(t, &qb)
 	assert.Equal(t, "site-a", qb.SiteID)
@@ -101,7 +102,7 @@ func TestPublishSync_QuitsOnlySkipsUpserts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.QuitsWritten)
 	require.Len(t, got, 1)
-	assert.Equal(t, "chat.hr.site-a.employees.quit", got[0].subj)
+	assert.Equal(t, "chat.hr.central.employees.quit", got[0].subj)
 }
 
 func TestPublishSync_PublishErrorAborts(t *testing.T) {

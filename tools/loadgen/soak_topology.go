@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"time"
 
 	"github.com/hmchangw/chat/pkg/idgen"
@@ -286,7 +286,7 @@ func isActiveSoakSubscription(
 	subscription *model.Subscription,
 	active map[string]struct{},
 ) bool {
-	if subscription == nil || !subscription.IsSubscribed {
+	if !isSoakRoomMember(subscription) {
 		return false
 	}
 	if len(active) == 0 {
@@ -294,6 +294,17 @@ func isActiveSoakSubscription(
 	}
 	_, ok := active[subscription.User.ID]
 	return ok
+}
+
+// isSoakRoomMember follows the production subscription model: channel and DM
+// membership is represented by row existence because leave deletes the row.
+// Only an app room (a botDM facing a ".bot" counterpart) keeps the row and uses
+// IsSubscribed as a soft toggle.
+func isSoakRoomMember(subscription *model.Subscription) bool {
+	if subscription == nil {
+		return false
+	}
+	return !model.IsAppRoom(subscription.RoomType, subscription.Name) || subscription.IsSubscribed
 }
 
 func reserveSoakPair(a, b *model.User, used map[string]struct{}) bool {
@@ -319,7 +330,7 @@ func buildSoakSubscriptions(
 ) []model.Subscription {
 	subscriptions := make([]model.Subscription, len(members))
 	for i := range members {
-		roles := []model.Role{model.RoleMember}
+		roles := []model.Role{model.RoleUser}
 		name := room.Name
 		if room.Type == model.RoomTypeChannel && i == 0 {
 			roles = []model.Role{model.RoleOwner}
@@ -333,14 +344,13 @@ func buildSoakSubscriptions(
 				ID:      members[i].ID,
 				Account: members[i].Account,
 			},
-			RoomID:       room.ID,
-			SiteID:       room.SiteID,
-			Roles:        roles,
-			Name:         name,
-			RoomType:     room.Type,
-			IsSubscribed: true,
-			Open:         true,
-			JoinedAt:     joinedAt,
+			RoomID:   room.ID,
+			SiteID:   room.SiteID,
+			Roles:    roles,
+			Name:     name,
+			RoomType: room.Type,
+			Open:     true,
+			JoinedAt: joinedAt,
 		}
 	}
 	return subscriptions

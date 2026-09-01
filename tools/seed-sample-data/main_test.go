@@ -30,9 +30,10 @@ func TestParseConfig_OverridesFromEnv(t *testing.T) {
 	assert.Equal(t, "s3cret", cfg.ValkeyPassword)
 }
 
-func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
-	got := dryRunSummary()
+func TestDryRunSummary_EmptySiteIsUnfilteredSingleSitePlan(t *testing.T) {
+	got := dryRunSummary("")
 	for _, want := range []string{
+		"site all",
 		"users 11",
 		"hr_employee 10",
 		"rooms 6",
@@ -43,6 +44,44 @@ func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
 		"thread_subscriptions 2",
 		"mongo:roomKeys 6",
 		"valkey:restrictedCache 4",
+	} {
+		assert.Contains(t, got, want, "dry-run summary missing %q", want)
+	}
+}
+
+func TestDryRunSummary_HasAllRowCounts(t *testing.T) {
+	got := dryRunSummary("site-local")
+	for _, want := range []string{
+		"site site-local",
+		"users 11",
+		"hr_employee 10",
+		"rooms 5",
+		"subscriptions 19",
+		"room_members 16",
+		"messages 20",
+		"thread_rooms 1",
+		"thread_subscriptions 2",
+		"mongo:roomKeys 5",
+		"valkey:restrictedCache 3",
+	} {
+		assert.Contains(t, got, want, "dry-run summary missing %q", want)
+	}
+}
+
+func TestDryRunSummary_RemoteSiteHasOnlyRemoteRoom(t *testing.T) {
+	got := dryRunSummary("site-remote")
+	for _, want := range []string{
+		"site site-remote",
+		"users 11",
+		"hr_employee 10",
+		"rooms 1",
+		"subscriptions 4",
+		"room_members 3",
+		"messages 3",
+		"thread_rooms 0",
+		"thread_subscriptions 0",
+		"mongo:roomKeys 1",
+		"valkey:restrictedCache 1",
 	} {
 		assert.Contains(t, got, want, "dry-run summary missing %q", want)
 	}

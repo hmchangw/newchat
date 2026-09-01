@@ -15,6 +15,8 @@ import (
 func TestSoakCollector_CountsOutcomesRetriesAndDistinctRPCs(t *testing.T) {
 	collector := NewSoakCollector(nil, time.Unix(100, 0), 10*time.Second, time.Minute)
 	at := time.Unix(111, 0)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, sample := range []soakOperationSample{
 		{Action: soakRPCReact, Outcome: soakOutcomeSucceeded, At: at, Latency: 10 * time.Millisecond, Retries: 1},
 		{Action: soakRPCEdit, Outcome: soakOutcomeFailed, At: at, Latency: 20 * time.Millisecond, ErrorClass: soakErrorInternal},
@@ -202,7 +204,7 @@ func TestSoakPrometheusMetrics_StableNamesAndBoundedLabels(t *testing.T) {
 		metrics.SoakOperations.WithLabelValues("reaction", "failed", "measured"),
 	))
 	assert.Equal(t, float64(2), testutil.ToFloat64(
-		metrics.SoakRetries.WithLabelValues("reaction"),
+		metrics.SoakRetries.WithLabelValues("reaction", "measured"),
 	))
 }
 

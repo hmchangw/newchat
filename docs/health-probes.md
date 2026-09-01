@@ -15,6 +15,7 @@ served by `pkg/health`.
 | Service | Probe port | Notes |
 |---------|-----------|-------|
 | `auth-service` | `PORT` (default `8080`) | On the main Gin server. |
+| `user-service` | `HEALTH_ADDR` (default `:8081`) | A dedicated listener, deliberately separate from its client API on `HTTP_PORT`: the API group sheds overload with `429`, and a shed liveness probe would restart pods mid-burst. |
 | `search-service` | `SEARCH_METRICS_ADDR` (default `:9090`) | Mounted on the existing metrics listener — no extra port. |
 | all other (NATS) services | `HEALTH_ADDR` (default `:8081`) | A dedicated health-only listener. One port per pod, so the shared default does not collide. |
 
@@ -52,9 +53,9 @@ addition, since that is the failure neither current probe catches.)
 
 ## Optional pprof profiling surface
 
-The nine message-pipeline NATS services (`broadcast-worker`, `history-service`,
+The ten message-pipeline NATS services (`broadcast-worker`, `history-service`,
 `inbox-worker`, `message-gatekeeper`, `message-worker`, `notification-worker`,
-`room-service`, `room-worker`, `search-sync-worker`) can mount the standard
+`room-service`, `roomlist-worker`, `room-worker`, `search-sync-worker`) can mount the standard
 `net/http/pprof` handlers (`/debug/pprof/*`) on the same health listener, gated
 by `PPROF_ENABLED` (default `false`). It is wired via
 `health.ServeWithPprof(addr, timeout, cfg.PProfEnabled, checks...)` — no extra

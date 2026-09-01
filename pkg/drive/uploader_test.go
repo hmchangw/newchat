@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClient_GetBaseURLFromRoomOrigin(t *testing.T) {
@@ -187,13 +190,55 @@ func TestClient_UploadGroupImages_SniffsEachPartIndependently(t *testing.T) {
 func TestClient_UploadGroupImages_ServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"quota exceeded"}`)
 	}))
 	defer srv.Close()
 	c := NewClient(&Config{URL: srv.URL, Token: "tok"})
 	_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
 		[]MultipartFile{{File: fakeMultipart("x"), Filename: "a.png"}})
-	if err == nil {
-		t.Fatal("expected error on 500")
+	require.ErrorContains(t, err, "status 500")
+	require.ErrorContains(t, err, "quota exceeded", "the response snippet must reach the error for diagnosis")
+}
+
+// TestClient_UploadGroupImages_TransportAndDecodeErrors covers the two error
+// paths around the HTTP round trip: the request never gets a response (network
+// error) and a 2xx response whose body isn't valid JSON (decode error).
+func TestClient_UploadGroupImages_TransportAndDecodeErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T) string // returns the client base URL
+		wantErr string
+	}{
+		{
+			name: "network error: server unreachable",
+			setup: func(t *testing.T) string {
+				srv := httptest.NewServer(http.NotFoundHandler())
+				srv.Close() // closed before use: Do() fails with a connection error
+				return srv.URL
+			},
+			wantErr: "upload group images",
+		},
+		{
+			name: "response body is not valid JSON",
+			setup: func(t *testing.T) string {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, "not valid json")
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL
+			},
+			wantErr: "decode drive bulk upload response",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewClient(&Config{URL: tt.setup(t), Token: "tok"})
+			_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
+				[]MultipartFile{{File: fakeMultipart("x"), Filename: "a.png"}})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
 	}
 }
 

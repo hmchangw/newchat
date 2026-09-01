@@ -16,11 +16,12 @@ services:
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.
       - PPROF_ENABLED=${PPROF_ENABLED:-false}
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017}
+      - MONGO_USER_READ_PREFERENCE=${MONGO_USER_READ_PREFERENCE:-primaryPreferred}
       - MONGO_DB=${MONGO_DB:-chat}
       # Read preference; secondaryPreferred offloads the primary, no-op without a replica set.
       - MONGO_READ_PREFERENCE=${MONGO_READ_PREFERENCE:-secondaryPreferred}
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
-      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-5m}
+      - ROOMSUBCACHE_TTL=${ROOMSUBCACHE_TTL:-90m}
       - LARGE_ROOM_THRESHOLD=${LARGE_ROOM_THRESHOLD:-500}
       # Recipients per PUSH-NOTIFICATION event. Default 100; well under FCM's 500-token
       # multicast cap and APNs HTTP/2 connection-frame ceiling.
@@ -41,6 +42,10 @@ services:
       - USER_SETTINGS_ENABLED=${USER_SETTINGS_ENABLED:-true}
       - USER_SETTINGS_BATCH_SIZE=${USER_SETTINGS_BATCH_SIZE:-512}
       - USER_SETTINGS_TIMEOUT=${USER_SETTINGS_TIMEOUT:-2s}
+      - USER_CACHE_SIZE=${USER_CACHE_SIZE:-10000}
+      - USER_CACHE_TTL=${USER_CACHE_TTL:-5m}
+      - MENTION_NAMES_ENABLED=${MENTION_NAMES_ENABLED:-true}
+      - MENTION_NAMES_TIMEOUT=${MENTION_NAMES_TIMEOUT:-2s}
       - BOOTSTRAP_STREAMS=${BOOTSTRAP_STREAMS:-true}
     volumes:
       - ../../../docker-local/backend.creds:${NATS_CREDS_FILE:-/etc/nats/backend.creds}:ro

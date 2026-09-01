@@ -30,17 +30,81 @@ metrics:
     prometheus.io/path: /metrics
     prometheus.io/port: "9099"
 
+# Profiling is off by default: a soak pod being OOM-killed cannot be
+# port-forwarded in time, so heapProfileDir (point it at the ledger mount) is
+# what makes a profile survive the kill. pprofAddr opens a separate listener so
+# turning it on never widens what the Prometheus scrape target exposes.
+profiling:
+  pprofAddr: ""
+  heapProfileDir: ""
+  heapProfileInterval: 5m
+  heapProfileKeep: 3
+
+# Go does not read the container memory limit, so without goMemLimit the GC
+# lets the heap grow to roughly twice the live set before collecting and the
+# pod is killed instead. Set it below resources.limits.memory.
+runtime:
+  goMemLimit: ""
+  goGC: ""
+
 ledger:
   enabled: true
+  # The run ID owns the seeded topology; the epoch owns the evidence journal.
+  # Bump the epoch whenever a loadgen image changes the ledger contract, so a
+  # fresh journal starts without re-seeding the room set.
+  #
+  # v2 adds the `invalidated` journal record. A v1 journal written by this image
+  # cannot be replayed by an image that predates it — the older reader rejects
+  # the unknown record and loses the evidence — so rolling this image back means
+  # rolling the epoch back with it.
+  #
+  # An epoch change starts a new evidence window rather than upgrading the old
+  # one: operations still in flight under the previous epoch receive a verdict
+  # from neither side, and the same applies in reverse on a rollback. Stop
+  # admission and drain until `loadgen_failure_inflight` is zero with no ledger
+  # debt before switching. Switching without draining is allowed, but the two
+  # sides are then explicitly non-continuous evidence and must not be read as
+  # one window. `loadgen_failure_abandoned_journals` stays non-zero for as long
+  # as a journal from an earlier epoch is retained, which is that signal.
+  epoch: v2
   existingClaim: ""
   storageClassName: ""
   accessMode: ReadWriteOnce
   size: 20Gi
   mountPath: /var/lib/loadgen/ledger
   capacity: "200000"
+  # Both bound the journal. The finalize count alone is not enough: a run whose
+  # operations all outlive their deadline never reaches it, and a restart loses
+  # the count, so the file would only ever grow.
+  compactEvery: "10000"
+  maxBytes: "536870912"
+  # Bounds one expiry sweep, which otherwise holds the ledger lock while it
+  # journals everything it retires. Unbounded by default: a bound below the rate
+  # operations arrive at is worse than the stall it prevents, because the
+  # backlog then grows until capacity is hit and the ledger invalidates itself.
+  # Size it above (operations/sec x sweep interval), where the sweep runs every
+  # min(30s, max(1s, reconcileDeadline/10)).
+  expireBatch: "0"
   reconcileDeadline: 10m
   reconcileRetryInterval: 1s
   reconcileReadShare: 0.5
+  roomReconcileReadShare: 0.5
+
+# Search-index observation is additive: with it off the ledger contract is
+# identical to one built before the observer existed, so an existing
+# ledger.epoch stays valid. Turning it on changes the contract — bump
+# ledger.epoch in the same change.
+searchObserver:
+  enabled: false
+
+# The one-message check that the encrypted write path reaches Cassandra and
+# wraps the room DEK. Turning it off is only allowed outside staging and
+# production: a run that skipped it is not evidence about at-rest encryption.
+# Raise the timeout — not soak.persistGrace — when an environment persists
+# slowly; persistGrace also sets when every ledger verification begins.
+encryptionPreflight:
+  enabled: true
+  timeout: 30s
 
 recipientObserver:
   enabled: false
@@ -66,6 +130,9 @@ soak:
   randomSeed: 42
   warmup: 30s
   heartbeatInterval: 30s
+  # Must be at least 2 * heartbeatInterval + 5s. For a Mongo fault campaign,
+  # override this lease beyond the planned outage and recovery window; see the
+  # staging campaign overlay in README.md.
   heartbeatStaleAfter: 2m
   terminationGracePeriodSeconds: 60
   maxInFlight: 200
@@ -80,6 +147,36 @@ soak:
   reactionRemoveShare: "0.20"
   pinnedListRate: "1"
   verifyRate: "1"
+  memberMutationRate: "2"
+  roomMutationRate: "1"
+  roomReadRate: "20"
+  userReadRate: "10"
+  # Diagnostic shape controls for the subscription-list read. Empty leaves
+  # user-service's own defaults in force, which is what every baseline so far
+  # was recorded against — set them only for a probe run.
+  # subscriptionListIncludeLastMessage: "false" drops the per-room fan-out to
+  # history-service, isolating that cost from the rest of the request.
+  subscriptionListLimit: ""
+  subscriptionListIncludeLastMessage: ""
+  # Room-popularity distribution for the send lane: P(rank) is proportional to
+  # (V+rank)^-S. Empty leaves the defaults every baseline was recorded against
+  # (S=1.2, V=1.0 — the hottest room takes ~21% of all sends). S must exceed 1;
+  # raise V to flatten instead (V=5 puts the hottest room near 5%).
+  roomZipfS: ""
+  roomZipfV: ""
+  searchReadRate: "5"
+  searchSettle: 30s
+  roomCreateRate: "0.05"
+  roomCreateBudget: "2000"
+  roomCreateSize: "5"
+  readReceiptRate: "5"
+  presenceRate: "30"
+  presenceConnections: "2000"
+  presenceQueryShare: "0.10"
+  presenceQueryBatch: "50"
+  presenceSettle: 5s
+  presenceTTL: 5m
+  memberQuarantineMax: "10000"
   maxUsers: "20000"
   activeUsers: "2000"
   roomCount: "10000"

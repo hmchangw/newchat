@@ -7,6 +7,7 @@ import useHoverWithDelay from '@/hooks/useHoverWithDelay'
 import { useNats } from '@/context/NatsContext'
 import { useSubscription } from '@/context/RoomEventsContext'
 import { redactInaccessibleQuoteSnapshot } from '@/lib/redactQuote'
+import { messageSenderName } from '@/lib/participantName'
 import './style.css'
 
 function formatDateTime(dateStr) {
@@ -20,16 +21,6 @@ function formatDateTime(dateStr) {
   })
 }
 
-function senderName(msg) {
-  // userDisplayName is the server-composed render-ready name (engName +
-  // chineseName + account fallback); prefer it over the raw sender fields.
-  if (msg.userDisplayName) return msg.userDisplayName
-  if (msg.sender) {
-    return msg.sender.engName || msg.sender.account || msg.sender.userId || 'Unknown'
-  }
-  return msg.userAccount || msg.userId || 'Unknown'
-}
-
 function pinnedLabel(msg) {
   const by = msg.pinnedBy
   const byName = by?.engName || by?.account
@@ -37,7 +28,7 @@ function pinnedLabel(msg) {
 }
 
 function senderInitial(msg) {
-  const name = senderName(msg)
+  const name = messageSenderName(msg)
   return (name.charAt(0) || '?').toUpperCase()
 }
 
@@ -94,7 +85,7 @@ export default function MessageRow({
       )}
       <div className="message-row-body">
         <div className="message-header">
-          <span className="message-sender">{senderName(message)}</span>
+          <span className="message-sender">{messageSenderName(message)}</span>
           <span className="message-time">{formatDateTime(message.createdAt)}</span>
           {message.editedAt && <span className="message-edited"> (edited)</span>}
           {message.pinnedAt && (

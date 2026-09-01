@@ -451,3 +451,23 @@ func TestKeyCacheTTLSafe(t *testing.T) {
 		})
 	}
 }
+
+func TestRetiredTTLSafe(t *testing.T) {
+	tests := []struct {
+		name       string
+		retiredTTL time.Duration
+		cacheTTL   time.Duration
+		want       bool
+	}{
+		{"exactly twice is safe", 20 * time.Minute, 10 * time.Minute, true},
+		{"more than twice is safe", time.Hour, 10 * time.Minute, true},
+		{"less than twice is unsafe", 15 * time.Minute, 10 * time.Minute, false},
+		{"equal is unsafe", 10 * time.Minute, 10 * time.Minute, false},
+		{"zero retention is unsafe", 0, 10 * time.Minute, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, retiredTTLSafe(tt.retiredTTL, tt.cacheTTL))
+		})
+	}
+}

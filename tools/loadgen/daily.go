@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"net/http"
 	"os"
 	"slices"
@@ -897,7 +897,7 @@ func (f *prodEnvFactory) Build(cfg dailyConfig, users []*userState) *stepEnv {
 	// permanent zero that reads as "no service errors".
 	//
 	// Unblocking it needs a uniform per-service error counter first. The
-	// natsrouter middleware in docs/load-testing/system/sli-slo.md §8 P1
+	// natsrouter middleware in docs/load-testing/common/sli-slo.md §8 P1
 	// (rpc_server_duration_seconds{subject_pattern, errcode_category}) is the
 	// intended source; point serviceErrorCounterName at it and fill this map
 	// once it ships. scrapeErrorCounter fails with errCounterFamilyAbsent if

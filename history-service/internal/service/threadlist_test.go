@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/service/mocks"
 	"github.com/hmchangw/chat/pkg/errcode"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
 // decodeThreadMsg decodes an opaque ThreadListItem body back into a message for
@@ -46,7 +47,7 @@ func newThreadListService(t *testing.T) (
 	users := mocks.NewMockUserStore(ctrl)
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true}
-	svc := service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg)
+	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg))
 	return svc, msgs, subs, rooms, threadSubs
 }
 
@@ -367,4 +368,131 @@ func TestHistoryService_ListThreadSubscriptions_CursorConverted(t *testing.T) {
 	require.NotNil(t, gotTs)
 	assert.Equal(t, base.UnixMilli(), gotTs.UnixMilli())
 	assert.Equal(t, "tr-9", gotID)
+}
+
+// attachmentBlobs encodes attachments into the raw LIST<BLOB> column form the
+// hydrated Cassandra rows carry.
+func attachmentBlobs(t *testing.T, atts ...cassandra.Attachment) [][]byte {
+	t.Helper()
+	raw := cassandra.EncodeAttachments(atts)
+	require.Len(t, raw, len(atts))
+	return raw
+}
+
+// rawBody unmarshals an opaque item body into its wire form. Assert on this map
+// rather than models.Message so key presence/absence is observable.
+func rawBody(t *testing.T, body json.RawMessage) map[string]any {
+	t.Helper()
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	return raw
+}
+
+// The list bodies must carry decoded attachments: the raw LIST<BLOB> column is
+// json:"-", so a body built without decoding reaches the client with no
+// attachments key at all.
+func TestHistoryService_ListThreadSubscriptions_DecodesAttachments(t *testing.T) {
+	svc, msgs, _, _, threadSubs := newThreadListService(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := []mongorepo.ThreadSubRow{
+		{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+	}
+	threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+		{MessageID: "p1", RoomID: "r1", Msg: "parent", Attachments: attachmentBlobs(t,
+			cassandra.Attachment{ID: "f-1", Title: "spec.pdf", Type: "file", TitleLink: "/d/f-1", FileType: "application/pdf"},
+		)},
+		{MessageID: "m1", RoomID: "r1", Msg: "last", Attachments: attachmentBlobs(t,
+			cassandra.Attachment{ID: "f-2", Title: "shot.png", Type: "file", TitleLink: "/d/f-2", ImageURL: "/i/f-2"},
+		)},
+	}, nil)
+
+	resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+
+	parent := decodeThreadMsg(t, resp.Items[0].ParentMessage)
+	require.Len(t, parent.DecodedAttachments, 1)
+	assert.Equal(t, "f-1", parent.DecodedAttachments[0].ID)
+	assert.Equal(t, "spec.pdf", parent.DecodedAttachments[0].Title)
+	assert.Equal(t, "application/pdf", parent.DecodedAttachments[0].FileType)
+
+	last := decodeThreadMsg(t, resp.Items[0].LastMessage)
+	require.Len(t, last.DecodedAttachments, 1)
+	assert.Equal(t, "f-2", last.DecodedAttachments[0].ID)
+	assert.Equal(t, "/i/f-2", last.DecodedAttachments[0].ImageURL)
+
+	// The raw blob column stays off the wire; only the decoded form ships.
+	assert.Contains(t, rawBody(t, resp.Items[0].ParentMessage), "attachments")
+	assert.Empty(t, parent.Attachments, "raw blobs are never serialized")
+}
+
+// A quoted parent carries its own attachments column; the decode must reach it
+// too or quoted-reply previews render without their files.
+func TestHistoryService_ListThreadSubscriptions_DecodesQuotedParentAttachments(t *testing.T) {
+	svc, msgs, _, _, threadSubs := newThreadListService(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := []mongorepo.ThreadSubRow{
+		{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+	}
+	threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+		{MessageID: "p1", RoomID: "r1", Msg: "parent"},
+		{MessageID: "m1", RoomID: "r1", Msg: "last", QuotedParentMessage: &models.QuotedParentMessage{
+			MessageID: "q1", RoomID: "r1", CreatedAt: base, Msg: "quoted",
+			Attachments: attachmentBlobs(t, cassandra.Attachment{ID: "f-3", Title: "quoted.pdf", Type: "file", TitleLink: "/d/f-3"}),
+		}},
+	}, nil)
+
+	resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+
+	last := decodeThreadMsg(t, resp.Items[0].LastMessage)
+	require.NotNil(t, last.QuotedParentMessage)
+	require.Len(t, last.QuotedParentMessage.DecodedAttachments, 1)
+	assert.Equal(t, "f-3", last.QuotedParentMessage.DecodedAttachments[0].ID)
+}
+
+// Decoding is lenient: a malformed blob is skipped, the good ones still ship,
+// and the row is never dropped from the page.
+func TestHistoryService_ListThreadSubscriptions_MalformedAttachmentSkipped(t *testing.T) {
+	svc, msgs, _, _, threadSubs := newThreadListService(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := []mongorepo.ThreadSubRow{
+		{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+	}
+	good := attachmentBlobs(t, cassandra.Attachment{ID: "f-1", Title: "ok.pdf", Type: "file", TitleLink: "/d/f-1"})
+	threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+		{MessageID: "p1", RoomID: "r1", Msg: "parent", Attachments: [][]byte{[]byte("{not json"), good[0]}},
+		{MessageID: "m1", RoomID: "r1", Msg: "last"},
+	}, nil)
+
+	resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1, "a bad blob must not drop the row")
+	parent := decodeThreadMsg(t, resp.Items[0].ParentMessage)
+	require.Len(t, parent.DecodedAttachments, 1)
+	assert.Equal(t, "f-1", parent.DecodedAttachments[0].ID)
+}
+
+// A message with no attachments omits the key entirely rather than emitting null.
+func TestHistoryService_ListThreadSubscriptions_NoAttachmentsOmitsKey(t *testing.T) {
+	svc, msgs, _, _, threadSubs := newThreadListService(t)
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	rows := []mongorepo.ThreadSubRow{
+		{ThreadRoomID: "tr-1", RoomID: "r1", SiteID: "site-a", ParentMessageID: "p1", LastMsgID: "m1", LastMsgAt: base.Add(5 * time.Hour)},
+	}
+	threadSubs.EXPECT().ListUserThreadSubscriptions(gomock.Any(), "alice", gomock.Any(), gomock.Any(), gomock.Any()).Return(rows, false, nil)
+	msgs.EXPECT().GetMessagesByIDs(gomock.Any(), gomock.Any()).Return([]models.Message{
+		{MessageID: "p1", RoomID: "r1", Msg: "parent"},
+		{MessageID: "m1", RoomID: "r1", Msg: "last"},
+	}, nil)
+
+	resp, err := svc.ListThreadSubscriptions(testContext(), pkgmodel.ThreadSubscriptionListRequest{Account: "alice", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	assert.NotContains(t, rawBody(t, resp.Items[0].ParentMessage), "attachments")
+	assert.NotContains(t, rawBody(t, resp.Items[0].LastMessage), "attachments")
 }

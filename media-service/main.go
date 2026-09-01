@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/minioutil"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -48,21 +49,34 @@ func run() error {
 	if cfg.EIDCacheTTL <= 0 {
 		return fmt.Errorf("EID_CACHE_TTL must be positive, got %s", cfg.EIDCacheTTL)
 	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Guard.Validate(); err != nil {
+		return err
+	}
 
 	sdk, obsShutdown, err := obs.Init(ctx)
 	if err != nil {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword, mongoutil.WithObservability(sdk))
+	readPref, err := mongoutil.ParseReadPreference(cfg.ReadPreference)
+	if err != nil {
+		return fmt.Errorf("parse mongo read preference: %w", err)
+	}
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk),
+		mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
+	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
 	defer mongoutil.Disconnect(ctx, mongoClient)
 
 	if err := store.EnsureEmojiIndexes(ctx); err != nil {
-		return fmt.Errorf("ensure emoji indexes: %w", err)
+		slog.Warn("ensure emoji indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 
 	minioClient, err := minioutil.Connect(ctx, cfg.MinioEndpoint, cfg.MinioUseSSL, cfg.MinioAccessKey, cfg.MinioSecretKey, minioutil.WithObservability(sdk))
@@ -71,21 +85,16 @@ func run() error {
 	}
 	blobs := newMinioBlobStore(minioClient, cfg.MinioBucket)
 
-	nc, err := natsutil.Connect(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace)
+	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
 		return fmt.Errorf("connect nats: %w", err)
 	}
 
 	h := newHandler(store, store, blobs, &cfg)
 
-	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
-	// instead of piling unbounded work onto MongoDB/MinIO. MAX_CONCURRENCY=0 disables.
-	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID)}
-	if cfg.MaxConcurrency > 0 {
-		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
-	}
-	router := natsrouter.New(nc, "media-service", routerOpts...)
-	router.Use(natsrouter.Recovery(), natsrouter.RequestID(), natsrouter.Logging())
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+	router := natsrouter.DefaultGuarded(nc, "media-service", cfg.Guard,
+		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
 	registerEmojiNATS(router, h, cfg.SiteID)
 
 	gin.SetMode(gin.ReleaseMode)
@@ -95,6 +104,10 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
+	// No blanket HTTP timeout: the avatar/emoji GET routes stream blobs via
+	// c.DataFromReader and the PUT routes accept uploads, both bound to the
+	// request context — a short deadline would cancel a slow up/download
+	// mid-stream. (The NATS request/reply side still uses cfg.Guard.)
 	sessions := botauth.NewValidator(
 		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
 	registerRoutes(r, h, sessions, cfg.SiteID)

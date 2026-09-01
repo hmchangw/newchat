@@ -34,7 +34,7 @@ func TestFailureLedgerPromRecorder_RecordsBoundedOutcomes(t *testing.T) {
 	now := time.Date(2026, 8, 12, 1, 2, 3, 0, time.UTC)
 	metrics := NewMetrics()
 	recorder := newFailureLedgerPromRecorder(metrics)
-	ledger, err := newFailureLedger(failureLedgerConfig{
+	ledger, err := newFailureLedger(&failureLedgerConfig{
 		Capacity: 1, Recorder: recorder, Now: func() time.Time { return now },
 	})
 	require.NoError(t, err)
@@ -307,4 +307,41 @@ func TestSoakPacing_BlockingActionDoesNotReduceOfferedRate(t *testing.T) {
 	assert.Equal(t, float64(1), dispatched)
 	assert.Equal(t, float64(3), laneSaturation)
 	assert.Equal(t, intended, dispatched+underrun+laneSaturation)
+}
+
+func TestNewMetrics_RoomLaneFamiliesUseBoundedLabels(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.SoakRoomCandidates.WithLabelValues("available").Set(1)
+	metrics.SoakRoomQuarantineProbes.WithLabelValues("resolved").Inc()
+	metrics.SoakRoomPoolExhausted.WithLabelValues("quarantine_full").Inc()
+	metrics.SoakRoomStateSources.WithLabelValues("room_service", "matched").Inc()
+	metrics.SoakRoomPoolDegraded.Set(0)
+	metrics.SoakRoomCreateBudgetRemaining.Set(10)
+	metrics.SoakEncryptionPreflight.Set(1)
+	metrics.FailureAbandonedJournals.Set(0)
+
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+
+	names := make(map[string]struct{}, len(families))
+	for _, family := range families {
+		names[family.GetName()] = struct{}{}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				assert.NotContains(t,
+					[]string{"room_id", "account", "message_id", "run_id", "operation_id"},
+					label.GetName(),
+					"family %s must not carry high-cardinality labels", family.GetName())
+			}
+		}
+	}
+	for _, name := range []string{
+		"loadgen_soak_room_candidates", "loadgen_soak_room_quarantine_probes_total",
+		"loadgen_soak_room_pool_exhausted_total", "loadgen_soak_room_pool_degraded",
+		"loadgen_soak_room_create_budget_remaining", "loadgen_soak_room_state_source_total",
+		"loadgen_soak_encryption_preflight",
+		"loadgen_failure_abandoned_journals",
+	} {
+		assert.Contains(t, names, name)
+	}
 }

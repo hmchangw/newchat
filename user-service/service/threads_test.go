@@ -20,7 +20,7 @@ import (
 // newThreadSvc builds a UserService whose fan-out set is site-a (local) + site-b
 // (cross), from ALL_SITE_IDS. The thread inbox only depends on the history
 // client, so the other deps are fresh no-expectation mocks.
-func newThreadSvc(t *testing.T) (*UserService, *mocks.MockHistoryClient, *mocks.MockUserRepository, *mocks.MockAppRepository) {
+func newThreadSvc(t *testing.T, opts ...Option) (*UserService, *mocks.MockHistoryClient, *mocks.MockUserRepository, *mocks.MockAppRepository) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
 	history := mocks.NewMockHistoryClient(ctrl)
@@ -40,6 +40,7 @@ func newThreadSvc(t *testing.T) (*UserService, *mocks.MockHistoryClient, *mocks.
 		&fakeBadgeCache{},
 		nil, nil, nil,
 		cfg,
+		opts...,
 	)
 	return svc, history, users, apps
 }
@@ -321,4 +322,22 @@ func ids(items []model.ThreadListItem) []string {
 		out[i] = items[i].ThreadRoomID
 	}
 	return out
+}
+
+// Rows carry the type their own subscriber sees, so the split reads RoomType
+// directly.
+func TestDistinctDMAndBotNames_SplitsAppRoomsFromDMs(t *testing.T) {
+	items := []model.ThreadListItem{
+		{RoomType: model.RoomTypeBotDM, RoomName: "weather.bot"},
+		{RoomType: model.RoomTypeDM, RoomName: "alice"},       // bot's own row, normalized
+		{RoomType: model.RoomTypeDM, RoomName: "p_admin_ops"}, // p_admin DM, normalized
+		{RoomType: model.RoomTypeDM, RoomName: "bob"},
+		{RoomType: model.RoomTypeChannel, RoomName: "general"},
+		{RoomType: model.RoomTypeBotDM, RoomName: ""},
+	}
+
+	dms, bots := distinctDMAndBotNames(items)
+
+	assert.Equal(t, []string{"alice", "p_admin_ops", "bob"}, dms)
+	assert.Equal(t, []string{"weather.bot"}, bots)
 }

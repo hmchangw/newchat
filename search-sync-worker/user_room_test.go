@@ -35,8 +35,12 @@ func TestUserRoomCollection_Metadata(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"chat.inbox.site-a.internal.member_added",
 		"chat.inbox.site-a.internal.member_removed",
+		"chat.inbox.site-a.internal.member_joinedat_refreshed",
+		"chat.inbox.site-a.internal.room_renamed",
 		"chat.inbox.site-a.external.member_added",
 		"chat.inbox.site-a.external.member_removed",
+		"chat.inbox.site-a.external.member_joinedat_refreshed",
+		"chat.inbox.site-a.external.room_renamed",
 	}, filters)
 }
 
@@ -137,6 +141,16 @@ func TestUserRoomCollection_BuildAction_MemberAdded(t *testing.T) {
 	roomTimestamps := upsert["roomTimestamps"].(map[string]any)
 	assert.Equal(t, float64(ts), roomTimestamps["r-eng"])
 	assert.NotEmpty(t, upsert["createdAt"])
+}
+
+func TestUserRoomCollection_BuildAction_JoinedAtRefreshedIsNoOp(t *testing.T) {
+	coll := newUserRoomCollection("user-room-site-a", false)
+	payload := baseInboxMemberEvent()
+	data := makeInboxMemberEvent(t, model.InboxMemberJoinedAtRefreshed, payload, 2000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "joinedAt is not in the user-room index; a refresh changes nothing here")
 }
 
 func TestUserRoomCollection_BuildAction_IndexesBotsAndAdmin(t *testing.T) {
@@ -391,6 +405,19 @@ func TestUserRoomCollection_BuildAction_BulkInvite(t *testing.T) {
 	assert.True(t, seenDocIDs["alice"])
 	assert.True(t, seenDocIDs["bob"])
 	assert.True(t, seenDocIDs["carol"])
+}
+
+// room_renamed rides the shared inbox filter but user-room stores no room name,
+// so BuildAction must skip it (nil actions, no error) — spotlight owns the
+// rename re-index. An error here would nak-loop a rename forever.
+func TestUserRoomCollection_BuildAction_RoomRenamedSkipped(t *testing.T) {
+	coll := newUserRoomCollection("user-room-site-a", false)
+	data := makeInboxRenameEvent(t, model.InboxRoomRenamed,
+		model.RoomRenamedInboxPayload{RoomID: "r-eng", NewName: "platform", Timestamp: 5000}, 5000)
+
+	actions, err := coll.BuildAction(data)
+	require.NoError(t, err)
+	assert.Empty(t, actions, "user-room ignores room_renamed")
 }
 
 func TestUserRoomCollection_BuildAction_Errors(t *testing.T) {

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -53,23 +51,11 @@ func (g *graphClient) GetGroup(ctx context.Context, groupID string) (*GroupProfi
 	q.Set("$select", "id,displayName,description")
 	endpoint := g.baseURL + "/groups/" + url.PathEscape(groupID) + "?" + q.Encode()
 
-	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	// getThrottled retries 429/503 per Retry-After and shares the tenant-wide
+	// throttle gate, so an hr-sync run survives a Graph throttle/hiccup.
+	body, err := g.getThrottled(ctx, token, endpoint, "get group", 1<<20) // 1 MiB
 	if err != nil {
-		return nil, fmt.Errorf("build get-group request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("get group: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read get-group response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// Never wrap the response body — surface the status only.
-		return nil, fmt.Errorf("get group: graph returned status %d", resp.StatusCode)
+		return nil, err
 	}
 	var profile GroupProfile
 	if err := json.Unmarshal(body, &profile); err != nil {
@@ -139,23 +125,10 @@ func (g *graphClient) ListGroupMembers(ctx context.Context, groupID string, page
 }
 
 func (g *graphClient) fetchMembersPage(ctx context.Context, token, endpoint string) (*membersPage, error) {
-	req, err := newExternalRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	// Shares getThrottled's 429/503 retry + tenant throttle gate (see GetGroup).
+	body, err := g.getThrottled(ctx, token, endpoint, "list group members", 1<<22) // 4 MiB
 	if err != nil {
-		return nil, fmt.Errorf("build list-members request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list group members: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<22))
-	if err != nil {
-		return nil, fmt.Errorf("read list-members response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		// Never wrap the response body — surface the status only.
-		return nil, fmt.Errorf("list group members: graph returned status %d", resp.StatusCode)
+		return nil, err
 	}
 	var page membersPage
 	if err := json.Unmarshal(body, &page); err != nil {

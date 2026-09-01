@@ -57,6 +57,12 @@ type broadcastMetrics struct {
 	deliveries   metric.Int64Counter
 	fanoutOpts   map[fanoutKey]metric.MeasurementOption
 	deliveryOpts map[deliveryKey]metric.MeasurementOption
+	// threadViewOpts is keyed by event type alone — that is the only label this
+	// counter carries.
+	threadViewOpts map[natsmetrics.EventType]metric.MeasurementOption
+
+	// Failures only: the delivery counter already carries this lane's volume.
+	threadViewFailures metric.Int64Counter
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
@@ -65,7 +71,10 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		metric.WithDescription("Intended fan-out recipients by bounded room and event kind."))
 	if err != nil {
 		// Telemetry must never block startup: fall back to a no-op instrument so
-		// the service runs blind on this metric rather than not at all.
+		// the service runs blind on this metric rather than not at all. The
+		// fallback's own error is discarded here and at each instrument below —
+		// a no-op meter has no failure mode, and there is nothing left to fall
+		// back to if it somehow had one.
 		fanout, _ = noopMeter.Int64Histogram("broadcast_worker_fanout_recipients")
 	}
 	deliveries, err := meter.Int64Counter("broadcast_worker_recipient_deliveries_total",
@@ -73,11 +82,24 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 	if err != nil {
 		deliveries, _ = noopMeter.Int64Counter("broadcast_worker_recipient_deliveries_total")
 	}
+	threadViewFailures, err := meter.Int64Counter("broadcast_worker_thread_view_publish_failures_total",
+		metric.WithDescription("Publishes to the thread-scoped view subject that failed."))
+	if err != nil {
+		threadViewFailures, _ = noopMeter.Int64Counter("broadcast_worker_thread_view_publish_failures_total")
+	}
 	m := &broadcastMetrics{
-		fanout:       fanout,
-		deliveries:   deliveries,
-		fanoutOpts:   make(map[fanoutKey]metric.MeasurementOption),
-		deliveryOpts: make(map[deliveryKey]metric.MeasurementOption),
+		fanout:             fanout,
+		deliveries:         deliveries,
+		threadViewFailures: threadViewFailures,
+		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
+		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
+		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption),
+	}
+	// threadViewOpts is keyed by event alone, so it gets its own loop. Filling it
+	// inside the room loop below wrote the same eight entries once per room kind
+	// and threw away thirty-two of the forty.
+	for _, event := range allBroadcastEvents {
+		m.threadViewOpts[event] = metric.WithAttributes(attribute.String("event_type", string(event)))
 	}
 	for _, room := range allRoomKinds {
 		roomAttr := attribute.String("room_kind", string(room))
@@ -137,6 +159,21 @@ func (m *broadcastMetrics) Delivery(ctx context.Context, room roomKindLabel, eve
 		result = deliveryFailed
 	}
 	m.deliveries.Add(ctx, 1, m.deliveryOpts[deliveryKey{normalizeRoomKind(room), normalizeBroadcastEvent(event), result}])
+}
+
+// ThreadViewPublishFailed counts a failed thread-view publish. Failures only:
+// viewers refetch on panel open, so only the rate is worth alerting on.
+//
+// The option is looked up, not built here. "It only runs after a failure" does
+// not make this a cold path: publishThreadViewEvent calls it once per target
+// subject inside its fan-out loop, so a broker outage runs it for every target
+// of every thread event — the moment the label set stops being cheap is exactly
+// the moment this counter matters.
+func (m *broadcastMetrics) ThreadViewPublishFailed(ctx context.Context, event natsmetrics.EventType) {
+	if m == nil || m.threadViewFailures == nil {
+		return
+	}
+	m.threadViewFailures.Add(ctx, 1, m.threadViewOpts[normalizeBroadcastEvent(event)])
 }
 
 type broadcastMetricLabels struct {

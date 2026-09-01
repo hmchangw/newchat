@@ -44,15 +44,13 @@ for future siblings (`.silent`, `.priority`) without restructuring the stream.
   "id": "{messageId}-b{batchIndex}",
   "accounts": ["alice", "bob", "carol"],
   "title": "",
-  "body": "the message content",
+  "body": "Alice Wang 愛麗絲 please review",
   "data": {
     "roomId": "r123",
     "messageId": "m456",
     "type": "c",
     "sender": { "account": "bob", "userId": "u-bob", "displayName": "Bob Chen 陳大寶" },
     "threadMessageId": "",
-    "fileName": "",
-    "fileType": "",
     "parentRoomId": "",
     "pushTime": "2026-05-28T00:00:00Z",
     "alsoSendToChannel": false
@@ -68,11 +66,21 @@ Field notes:
 - **`id`** = `{messageId}-b{batchIndex}` (zero-based). Also set as the `Nats-Msg-Id` header — see Dedup. Sorting survivors lexicographically before chunking makes batch *ordering* deterministic across redeliveries; it does not by itself guarantee the same accounts land in the same `batchIndex` on every redelivery — see the caveat under Dedup.
 - **`accounts`** = recipient accounts in this batch, lexicographically sorted, capped by `PUSH_RECIPIENT_BATCH_SIZE` (default 100). The push service iterates this list, resolves device tokens per account, and is expected to use the provider's native multicast (e.g. FCM `send_each_for_multicast` — up to 500 tokens per call) so one batch becomes one outbound HTTP request.
 - **`title`** is resolved by the worker so push-service needs no DB lookup. The rule mirrors the legacy implementation: `room.Name` if present, otherwise the sender's account (DM rooms have no name). Room metadata is served from an LRU+TTL cache (`pkg/roommetacache`) sized via `ROOM_META_CACHE_SIZE` / `ROOM_META_CACHE_TTL`.
-- **`body`** is the raw message content, **untruncated**. The push service should truncate to the APNs/FCM payload limit (~4 KB total) before delivery. (Truncation/PII-scrubbing on the worker side is tracked as follow-up.)
+- **`body`** is the message content with `@mentions` rendered for humans, **untruncated**. The push service should truncate to the APNs/FCM payload limit (~4 KB total) before delivery. (Truncation/PII-scrubbing on the worker side is tracked as follow-up.) Mention substitution (`pkg/mention.ReplaceAccounts`) drops the `@` marker and rewrites each token:
+  - a known account → its display name, composed with the same `pkg/displayfmt.CombineWithFallback(engName, chineseName, …)` rule as `data.sender.displayName` (`@alice` → `Alice Wang 愛麗絲`);
+  - `@all` → `All`, `@here` → `here` — fixed words, matched case-insensitively, never a DB lookup;
+  - anything unresolved — unknown account, user with neither name, failed lookup — keeps its literal `@token`, so push-service may still see raw `@account` text and must not assume substitution succeeded.
+
+  At most **50 distinct accounts** per message are resolved (`maxMentionLookups`); tokens past that cap keep their raw `@token`, bounding a user-controlled fan-out.
+
+  Names come from the `users` collection through an LRU+TTL cache (`pkg/userstore`, `USER_CACHE_SIZE` / `USER_CACHE_TTL`), bounded by `MENTION_NAMES_TIMEOUT` and gated by `MENTION_NAMES_ENABLED`. A renamed user can therefore show a stale name for up to `USER_CACHE_TTL`. The lookup runs once per message, only when the content has mentions **and** at least one recipient survived the filters, and it **fails open**: a Mongo error or timeout sends the unsubstituted body rather than dropping the push. Substitution is not idempotent or reversible — consumers must treat `body` as display text, not as a parseable mention source.
 - **`data.type`** is the short room type: `"c"` channel, `"d"` DM/botDM, `"p"` discussion.
+- **`data.fileName` / `data.fileType`** carry the push file info of the message's **first decodable attachment** — `Attachment.Title` (file name) and its MIME `fileType`. Both are omitted from the payload (`omitempty`) when the message has no attachment or no blob decodes — the example above is a text message, so neither key appears. Malformed blobs are skipped, so a malformed first attachment falls through to the next one.
 - **`data.sender`** is a `Participant` carrying `account`, `userId`, and `displayName`. **`displayName` is pre-composed by `message-gatekeeper`** at canonical-message write time via `pkg/displayfmt.CombineWithFallback(engName, chineseName, account)` (same helper already used by `room-worker/sysmsg.go`, `room-service/store_mongo.go`, and reaction rendering — one source of truth for display formatting across the system). The composition happens once per message regardless of downstream consumer count and never on the push hot path; push-service renders `sender.displayName` verbatim. Empty `displayName` (legacy in-flight canonical messages predating the field) falls back to `sender.account` in `notification-worker`. `engName` / `chineseName` are deliberately not propagated on the push event since the composed string is the only render-time input.
 - **`timestamp`** is event publish time (UnixMilli); **`data.pushTime`** is the RFC3339 domain send time. They are distinct fields.
 - **`unreadCounts`** (optional) is per-recipient badge counts stamped at notify time — see § Badge counts below. Omitted entirely (not an empty object) when the badge phase is disabled or produced no counts for this batch.
+
+Mention resolution emits no metric of its own. A lookup that errors or times out is reported by the `mention name lookup failed, body keeps raw mentions` warn line (trace-correlated, carries both the requested and the resolved count); the message itself still records as `notification_worker_outcomes_total{result="sent"}`, since the push is delivered either way. A failed lookup does **not** imply the whole body is unsubstituted: `Resolve` returns the names it did collect alongside the error and those are still applied, so an affected body may contain raw `@tokens` for some, all, or none of its mentions — compare the two counts on the warn line to tell which.
 
 ### Badge counts (`unreadCounts`)
 
@@ -147,16 +155,24 @@ Request / reply (`pkg/model/subscription.go`):
 `SADD` is atomic with the size read. The set is maintained on both edges:
 every message bumps the **full badge audience** (all members past the
 sender/muted/restricted/thread-scope filters — including members who won't be
-pushed), and every read / thread-read / unmute drops the account's whole set
-(plus its `badge:fresh` marker) so the next count or push recomputes from
-Mongo; a mute and a member-removal remove exactly that room. Residual drift
-(a missed bump, a drop racing a concurrent bump) is bounded by the next
-read-driven recompute, reseed-on-`subscription.count`, and the set's TTL
-(`BADGE_CACHE_TTL`, default 24h, identical across its writers) — failure
-direction is undercount-until-recompute, never a stuck overcount.
-`subscription.count` (unread=true) may itself be served from this set when
-user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true only
-after all badge writers run the marker-aware `pkg/badgecache`, or an old
+pushed), and a read removes exactly the room read (`ClearRoom`) — a room with
+unread followed threads stays counted, so the cache is left untouched in that
+case; a mute-on transition and a member-removal are the same exact `ClearRoom`. Thread-read,
+`thread.read.all`, and unmute still drop the account's whole set (`ClearAll`,
+plus its `badge:fresh` marker), since their post-state is genuinely ambiguous.
+Drift is now bounded by the freshness marker's own TTL
+(`BADGE_MARKER_TTL`, user-service only) rather than the set's TTL
+(`BADGE_CACHE_TTL`): the marker is stamped only by the Mongo-verifying
+seed/reseed paths and is never refreshed by a bump, so its expiry is the
+upper bound on how long the cached set can go unverified before the next
+count or push recomputes from Mongo and re-stamps it. A degraded computation
+— a cross-site `GetRoomsMeta` RPC failed and that site's rooms
+were dropped — is never cached: the best-effort count is still returned, but
+the marker is not stamped, so a knowingly-incomplete set is never blessed as
+verified. Failure direction is undercount-until-recompute, never a stuck
+overcount. `subscription.count` (unread=true) may itself be served from this
+set when user-service's `BADGE_COUNT_CACHE_FIRST` is enabled — flip it to true
+only after all badge writers run the marker-aware `pkg/badgecache`, or an old
 writer's set-only clear can leave a marker reading as a stale "fresh zero".
 
 ### Payload decoding
@@ -382,20 +398,31 @@ Required before a production rollout:
 4. **New env vars** (see `notification-worker/deploy/docker-compose.yml` for
    dev values):
    - `VALKEY_ADDRS` (**required**, comma-separated cluster seeds), `VALKEY_PASSWORD`
-   - `ROOMSUBCACHE_TTL` (default `5m`) — TTL for the Valkey room-member cache; no in-process L1 (per-pod memory bounded against very large rooms)
+   - `ROOMSUBCACHE_TTL` (default `90m`) — TTL for the Valkey room-member cache; no in-process L1 (per-pod memory bounded against very large rooms). Declared once on `roomsubcache.TTLConfig`; every reader of the shared key must be configured alike
    - `LARGE_ROOM_THRESHOLD` (default `500` — same knob as message-gatekeeper)
    - `PUSH_RECIPIENT_BATCH_SIZE` (default `100` — recipients per push event; tune toward provider multicast caps)
    - `ROOM_META_CACHE_SIZE` (default `10000`), `ROOM_META_CACHE_TTL` (default `2m`) — fronts `rooms` collection lookups for title resolution
+   - `USER_CACHE_SIZE` (default `10000`), `USER_CACHE_TTL` (default `5m`) — LRU+TTL cache fronting the `users` collection for mention display names
+   - `MENTION_NAMES_ENABLED` (default `true`) — kill switch for mention display-name resolution; `false` skips the users lookup entirely and only `@all`/`@here` are substituted
+   - `MENTION_NAMES_TIMEOUT` (default `2s`) — bounds the mention display-name lookup; on expiry the body ships with raw `@tokens`
    - `PUSH_ASYNC_MAX_PENDING` (default `1024`)
 
-   `message-gatekeeper` owns the sender display-name resolution; configure its
-   `USER_CACHE_SIZE` / `USER_CACHE_TTL` (defaults 10000 / 5m) there.
-   `notification-worker`'s only users-collection read is the member-cache
-   loader's batched home-site lookup (one `$in` query per room per
-   `ROOMSUBCACHE_TTL` — see §1 Badge counts, Home-site resolution); it never
-   reads users per event or per recipient. This consciously revises the
-   original "no users-collection lookups" contract: badge RPCs must route to
-   each recipient's home site, and only the users collection knows it.
+   `message-gatekeeper` owns the **sender** display-name resolution
+   (`data.sender.displayName`), composed once at canonical-message write time;
+   configure its `USER_CACHE_SIZE` / `USER_CACHE_TTL` there.
+   `notification-worker` makes three users-collection reads of its own, which
+   consciously revises the original "no users-collection lookups" contract:
+   - the member-cache loader's batched **home-site** lookup (one `$in` per room
+     per `ROOMSUBCACHE_TTL` — see §1 Badge counts, Home-site resolution), since
+     badge RPCs must route to each recipient's home site and only the users
+     collection knows it;
+   - **notification settings**, primary-pinned so a just-muted user is not
+     notified (see `USER_SETTINGS_*`);
+   - **mention** display names for `body`, at the default read preference (a
+     renamed user tolerates replica lag), cached per `USER_CACHE_SIZE` /
+     `USER_CACHE_TTL` and skipped entirely for messages without mentions.
+
+   None of the three is a per-recipient read: each is batched or cached.
    - `INDEX_ENSURE_TIMEOUT` (default `2m`)
    - `PRESENCE_RPC_ENABLED` (default `false`), `PRESENCE_BATCH_SIZE` (`512`), `PRESENCE_RPC_TIMEOUT` (`2s`)
    - `BADGE_COUNT_RPC_ENABLED` (default `true`) — gates the `badge.count.batch` RPC to each recipient's home-site `user-service`; set `false` to disable badge stamping (see §1 Badge counts)

@@ -17,38 +17,38 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
-// MockattemptRecorder is a mock of attemptRecorder interface.
-type MockattemptRecorder struct {
+// MockfailureRecorder is a mock of failureRecorder interface.
+type MockfailureRecorder struct {
 	ctrl     *gomock.Controller
-	recorder *MockattemptRecorderMockRecorder
+	recorder *MockfailureRecorderMockRecorder
 	isgomock struct{}
 }
 
-// MockattemptRecorderMockRecorder is the mock recorder for MockattemptRecorder.
-type MockattemptRecorderMockRecorder struct {
-	mock *MockattemptRecorder
+// MockfailureRecorderMockRecorder is the mock recorder for MockfailureRecorder.
+type MockfailureRecorderMockRecorder struct {
+	mock *MockfailureRecorder
 }
 
-// NewMockattemptRecorder creates a new mock instance.
-func NewMockattemptRecorder(ctrl *gomock.Controller) *MockattemptRecorder {
-	mock := &MockattemptRecorder{ctrl: ctrl}
-	mock.recorder = &MockattemptRecorderMockRecorder{mock}
+// NewMockfailureRecorder creates a new mock instance.
+func NewMockfailureRecorder(ctrl *gomock.Controller) *MockfailureRecorder {
+	mock := &MockfailureRecorder{ctrl: ctrl}
+	mock.recorder = &MockfailureRecorderMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockattemptRecorder) EXPECT() *MockattemptRecorderMockRecorder {
+func (m *MockfailureRecorder) EXPECT() *MockfailureRecorderMockRecorder {
 	return m.recorder
 }
 
-// Attempt mocks base method.
-func (m *MockattemptRecorder) Attempt(arg0 context.Context, arg1 natsmetrics.DestinationKind, arg2 natsmetrics.Operation, arg3 error) {
+// Failure mocks base method.
+func (m *MockfailureRecorder) Failure(arg0 context.Context, arg1 natsmetrics.DestinationKind, arg2 natsmetrics.Operation, arg3 error) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Attempt", arg0, arg1, arg2, arg3)
+	m.ctrl.Call(m, "Failure", arg0, arg1, arg2, arg3)
 }
 
-// Attempt indicates an expected call of Attempt.
-func (mr *MockattemptRecorderMockRecorder) Attempt(arg0, arg1, arg2, arg3 any) *gomock.Call {
+// Failure indicates an expected call of Failure.
+func (mr *MockfailureRecorderMockRecorder) Failure(arg0, arg1, arg2, arg3 any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Attempt", reflect.TypeOf((*MockattemptRecorder)(nil).Attempt), arg0, arg1, arg2, arg3)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Failure", reflect.TypeOf((*MockfailureRecorder)(nil).Failure), arg0, arg1, arg2, arg3)
 }

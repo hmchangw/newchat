@@ -645,6 +645,7 @@ func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
 		engine.UpsertTemplate(ctx, coll.TemplateName(), overrideIndexSettings(coll.TemplateBody())),
 		"upsert spotlight-org template",
 	)
+	registerStoredScripts(t, ctx, engine, coll)
 	preCreateIndex(t, esURL, indexName)
 	waitForClusterGreen(t, esURL, 120*time.Second)
 
@@ -721,5 +722,47 @@ func TestSearchSyncSpotlightOrg_Integration(t *testing.T) {
 		assert.Equal(t, "Engineering Renamed", s1["sectName"], "renamed field updated")
 		assert.Equal(t, "D1", s1["deptId"], "deptId preserved")
 		assert.Equal(t, "Tech", s1["deptName"], "deptName preserved")
+	})
+
+	// The two writes above arrived in stream order, so the guard let both through and
+	// recorded the second sequence. These drive the guard itself: the HR payload has no
+	// timestamp, so ordering rests entirely on this script comparing stream sequences.
+	applyAt := func(t *testing.T, sectName string, seq uint64) searchengine.BulkResult {
+		t.Helper()
+		actions, buildErr := coll.BuildActionSeq(
+			hrBatchJSON(t, []SpotlightOrgIndex{{SectID: "S1", SectName: sectName}}), seq)
+		require.NoError(t, buildErr)
+		require.Len(t, actions, 1)
+		results, bulkErr := engine.Bulk(ctx, actions)
+		require.NoError(t, bulkErr)
+		require.Len(t, results, 1)
+		refreshIndex(t, esURL, indexName)
+		return results[0]
+	}
+
+	t.Run("the stored sequence advances with each applied write", func(t *testing.T) {
+		s1 := getDoc(t, esURL, indexName, "S1")
+		require.NotNil(t, s1)
+		assert.NotNil(t, s1["orgSeq"], "the guard needs a stored sequence to compare against")
+	})
+
+	t.Run("a stale sequence cannot overwrite a newer row", func(t *testing.T) {
+		result := applyAt(t, "Engineering STALE", 1)
+
+		assert.True(t, searchengine.IsBulkItemSuccess(searchengine.ActionUpdate, result),
+			"a skipped update is a successful no-op, not a failure to retry")
+		s1 := getDoc(t, esURL, indexName, "S1")
+		require.NotNil(t, s1)
+		assert.Equal(t, "Engineering Renamed", s1["sectName"],
+			"a redelivered or slow batch must not resurrect the older row")
+	})
+
+	t.Run("a newer sequence still applies", func(t *testing.T) {
+		applyAt(t, "Engineering Final", 999999)
+
+		s1 := getDoc(t, esURL, indexName, "S1")
+		require.NotNil(t, s1)
+		assert.Equal(t, "Engineering Final", s1["sectName"])
+		assert.Equal(t, "D1", s1["deptId"], "the guard must not cost doc-merge semantics")
 	})
 }

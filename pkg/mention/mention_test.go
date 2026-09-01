@@ -221,3 +221,124 @@ func TestResolveFromParsed(t *testing.T) {
 		})
 	}
 }
+
+func TestReplaceAccounts(t *testing.T) {
+	names := map[string]string{
+		"alice":      "Alice Wang 愛麗絲",
+		"bob":        "Bob Chen",
+		"first.last": "First Last",
+	}
+
+	tests := []struct {
+		name    string
+		content string
+		names   map[string]string
+		want    string
+	}{
+		{name: "no mentions", content: "hello world", names: names, want: "hello world"},
+		{name: "empty content", content: "", names: names, want: ""},
+		{name: "single known mention", content: "hello @alice", names: names, want: "hello Alice Wang 愛麗絲"},
+		{name: "mention at start", content: "@alice hello", names: names, want: "Alice Wang 愛麗絲 hello"},
+		{name: "multiple known mentions", content: "@alice check with @bob", names: names, want: "Alice Wang 愛麗絲 check with Bob Chen"},
+		{name: "duplicate mention replaced every occurrence", content: "@bob and @bob again", names: names, want: "Bob Chen and Bob Chen again"},
+		{name: "unknown account kept verbatim", content: "hey @nobody", names: names, want: "hey @nobody"},
+		{name: "mixed known and unknown", content: "@alice and @nobody", names: names, want: "Alice Wang 愛麗絲 and @nobody"},
+		{name: "token casing folded for lookup", content: "hey @ALICE", names: names, want: "hey Alice Wang 愛麗絲"},
+		{name: "dotted account", content: "cc @first.last ok", names: names, want: "cc First Last ok"},
+		{name: "trailing punctuation preserved", content: "hey @bob. check", names: names, want: "hey Bob Chen. check"},
+		{name: "mention after newline", content: "line1\n@bob", names: names, want: "line1\nBob Chen"},
+		{name: "mention after tab", content: "hi\t@bob", names: names, want: "hi\tBob Chen"},
+		{name: "email address is not a mention", content: "mail bob@example.com now", names: names, want: "mail bob@example.com now"},
+		{name: "second @ without separator untouched", content: "@alice@bob", names: names, want: "Alice Wang 愛麗絲@bob"},
+		{name: "at all becomes All", content: "hey @all now", names: names, want: "hey All now"},
+		{name: "at all casing folded", content: "@All and @ALL", names: names, want: "All and All"},
+		{name: "at here becomes here", content: "hey @here now", names: names, want: "hey here now"},
+		{name: "at here casing folded", content: "@Here now", names: names, want: "here now"},
+		{name: "literals resolve without a names map", content: "@all @here", names: nil, want: "All here"},
+		{name: "nil names leaves accounts verbatim", content: "hey @alice", names: nil, want: "hey @alice"},
+		{name: "empty names leaves accounts verbatim", content: "hey @alice", names: map[string]string{}, want: "hey @alice"},
+		{name: "empty display name falls back to raw token", content: "hey @alice", names: map[string]string{"alice": ""}, want: "hey @alice"},
+		{name: "literals win over a same-named account", content: "@all", names: map[string]string{"all": "Should Not Win"}, want: "All"},
+		{name: "everything at once", content: "@all ping @alice and @nobody cc @here", names: names, want: "All ping Alice Wang 愛麗絲 and @nobody cc here"},
+		// Substituted text is never rescanned: a display name that looks like a
+		// mention passes through inert. Pins the ReplaceAllStringFunc choice.
+		{name: "display name containing a mention is not rescanned", content: "@alice @bob", names: map[string]string{"alice": "@bob", "bob": "Bob Chen"}, want: "@bob Bob Chen"},
+		{name: "display name containing at-all is not rescanned", content: "@alice", names: map[string]string{"alice": "@all"}, want: "@all"},
+		// Regexp expansion metachars in a display name must survive verbatim; they
+		// would be eaten by a ReplaceAllString refactor.
+		{name: "dollar metachars in display name survive", content: "@eve hi", names: map[string]string{"eve": "Eve $1 $name &"}, want: "Eve $1 $name & hi"},
+		{name: "backslash in display name survives", content: "@eve hi", names: map[string]string{"eve": `Eve \\1`}, want: `Eve \\1 hi`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ReplaceAccounts(tt.content, tt.names))
+		})
+	}
+}
+
+func TestReplaceAccounts_DoesNotMutateInput(t *testing.T) {
+	names := map[string]string{"alice": "Alice Wang"}
+	content := "hey @alice"
+
+	got := ReplaceAccounts(content, names)
+
+	assert.Equal(t, "hey @alice", content, "input content must not be mutated")
+	assert.Equal(t, "hey Alice Wang", got)
+	assert.Len(t, names, 1, "names map must not be mutated")
+}
+
+func TestLookupAccountsFromParsed(t *testing.T) {
+	tests := []struct {
+		name   string
+		parsed ParseResult
+		want   []string
+	}{
+		{name: "empty result", parsed: ParseResult{}, want: nil},
+		{name: "mention all only", parsed: ParseResult{MentionAll: true}, want: nil},
+		{name: "here is filtered out", parsed: ParseResult{Accounts: []string{"here"}}, want: nil},
+		{name: "accounts kept", parsed: ParseResult{Accounts: []string{"alice", "bob"}}, want: []string{"alice", "bob"}},
+		{name: "literals stripped from accounts", parsed: ParseResult{Accounts: []string{"here", "alice", "all"}}, want: []string{"alice"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, LookupAccountsFromParsed(tt.parsed))
+		})
+	}
+}
+
+// TestResolve_PartialHitsSurviveLookupError pins the outage contract: a store
+// that answers some accounts and then fails must not lose the ones it answered.
+// pkg/userstore.Cache returns exactly this shape (L1 hits + error) when Mongo is
+// down, and dropping it means a mention that WAS resolvable is persisted as
+// plain text forever.
+func TestResolve_PartialHitsSurviveLookupError(t *testing.T) {
+	partial := []model.User{{ID: "u1", Account: "alice", EngName: "Alice"}}
+	lookup := func(context.Context, []string) ([]model.User, error) {
+		return partial, errors.New("mongo down")
+	}
+
+	got, err := Resolve(context.Background(), "hi @alice and @bob", lookup)
+	require.Error(t, err, "the caller must still learn the lookup degraded")
+	require.NotNil(t, got)
+
+	require.Len(t, got.Participants, 1, "the resolved half must survive")
+	assert.Equal(t, "alice", got.Participants[0].Account)
+	assert.Equal(t, "u1", got.Participants[0].UserID)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, got.Accounts, "raw accounts stay intact")
+}
+
+func TestResolve_MentionAllSurvivesLookupError(t *testing.T) {
+	lookup := func(context.Context, []string) ([]model.User, error) {
+		return nil, errors.New("mongo down")
+	}
+
+	got, err := Resolve(context.Background(), "@all and @alice", lookup)
+	require.Error(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.MentionAll)
+	// @all needs no lookup, so it must resolve even when every user lookup fails.
+	require.Len(t, got.Participants, 1)
+	assert.Equal(t, "all", got.Participants[0].Account)
+}

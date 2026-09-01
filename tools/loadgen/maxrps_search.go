@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,7 +17,7 @@ import (
 )
 
 // The search workload drives search-service's request/reply endpoints so SLO-7
-// ("search returns ok / eligible search requests", docs/load-testing/system/sli-slo.md
+// ("search returns ok / eligible search requests", docs/load-testing/common/sli-slo.md
 // §5) can be measured under load.
 //
 // SLO-7 is already computable server-side from

@@ -41,3 +41,29 @@ type Collection interface {
 	// e.g. filtered).
 	BuildAction(data []byte) ([]searchengine.BulkAction, error)
 }
+
+// ByQueryCollection is an optional Collection capability for events that mutate
+// many documents keyed by a field rather than by DocID — a shape the DocID-keyed
+// Bulk API can't express. A collection implementing it gets first crack at a
+// message: ok=true means "I handled it as one _update_by_query against index";
+// ok=false falls through to the normal BuildAction bulk path. Spotlight uses it
+// for room_renamed (re-index roomName across every member's doc).
+type ByQueryCollection interface {
+	BuildByQuery(data []byte) (index string, body json.RawMessage, ok bool, err error)
+}
+
+// sequencedCollection is a Collection whose ordering guard needs the source
+// message's JetStream stream sequence — a strict total order assigned
+// server-side at publish. Handler routes through BuildActionSeq when a
+// collection implements this, and through BuildAction otherwise. Same
+// optional-capability shape as ByQueryCollection above.
+//
+// Only spotlight-org needs it. The INBOX and canonical collections carry an
+// event timestamp in their payload and guard on that (external versioning for
+// messages/spotlight, a painless timestamp compare for user-room); the HR
+// employees.upsert payload is a bare array with no timestamp of its own, so the
+// stream sequence is the only ordering token available to it.
+type sequencedCollection interface {
+	Collection
+	BuildActionSeq(data []byte, streamSeq uint64) ([]searchengine.BulkAction, error)
+}

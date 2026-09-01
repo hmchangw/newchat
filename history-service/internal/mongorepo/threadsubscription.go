@@ -7,7 +7,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -44,20 +43,17 @@ func NewThreadSubscriptionRepo(db *mongo.Database) *ThreadSubscriptionRepo {
 	}
 }
 
-// EnsureIndexes creates the indexes the thread-inbox query needs. Idempotent.
-// The (threadRoomId, userAccount) unique index is the one message-worker owns;
-// history-service ensures it independently so startup order doesn't matter.
+// EnsureIndexes creates the (userAccount) index this service's thread-inbox query
+// needs. The (threadRoomId, userAccount) unique index is owned by room-service —
+// verified, not created here. Idempotent.
 func (r *ThreadSubscriptionRepo) EnsureIndexes(ctx context.Context) error {
-	_, err := r.subs.Raw().Indexes().CreateMany(ctx, []mongo.IndexModel{
-		// Fronts ListUserThreadSubscriptions' userAccount $match.
-		{Keys: bson.D{{Key: "userAccount", Value: 1}}},
-		{
-			Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		},
-	}, options.CreateIndexes())
-	if err != nil {
-		return fmt.Errorf("ensure thread_subscriptions indexes: %w", err)
+	// thread_subscriptions.{threadRoomId,userAccount} (unique) is owned by room-service; verify + warn only, never create.
+	mongoutil.WarnMissingIndexes(ctx, r.subs.Raw(), "threadRoomId_1_userAccount_1")
+	// Fronts ListUserThreadSubscriptions' userAccount $match.
+	if _, err := r.subs.Raw().Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "userAccount", Value: 1}},
+	}); err != nil {
+		return fmt.Errorf("ensure thread_subscriptions (userAccount) index: %w", err)
 	}
 	return nil
 }

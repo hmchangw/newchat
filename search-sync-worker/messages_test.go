@@ -644,7 +644,7 @@ func (f fakeTeamsUserResolver) ResolveIdentities(_ context.Context, ids []string
 }
 
 func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
-	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
 	c.teamsUsers = fakeTeamsUserResolver{
 		"graph-1": {Account: "alice", UserID: "uid-alice"},
 		"graph-2": {Account: "bob", UserID: "uid-bob"},
@@ -684,7 +684,7 @@ func TestMessageCollection_BuildAction_TeamsBatch(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
-	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
 	ts := time.Now().UTC()
 
 	data := teamsBatch(t,
@@ -700,7 +700,7 @@ func TestMessageCollection_BuildAction_TeamsBatch_Skips(t *testing.T) {
 }
 
 func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSiblings(t *testing.T) {
-	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
 	ts := time.Now().UTC()
 
 	valid, err := json.Marshal(teamsmigrate.Message{
@@ -723,7 +723,7 @@ func TestMessageCollection_BuildAction_TeamsBatch_MalformedRecordDoesNotDropSibl
 }
 
 func TestMessageCollection_BuildAction_TeamsBatch_SetsOrigin(t *testing.T) {
-	c := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+	c := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
 	ts := time.Now().UTC()
 
 	valid, err := json.Marshal(teamsmigrate.Message{
@@ -757,4 +757,38 @@ func TestBuildMessageAction_NormalPath_OmitsOrigin(t *testing.T) {
 	require.NoError(t, json.Unmarshal(action.Doc, &doc))
 	_, hasOrigin := doc["origin"]
 	assert.False(t, hasOrigin, "non-Teams docs must not carry an origin field")
+}
+
+// --- Fail-loud mode split: each collection decodes only its own shape ---
+
+func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
+	teamsColl := newTeamsMessageCollection("messages-site-a-v1", "site-a", false)
+	defaultColl := newMessageCollection("messages-site-a-v1", "site-a", time.Time{}, false)
+
+	msgEvent, _ := json.Marshal(model.MessageEvent{
+		Event:     model.EventCreated,
+		Timestamp: time.Now().UnixNano(),
+		Message:   model.Message{ID: "m-1", RoomID: "r-1", CreatedAt: time.Now().UTC()},
+	})
+	batch := teamsBatch(t, teamsmigrate.Message{
+		ID: "tm-1", RoomID: "room-1", MessageType: "message", CreatedDateTime: time.Now().UTC(),
+	})
+
+	// Each collection decodes only its own shape and fails loud on a mismatch,
+	// never falls through to the other decode.
+	tests := []struct {
+		name string
+		c    Collection
+		data []byte
+	}{
+		{"teams-only rejects bare array", teamsColl, []byte(`[{"id":"x"}]`)},
+		{"teams-only rejects MessageEvent", teamsColl, msgEvent},
+		{"default rejects batch envelope", defaultColl, batch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.c.BuildAction(tt.data)
+			require.Error(t, err)
+		})
+	}
 }

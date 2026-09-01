@@ -16,6 +16,8 @@ import (
 )
 
 func TestRequireBot(t *testing.T) {
+	// #nosec G101 -- fake fixture, not a live credential; hashed for the test below.
+	// nosemgrep: gosec.G101-1
 	const rawToken = "T3st-bot-tok"
 	hash := sessiontoken.Hash(rawToken)
 
@@ -109,7 +111,7 @@ func TestRequireBot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			r := gin.New()
-			sessions := &fakeSessionStore{FindByHashFn: tt.findByHashFn}
+			sessions := &sessionOnlyStore{FindSessionByHashFn: tt.findByHashFn}
 			nextCalls := 0
 			r.GET("/bot", requireBot(sessions), func(c *gin.Context) {
 				nextCalls++

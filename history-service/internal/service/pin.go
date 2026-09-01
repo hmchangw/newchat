@@ -216,12 +216,16 @@ func (s *HistoryService) ListPinnedMessages(c *natsrouter.Context, req models.Li
 	}, nil
 }
 
-// pinInaccessible: thread replies also gate on parent's createdAt (nil → redact conservatively).
+// pinInaccessible: thread-only replies also gate on parent's createdAt (nil →
+// redact conservatively). TShow replies skip that gate — they carry a
+// messages_by_room row, so load-history already serves the body to any caller
+// whose accessSince predates the reply; redacting the pin would only make the
+// pinned bar stricter than the timeline showing the same message.
 func pinInaccessible(m *models.Message, accessSince time.Time) bool {
 	if m.CreatedAt.Before(accessSince) {
 		return true
 	}
-	if m.ThreadParentID != "" {
+	if m.ThreadParentID != "" && !m.TShow {
 		if m.ThreadParentCreatedAt == nil || m.ThreadParentCreatedAt.Before(accessSince) {
 			return true
 		}
@@ -238,18 +242,11 @@ func redactUnavailablePins(pinned []models.Message, accessSince *time.Time) {
 		if !pinInaccessible(&pinned[i], *accessSince) {
 			continue
 		}
+		stripRichContent(&pinned[i])
 		pinned[i].Msg = UnavailableQuoteMsg
-		pinned[i].Mentions = nil
-		pinned[i].Attachments = nil
-		pinned[i].DecodedAttachments = nil
-		pinned[i].Card = nil
-		pinned[i].CardAction = nil
-		pinned[i].QuotedParentMessage = nil
-		pinned[i].Reactions = nil
-		// System messages carry event metadata in Type/SysMsgData (e.g.
-		// "user_joined" with a payload); scrub both so pre-access system
-		// pins don't leak event details past the placeholder.
+		// System messages carry event metadata in Type (e.g. "user_joined");
+		// scrub it too so pre-access system pins don't leak event details past
+		// the placeholder. blankOversize deliberately keeps Type.
 		pinned[i].Type = ""
-		pinned[i].SysMsgData = nil
 	}
 }

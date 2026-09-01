@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -195,6 +196,156 @@ func TestMongoStore_GetSubscription_ProjectionFields_Integration(t *testing.T) {
 	assert.Equal(t, []string{"t1", "t2"}, got.ThreadUnread)
 	require.NotNil(t, got.HistorySharedSince, "historySharedSince must be in the projection (addMembers inherits the requester's cap from it)")
 	assert.WithinDuration(t, hss, *got.HistorySharedSince, time.Second)
+}
+
+// Pins every User field a room-service call site reads, and — above all —
+// that users.services never comes back.
+func TestMongoStore_GetUser_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	mustInsertUser(t, db, &model.User{
+		ID: "uproj", Account: "alice", SiteID: "site-a",
+		EngName: "Alice", ChineseName: "愛麗絲",
+		Roles: []model.UserRole{model.UserRoleAdmin},
+		// Fields no room-service call site reads — the projection must drop them.
+		SectID: "s1", SectName: "Sect One", DeptID: "d1", DeptName: "Dept One",
+		EmployeeID: "E123", StatusText: "busy", StatusIsShow: true,
+		Services: model.Services{Password: model.PasswordCredentials{Bcrypt: "$2a$10$hash"}},
+	})
+
+	got, err := store.GetUser(ctx, "alice")
+	require.NoError(t, err)
+	assert.Equal(t, "uproj", got.ID, "_id must be in the projection (BuildDMRoomID keys on it)")
+	assert.Equal(t, "alice", got.Account)
+	assert.Equal(t, "Alice", got.EngName, "engName must be in the projection (createRoom rejects a user with both names empty)")
+	assert.Equal(t, "愛麗絲", got.ChineseName)
+	require.NotNil(t, got.Roles, "roles must be in the projection (IsPlatformAdmin gates roomRename/roomRestricted)")
+	assert.True(t, model.IsPlatformAdmin(got))
+
+	assert.Empty(t, got.Services.Password.Bcrypt, "projection must exclude users.services — credential material must never leave Mongo on this path")
+	assert.Empty(t, got.SectName, "projection must exclude fields no room-service call site reads")
+	assert.Empty(t, got.DeptName)
+	assert.Empty(t, got.EmployeeID)
+	assert.Empty(t, got.StatusText)
+	assert.False(t, got.StatusIsShow)
+}
+
+// Pins the narrow app read: both call sites need only Assistant.Enabled.
+func TestMongoStore_GetApp_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	_, err := db.Collection("apps").InsertOne(ctx, model.App{
+		ID: "aproj", Name: "Weather", Description: "forecasts",
+		Version: "1.2.3", ReportURL: "https://example.invalid/report",
+		AppViewURL: map[string]string{"en": "https://example.invalid/view"},
+		Sponsors:   []model.AppSponsor{{}},
+		Assistant:  &model.AppAssistant{Enabled: true, Name: "weather.bot", Username: "weather"},
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetApp(ctx, "weather.bot")
+	require.NoError(t, err)
+	require.NotNil(t, got.Assistant, "assistant must be in the projection (botDM availability gates on Enabled)")
+	assert.True(t, got.Assistant.Enabled)
+	assert.Equal(t, "weather.bot", got.Assistant.Name)
+
+	assert.Empty(t, got.Name, "projection must exclude fields the bot-availability check doesn't use")
+	assert.Empty(t, got.Description)
+	assert.Empty(t, got.Version)
+	assert.Empty(t, got.ReportURL)
+	assert.Nil(t, got.AppViewURL)
+	assert.Nil(t, got.Sponsors)
+}
+
+// Pins the dedup read: both call sites use only RoomID.
+func TestMongoStore_FindDMSubscription_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastSeen := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	mustInsertSub(t, db, &model.Subscription{
+		ID:           "sdm",
+		User:         model.SubscriptionUser{ID: "u1", Account: "alice"},
+		Name:         "bob",
+		RoomID:       "dm-alice-bob",
+		RoomType:     model.RoomTypeDM,
+		SiteID:       "site-a",
+		Roles:        []model.Role{model.RoleOwner},
+		Alert:        true,
+		ThreadUnread: []string{"t1"},
+		LastSeenAt:   &lastSeen,
+	})
+
+	got, err := store.FindDMSubscription(ctx, "alice", "bob")
+	require.NoError(t, err)
+	assert.Equal(t, "dm-alice-bob", got.RoomID, "roomId must be in the projection (open-or-create returns it)")
+
+	assert.Empty(t, got.Roles, "projection must exclude fields the dedup check doesn't use")
+	assert.Empty(t, got.ThreadUnread)
+	assert.Nil(t, got.LastSeenAt)
+	assert.False(t, got.Alert)
+}
+
+// Pins the narrow thread read: messageThreadRead uses only ThreadRoomID.
+func TestMongoStore_GetThreadSubscriptionByParent_ProjectionFields_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	lastSeen := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	mustInsertThreadSub(t, db, &model.ThreadSubscription{
+		ID:              "tsproj",
+		ParentMessageID: "pm1",
+		RoomID:          "r1",
+		ThreadRoomID:    "tr1",
+		UserID:          "u1",
+		UserAccount:     "alice",
+		SiteID:          "site-a",
+		LastSeenAt:      &lastSeen,
+		HasMention:      true,
+	})
+
+	got, err := store.GetThreadSubscriptionByParent(ctx, "alice", "pm1", "r1")
+	require.NoError(t, err)
+	assert.Equal(t, "tr1", got.ThreadRoomID, "threadRoomId must be in the projection (it is the only field the caller reads)")
+
+	assert.Empty(t, got.UserAccount, "projection must exclude fields the caller doesn't read")
+	assert.Empty(t, got.SiteID)
+	assert.Nil(t, got.LastSeenAt)
+	assert.False(t, got.HasMention)
+}
+
+// Guards the getRoomSubscriptions fallback (no room_members doc): dropping any
+// projected field zeroes it in the RoomMember result.
+func TestMongoStore_ListRoomMembers_SubscriptionProjection_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	joined := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Millisecond)
+	mustInsertSub(t, db, &model.Subscription{
+		ID:       "smember",
+		User:     model.SubscriptionUser{ID: "u7", Account: "carol"},
+		RoomID:   "rmembers",
+		SiteID:   "site-a",
+		Roles:    []model.Role{model.RoleOwner},
+		JoinedAt: joined,
+	})
+
+	got, _, err := store.ListRoomMembers(ctx, "rmembers", nil, nil, true)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "smember", got[0].ID, "_id must be in the projection (it is the RoomMember id)")
+	assert.Equal(t, "rmembers", got[0].RoomID)
+	assert.WithinDuration(t, joined, got[0].Ts, time.Second, "joinedAt must be in the projection (it is RoomMember.Ts)")
+	assert.Equal(t, "u7", got[0].Member.ID, "u._id must be in the projection (SubscriptionUser.ID maps to bson _id)")
+	assert.Equal(t, "carol", got[0].Member.Account, "u.account must be in the projection")
+	assert.True(t, got[0].Member.IsOwner, "roles must be in the projection (enrich derives IsOwner from it)")
 }
 
 func TestMongoStore_GetSubscriptionWithMembership_Integration(t *testing.T) {
@@ -480,7 +631,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-org-1", RoomID: "r1", Ts: base.Add(30 * time.Second),
 			Member: model.RoomMemberEntry{ID: "org-1", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		// orgs first, then individuals by ts asc
@@ -503,7 +654,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			RoomID: "r1", SiteID: "site-a", JoinedAt: base.Add(20 * time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		for _, m := range got {
@@ -527,7 +678,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		assert.Equal(t, "acct0", got[0].Member.Account)
@@ -545,7 +696,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, ptr(2), false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, ptr(2), false)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		assert.Equal(t, "acct2", got[0].Member.Account)
@@ -563,7 +714,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			})
 		}
 
-		got, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(1), false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(1), false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		assert.Equal(t, "acct1", got[0].Member.Account)
@@ -573,7 +724,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 	t.Run("empty room returns empty slice", func(t *testing.T) {
 		db := setupMongo(t)
 		store := NewMongoStore(db)
-		got, err := store.ListRoomMembers(ctx, "r-empty", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r-empty", nil, nil, false)
 		require.NoError(t, err)
 		assert.Empty(t, got)
 	})
@@ -592,12 +743,90 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 			RoomID: "r1", SiteID: "site-a", JoinedAt: base,
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		for _, m := range got {
 			assert.Equal(t, model.RoomMemberOrg, m.Member.Type)
 		}
+	})
+
+	t.Run("hasMore is true while rows remain beyond the page", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 5; i++ {
+			insertRM(t, db, model.RoomMember{
+				ID: fmt.Sprintf("rm-%d", i), RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: fmt.Sprintf("u%d", i), Type: model.RoomMemberIndividual, Account: fmt.Sprintf("acct%d", i)},
+			})
+		}
+
+		// First page: 2 of 5 — the over-fetched row must be trimmed off, not returned.
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		require.NoError(t, err)
+		require.Len(t, page, 2)
+		assert.True(t, hasMore)
+		assert.Equal(t, "acct1", page[1].Member.Account)
+
+		// Last page: offset 4 leaves exactly one row and nothing after it.
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(4), false)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
+
+		// A limit that exactly covers the remaining rows is still the last page.
+		exact, exactHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(5), nil, false)
+		require.NoError(t, err)
+		require.Len(t, exact, 5)
+		assert.False(t, exactHasMore)
+
+		// Offset past the end: empty page, nothing more.
+		beyond, beyondHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(9), false)
+		require.NoError(t, err)
+		assert.Empty(t, beyond)
+		assert.False(t, beyondHasMore)
+	})
+
+	t.Run("unlimited request never reports hasMore", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 3; i++ {
+			insertRM(t, db, model.RoomMember{
+				ID: fmt.Sprintf("rm-%d", i), RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: fmt.Sprintf("u%d", i), Type: model.RoomMemberIndividual, Account: fmt.Sprintf("acct%d", i)},
+			})
+		}
+
+		got, hasMore, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+		assert.False(t, hasMore)
+	})
+
+	t.Run("hasMore on the subscriptions fallback path", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC)
+		for i := 0; i < 3; i++ {
+			insertSub(t, db, model.Subscription{
+				ID: fmt.Sprintf("sub-%d", i), User: model.SubscriptionUser{ID: fmt.Sprintf("u-%d", i), Account: fmt.Sprintf("acct%d", i)},
+				RoomID: "r1", SiteID: "site-a", JoinedAt: base.Add(time.Duration(i) * time.Second),
+			})
+		}
+
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, false)
+		require.NoError(t, err)
+		require.Len(t, page, 2)
+		assert.True(t, hasMore)
+		assert.Equal(t, "acct0", page[0].Member.Account)
+		assert.Equal(t, "acct1", page[1].Member.Account)
+
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(2), false)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
 	})
 
 	t.Run("stable pagination with identical ts", func(t *testing.T) {
@@ -611,7 +840,7 @@ func TestMongoStore_ListRoomMembers_Integration(t *testing.T) {
 
 		seen := map[string]bool{}
 		for offset := 0; offset < 3; offset++ {
-			page, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(offset), false)
+			page, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(offset), false)
 			require.NoError(t, err)
 			require.Len(t, page, 1)
 			id := page[0].ID
@@ -661,7 +890,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -689,7 +918,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-bob", Type: model.RoomMemberIndividual, Account: "bob"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.False(t, got[0].Member.IsOwner)
@@ -712,7 +941,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "sect-eng", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -741,7 +970,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		})
 
 		// NO room_members docs inserted — exercises the subscriptions fallback path.
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
@@ -755,6 +984,35 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		assert.Equal(t, "Bob", bob.EngName)
 		assert.False(t, bob.IsOwner)
 		assert.Empty(t, bob.SectName)
+	})
+
+	t.Run("enrich=true trims the over-fetched row and reports hasMore", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 7, 0, 0, 0, 0, time.UTC)
+
+		insertUser(t, db, model.User{ID: "u-a", Account: "a", EngName: "A"})
+		insertUser(t, db, model.User{ID: "u-b", Account: "b", EngName: "B"})
+		insertUser(t, db, model.User{ID: "u-c", Account: "c", EngName: "C"})
+		for i, acct := range []string{"a", "b", "c"} {
+			insertRM(t, db, model.RoomMember{
+				ID: "rm-" + acct, RoomID: "r1", Ts: base.Add(time.Duration(i) * time.Second),
+				Member: model.RoomMemberEntry{ID: "u-" + acct, Type: model.RoomMemberIndividual, Account: acct},
+			})
+		}
+
+		page, hasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), nil, true)
+		require.NoError(t, err)
+		require.Len(t, page, 2, "the over-fetched row must not reach the caller")
+		assert.True(t, hasMore)
+		assert.Equal(t, "A", page[0].Member.EngName)
+		assert.Equal(t, "B", page[1].Member.EngName)
+
+		last, lastHasMore, err := store.ListRoomMembers(ctx, "r1", ptr(2), ptr(2), true)
+		require.NoError(t, err)
+		require.Len(t, last, 1)
+		assert.False(t, lastHasMore)
+		assert.Equal(t, "C", last[0].Member.EngName)
 	})
 
 	t.Run("enrich=false leaves display fields zero on same seed data", func(t *testing.T) {
@@ -772,7 +1030,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, false)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		m := got[0].Member
@@ -802,7 +1060,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-org", RoomID: "r1", Ts: base.Add(30 * time.Second),
 			Member: model.RoomMemberEntry{ID: "sect-c", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 3)
 		// Orgs first, then individuals by ts ascending.
@@ -812,9 +1070,9 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 
 		// Pagination is applied before enrichment — paging to the same slice
 		// with enrich=true and enrich=false must yield the same members (by ID).
-		bare, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), false)
+		bare, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), false)
 		require.NoError(t, err)
-		enriched, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), true)
+		enriched, _, err := store.ListRoomMembers(ctx, "r1", ptr(1), ptr(1), true)
 		require.NoError(t, err)
 		require.Len(t, bare, 1)
 		require.Len(t, enriched, 1)
@@ -846,7 +1104,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "X", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Engineering", got[0].Member.OrgName,
@@ -867,7 +1125,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "X", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Frontend", got[0].Member.OrgName)
@@ -884,7 +1142,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 			Member: model.RoomMemberEntry{ID: "ghost-org", Type: model.RoomMemberOrg},
 		})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "ghost-org", got[0].Member.OrgName)
@@ -904,7 +1162,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 		insertRM(t, db, model.RoomMember{ID: "rm-ops", RoomID: "r1", Ts: base.Add(2 * time.Second),
 			Member: model.RoomMemberEntry{ID: "dept-ops", Type: model.RoomMemberOrg}})
 
-		got, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "r1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 		byID := map[string]model.RoomMemberEntry{
@@ -919,7 +1177,7 @@ func TestMongoStore_ListRoomMembers_Enrich_Integration(t *testing.T) {
 }
 
 // TestMongoStore_ListRoomMembers_BotEnrichment_Integration verifies that the
-// subscriptions-fallback path (Path 2 / attachUserDisplayNames) correctly
+// subscriptions-fallback path (Path 2) correctly
 // partitions bot vs human accounts: bot accounts are looked up in apps for
 // Name, human accounts are looked up in users for EngName/ChineseName.
 func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
@@ -980,7 +1238,7 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 			JoinedAt: base.Add(time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "botdm-1", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "botdm-1", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
@@ -993,10 +1251,12 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		human := byAccount["alice"]
 		assert.Equal(t, "Alice Wang", human.EngName, "human member must have EngName from users")
 		assert.Equal(t, "愛麗絲", human.ChineseName, "human member must have ChineseName from users")
-		assert.Empty(t, human.Name, "human member must NOT have Name set")
+		assert.Empty(t, human.AppName, "human member must NOT have AppName set")
+		assert.Empty(t, human.Name, "human member must NOT have the name alias set")
 
 		bot := byAccount["weather.bot"]
-		assert.Equal(t, "Weather App", bot.Name, "bot member must have Name from apps")
+		assert.Equal(t, "Weather App", bot.AppName, "bot member must have AppName from apps")
+		assert.Equal(t, "Weather App", bot.Name, "bot member must carry the deprecated name alias with the same value")
 		assert.Empty(t, bot.SectName, "bot has no user doc → no sectName")
 		assert.Empty(t, bot.EngName, "bot member must NOT have EngName")
 		assert.Empty(t, bot.ChineseName, "bot member must NOT have ChineseName")
@@ -1036,13 +1296,13 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 			JoinedAt: base.Add(time.Second),
 		})
 
-		got, err := store.ListRoomMembers(ctx, "dm-2", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "dm-2", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 2)
 
 		for _, m := range got {
 			assert.NotEmpty(t, m.Member.EngName, "all human members must have EngName")
-			assert.Empty(t, m.Member.Name, "no Name on a human member")
+			assert.Empty(t, m.Member.AppName, "no AppName on a human member")
 		}
 	})
 
@@ -1067,11 +1327,144 @@ func TestMongoStore_ListRoomMembers_BotEnrichment_Integration(t *testing.T) {
 		})
 
 		// No apps collection data at all — verifies no panic/error on empty botAccounts.
-		got, err := store.ListRoomMembers(ctx, "dm-3", nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, "dm-3", nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Eve", got[0].Member.EngName)
-		assert.Empty(t, got[0].Member.Name)
+		assert.Empty(t, got[0].Member.AppName)
+	})
+
+	t.Run("room_members path: bot member gets AppName from apps", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+
+		insertUser(t, db, model.User{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲"})
+		insertApp(t, db, bson.M{
+			"_id": "app-weather", "name": "Weather App",
+			"assistant": bson.M{"enabled": true, "name": "weather.bot"},
+		})
+
+		// A room_members doc exists, so ListRoomMembers takes the aggregation path.
+		_, err := db.Collection("room_members").InsertMany(ctx, []any{
+			model.RoomMember{ID: "rm-alice", RoomID: "chan-1", Ts: base,
+				Member: model.RoomMemberEntry{ID: "u-alice", Type: model.RoomMemberIndividual, Account: "alice"}},
+			model.RoomMember{ID: "rm-bot", RoomID: "chan-1", Ts: base.Add(time.Second),
+				Member: model.RoomMemberEntry{ID: "u-bot", Type: model.RoomMemberIndividual, Account: "weather.bot"}},
+		})
+		require.NoError(t, err)
+
+		got, _, err := store.ListRoomMembers(ctx, "chan-1", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+
+		byAccount := make(map[string]model.RoomMemberEntry)
+		for _, m := range got {
+			byAccount[m.Member.Account] = m.Member
+		}
+		assert.Equal(t, "Weather App", byAccount["weather.bot"].AppName, "bot on room_members path must get AppName")
+		assert.Empty(t, byAccount["weather.bot"].EngName, "bot has no users doc")
+		assert.Equal(t, "Alice Wang", byAccount["alice"].EngName, "human enrichment must be unaffected")
+		assert.Empty(t, byAccount["alice"].AppName, "human must not get AppName")
+	})
+
+	t.Run("room_members path: a bot with a stray users doc gets AppName only", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+
+		// A users doc for the bot account must not leak human display fields:
+		// appName and engName/chineseName are documented as mutually exclusive.
+		insertUser(t, db, model.User{
+			ID: "u-stray", Account: "stray.bot",
+			EngName: "Stray", ChineseName: "流浪", SectName: "Ops", EmployeeID: "E999",
+		})
+		insertApp(t, db, bson.M{
+			"_id": "app-stray", "name": "Stray App",
+			"assistant": bson.M{"enabled": true, "name": "stray.bot"},
+		})
+		_, err := db.Collection("room_members").InsertOne(ctx, model.RoomMember{
+			ID: "rm-stray", RoomID: "chan-2", Ts: base,
+			Member: model.RoomMemberEntry{ID: "u-stray", Type: model.RoomMemberIndividual, Account: "stray.bot"},
+		})
+		require.NoError(t, err)
+
+		got, _, err := store.ListRoomMembers(ctx, "chan-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Stray App", got[0].Member.AppName)
+		assert.Empty(t, got[0].Member.EngName, "a bot must not carry human display fields")
+		assert.Empty(t, got[0].Member.ChineseName)
+		assert.Empty(t, got[0].Member.SectName)
+		assert.Empty(t, got[0].Member.EmployeeID)
+	})
+
+	t.Run("subscriptions path: isBot flag enriches a non-suffix bot account", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+		base := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-legacy", "name": "Legacy Assistant",
+			"assistant": bson.M{"enabled": true, "name": "legacy-assistant"},
+		})
+		// No ".bot" suffix, so only the isBot flag can classify this account.
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-legacy",
+			User:     model.SubscriptionUser{ID: "u-legacy", Account: "legacy-assistant", IsBot: true},
+			RoomID:   "botdm-2",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: base,
+		})
+
+		got, _, err := store.ListRoomMembers(ctx, "botdm-2", nil, nil, true)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "Legacy Assistant", got[0].Member.AppName, "isBot=true must route the account to apps")
+		assert.Empty(t, got[0].Member.EngName)
+	})
+
+	t.Run("bot with no apps document leaves AppName empty without error", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-ghost",
+			User:     model.SubscriptionUser{ID: "u-ghost", Account: "ghost.bot"},
+			RoomID:   "botdm-3",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, _, err := store.ListRoomMembers(ctx, "botdm-3", nil, nil, true)
+		require.NoError(t, err, "a bot with no apps doc must not fail the whole listing")
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName)
+	})
+
+	t.Run("enrich=false skips app enrichment entirely", func(t *testing.T) {
+		db := setupMongo(t)
+		store := NewMongoStore(db)
+
+		insertApp(t, db, bson.M{
+			"_id": "app-quiet", "name": "Quiet App",
+			"assistant": bson.M{"enabled": true, "name": "quiet.bot"},
+		})
+		insertSub(t, db, model.Subscription{
+			ID:       "sub-quiet",
+			User:     model.SubscriptionUser{ID: "u-quiet", Account: "quiet.bot"},
+			RoomID:   "botdm-4",
+			RoomType: model.RoomTypeBotDM,
+			Roles:    []model.Role{model.RoleMember},
+			JoinedAt: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+		})
+
+		got, _, err := store.ListRoomMembers(ctx, "botdm-4", nil, nil, false)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Empty(t, got[0].Member.AppName, "lean listing must carry no display fields")
 	})
 }
 
@@ -1981,7 +2374,8 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
+	_, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
 
 	got, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
@@ -1989,7 +2383,7 @@ func TestMongoStore_UpdateSubscriptionRead_Integration(t *testing.T) {
 	require.NotNil(t, got.LastSeenAt)
 	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
 
-	err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
+	_, err = store.UpdateSubscriptionRead(ctx, "r1", "missing", now)
 	assert.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
@@ -2011,13 +2405,45 @@ func TestMongoStore_UpdateSubscriptionRead_ClearsHasMention(t *testing.T) {
 	})
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now))
+	_, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
 
 	var raw model.Subscription
 	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&raw))
 	assert.False(t, raw.HasMention)
 	require.NotNil(t, raw.LastSeenAt)
 	assert.WithinDuration(t, now, *raw.LastSeenAt, time.Second)
+}
+
+func TestMongoStore_UpdateSubscriptionRead_ReturnsPostUpdateThreadUnread(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	_, err := db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", JoinedAt: time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1", "p2"},
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	n, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "reading the room must not drain threadUnread")
+
+	var got model.Subscription
+	require.NoError(t, db.Collection("subscriptions").FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
+	require.NotNil(t, got.LastSeenAt)
+	assert.WithinDuration(t, now, *got.LastSeenAt, time.Second)
+	assert.False(t, got.Alert)
+	// The stored array must survive untouched, not just the returned count: an
+	// implementation that drained threadUnread while returning the pre-update
+	// count would otherwise pass.
+	assert.Equal(t, []string{"p1", "p2"}, got.ThreadUnread)
+
+	_, err = store.UpdateSubscriptionRead(ctx, "r1", "nobody", now)
+	require.ErrorIs(t, err, model.ErrSubscriptionNotFound)
 }
 
 func TestMongoStore_GetUserSiteID_Integration(t *testing.T) {
@@ -2927,7 +3353,7 @@ func TestMongoStore_ApplySubscriptionRestriction_NamedOwnerRewritesRoles(t *test
 	for _, account := range []string{"alice", "carol", "dave"} {
 		got, err := store.GetSubscription(ctx, account, "r1")
 		require.NoError(t, err)
-		assert.Equal(t, []model.Role{model.RoleMember}, got.Roles, "%s: flattened to member by the rewrite", account)
+		assert.Equal(t, []model.Role{model.RoleUser}, got.Roles, "%s: flattened to user by the rewrite", account)
 	}
 }
 
@@ -2976,16 +3402,17 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 	}
 	mustInsertSub(t, db, sub)
 
-	// Promote: owner appended, member retained, order preserved.
+	// Promote: owner appended, the legacy "member" already on the doc rewritten to
+	// "user", order preserved.
 	roleTs := time.Now().UTC()
 	got, err := store.SetOwnerRole(ctx, "r1", "alice", true, roleTs)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, got.Roles)
 
 	persisted, err := store.GetSubscription(ctx, "alice", "r1")
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, persisted.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, persisted.Roles)
 	// rolesUpdatedAt is stamped at the supplied instant (BSON ms precision) so the
 	// origin doc shares the federated event's high-water mark.
 	assert.Equal(t, roleTs.UnixMilli(), subTimeField(t, db, "r1", "alice", "rolesUpdatedAt").UnixMilli())
@@ -2993,20 +3420,20 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 	// Promote again is idempotent — no duplicate owner.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", true, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember, model.RoleOwner}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser, model.RoleOwner}, got.Roles)
 
-	// Demote: owner removed, member retained.
+	// Demote: owner removed, user retained.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles)
 
 	// Demote again is idempotent.
 	got, err = store.SetOwnerRole(ctx, "r1", "alice", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles)
 
-	// Channel-creator parity: an owner seeded WITHOUT member (roles ["owner"], as
-	// processCreateRoom assigns the creator) must demote to ["member"], never [].
+	// Channel-creator parity: an owner seeded WITHOUT a second role (roles ["owner"],
+	// as processCreateRoom assigns the creator) must demote to ["user"], never [].
 	creator := &model.Subscription{
 		ID:       idgen.GenerateUUIDv7(),
 		User:     model.SubscriptionUser{ID: "u2", Account: "carol"},
@@ -3020,7 +3447,7 @@ func TestMongoStore_SetOwnerRole_Integration(t *testing.T) {
 
 	got, err = store.SetOwnerRole(ctx, "r1", "carol", false, time.Now().UTC())
 	require.NoError(t, err)
-	assert.Equal(t, []model.Role{model.RoleMember}, got.Roles, "demoting an owner-only creator must yield [member], never []")
+	assert.Equal(t, []model.Role{model.RoleUser}, got.Roles, "demoting an owner-only creator must yield [user], never []")
 
 	// Missing subscription → ErrSubscriptionNotFound (wrapped).
 	gotNil, err := store.SetOwnerRole(ctx, "missing", "alice", true, time.Now().UTC())
@@ -3059,7 +3486,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_DeptFirst_Integration(t *testing.
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+	got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Engineering 工程部", got[0].Member.OrgName, "dept wins on overlap; name+tcName combined")
@@ -3087,7 +3514,7 @@ func TestMongoStore_ListRoomMembers_OrgDisplay_FallbackToOrgId_Integration(t *te
 	})
 	require.NoError(t, err)
 
-	got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+	got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "Y", got[0].Member.OrgName, "no matching users → falls back to member.id")
@@ -3119,7 +3546,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Dept desc", got[0].Member.OrgDescription)
@@ -3142,7 +3569,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "Sect desc", got[0].Member.OrgDescription)
@@ -3165,7 +3592,7 @@ func TestMongoStore_ListRoomMembers_OrgDescription_Integration(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		got, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
+		got, _, err := store.ListRoomMembers(ctx, roomID, nil, nil, true)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Empty(t, got[0].Member.OrgDescription)
@@ -4221,63 +4648,85 @@ func TestBotAndAdminPredicate_GoAndMongoAgree_Integration(t *testing.T) {
 	}
 }
 
-// account is a user's identity, so EnsureIndexes makes users.account unique —
-// matching user-service's declaration on the shared collection. A second users
-// doc with the same account must violate the unique index.
-func TestEnsureIndexes_UsersAccountUnique_Integration(t *testing.T) {
-	db := setupMongo(t)
-	store := NewMongoStore(db)
-	ctx := context.Background()
-	require.NoError(t, store.EnsureIndexes(ctx))
-
-	users := db.Collection("users")
-	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
-	require.NoError(t, err)
-	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
-}
-
-// Building the users.account unique index against a collection that already holds
-// duplicate accounts (a dirty pre-rollout environment) must fail at startup with
-// an actionable error pointing operators at the dedupe preflight, not a bare
-// driver error.
-func TestEnsureIndexes_UsersAccountUnique_PreexistingDuplicates_Integration(t *testing.T) {
+// room-service owns the thread_subscriptions unique key: EnsureIndexes drops the
+// legacy (threadRoomId, userId) index and creates the canonical (threadRoomId,
+// userAccount) unique index. (The users.account unique index and its
+// operator-guidance errors moved to user-service, which owns the users collection.)
+func TestEnsureIndexes_ThreadSubsDropsLegacyAndCreatesUnique_Integration(t *testing.T) {
 	db := setupMongo(t)
 	store := NewMongoStore(db)
 	ctx := context.Background()
 
-	users := db.Collection("users")
-	_, err := users.InsertOne(ctx, bson.M{"_id": "u1", "account": "alice"})
-	require.NoError(t, err)
-	_, err = users.InsertOne(ctx, bson.M{"_id": "u2", "account": "alice"})
-	require.NoError(t, err)
-
-	err = store.EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.True(t, mongo.IsDuplicateKeyError(err), "expected duplicate-key error, got %v", err)
-	require.Contains(t, err.Error(), "dedupe preflight", "error must direct operators to the dedupe preflight")
-}
-
-// A pre-existing NON-unique account_1 index conflicts with EnsureIndexes'
-// unique account_1 declaration (IndexOptionsConflict 85 / IndexKeySpecsConflict
-// 86 — the latter when the auto-generated name collides). The service must
-// surface an actionable error telling the operator to drop the old index rather
-// than a bare driver error.
-func TestEnsureIndexes_UsersAccountIndexOptionsConflict_Integration(t *testing.T) {
-	db := setupMongo(t)
-	store := NewMongoStore(db)
-	ctx := context.Background()
-
-	// Pre-create a non-unique index named account_1 with the same key spec.
-	_, err := db.Collection("users").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "account", Value: 1}},
+	// Simulate a DB where the legacy index already exists (older worker). The name
+	// is threadRoomId_1_userId_1 regardless of uniqueness, which is what the drop targets.
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
 	})
 	require.NoError(t, err)
 
-	err = store.EnsureIndexes(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "drop the old non-unique account_1 index",
-		"error must direct operators to drop the conflicting non-unique index")
+	require.NoError(t, store.EnsureIndexes(ctx))
+
+	cur, err := db.Collection("thread_subscriptions").Indexes().List(ctx)
+	require.NoError(t, err)
+	var idxs []bson.M
+	require.NoError(t, cur.All(ctx, &idxs))
+	names := make(map[string]bool, len(idxs))
+	unique := make(map[string]bool, len(idxs))
+	for _, ix := range idxs {
+		if n, ok := ix["name"].(string); ok {
+			names[n] = true
+			u, _ := ix["unique"].(bool)
+			unique[n] = u
+		}
+	}
+	assert.True(t, names["threadRoomId_1_userAccount_1"],
+		"EnsureIndexes must create the canonical (threadRoomId, userAccount) index")
+	assert.True(t, unique["threadRoomId_1_userAccount_1"],
+		"the (threadRoomId, userAccount) index must be unique")
+	assert.False(t, names["threadRoomId_1_userId_1"],
+		"EnsureIndexes must drop the legacy (threadRoomId, userId) index")
+}
+
+// Create-before-drop: a FAILED canonical create must leave the legacy index intact,
+// so the collection is never left without either uniqueness constraint. Would fail
+// if the order were reverted to drop-legacy-then-create.
+func TestEnsureIndexes_ThreadSubsCanonicalCreateFailure_KeepsLegacy_Integration(t *testing.T) {
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+	ctx := context.Background()
+
+	// Legacy UNIQUE index present (models the real constraint the migration preserves).
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+	// Distinct (threadRoomId, userId) so both rows coexist under the legacy unique index,
+	// but the SAME (threadRoomId, userAccount) so the canonical UNIQUE create fails E11000.
+	_, err = db.Collection("thread_subscriptions").InsertMany(ctx, []any{
+		bson.M{"_id": "a", "threadRoomId": "tr1", "userId": "u1", "userAccount": "dup"},
+		bson.M{"_id": "b", "threadRoomId": "tr1", "userId": "u2", "userAccount": "dup"},
+	})
+	require.NoError(t, err)
+
+	// EnsureIndexes surfaces the canonical failure...
+	require.Error(t, store.EnsureIndexes(ctx))
+
+	// ...and must NOT have dropped the legacy index (the create ran first and failed).
+	cur, err := db.Collection("thread_subscriptions").Indexes().List(ctx)
+	require.NoError(t, err)
+	var idxs []bson.M
+	require.NoError(t, cur.All(ctx, &idxs))
+	names := make(map[string]bool, len(idxs))
+	for _, ix := range idxs {
+		if n, ok := ix["name"].(string); ok {
+			names[n] = true
+		}
+	}
+	assert.True(t, names["threadRoomId_1_userId_1"],
+		"a failed canonical create must leave the legacy index intact")
+	assert.False(t, names["threadRoomId_1_userAccount_1"],
+		"the canonical unique index must not exist when its create failed")
 }
 
 func TestMongoStore_ClearThreadSubscriptionsForAccount_Integration(t *testing.T) {

@@ -45,6 +45,14 @@ func (c *userRoomCollection) StoredScripts() map[string]json.RawMessage {
 // BuildAction fans a member_added/member_removed event into one ES update per account (bulk
 // invites yield N doc updates from one event); restricted rooms route into restrictedRooms{}, read alongside rooms[] by search-service.
 func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction, error) {
+	// room_renamed rides the shared inbox filter but the user-room index stores
+	// no room name — spotlight owns the rename re-index (via BuildByQuery). Skip
+	// before parseMemberEvent (which would reject the rename payload as an empty
+	// member event): no actions = ack.
+	if peekInboxEventType(data) == model.InboxRoomRenamed {
+		return nil, nil
+	}
+
 	evt, payload, err := parseMemberEvent(data)
 	if err != nil {
 		return nil, err
@@ -92,6 +100,10 @@ func (c *userRoomCollection) BuildAction(data []byte) ([]searchengine.BulkAction
 				DocID:  account,
 				Doc:    body,
 			})
+		case model.InboxMemberJoinedAtRefreshed:
+			// joinedAt is not in the user-room index (only membership + the ordering
+			// guard); a refresh changes neither, so there's nothing to update here.
+			continue
 		default:
 			return nil, fmt.Errorf("build user-room action: unsupported event type %q", evt.Type)
 		}

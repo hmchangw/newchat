@@ -68,6 +68,9 @@ type SubscriptionStore interface {
 	// membership write path (channel, DM, botDM, add-member); the
 	// re-subscribe semantic for botDM is owned by user-service.
 	BulkCreateSubscriptions(ctx context.Context, subs []*model.Subscription) error
+	// BulkRefreshJoinedAt sets joinedAt on existing (roomId, account) subs — the
+	// Teams migration's joinedAt self-correction; a missing sub is a no-op.
+	BulkRefreshJoinedAt(ctx context.Context, roomID string, joinedAtByAccount map[string]time.Time) error
 	// ReconcileMemberCounts recomputes Room.UserCount (non-bot subs) and
 	// Room.AppCount (bot subs) via index-backed counts on the denormalized
 	// u.isBot flag, then writes both back to the rooms collection in a single
@@ -167,10 +170,9 @@ type RoomKeyStore interface {
 	Get(ctx context.Context, roomID string) (*roomkeystore.VersionedKeyPair, error)
 	// Set writes a fresh keypair at version 0 — used when seeding a brand-new room.
 	Set(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (int, error)
-	// SetWithVersion writes pair at an explicit version. Used by the rotate
-	// fallback when Rotate finds no current key but fan-out already committed
-	// to predictedVersion = currentPair.Version + 1.
-	SetWithVersion(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair, version int) error
+	// SetIfAbsent installs pair at version 0 only when no current key exists and
+	// returns the key the room then holds, so racing rotation fallbacks converge.
+	SetIfAbsent(ctx context.Context, roomID string, pair roomkeystore.RoomKeyPair) (*roomkeystore.VersionedKeyPair, error)
 	// Rotate atomically increments version and writes newPair as current.
 	Rotate(ctx context.Context, roomID string, newPair roomkeystore.RoomKeyPair) (int, error)
 }

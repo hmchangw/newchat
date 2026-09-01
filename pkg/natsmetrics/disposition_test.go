@@ -37,7 +37,7 @@ func TestFinishDistinguishesCancellationFromAckWait(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			if tt.loopUp {
 				c.LoopStarted(context.Background())
 			}
@@ -60,7 +60,7 @@ func TestTermRecordsPermanentNotInternal(t *testing.T) {
 	for _, name := range []string{"Term", "TermWithReason"} {
 		t.Run(name, func(t *testing.T) {
 			m, reader := newTestMetrics(t)
-			c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+			c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 			tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventCreated, 5)
 
 			if name == "Term" {
@@ -81,7 +81,7 @@ func TestTermRecordsPermanentNotInternal(t *testing.T) {
 // MarkTerminal wins, so Term must not overwrite `invalid_payload`.
 func TestTermDoesNotOverwriteHandlerClassification(t *testing.T) {
 	m, reader := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}}, EventCreated, 5)
 
 	tracked.MarkTerminal(context.Background(), TerminalInvalidPayload)
@@ -105,7 +105,7 @@ func TestConsumeClassifiesOffTheDispatchPath(t *testing.T) {
 		&fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 1}},
 	}}
 	m, _ := newTestMetrics(t)
-	c := m.Consumer(ConsumerConfig{ServiceName: "svc", Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
 	c.LoopStarted(context.Background())
 
 	var wg sync.WaitGroup
@@ -143,4 +143,38 @@ func (s *scriptedIterator) Next(...jetstream.NextOpt) (context.Context, jetstrea
 	msg := s.msgs[0]
 	s.msgs = s.msgs[1:]
 	return context.Background(), msg, nil
+}
+
+// DeliveryAttemptFromContext lets a handler give one error class a short retry
+// budget independent of the consumer's MaxDeliver — a sub-second ordering race
+// does not need the 12-minute budget sized for a database outage, and spending
+// it holds an ack-pending slot that whole time.
+func TestDeliveryAttemptFromContext(t *testing.T) {
+	m, _ := newTestMetrics(t)
+	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "STREAM_s1", Consumer: "durable"})
+	c.LoopStarted(context.Background())
+
+	t.Run("reports the broker's delivery count", func(t *testing.T) {
+		for _, want := range []uint64{1, 2, 6} {
+			tracked := c.Track(context.Background(), &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: want}}, EventCreated, 6)
+			got, ok := DeliveryAttemptFromContext(tracked.Context(context.Background()))
+			require.True(t, ok, "a tracked delivery must report its attempt")
+			assert.Equal(t, want, got)
+		}
+	})
+
+	t.Run("untracked context reports nothing", func(t *testing.T) {
+		got, ok := DeliveryAttemptFromContext(context.Background())
+		assert.False(t, ok, "an untracked context must not claim an attempt count")
+		assert.Zero(t, got)
+	})
+
+	t.Run("missing metadata reports nothing", func(t *testing.T) {
+		// Track leaves numDelivered at 0 when Metadata() fails; callers must not
+		// read that as "first attempt" and must not treat it as exhausted either.
+		tracked := c.Track(context.Background(), &fakeMsg{}, EventCreated, 6)
+		got, ok := DeliveryAttemptFromContext(tracked.Context(context.Background()))
+		assert.False(t, ok)
+		assert.Zero(t, got)
+	})
 }

@@ -248,6 +248,26 @@ type Metrics struct {
 	bytes      metric.Int64Gauge
 	totalKeys  metric.Int64Gauge
 	totalBytes metric.Int64Gauge
+
+	// opts is the per-cache attribute set, built once. The label space is
+	// closed by construction — a cache label is a registered Keyspace name or
+	// Unclassified, nothing else — so the whole table is known at startup and
+	// the recording path is a map lookup rather than an attribute.NewSet per
+	// cache per tick. A scan records every cache on every interval for the
+	// life of the process, so the per-call cost would be paid forever.
+	opts map[string]metric.MeasurementOption
+}
+
+// newCacheOpts precomputes one attribute set per possible cache label.
+func newCacheOpts() map[string]metric.MeasurementOption {
+	spaces := cachekeys.Keyspaces()
+	opts := make(map[string]metric.MeasurementOption, len(spaces)+1)
+	for _, ks := range spaces {
+		opts[ks.Name] = metric.WithAttributes(attribute.String("cache", ks.Name))
+	}
+	opts[cachekeys.Unclassified] = metric.WithAttributes(
+		attribute.String("cache", cachekeys.Unclassified))
+	return opts
 }
 
 // NewMetrics creates the keyspace gauges against m.
@@ -277,14 +297,23 @@ func NewMetrics(m metric.Meter) (*Metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create valkey_cache_bytes_total gauge: %w", err)
 	}
-	return &Metrics{keys: keys, bytes: bytes, totalKeys: totalKeys, totalBytes: totalBytes}, nil
+	return &Metrics{
+		keys: keys, bytes: bytes, totalKeys: totalKeys, totalBytes: totalBytes,
+		opts: newCacheOpts(),
+	}, nil
 }
 
 // Record publishes r. Percentages are left to the dashboard: exporting a share
 // would bake in a denominator that a Grafana expression can compute per panel.
 func (m *Metrics) Record(ctx context.Context, r Report) {
 	for _, u := range r.Caches {
-		attrs := metric.WithAttributes(attribute.String("cache", u.Cache))
+		// A label outside the table cannot arise from Classify, but falling back
+		// to the unclassified set keeps this total rather than dropping the
+		// sample — and matches what such a key would have classified as anyway.
+		attrs, ok := m.opts[u.Cache]
+		if !ok {
+			attrs = m.opts[cachekeys.Unclassified]
+		}
 		m.keys.Record(ctx, u.Keys, attrs)
 		m.bytes.Record(ctx, u.EstimatedBytes, attrs)
 	}

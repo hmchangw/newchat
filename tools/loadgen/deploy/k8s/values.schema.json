@@ -13,9 +13,13 @@
     "metrics",
     "ledger",
     "recipientObserver",
+    "searchObserver",
+    "encryptionPreflight",
     "seed",
     "soak",
-    "teardown"
+    "teardown",
+    "profiling",
+    "runtime"
   ],
   "properties": {
     "phase": {
@@ -99,9 +103,14 @@
         "size",
         "mountPath",
         "capacity",
+        "compactEvery",
+        "maxBytes",
+        "expireBatch",
         "reconcileDeadline",
         "reconcileRetryInterval",
-        "reconcileReadShare"
+        "reconcileReadShare",
+        "epoch",
+        "roomReconcileReadShare"
       ],
       "properties": {
         "enabled": {"type": "boolean"},
@@ -114,9 +123,31 @@
         "size": {"type": "string", "minLength": 1},
         "mountPath": {"type": "string", "pattern": "^/"},
         "capacity": {"type": "string", "minLength": 1},
+        "compactEvery": {"type": "string", "minLength": 1},
+        "maxBytes": {"type": "string", "minLength": 1},
+        "expireBatch": {"type": "string", "minLength": 1},
         "reconcileDeadline": {"type": "string", "minLength": 1},
         "reconcileRetryInterval": {"type": "string", "minLength": 1},
-        "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+        "reconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "epoch": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "roomReconcileReadShare": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "searchObserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "encryptionPreflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "timeout"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "timeout": {"type": "string", "minLength": 1}
       }
     },
     "recipientObserver": {
@@ -131,6 +162,31 @@
         "enabled": {"type": "boolean"},
         "queue": {"type": "integer", "minimum": 1, "maximum": 65536},
         "connections": {"type": "integer", "minimum": 1, "maximum": 256}
+      }
+    },
+    "profiling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pprofAddr",
+        "heapProfileDir",
+        "heapProfileInterval",
+        "heapProfileKeep"
+      ],
+      "properties": {
+        "pprofAddr": {"type": "string"},
+        "heapProfileDir": {"type": "string"},
+        "heapProfileInterval": {"type": "string", "minLength": 1},
+        "heapProfileKeep": {"type": ["integer", "string"]}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goMemLimit", "goGC"],
+      "properties": {
+        "goMemLimit": {"type": "string"},
+        "goGC": {"type": ["string", "integer"]}
       }
     },
     "seed": {
@@ -176,6 +232,27 @@
         "reactionRemoveShare",
         "pinnedListRate",
         "verifyRate",
+        "memberMutationRate",
+        "roomMutationRate",
+        "roomReadRate",
+        "userReadRate",
+        "subscriptionListLimit",
+        "subscriptionListIncludeLastMessage",
+        "roomZipfS",
+        "roomZipfV",
+        "searchReadRate",
+        "searchSettle",
+        "roomCreateRate",
+        "roomCreateBudget",
+        "roomCreateSize",
+        "readReceiptRate",
+        "presenceRate",
+        "presenceConnections",
+        "presenceQueryShare",
+        "presenceQueryBatch",
+        "presenceSettle",
+        "presenceTTL",
+        "memberQuarantineMax",
         "maxUsers",
         "activeUsers",
         "roomCount",
@@ -200,8 +277,16 @@
         "runMode": {"type": "string", "enum": ["continuous"]},
         "randomSeed": {"type": "integer"},
         "warmup": {"type": "string", "minLength": 1},
-        "heartbeatInterval": {"type": "string", "minLength": 1},
-        "heartbeatStaleAfter": {"type": "string", "minLength": 1},
+        "heartbeatInterval": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Manifest heartbeat cadence. Loadgen requires heartbeatStaleAfter to be at least twice this interval plus 5s."
+        },
+        "heartbeatStaleAfter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Active-run destructive-operation lease. Must be at least 2 * heartbeatInterval + 5s and longer than the planned Mongo outage and recovery window."
+        },
         "terminationGracePeriodSeconds": {
           "type": "integer",
           "minimum": 1
@@ -221,6 +306,42 @@
         "reactionRemoveShare": {"type": "string", "minLength": 1},
         "pinnedListRate": {"type": "string", "minLength": 1},
         "verifyRate": {"type": "string", "minLength": 1},
+        "memberMutationRate": {"type": "string", "minLength": 1},
+        "roomMutationRate": {"type": "string", "minLength": 1},
+        "roomReadRate": {"type": "string", "minLength": 1},
+        "userReadRate": {"type": "string", "minLength": 1},
+        "subscriptionListLimit": {"type": "string", "pattern": "^([0-9]+)?$"},
+        "subscriptionListIncludeLastMessage": {"type": "string", "enum": ["", "true", "false"]},
+        "roomZipfS": {
+          "type": "string",
+          "description": "Zipf exponent. Must be greater than 1; empty leaves the Go default (1.2). math/rand returns a nil generator at or below 1, so a value Helm accepted but the runtime rejects would only surface as a crash-looping pod.",
+          "anyOf": [
+            {"const": ""},
+            {"pattern": "^([2-9][0-9]*|[1-9][0-9]+)(\\.[0-9]+)?$"},
+            {"pattern": "^1\\.[0-9]*[1-9][0-9]*$"}
+          ]
+        },
+        "roomZipfV": {
+          "type": "string",
+          "description": "Zipf offset. Must be at least 1; empty leaves the Go default (1.0). Larger flattens the room distribution.",
+          "anyOf": [
+            {"const": ""},
+            {"pattern": "^[1-9][0-9]*(\\.[0-9]+)?$"}
+          ]
+        },
+        "searchReadRate": {"type": "string", "minLength": 1},
+        "searchSettle": {"type": "string", "minLength": 1},
+        "roomCreateRate": {"type": "string", "minLength": 1},
+        "roomCreateBudget": {"type": "string", "minLength": 1},
+        "roomCreateSize": {"type": "string", "minLength": 1},
+        "readReceiptRate": {"type": "string", "minLength": 1},
+        "presenceRate": {"type": "string", "minLength": 1},
+        "presenceConnections": {"type": "string", "minLength": 1},
+        "presenceQueryShare": {"type": "string", "minLength": 1},
+        "presenceQueryBatch": {"type": "string", "minLength": 1},
+        "presenceSettle": {"type": "string", "minLength": 1},
+        "presenceTTL": {"type": "string", "minLength": 1},
+        "memberQuarantineMax": {"type": "string", "minLength": 1},
         "maxUsers": {"type": "string", "minLength": 1},
         "activeUsers": {"type": "string", "minLength": 1},
         "roomCount": {"type": "string", "minLength": 1},

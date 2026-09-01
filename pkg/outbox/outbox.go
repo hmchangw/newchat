@@ -1,5 +1,5 @@
 // Package outbox is the cross-site federation relay contract shared by the
-// producers (room-service, room-worker, message-worker) and the consumer
+// producers (room-service, room-worker, message-worker, broadcast-worker) and the consumer
 // (outbox-worker): which event types ride which OUTBOX consumer lane, and the
 // one way to publish a relay event onto the stream.
 package outbox
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -35,6 +36,14 @@ var ConcurrentEventTypes = []model.InboxEventType{
 	// thread_unread_added $addToSets one parent ID and thread_read $pulls one —
 	// per-ID set ops that commute across threads, so both ride this lane.
 	model.InboxThreadUnreadAdded,
+	// Teams migration joinedAt self-correction: sets joinedAt on an existing
+	// replica ($set, missing sub = no-op), targeting members added in a prior run.
+	// Idempotent + commutes with add/remove (a delete just makes it a no-op), so
+	// it rides the concurrent lane.
+	model.InboxMemberJoinedAtRefreshed,
+	// broadcast-worker: room-level mention badge. The destination write is a
+	// guarded idempotent $set, so duplicates and out-of-order applies converge.
+	model.InboxSubscriptionMention,
 }
 
 // OrderedEventTypes are the OUTBOX event types forwarded by outbox-worker's
@@ -92,7 +101,7 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 		Timestamp:  ts,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal inbox event envelope: %w", err)
+		return errcode.MarshalFailed("inbox event envelope", err)
 	}
 	data, err := json.Marshal(model.OutboxEvent{
 		RoomID:    roomID,
@@ -101,7 +110,7 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 		Timestamp: time.Now().UTC().UnixMilli(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal outbox event: %w", err)
+		return errcode.MarshalFailed("outbox event", err)
 	}
 	if err := publish(ctx, subject.Outbox(originSiteID, destSiteID, eventType), data, dedupID); err != nil {
 		return fmt.Errorf("publish outbox event for %s: %w", destSiteID, err)

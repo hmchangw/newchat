@@ -2,16 +2,25 @@ package drive
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 
 	"github.com/hmchangw/chat/pkg/restyutil"
 )
+
+// driveTimeout is the whole-request ceiling on a Drive transfer. Sized for the
+// internal leg only — 2 GiB moves in tens of seconds over the private network —
+// so it does not track the public client leg's server timeouts. Overrides
+// restyutil's 30s default, which large streamed bodies blow through.
+const driveTimeout = 5 * time.Minute
 
 // MultipartFile is an opened multipart file plus its name, ready to upload.
 type MultipartFile struct {
@@ -21,22 +30,30 @@ type MultipartFile struct {
 
 // Client talks to the internal Drive API.
 type Client struct {
-	uploadClient   *resty.Client
+	uploadHTTP     *http.Client
 	downloadClient *resty.Client
 	baseURLMap     map[string]string
 	baseURL        string
 	apiToken       string
 }
 
-// NewClient builds a Drive client. Both underlying Resty clients skip TLS
-// verification (the Drive is reached over a private network); the download
-// client uses a 5-minute timeout to allow large streamed bodies.
+// NewClient builds a Drive client. Both underlying clients skip TLS verification
+// (the Drive is reached over a private network) and share driveTimeout.
+//
+// The upload side keeps only the *http.Client — a deliberate exception to the
+// Resty-for-outbound-HTTP guideline: the bulk upload streams its body, and
+// Resty v2 materializes any io.Reader body it cannot natively replay
+// (createHTTPRequest -> getBodyCopy -> io.ReadAll; only in-memory bytes/strings
+// readers escape), which is the very OOM this path exists to avoid. Building it
+// through restyutil anyway preserves the shared transport, OTel instrumentation
+// and timeout — but not resty's request/response log hooks; upload failures are
+// logged once at the caller's errhttp boundary instead.
 func NewClient(cfg *Config) *Client {
 	// #nosec G402 -- internal Drive over a private network; TLS verification is intentionally skipped per deployment.
 	insecure := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}}
 	return &Client{
-		uploadClient:   restyutil.New(cfg.URL, restyutil.WithTransport(insecure)),
-		downloadClient: restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(5*time.Minute)),
+		uploadHTTP:     restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(driveTimeout)).GetClient(),
+		downloadClient: restyutil.New(cfg.URL, restyutil.WithTransport(insecure), restyutil.WithTimeout(driveTimeout)),
 		baseURLMap:     cfg.BaseURLMap,
 		baseURL:        cfg.URL,
 		apiToken:       cfg.Token,
@@ -58,30 +75,52 @@ func (c *Client) GetBaseURLFromRoomOrigin(origin string) string {
 // UploadGroupImages uploads files to a Drive group in one bulk multipart call.
 // userID/userName/email are sent as form fields; each file is attached with the
 // indexed naming convention files[i].file / files[i].fileName / files[i].mode.
+// The body is streamed (see buildStreamedBody), so memory does not scale with
+// upload size.
 func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
-	req := c.uploadClient.R().SetHeader("api-token", c.apiToken)
-	formData := map[string]string{
-		"userId":   userID,
-		"userName": username,
-		"email":    email,
+	fields := []formField{
+		{"userId", userID},
+		{"userName", username},
+		{"email", email},
 	}
 	for i, f := range files {
-		req.SetFileReader(fmt.Sprintf("files[%d].file", i), f.Filename, f.File)
-		formData[fmt.Sprintf("files[%d].fileName", i)] = f.Filename
-		formData[fmt.Sprintf("files[%d].mode", i)] = "Normal"
+		fields = append(fields,
+			formField{fmt.Sprintf("files[%d].fileName", i), f.Filename},
+			formField{fmt.Sprintf("files[%d].mode", i), "Normal"})
 	}
-	req.SetFormData(formData)
+	body, err := buildStreamedBody(fields, files)
+	if err != nil {
+		return nil, fmt.Errorf("build upload body: %w", err)
+	}
 
-	var result []UploadGroupImageResponse
-	resp, err := req.
-		SetResult(&result).
-		SetPathParam("groupId", groupID).
-		Post(fmt.Sprintf("%s/api/v1/groups/{groupId}/files/bulk?bypass=true", c.GetBaseURLFromRoomOrigin(origin)))
+	endpoint := fmt.Sprintf("%s/api/v1/groups/%s/files/bulk?bypass=true",
+		c.GetBaseURLFromRoomOrigin(origin), url.PathEscape(groupID))
+	req, err := http.NewRequest(http.MethodPost, endpoint, body.reader)
+	if err != nil {
+		return nil, fmt.Errorf("build upload request: %w", err)
+	}
+	// Set explicitly: net/http cannot infer the length of a streamed body and
+	// would fall back to chunked encoding without it.
+	req.ContentLength = body.length
+	req.Header.Set("api-token", c.apiToken)
+	req.Header.Set("Content-Type", body.contentType)
+
+	resp, err := c.uploadHTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("upload group images: %w", err)
 	}
-	if resp.IsError() {
-		return nil, fmt.Errorf("drive bulk upload returned status %d", resp.StatusCode())
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		// Bounded snippet so a Drive rejection is diagnosable without resty's
+		// response logging, and without ever logging a full body. A read error
+		// here is irrelevant next to the status and intentionally dropped.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("drive bulk upload returned status %d: %s", resp.StatusCode, snippet)
+	}
+	var result []UploadGroupImageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode drive bulk upload response: %w", err)
 	}
 	return result, nil
 }

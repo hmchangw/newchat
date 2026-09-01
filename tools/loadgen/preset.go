@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"time"
 
 	"github.com/hmchangw/chat/pkg/model"
@@ -175,7 +175,7 @@ func BuildFixtures(p *Preset, seed int64, siteID string) Fixtures {
 				User:     model.SubscriptionUser{ID: members[j].ID, Account: members[j].Account},
 				RoomID:   rooms[i].ID,
 				SiteID:   siteID,
-				Roles:    []model.Role{model.RoleMember},
+				Roles:    []model.Role{model.RoleUser},
 				JoinedAt: now,
 			})
 		}
@@ -310,7 +310,7 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 					ID:     fmt.Sprintf("sub-%s-%s", roomID, uA.ID),
 					User:   model.SubscriptionUser{ID: uA.ID, Account: uA.Account},
 					RoomID: roomID, SiteID: siteID,
-					Roles:    []model.Role{model.RoleMember},
+					Roles:    []model.Role{model.RoleUser},
 					JoinedAt: now,
 				})
 				if uA.ID != uB.ID { // skip duplicate sub on unfixable self-loop
@@ -318,7 +318,7 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 						ID:     fmt.Sprintf("sub-%s-%s", roomID, uB.ID),
 						User:   model.SubscriptionUser{ID: uB.ID, Account: uB.Account},
 						RoomID: roomID, SiteID: siteID,
-						Roles:    []model.Role{model.RoleMember},
+						Roles:    []model.Role{model.RoleUser},
 						JoinedAt: now,
 					})
 				}
@@ -385,7 +385,7 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 				ID:     fmt.Sprintf("sub-%s-%s", roomID, u.ID),
 				User:   model.SubscriptionUser{ID: u.ID, Account: u.Account},
 				RoomID: roomID, SiteID: siteID,
-				Roles:    []model.Role{model.RoleMember},
+				Roles:    []model.Role{model.RoleUser},
 				JoinedAt: now,
 			})
 		}

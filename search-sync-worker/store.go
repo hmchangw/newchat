@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/hmchangw/chat/pkg/searchengine"
 )
@@ -11,4 +12,8 @@ import (
 // Store defines the search engine operations needed by the handler.
 type Store interface {
 	Bulk(ctx context.Context, actions []searchengine.BulkAction) ([]searchengine.BulkResult, error)
+	// UpdateByQuery applies a by-query mutation for events that touch many docs
+	// keyed by a field rather than by DocID (e.g. room rename → every member's
+	// spotlight doc). Standalone ES call, outside the bulk buffer.
+	UpdateByQuery(ctx context.Context, index string, body json.RawMessage) error
 }

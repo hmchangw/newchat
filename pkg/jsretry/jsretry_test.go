@@ -91,33 +91,134 @@ func TestSettleQuiet_SameDecisions(t *testing.T) {
 	})
 }
 
+// assertJittered asserts d is within the equal-jitter band [base/2, base].
+func assertJittered(t *testing.T, base, d time.Duration) {
+	t.Helper()
+	assert.GreaterOrEqual(t, d, base/2, "equal jitter guarantees at least half the base delay")
+	assert.LessOrEqual(t, d, base, "jitter never exceeds the base delay")
+}
+
 func TestSettle_BackoffSelectedByAttempt(t *testing.T) {
 	m := &fakeMsg{numDelivered: 2} // second delivery -> testSchedule[1]
 	Settle(context.Background(), m, testSchedule, errors.New("boom"))
-	assert.Equal(t, testSchedule[1], m.nakDelay)
+	assertJittered(t, testSchedule[1], m.nakDelay)
 }
 
 func TestBackoffFor(t *testing.T) {
 	tests := []struct {
 		name         string
 		numDelivered uint64
-		want         time.Duration
+		base         time.Duration
 	}{
-		{name: "metadata zero — first", numDelivered: 0, want: testSchedule[0]},
-		{name: "first delivery — first", numDelivered: 1, want: testSchedule[0]},
-		{name: "second delivery — second", numDelivered: 2, want: testSchedule[1]},
-		{name: "third delivery — third", numDelivered: 3, want: testSchedule[2]},
-		{name: "beyond schedule — reuses last", numDelivered: 99, want: testSchedule[2]},
+		{name: "metadata zero — first", numDelivered: 0, base: testSchedule[0]},
+		{name: "first delivery — first", numDelivered: 1, base: testSchedule[0]},
+		{name: "second delivery — second", numDelivered: 2, base: testSchedule[1]},
+		{name: "third delivery — third", numDelivered: 3, base: testSchedule[2]},
+		{name: "beyond schedule — reuses last", numDelivered: 99, base: testSchedule[2]},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, backoffFor(&fakeMsg{numDelivered: tt.numDelivered}, testSchedule))
+			assertJittered(t, tt.base, backoffFor(&fakeMsg{numDelivered: tt.numDelivered}, testSchedule))
 		})
 	}
 }
 
 func TestBackoffFor_MetadataError(t *testing.T) {
-	assert.Equal(t, testSchedule[0], backoffFor(&fakeMsg{metaErr: errors.New("no meta")}, testSchedule))
+	assertJittered(t, testSchedule[0], backoffFor(&fakeMsg{metaErr: errors.New("no meta")}, testSchedule))
+}
+
+// Jitter must actually vary, otherwise a fleet that parked during one outage
+// retries in lockstep the moment the dependency recovers.
+func TestBackoffFor_JitterVaries(t *testing.T) {
+	seen := make(map[time.Duration]struct{})
+	for range 200 {
+		seen[backoffFor(&fakeMsg{numDelivered: 3}, testSchedule)] = struct{}{}
+	}
+	assert.Greater(t, len(seen), 1, "equal jitter should produce a spread of delays")
+}
+
+// A non-positive base must floor to minNakDelay, never pass through: a zero
+// delay serializes as a bare -NAK.
+func TestJitter_NonPositiveFloorsToMinimum(t *testing.T) {
+	assert.Equal(t, minNakDelay, jitter(0))
+	assert.Equal(t, minNakDelay, jitter(-time.Second))
+	assert.Equal(t, minNakDelay, jitter(minNakDelay))
+}
+
+func TestNak_UsesJitteredBackoffForAttempt(t *testing.T) {
+	m := &fakeMsg{numDelivered: 2}
+	Nak(context.Background(), m, testSchedule, "downstream unavailable")
+	assert.True(t, m.naked)
+	assert.False(t, m.acked)
+	assertJittered(t, testSchedule[1], m.nakDelay)
+}
+
+func TestNak_LogsWhenTheNakCallFails(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	var n int
+	slog.SetDefault(slog.New(countHandler{n: &n}))
+	Nak(context.Background(), &fakeMsg{numDelivered: 1, nakErr: errors.New("conn closed")}, testSchedule, "transient")
+	assert.Equal(t, 1, n, "a failed nak network call is logged once")
+}
+
+func TestNak_SilentOnSuccess(t *testing.T) {
+	orig := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	var n int
+	slog.SetDefault(slog.New(countHandler{n: &n}))
+	Nak(context.Background(), &fakeMsg{numDelivered: 1}, testSchedule, "transient")
+	assert.Zero(t, n, "the caller owns the business-error log; Nak must not double-log")
+}
+
+// Synadia's published four-entry schedule plus a 10m tail — 12m36s over five
+// gaps, the agreed ~15 min retry budget.
+func TestDefaultBackoff_Shape(t *testing.T) {
+	assert.Equal(t, []time.Duration{
+		1 * time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
+	}, DefaultBackoff)
+}
+
+// BackpressureBackoff exists to be strictly gentler than DefaultBackoff on a
+// backend that just said it is full: never retry sooner, never give up earlier.
+// The second half matters as much as the first — a schedule that skipped the
+// fast rungs but capped its tail below DefaultBackoff would swap one failure
+// mode (amplifying the overload) for another (dropping writes while the cluster
+// is still draining).
+func TestBackpressureBackoff_DominatesDefault(t *testing.T) {
+	assert.GreaterOrEqual(t, BackpressureBackoff[0], DefaultBackoff[2],
+		"the first backpressure retry must skip the fast rungs that feed the overload")
+
+	sum := func(s []time.Duration) time.Duration {
+		var total time.Duration
+		for _, d := range s {
+			total += d
+		}
+		return total
+	}
+	assert.GreaterOrEqual(t, sum(BackpressureBackoff), sum(DefaultBackoff),
+		"a saturated cluster gets at least the retry budget an ordinary failure gets")
+	assert.GreaterOrEqual(t, BackpressureBackoff[len(BackpressureBackoff)-1], DefaultBackoff[len(DefaultBackoff)-1],
+		"the reused tail entry paces the long outage; it must not be shorter than the default tail")
+}
+
+// Deliberately not extended: broadcast fan-out is user-visible and a
+// 15-minute-late broadcast is worthless.
+// The schedule has two jobs and they pull in opposite directions: open fast so
+// a sub-second hiccup is not user-visible on the fan-out path, then space out
+// far enough that a genuine outage can be ridden out within a usable delivery
+// budget. Asserted as those two properties rather than as a literal slice — the
+// literal is what let the schedule and the retry budget sized against it drift
+// apart unnoticed.
+func TestLowLatencyBackoff_OpensFastThenSpacesOut(t *testing.T) {
+	assert.Equal(t, []time.Duration{200 * time.Millisecond, 1 * time.Second, 5 * time.Second},
+		LowLatencyBackoff[:3], "the opening must stay near-immediate")
+
+	tail := LowLatencyBackoff[len(LowLatencyBackoff)-1]
+	assert.GreaterOrEqual(t, tail, 5*time.Minute,
+		"the repeating tail sets the outage window; a short one needs an unusable delivery budget")
 }
 
 // countHandler records how many log records were emitted.
@@ -173,4 +274,66 @@ func TestSettle_NetworkErrors(t *testing.T) {
 			assert.Equal(t, 1, n, "the network-failure path should log exactly once")
 		})
 	}
+}
+
+// jitter halves the base, so a sub-2ns entry can round to zero — and
+// NakWithDelay(0) is the bare -NAK this package exists to prevent.
+func TestNak_SubNanosecondScheduleNeverSendsZero(t *testing.T) {
+	for range 200 {
+		m := &fakeMsg{numDelivered: 1}
+		Nak(context.Background(), m, []time.Duration{1}, "tiny")
+		assert.Positive(t, m.nakDelay, "a nak delay of 0 is a bare -NAK")
+	}
+}
+
+func TestNak_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() { Nak(context.Background(), m, nil, "empty") })
+}
+
+func TestSettle_EmptyScheduleDoesNotPanic(t *testing.T) {
+	m := &fakeMsg{numDelivered: 1}
+	assert.NotPanics(t, func() {
+		Settle(context.Background(), m, nil, errors.New("boom"))
+	})
+}
+
+// Equal jitter means every wait can come in at half its nominal value, so a
+// retry budget sized on the nominal schedule promises twice the window it
+// actually guarantees. MinWindow is what a budget must be sized against.
+func TestMinWindow_IsHalfTheNominalSchedule(t *testing.T) {
+	schedule := []time.Duration{2 * time.Second, 10 * time.Second}
+
+	// 4 deliveries → 3 waits: schedule[0], schedule[1], schedule[1] (the last
+	// entry repeats). Nominal 22s, guaranteed 11s.
+	assert.Equal(t, 11*time.Second, MinWindow(schedule, 4))
+}
+
+func TestMinWindow_EdgeCases(t *testing.T) {
+	schedule := []time.Duration{time.Second}
+	assert.Zero(t, MinWindow(schedule, 1), "one delivery means no waits")
+	assert.Zero(t, MinWindow(schedule, 0))
+	assert.Zero(t, MinWindow(nil, 5), "an empty schedule cannot promise a window")
+}
+
+// Both shipped schedules must be able to span a real outage without an absurd
+// delivery count. LowLatencyBackoff exists to keep the FIRST retries fast; its
+// doc has always claimed a genuine outage is still spaced out, and a tail that
+// repeats every 30s cannot deliver that.
+func TestShippedSchedules_CanSpanAnHour(t *testing.T) {
+	for name, schedule := range map[string][]time.Duration{
+		"DefaultBackoff":    DefaultBackoff,
+		"LowLatencyBackoff": LowLatencyBackoff,
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.LessOrEqual(t, DeliveriesFor(schedule, time.Hour), 20,
+				"a schedule whose tail is too short needs an unusable delivery budget to ride out an outage")
+		})
+	}
+}
+
+// The whole point of the near-immediate opening: a sub-second hiccup must not
+// be user-visible on the fan-out path.
+func TestLowLatencyBackoff_StillOpensFast(t *testing.T) {
+	assert.Less(t, LowLatencyBackoff[0], time.Second)
 }

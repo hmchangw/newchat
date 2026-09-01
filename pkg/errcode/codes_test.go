@@ -18,7 +18,7 @@ var allReasons = []Reason{
 	UserAppNotFound, UserAppDisabled, UserSubscriptionNotFound, UserSSOTokenNotFound,
 	AuthTokenExpired, AuthInvalidToken, AuthInvalidRequest, AuthInvalidNKey, AuthMissingFields,
 	PortalAccountNotReady,
-	RequestIDRequired,
+	RequestIDRequired, NatsNoResponders, NatsRequestTimeout, ResponseTooLarge,
 	EmojiShortcodeReserved,
 	EmojiDeleteDisabled,
 	PermissionUnknownKey, PermissionInvalidSubjects, PermissionInvalidReason,
@@ -42,5 +42,14 @@ func TestReasons_Unique(t *testing.T) {
 			t.Errorf("duplicate reason: %q", r)
 		}
 		seen[r] = true
+	}
+}
+
+// The oversize fallback envelope is a wire contract documented in
+// docs/client-api.md §6: clients branch on this exact reason string rather
+// than on the message text, so a rename here is a breaking API change.
+func TestResponseTooLarge_WireValue(t *testing.T) {
+	if got := string(ResponseTooLarge); got != "response_too_large" {
+		t.Errorf("ResponseTooLarge = %q, want %q", got, "response_too_large")
 	}
 }

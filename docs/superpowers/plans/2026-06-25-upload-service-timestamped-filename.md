@@ -1,5 +1,7 @@
 # Timestamped Drive Filenames Implementation Plan
 
+**Status:** Superseded (2026-08-20) — `uniqueName` was removed; uploads now send the original filename as-is. See commit f54b8e45 and the design doc's supersession note. Do not re-implement this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Send a unique filename to Drive on every upload (so neither re-uploading the same file across requests nor duplicate names within one batch collide) while returning the original filename to the client.

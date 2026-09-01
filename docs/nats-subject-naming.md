@@ -23,6 +23,8 @@ All subjects are dot-delimited and organized into four namespaces:
 
 On connect, every client subscribes to `chat.user.{account}.>`. This single wildcard captures all personal events:
 
+> **Note:** this wildcard is optional, and it overlaps request/reply replies. `inboxPrefix` is `chat.user.{account}`, so a reply matches both the library's request mux and this subscription — and NATS delivers a **copy to every matching non-queue subscription**, not just the one that issued the request. A client subscribing this broadly therefore receives its own RPC replies here as well and must ignore subjects it did not expect. The frontend instead subscribes to the specific event subjects below; only the async `msg.send` reply (`chat.user.{account}.response.{requestID}`) actually requires a subscription, and a narrow one suffices.
+
 | Subject | Direction | Publisher | Purpose |
 |---------|-----------|-----------|---------|
 | `chat.user.{account}.stream.msg` | Server → Client | broadcast-worker | DM message delivery |
@@ -85,7 +87,7 @@ This requires zero additional subjects, zero extra publishes, and zero write amp
 
 When offline, clients miss messages on non-active sidebar rooms. To restore mention badge state on reconnect, the server tracks mention counts per-user-per-room:
 
-1. **broadcast-worker** — when processing a message with non-empty `mentionedUserIDs`, atomically increments `mentionCountSinceLastSeen` on the `Subscription` record in MongoDB for each mentioned user (expanding `"all"`/`"here"` to the full member list)
+1. **roomlist-worker** — when processing a message with parsed mentions, sets the `hasMention` badge on the `Subscription` record in MongoDB for each mentioned user not already read past the message (this doc's `mentionCountSinceLastSeen` elsewhere is a stale field name predating this write path; the actual field is the boolean `hasMention`)
 2. **Subscription list response** (`chat.user.{account}.request.rooms.list`) — includes `mentionCountSinceLastSeen` per room, allowing the client to restore `@` badges without fetching message history for every sidebar room
 3. **Mark as read** — when the user opens a room, the client sends a read-position update (advancing `lastSeenAt`); the server resets `mentionCountSinceLastSeen` to `0` for that user+room
 
@@ -161,8 +163,8 @@ The single source of truth for downstream consumers (broadcast-worker, notificat
 
 | Subject Pattern | Publisher | Consumer | Purpose |
 |-----------------|-----------|----------|---------|
-| `chat.msg.canonical.{siteID}.created` | message-gatekeeper | broadcast-worker, notification-worker, search-sync-worker | New message persisted |
-| `chat.msg.canonical.{siteID}.updated` | history-service | broadcast-worker, search-sync-worker | Message edited |
+| `chat.msg.canonical.{siteID}.created` | message-gatekeeper | broadcast-worker, notification-worker, roomlist-worker, search-sync-worker | New message persisted |
+| `chat.msg.canonical.{siteID}.updated` | history-service | broadcast-worker, roomlist-worker, search-sync-worker | Message edited |
 | `chat.msg.canonical.{siteID}.deleted` | history-service | broadcast-worker, search-sync-worker | Message soft-deleted |
 | `chat.msg.canonical.{siteID}.reacted` | history-service | broadcast-worker, notification-worker, search-sync-worker (skips) | Reaction toggled (add/remove). Payload carries a `ReactionDelta`. search-sync-worker subscribes via the stream wildcard but no-ops on this subject because reactions don't change indexed content. |
 
@@ -243,10 +245,8 @@ The auth-service issues per-user JWTs with these permissions:
 | Type | Pattern | Rationale |
 |------|---------|-----------|
 | Pub.Allow | `chat.user.{account}.>` | User can publish messages, requests, typing under own namespace |
-| Pub.Allow | `_INBOX.>` | Required for NATS core request/reply pattern |
-| Sub.Allow | `chat.user.{account}.>` | User receives own events, responses, notifications |
+| Sub.Allow | `chat.user.{account}.>` | User receives own events, responses, notifications, and NATS core request/reply replies (the client's `inboxPrefix` is `chat.user.{account}`) |
 | Sub.Allow | `chat.room.>` | User can subscribe to any room's message stream and events |
-| Sub.Allow | `_INBOX.>` | Required for NATS core request/reply pattern |
 
 All client publishes — message sends, member invites, room CRUD requests, typing indicators, and request/reply — fall under `chat.user.{account}.>`. No additional publish permissions are needed. Room-scoped subjects (`chat.room.*`) are server-published only; clients can subscribe but never publish to them.
 

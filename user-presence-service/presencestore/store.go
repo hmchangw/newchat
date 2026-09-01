@@ -182,28 +182,12 @@ type Store struct {
 	connsTTL int64 // ms
 }
 
-// ClusterConfig holds Valkey cluster connection config.
-type ClusterConfig struct {
-	Addrs    []string
-	Password string
-}
-
-// NewValkeyStore dials the cluster, pings it, and returns a Store.
-func NewValkeyStore(cfg ClusterConfig, staleThreshold, connsTTL time.Duration) (*Store, error) {
-	c := redis.NewClusterClient(&redis.ClusterOptions{Addrs: cfg.Addrs, Password: cfg.Password})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := c.Ping(ctx).Err(); err != nil {
-		if closeErr := c.Close(); closeErr != nil {
-			slog.Warn("valkey cluster close after failed connect", "error", closeErr)
-		}
-		return nil, fmt.Errorf("valkey cluster connect: %w", err)
-	}
-	return NewValkeyStoreFromClient(c, staleThreshold, connsTTL), nil
-}
-
-// NewValkeyStoreFromClient wraps a pre-built client (tests inject a
-// ClusterSlots-override client).
+// NewValkeyStoreFromClient wraps a pre-built client. Dialing is deliberately not
+// this package's job: main dials through valkeyutil.ConnectRaw so this service's
+// client carries the same instrumentation and dial policy as the rest of the
+// fleet. This package used to own a ClusterConfig and a bare
+// redis.NewClusterClient+Ping of its own, which is exactly the duplication
+// valkeyutil exists to end.
 func NewValkeyStoreFromClient(c *redis.ClusterClient, staleThreshold, connsTTL time.Duration) *Store {
 	return &Store{c: c, staleMs: staleThreshold.Milliseconds(), connsTTL: connsTTL.Milliseconds()}
 }

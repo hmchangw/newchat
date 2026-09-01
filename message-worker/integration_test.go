@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
@@ -99,6 +100,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			msg                   TEXT,
 			site_id               TEXT,
 			updated_at            TIMESTAMP,
+			edited_at             TIMESTAMP,
 			mentions              SET<FROZEN<"Participant">>,
 			attachments           LIST<BLOB>,
 			card                  FROZEN<"Card">,
@@ -113,6 +115,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			PRIMARY KEY ((room_id, bucket), created_at, message_id)
@@ -125,6 +128,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			msg                      TEXT,
 			site_id                  TEXT,
 			updated_at               TIMESTAMP,
+			edited_at                TIMESTAMP,
 			mentions                 SET<FROZEN<"Participant">>,
 			attachments              LIST<BLOB>,
 			card                     FROZEN<"Card">,
@@ -139,6 +143,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                     TEXT,
 			sys_msg_data             BLOB,
 			quoted_parent_message    FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload              BLOB,
 			enc_meta                 FROZEN<"EncMeta">,
 			PRIMARY KEY (message_id)
@@ -153,6 +158,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			msg                   TEXT,
 			site_id               TEXT,
 			updated_at            TIMESTAMP,
+			edited_at             TIMESTAMP,
 			mentions              SET<FROZEN<"Participant">>,
 			attachments           LIST<BLOB>,
 			card                  FROZEN<"Card">,
@@ -162,6 +168,7 @@ func setupCassandra(t *testing.T) *gocql.Session {
 			type                  TEXT,
 			sys_msg_data          BLOB,
 			quoted_parent_message FROZEN<"QuotedParentMessage">,
+			visible_to            TEXT,
 			enc_payload           BLOB,
 			enc_meta              FROZEN<"EncMeta">,
 			deleted               BOOLEAN,
@@ -883,6 +890,14 @@ func TestThreadStoreMongo_InsertThreadSubscription(t *testing.T) {
 	db := setupMongo(t)
 	store := newThreadStoreMongo(db)
 	require.NoError(t, store.EnsureIndexes(ctx))
+
+	// thread_subscriptions unique key is owned by room-service; create it here so
+	// the duplicate-insert path is exercised.
+	_, err := db.Collection("thread_subscriptions").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userAccount", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	sub := &model.ThreadSubscription{
@@ -2175,4 +2190,247 @@ func TestCassandraStore_SaveThreadMessage_TShowWritesAllTables(t *testing.T) {
 		`SELECT tshow FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
 		"r-tshow", bucket.Of(now), now, "m-tshow").WithContext(ctx).Scan(&gotTShow))
 	assert.True(t, gotTShow, "tshow mirror row written to messages_by_room with tshow=true")
+}
+
+// editStatements mirror history-service/internal/cassrepo/write.go. The edit and
+// the create live in different services, so these tests reproduce the edit here
+// rather than importing it; keep them in step with that file.
+const (
+	testEditMsgByID   = `UPDATE messages_by_id SET msg = ?, enc_payload = null, enc_meta = null, edited_at = ?, updated_at = ? WHERE message_id = ?`
+	testEditMsgByRoom = `UPDATE messages_by_room SET msg = ?, enc_payload = null, enc_meta = null, edited_at = ?, updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`
+	testEditThreadMsg = `UPDATE thread_messages_by_thread SET msg = ?, enc_payload = null, enc_meta = null, edited_at = ?, updated_at = ? WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`
+)
+
+// TestCassandraStore_SaveMessage_RedeliveryDoesNotRevertEdit reproduces the
+// edit-revert race end to end. Cassandra resolves per cell by write timestamp,
+// so an unpinned create re-executed after the author's edit outranks it and
+// silently restores the original body. Creates bind USING TIMESTAMP from
+// CreatedAt, so the redelivery replays the identical write and the edit stands.
+//
+// CreatedAt is set an hour in the past so the two orderings are unambiguous:
+// pinned, the create is an hour behind the edit; unpinned, it lands after it.
+func TestCassandraStore_SaveMessage_RedeliveryDoesNotRevertEdit(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	roomID := "revert-room"
+	msgID := "revert-msg-1"
+	sender := &cassParticipant{ID: "u-revert", Account: "alice", EngName: "Alice"}
+	msg := &model.Message{
+		ID:        msgID,
+		RoomID:    roomID,
+		UserID:    "u-revert",
+		CreatedAt: createdAt,
+		Content:   "helllo world",
+	}
+
+	// First delivery: persists, then a later step in the handler fails and NAKs.
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	// The author fixes the typo while the event is still queued for redelivery.
+	editedAt := time.Now().UTC()
+	require.NoError(t, cassSession.Query(
+		testEditMsgByID, "hello world", editedAt, editedAt, msgID,
+	).WithContext(ctx).Exec())
+	require.NoError(t, cassSession.Query(
+		testEditMsgByRoom, "hello world", editedAt, editedAt,
+		roomID, bucket.Of(createdAt), createdAt, msgID,
+	).WithContext(ctx).Exec())
+
+	// JetStream redelivers the original event, unchanged.
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	t.Run("messages_by_id keeps the edit", func(t *testing.T) {
+		var body string
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM messages_by_id WHERE message_id = ?`, msgID,
+		).WithContext(ctx).Scan(&body))
+		assert.Equal(t, "hello world", body)
+	})
+
+	t.Run("messages_by_room keeps the edit", func(t *testing.T) {
+		var body string
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			roomID, bucket.Of(createdAt), createdAt, msgID,
+		).WithContext(ctx).Scan(&body))
+		assert.Equal(t, "hello world", body)
+	})
+}
+
+// TestCassandraStore_SaveThreadMessage_RedeliveryDoesNotRevertEdit is the thread
+// counterpart. This is the path that actually reaches the race in production:
+// SaveThreadMessage commits and publishThreadReplyEvent runs after it, so a
+// failed publish NAKs an event whose Cassandra rows are already durable.
+func TestCassandraStore_SaveThreadMessage_RedeliveryDoesNotRevertEdit(t *testing.T) {
+	cassSession := setupCassandra(t)
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(cassSession, bucket, nil)
+	ctx := context.Background()
+
+	parentCreatedAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Millisecond)
+	replyCreatedAt := parentCreatedAt.Add(time.Hour)
+	roomID := "revert-thread-room"
+	threadRoomID := "tr-revert-1"
+	replyID := "revert-reply-1"
+
+	parentSender := &cassParticipant{ID: "u-revert-parent", Account: "alice", EngName: "Alice"}
+	require.NoError(t, store.SaveMessage(ctx, &model.Message{
+		ID:        "revert-parent",
+		RoomID:    roomID,
+		UserID:    "u-revert-parent",
+		CreatedAt: parentCreatedAt,
+		Content:   "parent message",
+	}, parentSender, "site-a"))
+
+	replySender := &cassParticipant{ID: "u-revert-replier", Account: "bob", EngName: "Bob"}
+	reply := &model.Message{
+		ID:                           replyID,
+		RoomID:                       roomID,
+		UserID:                       "u-revert-replier",
+		Content:                      "teh answer",
+		CreatedAt:                    replyCreatedAt,
+		ThreadParentMessageID:        "revert-parent",
+		ThreadParentMessageCreatedAt: &parentCreatedAt,
+	}
+
+	// First delivery: rows commit, then publishThreadReplyEvent fails and NAKs.
+	_, err := store.SaveThreadMessage(ctx, reply, replySender, "site-a", threadRoomID)
+	require.NoError(t, err)
+
+	editedAt := time.Now().UTC()
+	require.NoError(t, cassSession.Query(
+		testEditMsgByID, "the answer", editedAt, editedAt, replyID,
+	).WithContext(ctx).Exec())
+	require.NoError(t, cassSession.Query(
+		testEditThreadMsg, "the answer", editedAt, editedAt,
+		threadRoomID, replyCreatedAt, replyID,
+	).WithContext(ctx).Exec())
+
+	// JetStream redelivers the original reply event.
+	_, err = store.SaveThreadMessage(ctx, reply, replySender, "site-a", threadRoomID)
+	require.NoError(t, err)
+
+	t.Run("messages_by_id keeps the edit", func(t *testing.T) {
+		var body string
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM messages_by_id WHERE message_id = ?`, replyID,
+		).WithContext(ctx).Scan(&body))
+		assert.Equal(t, "the answer", body)
+	})
+
+	t.Run("thread_messages_by_thread keeps the edit", func(t *testing.T) {
+		var body string
+		require.NoError(t, cassSession.Query(
+			`SELECT msg FROM thread_messages_by_thread WHERE thread_room_id = ? AND created_at = ? AND message_id = ?`,
+			threadRoomID, replyCreatedAt, replyID,
+		).WithContext(ctx).Scan(&body))
+		assert.Equal(t, "the answer", body)
+	})
+}
+
+// TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable asserts what an
+// encrypted create actually has to guarantee across a JetStream redelivery:
+// that enc_payload and enc_meta still come from the SAME encryption attempt.
+//
+// This test used to assert the opposite behaviour — that a pinned create could
+// not outrank a later edit — and that pin is exactly what made the row
+// undecryptable. atrest.Encrypt draws a fresh random nonce per call, so a
+// redelivery produces a different ciphertext AND a different nonce. Pinned,
+// both attempts write at one timestamp, and Cassandra breaks a same-timestamp
+// conflict per cell by comparing values, independently. The row can end up
+// holding attempt A's ciphertext beside attempt B's nonce, which AES-GCM
+// cannot open and nothing repairs.
+//
+// Unpinned, each redelivery is strictly newer, so one attempt wins both cells.
+// The accepted cost is visible below: the redelivered create DOES overwrite an
+// edit made in between. That is recoverable content loss traded against an
+// unrecoverable, undecryptable row. Restoring the pin safely needs the
+// ciphertext and nonce in one reconciled cell, or a deterministic encrypted
+// bundle — see CLAUDE.md.
+func TestSaveMessage_EncryptedRedeliveryKeepsTheRowDecryptable(t *testing.T) {
+	ctx := context.Background()
+	session := setupCassandra(t)
+	mongoDB := setupMongo(t)
+
+	wrapper := newTestVaultWrapper(t, ctx)
+	cipher := atrest.NewCipher(wrapper, atrest.NewMongoDEKStore(mongoDB.Collection(atrest.CollectionName)),
+		atrest.Config{DEKCacheSize: 100, DEKCacheTTL: time.Hour})
+	bucket := msgbucket.New(24 * time.Hour)
+	store := NewCassandraStore(session, bucket, cipher)
+
+	// An hour in the past so the two orderings are unambiguous: pinned, the
+	// create sits an hour behind the edit; unpinned, it would land after it.
+	createdAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	roomID, msgID := "r-enc-revert", "m-enc-revert"
+	sender := &cassParticipant{ID: "u-1", Account: "alice"}
+	msg := &model.Message{
+		ID:          msgID,
+		RoomID:      roomID,
+		UserID:      "u-1",
+		UserAccount: "alice",
+		Content:     "helllo world",
+		CreatedAt:   createdAt,
+	}
+
+	// First delivery: rows commit, then a later step in the handler NAKs.
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	// The author fixes the typo while the event is still queued for redelivery.
+	// Mirrors editMsgByRoomEncrypted / editMsgByIDEncrypted in
+	// history-service/internal/cassrepo/write.go.
+	edited := []byte("edited-ciphertext")
+	editedAt := time.Now().UTC()
+	require.NoError(t, session.Query(
+		`UPDATE messages_by_id SET enc_payload = ?, msg = null, attachments = null, card = null, card_action = null, edited_at = ?, updated_at = ? WHERE message_id = ?`,
+		edited, editedAt, editedAt, msgID,
+	).WithContext(ctx).Exec())
+	require.NoError(t, session.Query(
+		`UPDATE messages_by_room SET enc_payload = ?, msg = null, attachments = null, card = null, card_action = null, edited_at = ?, updated_at = ? WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+		edited, editedAt, editedAt, roomID, bucket.Of(createdAt), createdAt, msgID,
+	).WithContext(ctx).Exec())
+
+	// JetStream redelivers the original event, unchanged.
+	require.NoError(t, store.SaveMessage(ctx, msg, sender, "site-a"))
+
+	for _, tc := range []struct {
+		name string
+		q    string
+		args []any
+	}{
+		{
+			name: "messages_by_id",
+			q:    `SELECT enc_payload, enc_meta FROM messages_by_id WHERE message_id = ?`,
+			args: []any{msgID},
+		},
+		{
+			name: "messages_by_room",
+			q:    `SELECT enc_payload, enc_meta FROM messages_by_room WHERE room_id = ? AND bucket = ? AND created_at = ? AND message_id = ?`,
+			args: []any{roomID, bucket.Of(createdAt), createdAt, msgID},
+		},
+	} {
+		t.Run(tc.name+" still decrypts", func(t *testing.T) {
+			var encPayload []byte
+			var encMeta cassandra.EncMeta
+			require.NoError(t, session.Query(tc.q, tc.args...).WithContext(ctx).Scan(&encPayload, &encMeta))
+			require.NotEmpty(t, encPayload)
+			require.Len(t, encMeta.Nonce, 12, "%s: nonce must survive the redelivery intact", tc.name)
+
+			// The load-bearing assertion. A mismatched pair fails here rather
+			// than being noticed by a user who can no longer read the message.
+			plain, err := cipher.Decrypt(ctx, roomID, encPayload, atrest.EncMeta{Nonce: encMeta.Nonce})
+			require.NoError(t, err,
+				"%s: ciphertext and nonce came from different encryption attempts", tc.name)
+
+			// The documented trade: the redelivery won, so the edit is gone and
+			// the original body is back. Recoverable, unlike an unopenable row.
+			assert.Equal(t, msg.Content, plain.Msg,
+				"%s: the redelivered create is expected to overwrite the edit", tc.name)
+			assert.NotEqual(t, edited, encPayload,
+				"%s: an unpinned redelivery must be the write that won", tc.name)
+		})
+	}
 }

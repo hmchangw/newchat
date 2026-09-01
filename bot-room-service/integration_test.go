@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -41,11 +43,10 @@ func TestIntegration_EnsureIndexes_SubscriptionKeys(t *testing.T) {
 	require.NoError(t, st.EnsureIndexes(context.Background()))
 
 	specs := testutil.IndexSpecs(t, st.subs)
-	require.Contains(t, specs, "roomId:1,u.account:1")
-	assert.True(t, specs["roomId:1,u.account:1"], "must be unique — room-service declares it so on the shared collection")
 	require.Contains(t, specs, "roomId:1,u._id:1")
 	assert.False(t, specs["roomId:1,u._id:1"])
-	assert.Len(t, specs, 3, "_id plus the two declared indexes, no duplicates")
+	// {roomId,u.account} unique is owned by room-service now, not created here.
+	assert.Len(t, specs, 2, "_id plus the {roomId,u._id} index this service owns")
 }
 
 // -------------------------------------------------------------------------
@@ -72,6 +73,14 @@ func TestIntegration_UpsertSubscription_CreatesThenNoOps(t *testing.T) {
 func TestIntegration_UpsertSubscription_DuplicateAccountIsNotAnError(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+
+	// subscriptions.{roomId,u.account} unique is owned by room-service; create it
+	// here so the duplicate-account dedup path is exercised.
+	_, err := st.subs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "roomId", Value: 1}, {Key: "u.account", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
 
 	created, err := st.UpsertSubscription(ctx, newSub("room-1", "user-1", "alice"))
 	require.NoError(t, err)
@@ -112,13 +121,17 @@ func TestIntegration_DeleteSubscription_ByUserID(t *testing.T) {
 	_, err := st.UpsertSubscription(ctx, newSub("room-1", "user-1", "alice"))
 	require.NoError(t, err)
 
-	deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
+	account, deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	assert.True(t, deleted)
+	// The account is read off the deleted row, which is what makes the caller's
+	// subauthcache bust independent of any follow-up user lookup.
+	assert.Equal(t, "alice", account)
 
-	deleted, err = st.DeleteSubscription(ctx, "room-1", "user-1")
+	account, deleted, err = st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	assert.False(t, deleted, "duplicate remove is a no-op")
+	assert.Empty(t, account, "nothing was deleted, so there is no account to bust")
 }
 
 func TestIntegration_DeleteSubscription_LeavesOtherRooms(t *testing.T) {
@@ -130,7 +143,7 @@ func TestIntegration_DeleteSubscription_LeavesOtherRooms(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
+	_, deleted, err := st.DeleteSubscription(ctx, "room-1", "user-1")
 	require.NoError(t, err)
 	require.True(t, deleted)
 

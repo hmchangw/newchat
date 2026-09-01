@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -34,6 +34,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid mongo pool config", "error", err)
+		os.Exit(1)
+	}
+
 	ctx := context.Background()
 
 	sdk, obsShutdown, err := obs.Init(ctx)
@@ -42,7 +47,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword, mongoutil.WithObservability(sdk))
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoWriteURI, cfg.MongoWriteUsername, cfg.MongoWritePassword, mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
@@ -69,7 +74,7 @@ func main() {
 
 	consumeCtxs := make([]o11ynats.ConsumeContext, 0, len(cfg.SiteIDs))
 	for _, siteID := range cfg.SiteIDs {
-		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID)
+		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID, cfg.Consumer)
 		if err != nil {
 			slog.Error("start site consumer failed", "site", siteID, "error", err)
 			os.Exit(1)
@@ -107,29 +112,34 @@ func main() {
 // startSiteConsumer wires one durable, strictly-sequential consumer on the
 // site's HR stream. MaxAckPending=1 so a quit can never overtake the upsert
 // that precedes it (low volume — one publish burst per sync run).
-func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string) (o11ynats.ConsumeContext, error) {
+func startSiteConsumer(ctx context.Context, js o11ynats.JetStream, handler *Handler, siteID string, s stream.ConsumerSettings) (o11ynats.ConsumeContext, error) {
 	streamCfg := stream.OrgSyncStream(siteID)
-	consCfg := stream.DurableConsumerDefaults(stream.ConsumerSettings{
-		AckWait:    30 * time.Second,
-		MaxDeliver: -1, // never drop a feed batch; jsretry backoff spaces the retries
-		MaxWaiting: 512,
-	})
-	consCfg.Durable = durableName
-	consCfg.MaxAckPending = 1
-	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, consCfg)
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamCfg.Name, buildConsumerConfig(s))
 	if err != nil {
 		return nil, err
 	}
 	return cons.Consume(ctx, func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
-			handlerCtx, _ := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			data, err := natsutil.DecodePayload(msg)
 			if err != nil {
 				// a bad frame won't decode on redelivery → poison
-				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest(fmt.Sprintf("decode payload: %s", err.Error()))))
+				jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, errcode.Permanent(errcode.BadRequest("decode payload", errcode.WithCause(err))))
 				return
 			}
 			jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Subject(), data))
 		})
 	})
+}
+
+// buildConsumerConfig adds the durable name and this worker's two overrides;
+// everything else comes from ConsumerSettings. MaxDeliver=-1 never drops a feed
+// batch (jsretry backoff spaces the retries) and exempts the schedule from the
+// len(BackOff)<=MaxDeliver rule; MaxAckPending=1 keeps the lane strictly
+// sequential so a quit cannot overtake the upsert before it.
+func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
+	cc.Durable = durableName
+	cc.MaxAckPending = 1
+	return cc
 }

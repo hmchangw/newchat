@@ -59,6 +59,9 @@ func newTTLCache[V any](size int, ttl time.Duration, rec Recorder) (*ttlCache[V]
 // nothing is cached and the error is returned.
 // If ctx is canceled before the shared load finishes, getOrLoad returns ctx.Err() immediately
 // while the load continues detached in the background, bounded by fetchTimeout.
+// remove drops key if present; absent keys are a no-op.
+func (c *ttlCache[V]) remove(key string) { c.lru.Remove(key) }
+
 func (c *ttlCache[V]) getOrLoad(ctx context.Context, key string, load func(context.Context) (V, bool, error)) (V, error) {
 	if v, ok := c.lru.Get(key); ok {
 		c.metrics.Hit(ctx)
@@ -108,7 +111,10 @@ type subEntry struct {
 	subscribed  bool
 }
 
-// SubscriptionCache caches positive subscription access checks.
+// SubscriptionCache caches positive subscription access checks (L1) in front of
+// a SubscriptionSource. The shared Valkey L2 and its circuit breaker live inside
+// that source, not here — history-service's base source already resolves through
+// subauthcache.ReadThrough — so this type stays a plain L1 with one loader path.
 type SubscriptionCache struct {
 	inner SubscriptionSource
 	cache *ttlCache[subEntry]
@@ -141,9 +147,8 @@ func (c *SubscriptionCache) GetHistorySharedSince(ctx context.Context, account, 
 	return entry.sharedSince, entry.subscribed, nil
 }
 
-// GetSubscription bypasses the access-window cache and delegates to the
-// underlying source. Pin/unpin paths need the full subscription doc (roles,
-// account) which we don't cache.
+// GetSubscription bypasses the access-window cache and delegates to the source, which
+// projects (mongorepo.subscriptionReadProjection) — read a new field, widen that first.
 func (c *SubscriptionCache) GetSubscription(ctx context.Context, account, roomID string) (*pkgmodel.Subscription, error) {
 	return c.inner.GetSubscription(ctx, account, roomID)
 }
@@ -154,6 +159,10 @@ type RoomSource interface {
 	GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error)
 	GetMinUserLastSeenAt(ctx context.Context, roomID string) (*time.Time, error)
 	GetRoomUserCount(ctx context.Context, roomID string) (int, error)
+	SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error
+	UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) (bool, error)
+	ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error)
+	InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error
 }
 
 type roomTimes struct {
@@ -218,11 +227,40 @@ func (c *RoomCache) GetRoomUserCount(ctx context.Context, roomID string) (int, e
 }
 
 // GetRoomTimesByIDs bypasses the per-key cache and delegates to the source.
-// It is a batch read for rooms without a usable caller-supplied hint, called
-// at most once per RoomsGet request — not a hot single-room path — so there is
-// no per-room caching benefit to justify the bookkeeping.
+// It is called at most once per RoomsGet request — not a hot single-room path —
+// so there is no per-room caching benefit to justify the bookkeeping. Caching it
+// would also be wrong now that it carries the stored preview: the freshness check
+// is an identity comparison against a lastMsgId that must be read live.
 func (c *RoomCache) GetRoomTimesByIDs(ctx context.Context, ids []string) (map[string]mongorepo.RoomTimes, error) {
 	return c.inner.GetRoomTimesByIDs(ctx, ids)
+}
+
+// SetPreviewMessage bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape is the RoomSource contract this passes through unchanged.
+func (c *RoomCache) SetPreviewMessage(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) error {
+	return c.inner.SetPreviewMessage(ctx, roomID, pvw, forMsgID, asOf)
+}
+
+// UpdatePreviewBody bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+//
+//nolint:gocritic // hugeParam: pvw's by-value shape is the RoomSource contract this passes through unchanged.
+func (c *RoomCache) UpdatePreviewBody(ctx context.Context, roomID string, pvw pkgmodel.PreviewMessage, forMsgID string, asOf int64) (bool, error) {
+	return c.inner.UpdatePreviewBody(ctx, roomID, pvw, forMsgID, asOf)
+}
+
+// ClearPreview bypasses the cache and delegates to the source — a write, not a
+// read this cache fronts.
+func (c *RoomCache) ClearPreview(ctx context.Context, roomID string, asOf int64) (bool, error) {
+	return c.inner.ClearPreview(ctx, roomID, asOf)
+}
+
+// InvalidatePreviewKey bypasses the cache and delegates to the source — a write,
+// not a read this cache fronts.
+func (c *RoomCache) InvalidatePreviewKey(ctx context.Context, roomID, msgID string, asOf int64) error {
+	return c.inner.InvalidatePreviewKey(ctx, roomID, msgID, asOf)
 }
 
 // previewEntry is the cached resolved room preview. found=false is never stored
@@ -240,6 +278,14 @@ type previewEntry struct {
 // rooms from real-time delivery. Positives-only, singleflight-deduped.
 type PreviewCache struct {
 	cache *ttlCache[previewEntry]
+}
+
+// Invalidate drops roomID's cached preview. A mutation changes what the room previews,
+// and the entry it would otherwise keep serving describes the message that changed --
+// including one that was just deleted. Local only: a sibling replica's copy lives out
+// its TTL, which is why #292 wants revision-keyed identity rather than eviction.
+func (c *PreviewCache) Invalidate(roomID string) {
+	c.cache.remove(roomID)
 }
 
 // NewPreviewCache builds a preview cache of size entries with the given TTL.

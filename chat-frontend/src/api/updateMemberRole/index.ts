@@ -1,7 +1,8 @@
 import { memberRoleUpdate } from '../_transport/subjects'
 import type { Nats, AsyncJobOptions, AsyncJobResult } from '../types'
 
-export type MemberRole = 'owner' | 'member'
+/** 'member' is the legacy spelling of 'user'; the server still accepts it. */
+export type MemberRole = 'owner' | 'user' | 'member'
 
 export interface UpdateMemberRoleArgs {
   roomId: string

@@ -101,33 +101,63 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 
 	resolved, err := mention.Resolve(ctx, evt.Message.Content, h.userStore.FindUsersByAccounts)
 	if err != nil {
-		return fmt.Errorf("resolve mentions: %w", err)
+		// Fail-open: mention resolution is enrichment, not durability. The content
+		// (including the literal @tokens) persists intact. Resolve still returns
+		// whatever it could — the user store's warm entries, plus @all, which needs
+		// no lookup — so keep those rather than discarding a partial answer; the
+		// unresolved accounts are the only ones that lose their notification.
+		// Blocking the write would be strictly worse.
+		slog.WarnContext(ctx, "mention resolution degraded, persisting the mentions that resolved",
+			"error", err, "message_id", evt.Message.ID,
+			"resolved", len(resolved.Participants), "parsed", len(resolved.Accounts),
+			"request_id", natsutil.RequestIDFromContext(ctx))
 	}
 	evt.Message.Mentions = resolved.Participants
 	// debug: mention resolution is the first decision step — count only, no content.
 	slog.DebugContext(ctx, "message-worker mentions resolved",
-		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(resolved.Participants))
+		"request_id", natsutil.RequestIDFromContext(ctx), "mentions", len(evt.Message.Mentions))
 
 	var sender *cassParticipant
 	user, err := h.userStore.FindUserByAccount(ctx, evt.Message.UserAccount)
-	if err != nil {
-		if model.IsSystemMessageType(evt.Message.Type) {
-			// System messages may have no real user; proceed with nil sender.
-			// A client type (e.g. important) has a real sender, so a lookup failure
-			// there falls through to the error branch like a normal message.
-			slog.WarnContext(ctx, "user not found for system message, using nil sender",
-				"account", evt.Message.UserAccount, "type", evt.Message.Type,
-				"request_id", natsutil.RequestIDFromContext(ctx))
-		} else {
-			return fmt.Errorf("lookup user %s: %w", evt.Message.UserAccount, err)
+	switch {
+	// user != nil is defensive, not a live fix: every current UserStore reports a
+	// miss as ErrUserNotFound rather than (nil, nil). It costs one comparison and
+	// keeps a future implementation that returns the looser (nil, nil) from
+	// panicking on the sole message-persistence path.
+	case err == nil && user != nil:
+		sender = senderFrom(user, evt.Message.UserAccount)
+	case model.IsSystemMessageType(evt.Message.Type):
+		// System messages may have no real user; proceed with nil sender.
+		// A client type (e.g. important) has a real sender, so a lookup failure
+		// there falls through to the fail-open branch like a normal message.
+		slog.WarnContext(ctx, "user not found for system message, using nil sender",
+			"account", evt.Message.UserAccount, "type", evt.Message.Type,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+	default:
+		// Fail-open: project the sender from the canonical event, which already
+		// carries the identity the gatekeeper resolved at send time. Only the
+		// EngName/ChineseName split is lost (UserDisplayName is already the
+		// composed render-ready name), so the write proceeds rather than
+		// NAK-buffering until Mongo returns.
+		slog.WarnContext(ctx, "sender lookup failed, projecting sender from event",
+			"error", err, "account", evt.Message.UserAccount,
+			"message_id", evt.Message.ID,
+			"request_id", natsutil.RequestIDFromContext(ctx))
+		// SiteID is deliberately left zero. It reaches
+		// publishThreadSubInboxIfRemote as ownerSiteID — the subscription
+		// owner's HOME site, not the room's site (evt.SiteID) — and we do not
+		// know it without the user doc. Guessing it either misroutes the
+		// federated event or silently short-circuits it; an empty value takes
+		// the documented skip-and-warn branch instead.
+		user = &model.User{
+			ID:      evt.Message.UserID,
+			Account: evt.Message.UserAccount,
+			EngName: evt.Message.UserDisplayName,
 		}
-	} else {
-		sender = &cassParticipant{
-			ID:          user.ID,
-			EngName:     user.EngName,
-			CompanyName: user.ChineseName,
-			Account:     evt.Message.UserAccount,
-		}
+		// Derived from the projected user, not written out a second time: the
+		// two identities must stay the same identity, and a field added to
+		// cassParticipant must not be able to reach one and miss the other.
+		sender = senderFrom(user, evt.Message.UserAccount)
 	}
 	// debug: which sender the message resolved to (system messages have none).
 	slog.DebugContext(ctx, "message-worker sender resolved",
@@ -150,10 +180,26 @@ func (h *Handler) processMessage(ctx context.Context, data []byte, isMigration b
 			if err != nil {
 				return fmt.Errorf("resolve thread parent createdAt: %w", err)
 			}
-			if !found {
+			switch {
+			case found:
+				evt.Message.ThreadParentMessageCreatedAt = &createdAt
+			case !parentResolveExhausted(ctx):
+				// The parent's own canonical write may still land — MESSAGES-CANONICAL
+				// does not order it relative to this reply — so retry rather than
+				// persist a null and corrupt the parent's partition coords.
 				return fmt.Errorf("thread parent %s not yet persisted in messages_by_id", evt.Message.ThreadParentMessageID)
+			default:
+				// Budget spent: the choice is now "persist without parent coords" or
+				// "lose the reply". message-worker is the sole persister of history and
+				// nothing dead-letters a MaxDeliver drop, so salvage the content. The
+				// writes below already tolerate a nil parent createdAt — the
+				// thread_room_id stamp is skipped and logged instead.
+				slog.ErrorContext(ctx, "thread parent never persisted — saving reply without parent linkage",
+					"request_id", natsutil.RequestIDFromContext(ctx),
+					"replyID", evt.Message.ID,
+					"parentMessageID", evt.Message.ThreadParentMessageID,
+					"room_id", evt.Message.RoomID)
 			}
-			evt.Message.ThreadParentMessageCreatedAt = &createdAt
 		}
 
 		// Resolve (or create) the thread room first so we have the threadRoomID
@@ -310,12 +356,23 @@ func debugFlowPersisted(ctx context.Context, messageID string, thread bool) {
 // should mark unread — the parent author alone on a first reply, or the room's
 // established ReplyAccounts on a subsequent one).
 //
-// `replier` may be nil for system messages with no real user (rare in thread
-// paths); subscriptions for the replier are skipped in that case.
+// `replier` is nil only for system messages with no real user, and the replier
+// subscription is skipped in that case. A real user whose Mongo sender lookup
+// failed (fail-open) is projected from the canonical event, so their
+// subscription still lands even during a Mongo outage.
 func (h *Handler) handleThreadRoomAndSubscriptions(ctx context.Context, msg *model.Message, eventSiteID string, replier *model.User, isMigration bool) (string, []string, error) {
 	now := msg.CreatedAt
 
-	var parentCreatedAt time.Time
+	// history-service gates the thread list on threadParentCreatedAt >= the
+	// member's historySharedSince (mongorepo.buildBaseThreadMatch), so a zero
+	// value here hides the thread from every member with a history window —
+	// permanently, and silently. On the salvage path the parent does not exist in
+	// history, so the thread's only content is this reply: gate it on the reply's
+	// own time, which is exactly what a member entitled to see the reply is
+	// entitled to see. Deliberately scoped to this document — msg's own parent
+	// coords stay unknown, because fabricating them would point the
+	// messages_by_id/messages_by_room writes at a partition that isn't the parent's.
+	parentCreatedAt := msg.CreatedAt
 	if msg.ThreadParentMessageCreatedAt != nil {
 		parentCreatedAt = *msg.ThreadParentMessageCreatedAt
 	}
@@ -696,7 +753,7 @@ func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageI
 			RoomID: roomID, ParentMessageID: parentMessageID, Accounts: accs, Timestamp: now,
 		})
 		if err != nil {
-			return fmt.Errorf("marshal thread_unread_added: %w", err)
+			return errcode.MarshalFailed("thread_unread_added event", err)
 		}
 		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, msgID, site)
 		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now); err != nil {
@@ -728,7 +785,7 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 
 	payload, err := sonic.Marshal(sub)
 	if err != nil {
-		return fmt.Errorf("marshal thread subscription: %w", err)
+		return errcode.MarshalFailed("thread subscription", err)
 	}
 	// Dedup-ID seed (threadRoomID + userID + msg.ID + hasMention + destSiteID):
 	// msg.ID is stable across MESSAGES-CANONICAL redeliveries so the same publish
@@ -765,7 +822,37 @@ func (h *Handler) publishThreadReplyEvent(ctx context.Context, msg *model.Messag
 	}
 	data, err := sonic.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal thread reply event: %w", err)
+		return errcode.MarshalFailed("thread reply event", err)
 	}
 	return h.publish(ctx, subject.ServerBroadcastThreadTCount(h.siteID), data, "")
+}
+
+// senderFrom renders the Cassandra participant for a resolved user. One mapping
+// for both identities the create path can produce — the one looked up in Mongo
+// and the one projected from the canonical event when that lookup fails — so a
+// field added to cassParticipant cannot reach one and miss the other. account
+// stays a parameter because the event's account is what the row is keyed by.
+func senderFrom(u *model.User, account string) *cassParticipant {
+	return &cassParticipant{
+		ID:          u.ID,
+		EngName:     u.EngName,
+		CompanyName: u.ChineseName,
+		Account:     account,
+	}
+}
+
+// parentResolveAttempts caps how many deliveries are spent waiting for a thread
+// parent's own canonical write to land. The race it covers is milliseconds —
+// message-worker persists the parent as soon as it processes it — so the full
+// MaxDeliver budget buys nothing and costs a lot: on DefaultBackoff each waiting
+// reply holds its ack-pending slot for 756s, and ~1.3 of them per second fills
+// the consumer's budget and stops it consuming anything at all.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than silently degrading the write.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

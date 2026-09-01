@@ -39,6 +39,8 @@ func TestSoakCatalog_PublishDoesNotAdmitUntilGatekeeperAccepts(t *testing.T) {
 
 func TestSoakCatalog_ThreadRecipientSetSurvivesReplyEviction(t *testing.T) {
 	catalog := newSoakCatalog(2, 100, 0, nil)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, candidate := range []soakCatalogCandidate{
 		{ID: "parent", RoomID: "room-1", Author: "alice", Content: "parent"},
 		{ID: "reply", RoomID: "room-1", Author: "bob", Content: "reply", ThreadParentID: "parent"},
@@ -125,7 +127,7 @@ func TestSoakCatalog_StateTransitions(t *testing.T) {
 	got, ok := catalog.Get("r-1", "m-1")
 	require.True(t, ok)
 	assert.True(t, got.Edited)
-	assert.Equal(t, "edited", got.Content)
+	assert.Equal(t, soakContentDigest("edited"), got.ContentSHA256)
 	assert.True(t, got.Pinned)
 	assert.Equal(t, map[string][]string{"party": {"bob"}}, got.Reactions)
 	assert.Equal(t, 1, got.ThreadReplies)

@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useReducer,
   useRef,
@@ -12,19 +13,23 @@ import { useNats } from '@/context/NatsContext'
 import { useRoomKeys } from '@/context/RoomKeysContext'
 import { BUFFER_MODE, initialState, roomEventsReducer } from './reducer'
 import { useRoomSubscriptions } from './useRoomSubscriptions'
-import { useUnreadCount as useUnreadCountQuery } from './useUnreadCount'
+import { useUnreadCount as useUnreadCountFold } from './useUnreadCount'
 import {
   fetchMessageHistory,
   fetchSurroundingMessages,
   markRoomRead,
+  getUnreadCount,
   createChatlistSection,
   renameChatlistSection,
   deleteChatlistSection,
   reorderChatlistSections,
   setChatlistSectionSortMode,
   moveChat,
+  subToRoom,
 } from '@/api'
 import { deriveSidebarSections } from '@/lib/chatlist'
+import { isRoomUnread } from './selectUnread'
+import { loadSubscriptionCache, saveSubscriptionCache } from '@/lib/subscriptionCache'
 import type {
   ChatlistState,
   ChatlistSortMode,
@@ -58,6 +63,37 @@ interface RoomBufferState {
  *  returned page of exactly this size means older messages may follow. */
 const HISTORY_PAGE_SIZE = 50
 
+/** One room's stored sidebar preview. Flattened and name-resolved at write
+ *  time so the render layer never branches on whether it came from a wire
+ *  PreviewMessage or a live Message. */
+interface RoomPreview {
+  /** The previewed message's id — guards the delete-clears rule in the
+   *  reducer's ROOM_PREVIEW_UPDATED case. */
+  messageId: string
+  senderName: string
+  /** Single-line, flattened, capped at PREVIEW_MAX_LENGTH. */
+  text: string
+  /** RFC3339, from the previewed message's createdAt. Powers
+   *  ROOM_PREVIEW_UPDATED's recency guard: broadcast-worker processes
+   *  canonical messages concurrently, so an edit/delete's server-resolved
+   *  preview can arrive after a genuinely newer message's live preview —
+   *  a strictly older incoming createdAt is rejected rather than regressing
+   *  the sidebar. Optional because older code paths / test fixtures may not
+   *  set it; a missing timestamp on either side of the comparison is
+   *  treated as "accept the write". */
+  createdAt?: string
+  /** True when this preview was built from a live message the client
+   *  couldn't decrypt — the reducer's "[encrypted message]" placeholder
+   *  branch. Guards ROOM_PREVIEW_UPDATED from overwriting the placeholder
+   *  with the server's plaintext previewMessage body for the SAME message
+   *  (history-service / broadcast-worker relay that body unencrypted). A
+   *  wire preview for a DIFFERENT, newer message still overwrites normally.
+   *  Known residual: after a reload there's no placeholder in state to
+   *  compare against, so bootstrap still shows the server's plaintext —
+   *  fully closing that gap needs a backend change, not a client one. */
+  encrypted?: boolean
+}
+
 /** Sidebar summary — derived from `model.Room` + the user's
  *  Subscription. Only the fields the sidebar / chat header read. */
 interface RoomSummary {
@@ -75,6 +111,15 @@ interface RoomSummary {
    *  for DM rooms whose subscription carried it. Plain channels stay
    *  undefined here. */
   hrInfo?: SubscriptionHRInfo
+  /** Joined in by useSidebarSections from state.previews. Undefined when the
+   *  room has no preview — the row still renders at full height with a blank
+   *  snippet line. */
+  preview?: RoomPreview
+  /** Read-position unread (the same rule as the header badge, via
+   *  isRoomUnread) — stamped by useSidebarSections so the row bolds for a
+   *  member whose read position is behind even when no live message counter
+   *  has accrued (e.g. she was just added to the room). */
+  hasUnread?: boolean
 }
 
 /** Top-level state shape returned by `roomEventsReducer`. */
@@ -96,6 +141,11 @@ interface RoomEventsState {
    *  so consumers reading the map for either channel or DM rooms see
    *  hrInfo as optional without narrowing. */
   subscriptions: Record<string, DMSubscription>
+  /** Keyed by roomId. Absent key = no preview to show. Deliberately NOT a
+   *  field on RoomSummary: summaries are rebuilt from `Room` records, which
+   *  mirror pkg/model.Room — and the backend hangs previewMessage off
+   *  SubscriptionRoom instead, so a summary field would break the mirror. */
+  previews: Record<string, RoomPreview>
   /** Chatlist section-definition overlay (names, order, sortMode). Seeded by
    *  CHATLIST_LOADED, replaced by CHATLIST_UPDATED (LWW). Membership rides the
    *  subscriptions; this is O(sections). */
@@ -129,6 +179,10 @@ interface RoomEventsContextValue {
   setActiveRoom: (roomId: string | null) => void
   jumpToMessage: (roomId: string, messageId: string) => Promise<void> | void
   resetToLiveTail: (roomId: string) => void
+  /** Re-pull the authoritative subscription state from user-service (the
+   *  three `subscription.list` buckets). The badge fold's drift backstop;
+   *  also picks up rooms whose membership events the client missed. */
+  resync: () => Promise<unknown>
   /** Register a thread-reply event handler; returns an unsubscribe fn. */
   registerThreadReplyHandler: (h: ThreadReplyHandler) => () => void
   /** Register a handler for thread-message edit/delete; returns an unsubscribe fn. */
@@ -136,6 +190,49 @@ interface RoomEventsContextValue {
 }
 
 const RoomEventsContext = createContext<RoomEventsContextValue | null>(null)
+
+/** Trailing-debounce window for the cache write. The persisted slices only
+ *  change on subscription/chatlist events, not on message traffic, so this
+ *  mostly just coalesces a burst of `subscription.update`s into one write. */
+const CACHE_WRITE_DEBOUNCE_MS = 1000
+
+/**
+ * Seed the reducer from the browser cache so the sidebar's first paint
+ * already has rooms.
+ *
+ * Replays the cached data through the SAME actions the network bootstrap
+ * uses, rather than assembling a state object by hand — cached state and
+ * fetched state are then identical in shape by construction, with no
+ * parallel hydration path to drift. Two consequences fall out of that:
+ * `unreadCount` zero-inits (it's a session-local counter no fetch would
+ * ever correct, so a persisted value would be stale forever) and
+ * `hasMention` comes from the subscription record, which is server-canonical.
+ */
+function hydrateFromCache(user: Nats['user']): RoomEventsState {
+  const cached = loadSubscriptionCache(user)
+  if (!cached) return initialState as RoomEventsState
+  const rooms = Object.values(cached.subscriptions).map((s) => subToRoom(s, user.siteId))
+  const seeded = roomEventsReducer(initialState, {
+    type: 'BUCKETS_LOADED',
+    favoriteIds: cached.favoriteIds,
+    appIds: cached.appIds,
+    channelDmIds: cached.channelDmIds,
+    subscriptions: cached.subscriptions,
+    rooms,
+  })
+  // Overlay the previews the last session ended on — the cached subscriptions
+  // only carry the previewMessage its bootstrap saw, so a message that arrived
+  // afterwards lives here.
+  const withPreviews = roomEventsReducer(seeded, {
+    type: 'PREVIEWS_HYDRATED',
+    previews: cached.previews,
+  })
+  if (!cached.chatlist) return withPreviews as RoomEventsState
+  return roomEventsReducer(withPreviews, {
+    type: 'CHATLIST_LOADED',
+    chatlist: cached.chatlist,
+  }) as RoomEventsState
+}
 
 export function RoomEventsProvider({ children }: { children: ReactNode }) {
   // `useNats()` returns `never` to TS because NatsContext.jsx does
@@ -146,7 +243,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
   const nats = useNats() as unknown as Nats
   const { user } = nats
   const { decrypt, ensureKey, seedKeys } = useRoomKeys()
-  const [state, dispatch] = useReducer(roomEventsReducer, initialState) as unknown as [
+  const [state, dispatch] = useReducer(roomEventsReducer, user, hydrateFromCache) as unknown as [
     RoomEventsState,
     Dispatch<{ type: string; [k: string]: unknown }>,
   ]
@@ -176,7 +273,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
 
   // useRoomSubscriptions reads `.current` on the ref slots when room-channel
   // events arrive, fanning them to ThreadEvents.
-  const { currentGeneration } = useRoomSubscriptions(
+  const { currentGeneration, resync } = useRoomSubscriptions(
     nats,
     dispatch,
     stateRef,
@@ -186,6 +283,24 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
     ensureKey,
     seedKeys,
   )
+
+  // Write-through to the browser cache, keyed by reference on the persisted
+  // slices. `previews` is the one that message traffic churns, and the trailing
+  // debounce is what keeps a busy room from writing per message: the timer
+  // restarts on each change, so a burst costs one write once it settles.
+  //
+  // The identity check is the teardown guard. `RESET` returns the
+  // `initialState` OBJECT, so `=== initialState.subscriptions` is an exact
+  // "we've been reset" test — without it, logout (and StrictMode's
+  // double-mount) would persist the empty post-RESET state over a good cache.
+  const { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews } = state
+  useEffect(() => {
+    if (subscriptions === initialState.subscriptions) return undefined
+    const timer = setTimeout(() => {
+      saveSubscriptionCache(user, { subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews })
+    }, CACHE_WRITE_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [user, subscriptions, favoriteIds, appIds, channelDmIds, chatlist, previews])
 
   const loadHistory = useCallback(
     async (roomId: string) => {
@@ -328,6 +443,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
+      resync,
       registerThreadReplyHandler,
       registerThreadMessageMutationHandler,
     }),
@@ -339,6 +455,7 @@ export function RoomEventsProvider({ children }: { children: ReactNode }) {
       setActiveRoom,
       jumpToMessage,
       resetToLiveTail,
+      resync,
       registerThreadReplyHandler,
       registerThreadMessageMutationHandler,
     ],
@@ -388,11 +505,12 @@ export function useRoomEvents(roomId: string | null | undefined) {
 }
 
 export function useRoomSummaries() {
-  const { state, setActiveRoom, jumpToMessage } = useRoomEventsInternal()
+  const { state, setActiveRoom, jumpToMessage, resync } = useRoomEventsInternal()
   return {
     summaries: state.summaries,
     setActiveRoom,
     jumpToMessage,
+    resync,
     error: state.roomsError,
   }
 }
@@ -400,15 +518,20 @@ export function useRoomSummaries() {
 /**
  * App-wide unread total for the header badge.
  *
- * Sourced from the `subscription.count` RPC (via `useUnreadCountQuery`),
- * not derived from `state.summaries`. Re-fetches whenever the active
- * room changes — opening/reading a room is when the server-side total
- * moves.
+ * Folded from local subscription state — no RPC. The client already holds
+ * every input the server's `subscription.count` computes over, and receives
+ * every delta live, so recomputing it server-side per message was redundant.
  */
 export function useUnreadCount(): number {
   const nats = useNats() as unknown as Nats
-  const { state } = useRoomEventsInternal()
-  return useUnreadCountQuery(nats, state.readSeq, state.msgRecvSeq)
+  const { state, resync } = useRoomEventsInternal()
+  // Drift backstop — see useUnreadCount's reconcile. getUnreadCount is the
+  // ONLY remaining subscription.count call site: periodic, not per-message.
+  const reconcile = useMemo(
+    () => ({ getCount: () => getUnreadCount(nats), resync }),
+    [nats, resync],
+  )
+  return useUnreadCountFold(state, reconcile)
 }
 
 export function useRoomDispatch(): RoomEventsContextValue['dispatch'] {
@@ -452,20 +575,25 @@ export interface SidebarSection {
  */
 export function useSidebarSections(): SidebarSection[] {
   const { state } = useRoomEventsInternal()
-  const { summaries, subscriptions, chatlist } = state
+  const { summaries, subscriptions, chatlist, previews, activeRoomId } = state
   return useMemo(() => {
     const enrich = (room: RoomSummary): RoomSummary => {
       const sub = subscriptions[room.id]
-      if (!sub) return room
+      const preview = previews[room.id]
+      // Stamped even when the room has no subscription record yet: a
+      // never-read room with activity is unread by the shared rule.
+      const hasUnread = isRoomUnread(room, sub, room.id === activeRoomId)
       return {
         ...room,
-        subscriptionName: sub.name ?? room.subscriptionName,
-        hrInfo: sub.hrInfo ?? room.hrInfo,
+        subscriptionName: sub?.name ?? room.subscriptionName,
+        hrInfo: sub?.hrInfo ?? room.hrInfo,
+        preview,
+        hasUnread,
       }
     }
     const sections = deriveSidebarSections(summaries, subscriptions, chatlist) as SidebarSection[]
     return sections.map((s) => ({ ...s, rooms: s.rooms.map(enrich) }))
-  }, [summaries, subscriptions, chatlist])
+  }, [summaries, subscriptions, chatlist, previews, activeRoomId])
 }
 
 /** Raw overlay section order (the full list the backend stores — built-ins +
@@ -530,4 +658,4 @@ export function useSubscription(roomId: string | null | undefined): DMSubscripti
   return roomId ? state.subscriptions[roomId] : undefined
 }
 
-export type { RoomEventsState, RoomSummary, RoomBufferState, RoomEventsContextValue }
+export type { RoomEventsState, RoomSummary, RoomPreview, RoomBufferState, RoomEventsContextValue }

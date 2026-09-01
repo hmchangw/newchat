@@ -16,6 +16,8 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/valkeyfake"
 )
 
 // --- In-memory InboxStore stub ---
@@ -25,6 +27,12 @@ type roleUpdate struct {
 	roomID    string
 	roles     []model.Role
 	updatedAt time.Time
+}
+
+type joinedAtRefresh struct {
+	roomID   string
+	account  string
+	joinedAt time.Time
 }
 
 type muteUpdate struct {
@@ -87,11 +95,18 @@ type threadUnreadAdded struct {
 	accounts        []string
 }
 
+type mentionBadge struct {
+	roomID       string
+	accounts     []string
+	msgCreatedAt time.Time
+}
+
 type stubInboxStore struct {
 	mu                    sync.Mutex
 	subscriptions         []model.Subscription
 	bulkSubscriptions     []*model.Subscription
 	bulkCreateErr         error
+	joinedAtRefreshes     []joinedAtRefresh
 	rooms                 []model.Room
 	roleUpdates           []roleUpdate
 	muteUpdates           []muteUpdate
@@ -110,16 +125,78 @@ type stubInboxStore struct {
 	addThreadUnreadErr    error
 	userStatusUpdates     []userStatusUpdate
 	userStatusErr         error
+	listAccountsErr       error
 	settingsUpdates       []userSettingsUpdate
 	chatlistUpdates       []userChatlistUpdate
 	sectionMoves          []sectionMove
 	permissionsApplies    []permissionsApply
+	remoteRoomActivity    []remoteRoomActivity
+	remoteRoomActivityErr error
+	roomSubscribed        map[string]bool
+	deletedRemoteRooms    []string
+	hasRoomSubErr         error
+	mentionBadges         []mentionBadge
+	mentionErr            error
+	accountUpserts        []userAccountUpsert
+	accountErr            error
+	chatlistErr           error
+	sectionErr            error
+}
+
+type userAccountUpsert struct {
+	event     model.UserAccountUpdated
+	updatedAt time.Time
 }
 
 type permissionsApply struct {
 	permission model.PermissionKey
 	accounts   []string
 	state      model.PermissionState
+}
+
+type remoteRoomActivity struct {
+	roomID    string
+	siteID    string
+	lastMsgAt time.Time
+}
+
+func (s *stubInboxStore) DeleteRemoteRoomActivity(_ context.Context, roomID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.roomSubscribed, roomID)
+	kept := s.remoteRoomActivity[:0]
+	for _, r := range s.remoteRoomActivity {
+		if r.roomID != roomID {
+			kept = append(kept, r)
+		}
+	}
+	s.remoteRoomActivity = kept
+	s.deletedRemoteRooms = append(s.deletedRemoteRooms, roomID)
+	return nil
+}
+
+func (s *stubInboxStore) HasRoomSubscription(_ context.Context, roomID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasRoomSubErr != nil {
+		return false, s.hasRoomSubErr
+	}
+	for i := range s.bulkSubscriptions {
+		if s.bulkSubscriptions[i].RoomID == roomID {
+			return true, nil
+		}
+	}
+	return s.roomSubscribed[roomID], nil
+}
+
+func (s *stubInboxStore) UpsertRemoteRoomActivity(_ context.Context, roomID, siteID string, lastMsgAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteRoomActivityErr != nil {
+		return s.remoteRoomActivityErr
+	}
+	s.remoteRoomActivity = append(s.remoteRoomActivity, remoteRoomActivity{roomID: roomID, siteID: siteID, lastMsgAt: lastMsgAt})
+	return nil
 }
 
 type userChatlistUpdate struct {
@@ -271,6 +348,15 @@ func (s *stubInboxStore) BulkCreateSubscriptions(_ context.Context, subs []*mode
 	return nil
 }
 
+func (s *stubInboxStore) BulkRefreshJoinedAt(_ context.Context, roomID string, joinedAtByAccount map[string]time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for account, joinedAt := range joinedAtByAccount {
+		s.joinedAtRefreshes = append(s.joinedAtRefreshes, joinedAtRefresh{roomID: roomID, account: account, joinedAt: joinedAt})
+	}
+	return nil
+}
+
 func (s *stubInboxStore) UpdateSubscriptionMute(_ context.Context, roomID, account string, muted bool, muteUpdatedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -334,7 +420,7 @@ func (s *stubInboxStore) getOpenUpdates() []openUpdate {
 	return cp
 }
 
-func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, account string, lastSeenAt time.Time, alert bool) error {
+func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, account string, lastSeenAt time.Time, alert bool) (bool, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.subReads = append(s.subReads, subRead{roomID, account, lastSeenAt, alert})
@@ -342,15 +428,16 @@ func (s *stubInboxStore) UpdateSubscriptionRead(_ context.Context, roomID, accou
 		if s.subscriptions[i].RoomID == roomID && s.subscriptions[i].User.Account == account {
 			// Order-safe: skip if stored lastSeenAt is not strictly earlier.
 			if s.subscriptions[i].LastSeenAt != nil && !s.subscriptions[i].LastSeenAt.Before(lastSeenAt) {
-				return nil
+				return false, 0, nil
 			}
 			ls := lastSeenAt
 			s.subscriptions[i].LastSeenAt = &ls
 			s.subscriptions[i].Alert = alert
-			return nil
+			// A room read does not drain threadUnread — only thread.read does.
+			return true, len(s.subscriptions[i].ThreadUnread), nil
 		}
 	}
-	return nil // missing-subscription → no-op
+	return false, 0, nil // missing-subscription → no-op
 }
 
 func (s *stubInboxStore) getSubReads() []subRead {
@@ -394,6 +481,22 @@ func (s *stubInboxStore) AddThreadUnread(_ context.Context, roomID, parentMessag
 		roomID: roomID, parentMessageID: parentMessageID, accounts: accounts,
 	})
 	return nil
+}
+
+func (s *stubInboxStore) SetSubscriptionMentions(_ context.Context, roomID string, accounts []string, msgCreatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mentionErr != nil {
+		return s.mentionErr
+	}
+	s.mentionBadges = append(s.mentionBadges, mentionBadge{roomID: roomID, accounts: accounts, msgCreatedAt: msgCreatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getMentionBadges() []mentionBadge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]mentionBadge(nil), s.mentionBadges...)
 }
 
 func (s *stubInboxStore) UpsertThreadSubscription(_ context.Context, sub *model.ThreadSubscription) error {
@@ -445,6 +548,21 @@ func (s *stubInboxStore) getVisibilityUpdates() []visibilityUpdate {
 	return cp
 }
 
+func (s *stubInboxStore) ListSubscriptionAccountsByRoom(_ context.Context, roomID string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listAccountsErr != nil {
+		return nil, s.listAccountsErr
+	}
+	var accounts []string
+	for i := range s.subscriptions {
+		if s.subscriptions[i].RoomID == roomID {
+			accounts = append(accounts, s.subscriptions[i].User.Account)
+		}
+	}
+	return accounts, nil
+}
+
 func (s *stubInboxStore) getThreadSubs() []model.ThreadSubscription {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -483,15 +601,55 @@ func (s *stubInboxStore) UpdateUserSettings(_ context.Context, account string, s
 func (s *stubInboxStore) UpdateUserChatlist(_ context.Context, account string, chatlist *model.ChatlistState, updatedAt int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.chatlistErr != nil {
+		return s.chatlistErr
+	}
 	s.chatlistUpdates = append(s.chatlistUpdates, userChatlistUpdate{account: account, chatlist: chatlist, updatedAt: updatedAt})
 	return nil
+}
+
+func (s *stubInboxStore) getChatlistUpdates() []userChatlistUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]userChatlistUpdate, len(s.chatlistUpdates))
+	copy(cp, s.chatlistUpdates)
+	return cp
+}
+
+func (s *stubInboxStore) UpsertUserAccount(_ context.Context, e *model.UserAccountUpdated, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accountErr != nil {
+		return s.accountErr
+	}
+	s.accountUpserts = append(s.accountUpserts, userAccountUpsert{event: *e, updatedAt: updatedAt})
+	return nil
+}
+
+func (s *stubInboxStore) getAccountUpserts() []userAccountUpsert {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]userAccountUpsert, len(s.accountUpserts))
+	copy(cp, s.accountUpserts)
+	return cp
 }
 
 func (s *stubInboxStore) UpdateSubscriptionSection(_ context.Context, roomID, account string, sectionID *string, order float64, updatedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sectionErr != nil {
+		return s.sectionErr
+	}
 	s.sectionMoves = append(s.sectionMoves, sectionMove{roomID: roomID, account: account, sectionID: sectionID, order: order, updatedAt: updatedAt})
 	return nil
+}
+
+func (s *stubInboxStore) getSectionMoves() []sectionMove {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]sectionMove, len(s.sectionMoves))
+	copy(cp, s.sectionMoves)
+	return cp
 }
 
 // --- fake badgeCache double ---
@@ -564,6 +722,44 @@ func (s *stubInboxStore) getPermissionsApplies() []permissionsApply {
 
 // --- Tests ---
 
+func TestHandleEvent_MemberJoinedAtRefreshed(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	joinedAt := time.Date(2023, 4, 5, 6, 7, 8, 0, time.UTC)
+	change := model.MemberAddEvent{
+		RoomID:   "room-1",
+		Accounts: []string{"alice", "bob"},
+		SiteID:   "site-a",
+		JoinedAt: joinedAt.UnixMilli(),
+	}
+	changeData, err := json.Marshal(change)
+	if err != nil {
+		t.Fatalf("marshal change: %v", err)
+	}
+	evt := model.InboxEvent{Type: model.InboxMemberJoinedAtRefreshed, SiteID: "site-a", DestSiteID: "site-b", Payload: changeData}
+	evtData, err := json.Marshal(evt)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+
+	if err := h.HandleEvent(context.Background(), evtData); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+
+	if len(store.joinedAtRefreshes) != 2 {
+		t.Fatalf("expected 2 joinedAt refreshes, got %d", len(store.joinedAtRefreshes))
+	}
+	for _, r := range store.joinedAtRefreshes {
+		if r.roomID != "room-1" {
+			t.Errorf("refresh roomID = %q, want room-1", r.roomID)
+		}
+		if !r.joinedAt.Equal(joinedAt) {
+			t.Errorf("refresh joinedAt = %v, want %v", r.joinedAt, joinedAt)
+		}
+	}
+}
+
 func TestHandleEvent_MemberAdded(t *testing.T) {
 	store := &stubInboxStore{
 		users: []model.User{
@@ -621,8 +817,8 @@ func TestHandleEvent_MemberAdded(t *testing.T) {
 	if sub.SiteID != "site-b" {
 		t.Errorf("subscription SiteID = %q, want %q", sub.SiteID, "site-b")
 	}
-	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleMember)
+	if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+		t.Errorf("subscription Roles = %v, want [%q]", sub.Roles, model.RoleUser)
 	}
 	if sub.RoomType != model.RoomTypeChannel {
 		t.Errorf("subscription RoomType = %q, want %q", sub.RoomType, model.RoomTypeChannel)
@@ -1024,8 +1220,8 @@ func TestHandleEvent_MemberAdded_EventSourcedFields(t *testing.T) {
 		if !sub.HistorySharedSince.Equal(historyShared) {
 			t.Errorf("sub[%d] HistorySharedSince = %v, want %v", i, *sub.HistorySharedSince, historyShared)
 		}
-		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleMember {
-			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleMember)
+		if len(sub.Roles) != 1 || sub.Roles[0] != model.RoleUser {
+			t.Errorf("sub[%d] Roles = %v, want [%q]", i, sub.Roles, model.RoleUser)
 		}
 	}
 
@@ -1094,6 +1290,104 @@ func TestHandleEvent_RoomSync_InvalidPayload(t *testing.T) {
 	if len(store.getRooms()) != 0 {
 		t.Error("room should not be upserted with invalid payload")
 	}
+}
+
+// TestHandleEvent_RoleUpdated_BustsSubL2 covers the federated role-change
+// case: this site's local replica of a remote-origin room's subscription had
+// its Roles rewritten, so this site's own subauthcache L2 entry must die too.
+func TestHandleEvent_RoleUpdated_BustsSubL2(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	subEvt := model.SubscriptionUpdateEvent{
+		UserID: "u2",
+		Subscription: model.Subscription{
+			ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
+			RoomID: "room-1", SiteID: "site-a", Roles: []model.Role{model.RoleOwner},
+		},
+		Action: "role_updated", Timestamp: 1735689600000,
+	}
+	subEvtData, _ := json.Marshal(subEvt)
+	evt := model.InboxEvent{
+		Type: "role_updated", SiteID: "site-a", DestSiteID: "site-b",
+		Payload: subEvtData, Timestamp: 1735689600000,
+	}
+	evtData, _ := json.Marshal(evt)
+	require.NoError(t, h.HandleEvent(context.Background(), evtData))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("room-1", "bob")})
+}
+
+// TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount covers the
+// federated removal case: this site's local replicas of the removed accounts'
+// subscriptions are deleted, so each one's subauthcache L2 entry must die too
+// — the same security case as room-worker's local removal, mirrored here for
+// federated rooms.
+func TestHandleEvent_MemberRemoved_BustsSubL2ForEachAccount(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2"},
+	)
+	store.mu.Unlock()
+
+	memberEvt := model.MemberRemoveEvent{
+		Type: "member-removed", RoomID: "r2", Accounts: []string{"alice", "dave"}, SiteID: "site-a",
+	}
+	payload, _ := json.Marshal(memberEvt)
+	evt := model.InboxEvent{Type: "member_removed", SiteID: "site-a", DestSiteID: "site-b", Payload: payload, Timestamp: time.Now().UnixMilli()}
+	data, _ := json.Marshal(evt)
+
+	require.NoError(t, h.HandleEvent(context.Background(), data))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r2", "alice"), subauthcache.SubKey("r2", "dave")})
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip for all removed accounts")
+}
+
+// TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber
+// covers the critical gap: ApplySubscriptionRestriction is the same store
+// method room-service's roomRestricted calls, and it can bulk-rewrite Roles
+// for every local subscriber of the room (owner set, everyone else demoted),
+// so every one of them — not just OwnerAccount — needs their subauthcache L2
+// entry busted on this (federated-destination) site too.
+func TestHandleEvent_RoomVisibilityChanged_BustsSubL2ForEveryLocalSubscriber(t *testing.T) {
+	store := &stubInboxStore{}
+	fake := valkeyfake.New()
+	h := NewHandler(store)
+	h.valkey = fake
+
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions,
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "owner1"}, RoomID: "r1"},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "bob"}, RoomID: "r1"},
+		model.Subscription{ID: "s3", User: model.SubscriptionUser{ID: "u3", Account: "unrelated"}, RoomID: "other-room"},
+	)
+	store.mu.Unlock()
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "owner1", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	assert.Subset(t, fake.DeletedKeys(), []string{subauthcache.SubKey("r1", "owner1"), subauthcache.SubKey("r1", "bob")},
+		"every local subscriber of the restricted room must be busted")
+	assert.NotContains(t, fake.DeletedKeys(), subauthcache.SubKey("other-room", "unrelated"),
+		"a subscriber of a different room must not be busted")
+	assert.Equal(t, 1, fake.Calls().Del, "must be a single batched Del round trip")
 }
 
 func TestHandleEvent_RoleUpdated(t *testing.T) {
@@ -1191,7 +1485,7 @@ func TestHandleEvent_MemberRemoved(t *testing.T) {
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u2", Account: "bob"},
-		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleMember},
+		RoomID: "r1", SiteID: "site-a", Roles: []model.Role{model.RoleUser},
 	})
 	store.mu.Unlock()
 
@@ -1266,8 +1560,8 @@ func TestHandleEvent_MemberRemoved_MultipleAccounts(t *testing.T) {
 	// Pre-populate subscriptions for both accounts
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions,
-		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
-		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleMember}},
+		model.Subscription{ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
+		model.Subscription{ID: "s2", User: model.SubscriptionUser{ID: "u2", Account: "dave"}, RoomID: "r2", Roles: []model.Role{model.RoleUser}},
 	)
 	store.mu.Unlock()
 
@@ -1439,15 +1733,12 @@ func subscriptionReadInboxPayload(t *testing.T, account, roomID string) []byte {
 	return data
 }
 
-// TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll: a federated
-// read invalidates the account's WHOLE badge set — no post-apply thread-state
-// check; the next count/push recomputes from Mongo.
-func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll(t *testing.T) {
+// A fully-read room is removed exactly; the set and its freshness marker survive.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearsRoomOnly(t *testing.T) {
 	store := &stubInboxStore{}
 	store.mu.Lock()
 	store.subscriptions = append(store.subscriptions, model.Subscription{
 		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
-		ThreadUnread: []string{"p1"}, // remaining threads must NOT prevent the drop
 	})
 	store.mu.Unlock()
 	h := NewHandler(store)
@@ -1456,8 +1747,48 @@ func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ClearAll(t *testing.T) 
 
 	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
 
-	assert.Equal(t, []string{"alice"}, badge.getClearAlls())
+	assert.Equal(t, []clearRoomCall{{account: "alice", roomID: "r1"}}, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls(), "a read must never drop the whole set")
+}
+
+// Unread followed threads remain, so the room was and stays unread — no edit.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_ThreadUnreadRemains(t *testing.T) {
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		ThreadUnread: []string{"p1"},
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
 	assert.Empty(t, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls())
+}
+
+// A replayed / out-of-order event the $lt guard rejects wrote nothing, so it
+// must not disturb the set either.
+func TestHandler_HandleEvent_SubscriptionRead_BadgeCache_GuardRejected(t *testing.T) {
+	future := time.Now().UTC().Add(time.Hour)
+	store := &stubInboxStore{}
+	store.mu.Lock()
+	store.subscriptions = append(store.subscriptions, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"}, RoomID: "r1",
+		LastSeenAt: &future, // already read past the incoming event
+	})
+	store.mu.Unlock()
+	h := NewHandler(store)
+	badge := &fakeBadgeCache{}
+	h.badge = badge
+
+	require.NoError(t, h.HandleEvent(context.Background(), subscriptionReadInboxPayload(t, "alice", "r1")))
+
+	assert.Empty(t, badge.getClearRooms())
+	assert.Empty(t, badge.getClearAlls())
 }
 
 // TestHandler_HandleEvent_SubscriptionRead_BadgeCache_NilBadgeNoPanic: a
@@ -1649,7 +1980,7 @@ func TestHandleEvent_MemberAdded_PartialUsers_CreatesPresentAndErrors(t *testing
 }
 
 func TestRolesForType(t *testing.T) {
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesForType(model.RoomTypeChannel))
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesForType(model.RoomTypeChannel))
 	assert.Nil(t, rolesForType(model.RoomTypeDM))
 	assert.Nil(t, rolesForType(model.RoomTypeBotDM))
 }
@@ -1661,15 +1992,35 @@ func TestSubscriptionName(t *testing.T) {
 	assert.Equal(t, "", subscriptionName(model.RoomType(""), "ignored", "alice"))
 }
 
-func TestSubscriptionIsSubscribed(t *testing.T) {
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeChannel, &model.User{Account: "bob"}))
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeDM, &model.User{Account: "bob"}))
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "weather.bot"}))
-	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "alice"}))
-	// Platform-admin pseudo-account stays bot-like (no client): not subscribed.
-	assert.False(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_adminsiteA"}))
-	// QA p_ account is an ordinary user: it holds a real subscription.
-	assert.True(t, subscriptionIsSubscribed(model.RoomTypeBotDM, &model.User{Account: "p_webhook"}))
+// A federated add only ever writes the far side of someone else's create, never
+// the initiator's own row, so it can never confer an app subscription — not even
+// when the recipient's row faces an app.
+func TestHandleMemberAdded_BotRequester_DoesNotSubscribeTheHuman(t *testing.T) {
+	store := &stubInboxStore{
+		users: []model.User{{ID: "u_alice", Account: "alice", SiteID: "site-B"}},
+	}
+	h := NewHandler(store)
+
+	changeData, _ := json.Marshal(model.MemberAddEvent{
+		Type:             "member_added",
+		RoomID:           "u_weatheru_alice",
+		RoomType:         model.RoomTypeBotDM,
+		Accounts:         []string{"alice"},
+		SiteID:           "site-A",
+		RequesterAccount: "weather.bot",
+		JoinedAt:         1740000000000,
+		Timestamp:        1740000000000,
+	})
+	evtData, _ := json.Marshal(model.InboxEvent{
+		Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
+
+	require.NoError(t, h.HandleEvent(context.Background(), evtData))
+
+	subs := store.bulkSubscriptions
+	require.Len(t, subs, 1)
+	assert.Equal(t, "weather.bot", subs[0].Name)
+	assert.Equal(t, model.RoomTypeBotDM, subs[0].RoomType, "alice faces an app")
+	assert.False(t, subs[0].IsSubscribed, "alice never asked for it")
 }
 
 func TestHandleMemberAdded_DM_BuildsRecipientSubWithCounterpartName(t *testing.T) {
@@ -1710,8 +2061,8 @@ func TestHandleMemberAdded_DM_BuildsRecipientSubWithCounterpartName(t *testing.T
 
 func TestHandleMemberAdded_BotDM_BuildsBotSub(t *testing.T) {
 	// Cross-site botDM: human (alice) is the requester on site-A; bot
-	// (weather.bot) lives on site-B. Bot's sub on site-B should have
-	// Name = human's account, IsSubscribed = false (bot side).
+	// (weather.bot) lives on site-B. The bot faces a person, so its row stores
+	// dm, names the human, and is not soft-unsubscribable.
 	store := &stubInboxStore{
 		users: []model.User{
 			{ID: "u_weather", Account: "weather.bot", SiteID: "site-B"},
@@ -1741,7 +2092,7 @@ func TestHandleMemberAdded_BotDM_BuildsBotSub(t *testing.T) {
 	assert.Equal(t, "alice", subs[0].Name)
 	assert.Nil(t, subs[0].Roles)
 	assert.False(t, subs[0].IsSubscribed, "bot account on the bot side never has IsSubscribed=true")
-	assert.Equal(t, model.RoomTypeBotDM, subs[0].RoomType)
+	assert.Equal(t, model.RoomTypeDM, subs[0].RoomType, "the bot's own row is an ordinary DM")
 }
 
 func TestHandleMemberAdded_Channel_BuildsChannelSub(t *testing.T) {
@@ -1774,7 +2125,7 @@ func TestHandleMemberAdded_Channel_BuildsChannelSub(t *testing.T) {
 	require.Len(t, subs, 2)
 	for _, s := range subs {
 		assert.Equal(t, "deal team", s.Name)
-		assert.Equal(t, []model.Role{model.RoleMember}, s.Roles)
+		assert.Equal(t, []model.Role{model.RoleUser}, s.Roles)
 		assert.Equal(t, model.RoomTypeChannel, s.RoomType)
 		assert.Equal(t, "site-A", s.SiteID)
 	}
@@ -1807,7 +2158,7 @@ func TestHandleMemberAdded_EmptyRoomType_DefaultsToChannel(t *testing.T) {
 	subs := store.bulkSubscriptions
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType, "empty RoomType must default to channel")
-	assert.Equal(t, []model.Role{model.RoleMember}, subs[0].Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, subs[0].Roles)
 }
 
 func TestHandleMemberAdded_DuplicateKey_IsIdempotent(t *testing.T) {
@@ -1846,6 +2197,107 @@ func TestHandleMemberAdded_BulkCreate_NonDuplicateError_ReturnsError(t *testing.
 	err := h.HandleEvent(context.Background(), evtData)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bulk create subscriptions")
+}
+
+// memberAddedEventData builds the wire bytes for a cross-site member_added on
+// room r1, owned by site-A. lastMsgAt nil = a room that has never had a message.
+func memberAddedEventData(t *testing.T, lastMsgAt *int64) []byte {
+	t.Helper()
+	change := model.MemberAddEvent{
+		Type: "member_added", RoomID: "r1", RoomType: model.RoomTypeChannel,
+		Accounts: []string{"bob"}, SiteID: "site-A", JoinedAt: 1, Timestamp: 1,
+		LastMsgAt: lastMsgAt,
+	}
+	changeData, err := json.Marshal(change)
+	require.NoError(t, err)
+	evtData, err := json.Marshal(model.InboxEvent{Type: "member_added", SiteID: "site-A", DestSiteID: "site-B", Payload: changeData})
+	require.NoError(t, err)
+	return evtData
+}
+
+func TestHandleRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	payload := func(roomID string, lastMsgAt int64) []byte {
+		b, err := json.Marshal(model.RoomActivityEvent{RoomID: roomID, SiteID: "site-A", LastMsgAt: lastMsgAt, Timestamp: at})
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("applies when this site holds a subscription", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", at)))
+
+		require.Len(t, store.remoteRoomActivity, 1)
+		assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+		assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID)
+		assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+	})
+
+	t.Run("drops rooms this site has no member in", func(t *testing.T) {
+		// The refresh is broadcast to every peer, so without this guard each site
+		// would accrue a row for every cross-site room in the deployment.
+		store := &stubInboxStore{}
+		require.NoError(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r-elsewhere", at)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects a malformed payload", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), []byte("{")))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+
+	t.Run("rejects an event with no position to apply", func(t *testing.T) {
+		store := &stubInboxStore{roomSubscribed: map[string]bool{"r1": true}}
+		require.Error(t, NewHandler(store).HandleRoomActivity(context.Background(), payload("r1", 0)))
+		assert.Empty(t, store.remoteRoomActivity)
+	})
+}
+
+func TestHandleMemberAdded_SeedsRemoteRoomActivity(t *testing.T) {
+	at := int64(1740000000000)
+	bob := []model.User{{ID: "u_bob", Account: "bob", SiteID: "site-B"}}
+
+	tests := []struct {
+		name     string
+		users    []model.User
+		lastMsg  *int64
+		seedErr  error
+		wantErr  bool
+		wantRows int
+		wantSubs int
+	}{
+		{name: "seeds the ordering row", users: bob, lastMsg: &at, wantRows: 1, wantSubs: 1},
+		{name: "no activity yet, nothing to seed", users: bob, lastMsg: nil, wantRows: 0, wantSubs: 1},
+		// Seeding before the missing-user return would leave a row for a room
+		// this site has no subscriber for, and nothing ever deletes it.
+		{name: "unknown user leaves no orphan row", users: nil, lastMsg: &at, wantErr: true, wantRows: 0, wantSubs: 0},
+		// The subscription is the correctness-critical write, so a failed
+		// ordering row must not Nak the event and re-run subscription creation.
+		{name: "seed failure does not fail the event", users: bob, lastMsg: &at, seedErr: fmt.Errorf("connection refused"), wantRows: 0, wantSubs: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubInboxStore{users: tt.users, remoteRoomActivityErr: tt.seedErr}
+			h := NewHandler(store)
+
+			err := h.HandleEvent(context.Background(), memberAddedEventData(t, tt.lastMsg))
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Len(t, store.remoteRoomActivity, tt.wantRows)
+			assert.Len(t, store.bulkSubscriptions, tt.wantSubs)
+			if tt.wantRows > 0 {
+				assert.Equal(t, "r1", store.remoteRoomActivity[0].roomID)
+				assert.Equal(t, "site-A", store.remoteRoomActivity[0].siteID, "the room's home site, not the destination")
+				assert.Equal(t, time.UnixMilli(at).UTC(), store.remoteRoomActivity[0].lastMsgAt)
+			}
+		})
+	}
 }
 
 func TestHandler_HandleEvent_ThreadRead_Happy(t *testing.T) {
@@ -2557,6 +3009,206 @@ func TestHandler_UserPermissionsUpdated_UnknownPermissionKey(t *testing.T) {
 	assert.Empty(t, store.getPermissionsApplies())
 }
 
+func TestHandler_UserAccountUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserAccountUpdated{
+		ID: "u1", Account: "alice", SiteID: "site-a", EngName: "A",
+		Roles: []model.UserRole{model.UserRoleBot}, Active: true, Timestamp: 1755640000000,
+	})
+	require.NoError(t, err)
+	// The envelope timestamp deliberately differs from the payload's: the watermark
+	// is the payload's, so a handler reading evt.Timestamp fails here.
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	upserts := store.getAccountUpserts()
+	require.Len(t, upserts, 1)
+	assert.Equal(t, "u1", upserts[0].event.ID)
+	assert.Equal(t, "alice", upserts[0].event.Account)
+	assert.Equal(t, "site-a", upserts[0].event.SiteID)
+	assert.Equal(t, []model.UserRole{model.UserRoleBot}, upserts[0].event.Roles)
+	assert.True(t, upserts[0].event.Active)
+	assert.Equal(t, time.UnixMilli(1755640000000).UTC(), upserts[0].updatedAt)
+}
+
+func TestHandler_UserAccountUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: []byte("{nope"), Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getAccountUpserts())
+}
+
+// A store failure must propagate so JetStream redelivers rather than Ack-dropping
+// the snapshot.
+func TestHandler_UserAccountUpdated_StoreError(t *testing.T) {
+	store := &stubInboxStore{accountErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserAccountUpdated{ID: "u1", Account: "alice", Timestamp: 1})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserAccountUpdated, Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upsert user account")
+}
+
+// Chatlist is replaced wholesale, and the event Timestamp rides through as the
+// store's HWM guard.
+func TestHandler_UserChatlistUpdated(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserChatlistUpdated{
+		Account: "alice",
+		Chatlist: model.ChatlistState{
+			SectionOrder:  []string{model.SectionFavorites, model.SectionChats},
+			LastUpdatedAt: 1755640000000,
+		},
+		Timestamp: 1755640000000,
+	})
+	require.NoError(t, err)
+	// Envelope timestamp deliberately differs from the payload's — the watermark is
+	// the payload's.
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserChatlistUpdated, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+	updates := store.getChatlistUpdates()
+	require.Len(t, updates, 1)
+	assert.Equal(t, "alice", updates[0].account)
+	require.NotNil(t, updates[0].chatlist)
+	assert.Equal(t, []string{model.SectionFavorites, model.SectionChats}, updates[0].chatlist.SectionOrder)
+	assert.Equal(t, int64(1755640000000), updates[0].updatedAt)
+}
+
+func TestHandler_UserChatlistUpdated_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserChatlistUpdated, Payload: []byte("{nope"), Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getChatlistUpdates())
+}
+
+// A store failure must propagate so JetStream redelivers rather than Ack-dropping
+// the chatlist state.
+func TestHandler_UserChatlistUpdated_StoreError(t *testing.T) {
+	store := &stubInboxStore{chatlistErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.UserChatlistUpdated{Account: "alice", Timestamp: 1})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxUserChatlistUpdated, Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "update user chatlist")
+}
+
+// A nil SectionID is the "moved out of every section" case and must reach the
+// store as nil rather than being coerced to an empty string.
+func TestHandler_SubscriptionSectionMoved(t *testing.T) {
+	section := "sec-1"
+	tests := []struct {
+		name      string
+		sectionID *string
+	}{
+		{name: "into a section", sectionID: &section},
+		{name: "out of every section", sectionID: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &stubInboxStore{}
+			h := NewHandler(store)
+
+			payload, err := json.Marshal(model.SubscriptionSectionMovedEvent{
+				Account: "alice", RoomID: "room-1", SectionID: tt.sectionID,
+				SectionOrder: 2.5, Timestamp: 1755640000000,
+			})
+			require.NoError(t, err)
+			// Envelope timestamp deliberately differs from the payload's — the
+			// watermark is the payload's.
+			evt, err := json.Marshal(model.InboxEvent{
+				Type: model.InboxSubscriptionSectionMoved, SiteID: "site-a", DestSiteID: "site-b",
+				Payload: payload, Timestamp: 1,
+			})
+			require.NoError(t, err)
+
+			require.NoError(t, h.HandleEvent(context.Background(), evt))
+
+			moves := store.getSectionMoves()
+			require.Len(t, moves, 1)
+			assert.Equal(t, "room-1", moves[0].roomID)
+			assert.Equal(t, "alice", moves[0].account)
+			assert.Equal(t, tt.sectionID, moves[0].sectionID)
+			assert.InDelta(t, 2.5, moves[0].order, 0)
+			assert.Equal(t, time.UnixMilli(1755640000000).UTC(), moves[0].updatedAt)
+		})
+	}
+}
+
+func TestHandler_SubscriptionSectionMoved_MalformedPayload(t *testing.T) {
+	store := &stubInboxStore{}
+	h := NewHandler(store)
+
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxSubscriptionSectionMoved, Payload: []byte("{nope"), Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	require.Error(t, h.HandleEvent(context.Background(), evt))
+	assert.Empty(t, store.getSectionMoves())
+}
+
+// A store failure must propagate so JetStream redelivers rather than Ack-dropping
+// the section move.
+func TestHandler_SubscriptionSectionMoved_StoreError(t *testing.T) {
+	store := &stubInboxStore{sectionErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.SubscriptionSectionMovedEvent{
+		Account: "alice", RoomID: "room-1", Timestamp: 1,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxSubscriptionSectionMoved, Payload: payload, Timestamp: 1,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "update subscription section")
+}
+
 // A bot-DM member_added at the target MUST upsert a subscription only, never a rooms doc
 // (DM origin lives at exactly one site). Subscription name comes from RequesterAccount.
 func TestHandleEvent_MemberAdded_BotDM_SubscriptionOnly(t *testing.T) {
@@ -2631,4 +3283,202 @@ func TestHandleEvent_MemberAdded_ChannelUnchanged(t *testing.T) {
 	require.Len(t, subs, 1)
 	assert.Equal(t, model.RoomTypeChannel, subs[0].RoomType)
 	assert.Equal(t, "deployments", subs[0].Name, "channel subscription name is the room name")
+}
+
+// ApplySubscriptionRestriction can bulk-rewrite Roles for every subscriber —
+// owner set, everyone else demoted — so by the time the bust runs the write has
+// already made every cached authorization decision for this room wrong. Acking
+// on a listing failure leaves those demoted members authorized from L2 for the
+// rest of the TTL. The event is idempotent, so the error must reach JetStream
+// and let the redelivery complete the invalidation.
+func TestHandler_RoomVisibilityChanged_ListingFailureIsRetryable(t *testing.T) {
+	store := &stubInboxStore{listAccountsErr: errors.New("mongo down")}
+	h := NewHandler(store)
+
+	payload, err := json.Marshal(model.RoomRestrictedInboxPayload{
+		RoomID: "r1", Restricted: true, ExternalAccess: false, OwnerAccount: "bob", Timestamp: 12345,
+	})
+	require.NoError(t, err)
+	evt, err := json.Marshal(model.InboxEvent{
+		Type: model.InboxRoomRestricted, SiteID: "site-a", DestSiteID: "site-b",
+		Payload: payload, Timestamp: 12345,
+	})
+	require.NoError(t, err)
+
+	err = h.HandleEvent(context.Background(), evt)
+
+	require.Error(t, err, "the event must NAK so the redelivery can finish the bust")
+	assert.NotErrorIs(t, err, errcode.ErrPermanent,
+		"a listing failure is transient — it must retry, not Ack-drop")
+	// The authoritative write still ran; only the invalidation is outstanding.
+	assert.Len(t, store.getVisibilityUpdates(), 1)
+}
+
+func TestHandleEvent_SubscriptionMention(t *testing.T) {
+	msgAt := time.UnixMilli(1755820800000).UTC()
+	valid := model.SubscriptionMentionEvent{
+		RoomID: "room-1", Accounts: []string{"alice", "bob"},
+		MentionedAt: msgAt.UnixMilli(), Timestamp: msgAt.UnixMilli(),
+	}
+
+	tests := []struct {
+		name          string
+		payload       any
+		storeErr      error
+		wantErr       string
+		wantPermanent bool
+		wantBadge     []mentionBadge
+	}{
+		{
+			name:      "applies the badge to the destination accounts",
+			payload:   valid,
+			wantBadge: []mentionBadge{{roomID: "room-1", accounts: []string{"alice", "bob"}, msgCreatedAt: msgAt}},
+		},
+		{
+			name:          "malformed payload is poison, not retried",
+			payload:       "not-an-object",
+			wantErr:       "unmarshal subscription_mention payload",
+			wantPermanent: true,
+		},
+		{
+			name:          "empty account list is poison — the producer can't emit one",
+			payload:       model.SubscriptionMentionEvent{RoomID: "room-1", MentionedAt: msgAt.UnixMilli()},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name: "blank room id is poison rather than matching nothing",
+			payload: model.SubscriptionMentionEvent{
+				Accounts: []string{"alice"}, MentionedAt: msgAt.UnixMilli(),
+			},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name: "omitted mentionedAt is poison rather than badging as 1970",
+			payload: model.SubscriptionMentionEvent{
+				RoomID: "room-1", Accounts: []string{"alice"},
+			},
+			wantErr:       "missing roomId, accounts or mentionedAt",
+			wantPermanent: true,
+		},
+		{
+			name:     "store error propagates for redelivery",
+			payload:  valid,
+			storeErr: errors.New("mongo down"),
+			wantErr:  "set subscription mentions",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stubInboxStore{mentionErr: tc.storeErr}
+
+			payload, err := json.Marshal(tc.payload)
+			require.NoError(t, err)
+			data, err := json.Marshal(model.InboxEvent{
+				Type:       model.InboxSubscriptionMention,
+				SiteID:     "site-a",
+				DestSiteID: "site-b",
+				Payload:    payload,
+				Timestamp:  msgAt.UnixMilli(),
+			})
+			require.NoError(t, err)
+
+			err = NewHandler(store).HandleEvent(context.Background(), data)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				// Permanent tells the consume loop to Ack-drop instead of Nak-forever.
+				_, permanent := errcode.IsPermanent(err)
+				assert.Equal(t, tc.wantPermanent, permanent)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBadge, store.getMentionBadges())
+		})
+	}
+}
+
+// A federated DM row stores the room as ITS OWN subscriber sees it, derived from
+// the counterpart the row is named after. Channels are unaffected.
+func TestSubscriptionRowType(t *testing.T) {
+	tests := []struct {
+		name      string
+		roomType  model.RoomType
+		roomName  string
+		requester string
+		want      model.RoomType
+	}{
+		{"human targeted by a bot", model.RoomTypeBotDM, "", "weather.bot", model.RoomTypeBotDM},
+		{"bot targeted by a human", model.RoomTypeBotDM, "", "alice", model.RoomTypeDM},
+		{"human targeted by a human", model.RoomTypeDM, "", "alice", model.RoomTypeDM},
+		{"platform admin counterpart", model.RoomTypeBotDM, "", "p_adminsiteA", model.RoomTypeDM},
+		{"channel keeps the room type", model.RoomTypeChannel, "eng", "alice", model.RoomTypeChannel},
+		{"discussion keeps the room type", model.RoomTypeDiscussion, "eng", "alice", model.RoomTypeDiscussion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name := subscriptionName(tt.roomType, tt.roomName, tt.requester)
+			assert.Equal(t, tt.want, model.SubscriptionRowType(tt.roomType, name))
+		})
+	}
+}
+
+// A payload that cannot be parsed cannot be parsed on redelivery either, so every
+// event type must return a permanent error: jsretry Ack-drops the poison instead
+// of holding an ack-pending slot for the full MaxDeliver budget and then dropping
+// it silently anyway.
+func TestHandler_HandleEvent_MalformedPayload_IsPermanent(t *testing.T) {
+	for _, eventType := range []model.InboxEventType{
+		model.InboxMemberAdded,
+		model.InboxMemberRemoved,
+		model.InboxMemberJoinedAtRefreshed,
+		"room_sync", // no model constant; the dispatch switch uses the literal
+		model.InboxRoleUpdated,
+		model.InboxSubscriptionRead,
+		model.InboxSubscriptionMuteToggled,
+		model.InboxSubscriptionFavoriteToggled,
+		model.InboxSubscriptionOpened,
+		model.InboxThreadSubscriptionUpserted,
+		model.InboxThreadRead,
+		model.InboxThreadReadAll,
+		model.InboxThreadUnreadAdded,
+		model.InboxRoomRenamed,
+		model.InboxRoomRestricted,
+		model.InboxUserStatusUpdated,
+		model.InboxUserSettingsUpdated,
+		model.InboxUserPermissionsUpdated,
+		model.InboxUserChatlistUpdated,
+		model.InboxUserAccountUpdated,
+		model.InboxSubscriptionSectionMoved,
+		model.InboxSubscriptionMention,
+	} {
+		t.Run(eventType, func(t *testing.T) {
+			h := NewHandler(&stubInboxStore{})
+			evt := model.InboxEvent{Type: eventType, SiteID: "site-a", DestSiteID: "site-b", Payload: []byte("not-json")}
+			data, err := json.Marshal(evt)
+			require.NoError(t, err)
+
+			err = h.HandleEvent(context.Background(), data)
+
+			require.Error(t, err)
+			ec, perm := errcode.IsPermanent(err)
+			require.True(t, perm, "a malformed %s payload must Ack-drop, not retry to MaxDeliver", eventType)
+			assert.Equal(t, errcode.CodeBadRequest, ec.Code)
+			assert.NotNil(t, errors.Unwrap(ec), "the decoder error must ride as the cause for the server-side log")
+		})
+	}
+}
+
+// The envelope itself is poison on the same argument as its payload.
+func TestHandler_HandleEvent_MalformedEnvelope_IsPermanent(t *testing.T) {
+	h := NewHandler(&stubInboxStore{})
+
+	err := h.HandleEvent(context.Background(), []byte("{not json"))
+
+	require.Error(t, err)
+	ec, perm := errcode.IsPermanent(err)
+	require.True(t, perm, "an unparseable inbox envelope must Ack-drop")
+	assert.Equal(t, errcode.CodeBadRequest, ec.Code)
 }

@@ -132,6 +132,9 @@ describe('NatsProvider connect wiring', () => {
     })
     expect(natsConnect).toHaveBeenCalledWith(
       expect.objectContaining({ servers: 'ws://nats.site-a', authenticator: fakeAuthenticator }))
+    expect(natsConnect).toHaveBeenCalledWith(
+      expect.objectContaining({ inboxPrefix: 'chat.user.alice' }),
+    )
     await waitFor(() => expect(result.current.connected).toBe(true))
     expect(result.current.user.siteId).toBe('site-a')
     expect(lastGetAuthUrl()()).toBe('http://site-a')
@@ -332,6 +335,91 @@ describe('NatsProvider connect wiring', () => {
       expect.any(Function),
       expect.any(Number),
     )
+  })
+
+  it('stops the status iterator when the connection closes', async () => {
+    // nc.close() only closes the protocol (nats.js:92-96); nc.status() pushes
+    // into nc.listeners (nats.js:415-422), which nothing stops on close. An
+    // un-stopped `for await` therefore stays pending forever and retains the
+    // dead connection, one leak per connect/disconnect cycle.
+    const stop = vi.fn()
+    let closeConn
+    const closed = new Promise((resolve) => { closeConn = resolve })
+    const iter = {
+      stop,
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+    }
+    natsConnect.mockReset().mockResolvedValue({
+      closed: () => closed,
+      status: () => iter,
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    await act(async () => { closeConn(undefined) })
+    await waitFor(() => expect(stop).toHaveBeenCalled())
+  })
+
+  it('reports an inbox permission violation as a session error', async () => {
+    natsConnect.mockReset().mockResolvedValue({
+      closed: () => new Promise(() => {}),
+      drain: vi.fn().mockResolvedValue(undefined),
+      status: async function* () {
+        yield { type: 'error', permissionContext: { operation: 'subscription', subject: 'chat.user.alice.abc.*' } }
+        await new Promise(() => {})
+      },
+    })
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    await waitFor(() => {
+      expect(result.current.error).toMatch(/permission denied/i)
+    })
+  })
+
+  it('tears the connection down on an inbox permission violation', async () => {
+    // nats.ws recreates the denied mux forever, so leaving the connection up
+    // means every client in a partial rollout keeps generating denied
+    // subscriptions and permission events. Stop producing requests instead.
+    const drain = vi.fn().mockResolvedValue(undefined)
+    natsConnect.mockReset().mockResolvedValue({
+      closed: () => new Promise(() => {}),
+      drain,
+      status: async function* () {
+        yield { type: 'error', permissionContext: { operation: 'subscription', subject: 'chat.user.alice.abc.*' } }
+        await new Promise(() => {})
+      },
+    })
+
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    await waitFor(() => expect(drain).toHaveBeenCalled())
+    await waitFor(() => expect(result.current.connected).toBe(false))
+  })
+
+  it('ignores a permission violation for a subject outside the inbox', async () => {
+    natsConnect.mockReset().mockResolvedValue({
+      closed: () => new Promise(() => {}),
+      status: async function* () {
+        yield { type: 'error', permissionContext: { operation: 'publication', subject: 'chat.user.bob.request.x' } }
+        await new Promise(() => {})
+      },
+    })
+    const { result } = renderHook(() => useNats(), { wrapper })
+    await act(async () => {
+      await result.current.connect({ mode: 'sso', ssoToken: 'tok', account: 'alice' })
+    })
+
+    await waitFor(() => expect(result.current.connected).toBe(true))
+    expect(result.current.error).toBeNull()
   })
 })
 

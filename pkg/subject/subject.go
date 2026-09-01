@@ -309,16 +309,36 @@ func InboxExternalAll(siteID string) string {
 	return fmt.Sprintf("chat.inbox.%s.external.>", siteID)
 }
 
-// InboxMemberEventSubjects returns the subject filters a consumer should use to
-// receive member_added/member_removed events on both the internal (same-site)
-// and external (cross-site) lanes for the given site. Use with
+// RoomActivity is the CORE-NATS subject carrying a remote room's activity
+// position to a destination site: `chat.roomactivity.{destSiteID}`.
+//
+// Deliberately outside `chat.inbox.>` so it is never captured by the INBOX
+// JetStream stream. The payload is a decorative ordering hint — coalesced,
+// idempotent, and applied under a $max guard — so it needs neither persistence
+// nor ordering, and putting it on INBOX would make a high-rate signal compete
+// for retention and ack budget with membership events that do need both.
+// Interest-routed across the supercluster: a site with no subscriber simply
+// does not receive it.
+func RoomActivity(destSiteID string) string {
+	return fmt.Sprintf("chat.roomactivity.%s", destSiteID)
+}
+
+// InboxMemberEventSubjects returns the subject filters a search-sync consumer
+// should use to receive the room-index-affecting events on both the internal
+// (same-site) and external (cross-site) lanes for the given site:
+// member_added/member_removed (per-member docs) and room_renamed (re-index the
+// room name across every member's doc). Use with
 // jetstream.ConsumerConfig.FilterSubjects (NATS 2.10+).
 func InboxMemberEventSubjects(siteID string) []string {
 	return []string{
 		InboxInternal(siteID, "member_added"),
 		InboxInternal(siteID, "member_removed"),
+		InboxInternal(siteID, "member_joinedat_refreshed"),
+		InboxInternal(siteID, "room_renamed"),
 		InboxExternal(siteID, "member_added"),
 		InboxExternal(siteID, "member_removed"),
+		InboxExternal(siteID, "member_joinedat_refreshed"),
+		InboxExternal(siteID, "room_renamed"),
 	}
 }
 
@@ -436,6 +456,23 @@ func RoomEventTargets(roomID string, crossSite *bool, crossSiteAt *time.Time, mo
 	out := make([]string, len(globals))
 	for i, g := range globals {
 		out[i] = RoomEvent(roomID, g)
+	}
+	return out
+}
+
+// RoomThreadEvent returns the subject a client subscribes to while a thread
+// panel is open. Same namespaces as RoomEvent.
+func RoomThreadEvent(roomID, parentMessageID string, global bool) string {
+	return roomBase(roomID, global) + ".thread." + parentMessageID + ".event"
+}
+
+// RoomThreadEventTargets returns the thread-scoped subject(s) to publish to.
+// Shares roomRouteGlobals with RoomEventTargets, so locality routing matches.
+func RoomThreadEventTargets(roomID, parentMessageID string, crossSite *bool, crossSiteAt *time.Time, mode RoomRouteMode, now time.Time) []string {
+	globals := roomRouteGlobals(crossSite, crossSiteAt, mode, now)
+	out := make([]string, len(globals))
+	for i, g := range globals {
+		out[i] = RoomThreadEvent(roomID, parentMessageID, g)
 	}
 	return out
 }
@@ -1738,7 +1775,10 @@ func OrgSyncUsersUpsert(centralSiteID string) string {
 	return fmt.Sprintf("chat.hr.%s.users.upsert", centralSiteID)
 }
 
-// EmployeesQuit is the per-site subject for departed-employee batches.
+// EmployeesQuit is the departed-employee-batch subject on a site's HR feed.
+// Publishers use the CENTRAL site id (like employees/users upsert) — the batch's
+// own site rides the payload's SiteID; a per-site subject has no owning stream
+// unless that site is provisioned.
 func EmployeesQuit(siteID string) string {
 	return fmt.Sprintf("chat.hr.%s.employees.quit", siteID)
 }

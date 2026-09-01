@@ -3,13 +3,19 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -22,7 +28,6 @@ func TestEnrichCrossSite_ContextCancelled_SkipsRPC(t *testing.T) {
 		{Subscription: model.Subscription{ID: "b", RoomID: "r2", SiteID: "site-b"}},
 	}
 	idxBySite := map[string][]int{"site-b": {0}}
-	roomIDsBySite := map[string][]string{"site-b": {"r2"}}
 
 	c := ctx("alice", "site-a")
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -31,7 +36,7 @@ func TestEnrichCrossSite_ContextCancelled_SkipsRPC(t *testing.T) {
 
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 
-	svc.enrichCrossSite(c, subs, idxBySite, roomIDsBySite)
+	svc.enrichCrossSite(c, "alice", subs, idxBySite)
 
 	assert.Nil(t, subs[0].Room, "cancelled fan-out leaves the sub without a room object")
 }
@@ -45,6 +50,7 @@ func key32(b byte) []byte {
 	return k
 }
 
+// Local and remote rows take different paths to the same shape.
 func TestEnrichWithRoomInfo_LocalAndCrossSite(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
 	seen := time.UnixMilli(100).UTC()
@@ -62,7 +68,7 @@ func TestEnrichWithRoomInfo_LocalAndCrossSite(t *testing.T) {
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Ops", UserCount: 3, LastMsgAt: &newer, LastMsgID: "m-3"}}, nil)
 
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 	assert.Equal(t, "eng-sub", subs[0].Name, "subscription name must survive enrichment")
 	assert.True(t, subs[0].Alert, "stored alert preserved")
@@ -95,7 +101,7 @@ func TestEnrichWithRoomInfo_LocalKeyMaterial(t *testing.T) {
 	}
 	// No GetRoomsInfo expectation: an all-local input must never hit the RPC.
 
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 	require.NotNil(t, subs[0].Room)
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -116,7 +122,7 @@ func TestEnrichWithRoomInfo_LocalNoKey(t *testing.T) {
 			RoomName: "Eng", UserCount: 5, LastMsgID: "m-base"},
 	}
 
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 	require.NotNil(t, subs[0].Room, "local room must still be built from the baseline")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -136,7 +142,7 @@ func TestEnrichWithRoomInfo_LocalInvalidKeyLength(t *testing.T) {
 			RoomName: "Eng", UserCount: 5, RoomKeyPriv: []byte("short"), RoomKeyVer: 2},
 	}
 
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 	require.NotNil(t, subs[0].Room, "invalid-length key still yields a baseline room object")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -164,7 +170,7 @@ func TestEnrichWithRoomInfo_AllRoomTypesKeyed(t *testing.T) {
 					RoomName: "room", RoomKeyPriv: key32(0xAB), RoomKeyVer: 4},
 			}
 
-			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 			require.NotNil(t, subs[0].Room)
 			require.NotNil(t, subs[0].Room.PrivateKey, "every room type returns its key")
@@ -183,7 +189,7 @@ func TestEnrichWithRoomInfo_CrossSiteRPCZeroFields(t *testing.T) {
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "a", RoomID: "r2", SiteID: "site-b"}, UserCount: 5, LastMsgID: "m-base"}}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Ops"}}, nil)
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 	require.NotNil(t, subs[0].Room)
 	assert.Equal(t, "Ops", subs[0].Room.Name)
 	assert.Equal(t, 5, subs[0].UserCount, "internal baseline untouched")
@@ -198,38 +204,39 @@ func TestEnrichWithRoomInfo_CrossSiteNotFoundNoRoom(t *testing.T) {
 	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "a", RoomID: "r2", SiteID: "site-b"}, UserCount: 5, LastMsgID: "m-base"}}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
 		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 	assert.Len(t, subs, 1)
 	assert.False(t, subs[0].Alert)
 	assert.Nil(t, subs[0].Room, "not-found cross-site room ⇒ no room object (no local baseline)")
 }
 
-// TestEnrichWithRoomInfo_LocalDeletedRoomNoRoom pins that a LOCAL sub whose room is
-// soft-deleted (baseline name "Del-...") is kept but gets NO room object.
-func TestEnrichWithRoomInfo_LocalDeletedRoomNoRoom(t *testing.T) {
+// TestEnrichWithRoomInfo_NoNameBasedRoomSuppression pins that enrichment applies no
+// name-based special case: a room name is just a name. "Del-" carries no meaning now
+// that the deployment guarantees no soft-delete rename reaches the database.
+func TestEnrichWithRoomInfo_NoNameBasedRoomSuppression(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	subs := []model.EnrichedSubscription{
 		{Subscription: model.Subscription{ID: "a", RoomID: "r1", SiteID: "site-a", Name: "team"},
 			RoomName: "Del-Team", UserCount: 5, RoomKeyPriv: key32(0xAB), RoomKeyVer: 1},
 	}
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
-	assert.Nil(t, subs[0].Room, "soft-deleted local room ⇒ no room object")
-	assert.Equal(t, "team", subs[0].Name, "the subscription itself is kept")
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
+	require.NotNil(t, subs[0].Room, "no name prefix suppresses the room object any more")
+	assert.Equal(t, "Del-Team", subs[0].Room.Name)
+	assert.Equal(t, 5, subs[0].Room.UserCount)
+	assert.Equal(t, "team", subs[0].Name, "the subscription's own name is untouched")
 }
 
-// TestEnrichWithRoomInfo_CrossSiteDeletedRoomDroppedFromList pins that with
-// dropDeleted=true (the list/count paths) a cross-site sub whose room-service entry
-// is soft-deleted (name "Del-...") is DROPPED from the returned slice — matching the
-// in-query exclusion of locally-deleted rooms — while a healthy sibling on the same
-// site and a local sub survive (order preserved).
-func TestEnrichWithRoomInfo_CrossSiteDeletedRoomDroppedFromList(t *testing.T) {
+// TestEnrichWithRoomInfo_NeverDropsARow pins that enrichment is now purely additive:
+// every input row comes back, in order, whatever room-service reports. Nothing about
+// a room's name removes a subscription from a list any more.
+func TestEnrichWithRoomInfo_NeverDropsARow(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
 	subs := []model.EnrichedSubscription{
-		// LOCAL healthy sub — survives (no RPC).
+		// LOCAL sub — served from the baseline, no RPC.
 		{Subscription: model.Subscription{ID: "loc", RoomID: "r1", SiteID: "site-a"}, RoomName: "Eng"},
-		// CROSS-SITE soft-deleted — dropped.
+		// CROSS-SITE with a Del--looking name — kept, and enriched like any other.
 		{Subscription: model.Subscription{ID: "del", RoomID: "r2", SiteID: "site-b"}},
-		// CROSS-SITE healthy on the same site — survives.
+		// CROSS-SITE healthy on the same site.
 		{Subscription: model.Subscription{ID: "ok", RoomID: "r3", SiteID: "site-b"}},
 	}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2", "r3"}).
@@ -238,30 +245,29 @@ func TestEnrichWithRoomInfo_CrossSiteDeletedRoomDroppedFromList(t *testing.T) {
 			{RoomID: "r3", Found: true, Name: "Ops"},
 		}, nil)
 
-	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
-	require.Len(t, got, 2, "the cross-site Del- sub is dropped from a list")
-	assert.Equal(t, "loc", got[0].ID, "local sub survives, order preserved")
-	assert.Equal(t, "ok", got[1].ID, "healthy cross-site sub survives, order preserved")
-	require.NotNil(t, got[1].Room, "healthy cross-site sub keeps its room")
-	assert.Equal(t, "Ops", got[1].Room.Name)
+	require.Len(t, subs, 3, "enrichment drops nothing")
+	assert.Equal(t, []string{"loc", "del", "ok"}, []string{subs[0].ID, subs[1].ID, subs[2].ID},
+		"order preserved")
+	require.NotNil(t, subs[1].Room)
+	assert.Equal(t, "Del-Ops", subs[1].Room.Name, "the name is passed through verbatim")
+	require.NotNil(t, subs[2].Room)
+	assert.Equal(t, "Ops", subs[2].Room.Name)
 }
 
-// TestEnrichWithRoomInfo_CrossSiteDeletedRoomKeptRoomlessInLookup pins that with
-// dropDeleted=false (the single-item getDM/getByRoomID paths) a cross-site sub whose
-// room is soft-deleted is KEPT with NO room object — exactly how a LOCAL Del- sub is
-// kept room-nulled in those lookups (never dropped).
-func TestEnrichWithRoomInfo_CrossSiteDeletedRoomKeptRoomlessInLookup(t *testing.T) {
+// A not-found cross-site room is still kept WITHOUT a room object — that path is
+// about the room being absent, not about its name, and is unaffected.
+func TestEnrichWithRoomInfo_NotFoundCrossSiteKeptRoomless(t *testing.T) {
 	svc, _, _, _, rooms, _, _ := newSvc(t)
-	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "del", RoomID: "r2", SiteID: "site-b"}}}
+	subs := []model.EnrichedSubscription{{Subscription: model.Subscription{ID: "gone", RoomID: "r2", SiteID: "site-b"}}}
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", []string{"r2"}).
-		Return([]model.RoomInfo{{RoomID: "r2", Found: true, Name: "Del-Ops"}}, nil)
+		Return([]model.RoomInfo{{RoomID: "r2", Found: false}}, nil)
 
-	got := svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, false, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
-	require.Len(t, got, 1, "single-item lookup keeps the Del- sub")
-	assert.Equal(t, "del", got[0].ID)
-	assert.Nil(t, got[0].Room, "soft-deleted cross-site room ⇒ no room object")
+	require.Len(t, subs, 1)
+	assert.Nil(t, subs[0].Room, "not-found ⇒ no room object, but the sub is kept")
 }
 
 // TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers pins per-site
@@ -280,7 +286,7 @@ func TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers(t *testing.T
 	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-c", []string{"r3"}).
 		Return([]model.RoomInfo{{RoomID: "r3", Found: true, Name: "Ops", LastMsgAt: &newer}}, nil)
 
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 
 	require.NotNil(t, subs[0].Room, "local sub built from baseline")
 	assert.Equal(t, "Eng", subs[0].Room.Name)
@@ -290,11 +296,12 @@ func TestEnrichWithRoomInfo_CrossSiteRPCFailDegradesSiteKeepsOthers(t *testing.T
 	assert.Equal(t, "Ops", subs[2].Room.Name) // site-c still enriched
 }
 
+// No rows means no RPC, not an empty one.
 func TestEnrichWithRoomInfo_Empty(t *testing.T) {
 	svc, _, _, _, _, _, _ := newSvc(t)
 	// No GetRoomsInfo / GetMany expectations: empty input must short-circuit before any call.
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), nil, true, false)
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), []model.EnrichedSubscription{}, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", nil, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", []model.EnrichedSubscription{}, false)
 }
 
 // TestEnrichWithRoomInfo_LocalNeverRecomputesFlags pins that local enrichment
@@ -309,7 +316,7 @@ func TestEnrichWithRoomInfo_LocalNeverRecomputesFlags(t *testing.T) {
 		{Subscription: model.Subscription{ID: "a", RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen, Alert: false, HasMention: false},
 			RoomName: "Eng", LastMsgAt: &newer, LastMentionAllAt: &mentionAt},
 	}
-	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+	svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 	assert.False(t, subs[0].Alert, "room lastMsgAt newer than lastSeen must NOT flip stored alert")
 	assert.False(t, subs[0].HasMention, "room lastMentionAllAt newer than lastSeen must NOT flip stored hasMention")
 }
@@ -359,14 +366,14 @@ func TestEnrichWithRoomInfo_ComputesHasUnread_Local(t *testing.T) {
 			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a"}, RoomName: "Eng", LastMsgAt: &newer}, true},
 		{"room has no msg is read",
 			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Eng"}, false},
-		{"soft-deleted room (no room object) is read",
-			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Del-Eng", LastMsgAt: &newer}, false},
+		{"a Del- prefixed name is just a name — unread is decided by the timestamps",
+			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Del-Eng", LastMsgAt: &newer}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _, _, _, _, _ := newSvc(t)
 			subs := []model.EnrichedSubscription{tc.sub}
-			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 			assert.Equal(t, tc.want, subs[0].HasUnread)
 		})
 	}
@@ -417,14 +424,14 @@ func TestEnrichWithRoomInfo_ComputesHasGroupMention_Local(t *testing.T) {
 			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a"}, RoomName: "Eng", LastMentionAllAt: &newer}, true},
 		{"no @all mention is read",
 			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Eng"}, false},
-		{"soft-deleted room (no room object) is read",
-			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Del-Eng", LastMentionAllAt: &newer}, false},
+		{"a Del- prefixed name is just a name — the mention is decided by the timestamps",
+			model.EnrichedSubscription{Subscription: model.Subscription{RoomID: "r1", SiteID: "site-a", LastSeenAt: &seen}, RoomName: "Del-Eng", LastMentionAllAt: &newer}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _, _, _, _, _ := newSvc(t)
 			subs := []model.EnrichedSubscription{tc.sub}
-			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), subs, true, false)
+			svc.enrichWithRoomInfoAndLastMsg(ctx("alice", "site-a"), "alice", subs, false)
 			assert.Equal(t, tc.want, subs[0].HasGroupMention)
 		})
 	}
@@ -476,12 +483,364 @@ func TestEnrichWithRoomInfo_BotRequester_KeepsKeyMaterial(t *testing.T) {
 
 	for _, requester := range []string{"p_hook", "weather.bot", "alice"} {
 		t.Run(requester+" keeps the key", func(t *testing.T) {
-			got := svc.enrichWithRoomInfoAndLastMsg(ctx(requester, "site-a"), mkSubs(), false, false)
+			got := mkSubs()
+			svc.enrichWithRoomInfoAndLastMsg(ctx(requester, "site-a"), requester, got, false)
 			require.Len(t, got, 1)
 			require.NotNil(t, got[0].Room)
 			require.NotNil(t, got[0].Room.PrivateKey, "key material is no longer stripped for bots")
 			assert.NotEmpty(t, *got[0].Room.PrivateKey)
 			require.NotNil(t, got[0].Room.KeyVersion)
 		})
+	}
+}
+
+// enrichFixture builds n local subscriptions on one site, each with a room whose
+// LastMsgAt makes it hint-eligible.
+func enrichFixture(n int, site string) ([]model.EnrichedSubscription, map[string][]int) {
+	last := time.Now().UTC()
+	subs := make([]model.EnrichedSubscription, n)
+	idx := make([]int, n)
+	for i := range subs {
+		id := fmt.Sprintf("r%d", i)
+		subs[i] = model.EnrichedSubscription{
+			Subscription: model.Subscription{ID: fmt.Sprintf("s%d", i), RoomID: id, SiteID: site},
+		}
+		subs[i].Room = &model.SubscriptionRoom{SiteID: site, LastMsgAt: &last}
+		idx[i] = i
+	}
+	return subs, map[string][]int{site: idx}
+}
+
+// history-service hard-rejects rooms.get above 100 ids AND above 100 hints, so an
+// unchunked 250-room page would come back with no previews at all.
+func TestEnrichLastMessage_ChunksBeyondBatchCap(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(250, "site-a")
+
+	var mu sync.Mutex
+	var batchSizes []int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, hints map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			assert.LessOrEqual(t, len(ids), 100, "history-service rejects batches over 100 ids")
+			assert.LessOrEqual(t, len(hints), 100, "history-service rejects over 100 hints too")
+			assert.Len(t, hints, len(ids), "each chunk carries hints for exactly its own rooms")
+			mu.Lock()
+			batchSizes = append(batchSizes, len(ids))
+			mu.Unlock()
+
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	sort.Ints(batchSizes)
+	assert.Equal(t, []int{50, 100, 100}, batchSizes)
+	for i := range subs {
+		require.NotNil(t, subs[i].Room, "row %d lost its room", i)
+		assert.NotNil(t, subs[i].Room.PreviewMessage, "row %d lost its preview", i)
+	}
+}
+
+// Chunking exists to make degradation finer than per-site.
+func TestEnrichLastMessage_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(250, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			if len(ids) == 50 {
+				return nil, errors.New("chunk boom")
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	var withPreview int
+	for i := range subs {
+		if subs[i].Room.PreviewMessage != nil {
+			withPreview++
+		}
+	}
+	assert.Equal(t, 200, withPreview, "a failed chunk must cost only its own 50 rooms, not the whole site")
+}
+
+// The cross-site fan-out has the same 100-id cap as the local one.
+func TestEnrichCrossSite_ChunksBeyondBatchCap(t *testing.T) {
+	svc, _, _, _, rooms, _, _ := newSvc(t)
+	subs, idxBySite := enrichFixture(250, "site-b")
+	for i := range subs {
+		subs[i].Room = nil // cross-site rows have no local room doc
+	}
+
+	var mu sync.Mutex
+	var batchSizes []int
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string) ([]model.RoomInfo, error) {
+			assert.LessOrEqual(t, len(ids), 100)
+			mu.Lock()
+			batchSizes = append(batchSizes, len(ids))
+			mu.Unlock()
+
+			out := make([]model.RoomInfo, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, model.RoomInfo{RoomID: id, Found: true, Name: "room-" + id})
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite)
+
+	sort.Ints(batchSizes)
+	assert.Equal(t, []int{50, 100, 100}, batchSizes)
+	for i := range subs {
+		assert.NotNil(t, subs[i].Room, "row %d must be enriched from its chunk", i)
+	}
+}
+
+// Same per-chunk degradation guarantee on the cross-site path.
+func TestEnrichCrossSite_OneFailedChunkDegradesOnlyItsRooms(t *testing.T) {
+	svc, _, _, _, rooms, _, _ := newSvc(t)
+	subs, idxBySite := enrichFixture(250, "site-b")
+	for i := range subs {
+		subs[i].Room = nil
+	}
+
+	rooms.EXPECT().GetRoomsInfo(gomock.Any(), "site-b", gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string) ([]model.RoomInfo, error) {
+			if len(ids) == 50 {
+				return nil, errors.New("chunk boom")
+			}
+			out := make([]model.RoomInfo, 0, len(ids))
+			for _, id := range ids {
+				out = append(out, model.RoomInfo{RoomID: id, Found: true, Name: "room-" + id})
+			}
+			return out, nil
+		}).Times(3)
+
+	svc.enrichCrossSite(context.Background(), "alice", subs, idxBySite)
+
+	var enriched int
+	for i := range subs {
+		if subs[i].Room != nil {
+			enriched++
+		}
+	}
+	assert.Equal(t, 200, enriched, "a failed chunk must not blank the whole site")
+}
+
+// A room count cannot bound reply bytes: previews carry untruncated message
+// bodies, so a full chunk can overflow the transport. It must be split, not lost.
+func TestEnrichLastMessage_SplitsOnResponseTooLarge(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	var mu sync.Mutex
+	var attempted []int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			mu.Lock()
+			attempted = append(attempted, len(ids))
+			mu.Unlock()
+			// The full batch is refused; halves fit.
+			if len(ids) > 50 {
+				return nil, errcode.Internal("reply exceeds max_payload",
+					errcode.WithReason(errcode.ResponseTooLarge))
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	sort.Ints(attempted)
+	assert.Equal(t, []int{50, 50, 100}, attempted, "the refused batch must be halved and retried")
+	for i := range subs {
+		assert.NotNil(t, subs[i].Room.PreviewMessage, "row %d must survive the split", i)
+	}
+}
+
+// Splitting applies only to the payload refusal; other failures must not be
+// retried, or a shedding downstream would see the request multiply.
+func TestEnrichLastMessage_DoesNotSplitOtherErrors(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		Return(nil, errcode.Unavailable("shed")).Times(1)
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades without a retry", i)
+	}
+}
+
+// A half that still overflows degrades alone rather than taking the page with it.
+func TestEnrichLastMessage_KeepsTheHalfThatFits(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			// Only the first half ever fits; the second keeps refusing to one room.
+			if len(ids) > 50 || ids[0] != "r0" {
+				return nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))
+			}
+			out := make(map[string]model.PreviewMessage, len(ids))
+			for _, id := range ids {
+				out[id] = model.PreviewMessage{MessageID: id + "-msg"}
+			}
+			return out, nil
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	var withPreview int
+	for i := range subs {
+		if subs[i].Room.PreviewMessage != nil {
+			withPreview++
+		}
+	}
+	assert.Equal(t, 50, withPreview, "the half that fits must survive")
+}
+
+// The fan-out semaphores send before spawning their receiver, so a capacity of
+// zero is an unbuffered channel that blocks forever. A directly-constructed
+// UserService must not be able to hang the enrichment.
+func TestFanout_NormalisesNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		assert.Equal(t, defaultSiteFanout, (&UserService{maxFanout: n}).fanout())
+	}
+	assert.Equal(t, 3, (&UserService{maxFanout: 3}).fanout())
+}
+
+// A zero fan-out would build an unbuffered semaphore and park forever, which
+// fixtures constructing UserService directly can otherwise hit.
+func TestEnrichLastMessage_UnsetFanoutDoesNotDeadlock(t *testing.T) {
+	_, _, _, history := newSvcRawHistory(t)
+	// maxFanout deliberately left at zero, as the badge/thread fixtures build it.
+	svc := &UserService{siteID: "site-a", history: history, roomBatchChunk: 100}
+	subs, idxBySite := enrichFixture(10, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(map[string]model.PreviewMessage{}, nil).AnyTimes()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enrichment deadlocked on an unbuffered semaphore")
+	}
+}
+
+// The gatekeeper caps a body at 20 KB but not a page at 400 of them, so
+// truncation is what keeps a max-size page off the pod's memory. Runes, not
+// bytes: a byte cut would split a multi-byte character.
+func TestEnrichLastMessage_TruncatesPreviewContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		chars   int
+		content string
+		want    string
+	}{
+		{name: "long ascii body", chars: 50, content: strings.Repeat("x", 20*1024), want: strings.Repeat("x", 50)},
+		{name: "short body untouched", chars: 50, content: "hi", want: "hi"},
+		{name: "exactly at the limit", chars: 4, content: "abcd", want: "abcd"},
+		{name: "multi-byte runes are not split", chars: 3, content: "你好世界", want: "你好世"},
+		{name: "zero disables truncation", chars: 0, content: strings.Repeat("x", 4096), want: strings.Repeat("x", 4096)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, _, history := newSvcRawHistory(t)
+			svc.previewChars = tt.chars
+			subs, idxBySite := enrichFixture(1, "site-a")
+
+			history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, _ string, ids []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+					out := make(map[string]model.PreviewMessage, len(ids))
+					for _, id := range ids {
+						out[id] = model.PreviewMessage{MessageID: id + "-msg", Content: tt.content}
+					}
+					return out, nil
+				})
+
+			svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+			require.NotNil(t, subs[0].Room.PreviewMessage)
+			assert.Equal(t, tt.want, subs[0].Room.PreviewMessage.Content)
+		})
+	}
+}
+
+// A truncated preview must not alias its original: a slice keeps the whole
+// backing array alive, so aliasing would pin the 20 KB body the truncation
+// exists to release.
+func TestTruncatePreviews_DetachesFromTheOriginalBody(t *testing.T) {
+	body := strings.Repeat("x", 20*1024)
+	m := map[string]model.PreviewMessage{"r1": {Content: body}}
+
+	(&UserService{previewChars: 50}).truncatePreviews(m)
+
+	got := m["r1"].Content
+	require.Len(t, got, 50)
+	// #nosec G103 -- test-only pointer identity check; asserts the preview does not alias the body
+	// nosemgrep: go.lang.security.audit.unsafe.use-of-unsafe-block
+	assert.NotSame(t, unsafe.StringData(body), unsafe.StringData(got),
+		"the preview must own its bytes, or the original body is never freed")
+}
+
+// On a payload-capped transport the page's own reply shares the ceiling history
+// just hit, so splitting spends RPCs on data that can never be delivered.
+func TestEnrichLastMessage_NoSplitOnPayloadCappedTransport(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		Return(nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))).Times(1)
+
+	svc.enrichLastMessage(payloadCapped(context.Background()), "alice", subs, idxBySite)
+
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades without a split", i)
+	}
+}
+
+// Unbounded halving is exponential in RPCs; past the depth cap the chunk degrades.
+func TestEnrichLastMessage_BoundsSplitDepth(t *testing.T) {
+	svc, _, _, history := newSvcRawHistory(t)
+	subs, idxBySite := enrichFixture(100, "site-a")
+
+	var mu sync.Mutex
+	var calls int
+	history.EXPECT().RoomsGet(gomock.Any(), "site-a", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, _ []string, _ map[string]model.RoomTimeHint) (map[string]model.PreviewMessage, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			// Never satisfiable, so only the cap can stop the recursion.
+			return nil, errcode.Internal("too large", errcode.WithReason(errcode.ResponseTooLarge))
+		}).AnyTimes()
+
+	svc.enrichLastMessage(context.Background(), "alice", subs, idxBySite)
+
+	assert.LessOrEqual(t, calls, 31, "a chunk must not exceed 2^(maxSplitDepth+1)-1 RPCs")
+	for i := range subs {
+		assert.Nil(t, subs[i].Room.PreviewMessage, "row %d degrades once the cap is hit", i)
 	}
 }

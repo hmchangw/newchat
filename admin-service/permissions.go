@@ -136,7 +136,8 @@ func displayUntilDate(t time.Time) string {
 // a permission for one or more subject accounts, all-or-nothing, with one
 // audit entry per created row. Validation order matches spec §4.4 exactly.
 func (h *Handler) createPermissions(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 
 	var req permissionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -285,9 +286,7 @@ func (h *Handler) createPermissions(c *gin.Context) {
 		slog.ErrorContext(ctx, "append permission audit entries failed", "action", action, "error", err)
 	}
 
-	fanoutCtx, cancelFanout := fanoutContext(ctx)
-	defer cancelFanout()
-	syncFailures := h.publishPermissionFanout(fanoutCtx, key, subjects, state)
+	syncFailures := h.publishPermissionFanout(ctx, key, []fanoutBatch{{accounts: subjects, state: state}})
 
 	c.JSON(http.StatusCreated, createPermissionsResponse{
 		Created:           len(grants),
@@ -297,63 +296,77 @@ func (h *Handler) createPermissions(c *gin.Context) {
 }
 
 // fanoutChunkSize bounds one UserPermissionsUpdated event's Accounts so a worst-case
-// event stays ~320KB — 3× margin under NATS's default 1MB max_payload.
-const fanoutChunkSize = 5000
+// chunk's INBOX envelope stays under the 128KB max_payload our NATS brokers are
+// configured with (the NATS default is 1MB, but ours is tightened). The envelope
+// base64-encodes the inner event (InboxEvent.Payload is []byte), so the wire size is
+// ~4/3 of the event JSON: 1000 accounts of up to 64 chars with every state bound set
+// land around 90KB — pinned by TestFanoutChunk_FitsBrokerMaxPayload. An oversized chunk
+// fails client-side with ErrMaxPayload on the create AND on every resync of the same
+// batch shape, so this margin is what keeps the fanout self-healing via resync.
+const fanoutChunkSize = 1000
 
-// fanoutTimeout is the server-side budget for ONE request's whole cross-site fanout,
-// however many publishPermissionFanout calls that takes — resync makes one per state
-// group, and a per-call budget would multiply wall time by the group count until it
-// exceeded httpWriteTimeout and the admin lost the syncFailures reply.
-const fanoutTimeout = 5 * time.Second
-
-// fanoutContext derives the fanout budget from a request ctx. The request ctx has no
-// deadline and dies if the client disconnects — neither fits: the ledger write already
-// committed, so fanout runs to completion on its own budget. A destination that doesn't
-// land within it is reported in syncFailures like any other unacknowledged publish.
-func fanoutContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), fanoutTimeout)
+// fanoutBatch is one (accounts, state) unit of a cross-site fanout. The create path
+// sends a single batch; resync sends one per distinct stored state.
+type fanoutBatch struct {
+	accounts []string
+	state    model.PermissionState
 }
 
-// publishPermissionFanout publishes the batch to every remote site's INBOX, one event
-// per site per chunk of accounts. Failures are logged and aggregated per destination and
-// never abort the fanout — one dead peer must not block the others. Returns the
-// destinations whose publish was not acknowledged (nil when all landed). ctx must come
-// from fanoutContext — the caller owns the budget so repeated calls share one.
-func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.PermissionKey, accounts []string, state model.PermissionState) []string {
-	dests := remoteSites(h.cfg.AllSiteIDs, h.cfg.SiteID)
-	if h.publishInbox == nil || len(accounts) == 0 || len(dests) == 0 {
+// publishPermissionFanout publishes every batch to every remote site's INBOX, one event
+// per site per chunk of accounts. Each destination gets its own goroutine that walks ALL
+// batches' chunks, so a stalled peer consumes only its own lane and can never hand a
+// later batch an expired ctx meant for a healthy peer. Failures are logged and
+// aggregated per destination and never abort the fanout. Returns the destinations whose
+// publish was not acknowledged (nil when all landed).
+func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.PermissionKey, batches []fanoutBatch) []string {
+	dests := h.remoteDests
+	if h.publish == nil || len(dests) == 0 {
 		return nil
 	}
+	ctx, cancel := h.fanoutCtx(ctx)
+	defer cancel()
 
 	now := time.Now().UTC().UnixMilli()
 	// Marshal each chunk's payload once; only the envelope differs per destination.
 	var chunks [][]byte
-	for start := 0; start < len(accounts); start += fanoutChunkSize {
-		end := min(start+fanoutChunkSize, len(accounts))
-		payload, err := json.Marshal(model.UserPermissionsUpdated{
-			Permission: permission,
-			Accounts:   accounts[start:end],
-			State:      state,
-			Timestamp:  now,
-		})
-		if err != nil {
-			// Cannot serialize the event at all: every destination is out of sync.
-			slog.ErrorContext(ctx, "marshal user permissions event", "error", err)
-			return dests
+	for _, b := range batches {
+		for accounts := range slices.Chunk(b.accounts, fanoutChunkSize) {
+			payload, err := json.Marshal(model.UserPermissionsUpdated{
+				Permission: permission,
+				Accounts:   accounts,
+				State:      b.state,
+				Timestamp:  now,
+			})
+			if err != nil {
+				// Cannot serialize the event at all: every destination is out of sync.
+				slog.ErrorContext(ctx, "marshal user permissions event", "error", err)
+				return slices.Clone(dests)
+			}
+			chunks = append(chunks, payload)
 		}
-		chunks = append(chunks, payload)
+	}
+	if len(chunks) == 0 {
+		return nil
 	}
 
-	// One goroutine per destination. Destinations are independent and share ONE budget
-	// (fanoutContext), so publishing them serially lets a single unreachable peer burn
-	// the whole budget and hand every peer behind it an already-expired ctx — reporting
-	// healthy sites as sync failures. Results land in a position-indexed slice, so no
-	// lock is needed and the reported order stays the configured destination order.
+	// One goroutine per destination. Destinations are independent and share ONE budget,
+	// so publishing them serially lets a single unreachable peer burn the whole budget
+	// and hand every peer behind it an already-expired ctx — reporting healthy sites as
+	// sync failures. Results land in a position-indexed slice, so no lock is needed and
+	// the reported order stays the configured destination order.
 	failed := make([]bool, len(dests))
 	var g errgroup.Group
 	for i, dest := range dests {
 		g.Go(func() error {
-			for _, payload := range chunks {
+			subj := subject.InboxExternal(dest, model.InboxUserPermissionsUpdated)
+			for n, payload := range chunks {
+				if err := ctx.Err(); err != nil {
+					// The budget is gone: every remaining chunk would fail the same way, so
+					// report the lane once instead of once per chunk.
+					slog.ErrorContext(ctx, "fanout budget expired", "dest", dest, "chunks_skipped", len(chunks)-n, "error", err)
+					failed[i] = true
+					break
+				}
 				data, err := json.Marshal(model.InboxEvent{
 					Type:       model.InboxUserPermissionsUpdated,
 					SiteID:     h.cfg.SiteID,
@@ -366,7 +379,7 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 					failed[i] = true
 					continue
 				}
-				if err := h.publishInbox(ctx, subject.InboxExternal(dest, model.InboxUserPermissionsUpdated), data); err != nil {
+				if err := h.publish(ctx, subj, data, ""); err != nil {
 					// Not self-healing like status/settings: surface it, don't swallow it.
 					slog.ErrorContext(ctx, "publish permissions inbox event", "dest", dest, "error", err)
 					failed[i] = true
@@ -376,7 +389,29 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 		})
 	}
 	_ = g.Wait() // every goroutine returns nil; per-destination outcomes are in failed
+	return failedDests(dests, failed)
+}
 
+// fanoutCtx derives the replication budget every fanout runs on. The request ctx
+// dies if the client disconnects, which doesn't fit: by the time a fanout starts,
+// the caller's local work has already committed (or, for resync, there is none),
+// so re-delivery runs to completion on its own budget instead of dying with the
+// client. That budget is cfg.FanoutTimeout capped by the request's absolute
+// deadline (withRequestBudget): the local work already spent part of net/http's
+// write window, and a fresh full FanoutTimeout on top could outlive it — the
+// connection would close before the caller reads syncFailures. A destination that
+// doesn't land in time is reported like any other unacknowledged publish.
+func (h *Handler) fanoutCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(h.cfg.FanoutTimeout)
+	if reqDeadline, ok := ctx.Deadline(); ok && reqDeadline.Before(deadline) {
+		deadline = reqDeadline
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
+}
+
+// failedDests collects the destinations whose position-indexed lane reported
+// failure, preserving the configured destination order.
+func failedDests(dests []string, failed []bool) []string {
 	var failures []string
 	for i, dest := range dests {
 		if failed[i] {
@@ -386,10 +421,20 @@ func (h *Handler) publishPermissionFanout(ctx context.Context, permission model.
 	return failures
 }
 
-// remoteSites filters allSiteIDs down to real remote destinations.
+// withRequestBudget pins one absolute deadline for the whole request, measured from
+// handler entry: net/http's WriteTimeout runs from the request, so the fanout can
+// only spend what the local work left over — see publishPermissionFanout.
+func withRequestBudget(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), requestBudget)
+}
+
+// remoteSites filters allSiteIDs down to real remote destinations: no self, no blanks,
+// no repeats — a peer listed twice in ALL_SITE_IDS would otherwise get a second lane,
+// a duplicate publish, and a duplicate syncFailures entry.
 func remoteSites(allSiteIDs []string, self string) []string {
 	var out []string
-	for _, dest := range allSiteIDs {
+	deduped, _ := dedupPreserveOrder(allSiteIDs)
+	for _, dest := range deduped {
 		if dest != "" && dest != self {
 			out = append(out, dest)
 		}
@@ -411,7 +456,8 @@ type resyncPermissionsResponse struct {
 // and is idempotent (delivered states keep their stored watermarks, so remote guards
 // no-op anything already applied).
 func (h *Handler) resyncPermissions(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx, cancel := withRequestBudget(c)
+	defer cancel()
 	var req resyncPermissionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errhttp.Write(ctx, c, errcode.BadRequest("invalid request body", errcode.WithReason(errcode.AuthMissingFields)))
@@ -448,23 +494,18 @@ func (h *Handler) resyncPermissions(c *gin.Context) {
 		groups[string(k)] = append(groups[string(k)], account)
 		states[string(k)] = *st
 	}
-	// ONE budget for the whole resync, not one per group: groups are keyed on
+	// ONE fanout call — hence ONE budget — for the whole resync: groups are keyed on
 	// UpdatedAt, so accounts granted across N admin submits yield N groups, and a
 	// per-group budget would stretch an unreachable peer's wall time to N × the
 	// budget — past httpWriteTimeout, which drops the connection before the admin
-	// can be told which peers to retry.
-	fanoutCtx, cancel := fanoutContext(ctx)
-	defer cancel()
-	seen := make(map[string]struct{})
-	var failures []string
+	// can be told which peers to retry. Handing every group to a single call keeps
+	// the budget shared while each destination walks all groups in its own lane, so
+	// a stalled peer cannot starve healthy peers of the later groups.
+	batches := make([]fanoutBatch, 0, len(groups))
 	for k, groupAccounts := range groups {
-		for _, dest := range h.publishPermissionFanout(fanoutCtx, key, groupAccounts, states[k]) {
-			if _, dup := seen[dest]; !dup {
-				seen[dest] = struct{}{}
-				failures = append(failures, dest)
-			}
-		}
+		batches = append(batches, fanoutBatch{accounts: groupAccounts, state: states[k]})
 	}
+	failures := h.publishPermissionFanout(ctx, key, batches)
 	c.JSON(http.StatusOK, resyncPermissionsResponse{SyncFailures: failures})
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -25,6 +26,11 @@ import (
 
 // defaultRecipientBatchSize mirrors PUSH_RECIPIENT_BATCH_SIZE's envDefault so unit tests don't re-declare it.
 const defaultRecipientBatchSize = 100
+
+// maxMentionLookups caps how many distinct @accounts one message may resolve.
+// Not an env knob: it bounds a user-controlled fan-out rather than tuning a
+// workload, and no legible push body renders this many names.
+const maxMentionLookups = 50
 
 // MemberCache reads the cached member list and supports targeted invalidation.
 type MemberCache interface {
@@ -46,8 +52,9 @@ type HandlerDeps struct {
 	Settings           UserSettingsSnapshotter // nil → noopUserSettings (pre-enforcement behaviour)
 	Hook               Vetoer
 	Emitter            Emitter
-	RoomMeta           RoomMetaGetter // nil → title falls back to sender.Account
-	BadgeClient        badgeClient    // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
+	RoomMeta           RoomMetaGetter      // nil → title falls back to sender.Account
+	MentionNames       MentionNameResolver // nil → only @all/@here are substituted in the body
+	BadgeClient        badgeClient         // nil (env-disabled or not wired) → badge phase skipped entirely (Phase A compat)
 	LargeRoomThreshold int
 	RecipientBatchSize int                  // per-event cap (≥ 1); 0 → defaultRecipientBatchSize
 	Metrics            *notificationMetrics // nil → built on the global meter
@@ -66,6 +73,21 @@ type Handler struct {
 // safe-by-default as long as they join IsSystemMessageType (the single membership list).
 func isNotifiable(msgType string) bool {
 	return !model.IsSystemMessageType(msgType)
+}
+
+// attachmentFileInfo returns the push file info (title, MIME type) of the first
+// decodable attachment; both empty when the message carries none. Malformed blobs
+// are skipped, matching DecodeAttachments' lenient decode — the skipped count is
+// discarded because a push carrying no file info is the intended degraded result.
+// Decodes one blob at a time so reading the first entry never materializes the rest.
+func attachmentFileInfo(attachments [][]byte) (fileName, fileType string) {
+	for i := range attachments {
+		atts, _ := cassandra.DecodeAttachments(attachments[i : i+1])
+		if len(atts) != 0 {
+			return atts[0].Title, atts[0].FileType
+		}
+	}
+	return "", ""
 }
 
 func NewHandler(deps HandlerDeps) *Handler { //nolint:gocritic // hugeParam: one-time constructor arg
@@ -129,11 +151,12 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	// @here is deliberately NOT a push trigger — the legacy frontend doesn't render it.
 	mentionsAll := mentionInfo.MentionAll
 	isLargeRoom := len(members) > h.deps.LargeRoomThreshold
-	isThreadOnlyReply := msg.ThreadParentMessageID != "" && !msg.TShow
+	isThreadOnlyReply := msg.IsHiddenThreadReply()
 
 	var followers map[string]struct{}
 	// parentCreatedAt/parentSenderAccount feed the suppression gate; use gatekeeper-carried values
-	// when present, else fetch from history-service (parent pre-exists, so the fetch is race-free).
+	// when present, else fetch from history-service. That fetch can race the parent's own
+	// Cassandra write (same stream, no ordering), which parentResolveAttempts covers.
 	var parentCreatedAt *time.Time
 	var parentSenderAccount string
 	if isThreadOnlyReply {
@@ -151,6 +174,16 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 			// The reply sender can always read the parent they replied to; fetch on their behalf.
 			parent, perr := h.deps.Parent.FetchParent(ctx, msg.UserAccount, msg.RoomID, evt.SiteID, msg.ThreadParentMessageID)
 			if perr != nil {
+				// The parent's Cassandra row is written asynchronously off the same
+				// stream, so a not_found can be an ordering race — retry once to cover
+				// it. Past that the parent is genuinely absent, and on DefaultBackoff
+				// the remaining attempts would hold an ack-pending slot for 756s, which
+				// is what fills the budget at ~1.3 msg/s. Only an outage
+				// (unavailable/internal/infra) keeps the full budget.
+				if ee, terminal := errcode.Terminal(perr); terminal && parentResolveExhausted(ctx) {
+					natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+					return errcode.Permanent(ee)
+				}
 				return fmt.Errorf("fetch thread parent %s: %w", msg.ThreadParentMessageID, perr)
 			}
 			pc := parent.CreatedAt
@@ -256,17 +289,20 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 	}
 
 	now := time.Now().UTC()
+	fileName, fileType := attachmentFileInfo(msg.Attachments)
 	// Template carries fields shared across every batch — only ID and Accounts change per batch.
 	pushEvt := model.PushNotificationEvent{
 		RoomID: msg.RoomID,
 		Title:  h.resolveTitle(ctx, msg.RoomID, roomType, sender),
-		Body:   msg.Content,
+		Body:   h.resolveBody(ctx, msg.Content, mentionInfo),
 		Data: model.PushNotificationData{
 			RoomID:            msg.RoomID,
 			MessageID:         msg.ID,
 			Type:              shortRoomType(roomType),
 			Sender:            sender,
 			ThreadMessageID:   msg.ThreadParentMessageID,
+			FileName:          fileName,
+			FileType:          fileType,
 			PushTime:          now.Format(time.RFC3339),
 			AlsoSendToChannel: msg.TShow,
 		},
@@ -300,7 +336,18 @@ func (h *Handler) HandleMessage(ctx context.Context, data []byte) (retErr error)
 		}
 	}
 	if len(emitErrs) > 0 {
-		return fmt.Errorf("emit push batches for message %s: %w", msg.ID, errors.Join(emitErrs...))
+		joined := errors.Join(emitErrs...)
+		// Ack-drop only when EVERY batch is unretryable (e.g. all oversized).
+		// {messageID}-b{N} dedup makes re-emitting the succeeded batches harmless,
+		// so a single transient failure keeps the whole message retryable — and the
+		// aggregate deliberately does NOT %w-wrap, because one permanent batch in
+		// the chain would otherwise strip a sibling transient batch of its retries.
+		if allBatchErrsPermanent(emitErrs) {
+			natsmetrics.MarkTerminalFromContext(ctx, natsmetrics.TerminalPermanent)
+			return errcode.Permanent(errcode.Internal(
+				fmt.Sprintf("emit push batches for message %s: %s", msg.ID, joined.Error())))
+		}
+		return fmt.Errorf("emit push batches for message %s: %s", msg.ID, joined.Error())
 	}
 	outcome = notifySent
 	return nil
@@ -405,6 +452,39 @@ func shortRoomType(t model.RoomType) string {
 	}
 }
 
+// resolveBody renders the push body: @mentions become display names (@all/@here
+// become their literal words) so the lock screen shows a person, not an account.
+// Runs after the survivor filter, so a message nobody receives never pays for the
+// lookup. Fails open — a resolver error substitutes whatever names came back and
+// leaves the rest as raw @tokens rather than dropping the push.
+func (h *Handler) resolveBody(ctx context.Context, content string, parsed mention.ParseResult) string {
+	if len(parsed.Accounts) == 0 && !parsed.MentionAll {
+		return content
+	}
+	var names map[string]string
+	if h.deps.MentionNames != nil {
+		if lookup := mention.LookupAccountsFromParsed(parsed); len(lookup) > 0 {
+			// Message content is user-controlled, so cap the fan-out: the $in is
+			// unbounded otherwise, and userstore's batch path neither dedups
+			// concurrent misses nor negatively-caches them, so a message spamming
+			// unknown @tokens would re-query Mongo on every redelivery. Tokens past
+			// the cap keep their raw @token — a push body can't render 50 names anyway.
+			if len(lookup) > maxMentionLookups {
+				lookup = lookup[:maxMentionLookups]
+			}
+			resolved, err := h.deps.MentionNames.Resolve(ctx, lookup)
+			names = resolved
+			if err != nil {
+				// Not counted in notificationMetrics: the warn line is the signal.
+				slog.WarnContext(ctx, "mention name lookup failed, body keeps raw mentions",
+					"error", err, "mentions", len(lookup), "resolved", len(resolved),
+					"request_id", natsutil.RequestIDFromContext(ctx))
+			}
+		}
+	}
+	return mention.ReplaceAccounts(content, names)
+}
+
 // resolveTitle returns the room name when present, else the sender's account (legacy rule).
 // DM/botDM rooms skip the cache lookup (never have names); RoomMeta failures also fall back to sender.
 func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType model.RoomType, sender *model.Participant) string {
@@ -422,4 +502,31 @@ func (h *Handler) resolveTitle(ctx context.Context, roomID string, roomType mode
 		return sender.Account
 	}
 	return ""
+}
+
+// allBatchErrsPermanent reports whether every push-batch failure is unretryable,
+// which is the only case where dropping the message loses nothing.
+func allBatchErrsPermanent(errs []error) bool {
+	for _, err := range errs {
+		if _, ok := errcode.IsPermanent(err); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// parentResolveAttempts caps how many deliveries are spent retrying a thread
+// parent that history-service reports as absent. The race it covers is
+// milliseconds (message-worker persists the parent off the same stream), so the
+// full MaxDeliver budget buys nothing and costs a lot: on DefaultBackoff each
+// waiting reply holds its ack-pending slot for 756s, and ~1.3 of them per
+// second fills the consumer's budget and stops push delivery entirely.
+const parentResolveAttempts = 2
+
+// parentResolveExhausted reports whether the parent-resolution retry budget is
+// spent for this delivery. An untracked context or unreadable metadata reports
+// false, so a missing count retries rather than dropping a recoverable event.
+func parentResolveExhausted(ctx context.Context) bool {
+	attempt, ok := natsmetrics.DeliveryAttemptFromContext(ctx)
+	return ok && attempt >= parentResolveAttempts
 }

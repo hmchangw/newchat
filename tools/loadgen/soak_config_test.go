@@ -165,8 +165,8 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 		{"negative warmup", func(c *soakConfig) { c.Warmup = -time.Second }, "SOAK_WARMUP"},
 		{"warmup equals duration", func(c *soakConfig) { c.Warmup = c.RunDuration }, "SOAK_WARMUP"},
 		{"zero heartbeat interval", func(c *soakConfig) { c.HeartbeatInterval = 0 }, "SOAK_HEARTBEAT_INTERVAL"},
-		{"stale threshold equals interval", func(c *soakConfig) {
-			c.HeartbeatStaleAfter = c.HeartbeatInterval
+		{"stale threshold cannot cover cadence and attempt timeout", func(c *soakConfig) {
+			c.HeartbeatStaleAfter = 2*c.HeartbeatInterval + soakHeartbeatAttemptTimeout - time.Nanosecond
 		}, "SOAK_HEARTBEAT_STALE_AFTER"},
 		{"negative persist grace", func(c *soakConfig) { c.PersistGrace = -time.Second }, "SOAK_PERSIST_GRACE"},
 		{"negative mutation retries", func(c *soakConfig) { c.MutationRetries = -1 }, "SOAK_MUTATION_RETRIES"},
@@ -211,6 +211,14 @@ func TestValidateSoakConfig_RejectsInvalidValues(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestValidateSoakConfig_AcceptsMinimumHeartbeatLease(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.HeartbeatInterval = 5 * time.Second
+	cfg.HeartbeatStaleAfter = 2*cfg.HeartbeatInterval + soakHeartbeatAttemptTimeout
+
+	require.NoError(t, validateSoakConfig(&cfg, "chat"))
 }
 
 func TestValidateSoakConfig_ContinuousModeDoesNotRequireDuration(t *testing.T) {
@@ -467,4 +475,264 @@ func TestValidateSoakPageBudget(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestSoakConfig_RoomLaneDefaults(t *testing.T) {
+	cfg := validSoakConfig(t)
+
+	assert.InDelta(t, 2.0, cfg.MemberMutationRate, 0.0001)
+	assert.InDelta(t, 1.0, cfg.RoomMutationRate, 0.0001)
+	assert.InDelta(t, 20.0, cfg.RoomReadRate, 0.0001)
+	assert.InDelta(t, 0.05, cfg.RoomCreateRate, 0.0001)
+	assert.Equal(t, 2000, cfg.RoomCreateBudget)
+	assert.Equal(t, 5, cfg.RoomCreateSize)
+	assert.InDelta(t, 0.5, cfg.RoomReconcileReadShare, 0.0001)
+	assert.Equal(t, 10000, cfg.MemberQuarantineMax)
+	assert.Equal(t, "v2", cfg.LedgerEpoch)
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestValidateSoakConfig_RoomLaneBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "negative member mutation rate",
+			mutate: func(cfg *soakConfig) { cfg.MemberMutationRate = -1 },
+			want:   "SOAK_MEMBER_MUTATION_RATE",
+		},
+		{
+			name:   "negative room mutation rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomMutationRate = -1 },
+			want:   "SOAK_ROOM_MUTATION_RATE",
+		},
+		{
+			name:   "negative room read rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomReadRate = -1 },
+			want:   "SOAK_ROOM_READ_RATE",
+		},
+		{
+			name:   "negative room create rate",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateRate = -1 },
+			want:   "SOAK_ROOM_CREATE_RATE",
+		},
+		{
+			name:   "share above one",
+			mutate: func(cfg *soakConfig) { cfg.RoomReconcileReadShare = 1.5 },
+			want:   "SOAK_ROOM_RECONCILE_READ_SHARE",
+		},
+		{
+			name:   "negative create budget",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateBudget = -1 },
+			want:   "SOAK_ROOM_CREATE_BUDGET",
+		},
+		{
+			name:   "create budget above the retained-room cap",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateBudget = soakRoomCreateBudgetMax + 1 },
+			want:   "SOAK_ROOM_CREATE_BUDGET",
+		},
+		{
+			name:   "create size below two",
+			mutate: func(cfg *soakConfig) { cfg.RoomCreateSize = 1 },
+			want:   "SOAK_ROOM_CREATE_SIZE",
+		},
+		{
+			name:   "zero quarantine capacity",
+			mutate: func(cfg *soakConfig) { cfg.MemberQuarantineMax = 0 },
+			want:   "SOAK_MEMBER_QUARANTINE_MAX",
+		},
+		{
+			name:   "unsafe ledger epoch",
+			mutate: func(cfg *soakConfig) { cfg.LedgerEpoch = "../escape" },
+			want:   "SOAK_LEDGER_EPOCH",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateSoakConfig_RejectsUnderprovisionedRoomReconciliation(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MemberMutationRate = 5
+	cfg.RoomMutationRate = 5
+	cfg.RoomReadRate = 4
+	cfg.RoomReconcileReadShare = 0.5
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_ROOM_READ_RATE")
+	assert.Contains(t, err.Error(), "below")
+}
+
+func TestValidateSoakConfig_AllowsDisabledRoomLanes(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.MemberMutationRate = 0
+	cfg.RoomMutationRate = 0
+	cfg.RoomCreateRate = 0
+	cfg.RoomReadRate = 0
+	cfg.ReadReceiptRate = 0
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestSoakConfig_PresenceAndReadReceiptDefaults(t *testing.T) {
+	cfg := validSoakConfig(t)
+
+	assert.InDelta(t, 5.0, cfg.ReadReceiptRate, 0.0001)
+	assert.InDelta(t, 30.0, cfg.PresenceRate, 0.0001)
+	assert.Equal(t, 2000, cfg.PresenceConnections)
+	assert.InDelta(t, 0.1, cfg.PresenceQueryShare, 0.0001)
+	assert.Equal(t, 50, cfg.PresenceQueryBatch)
+	assert.Equal(t, 5*time.Second, cfg.PresenceSettle)
+	assert.Equal(t, 5*time.Minute, cfg.PresenceTTL)
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+func TestValidateSoakConfig_PresenceAndReadReceiptBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*soakConfig)
+		want   string
+	}{
+		{
+			name:   "negative read receipt rate",
+			mutate: func(cfg *soakConfig) { cfg.ReadReceiptRate = -1 },
+			want:   "SOAK_READ_RECEIPT_RATE",
+		},
+		{
+			name:   "negative presence rate",
+			mutate: func(cfg *soakConfig) { cfg.PresenceRate = -1 },
+			want:   "SOAK_PRESENCE_RATE",
+		},
+		{
+			name:   "zero presence connections",
+			mutate: func(cfg *soakConfig) { cfg.PresenceConnections = 0 },
+			want:   "SOAK_PRESENCE_CONNECTIONS",
+		},
+		{
+			name:   "query share above one",
+			mutate: func(cfg *soakConfig) { cfg.PresenceQueryShare = 1.5 },
+			want:   "SOAK_PRESENCE_QUERY_SHARE",
+		},
+		{
+			name:   "query batch too large",
+			mutate: func(cfg *soakConfig) { cfg.PresenceQueryBatch = 5000 },
+			want:   "SOAK_PRESENCE_QUERY_BATCH",
+		},
+		{
+			name:   "zero settle",
+			mutate: func(cfg *soakConfig) { cfg.PresenceSettle = 0 },
+			want:   "SOAK_PRESENCE_SETTLE",
+		},
+		{
+			name:   "ttl below settle",
+			mutate: func(cfg *soakConfig) { cfg.PresenceTTL = time.Second },
+			want:   "SOAK_PRESENCE_TTL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validSoakConfig(t)
+			tt.mutate(&cfg)
+
+			err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateSoakConfig_ReadReceiptCountsTowardReconciliationCapacity(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.ReadReceiptRate = 40
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_ROOM_READ_RATE",
+		"mark-read is reconciled like any other mutation, so it must fit the read budget")
+}
+
+func TestValidateSoakConfig_PresenceBoundsAreSkippedWhenDisabled(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.PresenceRate = 0
+	cfg.PresenceConnections = 0
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+}
+
+// The observer needs a per-message searchable marker the payload does not carry
+// yet, so enabling it is refused outright rather than allowed to manufacture a
+// data-loss report from a query that matches nothing.
+func TestValidateSoakConfig_SearchObserverIsRefusedUntilPayloadsAreMarked(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
+
+	err := validateSoakConfig(&cfg, cfg.ConfirmKeyspace)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_SEARCH_OBSERVER_ENABLED")
+	assert.Contains(t, err.Error(), "marker")
+}
+
+// The search observer adds a second reconcile step to every admitted message,
+// drawn from the same share the history step already uses, so the floor has to
+// move with it.
+func TestSoakReconcileCapacityFor_CoversTwoStepsPerMessage(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = true
+	cfg.SendRate = 100
+	cfg.ReadRate = 700
+	cfg.ReconcileReadShare = 0.5
+
+	assert.True(t, soakReconcileCapacityFor(&cfg).Sufficient(),
+		"two reconcile steps per message fit inside 350 slots/s at 100 msg/s")
+
+	cfg.ReadRate = 200
+
+	capacity := soakReconcileCapacityFor(&cfg)
+
+	assert.Equal(t, 2, capacity.Steps)
+	assert.False(t, capacity.Sufficient())
+}
+
+// With the observer off the message lane needs one reconcile step per message,
+// so the tighter budget is fine. The floor must scale with the observers rather
+// than firing at a fixed ratio.
+func TestSoakReconcileCapacityFor_SearchStepOnlyCountsWhenEnabled(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchObserverEnabled = false
+	cfg.SendRate = 100
+	cfg.ReadRate = 200
+	cfg.ReconcileReadShare = 0.5
+
+	require.NoError(t, validateSoakConfig(&cfg, cfg.ConfirmKeyspace))
+	assert.True(t, soakReconcileCapacityFor(&cfg).Sufficient())
+}
+
+// The settle window must fit inside the reconciliation deadline, or every
+// message resolves unverified for lack of time to answer.
+func TestValidateSoakConfig_SearchSettleMustFitTheDeadline(t *testing.T) {
+	cfg := validSoakConfig(t)
+	cfg.SearchSettle = cfg.ReconcileDeadline
+
+	err := validateSoakSearchSettle(&cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SOAK_SEARCH_SETTLE")
 }

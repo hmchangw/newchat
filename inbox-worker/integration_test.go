@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -27,15 +28,45 @@ func setupMongo(t *testing.T) *mongo.Database {
 	return testutil.MongoDB(t, "inbox_worker_test")
 }
 
+// TestUpsertRemoteRoomActivity_MaxGuard_Integration pins the $max guard: the
+// write is idempotent and order-independent, so a duplicate or late event can
+// only ever advance lastMsgAt.
+func TestUpsertRemoteRoomActivity_MaxGuard_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := newGuardStore(db)
+
+	readBack := func(t *testing.T) model.RemoteRoom {
+		t.Helper()
+		var row model.RemoteRoom
+		require.NoError(t, db.Collection(remoteRoomsCollection).
+			FindOne(ctx, bson.M{"_id": "r-remote"}).Decode(&row))
+		row.LastMsgAt = row.LastMsgAt.UTC()
+		return row
+	}
+
+	base := time.UnixMilli(1740000000000).UTC()
+
+	// First touch upserts the row complete, including the immutable identity.
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", base))
+	assert.Equal(t, model.RemoteRoom{ID: "r-remote", SiteID: "site-A", LastMsgAt: base}, readBack(t))
+
+	// A newer event advances the position.
+	newer := base.Add(time.Minute)
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", newer))
+	assert.Equal(t, newer, readBack(t).LastMsgAt)
+
+	// A late or duplicate event carrying an older position is a silent no-op —
+	// this is what will make lossy, unordered delivery safe.
+	require.NoError(t, store.UpsertRemoteRoomActivity(ctx, "r-remote", "site-A", base))
+	assert.Equal(t, newer, readBack(t).LastMsgAt, "an older event must not regress the stored position")
+}
+
 func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	// Seed user for lookup
@@ -66,8 +97,8 @@ func TestInboxWorker_MemberAdded_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscription not found: %v", err)
 	}
-	if len(sub.Roles) == 0 || sub.Roles[0] != model.RoleMember {
-		t.Errorf("Roles = %v, want [member]", sub.Roles)
+	if len(sub.Roles) == 0 || sub.Roles[0] != model.RoleUser {
+		t.Errorf("Roles = %v, want [user]", sub.Roles)
 	}
 
 	// handleMemberAdded does not publish SubscriptionUpdateEvent — room-worker
@@ -79,11 +110,7 @@ func TestInboxWorker_RoomSync_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	room := model.Room{ID: "r1", Name: "synced-room", Type: model.RoomTypeChannel, UserCount: 5}
@@ -110,11 +137,7 @@ func TestInboxWorker_RoleUpdated_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	handler := NewHandler(store)
 
 	_, err := db.Collection("subscriptions").InsertOne(ctx, model.Subscription{
@@ -166,11 +189,7 @@ func TestInboxWorker_RoleUpdated_Integration(t *testing.T) {
 func TestInboxWorker_BulkCreateSubscriptions_IdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	originalSeenAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	original := &model.Subscription{
@@ -224,11 +243,7 @@ func TestInboxWorker_BulkCreateSubscriptions_IdempotentUpsert(t *testing.T) {
 
 func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	h := NewHandler(store)
 
 	ctx := context.Background()
@@ -279,12 +294,7 @@ func TestInboxWorker_MemberRemoved_Integration(t *testing.T) {
 func TestInbox_UpdateSubscriptionRead_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 
 	joined := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
 	_, err := store.subCol.InsertOne(ctx, model.Subscription{
@@ -294,7 +304,9 @@ func TestInbox_UpdateSubscriptionRead_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", now, true))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", now, true)
+	require.NoError(t, err)
+	assert.True(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -306,12 +318,7 @@ func TestInbox_UpdateSubscriptionRead_HappyPath(t *testing.T) {
 func TestInbox_UpdateSubscriptionRead_OutOfOrderSkipped(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 
 	t2 := time.Now().UTC().Truncate(time.Millisecond)
 	_, err := store.subCol.InsertOne(ctx, model.Subscription{
@@ -321,7 +328,9 @@ func TestInbox_UpdateSubscriptionRead_OutOfOrderSkipped(t *testing.T) {
 	require.NoError(t, err)
 
 	t1 := t2.Add(-time.Minute)
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false)
+	require.NoError(t, err)
+	assert.False(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -333,12 +342,7 @@ func TestInbox_UpdateSubscriptionRead_OutOfOrderSkipped(t *testing.T) {
 func TestInbox_UpdateSubscriptionRead_EqualTimestampSkipped(t *testing.T) {
 	ctx := context.Background()
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 
 	t1 := time.Now().UTC().Truncate(time.Millisecond)
 	_, err := store.subCol.InsertOne(ctx, model.Subscription{
@@ -347,7 +351,9 @@ func TestInbox_UpdateSubscriptionRead_EqualTimestampSkipped(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false))
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", t1, false)
+	require.NoError(t, err)
+	assert.False(t, applied)
 
 	var got model.Subscription
 	require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": "s1"}).Decode(&got))
@@ -360,9 +366,33 @@ func TestInbox_UpdateSubscriptionRead_MissingSubscriptionErrors(t *testing.T) {
 
 	// No subscription seeded — a genuinely missing sub must error so the event redelivers until
 	// member_added lands (field events can race ahead of member_added on the worker pool).
-	err := store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", time.Now().UTC(), false)
+	applied, _, err := store.UpdateSubscriptionRead(ctx, "missing-room", "ghost", time.Now().UTC(), false)
 	require.Error(t, err)
+	assert.False(t, applied)
 	assert.Contains(t, err.Error(), "subscription not found")
+}
+
+func TestInbox_UpdateSubscriptionRead_ReturnsPostUpdateThreadUnread(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := &mongoInboxStore{
+		subCol:       db.Collection("subscriptions"),
+		roomCol:      db.Collection("rooms"),
+		userCol:      db.Collection("users"),
+		threadSubCol: db.Collection("thread_subscriptions"),
+	}
+
+	_, err := store.subCol.InsertOne(ctx, model.Subscription{
+		ID: "s1", User: model.SubscriptionUser{ID: "u1", Account: "alice"},
+		RoomID: "r1", JoinedAt: time.Now().UTC().Add(-time.Hour),
+		ThreadUnread: []string{"p1"},
+	})
+	require.NoError(t, err)
+
+	applied, n, err := store.UpdateSubscriptionRead(ctx, "r1", "alice", time.Now().UTC().Truncate(time.Millisecond), false)
+	require.NoError(t, err)
+	assert.True(t, applied)
+	assert.Equal(t, 1, n, "a room read must not drain threadUnread")
 }
 
 func TestInbox_UpdateSubscriptionMute_MissingSubscriptionErrors(t *testing.T) {
@@ -399,13 +429,8 @@ func TestInboxWorker_ThreadSubscriptionUpserted_Insert_Integration(t *testing.T)
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store := newGuardStore(db)
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 
@@ -448,13 +473,8 @@ func TestInboxWorker_ThreadSubscription_DedupByUserAccount_Integration(t *testin
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store := newGuardStore(db)
+	store.ensureIndexes(ctx)
 
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	first := model.ThreadSubscription{
@@ -485,13 +505,8 @@ func TestInboxWorker_ThreadSubscriptionUpserted_MonotonicMention_Integration(t *
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store := newGuardStore(db)
+	store.ensureIndexes(ctx)
 
 	handler := NewHandler(store)
 	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
@@ -566,11 +581,7 @@ func mustInsertUser(t *testing.T, db *mongo.Database, u *model.User) {
 // newIntegrationHandler creates a Handler wired to the given database for integration tests.
 func newIntegrationHandler(t *testing.T, db *mongo.Database) *Handler {
 	t.Helper()
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	return NewHandler(store)
 }
 
@@ -720,10 +731,7 @@ func TestInboxWorker_FilterScoping_Integration(t *testing.T) {
 
 func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
@@ -761,10 +769,7 @@ func TestInboxStore_ApplyThreadRead_HappyPath(t *testing.T) {
 // read state still applies).
 func TestInboxStore_ApplyThreadRead_LegacyEmptyParentID_SkipsPull(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	seedSub := model.Subscription{
@@ -800,10 +805,7 @@ func TestInboxStore_ApplyThreadRead_LegacyEmptyParentID_SkipsPull(t *testing.T) 
 // subsequent Subscription write matches nothing and is a silent no-op.
 func TestInboxStore_ApplyThreadRead_MissingSubscription_NoError(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
@@ -824,10 +826,7 @@ func TestInboxStore_ApplyThreadRead_MissingSubscription_NoError(t *testing.T) {
 
 func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -878,7 +877,7 @@ func TestInboxStore_ApplyThreadReadAll_HappyPath(t *testing.T) {
 
 func TestInboxStore_AddThreadUnread_Integration(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
@@ -903,7 +902,7 @@ func TestInboxStore_AddThreadUnread_Integration(t *testing.T) {
 
 func TestInboxStore_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	store := newGuardStore(db)
 	ctx := context.Background()
 	require.NoError(t, store.AddThreadUnread(ctx, "r1", "p1", nil))
 }
@@ -911,10 +910,7 @@ func TestInboxStore_AddThreadUnread_EmptyAccountsNoop(t *testing.T) {
 // Stale event: thread-sub guard rejects, same gate skips the Subscription.
 func TestInboxStore_ApplyThreadRead_OutOfOrderThreadSub(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	t2 := time.Now().UTC().Truncate(time.Millisecond)
@@ -973,7 +969,7 @@ func newSubFixtureWithRoles(id, userID, account, roomID string, roles []model.Ro
 func TestMongoInboxStore_UpdateSubscriptionNamesForRoom(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-rename")
-	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	store := newGuardStore(db)
 
 	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
 		newSubFixture("s1", "u1", "alice", "r1", "old"),
@@ -1027,7 +1023,7 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 
 	t.Run("restrict with owner rewrites roles and sets flags", func(t *testing.T) {
 		db := testutil.MongoDB(t, "inbox-worker-visibility-restrict")
-		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+		store := newGuardStore(db)
 		seed(t, db)
 
 		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", true, false, "bob", time.Now().UTC()))
@@ -1035,8 +1031,8 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 		subs := loadSubs(t, db)
 		roles := rolesByAccount(subs)
 		assert.Equal(t, []model.Role{model.RoleOwner}, roles["bob"], "bob should be owner")
-		assert.Equal(t, []model.Role{model.RoleMember}, roles["alice"], "alice should be member")
-		assert.Equal(t, []model.Role{model.RoleMember}, roles["carol"], "carol should be member")
+		assert.Equal(t, []model.Role{model.RoleUser}, roles["alice"], "alice should be demoted to user")
+		assert.Equal(t, []model.Role{model.RoleUser}, roles["carol"], "carol should be demoted to user")
 		for _, sub := range subs {
 			assert.True(t, sub.Restricted, "sub %s Restricted should be true", sub.ID)
 			assert.False(t, sub.ExternalAccess, "sub %s ExternalAccess should be false", sub.ID)
@@ -1045,7 +1041,7 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 
 	t.Run("flags only when ownerAccount empty (roles untouched)", func(t *testing.T) {
 		db := testutil.MongoDB(t, "inbox-worker-visibility-flags")
-		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+		store := newGuardStore(db)
 		seed(t, db)
 
 		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", true, true, "", time.Now().UTC()))
@@ -1063,7 +1059,7 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 
 	t.Run("unrestrict clears flags and ignores ownerAccount", func(t *testing.T) {
 		db := testutil.MongoDB(t, "inbox-worker-visibility-unrestrict")
-		store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+		store := newGuardStore(db)
 		seed(t, db)
 
 		require.NoError(t, store.ApplySubscriptionRestriction(context.Background(), "r1", false, false, "bob", time.Now().UTC()))
@@ -1079,14 +1075,30 @@ func TestMongoInboxStore_ApplySubscriptionRestriction(t *testing.T) {
 	})
 }
 
+// TestMongoInboxStore_ListSubscriptionAccountsByRoom covers the store method
+// added to close the room_restricted bust gap: it must return every account
+// subscribed to the room (regardless of role) and nothing from other rooms.
+func TestMongoInboxStore_ListSubscriptionAccountsByRoom(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.MongoDB(t, "inbox-worker-list-sub-accounts")
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
+		newSubFixtureWithRoles("s1", "u1", "alice", "r1", []model.Role{model.RoleOwner}),
+		newSubFixtureWithRoles("s2", "u2", "bob", "r1", []model.Role{model.RoleMember}),
+		newSubFixtureWithRoles("s3", "u3", "carol", "other-room", []model.Role{model.RoleMember}),
+	})
+	require.NoError(t, err)
+
+	accounts, err := store.ListSubscriptionAccountsByRoom(ctx, "r1")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"alice", "bob"}, accounts)
+}
+
 func TestIntegration_HandleRoomRenamed(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-rename-handler")
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	h := NewHandler(store)
 
 	// Seed two subscription mirrors for room r1 with old name.
@@ -1130,11 +1142,7 @@ func TestIntegration_HandleRoomRenamed(t *testing.T) {
 func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "inbox-worker-visibility-handler")
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 	h := NewHandler(store)
 
 	// Seed: alice=owner, bob=member, carol=member.
@@ -1182,47 +1190,10 @@ func TestIntegration_HandleRoomVisibilityChanged(t *testing.T) {
 		assert.False(t, sub.ExternalAccess, "sub %s ExternalAccess should be false", sub.ID)
 	}
 
-	// bob promoted to owner, alice demoted to member, carol stays member.
+	// bob promoted to owner, alice and carol reset to the plain user role.
 	assert.Equal(t, []model.Role{model.RoleOwner}, rolesByAccount["bob"], "bob should be owner")
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["alice"], "alice should be member")
-	assert.Equal(t, []model.Role{model.RoleMember}, rolesByAccount["carol"], "carol should be member")
-}
-
-// ensureIndexes must standardize on (threadRoomId, userAccount) — the same
-// natural key room-service, message-worker, and history-service create — and
-// drop the legacy (threadRoomId, userId) index that message-worker explicitly
-// removes. Otherwise the two services thrash the index across restarts and the
-// collection ends up with two conflicting unique constraints.
-func TestInboxStore_EnsureIndexes_DropsLegacyAndCreatesUserAccount_Integration(t *testing.T) {
-	db := setupMongo(t)
-	ctx := context.Background()
-	threadSubs := db.Collection("thread_subscriptions")
-	store := &mongoInboxStore{threadSubCol: threadSubs}
-
-	// Simulate a DB where the legacy index already exists (older inbox-worker).
-	_, err := threadSubs.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "threadRoomId", Value: 1}, {Key: "userId", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, store.ensureIndexes(ctx))
-
-	cur, err := threadSubs.Indexes().List(ctx)
-	require.NoError(t, err)
-	var idxs []bson.M
-	require.NoError(t, cur.All(ctx, &idxs))
-
-	names := make(map[string]bool, len(idxs))
-	for _, ix := range idxs {
-		if n, ok := ix["name"].(string); ok {
-			names[n] = true
-		}
-	}
-	assert.True(t, names["threadRoomId_1_userAccount_1"],
-		"ensureIndexes must create the canonical (threadRoomId, userAccount) unique index")
-	assert.False(t, names["threadRoomId_1_userId_1"],
-		"ensureIndexes must drop the legacy (threadRoomId, userId) index")
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesByAccount["alice"], "alice should be user")
+	assert.Equal(t, []model.Role{model.RoleUser}, rolesByAccount["carol"], "carol should be user")
 }
 
 // Regression: a federated upsert for an existing (threadRoomId, userAccount)
@@ -1236,8 +1207,8 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 	db := setupMongo(t)
 	ctx := context.Background()
 	threadSubs := db.Collection("thread_subscriptions")
-	store := &mongoInboxStore{threadSubCol: threadSubs}
-	require.NoError(t, store.ensureIndexes(ctx))
+	store := newGuardStore(db)
+	store.ensureIndexes(ctx)
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
@@ -1275,10 +1246,7 @@ func TestInboxStore_UpsertThreadSubscription_DedupesByUserAccount_Integration(t 
 // Missing thread-sub: the guarded update matches nothing and is a silent no-op.
 func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing.T) {
 	db := setupMongo(t)
-	store := &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		threadSubCol: db.Collection("thread_subscriptions"),
-	}
+	store := newGuardStore(db)
 	ctx := context.Background()
 
 	seedSub := model.Subscription{
@@ -1303,10 +1271,11 @@ func TestInboxStore_ApplyThreadRead_MissingThreadSubscription_NoError(t *testing
 
 func newGuardStore(db *mongo.Database) *mongoInboxStore {
 	return &mongoInboxStore{
-		subCol:       db.Collection("subscriptions"),
-		roomCol:      db.Collection("rooms"),
-		userCol:      db.Collection("users"),
-		threadSubCol: db.Collection("thread_subscriptions"),
+		subCol:        db.Collection("subscriptions"),
+		roomCol:       db.Collection("rooms"),
+		userCol:       db.Collection("users"),
+		threadSubCol:  db.Collection("thread_subscriptions"),
+		remoteRoomCol: db.Collection(remoteRoomsCollection),
 	}
 }
 
@@ -1522,7 +1491,7 @@ func TestInbox_ApplySubscriptionRestriction_NewerApplies(t *testing.T) {
 	assert.True(t, alice.Restricted)
 	assert.True(t, bob.Restricted)
 	assert.Equal(t, []model.Role{model.RoleOwner}, bob.Roles)
-	assert.Equal(t, []model.Role{model.RoleMember}, alice.Roles)
+	assert.Equal(t, []model.Role{model.RoleUser}, alice.Roles)
 }
 
 func TestInbox_UpsertRoom_OlderUpdatedAtSkipped(t *testing.T) {
@@ -1561,11 +1530,7 @@ func TestInboxWorker_UpdateUserStatus_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	_, err := db.Collection("users").InsertOne(ctx, model.User{
 		ID: "u1", Account: "alice", SiteID: "site-b", StatusText: "old", StatusIsShow: true,
@@ -1618,11 +1583,7 @@ func TestInboxWorker_UpdateUserSettings_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	t1 := time.UnixMilli(1000).UTC()
 	t2 := time.UnixMilli(2000).UTC()
@@ -1700,11 +1661,7 @@ func TestInboxWorker_ApplyUserPermissions_Integration(t *testing.T) {
 	db := setupMongo(t)
 	ctx := context.Background()
 
-	store := &mongoInboxStore{
-		subCol:  db.Collection("subscriptions"),
-		roomCol: db.Collection("rooms"),
-		userCol: db.Collection("users"),
-	}
+	store := newGuardStore(db)
 
 	effectiveFrom := time.UnixMilli(500).UTC()
 	expiresAt := time.UnixMilli(9000).UTC()
@@ -1808,4 +1765,241 @@ func TestInboxWorker_ApplyUserPermissions_Integration(t *testing.T) {
 		assert.Equal(t, "keep-me", raw.Permissions["somethingElse"])
 		assert.NotNil(t, raw.Permissions["externalImageView"])
 	})
+}
+
+func TestInboxWorker_SubscriptionMention_Integration(t *testing.T) {
+	db := setupMongo(t)
+	ctx := context.Background()
+	store := &mongoInboxStore{subCol: db.Collection("subscriptions")}
+	msgAt := time.Now().UTC().Truncate(time.Millisecond)
+
+	// unread: never read (no lastSeenAt) — badged. stale: read before — badged.
+	// caught: read past the message — untouched. other: different room — untouched.
+	_, err := store.subCol.InsertMany(ctx, []any{
+		bson.M{"_id": "s1", "roomId": "room-1", "u": bson.M{"account": "unread"}},
+		bson.M{"_id": "s2", "roomId": "room-1", "u": bson.M{"account": "stale"}, "lastSeenAt": msgAt.Add(-time.Minute)},
+		bson.M{"_id": "s3", "roomId": "room-1", "u": bson.M{"account": "caught"}, "lastSeenAt": msgAt.Add(time.Minute)},
+		bson.M{"_id": "s4", "roomId": "room-2", "u": bson.M{"account": "unread"}},
+	})
+	require.NoError(t, err)
+
+	payload, err := json.Marshal(model.SubscriptionMentionEvent{
+		RoomID:      "room-1",
+		Accounts:    []string{"unread", "stale", "caught", "absent"},
+		MentionedAt: msgAt.UnixMilli(),
+		Timestamp:   msgAt.UnixMilli(),
+	})
+	require.NoError(t, err)
+	data, err := json.Marshal(model.InboxEvent{
+		Type:       model.InboxSubscriptionMention,
+		SiteID:     "site-a",
+		DestSiteID: "site-b",
+		Payload:    payload,
+		Timestamp:  msgAt.UnixMilli(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, NewHandler(store).HandleEvent(ctx, data))
+
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{{"s1", true}, {"s2", true}, {"s3", false}, {"s4", false}} {
+		var got struct {
+			HasMention bool `bson:"hasMention"`
+		}
+		require.NoError(t, store.subCol.FindOne(ctx, bson.M{"_id": tc.id}).Decode(&got))
+		assert.Equal(t, tc.want, got.HasMention, "subscription %s", tc.id)
+	}
+}
+
+// setupUserAccountStore hands each user-account test an isolated users
+// collection with the unique account index UpsertUserAccount's E11000-retry
+// branch depends on (owned by user-service in production).
+func setupUserAccountStore(t *testing.T, prefix string) (*mongoInboxStore, *mongo.Collection) {
+	t.Helper()
+	db := testutil.MongoDB(t, prefix)
+	users := db.Collection("users")
+	_, err := users.Indexes().CreateOne(context.Background(), mongo.IndexModel{
+		Keys: bson.D{{Key: "account", Value: 1}}, Options: options.Index().SetUnique(true),
+	})
+	require.NoError(t, err)
+	return &mongoInboxStore{userCol: users}, users
+}
+
+func TestUpsertUserAccount_Integration(t *testing.T) {
+	store, users := setupUserAccountStore(t, "inbox-user-account")
+	ctx := context.Background()
+
+	snap := func(ts int64, active bool, roles []model.UserRole) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-1", Account: "acct-1", SiteID: "site-a",
+			EngName: "Eng", ChineseName: "Eng CN", Roles: roles, Active: active, Timestamp: ts}
+	}
+	at := func(ts int64) time.Time { return time.UnixMilli(ts).UTC() }
+	readBack := func(t *testing.T) bson.M {
+		t.Helper()
+		var doc bson.M
+		require.NoError(t, users.FindOne(ctx, bson.M{"account": "acct-1"}).Decode(&doc))
+		return doc
+	}
+
+	t.Run("no doc: inserts complete doc", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1000, true, []model.UserRole{model.UserRoleBot}), at(1000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"])
+		assert.Equal(t, "site-a", doc["siteId"])
+		assert.Equal(t, "Eng", doc["engName"])
+		assert.Equal(t, true, doc["active"])
+	})
+	t.Run("existing HR-shaped doc: $set only, _id kept", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"},
+			bson.M{"$set": bson.M{"engName": "FromHR"}, "$unset": bson.M{"accountUpdatedAt": "", "roles": "", "active": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, false, []model.UserRole{}), at(2000)))
+		doc := readBack(t)
+		assert.Equal(t, "id-1", doc["_id"], "existing _id must survive")
+		assert.Equal(t, false, doc["active"])
+	})
+	t.Run("older timestamp: no-op, nil error", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(1500, true, []model.UserRole{}), at(1500)))
+		assert.Equal(t, false, readBack(t)["active"], "older snapshot must not regress")
+	})
+	t.Run("equal timestamp: applied ($lte)", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(2000, true, []model.UserRole{}), at(2000)))
+		assert.Equal(t, true, readBack(t)["active"])
+	})
+	t.Run("doc without watermark (HR raced): applied via non-upsert retry", func(t *testing.T) {
+		_, err := users.UpdateOne(ctx, bson.M{"account": "acct-1"}, bson.M{"$unset": bson.M{"accountUpdatedAt": ""}})
+		require.NoError(t, err)
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(3000, false, []model.UserRole{}), at(3000)))
+		assert.Equal(t, false, readBack(t)["active"])
+	})
+	t.Run("empty roles stored as [], not null", func(t *testing.T) {
+		require.NoError(t, store.UpsertUserAccount(ctx, snap(4000, false, nil), at(4000)))
+		doc := readBack(t)
+		roles, ok := doc["roles"].(bson.A)
+		require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+		assert.Len(t, roles, 0)
+	})
+}
+
+// TestUpsertUserAccount_ArrivalOrder_Integration pins the create/update ordering
+// contract: the payload watermark decides the winner, never the delivery order.
+// Federation gives no ordering guarantee on this lane (each destination is a
+// direct publish, no OUTBOX FIFO), so a create can land after the edit that
+// supersedes it. Each case owns its account so the subtests stay independent.
+func TestUpsertUserAccount_ArrivalOrder_Integration(t *testing.T) {
+	store, users := setupUserAccountStore(t, "inbox-user-account-order")
+	ctx := context.Background()
+
+	// createSnap is what admin-service fans out on create; updateSnap is what a
+	// later edit fans out (rename + role grant + deactivation), so every field
+	// differs and the assertions can tell which snapshot won.
+	createSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice", ChineseName: "Alice CN", Roles: []model.UserRole{model.UserRoleUser},
+			Active: true, Timestamp: ts}
+	}
+	updateSnap := func(account string, ts int64) *model.UserAccountUpdated {
+		return &model.UserAccountUpdated{ID: "id-" + account, Account: account, SiteID: "site-a",
+			EngName: "Alice Chen", ChineseName: "Alice Chen CN", Roles: []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			Active: false, Timestamp: ts}
+	}
+
+	const (
+		createTS = int64(1000)
+		updateTS = int64(2000)
+	)
+
+	tests := []struct {
+		name string
+		// deliver returns the events in the order the destination receives them.
+		deliver     func(account string) []*model.UserAccountUpdated
+		wantEngName string
+		wantRoles   []model.UserRole
+		wantActive  bool
+		wantMark    int64
+	}{
+		{
+			name: "in order: create then update, update wins",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, updateTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "reversed: update lands first and creates the doc, late create dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, updateTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "redelivery: create replayed after update stays dropped",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{
+					createSnap(a, createTS), updateSnap(a, updateTS), createSnap(a, createTS),
+				}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    updateTS,
+		},
+		{
+			name: "same millisecond, create last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{updateSnap(a, createTS), createSnap(a, createTS)}
+			},
+			wantEngName: "Alice",
+			wantRoles:   []model.UserRole{model.UserRoleUser},
+			wantActive:  true,
+			wantMark:    createTS,
+		},
+		{
+			name: "same millisecond, update last: $lte lets the last delivery win",
+			deliver: func(a string) []*model.UserAccountUpdated {
+				return []*model.UserAccountUpdated{createSnap(a, createTS), updateSnap(a, createTS)}
+			},
+			wantEngName: "Alice Chen",
+			wantRoles:   []model.UserRole{model.UserRoleUser, model.UserRoleAdmin},
+			wantActive:  false,
+			wantMark:    createTS,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := fmt.Sprintf("order-%d", i)
+			for _, e := range tt.deliver(account) {
+				require.NoError(t, store.UpsertUserAccount(ctx, e, time.UnixMilli(e.Timestamp).UTC()))
+			}
+
+			count, err := users.CountDocuments(ctx, bson.M{"account": account})
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, count, "every ordering must converge on one doc")
+
+			var doc bson.M
+			require.NoError(t, users.FindOne(ctx, bson.M{"account": account}).Decode(&doc))
+			assert.Equal(t, "id-"+account, doc["_id"], "_id is $setOnInsert, whichever snapshot inserted")
+			assert.Equal(t, "site-a", doc["siteId"])
+			assert.Equal(t, tt.wantEngName, doc["engName"])
+			assert.Equal(t, tt.wantActive, doc["active"])
+			assert.Equal(t, time.UnixMilli(tt.wantMark).UTC(), doc["accountUpdatedAt"].(bson.DateTime).Time().UTC())
+
+			roles, ok := doc["roles"].(bson.A)
+			require.True(t, ok, "roles must be an array, got %T", doc["roles"])
+			got := make([]model.UserRole, len(roles))
+			for j, r := range roles {
+				got[j] = model.UserRole(r.(string))
+			}
+			assert.Equal(t, tt.wantRoles, got)
+		})
+	}
 }

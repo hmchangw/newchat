@@ -38,12 +38,21 @@ func validFileName(name string) bool {
 }
 
 // HandleUpload stores a configFile (.yaml/.yml) + executeFile pair, streaming each
-// straight to MinIO. No size cap — streaming keeps memory bounded regardless of size.
+// straight to MinIO. The body is capped by limitUploadBody; past
+// MaxMultipartMemory the parts land on disk, so heap stays flat either way.
 func (h *Handler) HandleUpload(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	cfgFile, err := c.FormFile(configFileField)
 	if err != nil {
+		// This is the first read of the body, so the cap surfaces here. Reporting
+		// it as a missing part would send an operator after the wrong thing.
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			errhttp.Write(ctx, c, errcode.BadRequest(
+				fmt.Sprintf("the upload is too large: the limit is %d bytes", tooBig.Limit)))
+			return
+		}
 		errhttp.Write(ctx, c, errcode.BadRequest("configFile is required"))
 		return
 	}

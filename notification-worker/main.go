@@ -12,15 +12,14 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	"github.com/nats-io/nats.go/jetstream"
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
+	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
+	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -31,11 +30,11 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
 type config struct {
-	ServiceName   string `env:"OTEL_SERVICE_NAME"          envDefault:"unknown-service"`
 	NatsURL       string `env:"NATS_URL"                  envDefault:"nats://localhost:4222"`
 	NatsCredsFile string `env:"NATS_CREDS_FILE"           envDefault:""`
 	SiteID        string `env:"SITE_ID"                   envDefault:"default"`
@@ -45,131 +44,38 @@ type config struct {
 	MongoPassword string `env:"MONGO_PASSWORD"            envDefault:""`
 	// MongoReadPreference: read-only service (fan-out lookups); secondaryPreferred
 	// offloads the primary.
-	MongoReadPreference    string                  `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
-	MaxWorkers             int                     `env:"MAX_WORKERS"               envDefault:"100"`
-	LargeRoomThreshold     int                     `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
-	PushRecipientBatchSize int                     `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
-	RoomMetaCacheSize      int                     `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
-	RoomMetaCacheTTL       time.Duration           `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
-	RoomMetaL2TTL          time.Duration           `env:"ROOM_META_L2_TTL"          envDefault:"15m"`
-	ValkeyAddrs            []string                `env:"VALKEY_ADDRS"              envSeparator:","`
-	ValkeyPassword         string                  `env:"VALKEY_PASSWORD"           envDefault:""`
-	RoomSubCacheTTL        time.Duration           `env:"ROOMSUBCACHE_TTL"          envDefault:"5m"`
-	PresenceBatchSize      int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
-	PresenceRPCTimeout     time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
-	PresenceEnabled        bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
-	BadgeCountEnabled      bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
-	UserSettingsEnabled    bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
-	UserSettingsBatchSize  int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
-	UserSettingsTimeout    time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
-	Mode                   stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
-	Consumer               stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap              bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	HealthAddr             string                  `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled           bool                    `env:"PPROF_ENABLED" envDefault:"false"`
-}
-
-// mongoMemberLoader loads a room's member list and stamps each member's HOME
-// site from the users collection (one batch $in per cache fill). Not
-// Subscription.siteId — that is the ROOM's home site, which would misroute
-// badge RPCs. This deliberately revises the "no users-collection lookups"
-// contract (docs/notification-worker-downstream-contracts.md §3), cache-fill
-// time only.
-type mongoMemberLoader struct {
-	col   *mongo.Collection // subscriptions
-	users *mongo.Collection // users — home-site (siteId) lookup
-}
-
-func (m *mongoMemberLoader) Load(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
-	projection := bson.M{
-		"u._id":              1,
-		"u.account":          1,
-		"u.isBot":            1,
-		"roomType":           1,
-		"muted":              1,
-		"historySharedSince": 1,
-	}
-	cur, err := m.col.Find(ctx, bson.M{"roomId": roomID}, options.Find().SetProjection(projection))
-	if err != nil {
-		return nil, fmt.Errorf("find subscriptions for room %s: %w", roomID, err)
-	}
-	defer cur.Close(ctx)
-
-	var out []roomsubcache.Member
-	for cur.Next(ctx) {
-		var doc struct {
-			User struct {
-				ID      string `bson:"_id"`
-				Account string `bson:"account"`
-				IsBot   bool   `bson:"isBot"`
-			} `bson:"u"`
-			RoomType           model.RoomType `bson:"roomType"`
-			Muted              bool           `bson:"muted"`
-			HistorySharedSince *time.Time     `bson:"historySharedSince"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("decode subscription: %w", err)
-		}
-		var hssMs *int64
-		if doc.HistorySharedSince != nil {
-			ms := doc.HistorySharedSince.UnixMilli()
-			hssMs = &ms
-		}
-		out = append(out, roomsubcache.Member{
-			ID:                 doc.User.ID,
-			Account:            doc.User.Account,
-			RoomType:           doc.RoomType,
-			IsBot:              doc.User.IsBot,
-			Muted:              doc.Muted,
-			HistorySharedSince: hssMs,
-		})
-	}
-	if err := cur.Err(); err != nil {
-		return nil, fmt.Errorf("iterate subscriptions: %w", err)
-	}
-	if err := m.fillHomeSites(ctx, roomID, out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// fillHomeSites stamps each member's HomeSiteID from the users collection
-// ({account $in members}, projected to {account, siteId}). An account missing
-// from users leaves HomeSiteID empty — that member degrades to no badge count
-// downstream rather than misrouting the RPC.
-func (m *mongoMemberLoader) fillHomeSites(ctx context.Context, roomID string, members []roomsubcache.Member) error {
-	if len(members) == 0 {
-		return nil
-	}
-	accounts := make([]string, 0, len(members))
-	for i := range members {
-		accounts = append(accounts, members[i].Account)
-	}
-	cur, err := m.users.Find(ctx, bson.M{"account": bson.M{"$in": accounts}},
-		options.Find().SetProjection(bson.M{"_id": 0, "account": 1, "siteId": 1}))
-	if err != nil {
-		return fmt.Errorf("find home sites for room %s members: %w", roomID, err)
-	}
-	defer cur.Close(ctx)
-
-	siteByAccount := make(map[string]string, len(accounts))
-	for cur.Next(ctx) {
-		var doc struct {
-			Account string `bson:"account"`
-			SiteID  string `bson:"siteId"`
-		}
-		if err := cur.Decode(&doc); err != nil {
-			return fmt.Errorf("decode user home site: %w", err)
-		}
-		siteByAccount[doc.Account] = doc.SiteID
-	}
-	if err := cur.Err(); err != nil {
-		return fmt.Errorf("iterate user home sites: %w", err)
-	}
-	for i := range members {
-		members[i].HomeSiteID = siteByAccount[members[i].Account]
-	}
-	return nil
+	MongoReadPreference string `env:"MONGO_READ_PREFERENCE"     envDefault:"secondaryPreferred"`
+	// MongoUserReadPreference covers the settings read that gates push delivery.
+	// Kept off the client-wide preference (the other collections tolerate more
+	// lag), but primaryPreferred rather than primary: a stale mute is recoverable,
+	// a push pipeline that dies with the primary is not.
+	MongoUserReadPreference string `env:"MONGO_USER_READ_PREFERENCE" envDefault:"primaryPreferred"`
+	Pool                    mongoutil.PoolConfig
+	MaxWorkers              int           `env:"MAX_WORKERS"               envDefault:"100"`
+	LargeRoomThreshold      int           `env:"LARGE_ROOM_THRESHOLD"      envDefault:"500"`
+	PushRecipientBatchSize  int           `env:"PUSH_RECIPIENT_BATCH_SIZE" envDefault:"100"`
+	RoomMetaCacheSize       int           `env:"ROOM_META_CACHE_SIZE"      envDefault:"10000"`
+	RoomMetaCacheTTL        time.Duration `env:"ROOM_META_CACHE_TTL"       envDefault:"2m"`
+	RoomMetaL2              roommetacache.TTLConfig
+	Valkey                  valkeyutil.Config
+	RoomSubCache            roomsubcache.TTLConfig
+	Breaker                 mongoutil.BreakerConfig
+	PresenceBatchSize       int                     `env:"PRESENCE_BATCH_SIZE"       envDefault:"512"`
+	PresenceRPCTimeout      time.Duration           `env:"PRESENCE_RPC_TIMEOUT"      envDefault:"2s"`
+	PresenceEnabled         bool                    `env:"PRESENCE_RPC_ENABLED"      envDefault:"false"` // false → noopPresenceSnapshotter; set true once presence service is available
+	BadgeCountEnabled       bool                    `env:"BADGE_COUNT_RPC_ENABLED"   envDefault:"true"`  // true → per-recipient UnreadCounts stamped via badge.count.batch; set false to disable (nil badgeClient, no counts)
+	UserSettingsEnabled     bool                    `env:"USER_SETTINGS_ENABLED"     envDefault:"true"`  // false → noopUserSettings, i.e. pre-enforcement behaviour; kill switch, not a rollout gate
+	UserSettingsBatchSize   int                     `env:"USER_SETTINGS_BATCH_SIZE"  envDefault:"512"`
+	UserSettingsTimeout     time.Duration           `env:"USER_SETTINGS_TIMEOUT"     envDefault:"2s"`
+	UserCacheSize           int                     `env:"USER_CACHE_SIZE"           envDefault:"10000"`
+	UserCacheTTL            time.Duration           `env:"USER_CACHE_TTL"            envDefault:"5m"`
+	MentionNamesEnabled     bool                    `env:"MENTION_NAMES_ENABLED"     envDefault:"true"` // false → MentionNames nil, i.e. only @all/@here substituted; kill switch for a sick users collection
+	MentionNamesTimeout     time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
+	Mode                    stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
+	Consumer                stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Bootstrap               bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	HealthAddr              string                  `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
 func main() {
@@ -180,8 +86,16 @@ func main() {
 		slog.Error("parse config", "error", err)
 		os.Exit(1)
 	}
-	if len(cfg.ValkeyAddrs) == 0 {
-		slog.Error("VALKEY_ADDRS required")
+	if err := cfg.Valkey.Validate(); err != nil {
+		slog.Error("invalid valkey config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Breaker.Validate(""); err != nil {
+		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 
@@ -192,8 +106,8 @@ func main() {
 		slog.Error("init observability failed", "error", err)
 		os.Exit(1)
 	}
-	sharedMetrics := natsmetrics.NewFromProvider(sdk.MeterProvider())
-	publishMetrics := sharedMetrics.Publisher(cfg.ServiceName, cfg.SiteID)
+	sharedMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics)
+	publishMetrics := sharedMetrics.Publisher(cfg.SiteID)
 	domainMetrics := newNotificationMetrics(sdk.MeterProvider().Meter("notification-worker"))
 
 	readPref, err := mongoutil.ParseReadPreference(cfg.MongoReadPreference)
@@ -202,43 +116,64 @@ func main() {
 		os.Exit(1)
 	}
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk), mongoutil.WithReadPreference(readPref))
 	if err != nil {
 		slog.Error("mongo connect failed", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
 	db := mongoClient.Database(cfg.MongoDB)
-	subCol := db.Collection("subscriptions")
+	// Pinned to primary: this feeds roomsubcache, a SHARED 90-minute entry every
+	// service reads. A replica-lagged read here does not just miss one removal —
+	// it republishes a removed member as a room member for the whole TTL, and
+	// broadcast-worker and notification-worker both deliver to that list.
+	subCol := mongoutil.CollectionWithReadPreference(db.Collection("subscriptions"), readpref.Primary())
 	threadRoomCol := db.Collection("thread_rooms")
-	roomsCol := db.Collection("rooms")
-	// Settings gate push delivery, so a stale read means a user who just muted
-	// still gets notified; route to primary regardless of the client-wide
-	// preference. The other collections here tolerate replica lag and keep it.
-	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), readpref.Primary())
+	// Pinned for the same reason as subCol: roomsCol is read through into
+	// roommetacache, a SHARED key that message-gatekeeper and broadcast-worker
+	// also read, so a lagging secondary republishes a renamed or just-deleted
+	// room to all of them for the whole TTL.
+	roomsCol := mongoutil.CollectionWithReadPreference(db.Collection("rooms"), readpref.Primary())
+	// Settings gate push delivery, so this collection keeps its own preference
+	// rather than the client-wide one. The other collections here tolerate more
+	// replica lag and keep it.
+	userReadPref, err := mongoutil.ParseReadPreference(cfg.MongoUserReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo user read preference", "value", cfg.MongoUserReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo user read preference configured", "readPreference", userReadPref.Mode().String())
+	usersCol := mongoutil.CollectionWithReadPreference(db.Collection("users"), userReadPref)
 
-	valkeyClient, err := valkeyutil.ConnectCluster(ctx, cfg.ValkeyAddrs, cfg.ValkeyPassword,
-		valkeyutil.WithObservability(sdk),
-		valkeyutil.WithRequireParentSpan(true),
-	)
+	valkeyClient, err := valkeyutil.Connect(ctx, cfg.Valkey, valkeyutil.Instrumented(sdk))
 	if err != nil {
 		slog.Error("valkey connect failed", "error", err)
 		os.Exit(1)
 	}
 
-	metaRec := cachemetrics.For("roommeta", "l2")
-	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL,
-		func(ctx context.Context, roomID string) (roommetacache.Meta, error) {
-			return roommetacache.ReadThrough(ctx, valkeyClient, roomsCol, roomID, cfg.RoomMetaL2TTL, metaRec)
-		})
+	// Built here rather than inside the loader: the tier's closures escape to the
+	// heap, so constructing one per L1 miss would allocate on every cold room.
+	metaTier := roommetacache.NewL2Tier(valkeyClient, roomsCol, cfg.RoomMetaL2.TTL,
+		nil, cachemetrics.For("roommeta", "l2"))
+	roomMetaCache, err := roommetacache.New(cfg.RoomMetaCacheSize, cfg.RoomMetaCacheTTL, metaTier.Get)
 	if err != nil {
 		slog.Error("init room-meta cache failed", "error", err)
 		os.Exit(1)
 	}
 
 	cache := roomsubcache.NewValkeyCache(valkeyClient)
-	loader := &mongoMemberLoader{col: subCol, users: usersCol}
-	memberLookup := newCachedMemberLookup(cache, loader.Load, cfg.RoomSubCacheTTL)
+	// The shared loader stamps each member's HOME site for the per-site badge
+	// RPC. It has to: the cache key is shared, so whichever service fills it
+	// first decides what every other service reads — a loader that skipped the
+	// stamp here would be undone by a broadcast-worker cold fill anyway.
+	// roomsubcache.NewLookup then adds the TTL slide, so a warm member list
+	// survives an outage that outlasts its deadline.
+	loader := roomsubcache.NewMongoLoader(subCol, usersCol)
+	// Guard the loader, not the Lookup: an open breaker must still serve L2 hits.
+	memberBreaker := cfg.Breaker.New(ctx, "roomsub",
+		circuitbreaker.WithFailurePredicate(memberBreakerFailure))
+	memberLookup := roomsubcache.NewLookup(cache,
+		roomsubcache.GuardLoader(loader, memberBreaker), cfg.RoomSubCache.TTL)
 
 	nc, err := natsutil.ConnectWithMetrics(ctx, cfg.NatsURL, cfg.NatsCredsFile, sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace, sdk.MeterProvider())
 	if err != nil {
@@ -263,7 +198,7 @@ func main() {
 
 	consumerCfg := buildConsumerConfig(cfg.Consumer, cfg.Mode.ConsumerName("notification-worker"), wiring.CanonicalCreated)
 	consumerMetrics := sharedMetrics.Consumer(natsmetrics.ConsumerConfig{
-		ServiceName: cfg.ServiceName, Site: cfg.SiteID,
+		Site:   cfg.SiteID,
 		Stream: wiring.CanonicalStream.Name, Consumer: consumerCfg.Durable,
 	})
 	consumerMetrics.LoopStopped(ctx)
@@ -298,6 +233,28 @@ func main() {
 		settings = newMongoUserSettings(usersCol, cfg.UserSettingsBatchSize, cfg.UserSettingsTimeout)
 	}
 
+	// Display names for the push body read from the client-wide read preference
+	// (MONGO_READ_PREFERENCE, secondaryPreferred by default), not the
+	// primary-pinned usersCol above: a renamed user tolerates replica lag —
+	// and up to USER_CACHE_TTL of cache staleness — unlike the mute settings
+	// that gate delivery.
+	var mentionNames MentionNameResolver
+	if cfg.MentionNamesEnabled {
+		userCache, cerr := userstore.NewCache(userstore.NewMongoStore(db.Collection("users")),
+			cfg.UserCacheSize, cfg.UserCacheTTL)
+		if cerr != nil {
+			// Degrade rather than exit: a bad cache size/TTL costs display names in
+			// push bodies, which is not worth refusing to deliver notifications at all.
+			slog.Error("init user cache failed, mention display names disabled", "error", cerr)
+		} else {
+			mentionNames = newUserMentionNames(userCache, cfg.MentionNamesTimeout)
+			slog.Info("mention display names enabled", "user_cache_size", cfg.UserCacheSize,
+				"user_cache_ttl", cfg.UserCacheTTL, "lookup_timeout", cfg.MentionNamesTimeout)
+		}
+	} else {
+		slog.Info("mention display names disabled", "reason", "MENTION_NAMES_ENABLED=false")
+	}
+
 	handler := NewHandler(HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
@@ -307,6 +264,7 @@ func main() {
 		Hook:               noopVetoer{},
 		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
+		MentionNames:       mentionNames,
 		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
@@ -402,7 +360,7 @@ func main() {
 				// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
 				// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
 				jobguard.Run(msg, func() {
-					handlerCtx, reqID := natsutil.StampRequestID(msgCtx, msg.Headers(), msg.Subject())
+					handlerCtx, reqID := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 					// Migrated events carry X-Migration: live — the source already delivered them, so
 					// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
 					if natsutil.IsMigrationLiveHeader(msg.Headers()) {
@@ -432,7 +390,7 @@ func main() {
 		"site", cfg.SiteID,
 		"large_room_threshold", cfg.LargeRoomThreshold,
 		"push_recipient_batch_size", cfg.PushRecipientBatchSize,
-		"valkey_addrs", cfg.ValkeyAddrs,
+		"valkey_addrs", cfg.Valkey.Addrs,
 		"presence_enabled", cfg.PresenceEnabled,
 		"badge_count_enabled", cfg.BadgeCountEnabled,
 		"user_settings_enabled", cfg.UserSettingsEnabled,
