@@ -838,6 +838,16 @@ to this contract.
 | `preview_warmback_dropped_total` | counter | history-service | on first shed job | none — the job is shed before any store call, so no driver metric sees it | warm-back saturation. The writer queue is bounded and a full queue drops the job, so a rising share means rooms stay on the lazy bucket walk — which is SLO-4's cost model, making this a leading indicator for the walk-depth tail `sli-slo.md` §3 Caveats names |
 | `preview_warmback_failed_total` | counter | history-service | on first failed warm-back write | partial: Mongo driver metrics cover write I/O broadly, not this operation | the same outcome as `dropped` reached the other way — the write was attempted and lost. Separate because saturation and a broken store need different responses |
 
+**The three `preview_warmback_*` rows are provisional in their Read-by column.**
+They arrived with #406, which merged before this registry existed, so nobody was
+asked the question this table exists to ask. The rows above are read off the
+implementation and the author's own comment — *"counts what the queue would
+otherwise hide … a shed job and a failed write are both ways a room silently
+stays on the lazy walk"* — not off a dashboard or alert that consumes them
+today. Whoever owns #406 should confirm or replace them; if the honest answer is
+that nothing reads these, §13.4 step 1 applies and the finding is the metrics,
+not the rows.
+
 #### `messages_canonical_published_total` — three caveats
 
 **1. It is an approximate PubAck-based publish count, not an exactly-once
@@ -850,9 +860,13 @@ an undercount of one. No application counter can close that; an exact denominato
 needs a server-side stream delta or a persisted ledger. `sli-slo.md` §0.1 already
 labels these numerators approximate.
 
-**2. `broadcast_path="unknown"` is a validity signal, not a bucket.** It is
-emitted when the room-meta lookup fails, and it biases SLO-1b in the **green**
-direction: a genuine channel message whose lookup failed leaves the
+**2. `broadcast_path="unknown"` is a validity signal, not a bucket.** Two things
+produce it and they are not equally benign: the room-meta lookup failed, or the
+room carries a type neither service recognises. In the second case
+broadcast-worker's dispatch hits its `default:` and logs *"unknown room type,
+skipping fan-out"* — the message is dropped, not merely unmeasured. The label
+cannot separate them; the log line beside it can. Either way it biases SLO-1b in
+the **green** direction: a genuine channel message whose lookup failed leaves the
 `room_subject` denominator entirely, while the enqueue that follows it still
 increments the numerator — so a Mongo blip *raises* the measured ratio at exactly
 the moment the system is degraded. The rule is therefore zero-tolerance rather
@@ -877,16 +891,6 @@ numerator (`broadcast_channel_enqueue_total`) is consumer-side, so a JetStream
 redelivery increments it again while this denominator does not move. That is the
 correct trade — an outage-safe denominator is worth an over-countable numerator —
 but a panel that silently clamps at 1 hides the redelivery it is evidence of.
-
-**The three `preview_warmback_*` rows are provisional in their Read-by column.**
-They arrived with #406, which merged before this registry existed, so nobody was
-asked the question this table exists to ask. The rows above are read off the
-implementation and the author's own comment — *"counts what the queue would
-otherwise hide … a shed job and a failed write are both ways a room silently
-stays on the lazy walk"* — not off a dashboard or alert that consumes them
-today. Whoever owns #406 should confirm or replace them; if the honest answer is
-that nothing reads these, §13.4 step 1 applies and the finding is the metrics,
-not the rows.
 
 ### 13.4 Adding an instrument
 

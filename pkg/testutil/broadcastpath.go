@@ -16,14 +16,32 @@ import (
 const SampleThreadParentMessageID = "0123456789abcdefghij"
 
 // BroadcastPathCase is one row of the shared classification table.
+//
+// The two tshow fields are separate on purpose. A case is consumed at two
+// different points on the same message's path — message-gatekeeper sees the
+// client's request, broadcast-worker sees the canonical message — and the
+// gatekeeper normalizes between them. Carrying one field and feeding it to both
+// would silently drop the only case where they differ: a client that sets tshow
+// on a send with no thread parent. TestCasesNormalizeConsistently asserts the
+// two stand in the gatekeeper's normalization relation, so a row cannot describe
+// a message the gatekeeper could never produce.
 type BroadcastPathCase struct {
 	Name                  string
 	ThreadParentMessageID string
-	// TShow is the normalized value (req.TShow && ThreadParentMessageID != ""),
-	// which is what lands on the canonical message.
+	// RequestTShow is what the client sent — model.SendMessageRequest.TShow, the
+	// input to message-gatekeeper.
+	RequestTShow bool
+	// TShow is the normalized value (RequestTShow && ThreadParentMessageID != "")
+	// that lands on the canonical message, and so the input to broadcast-worker.
 	TShow    bool
 	RoomType model.RoomType
 	Want     broadcastpath.Path
+}
+
+// NormalizedTShow is the gatekeeper's rule, exposed so a test can assert the
+// table's two tshow fields agree with it rather than restating it.
+func (c BroadcastPathCase) NormalizedTShow() bool {
+	return c.RequestTShow && c.ThreadParentMessageID != ""
 }
 
 // BroadcastPathCases is the table that message-gatekeeper's label and
@@ -67,6 +85,7 @@ func BroadcastPathCases() []BroadcastPathCase {
 			// worker sends it down the room-subject path, not the thread path.
 			Name:                  "thread reply with tshow in a channel room",
 			ThreadParentMessageID: SampleThreadParentMessageID,
+			RequestTShow:          true,
 			TShow:                 true,
 			RoomType:              model.RoomTypeChannel,
 			Want:                  broadcastpath.RoomSubject,
@@ -74,19 +93,22 @@ func BroadcastPathCases() []BroadcastPathCase {
 		{
 			Name:                  "thread reply with tshow in a dm",
 			ThreadParentMessageID: SampleThreadParentMessageID,
+			RequestTShow:          true,
 			TShow:                 true,
 			RoomType:              model.RoomTypeDM,
 			Want:                  broadcastpath.DM,
 		},
 		{
-			// The normalized tshow is false here, so this is not a thread reply
-			// at all — it is an ordinary channel message whose TShow the
-			// gatekeeper ignored. Passing req.TShow instead of the normalized
-			// value is what this row catches.
-			Name:     "tshow with no thread parent",
-			TShow:    false,
-			RoomType: model.RoomTypeChannel,
-			Want:     broadcastpath.RoomSubject,
+			// The client asked for tshow on a send that carries no thread parent.
+			// The gatekeeper normalizes that away, so the canonical message
+			// carries TShow=false and this is an ordinary channel message — the
+			// one row where the request and the canonical message disagree, and
+			// the reason the two fields are separate.
+			Name:         "tshow with no thread parent",
+			RequestTShow: true,
+			TShow:        false,
+			RoomType:     model.RoomTypeChannel,
+			Want:         broadcastpath.RoomSubject,
 		},
 		{
 			// How a failed room-meta lookup arrives: no type to switch on.

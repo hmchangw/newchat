@@ -293,7 +293,9 @@ func TestHandler_processMessage_RecordsBroadcastPath(t *testing.T) {
 				ID: idgen.GenerateMessageID(), Content: "hello",
 				RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 				ThreadParentMessageID: tc.ThreadParentMessageID,
-				TShow:                 tc.TShow,
+				// The request field, not the normalized one: this handler is
+				// what does the normalizing.
+				TShow: tc.RequestTShow,
 			}
 			_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
 			require.NoError(t, err)

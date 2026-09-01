@@ -51,6 +51,20 @@ func TestThreadWinsOverEveryRoomType(t *testing.T) {
 	}
 }
 
+// TestCasesNormalizeConsistently is the guard on the shared table's two tshow
+// fields. message-gatekeeper feeds a row's RequestTShow to the handler and
+// broadcast-worker feeds its TShow to the worker; a row whose two values do not
+// stand in the gatekeeper's normalization relation describes a message the
+// gatekeeper could never produce, and both services would then be asserted
+// against a fiction.
+func TestCasesNormalizeConsistently(t *testing.T) {
+	for _, tc := range testutil.BroadcastPathCases() {
+		assert.Equal(t, tc.NormalizedTShow(), tc.TShow,
+			"case %q: TShow is not what the gatekeeper would normalize RequestTShow=%v with parent %q to",
+			tc.Name, tc.RequestTShow, tc.ThreadParentMessageID)
+	}
+}
+
 func TestPathIsValid(t *testing.T) {
 	for _, p := range broadcastpath.All {
 		assert.True(t, p.Valid(), "%q is in All but not Valid", p)

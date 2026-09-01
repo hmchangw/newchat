@@ -32,9 +32,12 @@ const (
 	Thread Path = "thread"
 	// DM is per-account fan-out for a DM or bot-DM room.
 	DM Path = "dm"
-	// Unknown is the fail-open value: the route could not be determined, most
-	// often because the room-meta lookup failed. It is a validity signal rather
-	// than a bucket — see docs/specs/o11y/nats-metrics-contract.md §13.3.
+	// Unknown is the fail-open value, and two very different things produce it:
+	// the room-meta lookup failed, or the room carries a type nothing here
+	// recognises. The second is not merely unmeasured — broadcast-worker's
+	// dispatch has no branch for it and drops the message — so Unknown is a
+	// validity signal rather than a bucket, and the log line beside it is what
+	// separates the two. See docs/specs/o11y/nats-metrics-contract.md §13.3.
 	Unknown Path = "unknown"
 )
 

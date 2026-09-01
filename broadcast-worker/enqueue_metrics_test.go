@@ -146,12 +146,6 @@ func TestHandler_ChannelEnqueue_RecordsOutcomes(t *testing.T) {
 // drift, SLO-1b's halves count different messages and the ratio is worthless.
 func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 	for _, tc := range testutil.BroadcastPathCases() {
-		if tc.Want == broadcastpath.Unknown {
-			// unknown is a failed room-meta lookup at the gatekeeper. Here the
-			// lookup is a separate call that would fail the handler outright, so
-			// there is no dispatch branch to compare against.
-			continue
-		}
 		t.Run(tc.Name, func(t *testing.T) {
 			pub := &mockPublisher{}
 			h, store, us, keyStore, reader := enqueueHandler(t, false, pub)
@@ -159,9 +153,15 @@ func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(room), nil).AnyTimes()
 			us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 			keyStore.EXPECT().Get(gomock.Any(), gomock.Any()).Return(testRoomKey(t), nil).AnyTimes()
-			store.EXPECT().GetThreadFollowers(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-			store.EXPECT().ListRoomMembers(gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
-			store.EXPECT().GetHistorySharedSince(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+			store.EXPECT().GetThreadFollowers(gomock.Any(), gomock.Any()).
+				Return(map[string]struct{}{"alice": {}}, nil).AnyTimes()
+			// Real members, not nil: with an empty room every non-room_subject
+			// route publishes nothing, and "no ok was recorded" would then be
+			// satisfied by a fan-out that never happened.
+			store.EXPECT().ListRoomMembers(gomock.Any(), gomock.Any()).
+				Return(testDMSubs, nil).AnyTimes()
+			store.EXPECT().GetHistorySharedSince(gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(nil, nil).AnyTimes()
 
 			evt := model.MessageEvent{
 				Event:  model.EventCreated,
@@ -169,19 +169,34 @@ func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 				Message: model.Message{
 					ID: "msg-1", RoomID: "room-1", UserID: "user-1", UserAccount: "sender",
 					Content: "hello", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+					// The canonical field, not the request one: this worker
+					// receives what the gatekeeper already normalized.
 					ThreadParentMessageID: tc.ThreadParentMessageID,
 					TShow:                 tc.TShow,
 				},
 			}
 			data, err := json.Marshal(evt)
 			require.NoError(t, err)
-			// The dispatch itself is what is under test; a downstream failure on
-			// a route this case does not care about must not mask it.
-			_ = h.HandleMessage(context.Background(), data)
+			require.NoError(t, h.HandleMessage(context.Background(), data))
 
 			want := map[string]int64{}
-			if tc.Want == broadcastpath.RoomSubject {
+			switch tc.Want {
+			case broadcastpath.RoomSubject:
 				want["ok"] = 1
+				assert.NotEmpty(t, pub.records, "the message was never dispatched anywhere")
+			case broadcastpath.Unknown:
+				// The second producer of `unknown`: a room type the worker's
+				// dispatch has no branch for. It logs and returns nil — the
+				// message is dropped, not merely unmeasured — which is why the
+				// contract calls the label a validity signal rather than a
+				// bucket. Pinned here so a future dispatch branch for a new room
+				// type cannot land without the gatekeeper's label learning it.
+				assert.Empty(t, pub.records, "an unrecognised room type must reach no fan-out at all")
+			default:
+				// Without the publish count, "no ok was recorded" is satisfied
+				// by a handler that returned before dispatching at all, and the
+				// case would prove nothing about routing.
+				assert.NotEmpty(t, pub.records, "the message was never dispatched anywhere")
 			}
 			assert.Equal(t, want, enqueueCounts(t, reader),
 				"the numerator must fire exactly on the route the gatekeeper labels room_subject")

@@ -431,10 +431,14 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// tshow ("Also send to channel") is only meaningful on a thread reply: it asks
 	// for the reply to also appear in the parent room's channel timeline. On a
 	// non-thread send it is normalized to false (ignored, not rejected) — see
-	// docs/client-api.md §msg.send. It is computed here rather than at the build
-	// site below because the broadcast_path classification needs the *normalized*
-	// value: classifying on req.TShow would call a tshow=true send with no thread
-	// parent a thread reply.
+	// docs/client-api.md §msg.send.
+	//
+	// It moved up from the message build site because broadcast_path classifies
+	// on it. Passing req.TShow instead would not change any label today — the
+	// predicate already requires a thread parent, so the two values differ only
+	// where the predicate ignores both — but it is the normalized value that
+	// lands on the canonical message broadcast-worker later routes, and the label
+	// has to be computed from the same thing the worker will see.
 	tshow := req.TShow && isThreadReply
 
 	// The room fetch now serves two callers with different conditions, so the two

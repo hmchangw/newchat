@@ -177,7 +177,8 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
   **first**, else channel → `room_subject`, else DM/BotDM → `dm`, else `unknown`.
   The rule lives in `pkg/broadcastpath` and both services are asserted against one
   shared table, so the two halves of SLO-1b cannot drift apart. This matters
-  because a **channel thread reply** (`TShow=false`) is a channel room yet routes to per-account thread
+  because a **channel thread reply** (`TShow=false`) is a channel room yet routes
+  to per-account thread
   fan-out, **not** `publishChannelEvent` — a `room_type="channel"` denominator
   would count it while no `broadcast_channel_enqueue_total` fires, wrongly
   depressing SLO-1b/2. (gatekeeper resolves room type at the emit site to set the
@@ -185,9 +186,15 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
   - **SLO-1a** uses the **all-`broadcast_path` total** (persistence covers every message).
   - **SLO-1b/2** use the **`broadcast_path="room_subject"` slice only** — v1
     excludes the `thread`/`dm` routes (see below).
-  - **`unknown` is a validity signal, not a bucket.** It is emitted when the
-    gatekeeper's room-meta lookup fails, and a metric must never fail a message,
-    so the send goes through labelled `unknown`. It biases SLO-1b **green**: a
+  - **`unknown` is a validity signal, not a bucket.** Two things produce it, and
+    they are not equally benign. The gatekeeper's room-meta lookup failed, so the
+    route is unknown — a metric must never fail a message, so the send goes
+    through labelled `unknown`. **Or** the room carries a type neither service
+    recognises, in which case broadcast-worker's dispatch hits its `default:` and
+    logs *"unknown room type, skipping fan-out"* — the message is dropped, not
+    merely unmeasured. The label cannot tell the two apart; the log line beside
+    it can, and the second case is an incident rather than a measurement gap.
+    Either way it biases SLO-1b **green**: a
     genuine channel message whose lookup failed leaves the `room_subject`
     denominator entirely, while the enqueue that follows it still increments the
     numerator — so a Mongo blip *raises* the measured ratio at exactly the moment
@@ -615,7 +622,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P | Work | Unlocks |
 |---|---|---|
 | P1 | ✅ `natsrouter` metrics middleware (`rpc_server_call_duration_seconds{rpc_method, error_type}`, OTel RPC semconv) | SLO-4/5 + dashboards for all non-named RPCs |
-| P2 | **P2a landed:** gatekeeper `messages_canonical_published_total{broadcast_path}` (upstream denominator) + `messages_canonical_publish_duplicate_total`, broadcast-worker `broadcast_channel_enqueue_total{outcome}`. **P2b outstanding:** the age histogram. J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
+| P2 | J1 counters. **Landed (P2a):** gatekeeper `messages_canonical_published_total{broadcast_path}` (upstream denominator) and `messages_canonical_publish_duplicate_total`; broadcast-worker `broadcast_channel_enqueue_total{outcome}`. Message-worker persistence already ships, but as `message_worker_persistence_total{message_kind,result}` rather than the `messages_persisted_total{outcome}` this document writes — real drift, unresolved, and renaming it would break existing dashboards. **Outstanding (P2b):** `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |
