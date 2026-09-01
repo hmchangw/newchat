@@ -168,3 +168,35 @@ The federation partition, subject builders, and forward lane are correct and int
 - `low` — Assert `evt.Envelope`'s `type`/`destSiteId` against the parsed subject in `HandleEvent`, treating a mismatch as `errcode.Permanent` — cheap guard against a producer building envelope and subject from different variables.
 - `low` — Promote `federationForwardTimeout` to a `FORWARD_TIMEOUT` env knob with `envDefault:"3s"`.
 - `low` — Add a table-driven test asserting `ConcurrentEventTypes ∪ OrderedEventTypes` equals the set of types actually passed to `outbox.Publish` across producers, so a new producer type fails a test rather than a runtime publish.
+
+---
+
+## 7. Performance — 3 / 5
+
+The lane design, jsretry discipline and pump-goroutine accounting are all correct, but the client-side capacity knobs (one shared worker pool, per-peer prefetch, a 10-minute backoff tail on a `MaxAckPending=1` lane) undo much of the per-destination isolation the consumer split exists to provide.
+
+### Findings
+- `high` — the worker pool is shared across every peer's concurrent lane, so a slow peer defeats the per-destination isolation the design claims. `sem` is one global `chan struct{}` of `MaxWorkers` — `outbox-worker/main.go:114` — handed to every `drainPool` call — `outbox-worker/main.go:142`. Each forward can block for the full 3s publish timeout (`outbox-worker/handler.go:31`), so one unreachable peer's first-delivery burst can hold all 100 slots and throttle forwarding to healthy peers. The server-side ack-pending isolation described at `outbox-worker/main.go:118-124` has no client-side counterpart.
+
+- `high` — the ordered FIFO lane's recovery latency is bounded by the backoff tail, not by the peer outage. `MaxAckPending=1` (`outbox-worker/main.go:279`) means one parked message blocks the whole per-destination membership lane, and `jsretry.DefaultBackoff` (`outbox-worker/main.go:106`) walks to a 10-minute tail (`pkg/jsretry/jsretry.go` `DefaultBackoff`). After a peer heals, `member_added`/`member_removed`/`room_renamed` still sit un-retried for up to 10 minutes, and every subsequent event on that lane waits behind them. `DefaultBackoff` suits per-message retry, not a head-of-line-blocked lane.
+
+- `medium` — ordered-lane in-flight handlers are not covered by `wg`, so shutdown can cut a forward mid-publish. `process` for the ordered lane runs inside the nats.go subscription callback goroutine (`ocons.Consume`, `outbox-worker/main.go:149`); `ConsumeContext.Stop()` only closes `done` and returns immediately (nats.go@v1.50.0 `jetstream/pull.go:769-781`). Shutdown calls `cc.Stop()` (`outbox-worker/main.go:173`) and then `wg.Wait()` (`outbox-worker/main.go:179`), which tracks only `drainPool` and its per-message goroutines, then drains NATS. An in-flight ordered forward loses its connection mid-`PublishMsg` and its Ack/Nak fails. This is exactly the race the `drainPool` comment at `outbox-worker/main.go:196-201` argues must not happen — the ordered lane simply wasn't given the same treatment.
+
+- `medium` — prefetch scales per peer while concurrency is global, so buffered messages can age past `AckWait`. Each lane pulls `2*MaxWorkers` (`outbox-worker/main.go:136`) — with P peers that is `2·P·MaxWorkers` already-delivered messages queued against a pool of `MaxWorkers`. Effective `AckWait` is 30s (`pkg/stream/consumer.go:19`, head of the derived `BackOff`), so at ~3s per stalled forward a backlog only a few hundred deep re-delivers server-side and the same event is forwarded twice.
+
+- `medium` — the "timed-out-but-delivered forward re-forwards safely" claim (`outbox-worker/handler.go:56`) depends on a dedup window nothing pins. `js.PublishMsg` carries `WithMsgID` (`outbox-worker/main.go:92`), but JetStream's duplicate window defaults to 2 minutes and neither `stream.Inbox` (`pkg/stream/stream.go:66-74`) nor `bootstrapStreams` (`outbox-worker/bootstrap.go:43-49`) sets `Duplicates`. `DefaultBackoff`'s 3rd/4th retries (2m, 10m) land outside that window, so a 3s timeout on a publish the server actually accepted produces a genuine duplicate at the destination.
+
+- `low` — every forward is a synchronous `PublishMsg` round-trip to the remote cluster (`outbox-worker/main.go:92`), so aggregate throughput is `MaxWorkers / cross-gateway RTT`, shared across all peers. `subscription_read` / `thread_read` are high-volume types on this lane (`pkg/outbox/outbox.go` `ConcurrentEventTypes`).
+
+- `nitpick` — the pump blocks on `sem <- struct{}{}` (`outbox-worker/main.go:217`) with no shutdown awareness, so it cannot exit promptly while the pool is saturated. Bounded by the 3s timeout, so harmless today.
+
+Positives verified: no `time.Sleep` synchronization, no bare `Nak()`/`NakWithDelay(0)`, no hardcoded `cc.BackOff` (derived via `stream.WithUnlimitedRedelivery`, `outbox-worker/main.go:238`), `MaxWorkers <= 0` fail-fast (`outbox-worker/main.go:55`), pump goroutine correctly counted in `wg`, no MongoDB/Cassandra paths.
+
+### Recommendations
+- `high` — give each concurrent lane its own bounded budget (per-peer sub-pool, or a per-peer cap inside the shared `sem`) so one unreachable peer cannot consume the global pool.
+- `high` — use a capped schedule (`LowLatencyBackoff`, or a bespoke 30s–60s tail) for the ordered lane; a 10-minute tail on a `MaxAckPending=1` lane charges the whole lane for one message's failure.
+- `medium` — track ordered-lane handlers: `wg.Add(1)`/`Done` inside `process` for that lane, or switch to `cc.Drain()` plus `<-cc.Closed()` in shutdown step 1 before `wg.Wait()`.
+- `medium` — size `PullMaxMessages` against the shared pool (e.g. `max(1, 2*MaxWorkers/len(peers))`), or scale `MaxWorkers` with peer count so prefetch cannot outlive `AckWait`.
+- `medium` — pin the INBOX `Duplicates` window (in `pkg/stream` and the ops/IaC provisioning) to at least the worst-case retry delay, or shorten the retry tail; otherwise the msgID dedup the handler relies on is best-effort.
+- `low` — for the concurrent lane, consider `PublishMsgAsync` with `PublishAsyncMaxPending` and settling on `PubAckFuture`, decoupling throughput from cross-site RTT.
+- `low` — export per-lane ack-pending / redelivery metrics so a stalled peer is visible before it shows up as federation lag.
