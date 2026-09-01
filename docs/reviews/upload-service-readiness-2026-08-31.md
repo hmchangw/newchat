@@ -93,3 +93,39 @@ Positives worth recording: `Store` holds exactly the two methods the handlers ne
 - `low` — Replace `NewHandler`'s scalar tail with a `handlerOptions`/`limits` struct so the call site names each bound.
 - `low` — Reorder to `Recovery → requestID → CORS → o11y → accessLog` so panics are caught and spans carry `request_id`.
 - `low` — Set `IdleTimeout` on the server and mount `mongoutil.BreakerConfig` with an `UPLOAD_` prefix.
+
+---
+
+## 4. Test coverage — 2 / 5
+
+Test *quality* is genuinely good — handler.go 92%, middleware.go 98.9%, mediatype.go 98.3%, generated mocks, no real infra in unit tests — but the service sits at 76.5%, under the CLAUDE.md Section 4 floor, which caps this dimension at 2.
+
+### Findings
+- `high` — Coverage is **76.5% (372/486 statements)**, below the 80% floor; per CLAUDE.md Section 4 this must not merge as-is — `coverage_by_service.txt:upload-service`
+  Composition: `main.go` 0/70, `store_mongo.go` 0/15, `store_minio.go` 3/14, `handler.go` 185/201. Excluding `main.go` and the two integration-covered store files the service is 369/387 (95.3%) — the shortfall is concentrated, not diffuse.
+- `medium` — `run()` is 0/70 statements (14.4% of the service) and is not pure wiring: it holds the DEV_MODE/OIDC required-config guard and the bucket-name default, both untested decisions — `upload-service/main.go:159-161`, `upload-service/main.go:151-154`
+- `medium` — `HandleUploadFile`'s rejection branches are uncovered while the *identical* branches on the images twin are tested: no-user 500, blank-email 500, non-multipart 400, and `fh.Open` failure are all 0% — `upload-service/handler.go:221-224,227-230,238-243,262-265`
+  The images equivalents exist at `handler_test.go:183`, `:193`, `:247` — the file endpoint is the one that runs MIME filtering, so its pre-Drive rejection path is the more important of the two.
+- `medium` — The stated "no orphaned Drive file" invariant is unasserted: dimensions are read before the Drive upload specifically so a read failure cannot orphan a file, yet that error branch is 0% and no test proves `UploadGroupImages` is *not* called on it — `upload-service/handler.go:283-290`
+  Same for the media-type resolver's error return (`handler.go:273-276`). Both are only reachable via a failing `Seek`, and the handler takes the reader straight from `fh.Open()` with no seam (`handler.go:261`), so as written they are structurally untestable — the reason they are 0%, not an oversight.
+- `medium` — `preprocessFiles`' third rejection reason, "failed to open file", is 0% — `upload-service/handler.go:464-466`
+  The other two per-file rejections are covered (size `handler_test.go:291`, extension `handler_test.go:270`); this one silently drops a file from a partial-success response, so its result-item shape is worth pinning.
+- `low` — `matchMediaType`'s exact-equality fallback is unreachable, so its 80% can never rise — `upload-service/mediatype.go:86`
+  `parseMediaTypes` routes only `*`, `*/*` and `type/*` into the wildcard slice (`mediatype.go:44-47`), and `matchSet` is the only caller, so `pattern == mime` cannot execute.
+- `low` — The SSO `account` fallback to `claims.Name` when `PreferredUsername` is empty is 0% — `upload-service/middleware.go:194-196`
+  Every downstream membership check keys on `user.Account`; nothing pins this derivation.
+- `low` — `store_mongo.go` (0/15) and `store_minio.Open` (3/14) show 0% only because their tests are behind `//go:build integration` and excluded from the unit profile — `upload-service/integration_test.go:1-115`
+  Those tests are well-formed (`TestMain` → `testutil.RunTests`, `testutil.MongoDB`/`testutil.MinIO`, not-found and missing-key paths both asserted). This is ~5.8 points of the headline gap that is not a real gap.
+- `low` — `upload_stream_test.go` carries no `//go:build integration` tag but stands up a live loopback HTTP server and pushes 100 MiB through it under `-race`, asserting a 16 MiB peak sampled process-wide every 10 ms — `upload-service/upload_stream_test.go:85-105`, `pkg/testutil/memtest.go:76-89`
+  A 10 ms sampler can miss a transient spike, so the guarantee is weaker than it reads, and it dominates the unit suite's runtime.
+- `nitpick` — Many tests miss the `Test<Type>_<Method>[_<Scenario>]` convention: `TestUpload_MissingRoomID_400`, `TestDownload_NotMember_403` name neither type nor method — `upload-service/handler_test.go:173`, `:653`
+  The same file's `TestHandler_HandleSetCookie_SetsCookieAttributes` (`:1218`) shows the intended form.
+
+### Recommendations
+- `high` — Mirror the four images-endpoint rejection tests onto `HandleUploadFile` (no-user, blank-email SSO caller, non-multipart, `fh.Open` failure). Copy-shape from `handler_test.go:183-257`; this alone recovers most of `handler.go`'s 16 uncovered statements.
+- `medium` — Give `HandleUploadFile` a reader seam (accept the opened file through a small `func(*multipart.FileHeader) (multipart.File, error)` field on `Handler`, defaulted to `fh.Open`) so a failing-`Seek` reader can be injected. Then assert the real invariant: on a dimensions/resolve failure the response is 500 **and** `fakeDrive.uploadGot.n == 0` — no orphaned Drive file.
+- `medium` — Extract `run()`'s two decisions into pure helpers — `requireOIDCConfig(cfg) error` and `bucketName(cfg) string` — and table-test them. Leave the rest of `run()` untested; connection wiring does not repay a test.
+- `low` — Add a `preprocessFiles` subtest for the open-failure branch, asserting the item is `{Status: "failure", Error: "failed to open file"}` and is excluded from `fileHeaders`.
+- `low` — Delete the unreachable `return pattern == mime` at `mediatype.go:86` rather than writing a test that cannot reach it; add a `middleware_test.go` case with `PreferredUsername: ""` and `Name: "alice"` to pin the account fallback.
+- `low` — Move `upload_stream_test.go` behind `//go:build integration` (or a `-short` guard) so `make test` is not carrying a 100 MiB sampled memory assertion under `-race`.
+- `nitpick` — Rename the `TestUpload_*` / `TestDownload_*` / `TestS3Download_*` families to `TestHandler_HandleUploadImages_*` etc. to match CLAUDE.md Section 4 naming.
