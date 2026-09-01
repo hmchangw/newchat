@@ -80,8 +80,8 @@ inside a JetStream handler with `AckWait=30s`. The path runs in `message-worker`
 (`message-worker/store_cassandra.go`), whose `MaxDeliver` is **17**, not the repo
 default 6 — `main.go:360` wraps its settings in `stream.WithOutageRetryBudget`.
 So a long thread does not degrade, it **terminally drops replies** after
-seventeen redeliveries spanning roughly two hours, while the stream looks
-healthy. The longer budget makes the drop slower to arrive, not less total: every
+seventeen **deliveries** — the first attempt plus sixteen redeliveries — spanning
+roughly two hours, while the stream looks healthy. The longer budget makes the drop slower to arrive, not less total: every
 one of those attempts re-runs the same full-partition scan and times out again.
 
 **Documentation is wrong about this.** `soak/cassandra-soak-plan.md` §1 states the
@@ -330,13 +330,14 @@ inter-site RTT.
 
 ### X9 — Delivery-budget exhaustion under a long outage · **NATS** · 🟢 largely mitigated
 
-**Corrected after reading the code.** `failure/nats-jetstream.md` §3 says
-message-gatekeeper does an "immediate `Nak()` against `MaxDeliver=5`", so "a short
-fault can burn the whole delivery budget in seconds". **The code does not do
-that.** `message-gatekeeper/handler.go:212` calls
+**Corrected after reading the code.** An earlier revision of
+`failure/nats-jetstream.md` §3 said message-gatekeeper does an "immediate `Nak()`
+against `MaxDeliver=5`", so "a short fault can burn the whole delivery budget in
+seconds" — **that document is fixed in this branch**, and the code never did
+that. `message-gatekeeper/handler.go:212` calls
 `jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, …)` — `1s / 5s / 30s / 2m / 10m`
 (`pkg/jsretry/jsretry.go:51`) — and `MaxDeliver` defaults to **6**, not 5
-(`pkg/stream/consumer.go:18`). The client-side budget is therefore about
+(`pkg/stream/consumer.go:20`). The client-side budget is therefore about
 **12.6 minutes**; the server-side `BackOff` for a message that goes un-acked is
 `{30s, 1m, 2m, 4m, 8m}`. A two-second dependency blip cannot exhaust either.
 
@@ -350,14 +351,32 @@ drops, and those are still invisible from consumer pending alone.
 arithmetic — does the configured budget exceed the longest outage you intend to
 survive — not instrumentation.
 
-**Test.** Inject a dependency outage longer than 12.6 minutes at sustained send,
-and confirm the loadgen ledger reports `missing_after_deadline` for the messages
-whose budget expired. That ledger result *is* the loss claim; a JetStream
-advisory consumer would add attribution (which consumer dropped it), not
-detection. Advisory capture needs a stream provisioned on the NATS cluster and is
-the platform team's territory — see
-[`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) §6 for the two
-in-territory alternatives.
+**Test — and it has to be split per consumer, because they have different budgets
+and different oracles.** An earlier revision of this section prescribed one
+outage "longer than 12.6 minutes" and one expected result. That does not work:
+12.6 minutes is *the gatekeeper's* budget, and if the gatekeeper exhausts, the
+message was never admitted — so nothing downstream can report it missing *after*
+a successful admission. Meanwhile the two consumers that are downstream need
+roughly two hours to exhaust anything.
+
+| Inject at | Budget to exceed | Oracle |
+|---|---|---|
+| **message-gatekeeper** (`MaxDeliver=6`) | ~12.6 min client-side | `chat_nats_terminal_failures_total{reason="max_deliver"}` on the gatekeeper, plus an **admission failure** — the send never becomes a canonical message. Do **not** expect a downstream `missing_after_deadline` for an admission that never happened |
+| **message-worker** (`MaxDeliver=17`) | ~2 h — read the live value first | Absence in Cassandra for messages that *were* admitted, plus the terminal counter on message-worker |
+| **broadcast-worker** (`MaxDeliver=18`) | ~2 h — read the live value first | Recipient absence for messages that *were* admitted, plus the terminal counter on broadcast-worker |
+
+The two-hour budgets make this an expensive test. Run the gatekeeper leg first:
+it is twelve minutes and it exercises the same mechanism.
+
+**Three signals, three different jobs — do not treat any one as "the only way".**
+
+| Signal | Covers | Blind to |
+|---|---|---|
+| **`chat_nats_terminal_failures_total{reason="max_deliver"}`** (`pkg/natsmetrics`, on `main` today) | The handler returned an error on its **final** delivery — the ordinary exhaustion path | Anything where the handler never completes: pod crash, OOM, hang, an `AckWait` expiry |
+| **loadgen's ledger** (`missing_after_deadline`) | End-to-end absence: the message never arrived, whatever killed it | Which consumer dropped it, and anything outside the run |
+| **Max-delivery advisories** | Completeness and **attribution** — including un-instrumented consumers and the un-acked paths the app counter cannot see | Nothing, but the stream is the platform team's to provision and is not available to us |
+
+
 
 ### X10 — Sparse/aged room history walk · **Cassandra** · 🟡
 

@@ -315,7 +315,7 @@ These are not new criteria — they are the ones easiest to get wrong.
 | SLO | Highest-ranked item covering it | Enforceable today? |
 |---|---|---|
 | SLO-1a (persist) | A1/A2 → B1; reconciled by A3/B2 soak ledger | Loadgen read-back only — **G4** for the ratio |
-| SLO-1b / SLO-2 (channel broadcast enqueue) | A1/A2 → B1 | **No** — G4 is the enforced boundary; loadgen L1 measures a different, downstream boundary |
+| SLO-1b / SLO-2 (channel broadcast enqueue) | A1/A2 → B1 | **No** — G4 is the *measurement* boundary, not an enforcement one: it is calibration-ready and attempt-based (see G4). loadgen L1 measures a different, downstream boundary |
 | SLO-3 (login) | A9 | Yes, client-side; auth-leg proxy per sli-slo §3 |
 | SLO-4 (enter channel) | A5 → B1 | Loadgen L1 only — **G9** for server-side |
 | SLO-5 (enter thread) | A5 → B1 | Loadgen L1 only — **G9** |
@@ -384,7 +384,8 @@ Added in rev 2, from the code review behind
    `extreme-scenarios.md` (X1) and the runbook.
 10. **X1's drop threshold was wrong for the same reason.** It read "terminally
    drops after five redeliveries"; the path runs in `message-worker`, so it is
-   seventeen. The longer budget makes the drop slower, **not less total** — each
+   seventeen **deliveries** (one attempt plus sixteen redeliveries). The longer
+   budget makes the drop slower, **not less total** — each
    attempt re-runs the same full-partition scan and times out again.
 
 ---

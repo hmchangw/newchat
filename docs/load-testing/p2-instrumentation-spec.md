@@ -135,8 +135,10 @@ signals survive.
 1. **No error budget for J1's delivery half.** Burn-rate alerting (`sli-slo.md`
    §7) is defined on event ratios. An error counter with no denominator cannot
    produce one, so SLO-1b and SLO-2 can never be alerted on the way every other
-   SLO is. They stay 🔧 permanently, and J1 ships with one of its three SLOs
-   enforceable.
+   SLO is. They stay 🔧 permanently. Note what P2 buys here is **approximate
+   burn-rate observation**, not enforcement: the counters are attempt-based, so a
+   real gate still waits on P7's logical-outcome ledger or a demonstrable
+   redelivery-bias bound.
 2. **SLO-2's failure mode has no proportional signal.** Consumer lag reports
    **queue depth, not age**. `sli-slo.md` §6 already makes this exact argument for
    federation: growth alone is insufficient, because a lane can park a small,
@@ -150,8 +152,8 @@ signals survive.
    the dashboards, and the investigation falls back to logs.
 4. **Calibration for 1b/2 is pushed out by a full window.** §0.2 asks for 4–6
    weeks of observation before targets are set. That clock cannot start until the
-   counters exist, so deferring P2 by N weeks delays *enforceable* J1 SLOs by
-   N + 6.
+   counters exist, so deferring P2 by N weeks delays *calibrated* J1 SLO targets
+   by N + 6. (Calibrated, not enforceable — see item 1.)
 5. **Every load-test verdict on 1b/2 stays one-sided.** A pass is conclusive; a
    miss is unattributable. Good enough for the first achievability run
    (`slo-measurement-map.md` §7), not good enough for a release gate.
@@ -169,16 +171,18 @@ which is the platform team's territory and not available to us. That constraint
 matters less than it looks, for three reasons.
 
 **The severity was overstated, and the source doc is stale.**
-`failure/nats-jetstream.md` §3 says message-gatekeeper does an "immediate `Nak()`
-against `MaxDeliver=5`", so "a short fault can burn the whole delivery budget in
-seconds". The code does not do that: `message-gatekeeper/handler.go:212` calls
+An earlier revision of `failure/nats-jetstream.md` §3 said message-gatekeeper
+does an "immediate `Nak()` against `MaxDeliver=5`", so "a short fault can burn
+the whole delivery budget in seconds". The code does not do that: `message-gatekeeper/handler.go:212` calls
 `jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, …)`, which is
 `1s / 5s / 30s / 2m / 10m` (`pkg/jsretry/jsretry.go:51`), and `MaxDeliver`
 defaults to **6**, not 5 (`pkg/stream/consumer.go:20`). The client-side budget is
 therefore about **12.6 minutes**, and the server-side `BackOff` for an un-acked
 message is `{30s, 1m, 2m, 4m, 8m}`. A two-second dependency blip cannot exhaust
 either. X9 drops from "highest-severity silent loss path" to "confirm the budget
-holds", and the two stale numbers in the failure doc should be corrected.
+holds". **`failure/nats-jetstream.md` is corrected in this branch**; the quotes
+above are of its earlier revision, kept because they are what the severity
+downgrade argues against.
 
 **What still needs watching, and how to see it without advisories.** An outage
 *longer than the budget* does still end in terminal drops. `msg.Metadata()`

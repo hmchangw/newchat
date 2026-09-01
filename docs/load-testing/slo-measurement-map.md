@@ -377,7 +377,7 @@ docker-local. Nothing new has to be built to run this.
 
 | SLO | Where loadgen sits vs the SLO's boundary | First number? |
 |---|---|---|
-| **1a** persist | Both counters exist and bracket the boundary exactly | ✅ **Real number.** `message_worker_persistence_total{message_kind=~"user\|thread_reply",result="success"}` ÷ `message_gatekeeper_messages_total{result="accepted"}`, as run-window deltas |
+| **1a** persist | Both counters exist and bracket the boundary — but **both count delivery attempts, not logical messages** | ⚠️ **Approximate run-window indicator, not a verdict.** `message_worker_persistence_total{message_kind=~"user\|thread_reply",result="success"}` ÷ `message_gatekeeper_messages_total{result="accepted"}`, as run-window deltas. A redelivery increments the numerator again, so the ratio can exceed 100%, and a lost message plus a double-processed one cancel exactly. Report it labelled per-attempt; **never as an SLO-1a verdict** — §2 and the summary table say the same, and this row used to disagree with them |
 | **1b** channel enqueue | No enqueue counter; loadgen observes hop 9, downstream of the boundary | ⚠️ **One-sided bound only** — see below |
 | **2** enqueue ≤ 1 s | Same | ⚠️ **One-sided bound only** — see below |
 | **3** login | loadgen drives the real HTTP leg; `http.server.request.duration` is the production counter | ✅ **Real number.** `max-rps --workload=login` |
