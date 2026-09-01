@@ -88,3 +88,39 @@ Correctly clean: no `os.Getenv`, no raw `fmt.Sprintf` subject building (all via 
 - `medium` — Move `subscriptionStore` and `BotSub` into `store.go` under the existing mockgen directive; delete `fakeSubStore`.
 - `low` — Delete `DevMode` and its compose entry, or wire it; collapse the duplicate `session.NewMongoStore` by exposing `EnsureIndexes` on `storeMongo`.
 - `low` — Unexport `BotplatformStore` → `botplatformStore` and `BotSub` → `botSub`.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+At **56.5% (545 stmts)** botplatform-service is below CLAUDE.md Section 4's 60% floor, and the shortfall is concentrated exactly where it hurts — the bot auth/authorization error branches, the cross-site routing decision, and both NATS federation forwarders are 0% or asserted-not-at-all.
+
+### Findings
+- `critical` — Coverage 56.5% (545 stmts), under the 60% floor; 80% is the merge requirement — `/home/user/newchat/botplatform-service/` (per `coverage_by_service.txt`)
+- `high` — `dm_ensurer.go` is 0% end-to-end (`newNATSDMEnsurer`, `Ensure`) — `botplatform-service/dm_ensurer.go:31-74`
+  The first-time-DM federation fallback: missing-session 500, `marshal identity`, timeout→`Unavailable`, and the `errcode.Parse` decode of a remote error reply are never executed. `bot_forwarder_test.go:20` already has a `fakeRequester` seam that makes this directly testable — this is an omission, not a hard case.
+- `high` — All four room-management forwarders are 0% — `botplatform-service/bot_forwarder.go:57,94,98,102`
+  `forwardRoomMgmt`'s 15s-timeout branch, `BotHandlerTimeout` mapping, and pass-through of bot-room-service's error envelope (`errcode.Parse`, line 86) are untested, while the structurally identical `forward` sits at 88.9%. Nothing verifies `createRoom`/`addMembers`/`removeMembers` build the right `subject.ServerBotRoom*` subjects.
+- `high` — `requireBot`'s store-failure branch is uncovered — `botplatform-service/middleware.go:69-72`
+  The bot-auth table at `middleware_bot_test.go:42-110` covers missing headers, unknown hash, userID mismatch, non-bot role and success, but has no `findByHashFn` returning a generic error, so the `errcode.Internal("find session")` path — the one that must NOT leak a 401-vs-500 distinction wrongly — is unverified.
+- `high` — Cross-site routing, the service's reason to exist, is asserted nowhere — `botplatform-service/routes_bot_test.go:25-45`
+  `alwaysLocalSub` always returns `SiteID: "site-a"` and `successForwarder`'s methods discard the `siteID` argument entirely, so no test proves `sub.SiteID` from `FindForBot`/`FindDMForBot` reaches the forwarder. The statement coverage on `botSendRoomMessage` (70%) / `handleMembersBatch` (73%) is vanity for the routing decision.
+- `high` — `mongoSubscriptionStore` is 0% with no integration test at all — `botplatform-service/subscription_store.go:40-76`
+  `integration_test.go` covers only login/validate/sessions/indexes. The `mongo.ErrNoDocuments → model.ErrSubscriptionNotFound` mapping at line 70 is what decides 403-not-a-member vs 500, and the `BuildDMRoomID` filter's agreement with bot-room-service is untested.
+- `medium` — `notMemberOrInternal` is 0% — `botplatform-service/bot_handlers.go:180`
+  The authorization verdict (403 `bot_not_a_room_member` vs infra 500) for every room-scoped bot endpoint has no test; `bot_handlers_test.go` mounts handlers with `h.subs` nil and only reaches pre-routing validation.
+- `medium` — Login credential-path branches uncovered: malformed JSON body (`handler.go:93`), `tokenGen` failure (`handler.go:132`), best-effort `DeleteSessionsBeyondCap` failure (`handler.go:152`) — `botplatform-service/handler.go`
+  The eviction branch in particular must not fail the login; nothing pins that.
+- `medium` — Rate-limit failure branches uncovered: missing principal → 500 (`middleware.go:127`), global-counter `IncrEx` error (`middleware.go:150`), and `botPrincipalFrom`'s not-present branch (`middleware.go:96`) — `botplatform-service/middleware.go`
+- `low` — Idempotency guard rails uncovered: missing principal (`middleware_idempotency.go:54`), body-read error (`:61`), sentinel `Del` failure (`:89`) — `botplatform-service/middleware_idempotency.go`
+- `low` — `accessLogMiddleware` 0%; no test asserts `request_id`/`bot_account`/`login_outcome` are emitted — `botplatform-service/middleware.go:23`
+- `low` — `store_mongo.go`'s 0% is partly an artifact: it is exercised only by `//go:build integration` tests (`integration_test.go:53`), which the profile excludes. Don't double-count it; `subscription_store.go` has no such excuse.
+- `nitpick` — Structure is otherwise compliant and good: per-test `gomock.NewController` (`handler_test.go:63`), no shared mutable state, injected `tokenGen`/`now` seams, no real NATS/Mongo in unit tests, and `TestMain` uses `testutil.RunTestsWithPrewarm(m, testutil.EnsureMongo)` (`integration_test.go:27-29`).
+
+### Recommendations
+- `critical` — Add a `dm_ensurer_test.go` table over the existing `fakeRequester`: nil session, marshal path, `nats.ErrTimeout`→`Unavailable`/`BotHandlerTimeout`, `errcode.Parse` remote-error pass-through, happy path asserting the `subject.ServerBotDMEnsure` subject and `HeaderBotIdentity`. Highest coverage-per-line in the service.
+- `high` — Mirror `bot_forwarder_test.go`'s existing cases onto `forwardRoomMgmt`: assert each of `createRoom`/`addMembers`/`removeMembers` builds its exact subject, sets the identity header, omits `X-Bot-Message-ID`, and maps timeout and errcode replies.
+- `high` — Extend the `requireBot` table with one `findByHashFn` returning a generic store error; assert 500 and that no `botPrincipal` is set.
+- `high` — Make routing assertable: have the fake forwarder record `siteID`, and add cases where `FindForBot`/`FindDMForBot` return `SiteID: "site-b"` (remote), `model.ErrSubscriptionNotFound` (→403 for room, →`Ensure` then local site for DM), and a generic error (→500).
+- `high` — Add integration tests for `mongoSubscriptionStore` using `testutil.MongoDB(t, …)`: hit, miss→`ErrSubscriptionNotFound`, DM lookup via `BuildDMRoomID`, and projection-only fields.
+- `medium` — Fill the login/rate-limit/idempotency error branches listed above; each is a two-line table case against mocks already in place.
