@@ -84,3 +84,34 @@ Verified compliant (no finding): sole OUTBOX ownership — only `outbox-worker` 
 - `medium` — Make an empty peer set explicit: either fail fast at startup (`ALL_SITE_IDS` is effectively required for this service) or fail the health check, so a misconfigured deploy cannot report healthy while forwarding nothing.
 - `low` — Move `drainPool`, `buildLaneConsumerConfig`/`build{Concurrent,Ordered}ConsumerConfig` and `federationPeers` into `consumer.go`, matching the existing test-file split and CLAUDE.md's `main.go` remit.
 - `low` — Emit a counter (o11y metric) for the malformed-event Ack-drop path in `handler.go:52` so producer-side `DedupID`/envelope regressions are alertable rather than log-only.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Statement coverage is 36.9% — far below the CLAUDE.md 60% critical floor — and the uncovered mass is exactly the durable-retry wiring (message disposition, dedup publish, lane pump), even though the handler-level tests that do exist are genuinely good.
+
+### Findings
+- `critical` — Coverage 36.9% (141 stmts), below the 60% floor and the 80% requirement. Structurally: `main.go` holds 118 of the 141 statements and 89 of them are uncovered; `handler.go` + `bootstrap.go` (23 stmts) are at 100% — `outbox-worker/main.go:46`
+  For the service that *is* the durable-retry guarantee, the untested 89 statements are the retry/park/forward wiring, not boilerplate.
+- `high` — The message-disposition closure `process` — `jobguard.Run` (Ack-on-panic poison drop), `logctx.ConsumeContext`, `jsretry.Settle` (permanent→Ack, transient→NakWithDelay) — is inlined in `main()` and has zero tests — `outbox-worker/main.go:103-108`
+  `broadcast-worker` extracts the identical concern as a named `guardedProcessor` covered at 100% (`broadcast-worker/main.go:547`); the precedent exists and is not followed here. Nothing pins that a panic Acks rather than crash-loops, or that a permanent error Ack-poisons rather than parking forever under `MaxDeliver=-1`.
+- `high` — The production publish closure — the only site that sets `jetstream.WithMsgID(msgID)`, i.e. the entire cross-site idempotency guarantee — is uncovered, and the integration suite *reimplements* it instead of calling it — `outbox-worker/main.go:90-96`, duplicated at `outbox-worker/integration_test.go:76-81`
+  Deleting `WithMsgID` from `main.go` would fail no test in the repo, while every redelivery would then double-apply at the destination.
+- `high` — `drainPool` is 50% covered: the only test drives the closed-iterator path — `outbox-worker/drainpool_test.go:124`. Uncovered are the per-message dispatch goroutine, the `MaxWorkers` semaphore bound, and the unexpected-iterator-error branch — `outbox-worker/main.go:212-215`
+  That branch logs and `return`s, permanently ending one peer's concurrent lane with the process still healthy and its OUTBOX backlog growing silently. No test asserts any behavior there.
+- `medium` — No test proves `DedupID` actually dedups at the destination. The outage test asserts arrival order and `State.Msgs == 2`, but never re-forwards the same DedupID to assert a single stored INBOX message — `outbox-worker/integration_test.go:348-354`. The claim it would verify is stated at `outbox-worker/handler.go:56`.
+- `medium` — `time.Sleep(300 * time.Millisecond)` is the synchronization point before the FIFO lane's `AckFloor`/`NumAckPending` assertions — `outbox-worker/integration_test.go:335`
+  CLAUDE.md §3 forbids sleep-based synchronization. Under CI load the sleep can expire before first delivery, so `AckFloor == 0` passes vacuously and `NumAckPending == 1` flakes.
+- `low` — Startup and shutdown decision points are untestable because they live in `main()` with `os.Exit`: `MAX_WORKERS <= 0` fail-fast (`main.go:55`), the zero-peer "events would sit unconsumed" warn (`main.go:124-127`), the four consumer-creation exits (`main.go:131-153`), and the worker-drain-timeout branch (`main.go:183-185`). `bot-message-worker/main.go:66` shows the `run(ctx) error` split that makes these reachable.
+- `nitpick` — Integration uses an in-process `natsserver.NewServer` (`integration_test.go:31-43`) rather than `testutil.NATS(t)`, so `TestMain`'s `testutil.RunTests(m)` reaps nothing. Widespread repo precedent (`broadcast-worker/consumeloop_test.go`, `room-worker/integration_test.go`), and it gives better per-test isolation — noted, not a defect.
+
+Quality of what *is* covered is high, not vanity: `HandleEvent` is 100% with permanent-vs-transient classification asserted via `errcode.IsPermanent` (`handler_test.go:52-94`), the two lane filter sets are golden-listed so a new `pkg/outbox` event type breaks the build (`consumer_config_test.go:264-308`), `federationPeers` is table-driven with descriptive subtests, and integration covers per-destination isolation and FIFO-through-outage. Tests are `package main`, independent (per-test site IDs, per-test embedded server), with no shared mutable state and no store mocks needed (pure relay, `PublishFunc` injected as a field per CLAUDE.md §4).
+
+### Recommendations
+- `high` — Extract `process` into a named `guardedProcessor(handler)` mirroring `broadcast-worker/main.go:547`, and unit-test the three dispositions against a fake `jetstream.Msg`: panic→Ack, permanent errcode→Ack, transient→`NakWithDelay` (never bare `Nak`).
+- `high` — Extract the publish closure into a package-level `newJSPublish(js) PublishFunc`, call it from both `main.go` and `integration_test.go` in place of `jsPublish`, and assert the forwarded message carries `Nats-Msg-Id == DedupID`.
+- `high` — Add a `drainpool_test.go` case that feeds N messages through a stub iterator and asserts (a) every message reaches `process`, (b) in-flight goroutines never exceed the semaphore cap, and (c) a non-`ErrMsgIteratorClosed` error terminates the pump — then decide whether that silent lane death should instead fail the health check.
+- `medium` — Add an integration case that publishes the same OUTBOX event twice with one DedupID and asserts the destination INBOX holds exactly one message.
+- `medium` — Replace `integration_test.go:335`'s sleep with `require.Eventually` on `NumAckPending == 1`, then assert `AckFloor == 0`.
+- `low` — Split `main()` into `main()` + `run(ctx, cfg) error` and a `validate(cfg) error`, making the `MAX_WORKERS`, zero-peer and drain-timeout branches table-testable; this alone moves the bulk of the 89 uncovered statements.
