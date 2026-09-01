@@ -195,3 +195,34 @@ Wire and subject-scoping mechanics are correct (`EncodeAccount` matches `pkg/sub
 - `medium` — delete `_INBOX.>` from `handler.go:312-313` and mirror `setup.sh`'s explicit "no `_INBOX` grant" rationale.
 - `medium` — document `/healthz` + `/readyz` in §2, and give `/readyz` a real check (OIDC JWKS reachability; botplatform when `BOTPLATFORM_URL` is set) or drop it and fix `docs/health-probes.md:11,17`.
 - `medium` — make `subject.UserRoomEvent` (and the other per-user event builders) call `EncodeAccount` so the grant contract is enforced in one place rather than by every caller's `isBot` guard.
+
+---
+
+## 7. Performance — 3 / 5
+
+The hot path itself is cheap and allocation-light (no DB, no JetStream, Ed25519 sign only) and the JWT jitter correctly de-synchronises fleet-wide re-auth, but the single most connection-critical service in the fleet ships with zero admission control and an unpooled upstream client that sibling services already tune correctly.
+
+### Findings
+- `high` — No admission control on the public, unauthenticated `POST /api/v1/auth`: the middleware chain is CORS → o11y → Recovery → RequestID → AccessLog only — no `ginutil.MaxConcurrency`, no `ginutil.LimitListener`, no `ginutil.Timeout` — `auth-service/main.go:111-125`, `auth-service/routes.go:11`.
+  `user-service` wires all three for the same Gin stack (`user-service/routes.go:25-27`, `user-service/main.go:387`); auth-service is the one endpoint every client connection must traverse, so it is the one that most needs a shed valve. `pkg/ginutil.MaxConcurrency` exists and returns 429 + Retry-After precisely for this.
+
+- `high` — Unknown-`kid` JWKS refetch amplification. `Validate` calls `verifier.Verify` (`pkg/oidc/oidc.go:133`); go-oidc's `RemoteKeySet` has **no minimum refresh interval** — a cache miss goes straight to `keysFromRemote` and re-fetches the IdP's JWKS (`go-oidc@v3.17.0/oidc/jwks.go:196-235`), serialised only by `inflight`. A caller submitting syntactically valid JWTs with random `kid` values drives a continuous 10s-timeout fetch loop against the IdP, one after another, at zero cost to the attacker — and with finding 1 there is nothing throttling the submission rate.
+
+- `medium` — The botplatform Resty client is built without `WithMaxIdleConns`, so it inherits `http.DefaultTransport`'s `MaxIdleConnsPerHost = 2` — `auth-service/main.go:79`. `pkg/botauth` permits 64 concurrent upstream validations (`pkg/botauth/botauth.go:41`), so every session-token request past the second pays a fresh TCP+TLS handshake. Both peer services that construct the identical validator do size the pool: `media-service/main.go:112` and `upload-service/main.go:191` pass `WithMaxIdleConns(32)`. This is a straight omission, not a deliberate difference.
+
+- `medium` — No per-request timeout, so `WriteTimeout` abandons the response while the handler keeps working. `srv.WriteTimeout` is 10s (`auth-service/main.go:125`) and the OIDC client timeout is also 10s (`pkg/oidc/oidc.go:78`, `httpTimeout`); a slow JWKS fetch therefore outlives the response deadline, and without `ginutil.Timeout` nothing cancels the request context. The goroutine, its buffers and its upstream socket stay held on a connection nobody will read. Under an IdP slowdown this compounds with finding 1 into unbounded goroutine growth.
+
+- `low` — Nothing is cached on either branch. Every client connect costs a full RSA signature verify (SSO) or a botplatform HTTP round trip (session); `pkg/botauth` coalesces only *concurrently* in-flight identical tokens and deliberately caches nothing between requests (`pkg/botauth/botauth.go:70-79`). The no-positive-cache choice is correctly justified for revocation, but *negative* results (`errInvalidToken`) carry no revocation risk and are exactly what a client retry storm generates.
+
+- `low` — On a startup listen failure `run` returns at `auth-service/main.go:146-149` without reaching `<-shutdownDone`, so `obsShutdown` never flushes and the `shutdown.Wait` goroutine is abandoned. The process exits, so it is not a true leak — but the traces and metrics explaining the startup failure are dropped.
+
+- `nitpick` — `big.NewInt(denom)` is re-allocated on every mint in `cryptoRandFloat` (`auth-service/handler.go:123`); the bound is a compile-time constant and belongs in a package-level `var`.
+
+### Recommendations
+- `high` — Add `ginutil.MaxConcurrency(cfg.MaxConcurrency, onShed)` and `ginutil.Timeout` on the `/api/v1/auth` route group, and wrap the listener with `ginutil.LimitListener(ln, cfg.HTTP.MaxConns)`, mirroring `user-service/routes.go:25-27` and `user-service/main.go:387`. Export the shed counter — it is the alert signal.
+- `high` — Bound JWKS refetch: gate `Validate` behind a token-bucket keyed on verification failures, or pre-parse the JWT header and reject an unrecognised `kid` against the cached key set before calling `Verify`, so an unknown `kid` cannot force an IdP round trip per request.
+- `medium` — Change `auth-service/main.go:79` to `restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32))`, matching media-service and upload-service and covering `botauth`'s 64-slot ceiling.
+- `medium` — Mount `ginutil.TimeoutConfig` as a named config field (`HTTP ginutil.TimeoutConfig`, as `tcard-service/main.go:43` and `portal-service/main.go:65` do), set it below `WriteTimeout`, and let it cancel the request context so an abandoned response releases its upstream call.
+- `low` — Add a small TTL-bounded negative cache for rejected tokens on both branches (seconds, not minutes) so retry storms are absorbed without touching the IdP or botplatform; positive results stay uncached.
+- `low` — Move `<-shutdownDone` (and the `obsShutdown` flush) ahead of the error return at `auth-service/main.go:146`, so startup-failure telemetry is exported.
+- `nitpick` — Hoist the `big.Int` bound in `cryptoRandFloat` to a package-level `var`.
