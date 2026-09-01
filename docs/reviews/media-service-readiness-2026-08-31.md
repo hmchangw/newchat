@@ -196,3 +196,38 @@ Cross-service contracts are clean where the strict rules bind — subject builde
 - `medium` — Correct the `custom_emojis` reader comments in `pkg/model/custom_emoji.go:6-7` and `media-service/store.go:36-37`: the collection currently has no in-repo reader besides media-service.
 - `low` — Pick one ETag shape (quote on emit, in `setImageCacheHeaders`) and fix the bot-upload example at `docs/client-api.md:7089` so the two upload endpoints document the same format.
 - `nitpick` — Add the projection to `store_mongo.go:109` (`minioKey`, `etag`, `contentType`).
+
+---
+
+## 7. Performance — 3 / 5
+
+Streaming, ETag/304 and the singleflight LRU are done well, but public cache headers leak onto error responses, avatar upload decodes untrusted images with no dimension pre-check, and the two hottest `<img src>` paths hit MongoDB uncached on every request.
+
+### Findings
+- `high` — bot-avatar upload calls `image.Decode` with no `image.DecodeConfig` dimension pre-check, so a small compressed PNG declaring huge dimensions allocates the full pixel buffer before any bound is applied — `media-service/upload.go:66`
+  `MaxBytesReader` caps the *body* at 1 MiB (`config.go:79`) but not the decoded raster. The emoji path already does this correctly in two phases (`emoji_upload.go:64-70`) with an explicit decompression-bomb comment; the avatar path has no `MAX_DIMENSION` knob at all.
+- `high` — `Cache-Control: public, max-age=21600` + `ETag` are written *before* the blob fetch, so a MinIO 500 or a not-found inherits them and becomes a shared-cache-storable error — `media-service/handler.go:75` then `:86-89`; same shape at `media-service/emoji_serve.go:59` then `:66-76`
+  A single transient MinIO blip is then pinned in CDN/browser caches for 6 h per key. `serveDefault`'s cacheable 404 is deliberate (`handler.go:52-59`); these are not.
+- `medium` — `Avatar` is the one find in the service with no projection, fetching the whole avatars doc when only `MinioKey`/`ETag` are read — `media-service/store_mongo.go:109`
+  CLAUDE.md §6 MongoDB: "every find/aggregation MUST specify an explicit projection". Every other query here projects precisely.
+- `medium` — no server-side cache on the avatar/emoji hot paths: an uncached room-avatar GET costs two sequential Mongo round trips (`RoomSite` at `media-service/handler.go:125`, then `Avatar` at `media-service/handler.go:147`) plus a MinIO `Stat`; the emoji GET costs `EmojiDoc` + `Stat` per image — `media-service/emoji_serve.go:47,65`
+  Only the account→employeeId lookup is cached (`cache.go:22-33`). A room list of N rooms is 2N Mongo finds on any cold browser cache; these docs are as near-immutable as the eid mapping and want the same LRU+TTL+singleflight treatment.
+- `medium` — `srv.WriteTimeout = 30 * time.Second` (`media-service/main.go:119`) directly contradicts the comment three lines above it claiming there is "no blanket HTTP timeout … a short deadline would cancel a slow up/download mid-stream" — `media-service/main.go:107-110`
+  `WriteTimeout` is exactly that blanket deadline: it spans the whole `c.DataFromReader` body write, truncating a slow mobile client mid-blob.
+- `medium` — uploads are stored and served at original resolution with no downscale or thumbnail, although every consumer renders 120 px (`avatar.go:63` viewBox 120, `avatar.go:79` `_120.JPG`) — `media-service/upload.go:75`
+  A 1 MiB original ships in full on every cache miss; a single 120 px derivative written at upload time would cut avatar egress by ~an order of magnitude.
+- `low` — `HandleEmojiList` returns the site's entire `custom_emojis` collection per RPC with no pagination, no `Limit`, and no cached copy — `media-service/emoji_nats.go:19`, `media-service/store_mongo.go:152-165`
+  Mitigated: the `(siteId, shortcode)` unique index (`store_mongo.go:130-133`) covers the sort, and the projection is tight. It is a per-login fan-in that grows unboundedly with the emoji set.
+- `low` — `drive.members` issues three sequential Mongo round trips; `UserByAccount` and `RoomMember` are independent and could run concurrently — `media-service/drive.go:68,79,90`
+- `low` — the singleflight loader detaches with `context.WithoutCancel(ctx)` and adds no deadline of its own — `media-service/cache.go:50`
+  `MONGO_SERVER_SELECTION_TIMEOUT` (2 s default) bounds selection only, not a socket read on an already-selected stalled server, so the `DoChan` goroutine can park indefinitely.
+- `nitpick` — no JetStream consumers in this service, so the `pkg/jsretry` / `BackOff` / `MaxAckPending` rules are N/A; no bare `Nak()`/`NakWithDelay(0)` exists to flag. Blob serving correctly streams via `c.DataFromReader` with a real `Content-Length` (`handler.go:93`, `emoji_serve.go:79`) rather than buffering — `media-service/minio.go:38-52`
+
+### Recommendations
+- `high` — Add `image.DecodeConfig` + a `MAX_DIMENSION` bound to `HandleBotUpload` before `image.Decode`, mirroring `validateEmojiImage`; extract that function so both paths share one guard.
+- `high` — Move `setImageCacheHeaders` to *after* a successful `blobs.Get`, and on the error/404 paths emit `Cache-Control: no-store` (keep the deliberate cacheable 404 in `serveDefault`).
+- `medium` — Add the missing projection `{minioKey:1, etag:1, contentType:1}` to `mongoStore.Avatar`.
+- `medium` — Generalize `eidCache` into a small TTL-LRU+singleflight used for `RoomSite`, `Avatar` and `EmojiDoc`; keep the TTL well under `CACHE_MAX_AGE_SECONDS` so an avatar change still propagates within the browser-cache window.
+- `medium` — Either drop `WriteTimeout` and rely on the per-request context (matching the stated intent) or fix the comment; if kept, set it from the largest expected blob ÷ worst-case client bandwidth.
+- `medium` — Generate and store a 120 px derivative at upload time and serve it from the GET paths, keeping the original only as a source.
+- `low` — Give the detached singleflight fetch its own `context.WithTimeout`, and run `UserByAccount`/`RoomMember` concurrently in `HandleDriveMembers`.
