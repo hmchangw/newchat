@@ -81,8 +81,9 @@ and auth-service connection coordinates. See
 **Endpoint:** `GET /api/settings`
 **Reply:** synchronous HTTP response
 
-Deployment-level frontend configuration — the backend API generation to target (`apiVersion`)
-and the OTEL telemetry base URL (`otelBaseUrl`). See
+Deployment-level frontend configuration — the backend API generation to target (`apiVersion`),
+the OTEL telemetry base URL (`otelBaseUrl`), the bot-login gate (`botLoginEnabled`), and the
+NATS failover peer list (`sites`, absent in a single-site deployment). See
 [../client-api.md §2.5](../client-api.md#25-http--get-apisettings-portal-service).
 
 **Emits:** `None — HTTP-only.`
@@ -2268,12 +2269,18 @@ kill-switch off (`forbidden`, reason `emoji_delete_disabled`), store failure (`i
 ### Send Message
 
 **Subject:** `chat.user.{account}.room.{roomID}.{siteID}.msg.send`
+**Failover subject:** `chat.user.{account}.room.{roomID}.{siteID}.failover.msg.send`
 **Async reply:** `chat.user.{account}.response.{requestID}` (subscribe to `chat.user.{account}.>` to receive it)
 
 Publish + async-reply pattern — no `chat.user.{account}.>` reply. Covers plain message, thread reply,
 and quoted message; variant determined by optional fields.
 
 `{siteID}` must be the room's origin siteID.
+
+A client connected to a peer site (its own site's NATS unreachable) publishes to the
+**failover subject** instead — same payload, same reply, same JWT scope; the live subject's
+stream is on the cluster that is down. See
+[../client-api.md §Send Message](../client-api.md#send-message).
 
 **botDM rooms receive no `new_message` fan-out** — `broadcast-worker` skips botDM types.
 
