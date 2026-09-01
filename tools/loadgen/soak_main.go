@@ -86,6 +86,9 @@ func soakMaxPages(pageLimit int) int {
 type soakOptions struct {
 	Seed      int64
 	PageLimit int
+	// PoolOut, when non-empty, makes the seed phase write the clientsim
+	// pool artifact (the borrowed active users' accounts) to this path.
+	PoolOut string
 }
 
 func parseSoakArgs(args []string) (soakOptions, error) {
@@ -368,6 +371,7 @@ func runSoakSeed(
 	ctx context.Context,
 	cfg *config,
 	seed int64,
+	poolOut string,
 ) int {
 	db, keyStore, cleanup, err := connectStores(ctx, cfg)
 	if err != nil {
@@ -388,6 +392,14 @@ func runSoakSeed(
 	if err != nil {
 		slog.Error("seed Cassandra soak topology", "runId", cfg.Soak.RunID, "error", err)
 		return 1
+	}
+	if poolOut != "" {
+		if err := writePoolArtifact(poolOut, cfg.Soak.RunID, cfg.SiteID,
+			digestSoakConfig(&cfg.Soak), topology.ActiveUsers); err != nil {
+			slog.Error("write pool artifact", "error", err, "path", poolOut)
+			return 1
+		}
+		slog.Info("pool artifact written", "path", poolOut, "accounts", len(topology.ActiveUsers))
 	}
 	slog.Info(
 		"Cassandra soak topology seeded",
