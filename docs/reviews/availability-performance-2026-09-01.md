@@ -224,3 +224,59 @@ Everything else here recovers automatically once the fault clears (floored by th
 
 1. **`hr-sync-worker`** combines `MaxDeliver=-1` with `MaxAckPending=1` and classifies only decode errors as permanent. A Mongo write failure retries forever with one in-flight message and **nothing behind it moving** — the only consumer in the repo that requires operator intervention.
 2. **`outbox-worker`'s ordered lane** wedges permanently on any deterministically-unforwardable event (over `max_payload`, a peer whose INBOX was never provisioned, a decommissioned site still in `ALL_SITE_IDS`). `HandleEvent` wraps every publish failure in a plain `fmt.Errorf`, so **nothing is ever classified permanent**, and `MaxAckPending=1` means the head blocks every membership event to that peer, forever, with no dead-letter and no metric.
+
+---
+
+## 5. Journey: send a message → delivered
+
+**Steady-state p50 is genuinely good: ~10 ms end-to-end.** Every finding below is a *cliff*, not baseline slowness.
+
+Assumptions, stated so the arithmetic is checkable: NATS core RTT ~0.3 ms, JetStream PubAck ~2 ms, Valkey ~1 ms, Mongo indexed point read ~2 ms, Cassandra `LocalQuorum` ~4 ms, Cassandra LWT ~20 ms, one warm history RPC ~8 ms.
+
+| Hop | Round trips (serial unless noted) | p50 | Worst |
+|---|---|---|---|
+| client → MESSAGES | 1 JS publish + PubAck | 2 ms | — |
+| **gatekeeper** | 0 warm; up to **6 serial** | 6–10 ms | **6.15 s** |
+| gatekeeper → sender reply | 1 core publish | 0.3 ms | 0.3 ms |
+| broadcast-worker (delivery) | 0 warm; 4–5 cold | 3–6 ms | ~2 s+ |
+| message-worker (plain create) | 1 Cassandra batch | 5 ms | 10 s |
+| roomlist-worker | coalesced, off the path | — | — |
+| notification-worker | **6 serial + N/100 serial** | 10–20 ms | ~11 s+ |
+
+### 5.1 The sender's reply path — the highest-value target
+
+The sender is blocked awaiting `chat.user.{account}.response.{requestId}`. On the reply path today:
+
+- `resolveQuoteSnapshot` (2 s) completes **before** `resolveThreadParent` starts.
+- `resolveThreadParent` is itself fetch (2 s) + `waitFor(150 ms)` + refetch (2 s).
+- Neither `HandleJetStreamMsg` nor `processMessage` imposes an overall deadline, and `natsmetrics.Consume` supplies none.
+
+The two fetches are only coupled when the IDs are equal, so **a thread reply that also quotes something else runs two full serial RPCs that could run concurrently — 6.15 s worst case, with the sender blocked on all of it.** Running them in an `errgroup` under a single ~2.5 s deadline cuts the worst case to ~2.2 s.
+
+### 5.2 The thread-reply cliff in persistence
+
+Every thread reply costs `message-worker` **~15 serial round trips**, including:
+
+- **Two Cassandra LWTs** (`IF EXISTS`, Paxos, ~4 extra round trips each) re-stamping `thread_room_id` on *every* subsequent reply, though the stamp is immutable after the first (`store_cassandra.go:464-484` — verified).
+- **A full-partition scan with no `LIMIT` and no `COUNT`** on every reply (`pkg/threadcount/count.go:41-44` — verified). Its own comment explains why (`deleted` tombstones must be walked past, not counted), which makes it deliberate — and O(N) per reply, O(N²) per thread. A 20k-reply thread decodes 20k rows to add one message.
+
+And **`SerialConsistency` is never set anywhere in the repo** (verified — zero occurrences), so those LWTs take the server default `SERIAL` rather than `LOCAL_SERIAL`: **cross-DC Paxos on every thread reply.**
+
+### 5.3 The `@all` cliff
+
+`mentioned := mentionsAll || …` makes `EligibleForPush` return true for **every** member regardless of `isLargeRoom`, so a 10,000-member room yields 10,000 candidates. Then:
+
+- `mongoUserSettings.Snapshot` chunks at 512 **sequentially** under a single 2 s budget — 20 chunks, and its own comment concedes the tail "never gets read and fails open" (see §4.4).
+- 100 push batches are emitted **one at a time, each awaiting a PubAck**.
+
+### 5.4 Work done four times
+
+The gatekeeper does **not** put resolved mentions on the canonical event, so `mention.Parse` runs independently in `broadcast-worker`, `message-worker`, `roomlist-worker` and `notification-worker`, with three separate account→user resolutions against three separate L1 caches. The gatekeeper already does exactly this shape of lookup for the sender's display name, so the pattern is established. And `mention.Parse` is **uncapped** — a 20 KB body can carry ~1,600 distinct `@tokens`; `notification-worker` caps at 50 and `roomlist-worker` has a mention budget, but `broadcast-worker` and `message-worker` bound neither.
+
+### 5.5 Verified sound
+
+- **Channel fan-out is O(1) publishes, not O(members)** — one marshal, one publish to `chat.room.{roomID}.event`, NATS does the fan-out. **Room size does not enter the delivery budget at all.** This is the single most important thing the design gets right, and it is why the message path has no room-size cliff.
+- The gatekeeper carries thread-parent resolution on the canonical event **precisely so** downstream consumers skip their own RPC — on the healthy path that removes two history RPCs per thread reply. (§1's correlated loop is the failure of this optimisation, not its absence.)
+- `roomlist-worker` is genuinely off the delivery path: it holds messages un-acked and coalesces to a 250 ms flush, so no MongoDB write can NAK a delivered message. CLAUDE.md's account of that split is accurate.
+- `natsrouter` sheds rather than queues, so a saturated `history-service` returns `unavailable` fast and the gatekeeper degrades to its placeholder in microseconds rather than burning 2 s.
+- `message-gatekeeper` treats a failed quoted-parent fetch as soft-fail degradation rather than a NAK — the correct posture, and the contrast that makes `broadcast-worker`'s NAK on the same failure stand out.
