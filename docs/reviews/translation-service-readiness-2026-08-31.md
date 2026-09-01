@@ -126,3 +126,23 @@ Contract discipline is strong — subject builders throughout, and `docs/client-
 - `nitpick` — When `REQUEST_TIMEOUT` is added (D2), document the resulting timeout `unavailable` case in the §3.6 error table and in `docs/client-api/request-reply.md`.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+The token cache is genuinely well-engineered (lock-free reads, single-flight refresh), but the outbound HTTP path has no request deadline and no connection-pool sizing, so a slow upstream converts directly into saturation.
+
+### Findings
+- `high` — no per-request deadline anywhere: `main.go:112-116` installs no `HandlerTimeout`, so a handler runs until resty's own client timeout (`TRANSLATION_HTTP_TIMEOUT`, default 30s at `main.go:36`) plus up to 5s of token exchange (`token.go:59-62`). A NATS `Request` caller gives up in ~2s (the pattern used in `integration_test.go:48`), so with a degraded upstream all 100 admission slots stay occupied for ~35s doing work no one will read, and every other caller gets "service busy". The two knobs are unrelated numbers today with nothing tying them together.
+- `medium` — the idle connection pool is never sized — `translator_stream.go:51` and `token.go:64` call `restyutil.New` without `restyutil.WithMaxIdleConns`. `pkg/restyutil` documents the reason it exists: "the stdlib keeps only 2, so a third concurrent request pays a fresh handshake". Both clients are single-host with `MAX_CONCURRENCY=100`, so at load ~98 of 100 concurrent translate calls pay a fresh TCP+TLS handshake to the third-party endpoint. `media-service/main.go:112` and `upload-service/main.go:191` already use `WithMaxIdleConns(32)`.
+- `low` — on the 429 and 5XX early returns (`translator_stream.go:109-118`) the raw body is closed without being drained, so those connections cannot be reused — exactly the paths where the upstream is already struggling and reconnect cost is highest.
+- `low` — no input size cap: `handler.go:26` only rejects empty text, and `docs/client-api.md:6275` confirms "No length cap is enforced by the service". The merge buffers (`merged`, `nonSSE` at `translator_stream.go:121-122`) grow unbounded within the HTTP timeout, and oversized text is forwarded verbatim to a metered third-party API.
+
+No `time.Sleep`-for-synchronization, no goroutine without a termination path (the only concurrency is `sync.Mutex` + `atomic.Pointer` in `token.go:52-53`, with the read path correctly lock-free and the double-checked lock at `token.go:74-84` collapsing a stampede to one exchange). No MongoDB, Cassandra, JetStream or `jsretry` surface in this service, so the projection, `$lookup`, `Nak()`/`BackOff` and `USING TIMESTAMP` rules do not apply.
+
+### Recommendations
+- `high` — Install `HandlerTimeout` via `natsrouter.GuardConfig` and set `TRANSLATION_HTTP_TIMEOUT` below it (e.g. `REQUEST_TIMEOUT=5s`, HTTP 4s), so a handler can never outlive the caller that is waiting on it.
+- `medium` — Pass `restyutil.WithMaxIdleConns(n)` to both `restyutil.New` calls, sized from `MAX_CONCURRENCY`.
+- `low` — Drain a bounded prefix of the body (`io.CopyN(io.Discard, body, 4<<10)`) before closing on the 429/5XX returns to keep connections reusable.
+- `low` — Add a configurable `TRANSLATION_MAX_TEXT_BYTES` rejected as `bad_request` with a new reason, and document it in `docs/client-api.md` §3.6.
