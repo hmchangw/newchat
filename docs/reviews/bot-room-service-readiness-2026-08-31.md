@@ -120,3 +120,44 @@ Coverage is 49.0% (410 stmts) — below the 60% CLAUDE.md floor, so the dimensio
 - `medium` — Replace the hand-written `fakeStore`/`fakeKeyStore` with `mockgen` output in `mock_store_test.go` and add the `//go:generate mockgen` directive to `store.go`, per CLAUDE.md.
 - `medium` — Delete the package-level `testKeyStore`/`testKeySender`; construct doubles per test (or per subtest) so state cannot leak.
 - `medium` — Add a `Register` test that drives a router and asserts all five subjects resolve, including that the add/remove patterns bind `roomID`; add an integration test for `PublishWithMsgID` proving a repeat `msgID` is deduped by JetStream.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Layout, naming and store-interface discipline are clean and the comments genuinely explain WHY, but `handleRemove` has outgrown a single function, and three key-lifecycle helpers plus `parseIdentity` are copy-pasted from sibling services and have already drifted.
+
+### Findings
+- `high` — `handleRemove` is 150 lines carrying four interlocking invariants (batch pre-validation, a deferred `BustSubs`, a deferred rotation safety-net gated on a `rotated` flag, and a deferred-until-after-rotation federation queue), 64 of those 150 lines being comment — `bot-room-service/handler.go:396-542`
+  Every invariant is correct and documented, but they are only *readable* via the comments; the ordering contract is invisible in the code. Adding a fifth step (thread cleanup, audit event) means re-deriving all four orderings by hand.
+
+- `medium` — `keyPairOrHeal`, `rotateAndFanOut` and `fanOutKey` are re-implementations of `room-worker`'s, and have already diverged in behaviour, not just style — `bot-room-service/handler.go:546-613` vs `room-worker/handler.go:1702-1722`, `room-worker/handler.go:346-359`, `room-worker/handler.go:2571`
+  Divergences: bot's `keyPairOrHeal` tolerates `roomkeystore.ErrNoCurrentKey` from `Get` while room-worker's treats *every* `Get` error as fatal; bot emits no `roomkeymetrics.RecordStoreError`; bot's `fanOutKey` is serial and emits no `RecordFanoutErrors`, so bot-driven key fan-out failures are invisible on the dashboards that cover the user pipeline. `pkg/roomkeystore` already hosts `CommitRotation`/`GenerateKeyPair`, so the extraction point exists.
+
+- `medium` — `parseIdentity` is byte-identical (bar the doc comment) to `bot-message-handler`'s — `bot-room-service/handler.go:694-710` and `bot-message-handler/handler.go:206-222`
+  Both validate the same `model.HeaderBotIdentity` contract with the same `errcode.BotInvalidHeader` reason. A third bot service will copy it a third time; a validation change (e.g. requiring `AppID`) has to be found in N places.
+
+- `medium` — dead config plumbing: `ALL_SITE_IDS` → `parsePeers` → `handler.allSiteIDs` is stored and never read — `bot-room-service/handler.go:61,79`, `bot-room-service/main.go:29,172-185`
+  The only consumer is the startup `slog.Info` line (`main.go:150`). The field's own comment claims it drives "per-destination outbox federation", but federation destinations come from `u.SiteID` (`handler.go:262,348,488`). A misleading knob operators will set and expect to matter.
+
+- `medium` — the sysmsg dedup comment claims more than the code delivers — `bot-room-service/sysmsg.go:61` vs `handler.go:539`
+  "defeats double-emit on retry", but the suffix is a wall-clock read: `handleRemove` calls `h.now()` a *second* time at emit (`handler.go:539`) while create/add reuse the request-scoped timestamp (`:277`, `:371`). No variant survives a client retry, since each request mints a new `now()`. Inconsistent derivation plus a WHY-comment that is wrong is worse than no comment.
+
+- `low` — the "org expansion not yet supported" guard is triplicated with three different field names (`req.Orgs`, `req.OrgIDs`, `req.OrgIDs`) — `handler.go:189-192,293-296,401-404`
+  Concrete measure of "how hard is one new feature": shipping org expansion touches three handlers, three response builders, and `model.MembersAdded.Orgs`.
+
+- `low` — a 13-entry type-alias block re-labels `pkg/model` types into `package main`, including a rename (`OwnerResp = model.BotOwnerResp`) — `handler.go:33-46`
+  Cross-service grep for `BotOwnerResp` misses every use site here.
+
+- `nitpick` — `captureOutbox.mu struct{ int32 }` is a field named like a mutex that is an anonymous struct, atomically incremented at `handler_test.go:62` and never read, while the adjacent `c.calls` append it appears to guard is genuinely unsynchronized — `handler_test.go:56-63`
+
+- `nitpick` — `store.go` has no `//go:generate mockgen` directive and the package hand-rolls `fakeStore`/`fakeKeyStore`/`captureOutbox`; `roomkey_test.go:13` states this as settled fact rather than a deviation from CLAUDE.md §4 — `bot-room-service/store.go`, `roomkey_test.go:11-19`
+
+### Recommendations
+- `high` — Split `handleRemove` into `collectRemovals` (validate + delete loop, returns `[]memberRemoval` + `removed`/`removedAccounts`) and a small orchestrator that owns the two defers and the rotate→federate ordering. The four invariants then live in three named units instead of one 150-line body, and the comment block shrinks to a one-line contract per unit.
+- `medium` — Lift `keyPairOrHeal` + `rotateAndFanOut` + `fanOutKey` into `pkg/roomkeystore` (or a `pkg/roomkeyops`) beside the existing `CommitRotation`, with `roomkeymetrics` wired once. Reconcile the `ErrNoCurrentKey` handling divergence explicitly during the move — pick one semantic and test it.
+- `medium` — Move `parseIdentity` to `pkg/model` (or `pkg/botidentity`) next to `HeaderBotIdentity`, and have both bot services call it.
+- `medium` — Delete `ALL_SITE_IDS`, `parsePeers`, and `handler.allSiteIDs`, or wire them to something real. Keeping a documented-but-unread knob is the more expensive option.
+- `medium` — Make the sysmsg dedup suffix request-derived (e.g. the NATS message ID or a caller-supplied idempotency key) so the comment becomes true, and use one derivation across all three call sites.
+- `low` — Extract the org-expansion guard into one `rejectOrgExpansion(orgs []string) error` helper so the eventual feature has a single seam.
+- `nitpick` — Drop `captureOutbox.mu` and the `atomic.AddInt32`; assert on `len(c.calls)` instead.
