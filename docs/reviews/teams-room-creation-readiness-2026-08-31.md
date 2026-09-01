@@ -21,3 +21,28 @@ The gaps are all about what happens when something goes wrong. **A batch too lar
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
 | Count | 1 | 1 | 12 | 12 | 2 | **28** |
+
+---
+
+## 2. Go code quality — 4 / 5
+
+Idiomatic, tightly-scoped Go with correct `%w` wrapping and JSON `slog` throughout; the only real gap is a missing run-scoped correlation ID that both sibling jobs already have.
+
+### Findings
+- `medium` — No request/correlation ID is minted for the run, so every log line and every published message is uncorrelated — `teams-room-creation/main.go:36-48`
+  CLAUDE.md §3 "Request Logging & Tracing" requires an ID generated at the entry point and propagated via `context.Context`. `teams-hr-sync/main.go:91` (`natsutil.WithRequestID`) and `teams-user-sync/main.go:74` both do this. Consequence: `natsutil.NewMsg` returns a nil `Header` (acknowledged at `teams-room-creation/publisher.go:33-35`), so room-worker mints a fresh ID and the CronJob run cannot be traced to the rooms it created.
+- `low` — `publisher.go:31-37` hand-rolls the nil-header + `Nats-Encoding` guard that `natsutil.NewMsgEncoded` already owns — `pkg/natsutil/request_id.go:76-86`
+  The pkg doc explicitly says "callers don't need to know the quirk"; this is the duplicate that drifts.
+- `low` — `fmt.Errorf` with no format verb where `errors.New` is correct — `teams-room-creation/config.go:38`, `:41`
+- `low` — SAST audit-coverage gap, environmental not a service defect: gosec and the 18 repo-owned semgrep rules are clean repo-wide; `govulncheck` and the semgrep registry packs could not run (egress blocked) — per `GLOBAL_PREP.md`.
+- `nitpick` — Log key style is snake (`"site_id"`, `runner.go:79`) while sibling jobs use camel (`"requestId"`, `teams-user-sync/main.go:74`); the repo is genuinely mixed.
+
+Positives verified: no `fmt.Println`/`log.Println`; no bare `err` returns; no string error comparison; no token/body logging; no `errcode` misuse (correctly absent — this service has no client boundary); `//nolint` directives carry reasons.
+
+### Recommendations
+- `medium` — Mint `idgen.GenerateRequestID()` in `run()`, stamp it via `natsutil.WithRequestID`, and use it as the base logger, matching `teams-hr-sync/main.go:91-93`.
+- `low` — Replace `publisher.go:31-37` with `natsutil.NewMsgEncoded(ctx, subj, natsutil.EncodeZstd(data), natsutil.EncodingZstd)`.
+- `low` — `errors.New` for the two verbless `fmt.Errorf` calls in `config.go`.
+- `low` — Re-run `make sast-vuln` in a network-enabled CI leg before release; this environment cannot certify dependency CVEs.
+
+---
