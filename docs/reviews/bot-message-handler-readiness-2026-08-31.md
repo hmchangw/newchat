@@ -44,3 +44,22 @@ Idiomatic, well-wrapped, no logging or `errors.Is` violations; one genuine `pkg/
 - `nitpick` — Move `publishTimeout` into `config` with an `envDefault:"2s"`.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook CLAUDE.md layout — consumer-defined store, constructor DI, `pkg/subject` builders, opt-in bootstrap, correct shutdown order — but the mandated `deploy/azure-pipelines.yml` is missing and the Mongo hot path has no breaker.
+
+### Findings
+- `high` — no `deploy/azure-pipelines.yml`; the directory holds only `Dockerfile` and `docker-compose.yml` — `bot-message-handler/deploy/`. CLAUDE.md §5 "When Creating Services" requires it; 29 of 37 services have one, so this is a real gap, not a fleet-wide convention change.
+- `medium` — `config` mounts `mongoutil.PoolConfig` (`main.go:36`) but no `mongoutil.BreakerConfig`, even though `main.go:29` explicitly positions this service as "same authz shape as message-gatekeeper, with no cache in front". `message-gatekeeper/main.go:57,149-153` mounts the breaker with per-collection instances; here a Mongo stall parks all 200 guarded slots for the full 10s `REQUEST_TIMEOUT`.
+- `low` — `bootstrapStreams` sets only `Name + Subjects` and, when disabled, *verifies* the stream exists so a missing stream fails at boot rather than first publish — `bot-message-handler/bootstrap.go:24-38`. This exceeds the CLAUDE.md contract in a good way; noted as a pattern other services should copy.
+- `low` — the service is req/reply only (no JetStream consumer), so the `MAX_WORKERS`/`Consume` pattern rules don't apply; admission is bounded by `natsrouter.GuardConfig` (`main.go:61-64`) — correctly validated before use.
+
+### Recommendations
+- `high` — Add `bot-message-handler/deploy/azure-pipelines.yml`, copying `bot`-adjacent shape from `botplatform-service/deploy/azure-pipelines.yml`.
+- `medium` — Mount `Breaker mongoutil.BreakerConfig` with an env prefix and wrap the subscription/user lookups, mirroring `message-gatekeeper/main.go:149-169`.
+- `low` — Add a Mongo readiness check alongside `natsutil.HealthCheck(nc)` at `main.go:104-106`; every request needs Mongo, but readiness only reflects NATS.
+
+---
