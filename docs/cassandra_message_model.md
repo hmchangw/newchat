@@ -112,7 +112,11 @@ maintained:
   occupy rows, so a read that filled its cap may have seen nothing but
   tombstones while live replies survive just past it. Such a read may only
   **raise** the count and **advance** `thread_last_msg_at` — never stamp an
-  exact value, never clear the timestamp.
+  exact value, never clear the timestamp — and it skips the adjustment on a
+  redelivery, exactly as the approximate path does. The "exact, idempotent,
+  self-healing" properties above therefore belong to the *complete* read: only
+  a read that reached the end of the partition replaces the stamped value
+  outright, which is what makes repeating it harmless.
 - **At or past the limit** — the scan is skipped entirely and the stamped count
   is moved by one with a plain write. Per-reply cost stops depending on thread
   length, which is what keeps a long thread out of the timeout → NAK →
@@ -155,9 +159,10 @@ the retry is acked. It also advances `thread_last_msg_at` with the reply's own
 time (idempotent, unlike the count), and deliberately skips re-anchor sampling —
 a retry burst is the worst moment to add partition scans.
 
-Consequence for readers: `tcount` is exact for threads under the scan limit —
-every thread in practice — and beyond it is an approximation that stays close
-and is periodically corrected. Nothing server-side depends on the precise
+Consequence for readers: `tcount` is exact for threads under the scan limit
+whose partition the scan can read to the end — every thread in practice — and
+otherwise, above the limit or behind a wall of tombstones, an approximation that
+stays close and is periodically corrected. Nothing server-side depends on the precise
 value: the only consumers test it against zero (`history-service` skips
 Cassandra for a thread with no surviving replies, and treats a positive count
 as "this message is a thread parent"). The exact figure is used for display.
