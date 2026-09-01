@@ -21,3 +21,25 @@ The service has **no NATS surface at all**, so its integration risk is entirely 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
 | Count | 1 | 2 | 10 | 14 | 2 | **29** |
+
+---
+
+## 2. Go code quality — 4 / 5
+
+Idiomatic, precisely commented, correct errcode tiering and slog discipline; one real reason-code gap and a handful of low-severity drifts from CLAUDE.md.
+
+### Findings
+- `medium` — a defined domain reason is never emitted: both site-registry failures return a raw `fmt.Errorf`, which `Classify` collapses to `internal` with an **empty** reason — `portal-service/handler.go:193`, `portal-service/handler.go:299`. `errcode.BotplatformSiteUnknown` ("site_unknown") already exists at `pkg/errcode/codes_botplatform.go:30` and `docs/client-api.md:414` promises it to the frontend.
+- `low` — log-and-return: `slog.WarnContext` immediately before `errhttp.Write`, which runs `Classify` and logs again — `portal-service/handler.go:284`, `:291`, `:319`. CLAUDE.md §3 says never log AND return. It is a repo-wide login-audit convention (`admin-service/login.go:145`, `botplatform-service/handler.go:180`), but CLAUDE.md wins; if the audit line is wanted, it should carry a distinct `login_outcome` key and the errcode path should stay quiet.
+- `low` — error compared with `!=` instead of `errors.Is` — `portal-service/main.go:191`. Siblings already use `errors.Is` (`media-service/main.go:143`, `admin-service/main.go:174`).
+- `low` — a secret carries an `envDefault` — `MONGO_PASSWORD` at `portal-service/main.go:59`. CLAUDE.md: "never default secrets or connection strings".
+- `nitpick` — stuttering names `PortalHandler` / `NewPortalHandler` / `PortalHandlerOption` in `package main` — `portal-service/handler.go:104`, `:121`, `:139`. Every other service uses `Handler`/`NewHandler` (e.g. `broadcast-worker/handler.go:79`).
+- `low` — audit-coverage gap, not a defect: gosec + repo-owned semgrep clean repo-wide; `govulncheck` and semgrep registry packs unavailable (blocked egress).
+
+### Recommendations
+- `medium` — attach `errcode.WithReason(errcode.BotplatformSiteUnknown)` via `errcode.Internal(...)` at `handler.go:193`/`:299`, or delete the promise from `docs/client-api.md:414`; assert the reason in `TestHandleLogin_500_SiteUnknown` (`handler_test.go:652`), which currently checks only the status.
+- `low` — drop the pre-`Write` `slog.Warn` calls (`handler.go:284`, `:291`, `:319`) and let `errhttp.Write` be the single log site.
+- `low` — `errors.Is(err, http.ErrServerClosed)` at `main.go:191`; make `MONGO_PASSWORD` tag-free or `required` per deployment.
+- `nitpick` — rename to `Handler`/`NewHandler`/`handlerOption` for repo consistency.
+
+---
