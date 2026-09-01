@@ -618,8 +618,10 @@ func TestMessageCollection_FilterSubjects(t *testing.T) {
 	user := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
 	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, user.FilterSubjects("site-a"))
 
+	// The bot collection binds BOT-MESSAGES-CANONICAL, whose subjects are
+	// chat.bot.canonical.{site}.> — it must filter on that tree, not the user one.
 	bot := newBotMessageCollection("msgs-v1", false)
-	assert.Equal(t, []string{"chat.msg.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
+	assert.Equal(t, []string{"chat.bot.canonical.site-a.*"}, bot.FilterSubjects("site-a"))
 
 	teams := newTeamsMessageCollection("msgs-v1", "site-a", false)
 	assert.Equal(t, []string{"chat.teams.msg.canonical.site-a.batch"}, teams.FilterSubjects("site-a"))
@@ -789,6 +791,99 @@ func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := tt.c.BuildAction(tt.data)
 			require.Error(t, err)
+		})
+	}
+}
+
+// TestCollections_FilterSubjectsAreCapturedByTheirStream is the invariant that
+// was missing when the bot collection filtered on the user subject tree.
+//
+// A consumer whose filter matches nothing on its own stream is not an error
+// state in JetStream: creation succeeds, the consumer sits with an empty
+// interest set, and it reports healthy forever while indexing nothing. Nothing
+// in the wiring couples a collection's stream to its filter, so the only guard
+// is asserting the pairing here — and at startup, see assertFiltersMatchStream.
+func TestCollections_FilterSubjectsAreCapturedByTheirStream(t *testing.T) {
+	const site = "site-a"
+
+	tests := []struct {
+		name string
+		coll Collection
+	}{
+		{"user messages", newMessageCollection("msgs-v1", site, time.Time{}, false)},
+		{"bot messages", newBotMessageCollection("msgs-v1", false)},
+		{"teams messages", newTeamsMessageCollection("msgs-v1", site, false)},
+		{"spotlight", newSpotlightCollection("spotlight-v1", false)},
+		{"spotlight org", newSpotlightOrgCollection("spotlight-org-v1", site, "hr-site", false)},
+		{"user room", newUserRoomCollection("user-room-v1", false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			streamCfg := tt.coll.StreamConfig(site)
+			filters := tt.coll.FilterSubjects(site)
+			require.NotEmpty(t, streamCfg.Subjects, "a collection must name the stream it binds")
+
+			for _, f := range filters {
+				assert.True(t, anySubjectCovers(streamCfg.Subjects, f),
+					"consumer %q filters on %q, which no subject of its stream %q (%v) captures — "+
+						"the consumer would match nothing and index nothing, silently",
+					tt.coll.ConsumerName(), f, streamCfg.Name, streamCfg.Subjects)
+			}
+		})
+	}
+}
+
+func TestSubjectCovers(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		filter  string
+		want    bool
+	}{
+		{"exact match", "chat.bot.canonical.s.created", "chat.bot.canonical.s.created", true},
+		{"tail wildcard covers a single-token filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.*", true},
+		{"tail wildcard covers a literal leaf", "chat.bot.canonical.s.>", "chat.bot.canonical.s.created", true},
+		{"tail wildcard covers a deeper filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.a.b", true},
+		{"token wildcard covers one token", "chat.msg.canonical.*.created", "chat.msg.canonical.s.created", true},
+		{"token wildcard covers a wildcard token", "chat.msg.canonical.*.created", "chat.msg.canonical.*.created", true},
+
+		{"the bug: different tree is not covered", "chat.bot.canonical.s.>", "chat.msg.canonical.s.*", false},
+		{"different site is not covered", "chat.bot.canonical.s.>", "chat.bot.canonical.other.*", false},
+		{"shorter filter is not covered", "chat.bot.canonical.s.>", "chat.bot.canonical", false},
+		{"token wildcard does not span two tokens", "chat.msg.canonical.*.created", "chat.msg.canonical.a.b.created", false},
+		{"token wildcard does not cover a tail wildcard", "chat.msg.canonical.*.created", "chat.msg.canonical.>", false},
+		{"deeper filter without a tail wildcard is not covered", "chat.a.b", "chat.a.b.c", false},
+		{"empty filter is not covered", "chat.a.>", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, subjectCovers(tt.pattern, tt.filter))
+		})
+	}
+}
+
+func TestCheckFilterSubjects(t *testing.T) {
+	tests := []struct {
+		name     string
+		subjects []string
+		filters  []string
+		wantErr  bool
+	}{
+		{"a covered filter passes", []string{"chat.bot.canonical.s.>"}, []string{"chat.bot.canonical.s.*"}, false},
+		{"no filter at all passes (consumes the whole stream)", []string{"chat.bot.canonical.s.>"}, nil, false},
+		{"every filter must be covered", []string{"chat.bot.canonical.s.>"},
+			[]string{"chat.bot.canonical.s.*", "chat.msg.canonical.s.*"}, true},
+		{"the shipped bug is rejected", []string{"chat.bot.canonical.s.>"}, []string{"chat.msg.canonical.s.*"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkFilterSubjects("BOT-MESSAGES-CANONICAL-s", tt.subjects, tt.filters, "bot-message-sync")
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "would consume nothing")
+				return
+			}
+			assert.NoError(t, err)
 		})
 	}
 }
