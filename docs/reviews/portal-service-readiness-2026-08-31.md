@@ -62,3 +62,26 @@ Textbook layering for a small Gin service — consumer-owned store interface, co
 - `low` — collapse the four dev/site parameters of `NewPortalHandler` into one options struct.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+**58.6% (239 statements)** — below the 60% CLAUDE.md floor, so scored 1, even though the tested code is tested *well*.
+
+### Findings
+- `critical` — 58.6% statement coverage, under the CLAUDE.md §4 60% line and far under the 80% floor (`coverage_by_service.txt`).
+- Where the deficit is: `handler.go` and `cache.go` are 92–100% per function (`covfunc.txt`); the entire shortfall is `main.go:80 run` at 0.0% and all four `store_mongo.go` functions at 0.0% in the unit profile.
+- `high` — `GetByAccount` (`portal-service/store_mongo.go:94`) has **no** integration test — `integration_test.go` covers only `ListEmployees` (`:27`, `:106`) and `EnsureIndexes` (`:115`). The login cache-miss fallback projection (`store_mongo.go:95-100`, which deliberately omits `_id`/`employeeId`) is never validated against real Mongo, including whether `roles` decodes into `[]model.UserRole`.
+- `medium` — no test for `GetByAccount` returning an **error** (`handler.go:277-278`, the warn-and-treat-as-miss branch); `handler_test.go:381` and `:405` mock only the found/not-found arms. That is `HandleLogin`'s 92.1% gap.
+- `medium` — `resolve`'s uncovered branch (95.7%) is exactly the empty-`baseUrl` bug at `handler.go:197-201`: `testSites` (`handler_test.go:71-75`) contains `site-local`, so the dev-fallback-site-unregistered path is never exercised.
+- `low` — `RefreshLoop` 90.9%: the "context cancelled during a failed load" early return (`cache.go:92-94`) is untested.
+- Quality is otherwise strong: table-driven subtests with descriptive names, `gomock` from `mock_store_test.go` (generated, matches `make generate`'s zero diff), no real DB/NATS in unit tests, per-test state via `cacheWith` (`handler_test.go:63`), a genuine race test (`cache_test.go:150`), and `TestMain(m) { testutil.RunTests(m) }` with `testutil.MongoDB` containers (`integration_test.go:18`, `:28`).
+
+### Recommendations
+- `high` — add `TestMongoDirectoryStore_GetByAccount` to `integration_test.go`: hit/miss/role-decode, and assert `employeeId`/`userId` come back empty (the projection excludes them) so the login path's contract is pinned.
+- `medium` — add a `HandleLogin` subtest where the mock returns `(employee{}, false, errors.New(...))` and assert 401 plus no upstream call.
+- `medium` — add a dev-mode subtest whose `devFallbackSiteID` is *absent* from the site registry; assert the response's `baseUrl` — it will fail today, which is the point.
+- `low` — cover `cache.go:92-94` by cancelling ctx while `ListEmployees` is blocked.
+
+---
