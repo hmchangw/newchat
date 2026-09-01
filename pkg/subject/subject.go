@@ -323,6 +323,98 @@ func RoomActivity(destSiteID string) string {
 	return fmt.Sprintf("chat.roomactivity.%s", destSiteID)
 }
 
+// FailoverInboxExternal is the subject a peer publishes a cross-site federation
+// event on when the destination site's own INBOX is unreachable:
+// `chat.failover.inbox.{siteID}.external.{eventType}`. The standby stream that
+// captures it is hosted on the destination site's buddy cluster, so the
+// destination's own inbox-worker consumes it over its buddy connection and
+// applies the event to the destination's DB.
+//
+// The publisher needs no knowledge of which cluster is whose buddy — the subject
+// names the destination site, and supercluster interest routing delivers it
+// wherever the stream lives.
+//
+// The chat.failover.> root is deliberately disjoint from chat.inbox.> (two
+// streams in one account may not claim overlapping subjects) and from
+// chat.local.> (which the platform filters out of gateway interest).
+func FailoverInboxExternal(siteID, eventType string) string {
+	return fmt.Sprintf("chat.failover.inbox.%s.external.%s", siteID, eventType)
+}
+
+// FailoverInboxExternalAll matches every event on a site's failover INBOX lane:
+// `chat.failover.inbox.{siteID}.external.>`. Use as the INBOX-FAILOVER-{siteID}
+// stream's subject pattern and as its consumer's FilterSubjects.
+func FailoverInboxExternalAll(siteID string) string {
+	return fmt.Sprintf("chat.failover.inbox.%s.external.>", siteID)
+}
+
+// FailoverMsgSend is the subject a displaced client publishes a message on while
+// its home site's NATS is down: the live MsgSend subject with a `failover` token
+// inserted before `msg`. Captured by MESSAGES-FAILOVER-{siteID} on the site's
+// buddy cluster.
+//
+// Deliberately still inside chat.user.{account}.> so the JWT auth-service mints
+// already permits it — no permission change. The MESSAGES-{siteID} stream
+// filters chat.user.*.room.*.{siteID}.msg.>, which does not match `.failover.`
+// at that position, so the two stream filters are disjoint.
+//
+// Account is passed through unencoded, exactly as MsgSend does, so a client
+// builds the same account token on either lane.
+func FailoverMsgSend(account, roomID, siteID string) string {
+	return fmt.Sprintf("chat.user.%s.room.%s.%s.failover.msg.send", account, roomID, siteID)
+}
+
+// FailoverMsgSendWildcard is the MESSAGES-FAILOVER-{siteID} stream's subject.
+func FailoverMsgSendWildcard(siteID string) string {
+	return fmt.Sprintf("chat.user.*.room.*.%s.failover.msg.>", siteID)
+}
+
+// FailoverMsgCanonicalCreated is where message-gatekeeper publishes a validated
+// message on the failover lane. The live canonical stream lives on the cluster
+// that is down, so a failover-lane message must not be published to it.
+func FailoverMsgCanonicalCreated(siteID string) string {
+	return fmt.Sprintf("chat.failover.msg.canonical.%s.created", siteID)
+}
+
+// FailoverMsgCanonicalWildcard is the MESSAGES-CANONICAL-FAILOVER-{siteID}
+// stream's subject and its consumers' filter.
+func FailoverMsgCanonicalWildcard(siteID string) string {
+	return fmt.Sprintf("chat.failover.msg.canonical.%s.>", siteID)
+}
+
+// FailoverMsgCanonicalMessageWildcard matches the single-token message events
+// (created/updated/deleted/...) on the failover canonical lane, mirroring
+// MsgCanonicalMessageWildcard. Narrower than FailoverMsgCanonicalWildcard, which
+// is the stream's own subject.
+func FailoverMsgCanonicalMessageWildcard(siteID string) string {
+	return fmt.Sprintf("chat.failover.msg.canonical.%s.*", siteID)
+}
+
+// FailoverPushNotification is where notification-worker publishes a push request
+// derived from a failover-lane message.
+func FailoverPushNotification(siteID string) string {
+	return fmt.Sprintf("chat.failover.push.%s.send", siteID)
+}
+
+// FailoverPushNotificationFilter is the PUSH-NOTIFICATION-FAILOVER-{siteID}
+// stream's subject and its consumer's filter.
+func FailoverPushNotificationFilter(siteID string) string {
+	return fmt.Sprintf("chat.failover.push.%s.>", siteID)
+}
+
+// FailoverOutbox mirrors Outbox on the failover lane, keeping a site federating
+// outward while its own NATS is down. Destination and event type ride the
+// subject so outbox-worker's per-destination consumers filter on one peer
+// exactly as they do on the live stream.
+func FailoverOutbox(originSiteID, destSiteID, eventType string) string {
+	return fmt.Sprintf("chat.failover.outbox.%s.%s.%s", originSiteID, destSiteID, eventType)
+}
+
+// FailoverOutboxWildcard is the OUTBOX-FAILOVER-{originSiteID} stream's subject.
+func FailoverOutboxWildcard(originSiteID string) string {
+	return fmt.Sprintf("chat.failover.outbox.%s.>", originSiteID)
+}
+
 // InboxMemberEventSubjects returns the subject filters a search-sync consumer
 // should use to receive the room-index-affecting events on both the internal
 // (same-site) and external (cross-site) lanes for the given site:

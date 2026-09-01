@@ -1352,3 +1352,120 @@ func TestRoomThreadEventTargets_TransitionGrace(t *testing.T) {
 	after := flip.Add(subject.DefaultRoomLocalityGrace + time.Minute)
 	assert.Equal(t, []string{g}, subject.RoomThreadEventTargets("r1", "p1", &trueP, &flip, subject.RouteLocal, after))
 }
+
+func TestFailoverInboxExternal(t *testing.T) {
+	assert.Equal(t, "chat.failover.inbox.site-a.external.member_added",
+		subject.FailoverInboxExternal("site-a", "member_added"))
+	assert.Equal(t, "chat.failover.inbox.site-a.external.>",
+		subject.FailoverInboxExternalAll("site-a"))
+}
+
+// The failover root must not overlap any live stream's subject filter, or the
+// stream create is rejected supercluster-wide (one account, one JS domain).
+func TestFailoverInboxExternal_DisjointFromLiveFilters(t *testing.T) {
+	failover := subject.FailoverInboxExternalAll("site-a")
+	live := []string{
+		subject.InboxExternalAll("site-a"),
+		"chat.inbox.site-a.internal.>",
+		subject.OutboxWildcard("site-a"),
+	}
+	for _, l := range live {
+		assert.False(t, subjectsOverlap(failover, l),
+			"failover filter %q must not overlap live filter %q", failover, l)
+	}
+}
+
+// The failover root must also sit outside chat.local.>, which the platform
+// filters from gateway interest advertisement — a failover subject under it
+// would never cross a gateway.
+func TestFailoverInboxExternal_NotUnderLocalRoot(t *testing.T) {
+	assert.False(t, strings.HasPrefix(subject.FailoverInboxExternalAll("site-a"), "chat.local."))
+}
+
+// subjectsOverlap reports whether two NATS subject filters can match a common
+// subject. Token-by-token: ">" swallows the rest, "*" matches any single token,
+// otherwise tokens must be equal.
+func subjectsOverlap(a, b string) bool {
+	at, bt := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(at) && i < len(bt); i++ {
+		if at[i] == ">" || bt[i] == ">" {
+			return true
+		}
+		if at[i] == "*" || bt[i] == "*" {
+			continue
+		}
+		if at[i] != bt[i] {
+			return false
+		}
+	}
+	return len(at) == len(bt)
+}
+
+func TestFailoverMessagePathSubjects(t *testing.T) {
+	assert.Equal(t, "chat.user.alice.room.r1.site-a.failover.msg.send",
+		subject.FailoverMsgSend("alice", "r1", "site-a"))
+	assert.Equal(t, "chat.user.*.room.*.site-a.failover.msg.>",
+		subject.FailoverMsgSendWildcard("site-a"))
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.created",
+		subject.FailoverMsgCanonicalCreated("site-a"))
+	assert.Equal(t, "chat.failover.msg.canonical.site-a.>",
+		subject.FailoverMsgCanonicalWildcard("site-a"))
+	assert.Equal(t, "chat.failover.push.site-a.send",
+		subject.FailoverPushNotification("site-a"))
+	assert.Equal(t, "chat.failover.push.site-a.>",
+		subject.FailoverPushNotificationFilter("site-a"))
+	assert.Equal(t, "chat.failover.outbox.site-a.site-b.member_added",
+		subject.FailoverOutbox("site-a", "site-b", "member_added"))
+	assert.Equal(t, "chat.failover.outbox.site-a.>",
+		subject.FailoverOutboxWildcard("site-a"))
+}
+
+// The client-facing failover send subject must stay inside the account's JWT
+// scope, or auth-service would have to widen the minted permissions.
+func TestFailoverMsgSend_StaysInAccountScope(t *testing.T) {
+	assert.True(t, strings.HasPrefix(
+		subject.FailoverMsgSend("alice", "r1", "site-a"), "chat.user.alice."))
+}
+
+// Every failover filter must be disjoint from its live counterpart: two streams
+// in one account may not claim overlapping subjects, supercluster-wide.
+func TestFailoverMessagePath_DisjointFromLiveFilters(t *testing.T) {
+	pairs := []struct{ failover, live string }{
+		// MESSAGES-{site} filters on .msg.> — the failover token sits before it.
+		{subject.FailoverMsgSendWildcard("site-a"), "chat.user.*.room.*.site-a.msg.>"},
+		{subject.FailoverMsgCanonicalWildcard("site-a"), subject.MsgCanonicalWildcard("site-a")},
+		{subject.FailoverPushNotificationFilter("site-a"), subject.PushNotificationFilter("site-a")},
+		{subject.FailoverOutboxWildcard("site-a"), subject.OutboxWildcard("site-a")},
+	}
+	for _, p := range pairs {
+		assert.False(t, subjectsOverlap(p.failover, p.live),
+			"failover %q must not overlap live %q", p.failover, p.live)
+	}
+}
+
+// None may sit under chat.local.>, which the platform filters from gateway
+// interest advertisement.
+func TestFailoverMessagePath_NotUnderLocalRoot(t *testing.T) {
+	for _, s := range []string{
+		subject.FailoverMsgSendWildcard("site-a"),
+		subject.FailoverMsgCanonicalWildcard("site-a"),
+		subject.FailoverPushNotificationFilter("site-a"),
+		subject.FailoverOutboxWildcard("site-a"),
+	} {
+		assert.False(t, strings.HasPrefix(s, "chat.local."), "%q must not be under chat.local.", s)
+	}
+}
+
+// Both lanes must parse to the same account/room/site — the failover token sits
+// after the fields the parser reads, so one parser serves both.
+func TestParseUserRoomSiteSubject_HandlesBothLanes(t *testing.T) {
+	live, liveRoom, liveSite, ok := subject.ParseUserRoomSiteSubject(subject.MsgSend("alice", "r1", "site-a"))
+	require.True(t, ok)
+
+	fo, foRoom, foSite, ok := subject.ParseUserRoomSiteSubject(subject.FailoverMsgSend("alice", "r1", "site-a"))
+	require.True(t, ok)
+
+	assert.Equal(t, live, fo)
+	assert.Equal(t, liveRoom, foRoom)
+	assert.Equal(t, liveSite, foSite)
+}
