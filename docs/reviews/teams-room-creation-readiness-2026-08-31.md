@@ -46,3 +46,25 @@ Positives verified: no `fmt.Println`/`log.Println`; no bare `err` returns; no st
 - `low` — Re-run `make sast-vuln` in a network-enabled CI leg before release; this environment cannot certify dependency CVEs.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook service shape — consumer-owned store interface, constructor DI, no stream creation, typed env config — weakened by missing observability wiring and an unbounded shutdown path.
+
+### Findings
+- `medium` — No `pkg/obs.Init`, no metrics of any kind; the job emits nothing an operator can alert on (batches published/failed, chats stalled) — `teams-room-creation/main.go:63-66`
+  CLAUDE.md §1 requires each service to wire the o11y SDK once via `pkg/obs.Init`; `teams-hr-sync` and `teams-room-inspector` do. The `noop.NewTracerProvider()` shortcut is documented but is still the deviation.
+- `medium` — Both Mongo disconnects run on an unbounded `context.Background()`, so an unresponsive node holds the deferred cleanup past the pod's termination grace period — `main.go:55`, `main.go:61`
+  `teams-room-verify/main.go:41-51` defines exactly this pattern correctly (`disconnectTimeout = 10s`, fresh non-cancelled context) and documents why; this service took the fresh-context half and dropped the deadline. The NATS drain, by contrast, is bounded correctly at `main.go:73`.
+- `low` — `pkg/shutdown.Wait` is not used, contrary to CLAUDE.md §6 "in every service's `main.go`"; `signal.NotifyContext` (`main.go:48`) is the right primitive for a run-to-completion CronJob and matches all sibling `teams-*` jobs, so this reads as a rule that predates the job services rather than a defect.
+
+Verified compliant: `TeamsChatStore` defined in the consumer with exactly two methods (`store.go:26-34`); `newRunner`/`newMongoStore` accept interfaces, return structs; file layout matches the per-service convention (no `routes.go`/`handler.go` — correct, no HTTP or subscribe surface); **no `bootstrap.go` and no stream creation** — ROOMS-TEAMS is created by its owner `room-worker` (`room-worker/bootstrap.go:43-47`), exactly as the `BOOTSTRAP_STREAMS` rule demands; config is a typed `caarlos0/env` struct with `required,notEmpty` on both connection strings and `envDefault` on the knobs (`config.go:14-28`); `Pool mongoutil.PoolConfig` is mounted as a named field, not re-declared (`config.go:19`).
+
+### Recommendations
+- `medium` — Wire `pkg/obs.Init` and emit at least three counters: chats listed, batches published, batches failed — a silent CronJob whose batches all fail looks identical to a healthy no-op run.
+- `medium` — Copy `teams-room-verify`'s bounded `disconnect(client)` helper verbatim into `main.go`.
+- `low` — Add a startup existence check for `ROOMS-TEAMS-{siteID}` per site (mirroring `room-worker/bootstrap.go:57-60`'s fail-fast) so a misprovisioned site surfaces at startup rather than as a warn-per-run forever.
+
+---
