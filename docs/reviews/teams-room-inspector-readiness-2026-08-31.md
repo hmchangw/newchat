@@ -116,3 +116,22 @@ Verified correct: absence from `docs/client-api.md` is by design and documented 
 ### Recommendations
 - `medium` — move the path to `pkg/model/teams.go` (e.g. `TeamsRoomVerifyPath`) and reference it from `routes.go:9` and `teams-room-verify/client.go:13`.
 - `low` — leave the ordering assertion, but add a comment that the consumer keys by chat id so a future reorder is not read as a breaking change.
+
+---
+
+## 7. Performance — 3 / 5
+
+Two bounded queries, explicit projection, no `$lookup`, secondary-preferred reads — but nothing cancels a slow Mongo read, and a silently missing index would turn every batch into a collection scan.
+
+### Findings
+- `high` — no per-request deadline: `newServer` sets only `ReadTimeout`/`WriteTimeout` (`main.go:59-64`), which bound the socket and do **not** cancel the handler context — the repo's own helper says exactly this (`pkg/ginutil/timeout.go:10-14`). A stalled Mongo read at `store_mongo.go:47` or `:56` pins the request goroutine and its pooled connection indefinitely; with no `MaxPoolSize` lever either (D2), pool starvation is the failure mode.
+- `medium` — the subscriptions `$match {roomId: {$in: …}}` + `$group` (`store_mongo.go:56-59`) relies on an index owned by another service (`roomId_1_u.account_1`, per `room-service`), yet the service never calls `mongoutil.WarnMissingIndexes` — the established convention for exactly this dependency (`inbox-worker/main.go:560-562`, `user-service/mongorepo/subscriptions.go:75`; helper at `pkg/mongoutil/indexes.go:22`). A dropped or renamed index degrades a 500-id batch to a full scan of `subscriptions`, with no signal.
+- `low` — the endpoint is unauthenticated by design (`routes.go:5-6`) with no shed valve; `ginutil.MaxConcurrency` exists for this (`pkg/ginutil/limit.go:20-43`). Low because the only caller is a CronJob.
+
+Positives: `$in` batch bounded at 500 (`handler.go:60`), server-side `$sum` instead of shipping documents (`store_mongo.go:38-40,58`), explicit projection (`store_mongo.go:48`), empty-input short circuit (`store_mongo.go:43-45`), no N+1, no unterminated goroutines (`main.go:96-99,102-113`), no `time.Sleep`, secondary-preferred client (`main.go:82-87`). Absence at a key is the expected miss and handled by zero value, so `mongo.ErrNoDocuments` never applies (`handler.go:84`).
+
+### Recommendations
+- `high` — add `ginutil.TimeoutConfig` (default 10s) and `r.Use(cfg.HTTP.Middleware())` so a slow Mongo read is cancelled and its connection released.
+- `medium` — call `mongoutil.WarnMissingIndexes(ctx, subs.Raw(), "roomId_1_u.account_1")` in `newMongoStore` (`store_mongo.go:31-36`) so a missing dependency index is visible at startup rather than as latency.
+- `medium` — mount `mongoutil.PoolConfig` so pool size and server-selection timeout are operator-tunable for a service that fires 500-id `$in` batches.
+- `low` — consider `ginutil.MaxConcurrency` on the verify route; the endpoint has no auth boundary other than network policy.
