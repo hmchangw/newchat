@@ -24,8 +24,8 @@ import "github.com/hmchangw/chat/pkg/model"
 type Path string
 
 const (
-	// RoomSubject is one publish to the room's event subject, which NATS fans
-	// out to the room's subscribers.
+	// RoomSubject is one logical room-event enqueue. Locality routing may require
+	// both local and global subject targets; NATS fans each out to subscribers.
 	RoomSubject Path = "room_subject"
 	// Thread is per-account fan-out to a hidden thread reply's subscribers. It
 	// bypasses the room subject entirely.
@@ -33,11 +33,12 @@ const (
 	// DM is per-account fan-out for a DM or bot-DM room.
 	DM Path = "dm"
 	// Unknown is the fail-open value, and two very different things produce it:
-	// the room-meta lookup failed, or the room carries a type nothing here
-	// recognises. The second is not merely unmeasured — broadcast-worker's
-	// dispatch has no branch for it and drops the message — so Unknown is a
-	// validity signal rather than a bucket, and the log line beside it is what
-	// separates the two. See docs/specs/o11y/nats-metrics-contract.md §13.3.
+	// neither the subscription projection nor the room-meta fallback resolved
+	// the route, or the room carries a type nothing here recognises. The second
+	// is not merely unmeasured — broadcast-worker's dispatch has no branch for
+	// it and drops the message — so Unknown is a validity signal rather than a
+	// bucket, and the log line beside it is what separates the two. See
+	// docs/specs/o11y/nats-metrics-contract.md §13.3.
 	Unknown Path = "unknown"
 )
 
@@ -60,11 +61,12 @@ func (p Path) Valid() bool {
 //
 // tShow must be the *normalized* value — req.TShow && threadParentMessageID !=
 // "" — because that is what lands on the canonical message the worker later
-// classifies. Passing the raw request field misclassifies a tShow=true send that
-// carries no thread parent.
+// classifies. IsHiddenThreadReply also checks for a parent, so a parentless send
+// currently classifies the same either way; the normalized value keeps this
+// function aligned with the canonical wire contract.
 //
 // roomType may be empty or unrecognised, which is how a caller reports a failed
-// room-meta lookup: the result is Unknown, never an error. A metric must not be
+// room-type lookup: the result is Unknown, never an error. A metric must not be
 // able to fail a message.
 func Classify(threadParentMessageID string, tShow bool, roomType model.RoomType) Path {
 	// The thread test comes first and the room type gets no vote: a hidden

@@ -181,21 +181,23 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
   to per-account thread
   fan-out, **not** `publishChannelEvent` — a `room_type="channel"` denominator
   would count it while no `broadcast_channel_enqueue_total` fires, wrongly
-  depressing SLO-1b/2. (gatekeeper resolves room type at the emit site to set the
-  label; `thread`/`dm` slices are v1-unscored.)
+  depressing SLO-1b/2. (gatekeeper resolves room type from the subscription
+  projection already read on the send path, with room-meta fallback for legacy
+  or incomplete entries; `thread`/`dm` slices are v1-unscored.)
   - **SLO-1a** uses the **all-`broadcast_path` total** (persistence covers every message).
   - **SLO-1b/2** use the **`broadcast_path="room_subject"` slice only** — v1
     excludes the `thread`/`dm` routes (see below).
   - **`unknown` is a validity signal, not a bucket.** Two things produce it, and
-    they are not equally benign. The gatekeeper's room-meta lookup failed, so the
-    route is unknown — a metric must never fail a message, so the send goes
-    through labelled `unknown`. **Or** the room carries a type neither service
-    recognises, in which case broadcast-worker's dispatch hits its `default:` and
-    logs *"unknown room type, skipping fan-out"* — the message is dropped, not
-    merely unmeasured. The label cannot tell the two apart; the log line beside
-    it can, and the second case is an incident rather than a measurement gap.
-    Either way it biases SLO-1b **green**: a
-    genuine channel message whose lookup failed leaves the `room_subject`
+    they are not equally benign. Neither the subscription projection nor the
+    room-meta fallback resolved the room type — a metric must never fail a
+    message, so the send goes through labelled `unknown`, and a room-meta error
+    needed only for the large-room cap does not discard a valid subscription
+    route. **Or** the room carries a type neither service recognises, in which
+    case broadcast-worker's dispatch hits its `default:` and logs *"unknown room
+    type, skipping fan-out"* — the message is dropped, not merely unmeasured. The
+    label cannot tell the two apart; the log line beside it can, and the second
+    is an incident rather than a measurement gap. Either way an unresolved route
+    biases SLO-1b **green**: a genuine channel message leaves the `room_subject`
     denominator entirely, while the enqueue that follows it still increments the
     numerator — so a Mongo blip *raises* the measured ratio at exactly the moment
     the system is degraded.
@@ -232,14 +234,16 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     outage-safe denominator is worth an over-countable numerator — but a panel
     that silently clamps at 1 hides the redelivery it is evidence of.
 - **Numerators**, one outcome per logical message (approximate — see §0.1):
-  - `messages_persisted_total{outcome}` (message-worker) → SLO-1a.
+  - `message_worker_persistence_total{message_kind,result="success"|"error"}`
+    (message-worker) → SLO-1a.
   - `broadcast_channel_enqueue_total{outcome=ok|failed}` (broadcast-worker) →
-    SLO-1b. **A channel broadcast is a single room-subject publish, not a
-    per-recipient fan-out.** `publishChannelEvent` does one
-    `nc.PublishMsg(subject.RoomEvent(roomID), …)` and NATS fans out to subscribers
-    downstream (the code comment: *"one room-stream publish… reports the room
-    audience, not per-recipient deliveries"*). So the only channel outcome is
-    **`ok`/`failed` of that one publish** — there is **no `all/partial/failed`**.
+    SLO-1b. **A channel broadcast is one logical room-event enqueue, not a
+    per-recipient fan-out.** Locality routing may require both local and global
+    room-subject targets. `ok` means every required target accepted the enqueue;
+    failure of any target makes the one logical outcome `failed`. The metric is
+    recorded once per `publishChannelEvent`, never once per subject, so there is
+    deliberately **no `partial` label**. NATS fans each accepted subject out to
+    subscribers downstream; this still does not count recipient deliveries.
     **Core-NATS boundary — v1 measures *enqueue acceptance*, not publication.**
     `nc.PublishMsg` is fire-and-forget: a nil return means the message was
     *accepted into the local client's send/reconnect buffer*, **not**
@@ -317,7 +321,8 @@ is the exemplar). 🔧 declared last-mile via P5/P6.
 
 ### Caveats
 
-- A channel broadcast is **one room-subject enqueue, not N recipient deliveries**;
+- A channel broadcast is **one logical room-event enqueue across all required
+  locality targets, not N recipient deliveries**;
   `UserCount` ≠ connected recipients. Denominators are **canonical messages on the
   room-subject path**, not recipients.
 - **Cross-process clock-skew contract (SLO-2).** `broadcast_channel_enqueue_age_seconds`

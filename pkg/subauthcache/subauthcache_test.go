@@ -19,14 +19,16 @@ import (
 func TestFromSubscription(t *testing.T) {
 	t.Run("nil HistorySharedSince maps to nil", func(t *testing.T) {
 		sub := &model.Subscription{
-			User:   model.SubscriptionUser{ID: "u1", Account: "alice"},
-			Roles:  []model.Role{model.RoleMember},
-			RoomID: "room1",
+			User:     model.SubscriptionUser{ID: "u1", Account: "alice"},
+			Roles:    []model.Role{model.RoleMember},
+			RoomID:   "room1",
+			RoomType: model.RoomTypeChannel,
 		}
 		got := fromSubscription(sub)
 		assert.Equal(t, "u1", got.ID)
 		assert.Equal(t, "alice", got.Account)
 		assert.Equal(t, []model.Role{model.RoleMember}, got.Roles)
+		assert.Equal(t, model.RoomTypeChannel, got.RoomType)
 		assert.Nil(t, got.HistorySharedSince)
 	})
 
@@ -76,7 +78,7 @@ func newTestTier(c valkeyutil.Client, ttl time.Duration, rec Recorder, loader Lo
 }
 
 func TestSubKey(t *testing.T) {
-	assert.Equal(t, "sub:{room1}:alice:v2", SubKey("room1", "alice"))
+	assert.Equal(t, "sub:{room1}:alice:v3", SubKey("room1", "alice"))
 	// The version trails the key so every subscriber of one room still shares a
 	// cluster slot.
 	assert.Contains(t, SubKey("room1", "alice"), "{room1}")
@@ -86,7 +88,9 @@ func TestReadThrough_L2Hit_SkipsLoader(t *testing.T) {
 	fv := valkeyfake.New()
 	rec := &spyRecorder{}
 	// pre-populate L2
-	seed := SubAuth{ID: "u1", Account: "alice", Roles: []model.Role{model.RoleOwner}}
+	seed := SubAuth{
+		ID: "u1", Account: "alice", Roles: []model.Role{model.RoleOwner}, RoomType: model.RoomTypeChannel,
+	}
 	_, _, err := newTestTier(fv, time.Hour, rec, func(context.Context, string, string) (SubAuth, bool, error) { return seed, true, nil }).Resolve(context.Background(), "room1", "alice")
 	require.NoError(t, err)
 	// second call: loader must NOT be invoked
@@ -98,6 +102,7 @@ func TestReadThrough_L2Hit_SkipsLoader(t *testing.T) {
 	assert.True(t, subscribed)
 	assert.Equal(t, "u1", got.ID)
 	assert.Equal(t, []model.Role{model.RoleOwner}, got.Roles)
+	assert.Equal(t, model.RoomTypeChannel, got.RoomType)
 	assert.GreaterOrEqual(t, rec.hit, 1)
 }
 

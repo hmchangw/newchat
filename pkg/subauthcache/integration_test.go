@@ -27,6 +27,7 @@ func TestFetchFromMongo_Subscribed(t *testing.T) {
 		"_id":                "sub1",
 		"u":                  bson.M{"_id": "u1", "account": "alice"},
 		"roomId":             "room1",
+		"roomType":           model.RoomTypeChannel,
 		"roles":              []model.Role{model.RoleOwner},
 		"historySharedSince": since,
 	})
@@ -38,6 +39,7 @@ func TestFetchFromMongo_Subscribed(t *testing.T) {
 	assert.Equal(t, "u1", got.ID)
 	assert.Equal(t, "alice", got.Account)
 	assert.Equal(t, []model.Role{model.RoleOwner}, got.Roles)
+	assert.Equal(t, model.RoomTypeChannel, got.RoomType)
 	require.NotNil(t, got.HistorySharedSince)
 	assert.Equal(t, since.UnixMilli(), *got.HistorySharedSince)
 }

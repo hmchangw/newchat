@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 	"time"
 
@@ -139,6 +142,33 @@ func TestHandler_ChannelEnqueue_RecordsOutcomes(t *testing.T) {
 	})
 }
 
+func TestHandler_ChannelEnqueue_DualRoutePartialFailureIsOneLogicalFailure(t *testing.T) {
+	pub := &mockPublisher{failOn: map[string]error{
+		subject.RoomEvent("room-1", false): errors.New("local lane down"),
+	}}
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	us := NewMockUserStore(ctrl)
+	keyStore := NewMockRoomKeyProvider(ctrl)
+	h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteDual,
+		withBroadcastMetrics(newBroadcastMetrics(mp.Meter("test"))))
+	keyStore.EXPECT().Get(gomock.Any(), "room-1").Return(testRoomKey(t), nil)
+	meta := metaOf(testChannelRoom)
+	meta.CrossSite = ptrBool(false)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(meta, nil)
+	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil)
+
+	require.Error(t, h.HandleMessage(context.Background(), createdChannelEvent(t)))
+	assert.Equal(t, []string{
+		subject.RoomEvent("room-1", false),
+		subject.RoomEvent("room-1", true),
+	}, subjectsOf(pub), "all required targets must be attempted")
+	assert.Equal(t, map[string]int64{"failed": 1}, enqueueCounts(t, reader),
+		"one canonical message produces one logical outcome, not one outcome per target")
+}
+
 // TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator is the other half
 // of message-gatekeeper's TestHandler_processMessage_RecordsBroadcastPath. Both
 // drive the same shared table: the numerator must fire exactly when the
@@ -204,7 +234,7 @@ func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 	}
 }
 
-// TestPublishChannelEvent_HasOneCaller is the guard behind the denominator
+// TestPublishChannelEvent_MutationsDoNotCount checks the current dispatch
 // match. broadcast_channel_enqueue_total counts created channel messages on the
 // room-subject path, which is what
 // messages_canonical_published_total{broadcast_path="room_subject"} counts
@@ -213,7 +243,7 @@ func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 // subject through publishMutation → publishRoomEvent, bypassing it; a second
 // caller would silently add messages to the numerator that the denominator
 // never saw, pushing SLO-1b above 1 for a reason that is not redelivery.
-func TestPublishChannelEvent_HasOneCaller(t *testing.T) {
+func TestPublishChannelEvent_MutationsDoNotCount(t *testing.T) {
 	pub := &mockPublisher{}
 	h, store, us, keyStore, reader := enqueueHandler(t, false, pub)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").Return(metaOf(testChannelRoom), nil).AnyTimes()
@@ -249,4 +279,36 @@ func TestPublishChannelEvent_HasOneCaller(t *testing.T) {
 	assert.Greater(t, len(pub.records), 1, "the mutations must actually have reached the room subject")
 	assert.Equal(t, map[string]int64{"ok": 1}, enqueueCounts(t, reader),
 		"a mutation reached publishChannelEvent — the numerator now counts messages the upstream denominator never saw")
+}
+
+// TestPublishChannelEvent_HasOneCaller is the structural guard behind the
+// denominator match. A runtime event sample cannot prove that an untested event
+// or future branch did not add another caller, so parse the production source
+// and require exactly one call site, owned by handleCreated.
+func TestPublishChannelEvent_HasOneCaller(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "handler.go", nil, 0)
+	require.NoError(t, err)
+
+	var callers []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if ok && sel.Sel.Name == "publishChannelEvent" {
+				callers = append(callers, fn.Name.Name)
+			}
+			return true
+		})
+	}
+
+	assert.Equal(t, []string{"handleCreated"}, callers,
+		"SLO-1b's numerator must have exactly one production call site")
 }

@@ -6,14 +6,12 @@ import (
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/roommetacache"
-	"github.com/hmchangw/chat/pkg/stream"
 )
 
 // benchStore is a hand-written stub rather than the generated mock: gomock's
@@ -47,8 +45,9 @@ func benchHandler(store Store) *Handler {
 func newBenchStore(roles ...model.Role) *benchStore {
 	return &benchStore{
 		sub: &model.Subscription{
-			User:  model.SubscriptionUser{ID: "u-1", Account: "alice"},
-			Roles: roles,
+			User:     model.SubscriptionUser{ID: "u-1", Account: "alice"},
+			Roles:    roles,
+			RoomType: model.RoomTypeChannel,
 		},
 		meta: roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 5},
 	}
@@ -82,83 +81,31 @@ func BenchmarkProcessMessage_Member(b *testing.B) {
 	runProcessMessage(b, benchHandler(store))
 }
 
-// BenchmarkProcessMessage_BypassSender is the path this change actually widens.
-// An owner skipped the room-meta read entirely before, and now takes it to
-// classify. Warm cache: the steady state of a running service, where the room
-// has been seen recently.
+// BenchmarkProcessMessage_BypassSender guards the owner fast path: route
+// classification reuses the subscription projection and must not add a
+// room-meta lookup.
 func BenchmarkProcessMessage_BypassSender(b *testing.B) {
-	store, err := newCachedMetaStore(newBenchStore(model.RoleOwner), 1024, time.Minute)
+	inner := newBenchStore(model.RoleOwner)
+	store, err := newCachedMetaStore(inner, 1024, time.Minute)
 	if err != nil {
 		b.Fatal(err)
 	}
 	runProcessMessage(b, benchHandler(store))
+	if calls := inner.metaCalls.Load(); calls != 0 {
+		b.Fatalf("room meta read %d times on the bypass fast path", calls)
+	}
 }
 
-// BenchmarkProcessMessage_BypassSenderColdMiss times the same path with the
-// cache removed, so every message goes through to the store.
-//
-// It is a floor, not the real cold cost: the store here returns immediately,
-// where a genuine miss is a Mongo round-trip that dwarfs everything measured in
-// this file. What this isolates is the in-process overhead of the miss — the
-// cache machinery and the call itself — which is the part a benchmark can
-// honestly attribute to this change.
-func BenchmarkProcessMessage_BypassSenderColdMiss(b *testing.B) {
-	// The store unwrapped: no cache, so every message reaches GetRoomMeta.
+// BenchmarkProcessMessage_BypassSenderLegacyTypeFallback covers the temporary
+// compatibility path for a subscription projection with no room type. It is an
+// in-process floor; a real L2/Mongo miss is intentionally outside this microbench.
+func BenchmarkProcessMessage_BypassSenderLegacyTypeFallback(b *testing.B) {
 	store := newBenchStore(model.RoleOwner)
+	store.sub.RoomType = ""
 	h := benchHandler(store)
 	runProcessMessage(b, h)
 	if store.metaCalls.Load() < int64(b.N) {
 		b.Fatalf("only %d of %d messages reached the store — this is not the miss path",
 			store.metaCalls.Load(), b.N)
 	}
-}
-
-// BenchmarkProcessMessage_RealPublish exists to give the numbers above a
-// denominator that means something.
-//
-// The benchmarks above stub the canonical publish and the reply to an immediate
-// return, so their per-message wall time is processMessage minus both of its
-// network hops. A percentage measured against that is not the "1% of per-message
-// wall time" any budget is written in terms of — it is a percentage of the part
-// that happens to be cheap. This one runs the canonical publish against an
-// in-process JetStream server, so the ratio between the two is the correction
-// factor to apply.
-//
-// It is still a floor: the server is in the same process, so there is no wire.
-func BenchmarkProcessMessage_RealPublish(b *testing.B) {
-	opts := &natsserver.Options{Port: -1, JetStream: true, StoreDir: b.TempDir()}
-	ns, err := natsserver.NewServer(opts)
-	if err != nil {
-		b.Fatal(err)
-	}
-	ns.Start()
-	if !ns.ReadyForConnections(5 * time.Second) {
-		b.Fatal("nats server did not become ready")
-	}
-	b.Cleanup(ns.Shutdown)
-
-	nc, err := nats.Connect(ns.ClientURL())
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(nc.Close)
-	js, err := jetstream.New(nc)
-	if err != nil {
-		b.Fatal(err)
-	}
-	sc := stream.MessagesCanonical("site-a")
-	if _, err := js.CreateOrUpdateStream(context.Background(),
-		jetstream.StreamConfig{Name: sc.Name, Subjects: sc.Subjects}); err != nil {
-		b.Fatal(err)
-	}
-
-	store, err := newCachedMetaStore(newBenchStore(model.RoleOwner), 1024, time.Minute)
-	if err != nil {
-		b.Fatal(err)
-	}
-	publish := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-		return js.PublishMsg(ctx, msg, opts...)
-	}
-	reply := func(context.Context, *nats.Msg) error { return nil }
-	runProcessMessage(b, NewHandler(store, nil, publish, reply, "site-a", nil, 500, 1, 8192, ""))
 }

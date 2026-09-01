@@ -5,7 +5,8 @@
 // warms the other.
 //
 // It stores a single superset projection (SubAuth) so one L2 entry serves both
-// consumers: gatekeeper reads ID+Roles, history reads HistorySharedSince.
+// consumers: gatekeeper reads ID+Roles+RoomType, history reads
+// HistorySharedSince.
 // Positive-only: only confirmed subscribers are cached; "not subscribed" and
 // loader errors are never stored. Fail-open: a nil client or any Valkey error
 // degrades to the loader — only the loader's result governs the returned error.
@@ -29,10 +30,11 @@ import (
 // SubAuth is the shared L2 projection of a subscription. Its presence in L2
 // means "subscribed"; absence is never cached. json tags pin the wire format.
 type SubAuth struct {
-	ID                 string       `json:"id"`
-	Account            string       `json:"account"`
-	Roles              []model.Role `json:"roles,omitempty"`
-	HistorySharedSince *int64       `json:"historySharedSince,omitempty"` // epoch millis; nil = full access
+	ID                 string         `json:"id"`
+	Account            string         `json:"account"`
+	Roles              []model.Role   `json:"roles,omitempty"`
+	RoomType           model.RoomType `json:"roomType,omitempty"`
+	HistorySharedSince *int64         `json:"historySharedSince,omitempty"` // epoch millis; nil = full access
 }
 
 // usableAuth rejects an entry with no user ID: its presence means "subscribed",
@@ -59,19 +61,21 @@ func SubKey(roomID, account string) string {
 // cacheKeySchemaVersion namespaces keys by stored shape, as roomsubcache and
 // roommetacache do, so a future change to the stored value misses these entries
 // rather than decoding them into an all-zero SubAuth with no JSON error. No
-// earlier generation exists to clear: this package is new, and the shapes
-// numbered below it never ran outside this branch.
+// v3 adds RoomType. Existing v2 entries miss rather than silently classifying
+// a bypass sender from an incomplete projection.
 //
 // The version trails the key so the {roomID} hash tag still groups a room's
 // subscribers into one cluster slot.
-const cacheKeySchemaVersion = "v2"
+const cacheKeySchemaVersion = "v3"
 
 // FetchFromMongo reads the subscription projection both services need. Returns
 // (zero, false, nil) when the user is not subscribed (Mongo ErrNoDocuments).
 func FetchFromMongo(ctx context.Context, subscriptions *mongo.Collection, roomID, account string) (SubAuth, bool, error) {
 	var sub model.Subscription
 	filter := bson.M{"u.account": account, "roomId": roomID}
-	proj := options.FindOne().SetProjection(bson.M{"u._id": 1, "u.account": 1, "roles": 1, "historySharedSince": 1})
+	proj := options.FindOne().SetProjection(bson.M{
+		"u._id": 1, "u.account": 1, "roles": 1, "roomType": 1, "historySharedSince": 1,
+	})
 	if err := subscriptions.FindOne(ctx, filter, proj).Decode(&sub); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return SubAuth{}, false, nil
@@ -83,9 +87,10 @@ func FetchFromMongo(ctx context.Context, subscriptions *mongo.Collection, roomID
 
 func fromSubscription(sub *model.Subscription) SubAuth {
 	a := SubAuth{
-		ID:      sub.User.ID,
-		Account: sub.User.Account,
-		Roles:   sub.Roles,
+		ID:       sub.User.ID,
+		Account:  sub.User.Account,
+		Roles:    sub.Roles,
+		RoomType: sub.RoomType,
 	}
 	if sub.HistorySharedSince != nil {
 		ms := sub.HistorySharedSince.UTC().UnixMilli()

@@ -111,7 +111,8 @@ func BroadcastPathCases() []BroadcastPathCase {
 			Want:         broadcastpath.RoomSubject,
 		},
 		{
-			// How a failed room-meta lookup arrives: no type to switch on.
+			// How a failed subscription + room-meta type resolution arrives: no
+			// type to switch on.
 			Name:     "unresolved room type",
 			RoomType: "",
 			Want:     broadcastpath.Unknown,

@@ -46,10 +46,15 @@ func (s *MongoStore) GetSubscription(ctx context.Context, account, roomID string
 	if !subscribed {
 		return nil, fmt.Errorf("user %s not subscribed to room %s: %w", account, roomID, errNotSubscribed)
 	}
+	return subscriptionFromAuth(&auth), nil
+}
+
+func subscriptionFromAuth(auth *subauthcache.SubAuth) *model.Subscription {
 	return &model.Subscription{
-		User:  model.SubscriptionUser{ID: auth.ID, Account: auth.Account},
-		Roles: auth.Roles,
-	}, nil
+		User:     model.SubscriptionUser{ID: auth.ID, Account: auth.Account},
+		Roles:    auth.Roles,
+		RoomType: auth.RoomType,
+	}
 }
 
 // GetRoomMeta fences only the Mongo fetch behind the meta breaker, never the L2

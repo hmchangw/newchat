@@ -814,7 +814,7 @@ to this contract.
 | `messages_canonical_published_total` | counter | message-gatekeeper | on first published message | none | **SLO-1a denominator** (all-`broadcast_path` total) and **SLO-1b/2 denominator** (`broadcast_path="room_subject"` slice). Emitted upstream of both workers on purpose: a consumer-side denominator is only incremented by a worker that is running, so a stalled broadcast-worker would remove a message from *both* halves of SLO-1b and hold the ratio at 100% through the outage. Three caveats below |
 | `messages_canonical_publish_duplicate_total` | counter | message-gatekeeper | **never on a happy path** — only on a JetStream redelivery inside the stream's dedup window | none — the stream deduplicates silently | the size of the exclusion the row above makes. Unlabelled: the message it describes was already classified on its first publish |
 | `message_worker_persistence_total` | counter | message-worker | on first persist | none | campaign; SLO-1a |
-| `broadcast_channel_enqueue_total` | counter | broadcast-worker | on first channel message | none — a Core NATS publish leaves no broker-side record of acceptance | **SLO-1b numerator**. One `outcome` (`ok`/`failed`) per `publishChannelEvent` call, recorded from a `defer` on a named return so all three failure points — encryption, marshal, publish — count. Reached from `handleCreated` alone; mutations take `publishMutation` → `publishRoomEvent`, which is what makes it comparable to the `room_subject` denominator. **Enqueue acceptance, not delivery**: a nil return from a Core NATS publish means accepted into the client's send buffer (§7.1) |
+| `broadcast_channel_enqueue_total` | counter | broadcast-worker | on first channel message | none — a Core NATS publish leaves no broker-side record of acceptance | **SLO-1b numerator**. One logical `outcome` (`ok`/`failed`) per `publishChannelEvent` call, recorded from a `defer` on a named return so encryption, marshal, and every locality-routing publish are covered. `ok` requires every required room-subject target; any target failure yields the single `failed` outcome, with no `partial` label and no per-target increments. Reached from `handleCreated` alone; mutations take `publishMutation` → `publishRoomEvent`, which is what makes it comparable to the `room_subject` denominator. **Enqueue acceptance, not delivery**: a nil return from each Core NATS publish means accepted into the client's send buffer (§7.1) |
 | `broadcast_worker_fanout_recipients` | histogram | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_recipient_deliveries_total` | counter | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_thread_view_publish_failures_total` | counter | broadcast-worker | on first failed thread-view mirror | none — the mirror is a Core NATS publish the broker keeps no record of | thread-panel delivery health. Failures only, by the author's design (#349): an open panel refetches on open, so the rate is what is worth alerting on, not the absolute count |
@@ -860,13 +860,15 @@ an undercount of one. No application counter can close that; an exact denominato
 needs a server-side stream delta or a persisted ledger. `sli-slo.md` §0.1 already
 labels these numerators approximate.
 
-**2. `broadcast_path="unknown"` is a validity signal, not a bucket.** Two things
-produce it and they are not equally benign: the room-meta lookup failed, or the
-room carries a type neither service recognises. In the second case
+**2. `broadcast_path="unknown"` is a validity signal, not a bucket.** It is
+emitted when neither the subscription projection nor the room-meta fallback
+resolves the room type — a room-meta error needed only for the large-room cap
+retains a valid subscription route — or when the room carries a type neither
+service recognises. Those two are not equally benign: in the second,
 broadcast-worker's dispatch hits its `default:` and logs *"unknown room type,
-skipping fan-out"* — the message is dropped, not merely unmeasured. The label
-cannot separate them; the log line beside it can. Either way it biases SLO-1b in
-the **green** direction: a genuine channel message whose lookup failed leaves the
+skipping fan-out"*, so the message is dropped rather than merely unmeasured. The
+label cannot separate them; the log line beside it can. Either way an unresolved
+route biases SLO-1b in the **green** direction: a genuine channel message leaves the
 `room_subject` denominator entirely, while the enqueue that follows it still
 increments the numerator — so a Mongo blip *raises* the measured ratio at exactly
 the moment the system is degraded. The rule is therefore zero-tolerance rather

@@ -13,7 +13,23 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/subauthcache"
 )
+
+func TestSubscriptionFromAuth_PreservesRoomType(t *testing.T) {
+	got := subscriptionFromAuth(&subauthcache.SubAuth{
+		ID:       "u1",
+		Account:  "alice",
+		Roles:    []model.Role{model.RoleOwner},
+		RoomType: model.RoomTypeChannel,
+	})
+
+	assert.Equal(t, "u1", got.User.ID)
+	assert.Equal(t, "alice", got.User.Account)
+	assert.Equal(t, []model.Role{model.RoleOwner}, got.Roles)
+	assert.Equal(t, model.RoomTypeChannel, got.RoomType)
+}
 
 // A room that does not exist is a healthy answer from a healthy Mongo. Spending
 // the breaker's failure budget on it would let a handful of requests for deleted

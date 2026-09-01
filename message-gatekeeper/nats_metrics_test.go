@@ -275,10 +275,14 @@ func TestHandler_processMessage_RecordsBroadcastPath(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			store := NewMockStore(ctrl)
 			store.EXPECT().GetSubscription(gomock.Any(), "alice", "room-1").
-				Return(&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}}, nil)
-			if tc.Want == broadcastpath.Thread {
+				Return(&model.Subscription{
+					User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+					RoomType: tc.RoomType,
+				}, nil)
+			if tc.Want == broadcastpath.Thread || tc.ThreadParentMessageID != "" {
 				// The thread test is free — a hidden thread reply must not pay
-				// for a room-meta lookup it cannot use.
+				// for a room-meta lookup it cannot use. A tshow reply can classify
+				// from the subscription projection already read above.
 				store.EXPECT().GetRoomMeta(gomock.Any(), gomock.Any()).Times(0)
 			} else {
 				store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
@@ -341,6 +345,34 @@ func TestHandler_processMessage_RoomMetaErrorFailsOpenToUnknown(t *testing.T) {
 	require.NoError(t, err, "a metric must never fail a message")
 	assert.Len(t, published, 1, "the message is still published")
 	assert.Equal(t, map[string]int64{"unknown": 1}, canonicalPublishCounts(t, reader))
+}
+
+func TestHandler_processMessage_CapMetaErrorRetainsSubscriptionRoute(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	metrics := newGatekeeperMetrics(mp.Meter("test"))
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().GetSubscription(gomock.Any(), "alice", "room-1").
+		Return(&model.Subscription{
+			User:     model.SubscriptionUser{ID: "u-alice", Account: "alice"},
+			RoomType: model.RoomTypeChannel,
+		}, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
+		Return(roommetacache.Meta{}, errors.New("mongo unavailable"))
+	h := NewHandler(store, nil, makePublishFunc(nil, nil),
+		func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "",
+		withGatekeeperMetrics(metrics))
+
+	req := model.SendMessageRequest{
+		ID: idgen.GenerateMessageID(), Content: "hello",
+		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
+	}
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+
+	require.NoError(t, err, "the large-room cap remains fail-open")
+	assert.Equal(t, map[string]int64{"room_subject": 1}, canonicalPublishCounts(t, reader),
+		"a cap-only meta failure must not discard the route already known from the subscription")
 }
 
 func TestHandler_processMessage_DuplicateAckIsExcluded(t *testing.T) {
@@ -427,10 +459,10 @@ func TestHandler_processMessage_RejectedBeforePublishCountsNeither(t *testing.T)
 	assert.Empty(t, canonicalPublishCounts(t, reader))
 }
 
-// The large-room cap must keep its exact pre-existing scope. Classifying now
-// fetches room meta on paths that previously skipped it — a bypass-eligible
-// sender, and a tshow thread reply — and the cap must still not apply to either.
-func TestHandler_processMessage_ClassificationDoesNotWidenLargeRoomCap(t *testing.T) {
+// The large-room cap must keep its exact pre-existing scope, while route
+// classification must not add a room-meta lookup to bypass senders or tshow
+// replies when the subscription already carries the room type.
+func TestHandler_processMessage_ClassificationKeepsBypassFastPath(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		account   string
@@ -451,12 +483,11 @@ func TestHandler_processMessage_ClassificationDoesNotWidenLargeRoomCap(t *testin
 			store := NewMockStore(ctrl)
 			store.EXPECT().GetSubscription(gomock.Any(), tt.account, "room-1").
 				Return(&model.Subscription{
-					User:  model.SubscriptionUser{ID: "u-1", Account: tt.account},
-					Roles: tt.roles,
+					User:     model.SubscriptionUser{ID: "u-1", Account: tt.account},
+					Roles:    tt.roles,
+					RoomType: model.RoomTypeChannel,
 				}, nil)
-			// Well over the threshold: a message that reaches the cap is rejected.
-			store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
-				Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 10_000}, nil)
+			store.EXPECT().GetRoomMeta(gomock.Any(), gomock.Any()).Times(0)
 			h := NewHandler(store, nil, makePublishFunc(nil, nil),
 				func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "",
 				withGatekeeperMetrics(metrics))

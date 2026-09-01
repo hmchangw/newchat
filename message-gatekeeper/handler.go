@@ -431,46 +431,41 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// tshow ("Also send to channel") is only meaningful on a thread reply: it asks
 	// for the reply to also appear in the parent room's channel timeline. On a
 	// non-thread send it is normalized to false (ignored, not rejected) — see
-	// docs/client-api.md §msg.send.
-	//
-	// It moved up from the message build site because broadcast_path classifies
-	// on it. Passing req.TShow instead would not change any label today — the
-	// predicate already requires a thread parent, so the two values differ only
-	// where the predicate ignores both — but it is the normalized value that
-	// lands on the canonical message broadcast-worker later routes, and the label
-	// has to be computed from the same thing the worker will see.
+	// docs/client-api.md §msg.send. It is computed here rather than at the build
+	// site below because the broadcast_path classification needs the *normalized*
+	// value that will land on the canonical message. IsHiddenThreadReply also
+	// checks for a parent, so raw and normalized values happen to classify a
+	// parentless send identically; keeping one value still prevents the metric and
+	// wire payload from acquiring different semantics later.
 	tshow := req.TShow && isThreadReply
 
-	// The room fetch now serves two callers with different conditions, so the two
-	// are kept apart deliberately:
+	// Subscription resolution above already read the denormalized room type. Use
+	// it for route classification so bypass-eligible senders and tshow replies
+	// keep their pre-metric fast path. Room meta is fetched only when:
 	//
-	//   - The large-room cap wants it only when !isThreadReply && !bypass, and
-	//     that scope must not widen — a bypass-eligible sender and a thread reply
-	//     are exempt regardless of room size.
-	//   - broadcast_path wants the room *type* for every message that is not a
-	//     hidden thread reply, because that is exactly the set broadcast-worker
-	//     routes by room type. A hidden thread reply classifies without it.
+	//   - the large-room cap needs UserCount (!isThreadReply && !bypass), or
+	//   - a legacy/incomplete subscription has no recognised RoomType.
 	//
-	// So the fetch runs on the union and the cap still applies on its own
-	// intersection. What is newly paying for a lookup is the bypass path and the
-	// tshow thread reply; the cache in metacache.go is what keeps that affordable,
-	// and the benchmark in handler_bench_test.go is what keeps it honest.
-	broadcastPath := broadcastpath.Classify(req.ThreadParentMessageID, tshow, "")
-	if !model.IsHiddenThreadReply(req.ThreadParentMessageID, tshow) {
+	// The fallback is correctness-preserving during the v2→v3 cache transition.
+	// A cap-only meta failure retains a route already known from the subscription;
+	// only a genuinely unresolved type is labelled unknown.
+	broadcastPath := broadcastpath.Classify(req.ThreadParentMessageID, tshow, sub.RoomType)
+	capNeedsMeta := !isThreadReply && !bypass
+	typeNeedsFallback := broadcastPath == broadcastpath.Unknown
+	if capNeedsMeta || typeNeedsFallback {
 		meta, err := h.store.GetRoomMeta(ctx, roomID)
 		switch {
 		case err != nil:
-			// Fail-open, for both callers: during a Mongo outage the room-meta
-			// read is unavailable. The large-room cap is a spam/noise control,
-			// not an access control, so allow the post rather than block the
-			// send — and a metric must never fail a message either, so the
-			// route is labelled unknown rather than guessed. `unknown` is a
-			// validity signal, not a bucket: see the contract §13.3.
-			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap and route classification (fail-open)",
-				"request_id", req.RequestID, "room_id", roomID, "error", err)
+			// The large-room cap is spam/noise control rather than access control,
+			// so it remains fail-open. Classification also fails open: retain a
+			// route already known from the subscription, or unknown when neither
+			// source resolved it. See the contract §13.3.
+			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap (fail-open)",
+				"request_id", req.RequestID, "room_id", roomID,
+				"broadcast_path", string(broadcastPath), "error", err)
 		default:
 			broadcastPath = broadcastpath.Classify(req.ThreadParentMessageID, tshow, meta.Type)
-			if !isThreadReply && !bypass && meta.UserCount > h.largeRoomThreshold {
+			if capNeedsMeta && meta.UserCount > h.largeRoomThreshold {
 				slog.Info("send blocked",
 					"reason", string(errcode.MessageLargeRoomPostRestricted),
 					"account", account,

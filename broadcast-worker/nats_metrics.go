@@ -77,8 +77,8 @@ type broadcastMetrics struct {
 	// Failures only: the delivery counter already carries this lane's volume.
 	threadViewFailures metric.Int64Counter
 
-	// channelEnqueue is SLO-1b's numerator: one outcome per room-subject
-	// enqueue of a created channel message. Its denominator
+	// channelEnqueue is SLO-1b's numerator: one logical outcome per created
+	// channel message across every room subject required by locality routing. Its denominator
 	// (messages_canonical_published_total{broadcast_path="room_subject"}) is
 	// emitted upstream by message-gatekeeper, so the ratio can exceed 1 under
 	// redelivery — this side is consumer-side and counts again, that side does
@@ -110,7 +110,7 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		threadViewFailures, _ = noopMeter.Int64Counter("broadcast_worker_thread_view_publish_failures_total")
 	}
 	channelEnqueue, err := meter.Int64Counter("broadcast_channel_enqueue_total",
-		metric.WithDescription("Room-subject enqueues of a created channel message, by outcome."))
+		metric.WithDescription("Logical room-event enqueues of created channel messages, by outcome."))
 	if err != nil {
 		channelEnqueue, _ = noopMeter.Int64Counter("broadcast_channel_enqueue_total")
 	}
@@ -238,10 +238,11 @@ func (p *broadcastMetricPublisher) Publish(ctx context.Context, subject string, 
 	return err
 }
 
-// ChannelEnqueue records one room-subject enqueue outcome. It takes the error
-// rather than an outcome so the caller can defer it on a named return, which is
-// what makes "exactly one outcome per publishChannelEvent call" structural
-// instead of a thing every future early return has to remember.
+// ChannelEnqueue records one logical room-event enqueue outcome across every
+// required locality target. It takes the error rather than an outcome so the
+// caller can defer it on a named return, which makes "exactly one outcome per
+// publishChannelEvent call" structural instead of a thing every future early
+// return has to remember.
 func (m *broadcastMetrics) ChannelEnqueue(ctx context.Context, err error) {
 	outcome := enqueueOK
 	if err != nil {
