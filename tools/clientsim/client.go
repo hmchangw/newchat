@@ -40,6 +40,11 @@ type simClient struct {
 	// be broken"; only a completed walk answers "is the plan complete at all",
 	// and a live update can satisfy the first while the second is still false.
 	planVerified bool
+	// planEpoch advances on every disconnect. A walk reads it before its RPC
+	// and again before applying: the RPC happens with no lock held, so without
+	// this a walk whose reply arrived over a now-dead connection could set
+	// planVerified back to true after invalidatePlan cleared it.
+	planEpoch uint64
 	// touched tracks per-room mutation generations so a resync walk never
 	// reverts a live update that landed while its RPC was in flight.
 	touched map[string]uint64

@@ -134,6 +134,7 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	startGen := s.gen
+	startEpoch := s.planEpoch
 	s.mu.Unlock()
 
 	lister := &natsLister{
@@ -149,6 +150,13 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.planEpoch != startEpoch {
+		// The connection this plan was fetched over is gone. Applying it would
+		// reconcile against a dead snapshot, and marking it verified would
+		// vouch for a connection that no longer exists; the resync driving the
+		// new connection redoes the work.
+		return fmt.Errorf("bootstrap walk for %s: connection changed during the walk", s.account)
+	}
 	changes := diffPlans(s.planViewLocked(), plan)
 	kept := changes[:0]
 	for _, ch := range changes {

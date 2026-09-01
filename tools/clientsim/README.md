@@ -125,7 +125,10 @@ The exit gate also snapshots the current ready count immediately before
 SIGTERM drains the fleet, so a fleet that reached the floor and then stayed
 collapsed after a fault does not exit successfully.
 
-`clientsim_conns_ready_min` is the trough after the fleet first came up.
+`clientsim_conns_ready_min` is the trough after the fleet first came up,
+frozen at the shutdown boundary so the drain's own descent to zero is not
+mistaken for the window's low point. A run that never dipped reports the
+fleet it held, not a zero nothing ever touched.
 Those other two are single instants, so a fleet that collapsed mid-run and
 recovered before shutdown clears both — the trough is the only series that
 says how bad it got. Reported, never gated: in a failure test a dip is the

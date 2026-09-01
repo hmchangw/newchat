@@ -104,9 +104,28 @@ func TestMetrics_ReadyMinTracksTheTrough(t *testing.T) {
 		m.readyInc() // and recovers before shutdown
 	}
 	m.captureReadyAtDrain()
+	for i := 0; i < 10; i++ {
+		m.readyDec() // the drain every run ends with
+	}
 
 	assert.Equal(t, int64(10), m.readyPeak.Load())
 	assert.Equal(t, int64(10), m.readyAtDrain.Load())
 	assert.Equal(t, int64(2), m.readyMin.Load(),
-		"the trough must survive the recovery, or a mid-run collapse is invisible")
+		"the trough must survive both the recovery and the drain")
+}
+
+// A run that held its fleet the whole way has a minimum equal to what it held,
+// not the zero of an untouched counter — and the drain must not rewrite it.
+func TestMetrics_ReadyMinOnARunThatNeverDipped(t *testing.T) {
+	m := newMetrics()
+	for i := 0; i < 10; i++ {
+		m.readyInc()
+	}
+	m.captureReadyAtDrain()
+	for i := 0; i < 10; i++ {
+		m.readyDec()
+	}
+
+	assert.Equal(t, int64(10), m.readyMin.Load(),
+		"never dipping means the minimum is the fleet it held, not 0")
 }

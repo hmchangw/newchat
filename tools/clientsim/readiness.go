@@ -11,6 +11,7 @@ package main
 func (s *simClient) invalidatePlan() {
 	s.mu.Lock()
 	s.planVerified = false
+	s.planEpoch++
 	s.mu.Unlock()
 }
 

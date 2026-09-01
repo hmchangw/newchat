@@ -76,6 +76,7 @@ type metrics struct {
 	readyPeak     atomic.Int64
 	readyMin      atomic.Int64
 	readyMinSet   atomic.Bool
+	readyFrozen   atomic.Bool
 	readyAtDrain  atomic.Int64
 	readyCaptured atomic.Bool
 }
@@ -105,6 +106,12 @@ func (m *metrics) readyDec() {
 // recordTrough keeps the low-water mark. Seeded on the first decrement rather
 // than at zero, so the ramp up from an empty fleet is not itself the trough.
 func (m *metrics) recordTrough(n int64) {
+	// The drain that ends every run walks readiness down to zero. Without this
+	// guard the trough of any completed run is 0, which describes the shutdown
+	// rather than the measurement window.
+	if m.readyFrozen.Load() {
+		return
+	}
 	if m.readyMinSet.CompareAndSwap(false, true) {
 		m.readyMin.Store(n)
 		m.ConnsReadyMin.Set(float64(n))
@@ -126,7 +133,17 @@ func (m *metrics) recordTrough(n int64) {
 // connection and drives readyNow to zero. Store the value before publishing
 // the captured flag so readyGate never observes an uninitialized snapshot.
 func (m *metrics) captureReadyAtDrain() {
-	m.readyAtDrain.Store(m.readyNow.Load())
+	n := m.readyNow.Load()
+	m.readyAtDrain.Store(n)
+	// A run that never dipped has no recorded trough; its minimum is the fleet
+	// it held, not the zero of a counter nothing ever touched.
+	if m.readyMinSet.CompareAndSwap(false, true) {
+		m.readyMin.Store(n)
+		m.ConnsReadyMin.Set(float64(n))
+	}
+	// Freeze before the caller cancels the swarm, so the drain's own
+	// decrements cannot rewrite the window's low-water mark.
+	m.readyFrozen.Store(true)
 	m.readyCaptured.Store(true)
 }
 

@@ -306,3 +306,38 @@ func TestSimClient_LiveUpdateDoesNotPromoteAnUnverifiedPlan(t *testing.T) {
 	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
 		"one successful live open must not stand in for a completed walk")
 }
+
+// A walk that fetched its plan over a connection that has since dropped must
+// not report that plan as verified. Its snapshot describes a dead connection,
+// so letting it set planVerified hands a later live update the very licence
+// planVerified exists to withhold.
+func TestSimClient_StaleWalkDoesNotReVerifyAfterDisconnect(t *testing.T) {
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}, HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	// Pin a walk inside its RPC, then drop the connection under it.
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	walkDone := make(chan struct{})
+	go func() { defer close(walkDone); _ = s.bootstrapWalk(context.Background()) }()
+	select {
+	case <-fc.reqEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the walk never reached its RPC")
+	}
+	s.invalidatePlan()
+	s.markConnDown()
+	close(fc.reqGate) // the stale walk now completes against a dead connection
+	<-walkDone
+
+	s.markConnUp() // reconnected; no walk has succeeded since
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r9", "channel", nil))
+
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"a walk from the previous connection must not stand in for a post-reconnect one")
+}
