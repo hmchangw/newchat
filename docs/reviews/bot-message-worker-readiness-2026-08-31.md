@@ -42,3 +42,22 @@ Idiomatic, well-commented Go with correct `%w` wrapping and slog-only structured
 - `high` — reject non-retryable gocql errors (e.g. `gocql.ErrNotFound`, invalid-query/`ErrorMap` server errors) as permanent rather than NAKing them 6× over 12.6 minutes.
 - `medium` — add `"request_id", natsutil.RequestIDFromContext(ctx)` to all four log sites and `obs.ContextWithIdentity` after decode.
 - `low` — record the govulncheck gap in the release checklist and run it from an unblocked CI leg.
+
+---
+
+## 3. Architecture — 3 / 5
+
+Boundaries, DI, bootstrap opt-in and subject/stream builders are all correct, but the dispatcher goroutine is outside the WaitGroup — so shutdown can close Cassandra under an in-flight message — and the service ships without a CI pipeline.
+
+### Findings
+- `high` — the consumer loop goroutine is not tracked by `wg`; only the per-message workers are — `main.go:154-167`. A message returned by `iter.Next()` and blocked on `sem <- struct{}{}` (`:160`) is invisible to `wg.Wait()` (`:179-188`), so shutdown can proceed to `nc.Drain` and `cassSess.Close()` (`:189-190`) before that goroutine runs `HandleJetStreamMsg` against a closed session. `message-worker/main.go:281-286` explicitly counts the loop itself and documents exactly this hazard.
+- `high` — no `deploy/azure-pipelines.yml`; only `Dockerfile` and `docker-compose.yml` exist (`ls bot-message-worker/deploy/`). CLAUDE.md requires one per service; 29 of 37 service `deploy/` dirs have one.
+- `medium` — `store.go` has no `//go:generate mockgen` directive — `store.go:10-16`. ~20 peer services carry it (`room-service`, `message-worker`, `broadcast-worker`, …); its absence is why this service has no `mock_store_test.go`.
+- `low` — no `integration_test.go` and therefore no `TestMain`/`testutil.RunTests`, so the entire Cassandra store is unexercised against a real cluster (see D3).
+- Compliant and worth noting: `bootstrapStreams` verifies rather than creates when disabled (`bootstrap.go:23-37`), config is a typed `caarlos0/env` struct with `required` on secrets and a mounted `mongoutil.PoolConfig`/`atrest.Config` (`main.go:26-57`), `pkg/subject`/`pkg/stream` builders are used (`main.go:141,208`), `encoding/json` is correct here (this is not one of CLAUDE.md's designated sonic hot-path workers).
+
+### Recommendations
+- `high` — `wg.Add(1)` before the dispatcher goroutine with `defer wg.Done()`, matching `message-worker/main.go:281-286`.
+- `high` — add `deploy/azure-pipelines.yml` mirroring a peer worker's.
+- `medium` — add the `//go:generate mockgen` directive to `store.go` and generate `mock_store_test.go`.
+- `low` — start the health server before the consumer loop so readiness cannot report healthy on a half-wired process.
