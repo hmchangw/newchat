@@ -76,7 +76,20 @@ func Maintain(ctx context.Context, session *gocql.Session, threadRoomID string, 
 		// miss the real newest. A truncated read may therefore only raise the
 		// count and advance the timestamp — stamping it as exact is what would
 		// write tcount=0 over a live thread and clear its last-reply time.
-		n = max(n, adjusted(stamped, delta))
+		//
+		// A retry does not re-apply the delta, for the same reason the
+		// approximate path below does not: the reply may already be counted.
+		// This is the only branch that both applies a delta and cannot recount
+		// to check itself, so it needs the guard explicitly — the complete
+		// branch is idempotent by construction.
+		prior := 0
+		if stamped != nil {
+			prior = *stamped
+		}
+		if !redelivered {
+			prior = adjusted(stamped, delta)
+		}
+		n = max(n, prior)
 		tlm := stampedTLM
 		if latest != nil {
 			t := LaterOf(stampedTLM, *latest)
