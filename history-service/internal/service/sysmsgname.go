@@ -7,6 +7,7 @@ import (
 
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/displayfmt"
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 const (
@@ -14,11 +15,35 @@ const (
 	// "members_"), distinct from the modern model.MessageTypeMemberRemoved.
 	// Rows of this type carry a raw account in their text, not in sysMsgData.
 	legacyMembersRemovedType = "members_removed"
+	// legacyMembersLeftType is the migrated self-leave type. Nothing in this repo
+	// writes it — only the migration did — so it has no pkg/model constant.
+	legacyMembersLeftType = "members_left"
 	// removedFromChannelSuffix must match exactly, trailing period included: a
 	// user can type the same sentence without it, and the period plus the type
 	// gate is what keeps an ordinary message from being rewritten.
 	removedFromChannelSuffix = " has been removed from the channel."
 )
+
+// legacySysMsgTypes maps each migrated system-message type to the modern one
+// clients understand. Keyed by the constants above and valued by pkg/model's, so
+// a rename on either side is a compile error rather than silent drift.
+var legacySysMsgTypes = map[string]string{
+	legacyMembersRemovedType: model.MessageTypeMemberRemoved,
+	legacyMembersLeftType:    model.MessageTypeMemberLeft,
+}
+
+// normalizeLegacySysMsgTypes rewrites migrated types in place, on the wire only —
+// the Cassandra rows keep their legacy form.
+//
+// Unconditional by design: a members_removed row whose text never matched the
+// name-resolution suffix still gets the type its client expects.
+func normalizeLegacySysMsgTypes(msgs []models.Message) {
+	for i := range msgs {
+		if modern, ok := legacySysMsgTypes[msgs[i].Type]; ok {
+			msgs[i].Type = modern
+		}
+	}
+}
 
 // extractRemovedAccount returns the account baked into a legacy members_removed
 // row's text, which quotes it: `"bob" has been removed from the channel.`
@@ -49,17 +74,38 @@ func quoteRemoved(name string) string {
 	return `"` + name + `"` + removedFromChannelSuffix
 }
 
+// removedMemberName renders one account's display name, preferring a bot's
+// registered app name over the composed one — the precedence room-worker applies
+// on the live path, so a legacy row and a modern one show a bot alike.
+//
+// An empty return means "nothing resolved": leave the row exactly as stored.
+func (s *HistoryService) removedMemberName(ctx context.Context, account string, u *model.User) string {
+	var engName, chineseName string
+	if u != nil {
+		engName, chineseName = u.EngName, u.ChineseName
+	}
+	if model.IsBot(account) {
+		return s.botAwareDisplayName(ctx, engName, chineseName, account)
+	}
+	if u == nil {
+		return ""
+	}
+	return displayfmt.CombineWithFallback(engName, chineseName, account)
+}
+
 // resolveRemovedMemberNames rewrites every legacy members_removed row in msgs,
-// swapping the raw account in its text for the user's display name.
+// swapping the raw account in its text for the member's display name.
 //
 // One batched read serves the whole page however many rows qualify, and a page
-// with none — the overwhelmingly common case — returns before touching Mongo.
+// with none — the overwhelmingly common case — returns before touching Mongo. Bot
+// accounts stay in that same batch rather than earning a query of their own: a bot
+// may carry a user document, and the batch is issued either way.
 //
-// Best-effort throughout: a failed lookup or an account with no user document
-// leaves the row reading exactly as it does today. A display name is never worth
-// failing a history load over.
+// Best-effort throughout: a failed lookup, or an account matching neither a user
+// nor an app, leaves the row reading exactly as it does today. A display name is
+// never worth failing a history load over.
 func (s *HistoryService) resolveRemovedMemberNames(ctx context.Context, msgs []models.Message) {
-	if len(msgs) == 0 || s.users == nil {
+	if len(msgs) == 0 {
 		return
 	}
 
@@ -80,17 +126,27 @@ func (s *HistoryService) resolveRemovedMemberNames(ctx context.Context, msgs []m
 		return
 	}
 
-	users, err := s.users.FindUsersByAccounts(ctx, accounts)
-	if err != nil {
-		slog.WarnContext(ctx, "resolving removed-member display names, leaving raw accounts",
-			"accounts", len(accounts), "error", err)
-		return
+	// A users failure is logged and fallen through, not returned: it says nothing
+	// about `apps`, so a bot on this page can still resolve. Non-bot rows end up
+	// untouched either way, which is the same guarantee an early return gave.
+	var docs map[string]*model.User
+	if s.users != nil {
+		users, err := s.users.FindUsersByAccounts(ctx, accounts)
+		if err != nil {
+			slog.WarnContext(ctx, "resolving removed-member display names, leaving raw accounts",
+				"accounts", len(accounts), "error", err)
+		}
+		docs = make(map[string]*model.User, len(users))
+		for i := range users {
+			docs[users[i].Account] = &users[i]
+		}
 	}
 
-	names := make(map[string]string, len(users))
-	for i := range users {
-		u := &users[i]
-		names[u.Account] = displayfmt.CombineWithFallback(u.EngName, u.ChineseName, u.Account)
+	names := make(map[string]string, len(accounts))
+	for _, account := range accounts {
+		if name := s.removedMemberName(ctx, account, docs[account]); name != "" {
+			names[account] = name
+		}
 	}
 
 	for i := range msgs {
