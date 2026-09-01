@@ -70,6 +70,15 @@ type SearchConfig struct {
 	RecentWindow            time.Duration `env:"RECENT_WINDOW"              envDefault:"8760h"`
 	RequestTimeout          time.Duration `env:"REQUEST_TIMEOUT"            envDefault:"10s"`
 	HealthAddr              string        `env:"HEALTH_ADDR"                envDefault:":9090"`
+	// HR/App cache knobs size the pod-local L1 caches fronting the enrichment
+	// lookups in enrich.go. A non-positive size or TTL disables that cache.
+	// The TTL is the worst-case staleness of an HR name or an app name in a
+	// search result, and the worst-case delay before a newly-created user or
+	// app stops rendering as a bare account name.
+	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"8192"`
+	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"5m"`
+	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1024"`
+	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"5m"`
 }
 
 // Config is the root service config. Note that ES and Search share the

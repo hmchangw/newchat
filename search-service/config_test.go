@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -79,5 +80,54 @@ func TestConfig_MaxConcurrency(t *testing.T) {
 		cfg, err := env.ParseAs[Config]()
 		require.NoError(t, err)
 		assert.Equal(t, 64, cfg.Guard.MaxConcurrency)
+	})
+}
+
+// The four cache knobs are the operator's only control over enrichment
+// staleness and pod memory, so both the name and the default are pinned.
+func TestConfig_EnrichmentCacheKnobs(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		for _, k := range []string{"SEARCH_HR_CACHE_SIZE", "SEARCH_HR_CACHE_TTL", "SEARCH_APP_CACHE_SIZE", "SEARCH_APP_CACHE_TTL"} {
+			require.NoError(t, os.Unsetenv(k))
+		}
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 8192, cfg.Search.HRCacheSize)
+		assert.Equal(t, 5*time.Minute, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 1024, cfg.Search.AppCacheSize)
+		assert.Equal(t, 5*time.Minute, cfg.Search.AppCacheTTL)
+	})
+
+	t.Run("overrides", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		t.Setenv("SEARCH_HR_CACHE_SIZE", "16")
+		t.Setenv("SEARCH_HR_CACHE_TTL", "90s")
+		t.Setenv("SEARCH_APP_CACHE_SIZE", "8")
+		t.Setenv("SEARCH_APP_CACHE_TTL", "30s")
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 16, cfg.Search.HRCacheSize)
+		assert.Equal(t, 90*time.Second, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 8, cfg.Search.AppCacheSize)
+		assert.Equal(t, 30*time.Second, cfg.Search.AppCacheTTL)
+	})
+
+	// Zero is the documented disable switch, not a parse error — Task 3's
+	// constructor turns it into a pass-through store.
+	t.Run("zero disables", func(t *testing.T) {
+		setRequiredSearchEnv(t)
+		t.Setenv("SEARCH_HR_CACHE_SIZE", "0")
+		t.Setenv("SEARCH_APP_CACHE_TTL", "0s")
+
+		cfg, err := env.ParseAs[Config]()
+
+		require.NoError(t, err)
+		assert.Equal(t, 0, cfg.Search.HRCacheSize)
+		assert.Equal(t, time.Duration(0), cfg.Search.AppCacheTTL)
 	})
 }
