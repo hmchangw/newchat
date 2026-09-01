@@ -147,3 +147,30 @@ Confirmed non-applicable or correct, no finding: no NATS connection, subjects, s
 - `low` — State in that doc that `/validate` is advisory and does not reserve a version (see D2), so callers do not treat a 200 as a write lock.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+The read path is genuinely excellent — lock-free `atomic.Pointer` snapshot, zero Mongo reads, no re-marshalling — but the refresh path pairs an unauthenticated trigger with a non-cancellable mutex and a timeout that starts before the lock, which is a self-inflicted amplification vector.
+
+### Findings
+- `high` — `Load` starts its 60-second budget *before* acquiring `writeMu`, so a queued load can reach `ListCards` with almost none of it left — `tcard-service/cache.go:96-99`
+  Two waiters behind one slow scan get 60s minus their wait; the third may get milliseconds and fail with a context deadline that looks like a Mongo fault.
+- `high` — `sync.Mutex.Lock` is not context-aware, so a `HandleRefresh` request blocks on `writeMu` past its own HTTP deadline; `cfg.HTTP.Middleware()` sets a request deadline (`main.go:116`) that this wait cannot observe — `tcard-service/cache.go:98`, `handler.go:58`
+  Combined with the missing authorization on that route (D2), N concurrent `POST /refresh` calls serialize into N sequential full-collection scans while pinning N goroutines and N request contexts. Each scan is unbounded — `Find(ctx, bson.D{})` with no limit or batch bound (`store_mongo.go:43`).
+- `medium` — `POST /validate` reads an unbounded request body: `ShouldBindJSON` with no `http.MaxBytesReader` — `tcard-service/handler.go:148`
+  Every other body-accepting service in the repo caps it (`media-service/upload.go:58`, `botplatform-service/bot_handlers.go:193`, `client-update-service/routes.go:27`).
+- `low` — template and listing responses are not compressed; `ginutil.Gzip` exists and is used by `user-service/routes.go:26`, but is not installed here — `tcard-service/main.go:110-117`
+  Adaptive Card templates are highly compressible JSON served on every client start.
+- `low` — the projection is exclusion-based (`_id: 0, migratedAt: 0`) rather than the "select only the fields the caller needs" form CLAUDE.md §6 mandates — `tcard-service/store_mongo.go:40-42`
+  The inline comment justifies it correctly (templates are schemaless, so the wanted fields cannot be enumerated) — recorded as a documented exception, not a defect.
+
+Confirmed sound, no finding: reads are lock-free and allocation-free on the hot path (`cache.go:62-69`, `handler.go:100` writes the cached bytes directly); `List` is O(entries) per call but on a bounded catalog and documented as such (`cache.go:159-160`); the refresh goroutine has an explicit termination path via `refreshCancel`/`refreshWG.Wait` (`main.go:96-101`, `main.go:140-142`); no `time.Sleep` for synchronization anywhere; no `$lookup`; no N+1 (one full scan per day, not per request); no JetStream, so the `jsretry`/`BackOff`/`MaxAckPending` rules do not apply.
+
+### Recommendations
+- `high` — Move `context.WithTimeout` inside the critical section in `Load`, after `writeMu.Lock()`, so each scan gets its full budget.
+- `high` — Make `HandleRefresh` non-blocking under contention: use a `TryLock` (or a single-flight/`chan struct{}` admission gate) and return `errcode.TooManyRequests` when a load is already in flight, instead of queueing requests on a non-cancellable mutex.
+- `medium` — Wrap the `/validate` body in `http.MaxBytesReader` with an explicit `TCARD_MAX_BODY_BYTES`, matching `media-service`/`client-update-service`.
+- `low` — Install `ginutil.Gzip` on the `/api/v1/cards` routes.
+- `low` — Add a batch-size or streaming bound to `ListCards` so catalog growth degrades gradually rather than by cursor timeout.
