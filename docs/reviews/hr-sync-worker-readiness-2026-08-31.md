@@ -70,3 +70,28 @@ Correct: consumer-owned `Store` interface with three methods (`store.go:25-36`),
 - `low` — split `store_mongo.go` out; drop the unused `COPY` line in the Dockerfile.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is **21.1% (128 statements)** — far below the 60% critical line, with every store method and the entire bootstrap/consumer wiring at 0%.
+
+### Findings
+- `critical` — 21.1% vs CLAUDE.md's 80% floor. Zero-coverage functions: `bootstrapStreams` (`bootstrap.go:27`), `main` (`main.go:31`), `startSiteConsumer` (`main.go:116`), `newMongoStore` (`store.go:44`), `UpsertEmployees` (`store.go:51`), `UpsertUserIdentities` (`store.go:69`), `QuitTeamsEmployees` (`store.go:111`). Only `HandleMessage` (91.7%), `NewHandler`, `buildConsumerConfig` are covered.
+- `high` — `bootstrapStreams` has a purpose-built injectable seam ("`streamManager` … injected by tests", `bootstrap.go:19-23`) and **no test uses it**. Untested: the enabled/disabled branch split, the per-site loop, and the `verify` failure that is this service's production startup gate.
+- `high` — `UpsertUserIdentities` is the service's riskiest code (it writes the live auth store) and its unit coverage is 0%. The empty-account skip (`store.go:75-78`), the publisher-supplied-vs-minted `_id` branch (`store.go:82-85`), the conditional `employeeId` (`store.go:89-91`) and the all-skipped `len(models)==0` no-op (`store.go:102-104`) are exercised only by the integration test.
+- `high` — the assertions that actually protect production — "roles must never be touched" / "services must never be touched" (`integration_test.go:119-120`) — never run in CI: `deploy/azure-pipelines.yml:44` runs `go test ./hr-sync-worker/...` with no `-tags=integration`. (Fleet-wide: no service pipeline sets that tag.)
+- `medium` — the two uncovered `HandleMessage` blocks are precisely the store-error → Nak-retry paths for `users.upsert` (`handler.go:42-44`) and `employees.quit` (`handler.go:53-55`); only the employees path is asserted (`handler_test.go:76-85`).
+- `medium` — `integration_test.go:30-50` re-implements `startSiteConsumer` instead of calling it, using `stream.DurableConsumerDefaults` directly rather than `buildConsumerConfig` and omitting `jobguard.Run`, so neither the real consumer config nor panic containment is ever exercised end to end.
+
+Good: `package main` tests, `go.uber.org/mock` mocks unedited and up to date (`GLOBAL_PREP.md`), table-driven malformed-payload subtest (`handler_test.go:51-60`), `TestMain` via `testutil.RunTests` and `testutil.MongoDB`/`testutil.NATS` (`integration_test.go:26,68-69`).
+
+### Recommendations
+- `critical` — unit-test `bootstrapStreams` through the existing `streamManager` seam: enabled creates one stream per site with `Name+Subjects` only, disabled verifies, verify-failure returns wrapped.
+- `high` — add store unit tests (or promote the integration assertions) for `UpsertUserIdentities`: empty account skipped, supplied `_id` honoured, minted `_id` on insert, `employeeId` omitted for externals, all-empty input writes nothing.
+- `high` — add `-tags=integration` to a pipeline stage so the "auth fields untouched" invariant is actually gated.
+- `medium` — extend `TestHandleMessage_StoreErrorIsTransient` into a table across all three subjects.
+- `medium` — have the integration test call `startSiteConsumer`/`buildConsumerConfig` rather than a copy.
+
+---
