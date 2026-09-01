@@ -51,7 +51,7 @@ func TestProcessMessage_PopulatesDisplayName_Integration(t *testing.T) {
 		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 	}
 
-	_, perr := handler.processMessage(ctx, user.Account, "r1", "site-a", &req)
+	_, perr := handler.processMessage(ctx, user.Account, "r1", "site-a", &req, false)
 	require.NoError(t, perr)
 
 	captured := getCaptured()
@@ -129,7 +129,7 @@ func TestGatekeeper_DebugBreadcrumbsAndPropagation_Integration(t *testing.T) {
 	t.Run("flagged: flow breadcrumb emitted and X-Debug propagates onto canonical", func(t *testing.T) {
 		rec.reset()
 		req := newReq()
-		_, perr := handler.processMessage(admitRung("flow"), user.Account, "r-flow", "site-a", &req)
+		_, perr := handler.processMessage(admitRung("flow"), user.Account, "r-flow", "site-a", &req, false)
 		require.NoError(t, perr)
 
 		assert.True(t, rec.has(logctx.LevelFlow, "gatekeeper published to canonical"),
@@ -143,7 +143,7 @@ func TestGatekeeper_DebugBreadcrumbsAndPropagation_Integration(t *testing.T) {
 	t.Run("unflagged control: no flow breadcrumb, no X-Debug header", func(t *testing.T) {
 		rec.reset()
 		req := newReq()
-		_, perr := handler.processMessage(context.Background(), user.Account, "r-flow", "site-a", &req)
+		_, perr := handler.processMessage(context.Background(), user.Account, "r-flow", "site-a", &req, false)
 		require.NoError(t, perr)
 
 		assert.False(t, rec.hasLevel(logctx.LevelFlow), "unflagged traffic must emit no flow lines")
