@@ -135,3 +135,26 @@ Verified compliant: all three subjects come from `pkg/subject` builders, never `
 - `low` — Rename or re-document `subject.EmployeesQuit` to reflect that it is published on the central site.
 
 ---
+
+---
+
+## 7. Performance — 2 / 5
+
+No goroutines, no sleeps and correct bulk writes, but the whole org is read, held and published as one unbounded unit, and the direct-write store creates no indexes.
+
+### Findings
+- `high` — The entire upsert set is marshalled into **one** JetStream message with no chunking — `publisher.go:38` and `publishZstd` at :76-82. NATS enforces a server-side `max_payload` (1 MB by default); a full first run for a large tenant is a single message whose size scales linearly with headcount, with no batching, size check, or fallback path anywhere in the file.
+- `high` — Whole-collection load with no pagination: `ListTeamsEmployees` runs `FindMany(ctx, bson.M{}, …)` (`store_mongo.go:56-58`), which is `cursor.All` into one slice (`pkg/mongoutil/collection.go:60-73`). Combined with the unbounded Graph accumulation at `collect.go:28,54` and the diff map at `differ.go:21`, peak memory is three full copies of the org — in a CronJob pod with no configured limit awareness.
+- `medium` — `mongoWriteStore` creates no indexes and has no `EnsureIndexes` (`write_store.go:37-42`), yet `UpsertUserIdentities` filters on `employeeId` (:73) and `QuitTeamsEmployees` filters `account: {$in: …}` (:99-101). CLAUDE.md: "Create indexes in the store constructor or a dedicated `EnsureIndexes` method at startup." Both are collection scans in direct mode.
+- `medium` — The unfiltered read at `store_mongo.go:57` means every `hr_employee` row not present in Graph is emitted as a quit (`differ.go:38-40`), and in direct mode `QuitTeamsEmployees` deletes by account (`write_store.go:99`). Blast radius is the whole collection if another producer ever shares it — and `portal-service/store.go:15` reads `hr_employee` as an enrichment source.
+- `low` — `slog.WarnContext` inside the per-user loop (`write_store.go:69`) emits one line per skipped user; a migration with many keyless rows floods the log.
+- `nitpick` — The projection at `store_mongo.go:21` selects every `IEmployee` field. That is intentional (the diff compares all of them, and `store_mongo_test.go:38` enforces it), so it satisfies the explicit-projection rule — but it is not a narrowing projection.
+
+Verified clean: no goroutines launched, no `time.Sleep`, no `$lookup`, no blocking work in a NATS handler (there is no consumer), no `jsretry`/`Nak` surface (this is a producer, not a JetStream consumer), no Cassandra, and both write paths use bulk operations rather than per-row loops (`write_store.go:51,92`).
+
+### Recommendations
+- `high` — Chunk the upsert publishes into fixed-size batches (e.g. 500 rows/message) so payload size is bounded by config rather than headcount; pair with the D5 atomicity fix.
+- `high` — Stream the diff baseline with a cursor and paginate the Graph walk into batches instead of materializing the full org three times.
+- `medium` — Add `EnsureIndexes` on `mongoWriteStore` covering `employeeId` (unique) on `users` and `account` on `hr_employee`, called from `newMongoWriteStore`.
+- `medium` — Scope `ListTeamsEmployees` to rows this producer owns so a foreign row can never be published as a quit or deleted.
+- `low` — Aggregate the skipped-user warning into one count logged after the loop.
