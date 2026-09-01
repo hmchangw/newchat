@@ -127,3 +127,23 @@ Subjects, stream config and IDs all come from the shared packages and the contra
 - `low` — Record the assumed `Duplicates` window for `BOT-MESSAGES-CANONICAL` in a comment beside `handler.go:199` so ops and code agree.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+No goroutines, precise projections and bounded admission, but the mention path is a textbook N+1 sitting on an unbounded member scan, with no cache or breaker in front of Mongo.
+
+### Findings
+- `high` — N+1 on mentions: `canonicalizeMentions` fetches every member of the room (`handler.go:265`) and then issues one `FindUser` per mention inside the loop (`handler.go:284`). A 10-mention message costs 11 Mongo round trips on top of the 2 the handler already makes (`FindSubscription` `:142`, `FindRoom` `:150`), all inside the synchronous 10s request budget.
+- `high` — `ListMemberIDs` has no `limit` and no projection-side filter — `store_mongo.go:70-90`. It streams every subscription document of the room into a slice just to answer "is this one user a member". In a 5000-member room that is 5000 docs decoded per mention-bearing send.
+- `medium` — no Mongo circuit breaker and, by explicit design (`main.go:29`), no cache. With `MAX_CONCURRENCY=200` and `REQUEST_TIMEOUT=10s` (`main.go:37-38`), a Mongo brownout converts directly into 200 parked handlers and `replyBusy` for everyone else (`pkg/natsrouter/router.go:153`).
+- `low` — no `jsretry` concerns: the service has no JetStream consumer, so no `Nak()`/`NakWithDelay(0)` risk exists; the single publish is bounded by a 2s context (`handler.go:197`).
+- `low` — no goroutine leaks: the only concurrency is the router's, with `Shutdown` wired first in the 25s `shutdown.Wait` chain (`main.go:113-119`); no `time.Sleep` anywhere.
+- `low` — projections are explicit and precise on all four reads (`store_mongo.go:39,59,73,97`) and `mongo.ErrNoDocuments` is handled at every site (`:42,62,102`); no `$lookup`.
+
+### Recommendations
+- `high` — Replace the member scan + per-mention lookup with two targeted queries: `FindMemberIDs(ctx, roomID, requestedIDs)` using `{"roomId": roomID, "u._id": {"$in": ids}}`, and a single `FindUsers(ctx, ids)` with `$in` — turning N+1 into 2 round trips independent of room size.
+- `high` — Until that lands, cap `ListMemberIDs` with `options.Find().SetLimit(...)` so a large room cannot dominate a request.
+- `medium` — Mount `mongoutil.BreakerConfig` and wrap the subscription and user lookups so a Mongo stall fails fast instead of consuming the concurrency budget.
+- `low` — Consider a short-TTL L2 for the `(roomID, botID)` subscription check, the single most repeated read on this path; if the "no cache" stance at `main.go:29` is deliberate, restate the reason there so the next reader does not re-litigate it.
