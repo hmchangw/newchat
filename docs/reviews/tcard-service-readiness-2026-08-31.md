@@ -73,3 +73,33 @@ Confirmed conformant, no finding: consumer-owned `CardStore` with only `ListCard
 - `low` — Raise `MONGO_READ_PREFERENCE` into `mongoutil` as a named config field with per-service `envDefault` set at the mount point.
 
 ---
+
+---
+
+## 4. Test coverage — 2 / 5
+
+**69.7% (223/320 statements)** — below the CLAUDE.md §4 80% floor, so a `high` finding and a floored score; but the number is almost entirely startup and Mongo-driver code, and the unit-testable logic is at 96–100%.
+
+### Findings
+- `high` — 69.7% is under the 80% floor — `tcard-service` (per `coverage_by_service.txt`)
+  Per-file: `main.go` 0/66, `store_mongo.go` 13/38, `handler.go` 84/87 (96.6%), `cache.go` 94/96 (97.9%), `semver.go` 27/28, `routes.go` 5/5. All 66 uncovered `main.go` statements are `run()`'s wiring, and 25 of `store_mongo.go`'s are the Mongo-driver funcs that `integration_test.go:19-104` does cover under the `integration` tag — that profile is simply not merged into the repo-wide run.
+- `medium` — the service's own CI gate excludes `main.go` and `store_mongo.go` before measuring, so it reports ~97% and passes the same 80% threshold this audit's profile fails — `tcard-service/deploy/azure-pipelines.yml:26-28`, `:49-55`
+  Two gates disagree by 27 points on the same code. Whatever the answer, only one number should be authoritative.
+- `medium` — the shutdown path in `RefreshLoop` — `if ctx.Err() != nil { return }` after a cancelled `Load` — is never executed by any test — `tcard-service/cache.go:132-134`
+  This is the branch that makes `refreshWG.Wait()` in `main.go:142` terminate instead of looping for another 30s; a regression here turns graceful shutdown into a timeout.
+- `medium` — three `validateCard` required-field branches are uncovered: `type`, `schema`, and `version` empty — `tcard-service/handler.go:180-185`
+  `path` and `_tcardVersion` empty are tested; the other three are not, so the table in `handler_test.go:448-481` reads as complete but is not.
+- `low` — `parseSemver`'s `strconv.Atoi` error branch is uncovered and is reachable, not dead: `allDigits` admits `"99999999999999999999"`, which overflows to `ErrRange` — `tcard-service/semver.go:23-26`
+- `low` — `List`'s mixed semver/non-semver ordering branch (`if oki != okj`) is uncovered — `tcard-service/cache.go:206-208`
+  `TestCardCache_List_NonSemverVersionOrder` (`cache_test.go:412`) uses only non-semver versions, so the mixed case the comment promises a total order for is untested.
+- `low` — `docToCard`'s `bson.MarshalExtJSON` failure branch is uncovered — `tcard-service/store_mongo.go:93-95`
+
+Quality is otherwise strong: tests are `package main` (`handler_test.go:1`), table-driven with descriptive subtest names, mocks are generated `go.uber.org/mock` (`mock_store_test.go:1-6`), no real DB or NATS in unit tests, and the integration file has the required build tag and `TestMain(m) { testutil.RunTests(m) }` with `testutil.MongoDB` containers, no inline `testcontainers.GenericContainer` (`integration_test.go:1-20`).
+
+### Recommendations
+- `high` — Close the four named branches: cancel-during-`Load` in `RefreshLoop`, the three empty-field validate cases, `parseSemver` integer overflow, and the mixed semver/non-semver sort. That is ~8 statements and lifts the non-`main.go` files to ~100%.
+- `medium` — Reconcile the two coverage gates: either merge the `integration` profile into the repo-wide number, or apply the pipeline's `main.go`/`store_mongo.go` exclusion repo-wide. Do not leave both.
+- `medium` — Extract `run()`'s wiring into a testable `newServer(cfg) (*http.Server, func(), error)` so the 66 statements at `main.go:53-156` stop being structurally untestable.
+- `low` — Make `deepCard` (`handler_test.go:64-67`) a function rather than a package-level `var`; its `json.RawMessage` is a shared mutable slice across tests.
+
+---
