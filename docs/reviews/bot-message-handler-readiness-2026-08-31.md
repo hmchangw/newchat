@@ -106,3 +106,24 @@ At 1080 lines across 8 files with small, single-purpose functions it is easy to 
 - `low` — Delete the unused struct fields and narrow the projections to `_id`-only existence checks.
 
 ---
+
+---
+
+## 6. Integration — 3 / 5
+
+Subjects, stream config and IDs all come from the shared packages and the contract is documented, but the canonical event's `Timestamp` violates the CLAUDE.md publish-site rule and an unbounded header value reaches a Cassandra partition key.
+
+### Findings
+- `medium` — `MessageEvent.Timestamp` is set from the BP-supplied `msg.CreatedAt`, not publish time — `bot-message-handler/handler.go:191`. CLAUDE.md §6 "Event Timestamps": the event timestamp is set at the publish site via `time.Now().UTC().UnixMilli()` and is "distinct from any domain-level timestamps in embedded structs (e.g. `Message.CreatedAt`)". `message-gatekeeper/handler.go:504` does it correctly with `now.UnixMilli()` (`now := time.Now().UTC()`, `:440`). Here the two are collapsed, so event-lag observability on BOT-MESSAGES-CANONICAL measures the bot's clock, not the broker's.
+- `medium` — the unvalidated `createdAt` (`handler.go:237-242`) flows through the canonical event into `bot-message-worker`'s `s.bucket.Of(msg.CreatedAt)` (`bot-message-worker/store_cassandra.go:70,111`), so a bad header picks the partition. See D1.
+- `low` — no OUTBOX/INBOX involvement: this service publishes only to `BOT-MESSAGES-CANONICAL-{siteID}` via `subject.BotCanonicalCreated` (`handler.go:199`), matching `stream.BotMessagesCanonical` (`pkg/stream/stream.go:94`). No `fmt.Sprintf` subject construction anywhere; `pkg/outbox` partition rules do not apply.
+- `low` — IDs are correct per entity: DM rooms via `idgen.BuildDMRoomID` (`handler.go:92`, always exactly two participants), message IDs validated by `idgen.IsValidMessageID` (`handler.go:228`), never ad-hoc.
+- `low` — the client contract *is* documented: subjects are `chat.server.bot.request.…`, not `chat.user.…`, so the §5 client-api rule does not bind, yet `docs/client-api.md:8451-8552` documents both endpoints and every reason code this handler emits (`content_invalid`, `mention_invalid`, `invalid_header`, `not_a_room_member`, `room_not_found`) — no drift found.
+- `low` — JetStream dedup rides `PublishWithMsgID(..., msg.ID)` (`handler.go:44,199`), but the effective window is the ops-owned stream `Duplicates` setting, which no code or doc pins; `handler.go:225` acknowledges the Cassandra-PK fallback.
+
+### Recommendations
+- `medium` — Set `Timestamp: time.Now().UTC().UnixMilli()` in `publishCanonical` and leave `Message.CreatedAt` as the domain time.
+- `medium` — Reject out-of-range `createdAt` at the header boundary before it reaches the bucket math.
+- `low` — Record the assumed `Duplicates` window for `BOT-MESSAGES-CANONICAL` in a comment beside `handler.go:199` so ops and code agree.
+
+---
