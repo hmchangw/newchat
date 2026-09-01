@@ -168,3 +168,30 @@ A small, cleanly-layered service whose production code reads well and comments m
 - `low` — Split `run()` into `newHandler(ctx, cfg) (*AuthHandler, error)` and `newServer(cfg, h) *http.Server`, leaving `run()` as wiring; this also makes the dev/prod branch unit-testable.
 - `nitpick` — Replace the grant list in `handler.go:309-315` with a pointer to `docs/client-api.md §2.1` rather than a third transcription.
 - `nitpick` — Wrap the key-type error at `main.go:63` so the seed-parse and key-type failures are distinguishable at startup.
+
+---
+
+## 6. Integration — 3 / 5
+
+Wire and subject-scoping mechanics are correct (`EncodeAccount` matches `pkg/subject`, tag-based scoped JWT matches the live template), but `docs/client-api.md` §2.2 misstates how scope is derived, omits the entire session-token response shape, and the derived request/reply view has drifted — all `high` under CLAUDE.md's explicit auth-service clause.
+
+### Findings
+- `high` — `docs/client-api.md:200` claims "The scope of the returned JWT is derived server-side from the principal's roles (admin > bot > user)". It is not: `signNATSJWT` stamps only `account:<name>` (`auth-service/handler.go:321`) and `pkg/principal/principal.go` states role-derived scoping is an unimplemented follow-up — bots, admins and SSO users all get the identical `scoped_user` template. Clients are told a security property the server does not provide.
+- `high` — the `authToken` (session) branch's success response is undocumented. `handler.go:262-272` returns `user.account` = the **encoded** account and leaves `email`/`employeeId`/`engName`/`chineseName`/`deptName`/`deptId` empty, but the §2.2 response table (`docs/client-api.md:212-227`) documents only the SSO shape and says `user.account` is "Derived from the token's `preferred_username` claim". CLAUDE.md requires request/response schema per auth-service route.
+- `high` — derived view drift: `docs/client-api/request-reply.md:58` still says "Exchanges an SSO token for a signed NATS user JWT", contradicting canonical §2.2 (`docs/client-api.md:190`) which documents both the SSO and botplatform-session branches. `docs/client-api/events.md` is correctly silent (HTTP-only), no drift there.
+- `medium` — undocumented error variant: `handler.go:249` returns `400 "account contains invalid characters"` on the session branch, but the §2.2 error table (`docs/client-api.md:249`) only lists the SSO/dev wording `"account must be a single NATS subject token (no '.', '*', '>' or whitespace)"`. Two different bodies for the same 400, one of them unpublished.
+- `medium` — `handler.go:312-313` documents the effective grants as including `_INBOX.>` on both pub and sub and claims to be "kept in sync with `docker-local/setup.sh` and `docs/client-api.md` §2.1". Both sources say the opposite: `docker-local/setup.sh:56-62` states "There is no _INBOX grant" and the template (`:68-75`) has none; the §2.1 table (`docs/client-api.md:166-173`) has no `_INBOX` row. A platform-team change made from this comment would over-grant.
+- `medium` — `routes.go:12-14`: neither `/healthz` nor `/readyz` appears in `docs/client-api.md`, though CLAUDE.md names auth-service HTTP routes as binding (client-update-service's `/healthz` is documented at `docs/client-api.md:8872`, so the omission is inconsistent, not a category exemption).
+- `medium` — `/readyz` is registered with **zero** checks (`routes.go:14`), so it is a constant 200 identical to `/healthz`. `docs/health-probes.md:11` says readiness "Reports whether this pod is connected to NATS" and lists auth-service at `:17` — auth-service holds no NATS connection, and nothing probes the OIDC JWKS or botplatform, so a pod that cannot validate a single token still reports Ready to the gateway.
+- `medium` — the bot-account encoding contract is enforced only by scattered guards, not by the subject layer. `auth-service/handler.go:247` scopes a bot JWT to the encoded account, but only 2 of the ~10 per-user event builders encode (`pkg/subject/subject.go:260`, `:500`); `UserRoomEvent` (`:494`) does not. Today every publish site skips bots (`broadcast-worker/handler.go:701,918,1182,1339`; `room-service/handler.go:1490` excludes `RoomTypeBotDM`), so it is latent — but an unguarded future publisher emits `chat.user.weather.site-a.bot.event.room`, which the bot's JWT cannot match and which a human account named `weather` **can** (its grant is `chat.user.weather.>`).
+- `low` — `handleSSO` (`handler.go:189`) accepts any `IsValidAccountToken` account, including one ending `_bot`. `pkg/subject/subject.go:49-56` documents `DecodeAccount`'s correctness as resting on "no non-bot account ends in `_bot`" — auth-service is the mint point and enforces nothing.
+- `nitpick` — no NATS/JetStream/Mongo/Cassandra/idgen surface here, so the OUTBOX/INBOX, `Timestamp`-at-publish-site, `msgbucket` and ID-format checks are N/A for this service. `integration_test.go:76` correctly uses `testutil.RunTests(m)`.
+
+### Recommendations
+- `high` — rewrite `docs/client-api.md:200` to state that scope comes solely from the `account:` tag + `scoped_user` template and that roles are pass-through today.
+- `high` — add a session-token response sub-table to §2.2: encoded `user.account` (dots→underscores, cross-referencing §5), and the empty directory fields.
+- `high` — update `docs/client-api/request-reply.md:58` to name both token branches.
+- `medium` — collapse `handler.go:249` onto the documented 400 wording, or add the second variant to the §2.2 error table.
+- `medium` — delete `_INBOX.>` from `handler.go:312-313` and mirror `setup.sh`'s explicit "no `_INBOX` grant" rationale.
+- `medium` — document `/healthz` + `/readyz` in §2, and give `/readyz` a real check (OIDC JWKS reachability; botplatform when `BOTPLATFORM_URL` is set) or drop it and fix `docs/health-probes.md:11,17`.
+- `medium` — make `subject.UserRoomEvent` (and the other per-user event builders) call `EncodeAccount` so the grant contract is enforced in one place rather than by every caller's `isBot` guard.
