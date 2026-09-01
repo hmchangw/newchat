@@ -45,3 +45,24 @@ Secret handling verified clean: `TEAMS_CLIENT_SECRET` is read into config (`conf
 - `low` — Add `LOG_LEVEL` with `envDefault:"info"`; add lint + sast stages to the pipeline, copying `translation-service`.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Clean consumer-defined stores, a well-chosen `emitter` seam for the two modes, and correctly *no* stream bootstrap; deducted for the shutdown-helper deviation and a mapper interface defined implementer-side.
+
+### Findings
+- `medium` — No `pkg/shutdown.Wait`; shutdown is hand-rolled via `signal.NotifyContext` + defers — `main.go:71-72,141-149,246-250`. CLAUDE.md: "Use `pkg/shutdown.Wait` in every service's `main.go`." The hand-rolled version is *correct* (the drain deadline is deliberately detached from the cancelled ctx at `main.go:144`), but it is a documented deviation with no note saying why the helper does not fit a one-shot job.
+- `low` — `transform.Mapper` / `EmployeeUserConverter` are declared in the same package as their only implementations — `transform/transform.go:20-28` beside `DefaultMapper` at :35. CLAUDE.md: "Define interfaces in the consumer, not the implementer." `Store`/`WriteStore` get this right (`store.go:14`, `write_store.go:22`).
+- `low` — File layout omits `handler.go`/`routes.go` and adds `collect.go`/`differ.go`/`emitter.go`/`publisher.go`. Defensible for a CronJob with no handlers, but it is not the CLAUDE.md per-service layout and no README line claims the exception.
+- `nitpick` — `obs.Init` is deliberately skipped (`main.go:135-136`), so the job emits no traces or metrics — only the end-of-run log line at `main.go:104-119`. Justified in-comment; flagged so the operability trade-off is explicit.
+
+Verified compliant: no stream creation anywhere (`deploy/docker-compose.yml` comment confirms the HR stream is consumer-owned); config is a typed `caarlos0/env` struct with `required,notEmpty` on all secrets/URIs and `envDefault` on knobs (`config.go:15-63`); cross-field validation done in `run()` with fail-fast (`main.go:46-59`); `Pool mongoutil.PoolConfig` is mounted as a named field with no re-declared env tags (`config.go:45`); DI is constructor-based throughout.
+
+### Recommendations
+- `medium` — Either adopt `pkg/shutdown.Wait` or add a one-line comment in `main.go` recording why a one-shot CronJob binary opts out.
+- `low` — Move `Mapper`/`EmployeeUserConverter` declarations into `package main` (the consumer), leaving the default impls in `transform`.
+- `low` — Note the handler-less layout exception in `README.md` so the next reviewer does not read it as drift.
+
+---
