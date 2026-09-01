@@ -33,6 +33,19 @@ const (
 
 var allDeliveryResults = []deliveryResult{deliverySuccess, deliveryFailed}
 
+// enqueueOutcome is SLO-1b's numerator label. The name and its two values come
+// from docs/load-testing/common/sli-slo.md, not from the deliveryResult enum
+// above: that one is success/failed, this one is ok/failed, and the SLO query is
+// written against these strings.
+type enqueueOutcome string
+
+const (
+	enqueueOK     enqueueOutcome = "ok"
+	enqueueFailed enqueueOutcome = "failed"
+)
+
+var allEnqueueOutcomes = []enqueueOutcome{enqueueOK, enqueueFailed}
+
 type fanoutKey struct {
 	room  roomKindLabel
 	event natsmetrics.EventType
@@ -63,6 +76,15 @@ type broadcastMetrics struct {
 
 	// Failures only: the delivery counter already carries this lane's volume.
 	threadViewFailures metric.Int64Counter
+
+	// channelEnqueue is SLO-1b's numerator: one outcome per room-subject
+	// enqueue of a created channel message. Its denominator
+	// (messages_canonical_published_total{broadcast_path="room_subject"}) is
+	// emitted upstream by message-gatekeeper, so the ratio can exceed 1 under
+	// redelivery — this side is consumer-side and counts again, that side does
+	// not move. See the contract §13.3.
+	channelEnqueue     metric.Int64Counter
+	channelEnqueueOpts map[enqueueOutcome]metric.MeasurementOption
 }
 
 func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
@@ -87,6 +109,11 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 	if err != nil {
 		threadViewFailures, _ = noopMeter.Int64Counter("broadcast_worker_thread_view_publish_failures_total")
 	}
+	channelEnqueue, err := meter.Int64Counter("broadcast_channel_enqueue_total",
+		metric.WithDescription("Room-subject enqueues of a created channel message, by outcome."))
+	if err != nil {
+		channelEnqueue, _ = noopMeter.Int64Counter("broadcast_channel_enqueue_total")
+	}
 	m := &broadcastMetrics{
 		fanout:             fanout,
 		deliveries:         deliveries,
@@ -94,6 +121,11 @@ func newBroadcastMetrics(meter metric.Meter) *broadcastMetrics {
 		fanoutOpts:         make(map[fanoutKey]metric.MeasurementOption),
 		deliveryOpts:       make(map[deliveryKey]metric.MeasurementOption),
 		threadViewOpts:     make(map[natsmetrics.EventType]metric.MeasurementOption),
+		channelEnqueue:     channelEnqueue,
+		channelEnqueueOpts: make(map[enqueueOutcome]metric.MeasurementOption, len(allEnqueueOutcomes)),
+	}
+	for _, outcome := range allEnqueueOutcomes {
+		m.channelEnqueueOpts[outcome] = metric.WithAttributes(attribute.String("outcome", string(outcome)))
 	}
 	// threadViewOpts is keyed by event alone, so it gets its own loop. Filling it
 	// inside the room loop below wrote the same eight entries once per room kind
@@ -204,4 +236,30 @@ func (p *broadcastMetricPublisher) Publish(ctx context.Context, subject string, 
 	labels := broadcastLabels(ctx)
 	p.metrics.Delivery(ctx, labels.roomKind, labels.eventType, err)
 	return err
+}
+
+// ChannelEnqueue records one room-subject enqueue outcome. It takes the error
+// rather than an outcome so the caller can defer it on a named return, which is
+// what makes "exactly one outcome per publishChannelEvent call" structural
+// instead of a thing every future early return has to remember.
+func (m *broadcastMetrics) ChannelEnqueue(ctx context.Context, err error) {
+	outcome := enqueueOK
+	if err != nil {
+		outcome = enqueueFailed
+	}
+	m.recordChannelEnqueue(ctx, outcome)
+}
+
+func (m *broadcastMetrics) recordChannelEnqueue(ctx context.Context, outcome enqueueOutcome) {
+	if m == nil || m.channelEnqueue == nil {
+		return
+	}
+	opt, ok := m.channelEnqueueOpts[outcome]
+	if !ok {
+		// A value outside the enum can only arrive via a conversion. Count it as
+		// a failure rather than mint a series nothing closed: an unclassifiable
+		// enqueue is not evidence that the message went out.
+		opt = m.channelEnqueueOpts[enqueueFailed]
+	}
+	m.channelEnqueue.Add(ctx, 1, opt)
 }

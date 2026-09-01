@@ -1046,7 +1046,20 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 	return nil
 }
 
-func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionAll bool, mentions []model.Participant) error {
+// publishChannelEvent enqueues a created channel message onto the room subject.
+// It is SLO-1b's numerator, and it is reached from handleCreated alone —
+// mutations take publishMutation → publishRoomEvent — which is what makes the
+// count comparable to messages_canonical_published_total{broadcast_path="room_subject"}
+// upstream. TestPublishChannelEvent_HasOneCaller is the guard on that.
+//
+// The outcome is recorded from a defer on a named return rather than around the
+// final publish. Two of the three ways this can fail return early — encryption
+// and marshalling — and both are real enqueue failures; counting only the
+// publish would drop them from the numerator and bias the ratio green on exactly
+// the path where the room key is unavailable. A defer also covers whatever early
+// return is added next, which a wrapper around one call cannot.
+func (h *Handler) publishChannelEvent(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionAll bool, mentions []model.Participant) (err error) {
+	defer func() { h.metrics.ChannelEnqueue(ctx, err) }()
 	evt := buildRoomEvent(meta, clientMsg, timestamp)
 	evt.MentionAll = mentionAll
 	if len(mentions) > 0 {
