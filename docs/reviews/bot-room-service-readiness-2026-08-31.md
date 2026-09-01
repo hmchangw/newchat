@@ -161,3 +161,32 @@ Layout, naming and store-interface discipline are clean and the comments genuine
 - `medium` — Make the sysmsg dedup suffix request-derived (e.g. the NATS message ID or a caller-supplied idempotency key) so the comment becomes true, and use one derivation across all three call sites.
 - `low` — Extract the org-expansion guard into one `rejectOrgExpansion(orgs []string) error` helper so the eventual feature has a single seam.
 - `nitpick` — Drop `captureOutbox.mu` and the `atomic.AddInt32`; assert on `len(c.calls)` instead.
+
+---
+
+## 6. Integration — 3 / 5
+
+Federation plumbing is correct and contract-aligned (subject builders, `outbox.Publish` on the ordered lane, dedup IDs, inbox naming/LastMsgAt), but the subscription documents this service writes diverge from every other writer's shape, and one shared-config knob is pinned in a way that defeats the retired-key TTL contract.
+
+### Findings
+- `high` — Subscriptions written here omit `joinedAt` and `roles`; every other writer sets both (`room-worker/handler.go:1510`, `inbox-worker/handler.go:322`). room-service's `member.list` projects `roles`+`joinedAt` and paginates on the `{roomId,joinedAt,_id}` index — `bot-room-service/store_mongo.go:101-109`, `room-service/store_mongo.go:140,745-750`.
+  Bot-added members sort ahead of everyone (missing key sorts first) and render a zero join time.
+- `high` — Channel member subscriptions get `siteId` = the *member's* home site, not the room's site — `bot-room-service/handler.go:254`, `:335`. The convention is the room's site (`room-worker/handler.go:1170` `SiteID: room.SiteID`; `inbox-worker/handler.go:~310` `SiteID: event.SiteID`), and user-service's `subscription.list` groups rows by `sub.SiteID` to fetch room meta from that site (`user-service/service/subscriptions.go:237,789-795`, `user-service/service/apps.go:91`). The DM/owner paths correctly use `h.siteID` (`handler.go:153,163,215`), so the service is inconsistent with itself.
+- `medium` — `ROOM_KEY_RETIRED_TTL` is hardcoded in compose (`bot-room-service/deploy/docker-compose.yml:21`) while the three peers take an override (`room-service/deploy/docker-compose.yml:35`, `room-worker/deploy/docker-compose.yml:27`, `broadcast-worker/deploy/user/docker-compose.yml:36` all `${ROOM_KEY_RETIRED_TTL:-30m}`). Raising the fleet value leaves this service short — exactly the split-brain CLAUDE.md §Retired room keys names (`key.get` fails permanently). Go defaults do match (`main.go:42`).
+- `medium` — `BotIdentity.AppID/AppName/EngName/ChineseName` are persisted into `rooms.u` and returned as the create response owner (`handler.go:196-200`, `:281`), but no producer ever populates them: BP builds identity as `{ID, Account, SiteID}` only (`botplatform-service/bot_forwarder.go:62,112-116`, `botplatform-service/dm_ensurer.go:43`). The owner enrichment and `owner.appId/appName` are dead-empty in production.
+- `medium` — bot-room-service is an undocumented fifth OUTBOX producer riding the per-destination FIFO lane: `pkg/outbox/outbox.go:2` and CLAUDE.md §JetStream Streams both enumerate only room-service/room-worker/message-worker/broadcast-worker. Its events do partition correctly (`InboxMemberAdded`/`InboxMemberRemoved` ∈ `OrderedEventTypes`, `pkg/outbox/outbox.go:52-56`), so this is contract-doc drift, not a stranded type.
+- `low` — `ALL_SITE_IDS` → `parsePeers` → `handler.allSiteIDs` is dead: the field is assigned (`handler.go:79`) and never read; federation destinations come from each user's `siteId`. The config comment claims it drives "per-destination outbox federation" (`main.go:29-30`), which an operator will believe.
+- `low` — `handleGet` is registered on `subject.ServerBotRoomGet` (`handler.go:94-95`) with no in-repo caller — an exposed RPC whose contract nothing exercises.
+- `low` — The sysmsg dedup ID is not deterministic across retries: the suffix embeds a fresh wall-clock ms (`handler.go:277,371,539`), so BP's 15s-timeout retry (`botplatform-service/bot_forwarder.go:74`) yields a different `Nats-Msg-Id`, contradicting the "defeats double-emit on retry" claim at `sysmsg.go:63`.
+- `nitpick` — Federated events set `Type: "member_added"` / `"member_removed"` as string literals (`handler.go:661,683`) instead of `model.InboxMemberAdded`/`InboxMemberRemoved`, which the sibling producers use (`room-worker/handler.go:1176`).
+
+Verified clean: `pkg/subject` builders used for every subject (no `fmt.Sprintf`); OUTBOX subject is `chat.outbox.{origin}.{dest}.{type}` via `outbox.Publish`; `Timestamp` present and set at the publish site on both federated events (`handler.go:670,685`) and on the OUTBOX envelope; JetStream `PublishMsg` + `WithMsgID` rather than core NATS (`outboxpublish.go:36`); `idgen.BuildDMRoomID` for DMs, `GenerateID` for channel rooms, `GenerateUUIDv7` for subscriptions, `GenerateMessageID` for sysmsgs; no stream creation (correctly defers to inbox/outbox/bot-message-handler owners); no `chat.user.` subject, so `docs/client-api.md` is not implicated.
+
+### Recommendations
+- `high` — Add `joinedAt` (= `createdAt`) and `roles: ["user"]` for channel rows to `UpsertSubscription`'s `$setOnInsert` (`store_mongo.go:101-109`), matching `room-worker.newSub`.
+- `high` — Change `SiteID: u.SiteID` to `h.siteID` at `handler.go:254` and `:335`; the destination for federation already comes from `u.SiteID` separately, so nothing else moves.
+- `medium` — Switch the compose entry to `${ROOM_KEY_RETIRED_TTL:-30m}` (and `${ROOM_KEY_GRACE_PERIOD:-24h}`) so the four services move together.
+- `medium` — Either populate `AppID`/`AppName` in BP's `BotIdentity` (it has the bot session) or drop those fields from the room owner doc and `OwnerResp`; today the API advertises data it never returns.
+- `medium` — Add bot-room-service to the producer list in `pkg/outbox/outbox.go`'s package doc and CLAUDE.md §JetStream Streams OUTBOX bullet.
+- `low` — Delete `ALL_SITE_IDS`, `parsePeers`, and `handler.allSiteIDs`, or use them to reject a federation destination outside the configured peer set (which would also catch a peer outbox-worker has no consumer for).
+- `low` — Derive the sysmsg dedup suffix from stable inputs (sorted user IDs, or the caller's request ID) instead of `now()`, or drop the comment's determinism claim.
