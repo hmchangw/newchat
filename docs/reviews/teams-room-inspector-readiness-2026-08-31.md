@@ -61,3 +61,25 @@ N/A by design: no JetStream, so `BOOTSTRAP_STREAMS`/`pkg/stream`/consumer-patter
 - `medium` — mount `Pool mongoutil.PoolConfig` and pass it through `mongoutil.ConnectRead` (`main.go:86`).
 - `medium` — mount `HTTP ginutil.TimeoutConfig`, `Validate()` at load, `r.Use(cfg.HTTP.Middleware())`.
 - `low` — extract `RoomIDFromChatID(chatID string) string` into `pkg/teamsmigrate` and call it from both `room-worker/teamsroomcreate.go:62` and `handler.go:68`.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Unit coverage is **47.7% (42/88 statements)** — below the 60% floor, so a `critical` finding and score 1 per CLAUDE.md §4, even though the deficit is concentrated in wiring rather than logic.
+
+### Findings
+- `critical` — 47.7% is under the 60% floor; CLAUDE.md §4 requires ≥80% — service-wide, `coverage_by_service.txt`.
+- Composition (from `cov.out`): `handler.go` 29/29 = **100%**, `routes.go` 2/2, `newServer` 100%, `run` 11/40 (`main.go:69`), `store_mongo.go` **0/17** — the store is exercised only under the `integration` tag (`integration_test.go:1,18-51`), which the profile excludes. The percentage is not vanity; it is unit-scope accounting.
+- `medium` — both store error branches are unasserted anywhere, unit or integration — `store_mongo.go:49-51` and `:60-62`. The handler's store-error path is covered with a mock (`handler_test.go:132-140`), but the wrapping messages themselves never execute.
+- `medium` — the batch-cap boundary is only tested from above: `maxChatIDsPerRequest+1` rejects (`handler_test.go:98`), but exactly 500 is never accepted, so an off-by-one in `handler.go:60` would ship green and permanently 400 every full batch (`pkg/model/teams.go:104-110` explains why that failure mode looks like a healthy run).
+- `low` — `run()`'s shutdown path (`main.go:101-113`: `srv.Shutdown` then `mongoutil.Disconnect`) is untested; only the config-parse failure is (`main_test.go:21-25`).
+- `low` — duplicate chat ids in one request (two entries mapping to one room id, `handler.go:82-95`) are untested.
+
+Compliant: `package main` tests, `go.uber.org/mock` mocks in an unedited `mock_store_test.go`, no real DB/NATS in unit tests, table-driven invalid-input subtests with descriptive names (`handler_test.go:111-129`), `TestMain(m)` → `testutil.RunTests` and `testutil.MongoDB` for containers (`integration_test.go:16,19`).
+
+### Recommendations
+- `high` — add an integration case at exactly `model.TeamsRoomVerifyMaxChatIDs` ids end-to-end; it closes both the boundary gap and the large-`$in` path.
+- `medium` — cover `store_mongo.go:49-51,60-62` by pointing the store at a closed/cancelled context (or a dropped collection) and asserting the wrapped messages.
+- `medium` — add a handler case for duplicate chat ids asserting one result per requested entry, in order.
+- `low` — extract the shutdown sequence from `run()` into a testable func so `main.go:101-113` is reachable from a unit test.
