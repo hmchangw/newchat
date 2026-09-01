@@ -505,7 +505,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	}
 	internalData, _ := json.Marshal(internalEvt)
 	inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, model.InboxMemberRemoved, inboxSeed)); err != nil {
 		slog.ErrorContext(ctx, "local inbox member_removed publish failed", "error", err, "room_id", req.RoomID)
 	}
 
@@ -566,7 +566,7 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 	// matching the add/create/DM paths.
 	if user.SiteID != "" && user.SiteID != h.siteID {
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp)
-		dedupID := natsutil.InboxDedupID(ctx, user.SiteID, payloadSeed)
+		dedupID := natsutil.InboxDedupID(ctx, user.SiteID, model.InboxMemberRemoved, payloadSeed)
 		if err := h.federate(ctx, req.RoomID, user.SiteID, model.InboxMemberRemoved, memberEvtData, dedupID, now.UnixMilli()); err != nil {
 			return err
 		}
@@ -718,7 +718,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		}
 		internalData, _ := json.Marshal(internalEvt)
 		inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, inboxSeed)); err != nil {
+		if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberRemoved), internalData, natsutil.InboxDedupID(ctx, h.siteID, model.InboxMemberRemoved, inboxSeed)); err != nil {
 			slog.ErrorContext(ctx, "local inbox member_removed publish failed", "error", err, "room_id", req.RoomID)
 		}
 	}
@@ -779,7 +779,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 			Timestamp: now.UnixMilli(),
 		}
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.OrgID, req.Timestamp)
-		dedupID := natsutil.InboxDedupID(ctx, destSiteID, payloadSeed)
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, model.InboxMemberRemoved, payloadSeed)
 		if err := h.federate(ctx, req.RoomID, destSiteID, model.InboxMemberRemoved, mustMarshal(evt), dedupID, now.UnixMilli()); err != nil {
 			return err
 		}
@@ -1235,7 +1235,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			}
 			internalData, _ := json.Marshal(internalEvt)
 			inboxSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-			if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, inboxSeed)); err != nil {
+			if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, model.InboxMemberAdded, inboxSeed)); err != nil {
 				slog.ErrorContext(ctx, "local inbox member_added publish failed",
 					"error", err,
 					"room_id", req.RoomID,
@@ -1321,7 +1321,7 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 		}
 		siteEvtData, _ := json.Marshal(siteEvt)
 		payloadSeed := fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp)
-		dedupID := natsutil.InboxDedupID(ctx, destSiteID, payloadSeed)
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, model.InboxMemberAdded, payloadSeed)
 		if err := h.federate(ctx, req.RoomID, destSiteID, model.InboxMemberAdded, siteEvtData, dedupID, now.UnixMilli()); err != nil {
 			return err
 		}
@@ -1901,7 +1901,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 	}
 	internalData, _ := json.Marshal(internalEvt)
 	payloadSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
-	if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, payloadSeed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(room.SiteID, model.InboxMemberAdded), internalData, natsutil.InboxDedupID(ctx, room.SiteID, model.InboxMemberAdded, payloadSeed)); err != nil {
 		slog.ErrorContext(ctx, "local inbox member_added publish failed", "error", err, "room_id", room.ID, "request_id", requestID)
 	}
 
@@ -1923,7 +1923,7 @@ func (h *Handler) finishCreateRoom(ctx context.Context, req *model.CreateRoomReq
 		}
 		memberData, _ := json.Marshal(memberEvt)
 		memberSeed := fmt.Sprintf("%s:%s:%d", room.ID, requester.Account, req.Timestamp)
-		if err := h.federate(ctx, room.ID, destSiteID, model.InboxMemberAdded, memberData, natsutil.InboxDedupID(ctx, destSiteID, memberSeed), now.UnixMilli()); err != nil {
+		if err := h.federate(ctx, room.ID, destSiteID, model.InboxMemberAdded, memberData, natsutil.InboxDedupID(ctx, destSiteID, model.InboxMemberAdded, memberSeed), now.UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -2420,7 +2420,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	// would revert newer canonical state. The spotlight re-index is a derived
 	// cache; a rare missed publish self-corrects on the next rename/membership
 	// event and is far cheaper than risking source-of-truth reversion.
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxRoomRenamed), internalRenameData, natsutil.InboxDedupID(ctx, h.siteID, requestID)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxRoomRenamed), internalRenameData, natsutil.InboxDedupID(ctx, h.siteID, model.InboxRoomRenamed, requestID)); err != nil {
 		slog.ErrorContext(ctx, "local inbox room_renamed publish failed (best-effort)", "error", err, "room_id", req.RoomID)
 	}
 	// Relay room_renamed through the OUTBOX ordered lane (not a direct INBOX
@@ -2433,7 +2433,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	// awaits producer per-room lanes / reconciliation (design doc §5, §7).
 	for _, remoteSiteID := range remoteSites {
 		if err := h.federate(ctx, req.RoomID, remoteSiteID, model.InboxRoomRenamed,
-			renamedPayload, natsutil.InboxDedupID(ctx, remoteSiteID, requestID), now); err != nil {
+			renamedPayload, natsutil.InboxDedupID(ctx, remoteSiteID, model.InboxRoomRenamed, requestID), now); err != nil {
 			return err
 		}
 	}

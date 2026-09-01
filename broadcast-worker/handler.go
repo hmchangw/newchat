@@ -482,7 +482,7 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		// at separates an edit from the send; an edit is its own canonical event
 		// carrying its own request ID, so two same-ms edits can't collide.
 		seed := fmt.Sprintf("%s:%s:%d", roomID, msgID, at.UnixMilli())
-		dedupID := natsutil.InboxDedupID(ctx, destSiteID, seed)
+		dedupID := natsutil.InboxDedupID(ctx, destSiteID, model.InboxSubscriptionMention, seed)
 		select {
 		case sem <- struct{}{}:
 		case <-fanoutCtx.Done():

@@ -307,7 +307,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		return errcode.MarshalFailed("internal inbox envelope", err)
 	}
 	seed := fmt.Sprintf("%s:%s:%d", room.ID, eventType, acceptedAt.UnixMilli())
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, eventType), internalData, natsutil.InboxDedupID(ctx, h.siteID, eventType, seed)); err != nil {
 		return fmt.Errorf("local inbox publish: %w", err)
 	}
 
@@ -324,7 +324,7 @@ func (h *Handler) federateTeamsMembership(ctx context.Context, room *model.Room,
 		if err != nil {
 			return errcode.MarshalFailed("federated membership event", err)
 		}
-		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
+		dedupID := natsutil.InboxDedupID(ctx, destSite, eventType, seed)
 		if err := h.federate(ctx, room.ID, destSite, eventType, siteData, dedupID, acceptedAt.UnixMilli()); err != nil {
 			return fmt.Errorf("federate to %s: %w", destSite, err)
 		}
@@ -370,7 +370,7 @@ func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room,
 	if err != nil {
 		return errcode.MarshalFailed("internal joinedAt-refresh envelope", err)
 	}
-	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberJoinedAtRefreshed), internalData, natsutil.InboxDedupID(ctx, h.siteID, seed)); err != nil {
+	if err := h.publish(ctx, subject.InboxInternal(h.siteID, model.InboxMemberJoinedAtRefreshed), internalData, natsutil.InboxDedupID(ctx, h.siteID, model.InboxMemberJoinedAtRefreshed, seed)); err != nil {
 		return fmt.Errorf("local inbox joinedAt-refresh publish: %w", err)
 	}
 
@@ -388,7 +388,7 @@ func (h *Handler) federateJoinedAtRefresh(ctx context.Context, room *model.Room,
 		if err != nil {
 			return errcode.MarshalFailed("federated joinedAt-refresh event", err)
 		}
-		dedupID := natsutil.InboxDedupID(ctx, destSite, seed)
+		dedupID := natsutil.InboxDedupID(ctx, destSite, model.InboxMemberJoinedAtRefreshed, seed)
 		if err := h.federate(ctx, room.ID, destSite, model.InboxMemberJoinedAtRefreshed, payload, dedupID, acceptedAt.UnixMilli()); err != nil {
 			return fmt.Errorf("federate joinedAt refresh to %s: %w", destSite, err)
 		}

@@ -1207,7 +1207,7 @@ func TestProcessAddMembers_PublishesLocalInbox_Integration(t *testing.T) {
 	assert.ElementsMatch(t, []string{"charlie", "bob"}, inner.Accounts,
 		"local INBOX must carry full add set — same-site (charlie) + remote (bob)")
 	assert.Equal(t, reqID+":site-A", pubs[0].msgID,
-		"Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, payloadSeed) so JetStream dedups self-loop replays")
+		"Nats-Msg-Id must be natsutil.InboxDedupID(ctx, originSite, eventType, payloadSeed) so JetStream dedups self-loop replays")
 
 	// members_added sys-message: requester is the sender, Content is server-rendered.
 	sysPubs := cap.publishesOnPrefix(subject.MsgCanonicalCreated("site-A"))
