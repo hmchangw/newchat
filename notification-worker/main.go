@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -11,11 +10,13 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -73,6 +74,7 @@ type config struct {
 	MentionNamesTimeout     time.Duration           `env:"MENTION_NAMES_TIMEOUT"     envDefault:"2s"`
 	Mode                    stream.Pipeline         `env:"MODE,required"` // user | bot; drives all stream/subject wiring via pkg/stream.Resolve
 	Consumer                stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy                   natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap               bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr              string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
@@ -255,7 +257,9 @@ func main() {
 		slog.Info("mention display names disabled", "reason", "MENTION_NAMES_ENABLED=false")
 	}
 
-	handler := NewHandler(HandlerDeps{
+	// Hoisted so the failover lane can reuse every dependency and swap only the
+	// emitter, which must target the buddy's push stream.
+	deps := HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
 		Parent:             newHistoryParentFetcher(nc, publishMetrics),
@@ -269,7 +273,8 @@ func main() {
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 		Metrics:            domainMetrics,
-	})
+	}
+	handler := NewHandler(deps)
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
@@ -334,49 +339,44 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		// The loop itself is counted so shutdown, which stops the iterator and
-		// then waits on wg, cannot pass through while a message Next already
-		// returned is still on its way to a worker.
-		defer wg.Done()
-		for {
-			msgCtx, msg, err := iter.Next()
-			if err != nil {
-				consumerMetrics.LoopFailed(context.Background(), err)
-				return
-			}
-			sem <- struct{}{}
-			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
-				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.EventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
-				msg = tracked
-				msgCtx = tracked.Context(msgCtx)
-				defer func() {
-					tracked.Finish(msgCtx)
-					<-sem
-					wg.Done()
-				}()
-				// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
-				// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
-				jobguard.Run(msg, func() {
-					handlerCtx, reqID := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
-					// Migrated events carry X-Migration: live — the source already delivered them, so
-					// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
-					if natsutil.IsMigrationLiveHeader(msg.Headers()) {
-						slog.Info("skipping migrated event (no re-notify)", "subject", msg.Subject(), "request_id", reqID)
-						if err := msg.Ack(); err != nil {
-							slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
-						}
-						domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
-						return
-					}
-					// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
-					jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
-				})
-			}(msgCtx, msg)
-		}
-	}()
+	natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
+		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
+		notifyProcessor(handler, domainMetrics))
+
+	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
+	// nil and the service runs home-only. HasFailover gates the bot pipeline out
+	// without a mode check here.
+	//
+	// The failover lane needs its OWN emitter: a notification derived from a
+	// failover-lane message must be published to the failover push stream on the
+	// buddy, because the live push stream sits on the cluster that is down.
+	binder := failoverlane.Binder{
+		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
+		Sem: sem, WG: &wg, Metrics: sharedMetrics,
+	}
+	var buddyLane *natsutil.Lane
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			// Its own emitter: a notification derived from a failover-lane
+			// message must reach the failover push stream on the buddy. deps is
+			// copied, so the home lane keeps the live push subject.
+			failoverDeps := deps
+			failoverDeps.Emitter = newMobileEmitter(&jsPublisher{js: bjs},
+				wiring.PushFailoverSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
+
+			var bErr error
+			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
+				Stream: wiring.CanonicalFailoverStream,
+				// The push standby stream is published to, not consumed: it must
+				// exist before the first failover notification is built.
+				AlsoEnsure: []stream.Config{wiring.PushFailoverStream},
+				Consumer: buildConsumerConfig(cfg.Consumer,
+					cfg.Mode.FailoverConsumerName("notification-worker"), wiring.CanonicalFailoverCreated),
+			}, notifyHandler(NewHandler(failoverDeps), domainMetrics))
+			return bErr
+		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -397,20 +397,16 @@ func main() {
 	)
 
 	shutdown.Wait(ctx, 25*time.Second,
+		// Stop both iterators before draining, so neither lane pulls new work
+		// while the other is still finishing. Both feed one WaitGroup.
 		func(_ context.Context) error {
 			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()
+			buddyLane.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
+			return natsutil.WaitPool(ctx, &wg)
 		},
 		func(_ context.Context) error {
 			invalIter.Stop()
@@ -430,6 +426,7 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
@@ -437,8 +434,48 @@ func main() {
 	)
 }
 
-// buildConsumerConfig returns the durable consumer config, centralized so it's unit-testable
-// without NATS; durable/filterSubject are env-driven so the binary can bind to user or bot pipelines.
+// notifyProcessor is the per-message body both lanes run, so the home lane and
+// the buddy lane settle a message identically — a failover-lane event is still
+// this site's event.
+// notifyHandler is notifyProcessor for callers that hand back a plain
+// jetstream.Msg — the failover binder's handler shape.
+func notifyHandler(handler *Handler, domainMetrics *notificationMetrics) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		notifySettle(msgCtx, msg, handler, domainMetrics)
+	}
+}
+
+func notifyProcessor(handler *Handler, domainMetrics *notificationMetrics) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		notifySettle(msgCtx, msg, handler, domainMetrics)
+	}
+}
+
+// notifySettle is the per-message body both lanes run.
+func notifySettle(msgCtx context.Context, msg jetstream.Msg, handler *Handler, domainMetrics *notificationMetrics) {
+	// jobguard recovers handler panics — this goroutine runs outside natsrouter's Recovery
+	// middleware, so an unrecovered panic would crash the worker and crash-loop on redelivery.
+	jobguard.Run(msg, func() {
+		handlerCtx, reqID := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
+		// Migrated events carry X-Migration: live — the source already delivered them, so
+		// this live-delivery worker must not re-notify. Ack and drop without invoking the handler.
+		if natsutil.IsMigrationLiveHeader(msg.Headers()) {
+			slog.Info("skipping migrated event (no re-notify)", "subject", msg.Subject(), "request_id", reqID)
+			if err := msg.Ack(); err != nil {
+				slog.Error("failed to ack migrated message", "error", err, "request_id", reqID)
+			}
+			domainMetrics.Record(handlerCtx, notifyKindPush, notifySuppressed)
+			return
+		}
+		// Transient failures retry with backoff (never drop); malformed events Ack-drop as poison.
+		jsretry.Settle(handlerCtx, msg, jsretry.DefaultBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+	})
+}
+
+// buildConsumerConfig returns the durable consumer config, centralized so it's
+// unit-testable without NATS; durable/filterSubject are pipeline-driven so the
+// binary can bind to user or bot streams, and the failover lane reuses it with
+// its own durable and filter.
 func buildConsumerConfig(s stream.ConsumerSettings, durable, filterSubject string) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = durable

@@ -67,3 +67,21 @@ func TestBuildConsumerConfig(t *testing.T) {
 		assert.ElementsMatch(t, []string{"chat.bot.canonical.site-a.created"}, cc.FilterSubjects)
 	})
 }
+
+// The failover lane reuses buildConsumerConfig — already parameterized by
+// durable and filter — so what needs asserting is that the two lanes get
+// distinct durables and filters. A shared durable would have them clobber each
+// other's cursor on a single-server dev NATS.
+func TestFailoverConsumerConfig_DiffersFromPrimary(t *testing.T) {
+	w := stream.Resolve(stream.PipelineUser, "site-a")
+
+	primary := buildConsumerConfig(stream.ConsumerSettings{},
+		stream.PipelineUser.ConsumerName("notification-worker"), w.CanonicalCreated)
+	failover := buildConsumerConfig(stream.ConsumerSettings{},
+		stream.PipelineUser.FailoverConsumerName("notification-worker"), w.CanonicalFailoverCreated)
+
+	assert.Equal(t, "notification-worker-failover", failover.Durable)
+	assert.Equal(t, []string{"chat.failover.msg.canonical.site-a.created"}, failover.FilterSubjects)
+	assert.NotEqual(t, primary.Durable, failover.Durable)
+	assert.NotEqual(t, primary.FilterSubjects, failover.FilterSubjects)
+}
