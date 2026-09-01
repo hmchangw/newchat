@@ -127,3 +127,25 @@ No NATS surface at all, so the integration risk is entirely the client-facing HT
 - `low` — document `/healthz` and `/readyz`, noting `/readyz` returns 503 until the first successful directory load (`handler.go:357-363`).
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+The read path is genuinely well-engineered (lock-free snapshot, precise projections), but the outbound login forwarder and the public login endpoint both lack the connection-pool and load-shedding tuning the sibling services already apply.
+
+### Findings
+- `medium` — the botplatform forwarder is built without `restyutil.WithMaxIdleConns` — `portal-service/main.go:139`. The stdlib default keeps 2 idle conns per host (`pkg/restyutil/restyutil.go:37-39`), so a third concurrent login pays a fresh TCP+TLS handshake against a single-host upstream. `media-service/main.go:112` and `upload-service/main.go:191` pass `WithMaxIdleConns(32)` on the *same* botplatform client.
+- `medium` — the unauthenticated `POST /api/v1/login` (`portal-service/routes.go:7`) has no concurrency shedding. `ginutil.MaxConcurrency` exists and is wired in `user-service/routes.go:25`; without it every in-flight login pins a goroutine plus an upstream socket for up to the 5s resty timeout, with no 429 backpressure.
+- `medium` — the directory refresh materializes the whole `users` collection in one slice via `cur.All` (`portal-service/store_mongo.go:84`) under a 1-minute cap (`cache.go:12`), then builds a second full map (`cache.go:71-80`) — peak memory is ~2× the directory, unbounded in the number of provisioned accounts, with no batching or paging.
+- `low` — portal queries `users` by `account` (`store_mongo.go:102`) but its own `EnsureIndexes` only indexes `hr_employee` (`store_mongo.go:29-37`). The supporting unique `users.account` index is owned by `user-service` (`user-service/mongorepo/users.go:41-44`) — an undocumented startup-order dependency; in a site where user-service has not run, the login fallback is a collection scan.
+- `low` — `WriteTimeout: 10s` (`portal-service/main.go:165`) exactly equals `ginutil.TimeoutConfig`'s default `REQUEST_TIMEOUT` of 10s (`pkg/ginutil/timeoutconfig.go:18`): the per-request middleware has zero headroom to write its timeout response, and raising `REQUEST_TIMEOUT` above 10s has no effect.
+- `low` — 401 timing side channel: unknown and non-bot accounts are rejected locally with no upstream round trip (`handler.go:283-288`), while a known bot with a wrong password waits on botplatform (`handler.go:312`). Bodies are byte-identical as `docs/client-api.md:412` claims, but latency distinguishes the arms.
+- Positives verified: lock-free `atomic.Pointer` snapshot with immutable maps (`cache.go:23-46`); explicit precise projections on both queries (`store_mongo.go:70-77`, `:95-100`); the `$lookup` carries the CLAUDE.md-required justification comment (`store_mongo.go:43-44`) and its correlated `$expr` equality is on the indexed `account`; `mongo.ErrNoDocuments` handled (`store_mongo.go:103`); no `time.Sleep` synchronization anywhere; the refresh goroutine terminates on cancel (`cache.go:99-104`); `secondaryPreferred` read preference offloads the primary (`main.go:62`).
+
+### Recommendations
+- `medium` — add `restyutil.WithMaxIdleConns(32)` at `portal-service/main.go:139`, matching media-service and upload-service.
+- `medium` — mount `ginutil.MaxConcurrency` on `POST /api/v1/login` in `routes.go`, with the limit env-driven; it sheds with 429 + `Retry-After` rather than 5xx, which matters for mesh outlier ejection.
+- `medium` — bound the directory load: set an aggregation batch size and stream into the new map with `cur.Next` instead of `cur.All` (`store_mongo.go:84`), so peak memory is one map, not two slices plus a map.
+- `low` — either add the `users.account` index to portal's `EnsureIndexes` (idempotent, `mongoutil.EnsureIndexWithRepair` already handles the conflict case) or document the user-service dependency in `store_mongo.go`.
+- `low` — raise `WriteTimeout` to ~15s (as `admin-service`/`media-service` do) so the request-timeout middleware can actually deliver its response.
