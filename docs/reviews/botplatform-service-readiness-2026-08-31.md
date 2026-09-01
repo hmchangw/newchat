@@ -189,3 +189,39 @@ Subject, ID and downstream type contracts are clean and builder-driven, but the 
 - `low` — Accept an optional client-supplied idempotency key (or message ID) on the two send endpoints and thread it into `X-Bot-Message-ID`, so a post-window retry converges instead of duplicating.
 - `low` — Move the 15s room-management timeout into `config` and inject it into both `botForwarder` and `natsDMEnsurer` so the two cannot drift.
 - `low` — Add one integration test that writes a `model.Subscription` and reads it back through `FindForBot`/`FindDMForBot`, pinning the projection's bson field names against the shared model.
+
+---
+
+## 7. Performance — 3 / 5
+
+Hot paths are genuinely well-built — precise Mongo projections everywhere, a shared breaker, an L2 session tier, no goroutine leaks, no `time.Sleep`, no `$lookup`, no N+1 — but three unbounded-work paths (full-body buffering before any cap, unrate-limited bcrypt, uncached negative auth) and a timeout budget that the request deadline silently truncates keep it off a 4.
+
+### Findings
+- `high` — The idempotency middleware reads the entire request body with an **uncapped** `io.ReadAll(c.Request.Body)` and buffers it in RAM before the handler runs — `botplatform-service/middleware_idempotency.go:60`.
+  It is wired ahead of the handler on all five bot routes (`routes.go:39-47`), so `bindStrict`'s `http.MaxBytesReader` cap (`bot_handlers.go:193`) is applied to an already-buffered `NopCloser` and can never reject during read. The comment at `bot_handlers.go:189` ("Body is capped so oversized requests fail during read") is false whenever Valkey is configured, i.e. in production. A single authenticated bot posting a multi-GB body OOMs the pod; the body is then also SHA-256'd (`:101`) and re-read into a second copy by `bindStrict`.
+
+- `high` — `/api/v1/login` is unauthenticated, has **no rate limiter**, and performs a full bcrypt verify (default cost 10, ~50-100 ms CPU) per request — `handler.go:120`, `pwhash.Verify` at cost baked into the stored hash; the engine's global middleware chain (`main.go:120-125`) contains no limiter, and `botRateLimit` is attached only to bot routes (`routes.go:29,40-42`).
+  A few dozen concurrent wrong-password requests against one known bot account saturate every CPU and starve `/auth/validate`, which every bot request depends on.
+
+- `high` — `botRateLimit` runs **after** `requireBot`, so an invalid token is never rate-limited — `routes.go:40` (`out := []gin.HandlerFunc{auth}` before `rateLimit`). Combined with the session tier being positive-only by design (`pkg/sessioncache/sessioncache.go:11-16`, `loadEntry` returns `ErrNotFound` as an uncached miss at `:90-95`), every bogus-token request is one uncapped MongoDB `FindOne`. Token spraying is an unmetered load generator against the same Mongo the breaker is meant to protect.
+
+- `medium` — The 15 s room-management budget is unreachable: `forwardRoomMgmt` derives `context.WithTimeout(ctx, 15*time.Second)` from the request context (`bot_forwarder.go:75`), and `dmEnsurer` likewise (`main.go:116`), but `cfg.HTTP.Middleware()` already stamped a 10 s deadline on that context (`main.go:124`; `ginutil.TimeoutConfig.RequestTimeout` `envDefault:"10s"`). Multi-member fan-out is cut at 10 s, and the idempotency TTLs sized against 15 s (`config.go:54-55`) are reasoning from a number that never applies.
+
+- `medium` — `forwardRoomMgmt` hardcodes `15*time.Second` instead of using the forwarder's own `timeout` field — `bot_forwarder.go:75` vs `bot_forwarder.go:132`. The room-mgmt budget is the one that scales with batch size (up to 100 userIDs, `bot_handlers.go:26`) and is the only unconfigurable timeout in the service.
+
+- `low` — Each bot request costs ~5 sequential round trips before any work: session L2 read, `IncrEx` per-caller, `IncrEx` global, `SetNX`, then `Del` after — `middleware.go:134`, `middleware.go:149`, `middleware_idempotency.go:72`, `:89`. The two counters are independent and could be pipelined into one round trip.
+
+- `low` — `sessions` has no TTL/expiry index and `Session` carries no expiry field; rows are trimmed only by the per-account FIFO cap of 100 (`pkg/session/session.go:23-30`, `:208-230`, `handler.go:151`). The collection grows monotonically with account count and nothing ever ages an idle token out.
+
+- `low` — `/healthz` issues a raw `client.Ping` outside the breaker — `store_mongo.go:106`. During a Mongo outage every probe pays the 2 s `MONGO_SERVER_SELECTION_TIMEOUT` and holds a pooled connection, exactly when the breaker is trying to stop paying that cost.
+
+- `nitpick` — `DeleteBeyondCap` sorts `{issuedAt:-1, _id:-1}` but the index is `{account:1, issuedAt:1}` (`pkg/session/session.go:110`, `:219`), so the `_id` tie-break forces a blocking in-memory sort stage. Harmless at cap 100; would not be at a larger cap.
+
+### Recommendations
+- `high` — Wrap the idempotency read in `http.MaxBytesReader(c.Writer, c.Request.Body, botRequestBodyMaxBytes)` at `middleware_idempotency.go:60`, return the same 400 as `bindStrict`, and stash the buffered bytes in the gin context so `bindStrict` reuses them instead of re-reading.
+- `high` — Put an IP/account-keyed limiter in front of `/api/v1/login` (the existing `botRateLimit` shape with a caller key of `req.Username`+`c.ClientIP()` works), so bcrypt cost is bounded per source.
+- `high` — Move `rateLimit` ahead of `auth` in `routes.go:40` with an IP-derived key when no principal exists, so invalid tokens are throttled before they reach MongoDB.
+- `medium` — Either raise `REQUEST_TIMEOUT` above the room-mgmt budget or derive the room-mgmt timeout from config and assert `RequestTimeout > roomMgmtTimeout` in `run()` alongside the other `Validate()` calls (`main.go:47-55`).
+- `medium` — Give `botForwarder` a second `roomMgmtTimeout` field set from config and delete the literal at `bot_forwarder.go:75`.
+- `low` — Pipeline the two `IncrEx` calls, and add a short-TTL negative cache for repeatedly-failing token hashes (keyed by hash, seconds not minutes) to cap the Mongo cost of token spraying without weakening the positive-only security posture.
+- `low` — Add a TTL index on a new `expiresAt` field in `pkg/session`, or document why sessions are retained indefinitely.
