@@ -152,7 +152,7 @@ part's declared `Content-Type` is used only when it is specific. See
 
 Downloads a protected file (image/audio/video/document). `ssoToken` (header, or the
 `ssoToken` cookie from `POST /api/v1/file/setCookie` for browser `<img>` downloads; header
-wins) **or** `x-user-id` + `x-auth-token`; caller must be a room member. `drive_host` query param required.
+wins) **or** `x-user-id` + `x-auth-token`; caller must be a room member. `drive_host` query param required, and must be one of the deployment's configured Drive base URLs (an unrecognised host is a 400, not a 503).
 Called with the `relativePath` (image upload) or `titleLink` (file upload)
 returned by the upload endpoints. See
 [../client-api.md §2.4](../client-api.md#get-apiv1fileroomsroomidfilefileid).
@@ -171,7 +171,7 @@ system version). Identical to `GET /api/v1/file/rooms/:roomId/file/:fileId` but
 proxied from a separate (legacy) Drive backend with its own credentials.
 `ssoToken` (header, or the `ssoToken` cookie from `POST /api/v1/file/setCookie` for
 browser `<img>` downloads; header wins) **or** `x-user-id` + `x-auth-token`; caller must
-be a room member. `drive_host` query param required. See
+be a room member. `drive_host` query param required, and must be one of the deployment's configured Drive base URLs (an unrecognised host is a 400, not a 503). See
 [../client-api.md §2.4](../client-api.md#get-apiv3roomsroomidprotected-imagefileid).
 
 **Emits:** `None — HTTP-only.`

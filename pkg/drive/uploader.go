@@ -131,6 +131,12 @@ func (c *Client) fetchPresignedURL(host, groupID, fileID string) (string, error)
 		URL   string `json:"url"`
 		Error string `json:"error,omitempty"`
 	}
+	// The api-token below is attached to whatever host we are handed, and that
+	// host can originate in a client query string — so the allow-list check has
+	// to happen before the request is built, not at the caller.
+	if !c.hostAllowed(host) {
+		return "", ErrHostNotAllowed
+	}
 	var result presignedURL
 	resp, err := c.downloadClient.R().
 		SetHeader("api-token", c.apiToken).

@@ -357,6 +357,16 @@ func (h *Handler) downloadFrom(c *gin.Context, dc driveClient) {
 
 	img, err := dc.GetGroupImage(driveHost, roomID, fileID)
 	if err != nil {
+		if errors.Is(err, drive.ErrHostNotAllowed) {
+			// A host outside the configured Drive base URLs is a malformed
+			// request, not a broken dependency — 400, not 503. The rejected
+			// value rides the log line (WithLogValues, so Classify still logs
+			// exactly once) because it is the signal that someone is probing
+			// the credential boundary; it is never echoed to the client.
+			ctx = errcode.WithLogValues(ctx, "drive_host", driveHost)
+			errhttp.Write(ctx, c, errcode.BadRequest("drive_host is not a configured Drive host"))
+			return
+		}
 		errhttp.Write(ctx, c, errcode.Unavailable("failed to retrieve file", errcode.WithCause(err)))
 		return
 	}
