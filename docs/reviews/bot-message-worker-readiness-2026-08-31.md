@@ -100,3 +100,21 @@ Small, readable and well-commented, but `store_cassandra.go` is four near-duplic
 - `medium` — after making permanent errors reachable, replace the hand-rolled branch with `jsretry.Settle` plus a metric hook, or move the counter into `jsretry`.
 - `low` — extract `pkg/`-level shared helpers for `toSender`/`toMentionSet`/`buildCassandraMessage`, which duplicate `message-worker` equivalents.
 - `low` — add a README noting this service intentionally mirrors `message-worker`'s write path, so future changes there get mirrored.
+
+---
+
+## 6. Integration — 2 / 5
+
+Subject, stream and consumer wiring are exactly right, but the Cassandra write-timestamp contract in CLAUDE.md is unimplemented across all ten creates — and the documented rationale for tolerating that is factually wrong.
+
+### Findings
+- `high` — **confirmed: none of the 10 create INSERTs pin `USING TIMESTAMP`** (`grep "USING TIMESTAMP" bot-message-worker/` → 0 hits) — `store_cassandra.go:74,84,115,125,151,161,173,203,215,227`. CLAUDE.md requires every *plaintext* create to bind `writeTS`; `message-worker/store_cassandra.go:173,184,265,276,297` does. The four plaintext creates (`:74,84,151,161,173`) are in violation; the encrypted ones (`:115,125,203,215,227`) are correct to remain unpinned per the same rule, but by accident rather than intent.
+- `high` — **CLAUDE.md's stated exposure for this service is wrong on both halves.** (a) "no failure point after the Cassandra commit in its handler" is false for the thread path: `countAndSetParentTcount` runs *after* `ExecuteBatch` commits and can fail on the partition scan or either UPDATE, returning a transient error that NAKs and replays the already-committed create — `store_cassandra.go:186,241,246-270`. (b) "repo-default `MaxDeliver=6` (~2.6 min)" understates the window: the handler NAKs with `jsretry.DefaultBackoff` (`handler.go:45`), whose schedule is `{1s,5s,30s,2m,10m}` = **12.6 minutes** across `MaxDeliver=6` (`pkg/jsretry/jsretry.go:52-59`; `pkg/stream/consumer.go:20`). The edit-reverting race window is ~5× larger than documented.
+- `medium` — the encrypted creates bind literal `null` for `msg/attachments/card/card_action` inside the INSERT — `store_cassandra.go:120,130,209,220,232` — the exact form CLAUDE.md forbids ("never as NULLs bound into it"). It is harmless *only* because these statements are unpinned; pinning them later (the D5 fix above) would silently stop the legacy-plaintext clear from landing. `message-worker` keeps them as separate unpinned `stripLegacyPlaintext*` UPDATEs (`message-worker/store_cassandra.go:144-146, 226, 236`) precisely to keep the requirement local.
+- Compliant: consumes only, publishes nothing (`grep Publish` → 0 hits), registers no `chat.user.…` handler — so no `docs/client-api.md` obligation; `subject.BotCanonicalCreated` and `stream.BotMessagesCanonical` used via builders (`main.go:141,208`); bucket math via `msgbucket.New(MESSAGE_BUCKET_HOURS)` (`main.go:102`) with the fleet default 360 (`deploy/docker-compose.yml`); `inbox-worker`/`outbox-worker` ownership untouched.
+
+### Recommendations
+- `high` — pin the four plaintext create INSERTs with `USING TIMESTAMP writeTS(msg.CreatedAt)`, porting `message-worker/store_cassandra.go:82-119` verbatim, and leave the encrypted creates unpinned with the CLAUDE.md rationale as a comment.
+- `high` — make `countAndSetParentTcount` non-fatal for the commit (Ack the create and retry the tcount SET separately), or move it ahead of the commit, so a post-commit failure cannot replay the create.
+- `high` — correct the CLAUDE.md bot-message-worker paragraph: the retry window is 12.6 min via `jsretry.DefaultBackoff`, and the thread path *does* have a post-commit failure point.
+- `medium` — convert the inline encrypted `null` bindings into separate unpinned `stripLegacyPlaintext*` UPDATE statements before pinning anything.
