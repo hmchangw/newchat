@@ -69,16 +69,26 @@ func lookupCached[T any](
 			}
 			continue
 		}
-		rec.Miss(ctx)
 		missing = append(missing, k)
 	}
 	if len(missing) == 0 {
 		return out, nil
 	}
 
+	// Miss vs Error is decided by the load, not by the cache lookup: a key that
+	// fell through is only a clean absence once the backing store answered.
+	// pkg/userstore and pkg/roommetacache record the same way, so one Grafana
+	// panel reads every tier alike — a Mongo outage must surface as errors here
+	// too, not as a tier reporting a 0% hit rate and no errors at all.
 	loaded, err := load(ctx, missing)
 	if err != nil {
+		for range missing {
+			rec.Error(ctx)
+		}
 		return nil, err
+	}
+	for range missing {
+		rec.Miss(ctx)
 	}
 	for _, k := range missing {
 		v, found := loaded[k]

@@ -180,17 +180,24 @@ func TestLookupCached_ErrorPropagatesAndIsNotCached(t *testing.T) {
 	sentinel := errors.New("mongo down")
 	loader := &recordingLoad{table: map[string]HRUser{"alice": hrUser("alice")}, err: sentinel}
 	c := newEntryLRU[HRUser](8, time.Minute)
+	rec := &countingRecorder{}
 
-	got, err := lookupCached(context.Background(), c, &countingRecorder{}, []string{"alice"}, loader.load)
+	got, err := lookupCached(context.Background(), c, rec, []string{"alice"}, loader.load)
 
 	require.ErrorIs(t, err, sentinel)
 	assert.Nil(t, got)
+	// A failed backing load is an error, not a clean absence: recording it as a
+	// miss would leave a Mongo outage looking like a 0% hit rate with no errors.
+	assert.Equal(t, 1, rec.errCount)
+	assert.Equal(t, 0, rec.misses)
 
 	loader.err = nil
-	got, err = lookupCached(context.Background(), c, &countingRecorder{}, []string{"alice"}, loader.load)
+	got, err = lookupCached(context.Background(), c, rec, []string{"alice"}, loader.load)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]HRUser{"alice": hrUser("alice")}, got)
 	assert.Equal(t, 2, loader.callCount())
+	assert.Equal(t, 1, rec.misses, "the retry resolved cleanly, so it counts as a miss")
+	assert.Equal(t, 1, rec.errCount, "and must not add a second error")
 }
 
 func TestLookupCached_NilCacheAlwaysLoads(t *testing.T) {

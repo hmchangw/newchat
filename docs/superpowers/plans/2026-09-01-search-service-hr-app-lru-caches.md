@@ -96,10 +96,10 @@ func TestConfig_EnrichmentCacheKnobs(t *testing.T) {
 		cfg, err := env.ParseAs[Config]()
 
 		require.NoError(t, err)
-		assert.Equal(t, 8192, cfg.Search.HRCacheSize)
-		assert.Equal(t, 5*time.Minute, cfg.Search.HRCacheTTL)
-		assert.Equal(t, 1024, cfg.Search.AppCacheSize)
-		assert.Equal(t, 5*time.Minute, cfg.Search.AppCacheTTL)
+		assert.Equal(t, 130000, cfg.Search.HRCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.HRCacheTTL)
+		assert.Equal(t, 1000, cfg.Search.AppCacheSize)
+		assert.Equal(t, 24*time.Hour, cfg.Search.AppCacheTTL)
 	})
 
 	t.Run("overrides", func(t *testing.T) {
@@ -158,10 +158,10 @@ type SearchConfig struct {
 	// The TTL is the worst-case staleness of an HR name or an app name in a
 	// search result, and the worst-case delay before a newly-created user or
 	// app stops rendering as a bare account name.
-	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"8192"`
-	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"5m"`
-	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1024"`
-	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"5m"`
+	HRCacheSize  int           `env:"HR_CACHE_SIZE"              envDefault:"130000"`
+	HRCacheTTL   time.Duration `env:"HR_CACHE_TTL"               envDefault:"24h"`
+	AppCacheSize int           `env:"APP_CACHE_SIZE"             envDefault:"1000"`
+	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"24h"`
 }
 ```
 
@@ -957,10 +957,10 @@ Expected: build succeeds; all tests PASS.
 In `search-service/deploy/docker-compose.yml`, after the `SEARCH_REQUEST_TIMEOUT` line in the service `environment:` block, add:
 
 ```yaml
-      - SEARCH_HR_CACHE_SIZE=${SEARCH_HR_CACHE_SIZE:-8192}
-      - SEARCH_HR_CACHE_TTL=${SEARCH_HR_CACHE_TTL:-5m}
-      - SEARCH_APP_CACHE_SIZE=${SEARCH_APP_CACHE_SIZE:-1024}
-      - SEARCH_APP_CACHE_TTL=${SEARCH_APP_CACHE_TTL:-5m}
+      - SEARCH_HR_CACHE_SIZE=${SEARCH_HR_CACHE_SIZE:-130000}
+      - SEARCH_HR_CACHE_TTL=${SEARCH_HR_CACHE_TTL:-24h}
+      - SEARCH_APP_CACHE_SIZE=${SEARCH_APP_CACHE_SIZE:-1000}
+      - SEARCH_APP_CACHE_TTL=${SEARCH_APP_CACHE_TTL:-24h}
 ```
 
 - [ ] **Step 4: Run the full gate**
