@@ -280,3 +280,75 @@ The gatekeeper does **not** put resolved mentions on the canonical event, so `me
 - `roomlist-worker` is genuinely off the delivery path: it holds messages un-acked and coalesces to a 250 ms flush, so no MongoDB write can NAK a delivered message. CLAUDE.md's account of that split is accurate.
 - `natsrouter` sheds rather than queues, so a saturated `history-service` returns `unavailable` fast and the gatekeeper degrades to its placeholder in microseconds rather than burning 2 s.
 - `message-gatekeeper` treats a failed quoted-parent fetch as soft-fail degradation rather than a NAK — the correct posture, and the contrast that makes `broadcast-worker`'s NAK on the same failure stand out.
+
+---
+
+## 6. Journey: app open → sidebar
+
+**This is the journey every user pays on every cold start, and it is the weakest of the five.**
+
+### 6.1 The client gives up before the server is allowed to finish
+
+The client's `requestSync` default timeout is **5 s** with no override in `fetchSidebarBuckets`. `user-service`'s budget is **15 s**, and its enrichment alone budgets **10 s serially**: `enrichWithRoomInfoAndLastMsg` runs `enrichCrossSite` **then** `enrichLastMessage`, never overlapped, each bounded by a 5 s NATS RPC timeout, each waiting on the slowest site.
+
+**One unreachable peer costs 5 s in phase 1 and another 5 s in phase 2.** The client has already abandoned; `user-service` keeps burning the full 15 s of Mongo and RPC work per abandoned request; and `fetchAllPages` treats the failure as terminal for that bucket. **Every user holding ≥1 subscription on a degraded peer loses their whole sidebar bucket** — including the rooms on the healthy local site.
+
+The two phases are independent for the local site. Running them concurrently, and `lookupApps`/`lookupHRInfo` alongside, removes ~2 of the 4 serial phases at no correctness cost.
+
+### 6.2 Paginated in its reply, not in its work
+
+`AggregateSubscriptions` issues an **unpaginated** `Find` over all matching subscriptions before any offset/limit is applied, then resolves sort keys for all of them. The client drains buckets by offset, so a 500-room user's `rooms` bucket costs 3 serial round trips × 500-doc scan. With three overlapping buckets fired in parallel, **one app-open reads roughly 4–5× the user's subscription set.** Scaling is O(rooms²/limit) in documents.
+
+### 6.3 The badge path's failure mode is a permanent cache miss
+
+`unreadRooms` builds `roomIDsBySite[site]` with **every** remote room id and calls `GetRoomsMeta` once — **no chunking**, unlike `enrichCrossSite` which does chunk. At ~200 B per `RoomInfo`, a 600-room peer reply is ~120 KB against a 128 KB ceiling. Overflow marks the site failed, sets `degraded`, and `CountSubscriptionsFor` then **skips `Reseed`** — so the badge cache can never warm for exactly the accounts that most need it, and every `subscription.count` recomputes the full aggregate plus the doomed RPC.
+
+Server-side, `badge.count.batch` is **O(accounts) sequential** on a cold cache: each miss is one Mongo query plus up to P−1 cross-site RPCs, **one account at a time**, inside a 10 s handler called with a 5 s client timeout.
+
+---
+
+## 7. Journey: open a room → history
+
+**The read path is well-bounded and the enrichment has no N+1** — this is the strongest journey in the audit. One cross-component loop is dangerous.
+
+### 7.1 The bucket walk, quantified
+
+`messages_by_room` is `(room_id, bucket)` with `MESSAGE_BUCKET_HOURS=360` — **15-day partitions**. The walk is contiguous by design (it will not trust `rooms.lastMsgAt` as a ceiling, correctly — see §7.4), bounded by `max(room.createdAt, now−730d)` and `MESSAGE_READ_MAX_BUCKETS=122`.
+
+| Case | Partitions read | Sequential waves |
+|---|---|---|
+| Recent page, busy room | **1** | **1** |
+| Room silent 1 year | 25 | **4** |
+| Room ≥2 y old, empty in window | **50** | **7** |
+| Thread open | **1 partition** | **3 round trips, no walk** |
+| Restricted reader (unclamped floor) | up to **122** | **~16** |
+
+So a single cold room is bounded: ~50 partitions, ~35–140 ms of Cassandra RTT. **Two things break the bound:**
+
+1. **The restricted-access branch bypasses `walkBounds` entirely.** Config validation sizes `MESSAGE_READ_MAX_BUCKETS` off the history floor only, so a member who joined a since-silent room >2 y ago walks past the floor the validation assumes — and an exhausted budget returns an **empty page with `hasNext=false`**: silent history loss, for exactly the readers the validation exists to protect.
+2. **`MESSAGE_BUCKET_HOURS` is one global constant with a hard tension and no escape.** 15-day partitions in a 10 msg/min room are ~216k rows — past Cassandra's practical partition size. Shrinking it multiplies walk length, and the validator then *forces* `MESSAGE_READ_MAX_BUCKETS` up to match: at `W=24h` a quiet-room read legitimately touches **733 partitions / ~92 waves**. It is also welded to `compaction_window_size` in the DDL, so it cannot be retuned without a schema change.
+
+### 7.2 The preview loop — the dangerous one
+
+`openStoredPreview` serves a stored preview **only while `previewForMsgId == lastMsgId`** — and those two fields are written by **two different consumers**. When they disagree the room falls to `walkForPreview`: a `pageSize=1` walk, ~9 waves / ~48 partitions.
+
+`rooms.get` takes **100 rooms** with 16-way concurrency and fanout 8. So a chat-list load of cold rooms is **up to 5,000 partition reads and 128 concurrent Cassandra queries per in-flight RPC, ~63 sequential round trips, against a 5 s caller deadline.**
+
+Two mechanisms create and sustain the cold rooms (both verified by hand):
+
+- **`previewWriter.Flush` swaps the pending map out *before* the bulk write** (`broadcast-worker/preview_writer.go:148-161`), so a failed flush **discards the batch entirely** — no retry, no re-buffer. Above 5,000 buffered rooms it also sheds bodies.
+- **`previewWarmer.Submit` drops silently when its queue is full** (`history-service/internal/service/warmback.go:110-125`) — which is precisely when a burst of cold rooms is arriving. Its comment calls a dropped job "self-correcting — the next read re-walks the room and submits again," which is **circular: the re-walk is the expensive thing.**
+
+**This contradicts CLAUDE.md.** Line 278 states the `previewForMsgId`/`lastMsgId` disagreement "only costs history-service's lazy walk, which then warms the room back." Both halves understate it: the cost is up to 5,000 partition reads per RPC, and the warm-back is not guaranteed. This is the **second** instance in this audit of a CLAUDE.md risk assessment that justified leaving a trade-off in place while materially understating it — the first was the `bot-message-worker` write-timestamp note found in the fleet audit.
+
+### 7.3 Search is the weakest single hop
+
+`track_total_hits: true` with an **unbounded `from`** on a cross-cluster index pattern. `normalizePagination` caps `size` at 100 and never caps `offset`. Exact total-hit counting has no 10k cap, so every query costs a full count **across every shard of every remote cluster**; deep `from` makes each shard in each cluster materialise `from+size` hits; past `index.max_result_window` ES 400s and the user sees `internal`. There is also no ES-side `timeout`/`terminate_after`, so a cancelled search **keeps running remotely** — compounding on the cluster already slow.
+
+### 7.4 Verified sound
+
+- **Per page of messages, enrichment costs zero extra round trips.** Sender, mentions, quoted parent, reactions, attachments, `tcount`, `pinnedAt` are denormalised columns on the row. At-rest decryption is one DEK per room, 2Q-cached, singleflight-coalesced, with a Valkey L2 — per-row cost is an AES-GCM open, not a fetch.
+- **Thread reads are exactly what the schema promises**: one partition, one query, a real page-state cursor.
+- The refusal to use `rooms.lastMsgAt` as a walk ceiling is correct and well-argued — it is written by a separate consumer with `MaxDeliver=-1` and lags without bound; using it would silently hide just-written rows.
+- The startup check on `MESSAGE_READ_MAX_BUCKETS` correctly accounts for the partial partitions at each end and **refuses to start rather than lose history**. It is the most careful capacity check in the repo.
+- Empty pages never claim `hasNext`, which keeps a budget-exhausted walk from wedging the client's pagination.
