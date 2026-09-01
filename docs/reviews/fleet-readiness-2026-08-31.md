@@ -300,3 +300,85 @@ All 35 audits are now complete. This table supersedes the partial scorecard in C
 **The two highest scores share the opposite shape.** `roomlist-worker` (3.7) and `translation-service` (3.7) both have small, dependency-injected, `main()`-light surfaces. `translation-service` is the fleet's only service over the coverage floor, and it is not the smallest or the simplest — it is the one whose logic is not trapped behind wiring. That is the entire argument of Chapter 2, visible as a single data point.
 
 **Where coverage and score diverge, read the score.** `teams-room-creation` scores 3.5 at 55.9% coverage; `upload-service` scores 3.0 at 76.5%. Coverage measures how much of a service is exercised; it says nothing about whether the service is doing the right thing. `upload-service` carries the fleet's one genuinely `critical` security finding **in well-tested code**.
+
+---
+
+## 7. Cross-cutting risk #5 — `CLAUDE.md` and the docs have drifted from the code
+
+`CLAUDE.md` is binding project law, and every one of the 210 expert agents read it in full before judging anything. That makes it unusually well-audited — and it turned up **wrong in places the code depends on**, alongside a broader pattern of documentation that describes a system slightly different from the one that runs.
+
+This chapter is separate from the others because its failure mode is different. A bug is found by the person it bites. **A wrong document is found by the person who trusted it** — and by then they have already written the code.
+
+### 7.1 `CLAUDE.md` states a risk assessment that is factually wrong
+
+The Cassandra write-timestamp section says of `bot-message-worker`: *"Its exposure is much smaller — the repo-default `MaxDeliver=6` (~2.6 min, no outage retry budget) and no failure point after the Cassandra commit in its handler."*
+
+Both halves are wrong, and the agent that checked verified each independently:
+
+- **There *is* a failure point after the commit.** `countAndSetParentTcount` runs *after* `ExecuteBatch` commits and can fail on the partition scan or either UPDATE, returning a transient error that NAKs and replays an already-committed create (`bot-message-worker/store_cassandra.go:186`, `:241`, `:246-270`).
+- **The window is ~12.6 minutes, not ~2.6.** The handler NAKs on `jsretry.DefaultBackoff`, not the bare `AckWait` schedule the note assumes.
+
+This matters because that assessment is **the stated justification for leaving the service unpinned**. The document's own argument for deferring the fix rests on two facts that are not true, and the deferral has held.
+
+### 7.2 Producer and consumer lists in `CLAUDE.md` are incomplete
+
+`bot-room-service` is a **fifth OUTBOX producer**, publishing `member_added`/`member_removed` through `outbox.Publish` on the per-destination FIFO lane (`bot-room-service/handler.go:676`, `:690`). CLAUDE.md's JetStream Streams section and `pkg/outbox/outbox.go:2` both enumerate only room-service, room-worker, message-worker and broadcast-worker.
+
+Its events *do* partition correctly, so nothing is stranded today — but this was found **independently by the OUTBOX owner's audit and by bot-room-service's own**, which is how federation doc drift usually surfaces: two services disagree about who is on the contract. The `chat.roomactivity` third lane in Chapter 4 is the same pattern one step further along, where the undocumented lane has no owner at all.
+
+### 7.3 Service READMEs describe services that no longer exist
+
+`teams-hr-sync/README.md` presents itself as the contract for *"an external persister [that] can replace this worker"*, and is materially wrong in four places:
+
+- it points the direct-write surface at **`pkg/hrstore` — a package that does not exist** (and `write_store.go:20-21` says the opposite: "Owned by this service … there is no shared store package");
+- it claims the diff is scoped `source:"teams"`, while the query is an unfiltered `bson.M{}` and `model.IEmployee` **has no source field at all**;
+- it documents a `Source` field and a `transform.SourceTeams` tag that do not exist;
+- it names the change-type constants wrongly.
+
+`hr-sync-worker/README.md` — the consumer of that same feed, and likewise offered as a replaceable-implementation contract — repeats two of the four. **A replacement built from either document would filter on a field that is not there**, and silently delete rows it believed it was scoping.
+
+### 7.4 The client API contract has drifted in eight services
+
+Every drift below is against `docs/client-api.md` or its two derived views, which CLAUDE.md §5 requires to stay in lockstep:
+
+| Service | Drift | Consequence |
+|---|---|---|
+| `auth-service` | §2.2 claims JWT scope "is derived server-side from the principal's roles (admin > bot > user)". It is not — `signNATSJWT` stamps only `account:<name>`, and `pkg/principal` records role scoping as unimplemented | **Clients are told a security property the server does not provide** |
+| `botplatform-service` | Docs publish `POST`/`DELETE …/rooms/:roomID/members`; the code registers `…/members/add` and `…/members/remove` | **Any SDK written from the docs 404s on both** |
+| `botplatform-service` | The derived view lists two endpoints and says "Emits: None — HTTP-only", dropping all five bot endpoints canonical §10.3–10.7 documents | Half the bot surface is invisible in the derived view |
+| `message-gatekeeper` | The derived view says botDM rooms receive no `new_message` fan-out; the canonical doc and `broadcast-worker` say the opposite | **A client built from the view silently misses every bot DM** |
+| `portal-service` | `§2.5` is used **twice**; the login endpoint has no TOC entry; `upstream_unavailable` is attributed to an endpoint that makes no outbound call | Colliding anchors in the derived views; wrong error attribution |
+| `auth-service` | The `authToken` branch's entire response shape is undocumented | Six user fields the doc promises come back empty |
+| `media-service` | `GET /api/v1/drive.members` is absent from §7 and bypasses `pkg/errcode` for a bespoke envelope | An undocumented endpoint with an error taxonomy no client library knows |
+| `upload-service` | Broken internal references to the service's own section | — |
+
+Four services also **document error reasons that no code path emits** (`portal-service`'s `site_unknown`, `botplatform-service`'s `dm_ensure_unavailable`) or **emit client-facing errors that appear in no table** (`message-gatekeeper`'s three attachment errors and the invalid-quoted-parent error; `auth-service`'s second 400 wording).
+
+### 7.5 Comments that claim guarantees the code does not provide
+
+These are the most dangerous class, because they are read *while* changing the code they describe:
+
+- **`auth-service/handler.go:312-313`** documents the effective NATS grants as including `_INBOX.>` on pub and sub, and claims to be "kept in sync with `docker-local/setup.sh` and `docs/client-api.md` §2.1". **Both sources say the opposite** — the setup script states "There is no _INBOX grant" and the §2.1 table has no such row. A platform-team change made from this comment **would over-grant**, on the service that defines what every client may publish.
+- **`user-presence-service/main.go:65-67`** asserts a compile-time interface check covers "including `SetExternal`". `PresenceStore` declares no `SetExternal`; the type system is not providing the guard the comment claims.
+- **`message-gatekeeper/store.go:79-85`** documents `ParentMessageFetcher` errors as all soft-failed. The handler has since **tiered** them — terminal errors now *reject* the send. A second implementation written against this comment would get the failure semantics **backwards**.
+- **`media-service/main.go:107-110`** explains there is deliberately "no blanket HTTP timeout … a short deadline would cancel a slow up/download mid-stream" — three lines above `srv.WriteTimeout = 30 * time.Second`.
+- **`bot-room-service/sysmsg.go:385-388`** claims a dedup id that cannot dedup a retry.
+- **`teams-hr-sync/store.go:12`** states "this producer never writes `hr_employee`"; direct mode writes exactly that collection through the same constant.
+
+### 7.6 Rules that are correct but that six services must break
+
+CLAUDE.md §6 requires `pkg/shutdown.Wait` in "every service's `main.go`". The six `teams-*` and `hr-sync` one-shot CronJob binaries all use `signal.NotifyContext` instead — **correctly**, because `shutdown.Wait` blocks waiting for a signal and is the wrong primitive for a run-to-completion job. Four separate audits independently flagged this as a rule violation *and* argued the code is right.
+
+Similarly, the per-service file layout (`handler.go`, `routes.go`) has no sanctioned form for a job with no handler and no routes, so six services name that file `syncer.go` or `runner.go` and read as non-compliant.
+
+**These are documentation bugs, not code bugs.** A rule that correct code must break trains readers to treat the document as advisory — which is precisely what makes §7.1–§7.5 dangerous.
+
+### Fleet recommendations
+
+- `high` — **Correct the `bot-message-worker` exposure note in `CLAUDE.md` §Cassandra.** It is wrong on both halves and is the stated reason a durability contract remains unimplemented. Do this before the fix itself, so the fix is argued from the real numbers.
+- `high` — **Reconcile `docs/client-api.md` and both derived views against the code, service by service**, starting with `auth-service` §2.2 (a stated security property that does not exist) and `botplatform-service`'s member endpoints (documented routes that 404). Consider generating the derived views rather than maintaining them: six of the eight drifts above are view-versus-canonical, and CLAUDE.md already forbids exactly that divergence.
+- `high` — **Rewrite `teams-hr-sync/README.md` and `hr-sync-worker/README.md` from the code.** Both are offered as replaceable-implementation contracts and both are wrong about the data model.
+- `medium` — **Add `bot-room-service` to the OUTBOX producer list** in `CLAUDE.md` and `pkg/outbox/outbox.go`, and give `chat.roomactivity` (Chapter 4) either documentation or an owner.
+- `medium` — **Fix the six guarantee-claiming comments in §7.5**, prioritising `auth-service`'s `_INBOX` grant comment — it is the one that would cause a security regression if acted on.
+- `medium` — **Add a CronJob carve-out to §6** for `pkg/shutdown.Wait` and the per-service file layout, so six correct services stop reading as violations.
+- `low` — When a `CLAUDE.md` claim is load-bearing enough to justify deferring work — as §7.1's was — **cite the file and line it rests on**, so the next reader can check it in seconds rather than re-deriving it.
