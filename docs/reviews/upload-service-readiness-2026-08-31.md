@@ -129,3 +129,39 @@ Test *quality* is genuinely good — handler.go 92%, middleware.go 98.9%, mediat
 - `low` — Delete the unreachable `return pattern == mime` at `mediatype.go:86` rather than writing a test that cannot reach it; add a `middleware_test.go` case with `PreferredUsername: ""` and `Name: "alice"` to pin the account fallback.
 - `low` — Move `upload_stream_test.go` behind `//go:build integration` (or a `-short` guard) so `make test` is not carrying a 100 MiB sampled memory assertion under `-race`.
 - `nitpick` — Rename the `TestUpload_*` / `TestDownload_*` / `TestS3Download_*` families to `TestHandler_HandleUploadImages_*` etc. to match CLAUDE.md Section 4 naming.
+
+---
+
+## 5. Maintainability — 3 / 5
+
+Clean file layout and unusually good WHY-comments, but a 11-parameter constructor, a 31-line copy-pasted handler preamble, and a 1390-line non-table-driven test file make the next feature noticeably more expensive than it should be.
+
+### Findings
+- `high` — `NewHandler` takes 11 positional parameters, 8 of them bare scalars/bools — `upload-service/handler.go:72-80`. Ten call sites already pass magic literals (`..., 0, nil, testCacheMaxAge, true, ...` at `handler_test.go:170`, `:262`, `:296`, `:507`, `:780`, `:793`, `:815`, `handler_setcookie_test.go:25`, `:45`). Adding one knob is a 10-site edit, and the positional `int`/`int64`/`bool` run is trivially transposable. The service already demonstrates the right pattern one file over: `authDeps` exists precisely "rather than four positional parameters" (`middleware.go:128-134`).
+
+- `high` — 31 byte-identical lines duplicated between the two upload handlers: `handler.go:136-167` vs `handler.go:213-244` (roomID check → `userFromContext` → email guard → `requireMembership` → `MultipartForm` + its 2-line comment, verbatim). Any fix to the auth/membership preamble has to be made twice and can silently diverge.
+
+- `medium` — `HandleUploadFile` is 104 lines (`handler.go:212-315`) doing validation, membership, open, MIME resolution, filtering, dimension read, Drive upload, Drive-status decoding and attachment assembly. It is the file's complexity peak and the hardest place to add a step.
+
+- `medium` — A `nil` `mimeFilter` is constructible and panics on first use. `allowed` has a pointer receiver reading `f.blacklistExact` (`mediatype.go:60-68`); `NewHandler` accepts `nil` with no guard and the tests do pass `nil` (`handler_test.go:170`). Production is safe only because `newMediaTypeFilter` never returns nil — exactly the latent hazard a wide positional constructor invites.
+
+- `medium` — The download-response header map is built twice, identically, in two handlers: `handler.go:352-357` and `handler.go:419-427` (Content-Disposition + CSP + `private, max-age`). The two comments even explain the same reasoning twice. A security-relevant header change has to land in both.
+
+- `medium` — Dead field carried through the whole read path: `upload.UserID` (`store.go:17`) is projected from Mongo (`store_mongo.go:47`) but never read by any handler; `upload.ID` likewise. This also weakens CLAUDE.md's "project precisely" rule for no benefit.
+
+- `medium` — ~120 lines of test differ only in which method is called: `handler_test.go:617-676` (`TestDownload_*`) vs `handler_test.go:872-933` (`TestDownloadV3_*`) cover the same six scenarios against the *already-shared* `downloadFrom`. The whole file has 70 top-level `Test` funcs and exactly **one** `t.Run` (`handler_test.go`), against CLAUDE.md §4 "prefer table-driven tests when testing multiple input/output variations of the same logic".
+
+- `low` — `defaultUploadContentType` is declared (`handler.go:37`) yet the same literal is hardcoded 60 lines later as the S3 fallback (`handler.go:418`), so the const does not actually own the value its doc-comment claims it owns.
+
+- `low` — `authMiddleware` is 74 lines (`middleware.go:138-211`) with the session path extracted into `sessionUser` but the dev-mode and OIDC claim-mapping paths left inline — an asymmetry that makes the SSO branch the one that keeps growing.
+
+- `nitpick` — `imageDimensions` carries a 12-line doc comment over a 20-line body (`dimensions.go:14-25`), and the blank-import rationale is stated twice (once at `:9-10`, again at `:23-25`).
+
+### Recommendations
+- `high` — Replace `NewHandler`'s scalar tail with a named `handlerLimits` struct (`MaxImages, MaxAttachments, MaxImageSize, MaxFileSize, MIMEFilter, CacheMaxAge, SetCookiePartitioned`), mirroring the existing `authDeps` pattern. Signature becomes `NewHandler(store, drive, legacyDrive, s3, limits)`; call sites become self-documenting and the nil-filter trap disappears behind one constructor guard.
+- `high` — Extract the shared preamble as `func (h *Handler) uploadContext(c *gin.Context) (uploadCtx, bool)` returning `{ctx, roomID, user, siteID, form}` and writing its own error responses. Both upload handlers shrink by ~30 lines each and `HandleUploadFile` drops under 75.
+- `medium` — Extract `func (h *Handler) downloadHeaders(filename string) map[string]string` and call it from `downloadFrom` and `HandleDownloadMinioS3File`; keep the caching rationale as one comment on the helper.
+- `medium` — Drop `UserID` and `ID` from the `upload` DTO and from the `GetUpload` projection until a caller needs them.
+- `medium` — Collapse `TestDownload_*` / `TestDownloadV3_*` into one table over `{name, invoke func(*Handler, *gin.Context), wantStatus}`, and split `handler_test.go` into `handler_upload_test.go` / `handler_download_test.go`. Same coverage, roughly 200 fewer lines to maintain.
+- `low` — Use `defaultUploadContentType` at `handler.go:418` instead of the literal.
+- `low` — Extract the dev-mode and OIDC branches of `authMiddleware` into `ssoUser(ctx, token)`, matching the existing `sessionUser`, so the middleware body reads as three symmetric credential paths.
