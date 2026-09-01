@@ -38,6 +38,7 @@ type config struct {
 	// events sit in the OUTBOX stream unconsumed.
 	AllSiteIDs   []string                `env:"ALL_SITE_IDS" envDefault:"" envSeparator:","`
 	Consumer     stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy        natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap    bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	HealthAddr   string                  `env:"HEALTH_ADDR" envDefault:":8081"`
 	PProfEnabled bool                    `env:"PPROF_ENABLED" envDefault:"false"`
@@ -154,6 +155,22 @@ func main() {
 		orderedCtxs = append(orderedCtxs, cc)
 	}
 
+	// Buddy lane: keeps this site federating OUTWARD while its own NATS is down.
+	// BindBuddy never fails startup — on any failure no failover lane is added
+	// and the home lanes carry on. With no peers there is nothing to forward, so
+	// the lane is gated out entirely.
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(len(peers) > 0), cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			fIters, fOrdered, fErr := startFailoverLanes(ctx, bjs, &cfg, peers, sem, &wg, process)
+			if fErr != nil {
+				return fErr
+			}
+			iters = append(iters, fIters...)
+			orderedCtxs = append(orderedCtxs, fOrdered...)
+			return nil
+		})
+
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
 	)
@@ -175,16 +192,10 @@ func main() {
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
+			return natsutil.WaitPool(ctx, &wg)
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { return healthStop(ctx) },
 		// obsShutdown LAST so all prior teardown telemetry is exported.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
@@ -239,19 +250,91 @@ func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan stru
 // peer's parked events and stall first-delivery of every healthy peer's events.
 // One consumer per peer gives each its own budget, so a down peer stalls only
 // its own lane.
-func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane string, eventTypes []model.InboxEventType) jetstream.ConsumerConfig {
+// The failover variant carries the same MaxDeliver=-1 and the same
+// per-destination isolation — a peer that is down while WE are failed over is
+// still a peer that must not stall the others — and a distinct durable so the
+// live and failover lanes keep independent cursors.
+func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane string,
+	eventTypes []model.InboxEventType, failover bool,
+) jetstream.ConsumerConfig {
 	// Unlimited redelivery: a peer that is down for an hour must not exhaust
 	// MaxDeliver and drop the federated event. Applied to the settings, not to
 	// the config afterwards, so the derived BackOff is not clamped against a cap
 	// that no longer applies — see stream.WithUnlimitedRedelivery.
 	cc := stream.DurableConsumerDefaults(stream.WithUnlimitedRedelivery(s))
 	cc.Durable = "outbox-worker-" + lane + "-" + destSiteID
+	if failover {
+		cc.Durable = "outbox-worker-" + lane + "-failover-" + destSiteID
+	}
 	filters := make([]string, 0, len(eventTypes))
 	for _, et := range eventTypes {
+		if failover {
+			filters = append(filters, subject.FailoverOutbox(siteID, destSiteID, et))
+			continue
+		}
 		filters = append(filters, subject.Outbox(siteID, destSiteID, et))
 	}
 	cc.FilterSubjects = filters
 	return cc
+}
+
+// startFailoverLanes readies the buddy-hosted OUTBOX-FAILOVER stream and binds
+// the same per-destination consumer pair the live stream gets: a concurrent lane
+// per peer plus a FIFO lane per peer. The partition must be mirrored exactly, or
+// an event type would land on the failover stream with no consumer.
+//
+// Failing partway is not partial-success: any error returns and the caller keeps
+// the home lanes running, because a half-bound failover lane would silently drop
+// whichever event types missed their consumer.
+func startFailoverLanes(ctx context.Context, bjs o11ynats.JetStream, cfg *config, peers []string,
+	sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg),
+) ([]o11ynats.MessagesContext, []o11ynats.ConsumeContext, error) {
+	failoverCfg := stream.OutboxFailover(cfg.SiteID)
+	if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(bjs), failoverCfg,
+		cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+		return nil, nil, err
+	}
+
+	iters := make([]o11ynats.MessagesContext, 0, len(peers))
+	ordered := make([]o11ynats.ConsumeContext, 0, len(peers))
+	for _, dest := range peers {
+		ccons, err := bjs.CreateOrUpdateConsumer(ctx, failoverCfg.Name,
+			buildFailoverConcurrentConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+		if err != nil {
+			return nil, nil, fmt.Errorf("create failover concurrent consumer for %s: %w", dest, err)
+		}
+		iter, err := ccons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
+		if err != nil {
+			return nil, nil, fmt.Errorf("bind failover concurrent messages for %s: %w", dest, err)
+		}
+		iters = append(iters, iter)
+		drainPool(ctx, iter, sem, wg, process)
+
+		ocons, err := bjs.CreateOrUpdateConsumer(ctx, failoverCfg.Name,
+			buildFailoverOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
+		if err != nil {
+			return nil, nil, fmt.Errorf("create failover ordered consumer for %s: %w", dest, err)
+		}
+		cc, err := ocons.Consume(ctx, process)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failover ordered consume for %s: %w", dest, err)
+		}
+		ordered = append(ordered, cc)
+	}
+	return iters, ordered, nil
+}
+
+// buildFailoverConcurrentConsumerConfig mirrors buildConcurrentConsumerConfig on
+// the buddy-hosted OUTBOX-FAILOVER stream.
+func buildFailoverConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
+	return buildLaneConsumerConfig(s, siteID, destSiteID, "concurrent", outbox.ConcurrentEventTypes, true)
+}
+
+// buildFailoverOrderedConsumerConfig mirrors buildOrderedConsumerConfig on the
+// buddy-hosted OUTBOX-FAILOVER stream, keeping MaxAckPending=1 so membership and
+// rename events cannot overtake each other while this site is failed over.
+func buildFailoverOrderedConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
+	return buildOrderedConsumerConfigForRoot(s, siteID, destSiteID, true)
 }
 
 // buildConcurrentConsumerConfig returns a per-destination consumer config for
@@ -262,7 +345,7 @@ func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane
 // within a peer is preserved (default MaxAckPending); only the isolation
 // boundary is per-destination.
 func buildConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
-	return buildLaneConsumerConfig(s, siteID, destSiteID, "concurrent", outbox.ConcurrentEventTypes)
+	return buildLaneConsumerConfig(s, siteID, destSiteID, "concurrent", outbox.ConcurrentEventTypes, false)
 }
 
 // buildOrderedConsumerConfig returns the per-destination FIFO consumer config
@@ -275,7 +358,14 @@ func buildConcurrentConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID
 // interval. These events are low-volume, so the serial ceiling (~1/RTT per
 // destination) is far above the real rate.
 func buildOrderedConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID string) jetstream.ConsumerConfig {
-	cc := buildLaneConsumerConfig(s, siteID, destSiteID, "ordered", outbox.OrderedEventTypes)
+	return buildOrderedConsumerConfigForRoot(s, siteID, destSiteID, false)
+}
+
+// buildOrderedConsumerConfigForRoot holds the FIFO lane's one distinguishing
+// setting for both roots, so the live and failover lanes cannot drift apart on
+// the very property the lane exists to guarantee.
+func buildOrderedConsumerConfigForRoot(s stream.ConsumerSettings, siteID, destSiteID string, failover bool) jetstream.ConsumerConfig {
+	cc := buildLaneConsumerConfig(s, siteID, destSiteID, "ordered", outbox.OrderedEventTypes, failover)
 	cc.MaxAckPending = 1
 	return cc
 }
