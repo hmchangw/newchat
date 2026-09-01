@@ -89,3 +89,27 @@ Quality is otherwise strong: table-driven with descriptive subtests (`config_tes
 - `low` — Move `zstdTestDecoder` construction inside the test that uses it.
 
 ---
+
+---
+
+## 5. Maintainability — 3 / 5
+
+The code is small, well-factored and readable; the documentation and several load-bearing comments describe a service that no longer exists.
+
+### Findings
+- `high` — `README.md` is materially wrong in four places: it points the direct-write surface at `pkg/hrstore` "shared with `hr-sync-worker`" (:14-15, :48-51) — **that package does not exist** (`ls pkg/`), and `write_store.go:20-21` says the opposite ("Owned by this service … there is no shared store package"); it claims stream mode diffs `hr_employee` rows "(`source:"teams"` only)" (:8) when the query is an unfiltered `bson.M{}` (`store_mongo.go:57`) and `model.IEmployee` has no source field; it documents a `Source` field on `EmployeeFromMember` (:44) and a `transform.SourceTeams` tag (:54) that do not exist; and it names the constants `model.ChangeTypeNewHire`/`ChangeTypeUpdate` (:53) when they are `IChangeType*`.
+- `medium` — `store.go:12` states "this producer never writes `hr_employee`", but `write_store.go:39` writes exactly that collection via the same `hrEmployeeCollection` constant. The comment predates direct mode and now misleads at the interface that most needs trust.
+- `medium` — The `[]model.IUserWithChange` build loop is duplicated verbatim between `publisher.go:43-49` and `emitter.go:51-57`; the converter seam already exists, so a `usersFrom(converter, upserts)` helper removes it.
+- `low` — `deploy/docker-compose.yml:19` sets `ORG_TYPE=group`, which no config field reads (`transform.go:34` notes the field was removed).
+- `nitpick` — `transform.go:34` carries a leftover working note ("ponytail: no OrgType") in an exported package doc comment.
+- `nitpick` — `QuitTeamsEmployees` hard-deletes (`write_store.go:99`) rather than marking a status; the name implies a state change.
+
+No dead code, no oversized file (largest is `main.go` at 250 lines), no function above ~25 lines, comments overwhelmingly explain WHY (`main.go:35-39`, `:142-143`, `write_store.go:59-61`, `publisher.go:63-66` are all good examples).
+
+### Recommendations
+- `high` — Rewrite `README.md` against the current code: drop `pkg/hrstore`, drop the `source:"teams"` and `Source`/`SourceTeams` claims, fix the `IChangeType*` names, and document `WriteStore` as service-owned.
+- `medium` — Fix the `store.go:12` comment to say the read surface is read-only while direct mode writes through `WriteStore`.
+- `medium` — Extract the duplicated user-conversion loop into one helper used by both emitters.
+- `low` — Delete `ORG_TYPE` from the compose file and the "ponytail" note from the package comment.
+
+---
