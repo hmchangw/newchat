@@ -83,3 +83,20 @@ Compliant: `package main` tests, `go.uber.org/mock` mocks in an unedited `mock_s
 - `medium` — cover `store_mongo.go:49-51,60-62` by pointing the store at a closed/cancelled context (or a dropped collection) and asserting the wrapped messages.
 - `medium` — add a handler case for duplicate chat ids asserting one result per requested entry, in order.
 - `low` — extract the shutdown sequence from `run()` into a testable func so `main.go:101-113` is reachable from a unit test.
+
+---
+
+## 5. Maintainability — 4 / 5
+
+670 lines across nine files, every function short, comments explain WHY (`main.go:82-85`, `pkg/model/teams.go:104-110`) — the only real hazard is a cross-service invariant maintained by hand.
+
+### Findings
+- `low` — the hand-synced room-id derivation (`handler.go:44-46,68` ↔ `room-worker/teamsroomcreate.go:62`) is the one place where an edit in another service silently breaks this one: every chat would report `roomExists=false` and the verifier would log mismatches forever rather than fail.
+- `low` — `verifyRequestBodyMaxBytes` hardcodes a 256-byte-per-id assumption (`handler.go:19-25`); the 4 KB slack absorbs it today, but nothing tests or asserts the assumption.
+- `nitpick` — `RoomState.UserCount` is read, mapped to `RoomUserCount` and never used in any decision (`store.go:11-15`, `handler.go:93`, `teams-room-verify/runner.go:151-159`); it is deliberate diagnostic context (`pkg/model/teams.go:119-129`), so keep it — just do not mistake it for logic.
+
+No dead code, no duplicated logic inside the service, no file that has outgrown its purpose. Adding a second inspection field is a one-line change in three places.
+
+### Recommendations
+- `low` — the `pkg/teamsmigrate` extraction above is the single refactor worth doing; it removes the only hand-synced invariant.
+- `nitpick` — assert `verifyRequestBodyMaxBytes` covers a max-size batch of realistic Graph ids in the boundary test recommended in D3.
