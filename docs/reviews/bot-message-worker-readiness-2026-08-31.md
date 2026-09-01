@@ -61,3 +61,23 @@ Boundaries, DI, bootstrap opt-in and subject/stream builders are all correct, bu
 - `high` — add `deploy/azure-pipelines.yml` mirroring a peer worker's.
 - `medium` — add the `//go:generate mockgen` directive to `store.go` and generate `mock_store_test.go`.
 - `low` — start the health server before the consumer loop so readiness cannot report healthy on a half-wired process.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is **13.6%** (206 statements) — the lowest in the fleet and far below the 60% critical line, with the entire Cassandra store, `bootstrapStreams` and `run` at 0%.
+
+### Findings
+- `critical` — 13.6% statement coverage, well under CLAUDE.md's 80% floor and the 60% critical threshold (`coverage_by_service.txt`). Every function in `store_cassandra.go` is 0.0%: `SaveMessage:64`, `saveEncrypted:100`, `SaveThreadMessage:142`, `saveThreadEncrypted:189`, `countAndSetParentTcount:246`, `toSender:27`, `toMentionSet:36`, `buildCassandraMessage:274` (`covfunc.txt`). That is the entire durability surface — 10 INSERTs, the encryption split, the bucket math and the tcount SET — with zero assertions.
+- `high` — zero integration tests: no `integration_test.go`, no `//go:build integration` file, no `TestMain`/`testutil.RunTests`. Peer `message-worker` has `integration_test.go`, `store_cassandra_test.go`, `store_cassandra_batch_test.go` and `store_cassandra_writetime_test.go`; none of those guardrails exist here, which is precisely why the write-timestamp divergence (D5) went unnoticed.
+- `high` — `bootstrapStreams` is 0.0% (`bootstrap.go:23`) despite `streamManager` being an injectable interface built for testing — the "verify" branch that must fail fast in production is untested.
+- `medium` — the store is mocked with a hand-written `fakeStore` (`handler_test.go:21-48`) rather than a `go.uber.org/mock` mock in `mock_store_test.go`, contrary to CLAUDE.md Section 4.
+- `low` — the five handler tests are flat `TestX` functions, not table-driven; the four scenarios (main/thread/malformed/transient/permanent) are near-identical shapes that CLAUDE.md's table-driven rule would collapse.
+- Good: tests are `package main`, independent, and snapshot the Prometheus counter as a delta (`handler_test.go:160,169`) so they don't cross-contaminate.
+
+### Recommendations
+- `critical` — add `integration_test.go` (`//go:build integration`, `TestMain` → `testutil.RunTests`, `testutil.CassandraKeyspace`) covering: plaintext main-room write, encrypted write, thread reply with and without `TShow`, and `countAndSetParentTcount` idempotency across a simulated redelivery.
+- `high` — port `message-worker/store_cassandra_writetime_test.go` to pin the plaintext-pinned / encrypted-unpinned rule here once D5 is fixed.
+- `high` — unit-test `bootstrapStreams` both branches with a fake `streamManager`.
+- `medium` — replace `fakeStore` with a generated mock and table-drive the handler scenarios.
