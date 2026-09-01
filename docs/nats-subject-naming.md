@@ -234,6 +234,83 @@ lane, routed across the NATS supercluster to the destination's INBOX.
 
 Stream wildcards: `chat.inbox.{siteID}.external.>` and `chat.inbox.{siteID}.internal.>`
 
+### Failover Stream (`INBOX-FAILOVER-{siteID}`)
+
+When a site's own NATS cluster is down, a peer's forward to
+`chat.inbox.{siteID}.external.…` gets no responders. Rather than parking the
+event for the whole outage, the peer republishes it here — to a standby stream
+hosted on **that site's buddy cluster**, where the down site's own
+`inbox-worker` consumes it over its buddy connection and applies it to the down
+site's own MongoDB, which is still up.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.failover.inbox.{siteID}.external.{eventType}` | outbox-worker (at the **origin** site, after an unambiguous no-responders) | inbox-worker (of `{siteID}`, over its buddy connection) | Redirected cross-site federation events |
+
+Stream wildcard: `chat.failover.inbox.{siteID}.external.>`
+
+Three properties of this subject are load-bearing:
+
+- **It names the destination site, not the buddy.** The publisher never learns
+  which cluster is whose buddy — supercluster interest routing delivers the
+  publish wherever the stream happens to live. Reassigning a buddy is ops config
+  invisible to every other site.
+- **It is disjoint from `chat.inbox.>`.** Two streams in one account may not
+  claim overlapping subject filters, and that is enforced supercluster-wide, so
+  the standby cannot simply reuse the live subject.
+- **It is outside `chat.local.>`.** That prefix is filtered from gateway
+  interest advertisement; a failover subject beneath it would never cross a
+  gateway, and the lane would look correctly provisioned while silently
+  receiving nothing.
+
+The redirect fires **only** on an unambiguous no-responders. A timeout may
+already have landed, and the two INBOX streams have independent dedup windows —
+so a shared `Nats-Msg-Id` would not collapse a duplicate across them. An
+ambiguous failure parks and retries on the live lane, exactly as before.
+
+No failover lane exists for the `internal.>` search feed: it is published by
+same-site services that are idle while their own site's NATS is down.
+
+### Failover message path
+
+While a site's NATS is down, its displaced clients and its own services drive a
+parallel set of standby streams on the buddy cluster. Four subjects, mirroring
+the live message path one-for-one.
+
+| Subject Pattern | Publisher | Consumer | Purpose |
+|-----------------|-----------|----------|---------|
+| `chat.user.{account}.room.{roomId}.{siteID}.failover.msg.send` | displaced client | message-gatekeeper (over its buddy connection) | Message send while the home site's NATS is down |
+| `chat.failover.msg.canonical.{siteID}.{event}` | message-gatekeeper | message-worker, broadcast-worker, notification-worker, search-sync-worker | Validated messages on the failover lane |
+| `chat.failover.push.{siteID}.send` | notification-worker | push-notification-service | Push requests derived from failover-lane messages |
+| `chat.failover.outbox.{siteID}.{destSiteID}.{eventType}` | room-service | outbox-worker | Outbound federation while the home site's NATS is down |
+
+Stream wildcards: `chat.user.*.room.*.{siteID}.failover.msg.>`,
+`chat.failover.msg.canonical.{siteID}.>`, `chat.failover.push.{siteID}.>`,
+`chat.failover.outbox.{siteID}.>`.
+
+**The send subject is the only client-facing one, and it stays inside
+`chat.user.{account}.>` deliberately.** The JWT `auth-service` mints scopes
+publish permission to that prefix, so keeping the failover variant beneath it
+needs no permission change at all. The `failover` token sits *before* `msg`,
+where the live `MESSAGES-{siteID}` filter (`chat.user.*.room.*.{siteID}.msg.>`)
+cannot match it — that placement is what makes the two stream filters disjoint.
+
+**Each hinge service must publish onward to the matching lane.** A
+failover-lane message validated by `message-gatekeeper` has to go to
+`chat.failover.msg.canonical.…`, not the live canonical subject, because the
+live canonical stream lives on the cluster that is down. The same holds for
+`notification-worker` publishing push requests. The gatekeeper derives the lane
+from the inbound subject (`subject.IsFailoverMsgSend`) rather than from wiring,
+so a send cannot be attributed to the wrong lane.
+
+**The bot pipeline has no failover lane.** `stream.Resolve` leaves the failover
+fields zero for `PipelineBot` and services skip the lane when
+`Wiring.HasFailover()` is false — bots are not displaced users.
+
+**`ROOMS` has no failover lane either**, so room creation, invites, and the
+roster events `room-worker` derives from them stall for the outage. Deliberate
+scope limit, not an oversight.
+
 `inbox-worker` filters the `external.>` lane only — the structural guard that
 keeps it from re-applying same-site events the originating service already wrote
 to the local DB. `search-sync-worker` consumes member events on both lanes.
