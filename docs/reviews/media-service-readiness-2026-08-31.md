@@ -58,3 +58,38 @@ Notable strengths, verified: no `fmt.Println`/`log.Println` anywhere; no error c
 - `low` — give the detached load in `cache.go:50` its own bounded deadline (`context.WithTimeout(context.WithoutCancel(ctx), …)`) so the goroutine has a guaranteed exit independent of driver behaviour.
 - `low` — add a one-line WHY comment at `drive.go:45` naming the external Drive contract and linking the design spec, so the errcode bypass reads as sanctioned rather than as drift.
 - `low` — re-run `govulncheck` and the semgrep registry packs in an environment with egress before treating this service's SAST posture as fully verified.
+
+---
+
+## 3. Architecture — 4 / 5
+
+Clean, conventional Gin service — consumer-defined store interfaces, constructor DI, `pkg/subject` builders, typed env config with shared knobs mounted correctly, and `pkg/shutdown.Wait` — with a handful of localized boundary deviations (bespoke error envelope, interface placed with its implementer, best-effort index that a correctness path depends on).
+
+### Findings
+- `medium` — `drive.members` bypasses `pkg/errcode`/`errhttp` entirely, writing a bespoke `{success,error,errorType}` envelope with its own four-constant error taxonomy, and logs-then-writes on every failure path — `media-service/drive.go:32-48`, `:70-71`, `:81-82`, `:92-93`
+  CLAUDE.md mandates `errcode` for ALL client-facing errors and forbids log-AND-return (`Write` classifies and logs once). No justification comment, and the route is absent from `docs/client-api.md`, so the divergent contract is undocumented.
+- `medium` — the `(siteId, shortcode)` unique index is created best-effort and only warned on failure, yet `UpsertEmoji`'s duplicate-key retry is written on the assumption that the index exists — `media-service/main.go:78-80`, `media-service/store_mongo.go:189-193`
+  Without the index two concurrent first-time creates both insert, leaving two docs for one shortcode; `EmojiDoc`/`DeleteEmoji` then resolve non-deterministically. This is a correctness invariant, not an optimization — it should fail startup.
+- `medium` — authorization is asymmetric across the two transports for the same resource: HTTP emoji upload is admin-gated, the NATS `emoji.delete` RPC is open to any authenticated account, guarded only by a kill-switch — `media-service/routes.go:20`, `media-service/emoji_nats.go:37-43`
+  A shortcode is site-wide shared state (the handler's own comment says so); create requires admin, destroy does not.
+- `medium` — `Access-Control-Allow-Origin: *` is hardcoded and applied to the two authenticated PUT routes, with `x-auth-token` in the allowed-headers list — `media-service/middleware.go:29-42`, `media-service/routes.go:19-20`
+  The repo's other blob service parameterizes this (`upload-service/main.go:48-50`, `CORS_ALLOWED_ORIGINS` with an empty default). Public GETs justify `*`; the write routes should not inherit it.
+- `low` — `blobStore` is declared in `minio.go`, the file that implements it, not with its consumer — `media-service/minio.go:23-27`
+  CLAUDE.md: "Define interfaces in the consumer, not the implementer"; `avatarStore`/`emojiStore` follow this in `store.go:13,38`. Consequence: `blobStore` is outside the `//go:generate mockgen -source=store.go` directive (`store.go:9`), so its double is a hand-written `fakeBlobStore` (`handler_test.go:53-91`) instead of a generated mock.
+- `low` — the comment asserting "No blanket HTTP timeout … a short deadline would cancel a slow up/download mid-stream" sits three lines above a blanket `WriteTimeout: 30s` / `ReadTimeout: 15s` — `media-service/main.go:107-119`
+  `WriteTimeout` starts at end-of-header and bounds the whole stream (see the correct treatment in `upload-service/main.go:34-41`). The values happen to be generous for ≤1 MiB payloads, so this is a misleading comment rather than a live bug — but it will mislead whoever next raises `MAX_UPLOAD_BYTES`.
+- `low` — `avatarStore` carries `UserByAccount` and `RoomMember`, which exist solely for the `drive.members` probe and have nothing to do with avatars — `media-service/store.go:13-33`
+  The name no longer describes the seam; `handler` now straddles avatars, the drive membership probe, and custom emoji with one struct and four dependencies.
+- `nitpick` — `requestIDMiddleware`/`accessLogMiddleware` are registered after `gin.Recovery()`, so a panicking request is recovered upstream and produces no access-log line (the `slog` call after `c.Next()` is not deferred) — `media-service/main.go:104-106`, `media-service/middleware.go:46-61`
+- `nitpick` — `srv.Shutdown` runs third, after `router.Shutdown` and `natsutil.Drain`, so the HTTP listener keeps accepting new requests while NATS is already drained — `media-service/main.go:131-140`. Harmless today (no HTTP handler publishes to NATS) but inverts the usual stop-accepting-first order.
+
+Compliance confirmed (no finding): flat repo-root service with the mandated file set; `GET /healthz` at `routes.go:12`; routes wholly in `routes.go`; Resty via `restyutil` with a 5s timeout (`main.go:111-112`); request-ID middleware using `idgen.ResolveRequestID` and propagated via context (`middleware.go:15-27`); no `os.Getenv`; `mongoutil.PoolConfig` and `natsrouter.GuardConfig` mounted as named fields, never re-declared (`config.go:68,110`); no JetStream usage anywhere, so the absent `bootstrap.go` is correct, not a gap.
+
+### Recommendations
+- `medium` — Convert `drive.go` to return `*errcode.Error` through `errhttp.Write`; if the `{success,errorType}` shape is a hard external contract, keep it but add a justification comment and document the route in `docs/client-api.md`.
+- `medium` — Make `EnsureEmojiIndexes` fatal at startup (`return fmt.Errorf(...)` instead of `slog.Warn`), since `UpsertEmoji`'s race handling depends on it.
+- `medium` — Gate `HandleEmojiDelete` on the admin role to match `requireAdmin()` on upload, or document why delete is deliberately open.
+- `medium` — Replace `Access-Control-Allow-Origin: *` on the PUT routes with a configured allowlist, mirroring `upload-service`'s `CORS_ALLOWED_ORIGINS`.
+- `low` — Move `blobStore` (+ `blobInfo`, `errBlobNotFound`) into `store.go` so mockgen generates its mock and the interface sits with its consumer.
+- `low` — Rename `avatarStore`, or split the two drive-probe methods into a `memberStore`, so the interface names match the seams.
+- `nitpick` — Reorder middleware to `requestID → accessLog → Recovery`, and move `srv.Shutdown` ahead of the NATS drain.
