@@ -810,7 +810,9 @@ to this contract.
 
 | Exported name | Type | Emitted by | Appears | Platform alternative | Read by |
 |---|---|---|---|---|---|
-| `message_gatekeeper_messages_total` | counter | message-gatekeeper | on first message | none | campaign; **SLO-1a upstream denominator** (roadmap P2) |
+| `message_gatekeeper_messages_total` | counter | message-gatekeeper | on first message | none | campaign; handler outcomes by `result`/`reason`. **Not** an SLO denominator — it is recorded after the reply, not at the publish, and `result="accepted"` is a handler verdict rather than a published message |
+| `messages_canonical_published_total` | counter | message-gatekeeper | on first published message | none | **SLO-1a denominator** (all-`broadcast_path` total) and **SLO-1b/2 denominator** (`broadcast_path="room_subject"` slice). Emitted upstream of both workers on purpose: a consumer-side denominator is only incremented by a worker that is running, so a stalled broadcast-worker would remove a message from *both* halves of SLO-1b and hold the ratio at 100% through the outage. Three caveats below |
+| `messages_canonical_publish_duplicate_total` | counter | message-gatekeeper | **never on a happy path** — only on a JetStream redelivery inside the stream's dedup window | none — the stream deduplicates silently | the size of the exclusion the row above makes. Unlabelled: the message it describes was already classified on its first publish |
 | `message_worker_persistence_total` | counter | message-worker | on first persist | none | campaign; SLO-1a |
 | `broadcast_worker_fanout_recipients` | histogram | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_recipient_deliveries_total` | counter | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
@@ -834,6 +836,46 @@ to this contract.
 | `preview_warmback_stored_total` | counter | history-service | on first successful warm-back write | none | warm-back repair health, and the denominator that makes the two failure counters a rate rather than an absolute count |
 | `preview_warmback_dropped_total` | counter | history-service | on first shed job | none — the job is shed before any store call, so no driver metric sees it | warm-back saturation. The writer queue is bounded and a full queue drops the job, so a rising share means rooms stay on the lazy bucket walk — which is SLO-4's cost model, making this a leading indicator for the walk-depth tail `sli-slo.md` §3 Caveats names |
 | `preview_warmback_failed_total` | counter | history-service | on first failed warm-back write | partial: Mongo driver metrics cover write I/O broadly, not this operation | the same outcome as `dropped` reached the other way — the write was attempted and lost. Separate because saturation and a broken store need different responses |
+
+#### `messages_canonical_published_total` — three caveats
+
+**1. It is an approximate PubAck-based publish count, not an exactly-once
+logical-publish count.** The canonical publish is deduplicated by message id, so
+the approximation runs in one direction each way: a JetStream redelivery of an
+already-published message gets a duplicate-flagged ack and is excluded here (and
+counted by `messages_canonical_publish_duplicate_total` instead), while a first
+publish whose ack is lost is retried, flagged duplicate, and counted by neither —
+an undercount of one. No application counter can close that; an exact denominator
+needs a server-side stream delta or a persisted ledger. `sli-slo.md` §0.1 already
+labels these numerators approximate.
+
+**2. `broadcast_path="unknown"` is a validity signal, not a bucket.** It is
+emitted when the room-meta lookup fails, and it biases SLO-1b in the **green**
+direction: a genuine channel message whose lookup failed leaves the
+`room_subject` denominator entirely, while the enqueue that follows it still
+increments the numerator — so a Mongo blip *raises* the measured ratio at exactly
+the moment the system is degraded. The rule is therefore zero-tolerance rather
+than a threshold: **any non-zero `unknown` in a measurement window makes SLO-1b
+and SLO-2 `INCONCLUSIVE` for that window**, unless the worst case is *shown* to
+pass — recompute with every `unknown` counted as a `room_subject` message whose
+enqueue failed, and report that number:
+
+```promql
+# worst-case SLO-1b for a window in which unknown > 0
+sum(increase(broadcast_channel_enqueue_total{outcome="ok"}[$w]))
+/
+( sum(increase(messages_canonical_published_total{broadcast_path="room_subject"}[$w]))
++ sum(increase(messages_canonical_published_total{broadcast_path="unknown"}[$w])) )
+```
+
+Any SLO-1b/2 recording rule must carry that worst-case denominator, not the bare
+`room_subject` slice.
+
+**3. SLO-1b's ratio can exceed 1, and the dashboard must not clamp it.** The
+numerator (`broadcast_channel_enqueue_total`) is consumer-side, so a JetStream
+redelivery increments it again while this denominator does not move. That is the
+correct trade — an outage-safe denominator is worth an over-countable numerator —
+but a panel that silently clamps at 1 hides the redelivery it is evidence of.
 
 **The three `preview_warmback_*` rows are provisional in their Read-by column.**
 They arrived with #406, which merged before this registry existed, so nobody was

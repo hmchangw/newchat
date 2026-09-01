@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
 
+	"github.com/hmchangw/chat/pkg/broadcastpath"
 	"github.com/hmchangw/chat/pkg/displayfmt"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errnats"
@@ -426,23 +427,55 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 	// owner fast-path generalized).
 	isThreadReply := req.ThreadParentMessageID != ""
 	bypass := canBypassLargeRoomCap(sub)
-	if !isThreadReply && !bypass {
+
+	// tshow ("Also send to channel") is only meaningful on a thread reply: it asks
+	// for the reply to also appear in the parent room's channel timeline. On a
+	// non-thread send it is normalized to false (ignored, not rejected) — see
+	// docs/client-api.md §msg.send. It is computed here rather than at the build
+	// site below because the broadcast_path classification needs the *normalized*
+	// value: classifying on req.TShow would call a tshow=true send with no thread
+	// parent a thread reply.
+	tshow := req.TShow && isThreadReply
+
+	// The room fetch now serves two callers with different conditions, so the two
+	// are kept apart deliberately:
+	//
+	//   - The large-room cap wants it only when !isThreadReply && !bypass, and
+	//     that scope must not widen — a bypass-eligible sender and a thread reply
+	//     are exempt regardless of room size.
+	//   - broadcast_path wants the room *type* for every message that is not a
+	//     hidden thread reply, because that is exactly the set broadcast-worker
+	//     routes by room type. A hidden thread reply classifies without it.
+	//
+	// So the fetch runs on the union and the cap still applies on its own
+	// intersection. What is newly paying for a lookup is the bypass path and the
+	// tshow thread reply; the cache in metacache.go is what keeps that affordable,
+	// and the benchmark in handler_bench_test.go is what keeps it honest.
+	broadcastPath := broadcastpath.Classify(req.ThreadParentMessageID, tshow, "")
+	if !model.IsHiddenThreadReply(req.ThreadParentMessageID, tshow) {
 		meta, err := h.store.GetRoomMeta(ctx, roomID)
-		if err != nil {
-			// Fail-open: during a Mongo outage the room-meta read is
-			// unavailable. The large-room cap is a spam/noise control, not an
-			// access control, so allow the post rather than block the send.
-			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap (fail-open)",
+		switch {
+		case err != nil:
+			// Fail-open, for both callers: during a Mongo outage the room-meta
+			// read is unavailable. The large-room cap is a spam/noise control,
+			// not an access control, so allow the post rather than block the
+			// send — and a metric must never fail a message either, so the
+			// route is labelled unknown rather than guessed. `unknown` is a
+			// validity signal, not a bucket: see the contract §13.3.
+			slog.WarnContext(ctx, "room-meta unavailable, bypassing large-room cap and route classification (fail-open)",
 				"request_id", req.RequestID, "room_id", roomID, "error", err)
-		} else if meta.UserCount > h.largeRoomThreshold {
-			slog.Info("send blocked",
-				"reason", string(errcode.MessageLargeRoomPostRestricted),
-				"account", account,
-				"room_id", roomID,
-				"userCount", meta.UserCount,
-				"threshold", h.largeRoomThreshold,
-			)
-			return nil, errLargeRoomPostRestricted
+		default:
+			broadcastPath = broadcastpath.Classify(req.ThreadParentMessageID, tshow, meta.Type)
+			if !isThreadReply && !bypass && meta.UserCount > h.largeRoomThreshold {
+				slog.Info("send blocked",
+					"reason", string(errcode.MessageLargeRoomPostRestricted),
+					"account", account,
+					"room_id", roomID,
+					"userCount", meta.UserCount,
+					"threshold", h.largeRoomThreshold,
+				)
+				return nil, errLargeRoomPostRestricted
+			}
 		}
 	}
 	// debug: how the large-room gate was decided (metadata only).
@@ -487,12 +520,6 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 		}
 	}
 
-	// tshow ("Also send to channel") is only meaningful on a thread reply: it asks for the
-	// reply to also appear in the parent room's channel timeline. On a
-	// non-thread send it is normalized to false (ignored, not rejected) — see
-	// docs/client-api.md §msg.send.
-	tshow := req.TShow && req.ThreadParentMessageID != ""
-
 	msg := model.Message{
 		ID:                           req.ID,
 		RoomID:                       roomID,
@@ -522,7 +549,8 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 
 	canonicalSubj := subject.MsgCanonicalCreated(siteID)
 	canonicalMsg := natsutil.NewMsg(ctx, canonicalSubj, evtData)
-	if _, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt))); err != nil {
+	ack, err := h.publish(ctx, canonicalMsg, jetstream.WithMsgID(natsutil.CanonicalDedupID(&evt)))
+	if err != nil {
 		if errors.Is(err, nats.ErrMaxPayload) {
 			// Rejected client-side before the wire. The caps this handler enforces
 			// (content, attachments) are meant to keep a message under max_payload,
@@ -531,6 +559,15 @@ func (h *Handler) processMessage(ctx context.Context, account, roomID, siteID st
 			return nil, errcode.Permanent(errcode.Internal("canonical message exceeds broker max_payload"))
 		}
 		return nil, fmt.Errorf("publish to MESSAGES-CANONICAL: %w", errors.Join(errCanonicalPublish, err))
+	}
+	// The publish is deduplicated by message id, so a JetStream redelivery of an
+	// already-published message gets an ack flagged duplicate. Excluding it keeps
+	// the denominator a count of canonical messages rather than of publish
+	// attempts; the excluded case is counted separately so its size is visible.
+	if ack != nil && ack.Duplicate {
+		h.metrics.RecordCanonicalPublishDuplicate(ctx)
+	} else {
+		h.metrics.RecordCanonicalPublished(ctx, broadcastPath)
 	}
 	// flow: the message cleared the gate and was handed off to MESSAGES-CANONICAL.
 	slog.Log(ctx, logctx.LevelFlow, "gatekeeper published to canonical",

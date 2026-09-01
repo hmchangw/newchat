@@ -699,7 +699,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			wantInfra: false,
 		},
 		{
-			name:    "owner sends in big room — fast-path skips GetRoom",
+			name:    "owner sends in big room — cap bypassed, meta fetched only to classify",
 			account: validAccount,
 			roomID:  validRoomID,
 			siteID:  validSiteID,
@@ -715,7 +715,12 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						User:  model.SubscriptionUser{ID: "u1", Account: validAccount},
 						Roles: []model.Role{model.RoleOwner},
 					}, nil)
-				// No GetRoom expectation: owners must skip the fetch entirely.
+				// The fetch is no longer skipped — broadcast_path needs the room
+				// type — but the cap must still not apply: UserCount is far over
+				// the threshold and the send goes through.
+				s.EXPECT().
+					GetRoomMeta(gomock.Any(), validRoomID).
+					Return(roommetacache.Meta{ID: validRoomID, Type: model.RoomTypeChannel, UserCount: 10_000}, nil)
 			},
 			setupPub: func() (publishFunc, *[]publishedMsg) {
 				var published []publishedMsg
@@ -727,7 +732,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name:    "admin sends in big room — fast-path skips GetRoom",
+			name:    "admin sends in big room — cap bypassed, meta fetched only to classify",
 			account: validAccount,
 			roomID:  validRoomID,
 			siteID:  validSiteID,
@@ -743,7 +748,9 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						User:  model.SubscriptionUser{ID: "u1", Account: validAccount},
 						Roles: []model.Role{model.RoleAdmin},
 					}, nil)
-				// No GetRoom expectation: admins must skip the fetch entirely.
+				s.EXPECT().
+					GetRoomMeta(gomock.Any(), validRoomID).
+					Return(roommetacache.Meta{ID: validRoomID, Type: model.RoomTypeChannel, UserCount: 10_000}, nil)
 			},
 			setupPub: func() (publishFunc, *[]publishedMsg) {
 				var published []publishedMsg
@@ -755,7 +762,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 			},
 		},
 		{
-			name:    "bot account in big room with member role — fast-path skips GetRoom",
+			name:    "bot account in big room with member role — cap bypassed, meta fetched only to classify",
 			account: "helper.bot",
 			roomID:  validRoomID,
 			siteID:  validSiteID,
@@ -771,7 +778,9 @@ func TestHandler_ProcessMessage(t *testing.T) {
 						User:  model.SubscriptionUser{ID: "u-bot", Account: "helper.bot"},
 						Roles: []model.Role{model.RoleMember},
 					}, nil)
-				// No GetRoom expectation: bot accounts must skip the fetch entirely.
+				s.EXPECT().
+					GetRoomMeta(gomock.Any(), validRoomID).
+					Return(roommetacache.Meta{ID: validRoomID, Type: model.RoomTypeChannel, UserCount: 10_000}, nil)
 			},
 			setupPub: func() (publishFunc, *[]publishedMsg) {
 				var published []publishedMsg
@@ -2218,13 +2227,16 @@ func TestHandleJetStreamMsg_BotSubject_DecodesAccount(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	store := NewMockStore(ctrl)
 	// GetSubscription is keyed on the DECODED account. A ".bot" subscription
-	// bypasses the large-room cap, so GetRoomMeta is never called.
+	// bypasses the large-room cap; GetRoomMeta is still read, for broadcast_path.
 	store.EXPECT().
 		GetSubscription(gomock.Any(), "weather.bot", "room-1").
 		Return(&model.Subscription{
 			User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
 			Roles: []model.Role{model.RoleMember},
 		}, nil)
+	store.EXPECT().
+		GetRoomMeta(gomock.Any(), "room-1").
+		Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 1}, nil)
 
 	var captured []*nats.Msg
 	reply := func(_ context.Context, m *nats.Msg) error {
@@ -2261,6 +2273,10 @@ func TestHandler_processMessage_RequestTShowMapsToTShow(t *testing.T) {
 		store := NewMockStore(ctrl)
 		store.EXPECT().GetSubscription(gomock.Any(), "alice", "room-1").
 			Return(&model.Subscription{User: model.SubscriptionUser{ID: "u-alice", Account: "alice"}}, nil)
+		// tshow puts the reply on the room-subject path, so it is not a hidden
+		// thread reply and its route has to be classified from the room type.
+		store.EXPECT().GetRoomMeta(gomock.Any(), "room-1").
+			Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 1}, nil)
 
 		var published []publishedMsg
 		h := NewHandler(store, nil, makePublishFunc(&published, nil), replyFn, "site1", nil, 500, 1, 8192, "")
@@ -2654,6 +2670,9 @@ func TestHandleJetStreamMsg_AttachesIdentityToContext(t *testing.T) {
 				User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
 				Roles: []model.Role{model.RoleMember},
 			}, nil)
+		store.EXPECT().
+			GetRoomMeta(gomock.Any(), "room-1").
+			Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 1}, nil)
 
 		var publishCtx, replyCtx context.Context
 		publish := func(ctx context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
@@ -2768,6 +2787,9 @@ func TestHandleJetStreamMsg_ValidSubject_MasterOffDropsForgedIdentity(t *testing
 			User:  model.SubscriptionUser{ID: "u-bot", Account: "weather.bot"},
 			Roles: []model.Role{model.RoleMember},
 		}, nil)
+	store.EXPECT().
+		GetRoomMeta(gomock.Any(), "room-1").
+		Return(roommetacache.Meta{ID: "room-1", Type: model.RoomTypeChannel, UserCount: 1}, nil)
 
 	var publishCtx, replyCtx context.Context
 	publish := func(ctx context.Context, _ *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
