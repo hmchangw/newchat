@@ -43,3 +43,23 @@ Idiomatic, well-commented Go with correct `errcode` tiering, clean error wrappin
 - `nitpick` — Replace verb-less `fmt.Errorf` calls with `errors.New`.
 
 ---
+
+---
+
+## 3. Architecture — 3 / 5
+
+Textbook stateless request/reply service — consumer-defined interface, constructor DI, correct subject builders, `shutdown.Wait` — undercut by re-declaring a shared knob locally and shipping exactly half of the router's overload protection.
+
+### Findings
+- `high` — the service applies the admission cap without the companion request timeout — `translation-service/main.go:112-116`. `pkg/natsrouter/guard.go:57-66` documents `DefaultGuarded` as existing precisely "so a service can't apply only half of the overload protection — the cap … and the timeout … are otherwise two separate calls that are easy to forget one of." No `HandlerTimeout` middleware is installed anywhere in `main.go`, so handler contexts have no deadline.
+- `high` — `MAX_CONCURRENCY` is re-declared in the service Config with a divergent default — `translation-service/main.go:41` (`envDefault:"100"`) vs the owning package `pkg/natsrouter/guard.go:21` (`envDefault:"256"`). CLAUDE.md §6 Configuration: a knob shared by more than one service is declared once in the owning package and mounted as a named field. Six other services (`room-service`, `media-service`, `history-service`, `search-service`, `room-worker`, …) mount `natsrouter.GuardConfig`; this one does not, and consequently has no `REQUEST_TIMEOUT` knob at all.
+- `low` — the `Translator` interface is defined in `translator.go` rather than the CLAUDE.md-named `store.go`; defensible (there is no store — the service is stateless) but it is a departure from the documented per-service file layout worth one line in the service README/deploy notes.
+
+Correctly done and worth stating: no JetStream usage at all, so the absence of `bootstrap.go`/`BOOTSTRAP_STREAMS` is right, not a gap; `subject.TranslateRequestPattern` is used, never `fmt.Sprintf` (`main.go:117`); config is fully `caarlos0/env` with `required` on `SITE_ID`/`NATS_URL`/`TRANSLATION_BACKEND` and fail-fast startup validation of the stream backend (`main.go:48-77`); shutdown order is router → drain → obs (`main.go:121-125`).
+
+### Recommendations
+- `high` — Replace the hand-rolled cap with `natsrouter.GuardConfig` mounted as a named field and `natsrouter.DefaultGuarded(nc, "translation-service", cfg.Guard, natsrouter.WithSiteID(...), natsrouter.WithMetrics(...))`; drop the local `MaxConcurrency` field.
+- `high` — Set `REQUEST_TIMEOUT` below the client's NATS request timeout (2–5s) and map `context.DeadlineExceeded` to `errcode.Unavailable` in `Handler.Translate` per `pkg/natsrouter/doc.go:15-21`, then document the new `unavailable` case in `docs/client-api.md` §3.6.
+- `low` — Add a one-line note in the service explaining why there is no `store.go`.
+
+---
