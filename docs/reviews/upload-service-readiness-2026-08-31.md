@@ -65,3 +65,31 @@ Idiomatic, well-wrapped, correctly-tiered `errcode` usage with unusually good WH
 - `low` — Move `errcode.WithLogValues(ctx, "request_id", …)` into `requestIDMiddleware` and delete `logCtx`; handlers then use `c.Request.Context()` directly.
 - `low` — Add the required one-line justification comments to the two discarded `Close()` calls.
 - `low` — Re-run `make sast-vuln` and the semgrep registry packs from an environment with egress before merge; this audit could not clear the dependency tree.
+
+---
+
+## 3. Architecture — 4 / 5
+
+Clean, conventional Gin service: consumer-owned store interface, constructor DI, correct file layout and shutdown order; the gaps are config fail-fast on the Drive dependency and a few boundary/knob-ownership slips, none structural.
+
+### Findings
+- `high` — Neither Drive backend's URL or API token is `required`/`notEmpty`, and nothing validates them at startup: `pkg/drive/config.go:12-13` declares `env:"URL"` / `env:"API_TOKEN"` with no marker, and `upload-service/main.go:103-105` mounts two instances (`DRIVE_`, `LEGACY_DRIVE_`) then builds clients at `main.go:145-146` without a check. A pod with an empty `DRIVE_URL` starts healthy, passes `/healthz`, and fails every upload/download at request time. Contrast `BOTPLATFORM_URL` (`main.go:90`) and `cfg.Pool.Validate()` (`main.go:120`) — the fail-fast pattern exists in this same file and Drive is the hole.
+- `medium` — `LoadBaseURLs` fails open: a missing or malformed baseurls file only logs a warning and installs an empty map (`pkg/drive/config.go:26-39`), after which `GetBaseURLFromRoomOrigin` silently falls back to the default base URL (`pkg/drive/uploader.go:67-72`) for every cross-site room. Called unconditionally at `upload-service/main.go:125-126`. Also the only file-based config in the service, against CLAUDE.md §6 "All config from environment variables — no config files".
+- `medium` — MinIO knobs are re-declared per service rather than owned by `pkg/minioutil`: `MINIO_DOWNLOAD_TIMEOUT` appears with identical tag+default in `upload-service/main.go:101` and `client-update-service/config.go:24`, and `MINIO_ENDPOINT`/`ACCESS_KEY`/`SECRET_KEY`/`USE_SSL` in those two plus `media-service/config.go:70-74`. CLAUDE.md §6 Configuration requires a shared knob be declared once in the owning package and mounted as a named field with `envPrefix` — exactly what `Pool mongoutil.PoolConfig` (`main.go:59`) and `Drive drive.Config` (`main.go:103`) already do here. `pkg/minioutil` has no `Config` type at all.
+- `medium` — The object-storage boundary interface lives outside `store.go` and so is outside mockgen's reach: `objectStore` is declared at `handler.go:46-49`, while `//go:generate mockgen -source=store.go` (`store.go:265`) only covers `Store`. Tests consequently hand-roll `fakeS3` (`handler_test.go:69-75`) and `fakeDrive` (`handler_test.go:37-66`), which drift from the interface silently. `driveClient` (`handler.go:40-44`) has the same problem.
+- `low` — `NewHandler` takes ten positional parameters, seven of them bare scalars (`handler.go:72-73`), and the call site is a three-line argument list (`main.go:175-177`). Two adjacent `int`s (`maxImages`, `maxAttachments`) and two adjacent `int64`s (`maxImageSize`, `maxFileSize`) are swappable without a compile error.
+- `low` — Middleware ordering puts `corsMiddleware` ahead of `gin.Recovery()` and `requestIDMiddleware` (`main.go:183-189`), so a panic in the CORS path is unrecovered and the o11y server span at `main.go:186` is created before `request_id` exists, leaving spans uncorrelated with the access log's `request_id` (`middleware.go:76-84`).
+- `low` — `http.Server` sets `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout` but no `IdleTimeout` (`main.go:200-208`), so keep-alive connections are held by the Go default rather than an explicit bound on a service whose other timeouts are 15m.
+- `low` — Mongo is wired without a circuit breaker (`main.go:137-139`), unlike peer services that mount `mongoutil.BreakerConfig` (`botplatform-service/config.go:22`, `notification-worker/main.go:62`). Every download does a blocking `MemberSiteID`/`GetUpload` in the request path (`handler.go:395`, `handler.go:435`).
+- `nitpick` — A startup failure returns before any teardown runs (`main.go:227-230`), so `obsShutdown` never flushes the traces/logs describing why the process died.
+
+Positives worth recording: `Store` holds exactly the two methods the handlers need and is defined in the consumer (`store.go:282-291`); `NewMongoStore` returns an unexported struct (`store_mongo.go:369`); routes are entirely in `routes.go` with `/healthz` outside the auth group; the MinIO reader correctly ties the timeout context's lifetime to `Close` via `cancelReadCloser` (`store_minio.go:340-350`) rather than leaking or cancelling mid-stream; outbound calls use `restyutil` (`main.go:191`) except the documented streaming-upload exception (`pkg/drive/uploader.go:41-49`); no NATS/JetStream surface, so the `BOOTSTRAP_STREAMS` and consumer-pattern rules do not apply.
+
+### Recommendations
+- `high` — Mark `pkg/drive/config.go` `URL` as `required,notEmpty` and `Token` as `required` (it is a secret), or add a `Config.Validate()` called beside `cfg.Pool.Validate()` in `main.go:120`.
+- `medium` — Make `LoadBaseURLs` return an error and fail startup on a malformed file; keep the empty-map fallback only for a genuinely absent path.
+- `medium` — Add `minioutil.Config` (endpoint, keys, SSL, download timeout) and mount it as a named field in upload-service, client-update-service and media-service, deleting the three duplicate declarations.
+- `medium` — Move `objectStore` and `driveClient` into `store.go` so `make generate` produces their mocks, and delete `fakeS3`/`fakeDrive`.
+- `low` — Replace `NewHandler`'s scalar tail with a `handlerOptions`/`limits` struct so the call site names each bound.
+- `low` — Reorder to `Recovery → requestID → CORS → o11y → accessLog` so panics are caught and spans carry `request_id`.
+- `low` — Set `IdleTimeout` on the server and mount `mongoutil.BreakerConfig` with an `UPLOAD_` prefix.
