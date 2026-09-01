@@ -116,3 +116,34 @@ Adding a feature here is easy: a new projected field is a one-line change in the
 - `low` — Drop the unreachable marshal-error branch.
 
 ---
+
+---
+
+## 6. Integration — 4 / 5
+
+The room-worker contract verified end-to-end — subject, stream binding, zstd framing, struct identity and timestamp all line up — with one avoidable field omission that forces the consumer to re-derive room type from a string suffix.
+
+Cross-service contract, traced and confirmed:
+1. **Subject** `subject.RoomTeamsCanonicalCreate(siteID)` (`runner.go:83`) → `chat.teams.room.canonical.{siteID}.create` (`pkg/subject/subject.go:213`), matching `RoomTeamsCanonicalWildcard`, which is the sole binding of `ROOMS-TEAMS-{siteID}` (`pkg/stream/stream.go:49-54`). No raw `fmt.Sprintf` subject anywhere in the service.
+2. **Stream ownership** `room-worker` in teams mode selects that stream (`room-worker/main.go:212-216`) and bootstraps/verifies it (`room-worker/bootstrap.go:43-47`); this service creates nothing — correct.
+3. **Framing** publish sets `Nats-Encoding: zstd` (`publisher.go:31-37`); consumer decodes via `natsutil.DecodePayload` before dispatch (`room-worker/handler.go:264-265`). Round-trip proven in `integration_test.go:101-103`.
+4. **Struct** `model.TeamsRoomCreateMember(m)` is a legal direct conversion — `TeamsChatMember` (`pkg/model/teams.go:72-76`) and `TeamsRoomCreateMember` (`pkg/model/teamsroom.go:28-33`) are field-identical, so divergence becomes a compile error (`runner.go:133`). All fields carry both `json` and `bson` camelCase tags.
+5. **Timestamp** set at the publish site via `now.UTC().UnixMilli()` with `Now` injected (`runner.go:76`, `:144`); the consumer reads it as `acceptedAt` and it becomes the room's `UpdatedAt` and the ES external doc version (`room-worker/teamsroomcreate.go:32`, `:288`).
+
+### Findings
+- `medium` — The event omits `chatType`, which the source document carries authoritatively (`pkg/model/teams.go:85`, values `oneOnOne|group|meeting`), forcing room-worker to re-derive DM-ness from a chat-id string suffix — projection at `store_mongo.go:36`, re-derivation at `room-worker/teamsroomcreate.go:223-228`
+  Any `oneOnOne` chat whose id does not end `@unq.gbl.spaces` silently becomes a channel room. Passing the field the producer already has removes a guess from the consumer.
+- `medium` — No guard against an empty `SiteID` at the publish site: `subject.RoomTeamsCanonicalCreate("")` yields `chat.teams.room.canonical..create`, an invalid empty-token subject whose publish fails every run forever, leaving those chats flagged permanently — `runner.go:83`
+  Upstream does guarantee non-empty (`teams-chat-sync/syncer.go:216-221`, `SYNC_DEFAULT_SITE_ID` is `required,notEmpty`), which is why this is medium and not high — but the sibling defends and this one does not.
+- `low` — Cross-service ID convention: room-worker derives the DM room id via `idgen.DeterministicID([]byte(chat.ID))` (`room-worker/teamsroomcreate.go:62`) rather than `idgen.BuildDMRoomID(a,b)` as CLAUDE.md §6 mandates for DM rooms. Deliberate (the Teams chat id is the stable key) but it means migrated DMs will not collide-dedup with natively created DMs between the same two users.
+- `low` — Doc drift on the shared model's subject comment (see D4).
+
+Not applicable, verified: no `chat.user.…` subject and no HTTP route, so `docs/client-api.md` and its derived views are correctly untouched — this is a server-to-server contract, matching the explicit precedent documented at `pkg/model/teams.go:100-103`. No OUTBOX/INBOX participation, so the `pkg/outbox` partition rule does not apply. No Cassandra, no `msgbucket`, no room-key TTL surface.
+
+### Recommendations
+- `medium` — Add `chatType` to the projection (`store_mongo.go:36`), to `TeamsRoomCreateChat`, and to `buildEvent`; switch `roomTypeFromTeamsChatID` to prefer it, keeping the suffix as fallback for in-flight events.
+- `medium` — Skip and WARN on a chat with an empty `SiteID` in `planBatches` rather than emitting an invalid subject.
+- `low` — Correct the subject in `pkg/model/teamsroom.go:6` and `main.go:4`.
+- `low` — Add a comment at `room-worker/teamsroomcreate.go:62` recording why migrated DMs deviate from `BuildDMRoomID`.
+
+---
