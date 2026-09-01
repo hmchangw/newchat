@@ -24,14 +24,12 @@ import (
 // restyutil's 30s default, which large streamed bodies blow through.
 const driveTimeout = 5 * time.Minute
 
-// Drive's per-file upload modes and the markers that identify a name conflict
-// in its per-file result. Both are matched case-insensitively — Drive's casing
-// is not contractual, and the status arrives spelled either way.
+// Drive's per-file upload modes, and the error substring marking a name
+// collision. Matched case-insensitively: Drive's wire casing is not contractual.
 const (
 	modeNormal   = "Normal"
 	modeKeepBoth = "KeepBoth"
 
-	statusFailure  = "failure"
 	conflictMarker = "file conflict"
 )
 
@@ -88,41 +86,36 @@ func (c *Client) GetBaseURLFromRoomOrigin(origin string) string {
 // UploadGroupImages uploads files to a Drive group in one bulk multipart call,
 // then re-sends any file Drive rejected as a name conflict under KeepBoth.
 //
-// Drive reports conflicts per file inside a 200 response, so the retry is
-// scoped to exactly those entries: files that uploaded on the first attempt are
-// never sent again, which is what keeps a KeepBoth retry from storing a second
-// copy of them. Retried once only — a KeepBoth upload has no name to collide
-// with, so a repeat would only burn the bytes again.
-//
-// A retry that never lands leaves the first attempt's results standing rather
-// than failing the whole batch: the successes are real, and the conflicting
-// entries stay per-file failures marked as retried, with the cause logged
-// server-side rather than handed to the client.
+// Drive reports conflicts per file inside a 200, so only those entries go back —
+// re-sending the batch would store a second copy of everything that succeeded.
+// Once only: a KeepBoth upload has no name left to collide with. A retry that
+// never lands keeps the first attempt's results; its successes are real.
 func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
 	results, err := c.uploadBulk(userID, username, email, groupID, origin, files, modeNormal)
 	if err != nil {
 		return nil, err
 	}
 
-	conflicts := conflictedIndexes(results, len(files))
+	var conflicts []int
+	var retryFiles []MultipartFile
+	// A result past the end of what was sent has no file to re-upload.
+	matched := results[:min(len(results), len(files))]
+	for i := range matched {
+		if isNameConflict(&matched[i]) {
+			conflicts = append(conflicts, i)
+			retryFiles = append(retryFiles, files[i])
+		}
+	}
 	if len(conflicts) == 0 {
 		return results, nil
 	}
 
-	retryFiles := make([]MultipartFile, 0, len(conflicts))
-	for _, i := range conflicts {
-		retryFiles = append(retryFiles, files[i])
-	}
 	retried, err := c.uploadBulk(userID, username, email, groupID, origin, retryFiles, modeKeepBoth)
 	if err != nil {
-		// Logged here because returning a nil error means no boundary handler
-		// will. The client is told only that the retry ran — the Drive status
-		// and body snippet stay server-side.
+		// Nothing downstream will log this: the batch returns no error, so its
+		// successes survive and the conflicts stay the failures Drive reported.
 		slog.Error("drive keepboth retry failed",
 			"error", err, "groupId", groupID, "files", len(retryFiles))
-		for _, i := range conflicts {
-			results[i].Error = fmt.Sprintf("%s; %s retry failed", results[i].Error, modeKeepBoth)
-		}
 		return results, nil
 	}
 	for n, i := range conflicts {
@@ -133,21 +126,10 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 	return results, nil
 }
 
-// conflictedIndexes returns the positions of the results Drive failed with a
-// name conflict. An entry past the end of what was sent is skipped: there is no
-// file to re-upload for it, whatever it says.
-func conflictedIndexes(results []UploadGroupImageResponse, sent int) []int {
-	var conflicts []int
-	for i, r := range results {
-		if i >= sent {
-			break
-		}
-		if strings.EqualFold(r.Status, statusFailure) &&
-			strings.Contains(strings.ToLower(r.Error), conflictMarker) {
-			conflicts = append(conflicts, i)
-		}
-	}
-	return conflicts
+// isNameConflict reports whether Drive rejected an entry for a name collision.
+func isNameConflict(r *UploadGroupImageResponse) bool {
+	return strings.EqualFold(r.Status, StatusFailure) &&
+		strings.Contains(strings.ToLower(r.Error), conflictMarker)
 }
 
 // uploadBulk performs one bulk multipart call with every file under mode.

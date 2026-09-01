@@ -527,7 +527,7 @@ Uploads one or more images for a room on behalf of the authenticated user. Each
 file is validated independently and the response reports per-file
 success/failure in a single `200` (partial success). A file whose name already
 exists in the room is re-uploaded automatically as a separate copy, so a name
-conflict is reported as a success rather than a failure.
+conflict is reported as a success unless that re-upload also fails.
 
 #### Request
 
@@ -554,7 +554,7 @@ conflict is reported as a success rather than a failure.
 |---|---|---|
 | `name` | string | The file name. |
 | `status` | string | `success` for an uploaded file, `failure` for a rejected one. |
-| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, `failed to open file`, or the storage backend's own message. A name conflict whose automatic re-upload also failed is suffixed `; KeepBoth retry failed`. |
+| `error` | string | Present on failure: `file size exceeds limit`, `file has an invalid file type`, `failed to open file`, or the storage backend's own message. |
 | `relativePath` | string | Present on success: path to download the file via the GET endpoint below, including the `drive_host` query param. |
 
 ```json

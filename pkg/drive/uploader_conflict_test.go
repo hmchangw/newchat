@@ -102,6 +102,15 @@ func readFilePart(t *testing.T, req *http.Request, i int) string {
 	return string(b)
 }
 
+// pngFiles stages one distinguishable PNG per name; each body is pngMagic+name.
+func pngFiles(names ...string) []MultipartFile {
+	files := make([]MultipartFile, len(names))
+	for i, n := range names {
+		files[i] = MultipartFile{File: fakeMultipart(pngMagic + n), Filename: n}
+	}
+	return files
+}
+
 // A conflict is per-file, so only the conflicting file is re-sent under
 // KeepBoth — re-sending the whole batch would store a second copy of every file
 // that already succeeded.
@@ -112,11 +121,7 @@ func TestClient_UploadGroupImages_RetriesOnlyConflictedFiles(t *testing.T) {
 	attempt2 := `[{"status":"success","object":{"objectId":"f1kb","groupId":"r1","fileName":"b (1).png"}}]`
 	rec, c := newBulkServer(t, attempt1, attempt2)
 
-	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", []MultipartFile{
-		{File: fakeMultipart(pngMagic + "aaa"), Filename: "a.png"},
-		{File: fakeMultipart(pngMagic + "bbb"), Filename: "b.png"},
-		{File: fakeMultipart(pngMagic + "ccc"), Filename: "c.png"},
-	})
+	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", pngFiles("a.png", "b.png", "c.png"))
 	require.NoError(t, err)
 
 	reqs := rec.snapshot()
@@ -124,7 +129,7 @@ func TestClient_UploadGroupImages_RetriesOnlyConflictedFiles(t *testing.T) {
 	assert.Equal(t, []string{"Normal", "Normal", "Normal"}, reqs[0].modes)
 	assert.Equal(t, []string{"b.png"}, reqs[1].fileNames, "only the conflicting file is re-sent")
 	assert.Equal(t, []string{"KeepBoth"}, reqs[1].modes)
-	assert.Equal(t, []string{pngMagic + "bbb"}, reqs[1].bodies,
+	assert.Equal(t, []string{pngMagic + "b.png"}, reqs[1].bodies,
 		"the retry must re-read the file from the start, whole")
 	assert.Equal(t, "alice", reqs[1].userID, "the retry carries the same identity fields")
 
@@ -143,17 +148,14 @@ func TestClient_UploadGroupImages_RetriesEveryConflictedFile(t *testing.T) {
 	attempt2 := `[{"status":"success","object":{"objectId":"k0"}},{"status":"success","object":{"objectId":"k1"}}]`
 	rec, c := newBulkServer(t, attempt1, attempt2)
 
-	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", []MultipartFile{
-		{File: fakeMultipart(pngMagic + "aaa"), Filename: "a.png"},
-		{File: fakeMultipart(pngMagic + "bbb"), Filename: "b.png"},
-	})
+	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", pngFiles("a.png", "b.png"))
 	require.NoError(t, err)
 
 	reqs := rec.snapshot()
 	require.Len(t, reqs, 2)
 	assert.Equal(t, []string{"a.png", "b.png"}, reqs[1].fileNames)
 	assert.Equal(t, []string{"KeepBoth", "KeepBoth"}, reqs[1].modes)
-	assert.Equal(t, []string{pngMagic + "aaa", pngMagic + "bbb"}, reqs[1].bodies)
+	assert.Equal(t, []string{pngMagic + "a.png", pngMagic + "b.png"}, reqs[1].bodies)
 
 	require.Len(t, resp, 2)
 	assert.Equal(t, "k0", resp[0].File.FileID)
@@ -193,7 +195,7 @@ func TestClient_UploadGroupImages_RetryTrigger(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec, c := newBulkServer(t, tt.result, `[{"status":"success","object":{"objectId":"kb"}}]`)
 			_, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
-				[]MultipartFile{{File: fakeMultipart(pngMagic), Filename: "a.png"}})
+				pngFiles("a.png"))
 			require.NoError(t, err)
 			assert.Len(t, rec.snapshot(), tt.wantRequests)
 		})
@@ -208,20 +210,15 @@ func TestClient_UploadGroupImages_KeepsFirstAttemptWhenRetryFails(t *testing.T) 
 	              {"status":"failure","error":"file conflict: b.png already exists"}]`
 	rec, c := newBulkServer(t, attempt1) // no second scripted body: the retry gets a 500
 
-	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", []MultipartFile{
-		{File: fakeMultipart(pngMagic + "aaa"), Filename: "a.png"},
-		{File: fakeMultipart(pngMagic + "bbb"), Filename: "b.png"},
-	})
+	resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", pngFiles("a.png", "b.png"))
 	require.NoError(t, err, "a failed retry must not discard the files that uploaded")
 	assert.Len(t, rec.snapshot(), 2)
 
 	require.Len(t, resp, 2)
 	assert.Equal(t, "f0", resp[0].File.FileID)
 	assert.Equal(t, "failure", resp[1].Status)
-	assert.Contains(t, resp[1].Error, "file conflict: b.png already exists")
-	assert.Contains(t, resp[1].Error, "KeepBoth retry failed", "the retry failure must be visible, not swallowed")
-	assert.NotContains(t, resp[1].Error, "status 500", "internal Drive detail must not reach the client")
-	assert.NotContains(t, resp[1].Error, "drive down", "internal Drive detail must not reach the client")
+	assert.Equal(t, "file conflict: b.png already exists", resp[1].Error,
+		"the entry keeps Drive's own message; the retry failure is logged, never handed to the client")
 }
 
 // Drive's array is trusted only as far as it lines up with what was sent: an
@@ -234,7 +231,7 @@ func TestClient_UploadGroupImages_MisalignedResponses(t *testing.T) {
 		rec, c := newBulkServer(t, attempt1, attempt2)
 
 		resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x",
-			[]MultipartFile{{File: fakeMultipart(pngMagic), Filename: "a.png"}})
+			pngFiles("a.png"))
 		require.NoError(t, err)
 
 		reqs := rec.snapshot()
@@ -249,10 +246,7 @@ func TestClient_UploadGroupImages_MisalignedResponses(t *testing.T) {
 		attempt1 := `[{"status":"failure","error":"file conflict"},{"status":"failure","error":"file conflict"}]`
 		rec, c := newBulkServer(t, attempt1, `[{"status":"success","object":{"objectId":"kb"}}]`)
 
-		resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", []MultipartFile{
-			{File: fakeMultipart(pngMagic + "aaa"), Filename: "a.png"},
-			{File: fakeMultipart(pngMagic + "bbb"), Filename: "b.png"},
-		})
+		resp, err := c.UploadGroupImages("alice", "Alice", "a@x.com", "r1", "site-x", pngFiles("a.png", "b.png"))
 		require.NoError(t, err)
 		assert.Len(t, rec.snapshot(), 2)
 

@@ -22,7 +22,7 @@ import (
 // Per-file result status values for the upload response.
 const (
 	statusFailure      = "failure" // pre-check rejection
-	driveStatusSuccess = "success" // Drive's success marker
+	driveStatusSuccess = drive.StatusSuccess
 )
 
 // imageFormField is the multipart form field carrying the uploaded images.
