@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -24,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -62,6 +65,7 @@ type config struct {
 	PProfEnabled             bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 	MetricsAddr              string                  `env:"METRICS_ADDR"               envDefault:":9090"`
 	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy                    natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
 	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
 	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
@@ -218,18 +222,40 @@ func main() {
 
 	iter, err := cons.Messages(ctx, jetstream.PullMaxMessages(2*cfg.MaxWorkers))
 	if err != nil {
-		slog.Error("messages failed", "error", err)
+		slog.Error("bind MESSAGES lane failed", "error", err)
 		os.Exit(1)
 	}
 	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
+	// One pool shared by both lanes, so a bound buddy lane does not double this
+	// service's in-flight validations against MongoDB.
+	sem := make(chan struct{}, cfg.MaxWorkers)
 
-	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
-		func(msgCtx context.Context, msg *natsmetrics.Message) {
-			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
-			handler.HandleJetStreamMsg(handlerCtx, msg)
+		gatekeeperProcessor(handler, false))
+
+	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
+	// nil and the service runs home-only.
+	binder := failoverlane.Binder{
+		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
+		Sem: sem, WG: &wg, Metrics: sharedMetrics,
+	}
+	var buddyLane *natsutil.Lane
+	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			var bErr error
+			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
+				Stream: stream.MessagesFailover(cfg.SiteID),
+				// The canonical standby is published to, not consumed: a
+				// validated failover send must have somewhere to go.
+				AlsoEnsure: []stream.Config{stream.MessagesCanonicalFailover(cfg.SiteID)},
+				Consumer:   buildFailoverConsumerConfig(cfg.Consumer),
+			}, gatekeeperHandler(handler, true))
+			return bErr
 		})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
@@ -243,22 +269,18 @@ func main() {
 	slog.Info("message-gatekeeper running", "site", cfg.SiteID)
 
 	shutdown.Wait(ctx, 25*time.Second,
+		// Stop both iterators before draining either, so neither lane pulls
+		// new work while the other is still finishing.
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
+			buddyLane.Stop()
 			return nil
 		},
-		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
-		},
+		// Both lanes feed one WaitGroup, so waiting on it drains both.
+		func(ctx context.Context) error { return natsutil.WaitPool(ctx, &wg) },
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkeyClient); return nil },
@@ -268,8 +290,52 @@ func main() {
 
 // buildConsumerConfig returns the durable consumer config for
 // message-gatekeeper. Centralized so it is unit-testable without NATS.
+// gatekeeperProcessor is the per-message body both lanes run. failoverLane is
+// fixed by the consumer that delivered the message, so it is bound once here
+// rather than re-derived from every message's subject.
+// gatekeeperHandler is gatekeeperProcessor for callers that hand back a plain
+// jetstream.Msg — the failover binder's handler shape.
+func gatekeeperHandler(handler *Handler, failoverLane bool) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		gatekeeperSettle(msgCtx, msg, handler, failoverLane)
+	}
+}
+
+func gatekeeperProcessor(handler *Handler, failoverLane bool) natsmetrics.ProcessMessage {
+	return func(msgCtx context.Context, msg *natsmetrics.Message) {
+		gatekeeperSettle(msgCtx, msg, handler, failoverLane)
+	}
+}
+
+// gatekeeperSettle is the per-message body both lanes run.
+func gatekeeperSettle(msgCtx context.Context, msg jetstream.Msg, handler *Handler, failoverLane bool) {
+	handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
+	handler.HandleJetStreamMsg(handlerCtx, msg, failoverLane)
+}
+
 func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "message-gatekeeper"
 	return cc
+}
+
+// buildFailoverConsumerConfig is the durable consumer on the buddy-hosted
+// MESSAGES-FAILOVER lane, which carries sends from clients displaced by this
+// site's own NATS outage. Distinct durable from the home lane so the two keep
+// independent cursors.
+func buildFailoverConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
+	cc := stream.DurableConsumerDefaults(s)
+	cc.Durable = "message-gatekeeper-failover"
+	return cc
+}
+
+// canonicalSubjectForLane picks the canonical subject matching the lane a send
+// arrived on. A failover-lane message must go to the failover canonical stream:
+// the live one lives on the cluster that is down, so publishing there would
+// send it nowhere.
+func canonicalSubjectForLane(siteID string, failover bool) string {
+	if failover {
+		return subject.FailoverMsgCanonicalCreated(siteID)
+	}
+	return subject.MsgCanonicalCreated(siteID)
 }

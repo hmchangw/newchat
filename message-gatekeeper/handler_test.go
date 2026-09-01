@@ -1065,7 +1065,7 @@ func TestHandler_ProcessMessage(t *testing.T) {
 
 			var req model.SendMessageRequest
 			_ = json.Unmarshal(tc.buildData(), &req) // tests build valid payloads; ignore parse errors here
-			data, err := h.processMessage(context.Background(), tc.account, tc.roomID, tc.siteID, &req)
+			data, err := h.processMessage(context.Background(), tc.account, tc.roomID, tc.siteID, &req, false)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -1116,7 +1116,7 @@ func TestHandler_processMessage_RejectsInvalidThreadParentMessageID(t *testing.T
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ThreadParentMessageID: "not-a-valid-msg-id",
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid thread parent message ID")
 }
@@ -1138,7 +1138,7 @@ func TestHandler_processMessage_RejectsInvalidQuotedParentMessageID(t *testing.T
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		QuotedParentMessageID: "not-a-valid-msg-id",
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid quoted parent message ID")
 	var ee *errcode.Error
@@ -1163,7 +1163,7 @@ func TestHandler_processMessage_AcceptsImportantTypeAndSetsCanonical(t *testing.
 	h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
 
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f", Type: model.MessageTypeImportant}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.NoError(t, err)
 
 	var evt model.MessageEvent
@@ -1184,7 +1184,7 @@ func TestHandler_processMessage_RejectsClientSystemAndUnknownTypes(t *testing.T)
 		h := NewHandler(store, nil, pub, reply, "site1", nil, 500, 1, 8192, "")
 
 		req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f", Type: badType}
-		_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+		_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 		require.Error(t, err, "type %q must be rejected", badType)
 		assert.Contains(t, err.Error(), "invalid message type")
 		var ee *errcode.Error
@@ -1218,7 +1218,7 @@ func TestHandler_processMessage_PropagatesRequestIDOnCanonicalPublish(t *testing
 	const payloadReqID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hello", RequestID: payloadReqID}
 
-	_, err := h.processMessage(ctx, "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(ctx, "alice", "room-1", "site1", &req, false)
 	require.NoError(t, err)
 	require.NotNil(t, capturedHeader, "publish must carry X-Request-ID header")
 	assert.Equal(t, payloadReqID, capturedHeader.Get(natsutil.RequestIDHeader),
@@ -1250,7 +1250,7 @@ func TestHandler_processMessage_BridgesPayloadRequestIDWhenCtxHasNone(t *testing
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hello", RequestID: payloadReqID}
 
 	// ctx has no request ID — simulates an inbound MESSAGES message with no X-Request-ID header.
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.NoError(t, err)
 	require.NotNil(t, capturedHeader, "publish must carry X-Request-ID header")
 	assert.Equal(t, payloadReqID, capturedHeader.Get(natsutil.RequestIDHeader))
@@ -1290,7 +1290,7 @@ func TestHandler_processMessage_PopulatesUserDisplayName(t *testing.T) {
 	h := NewHandler(store, users, pub, reply, "site1", nil, 500, 1, 8192, "")
 
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f"}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.NoError(t, err)
 
 	var evt model.MessageEvent
@@ -1318,7 +1318,7 @@ func TestHandler_processMessage_FallsBackToAccountWhenUserLookupFails(t *testing
 	h := NewHandler(store, users, pub, reply, "site1", nil, 500, 1, 8192, "")
 
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f"}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 	require.NoError(t, err, "user-meta lookup failure must not block message publish")
 
 	var evt model.MessageEvent
@@ -1716,7 +1716,7 @@ func TestHandler_ProcessMessage_WithQuote(t *testing.T) {
 
 			var req model.SendMessageRequest
 			_ = json.Unmarshal(tc.buildData(), &req)
-			data, err := h.processMessage(context.Background(), validAccount, validRoomID, validSiteID, &req)
+			data, err := h.processMessage(context.Background(), validAccount, validRoomID, validSiteID, &req, false)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -2187,7 +2187,7 @@ func TestHandleJetStreamMsg_MalformedBody_Acks(t *testing.T) {
 		subject: "chat.user.alice.room.r1.site-A.msg.send",
 		data:    []byte(`{not json`),
 	}
-	h.HandleJetStreamMsg(context.Background(), msg)
+	h.HandleJetStreamMsg(context.Background(), msg, false)
 	assert.True(t, msg.acked, "malformed body must Ack — never retryable")
 	assert.False(t, msg.naked)
 	// Reply is skipped (no valid requestId in a body that didn't parse).
@@ -2201,7 +2201,7 @@ func TestHandleJetStreamMsg_InvalidSubject_Acks(t *testing.T) {
 		subject: "chat.garbage",
 		data:    []byte(`{}`),
 	}
-	h.HandleJetStreamMsg(context.Background(), msg)
+	h.HandleJetStreamMsg(context.Background(), msg, false)
 	assert.True(t, msg.acked, "invalid subject must Ack — not retryable")
 	assert.False(t, msg.naked)
 }
@@ -2238,7 +2238,7 @@ func TestHandleJetStreamMsg_BotSubject_DecodesAccount(t *testing.T) {
 	data, _ := json.Marshal(req)
 	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-A.msg.send", data: data}
 
-	h.HandleJetStreamMsg(context.Background(), msg)
+	h.HandleJetStreamMsg(context.Background(), msg, false)
 
 	assert.True(t, msg.acked, "successful send must Ack")
 	require.Len(t, published, 1, "must publish to MESSAGES-CANONICAL")
@@ -2272,7 +2272,7 @@ func TestHandler_processMessage_RequestTShowMapsToTShow(t *testing.T) {
 			ThreadParentMessageID: parentID,
 			TShow:                 true,
 		}
-		data, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+		data, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 		require.NoError(t, err)
 
 		require.Len(t, published, 1)
@@ -2302,7 +2302,7 @@ func TestHandler_processMessage_RequestTShowMapsToTShow(t *testing.T) {
 			RequestID:             reqUUID,
 			ThreadParentMessageID: parentID,
 		}
-		_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+		_, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 		require.NoError(t, err)
 
 		require.Len(t, published, 1)
@@ -2328,7 +2328,7 @@ func TestHandler_processMessage_RequestTShowMapsToTShow(t *testing.T) {
 			RequestID: reqUUID,
 			TShow:     true,
 		}
-		data, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req)
+		data, err := h.processMessage(context.Background(), "alice", "room-1", "site1", &req, false)
 		require.NoError(t, err, "non-thread tshow must be ignored, not rejected")
 
 		require.Len(t, published, 1)
@@ -2360,7 +2360,7 @@ func TestHandler_processMessage_CarriesAttachments(t *testing.T) {
 		ID: idgen.GenerateMessageID(), Content: "", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Attachments: [][]byte{att},
 	}
-	out, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	out, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 
 	require.Len(t, published, 1)
@@ -2381,7 +2381,7 @@ func TestHandler_processMessage_EmptyContentRejectedWithoutAttachments(t *testin
 	reply := func(ctx context.Context, msg *nats.Msg) error { return nil }
 	h := NewHandler(store, nil, pub, reply, "site-a", nil, 500, 1, 8192, "")
 	req := model.SendMessageRequest{ID: idgen.GenerateMessageID(), Content: "", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f"}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	var ee *errcode.Error
 	require.ErrorAs(t, err, &ee)
 }
@@ -2396,7 +2396,7 @@ func TestHandler_processMessage_RejectsTooManyAttachments(t *testing.T) {
 		ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Attachments: [][]byte{[]byte("a"), []byte("b")},
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	var ee *errcode.Error
 	require.ErrorAs(t, err, &ee)
 }
@@ -2419,7 +2419,7 @@ func TestHandler_processMessage_ConfigurableAttachmentCap(t *testing.T) {
 		ID: idgen.GenerateMessageID(), Content: "hi", RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Attachments: [][]byte{[]byte(`{"id":"f1"}`), []byte(`{"id":"f2"}`)},
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 
 	require.Len(t, published, 1)
@@ -2468,7 +2468,7 @@ func TestHandler_processMessage_ThreadParentCreatedAt_ResolvedViaFetch(t *testin
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ThreadParentMessageID: parentID,
 	}
-	data, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	data, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 
 	var msg model.Message
@@ -2497,7 +2497,7 @@ func TestHandler_processMessage_ThreadParentCreatedAt_FetchFails_StillPublishes(
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ThreadParentMessageID: parentID,
 	}
-	data, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	data, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err, "fetch failure must NOT block the send (soft-fail)")
 
 	var msg model.Message
@@ -2524,7 +2524,7 @@ func TestHandler_processMessage_ThreadParentCreatedAt_NilSnapshot_StillPublishes
 		RequestID:             "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		ThreadParentMessageID: parentID,
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 	require.Len(t, *published, 1)
 	var evt model.MessageEvent
@@ -2558,7 +2558,7 @@ func TestHandler_processMessage_ThreadParentCreatedAt_ReusesVerifiedQuoteSnapsho
 		ThreadParentMessageID: parentID,
 		QuotedParentMessageID: parentID,
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 	require.Len(t, *published, 1)
 	var evt model.MessageEvent
@@ -2582,7 +2582,7 @@ func TestHandler_processMessage_NonThreadMessage_NoParentFetch(t *testing.T) {
 		Content:   "plain message",
 		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req)
+	_, err := h.processMessage(context.Background(), "alice", "room-1", "site-a", &req, false)
 	require.NoError(t, err)
 	require.Len(t, *published, 1)
 }
@@ -2666,7 +2666,7 @@ func TestHandleJetStreamMsg_AttachesIdentityToContext(t *testing.T) {
 		}
 		h := NewHandler(store, nil, publish, reply, "site-A", nil, 500, 1, 8192, "")
 
-		h.HandleJetStreamMsg(context.Background(), newMsg())
+		h.HandleJetStreamMsg(context.Background(), newMsg(), false)
 
 		require.NotNil(t, publishCtx, "canonical publish must run")
 		require.NotNil(t, replyCtx, "client reply must run")
@@ -2689,7 +2689,7 @@ func TestHandleJetStreamMsg_AttachesIdentityToContext(t *testing.T) {
 		}
 		h := NewHandler(store, nil, makePublishFunc(nil, nil), reply, "site-A", nil, 500, 1, 8192, "")
 
-		h.HandleJetStreamMsg(context.Background(), newMsg())
+		h.HandleJetStreamMsg(context.Background(), newMsg(), false)
 
 		require.NotNil(t, replyCtx, "error reply must run")
 		assertIdentity(t, replyCtx, "error reply context")
@@ -2727,7 +2727,7 @@ func TestHandleJetStreamMsg_InvalidSubject_DropsForgedIdentity(t *testing.T) {
 	require.NoError(t, err)
 	msg := &fakeJSMsg{subject: "chat.user.alice.garbage", data: data}
 
-	h.HandleJetStreamMsg(ctx, msg)
+	h.HandleJetStreamMsg(ctx, msg, false)
 
 	require.True(t, msg.acked, "invalid subject must Ack — not retryable")
 	require.NotNil(t, replyCtx, "best-effort error reply must run")
@@ -2797,7 +2797,7 @@ func TestHandleJetStreamMsg_ValidSubject_MasterOffDropsForgedIdentity(t *testing
 	require.NoError(t, err)
 	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-A.msg.send", data: data}
 
-	h.HandleJetStreamMsg(ctx, msg)
+	h.HandleJetStreamMsg(ctx, msg, false)
 
 	require.NotNil(t, publishCtx, "canonical publish must run")
 	require.NotNil(t, replyCtx, "client reply must run")
@@ -2842,7 +2842,7 @@ func TestProcessMessage_RoomMetaError_FailsOpen(t *testing.T) {
 		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 		Content:   "hi",
 	}
-	_, err := h.processMessage(context.Background(), "alice", "room1", "site1", req)
+	_, err := h.processMessage(context.Background(), "alice", "room1", "site1", req, false)
 	require.NoError(t, err, "room-meta error must fail-open, not block the send")
 	require.Len(t, published, 1, "message should still be published to canonical")
 }
@@ -2890,7 +2890,7 @@ func TestHandler_processMessage_ThreadParentRecheckHonoursContextCancellation(t 
 	}
 
 	start := time.Now()
-	_, err := h.processMessage(ctx, account, roomID, siteID, &req)
+	_, err := h.processMessage(ctx, account, roomID, siteID, &req, false)
 	require.Error(t, err)
 
 	assert.Less(t, time.Since(start), 5*time.Second, "a cancelled request must not wait out the re-check delay")
