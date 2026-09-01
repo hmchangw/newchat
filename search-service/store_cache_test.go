@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/model"
 )
 
 // recordingLoad is a batch loader that answers from a fixed table and records
@@ -256,4 +258,216 @@ func TestLookupCached_ConcurrentCallersAreRaceFree(t *testing.T) {
 	wg.Wait()
 
 	assert.GreaterOrEqual(t, loader.callCount(), 1)
+}
+
+// cachedTestMongo is a MongoStore that answers keyed lookups from fixed tables
+// and records the exact keys of each call. It differs from handler_test.go's
+// fakeMongo, which returns its whole table regardless of the keys asked for —
+// that shape cannot show whether the cache narrowed the query.
+type cachedTestMongo struct {
+	mu sync.Mutex
+
+	users    map[string]HRUser
+	apps     map[string]AppRef
+	usersErr error
+	appsErr  error
+
+	userCalls [][]string
+	appCalls  [][]string
+	subCalls  int
+	appSearch int
+}
+
+func (f *cachedTestMongo) UsersByAccounts(_ context.Context, accounts []string) (map[string]HRUser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userCalls = append(f.userCalls, append([]string(nil), accounts...))
+	if f.usersErr != nil {
+		return nil, f.usersErr
+	}
+	out := map[string]HRUser{}
+	for _, a := range accounts {
+		if v, ok := f.users[a]; ok {
+			out[a] = v
+		}
+	}
+	return out, nil
+}
+
+func (f *cachedTestMongo) AppsByAssistantNames(_ context.Context, bots []string) (map[string]AppRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appCalls = append(f.appCalls, append([]string(nil), bots...))
+	if f.appsErr != nil {
+		return nil, f.appsErr
+	}
+	out := map[string]AppRef{}
+	for _, b := range bots {
+		if v, ok := f.apps[b]; ok {
+			out[b] = v
+		}
+	}
+	return out, nil
+}
+
+func (f *cachedTestMongo) SubscriptionsByRoomIDs(_ context.Context, _ string, _ []string) (map[string]SubscriptionMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subCalls++
+	return map[string]SubscriptionMeta{"r1": {RoomType: model.RoomTypeDM, Name: "bob"}}, nil
+}
+
+func (f *cachedTestMongo) SearchAppsByName(_ context.Context, _, _ string, _ *bool, _, _ int) ([]model.App, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appSearch++
+	return []model.App{{ID: "app-1"}}, nil
+}
+
+func enabledCacheConfig() cacheConfig {
+	return cacheConfig{HRSize: 64, HRTTL: time.Minute, AppSize: 64, AppTTL: time.Minute}
+}
+
+func TestNewCachedMongoStore_ReturnsInnerWhenFullyDisabled(t *testing.T) {
+	inner := &cachedTestMongo{}
+
+	got := newCachedMongoStore(inner, cacheConfig{})
+
+	assert.Same(t, inner, got, "with both tiers off there is nothing to decorate")
+}
+
+func TestNewCachedMongoStore_WrapsWhenEitherTierEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  cacheConfig
+	}{
+		{"hr only", cacheConfig{HRSize: 8, HRTTL: time.Minute}},
+		{"app only", cacheConfig{AppSize: 8, AppTTL: time.Minute}},
+		{"both", enabledCacheConfig()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &cachedTestMongo{}
+
+			got := newCachedMongoStore(inner, tc.cfg)
+
+			assert.NotSame(t, inner, got)
+		})
+	}
+}
+
+func TestCachedMongoStore_UsersServedFromCacheOnSecondCall(t *testing.T) {
+	inner := &cachedTestMongo{users: map[string]HRUser{"alice": hrUser("alice"), "bob": hrUser("bob")}}
+	s := newCachedMongoStore(inner, enabledCacheConfig())
+
+	first, err := s.UsersByAccounts(context.Background(), []string{"alice"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]HRUser{"alice": hrUser("alice")}, first)
+
+	second, err := s.UsersByAccounts(context.Background(), []string{"alice", "bob"})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]HRUser{"alice": hrUser("alice"), "bob": hrUser("bob")}, second)
+	require.Len(t, inner.userCalls, 2)
+	assert.Equal(t, []string{"alice"}, inner.userCalls[0])
+	assert.Equal(t, []string{"bob"}, inner.userCalls[1])
+}
+
+func TestCachedMongoStore_AppsServedFromCacheOnSecondCall(t *testing.T) {
+	weather := AppRef{ID: "app-1", Name: "Weather", AssistantName: "weather.bot"}
+	inner := &cachedTestMongo{apps: map[string]AppRef{"weather.bot": weather}}
+	s := newCachedMongoStore(inner, enabledCacheConfig())
+
+	_, err := s.AppsByAssistantNames(context.Background(), []string{"weather.bot"})
+	require.NoError(t, err)
+
+	got, err := s.AppsByAssistantNames(context.Background(), []string{"weather.bot"})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]AppRef{"weather.bot": weather}, got)
+	assert.Len(t, inner.appCalls, 1, "a fully cached batch must not query")
+}
+
+func TestCachedMongoStore_UsersErrorIsWrappedAndNotCached(t *testing.T) {
+	sentinel := errors.New("mongo down")
+	inner := &cachedTestMongo{users: map[string]HRUser{"alice": hrUser("alice")}, usersErr: sentinel}
+	s := newCachedMongoStore(inner, enabledCacheConfig())
+
+	got, err := s.UsersByAccounts(context.Background(), []string{"alice"})
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, sentinel)
+	assert.Contains(t, err.Error(), "load uncached users")
+
+	inner.usersErr = nil
+	got, err = s.UsersByAccounts(context.Background(), []string{"alice"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]HRUser{"alice": hrUser("alice")}, got)
+}
+
+func TestCachedMongoStore_AppsErrorIsWrappedAndNotCached(t *testing.T) {
+	sentinel := errors.New("mongo down")
+	inner := &cachedTestMongo{apps: map[string]AppRef{"weather.bot": {ID: "app-1"}}, appsErr: sentinel}
+	s := newCachedMongoStore(inner, enabledCacheConfig())
+
+	got, err := s.AppsByAssistantNames(context.Background(), []string{"weather.bot"})
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, sentinel)
+	assert.Contains(t, err.Error(), "load uncached apps")
+
+	inner.appsErr = nil
+	got, err = s.AppsByAssistantNames(context.Background(), []string{"weather.bot"})
+	require.NoError(t, err)
+	assert.Len(t, got, 1)
+}
+
+// Subscriptions are per-caller and carry the volatile isSubscribed flag, and
+// SearchAppsByName is a paged text query. Neither is cacheable by account key,
+// so both must reach the inner store on every call.
+func TestCachedMongoStore_UncachedMethodsPassThroughEveryTime(t *testing.T) {
+	inner := &cachedTestMongo{}
+	s := newCachedMongoStore(inner, enabledCacheConfig())
+
+	for i := 0; i < 3; i++ {
+		subs, err := s.SubscriptionsByRoomIDs(context.Background(), "alice", []string{"r1"})
+		require.NoError(t, err)
+		assert.Len(t, subs, 1)
+
+		apps, err := s.SearchAppsByName(context.Background(), "weath", "alice", nil, 0, 10)
+		require.NoError(t, err)
+		assert.Len(t, apps, 1)
+	}
+
+	assert.Equal(t, 3, inner.subCalls)
+	assert.Equal(t, 3, inner.appSearch)
+}
+
+// One disabled tier must not disable the other.
+func TestCachedMongoStore_DisabledTierStillPassesThrough(t *testing.T) {
+	inner := &cachedTestMongo{
+		users: map[string]HRUser{"alice": hrUser("alice")},
+		apps:  map[string]AppRef{"weather.bot": {ID: "app-1"}},
+	}
+	s := newCachedMongoStore(inner, cacheConfig{AppSize: 8, AppTTL: time.Minute})
+
+	for i := 0; i < 2; i++ {
+		_, err := s.UsersByAccounts(context.Background(), []string{"alice"})
+		require.NoError(t, err)
+		_, err = s.AppsByAssistantNames(context.Background(), []string{"weather.bot"})
+		require.NoError(t, err)
+	}
+
+	assert.Len(t, inner.userCalls, 2, "the HR tier is off, so every call queries")
+	assert.Len(t, inner.appCalls, 1, "the app tier is on and must still cache")
+}
+
+// The decorator satisfies the interface enrich.go consumes, so the cache is
+// invisible to the enrichment path.
+func TestCachedMongoStore_SatisfiesMongoStore(t *testing.T) {
+	got := newCachedMongoStore(&cachedTestMongo{}, enabledCacheConfig())
+	_, ok := got.(*cachedMongoStore)
+	assert.True(t, ok, "an enabled config must wrap in the decorator, not just return something MongoStore-shaped")
 }

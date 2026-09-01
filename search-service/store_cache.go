@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
 
+	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -83,6 +85,68 @@ func lookupCached[T any](
 		if found {
 			out[k] = v
 		}
+	}
+	return out, nil
+}
+
+// cacheConfig sizes the two enrichment tiers. A non-positive size or TTL
+// disables that tier.
+type cacheConfig struct {
+	HRSize  int
+	HRTTL   time.Duration
+	AppSize int
+	AppTTL  time.Duration
+}
+
+// cachedMongoStore fronts the two account-keyed enrichment lookups with
+// pod-local LRU+TTL caches. The embedded MongoStore carries the rest
+// unchanged: SubscriptionsByRoomIDs is per-caller and its isSubscribed flag is
+// volatile, and SearchAppsByName is a paged text query, so neither is
+// cacheable by key.
+//
+// Entries are pod-local and TTL-bounced, so a rename is visible to one pod up
+// to a TTL after another — enrichment renders a display name, not a decision
+// input, so a brief disagreement costs a stale label and nothing else.
+type cachedMongoStore struct {
+	MongoStore
+	users   *lru.LRU[string, cacheEntry[HRUser]]
+	apps    *lru.LRU[string, cacheEntry[AppRef]]
+	userMet cacheRecorder
+	appMet  cacheRecorder
+}
+
+// newCachedMongoStore wraps inner, or returns it untouched when both tiers are
+// disabled — an operator turning the cache off gets the original store, not a
+// decorator that forwards every call.
+func newCachedMongoStore(inner MongoStore, cfg cacheConfig) MongoStore {
+	users := newEntryLRU[HRUser](cfg.HRSize, cfg.HRTTL)
+	apps := newEntryLRU[AppRef](cfg.AppSize, cfg.AppTTL)
+	if users == nil && apps == nil {
+		return inner
+	}
+	return &cachedMongoStore{
+		MongoStore: inner,
+		users:      users,
+		apps:       apps,
+		userMet:    cachemetrics.For("search_hr", "l1"),
+		appMet:     cachemetrics.For("search_app", "l1"),
+	}
+}
+
+// UsersByAccounts serves cached accounts and queries only the remainder.
+func (s *cachedMongoStore) UsersByAccounts(ctx context.Context, accounts []string) (map[string]HRUser, error) {
+	out, err := lookupCached(ctx, s.users, s.userMet, accounts, s.MongoStore.UsersByAccounts)
+	if err != nil {
+		return nil, fmt.Errorf("load uncached users: %w", err)
+	}
+	return out, nil
+}
+
+// AppsByAssistantNames serves cached bot accounts and queries only the remainder.
+func (s *cachedMongoStore) AppsByAssistantNames(ctx context.Context, botAccounts []string) (map[string]AppRef, error) {
+	out, err := lookupCached(ctx, s.apps, s.appMet, botAccounts, s.MongoStore.AppsByAssistantNames)
+	if err != nil {
+		return nil, fmt.Errorf("load uncached apps: %w", err)
 	}
 	return out, nil
 }
