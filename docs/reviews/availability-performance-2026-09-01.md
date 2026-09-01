@@ -127,3 +127,48 @@ All three convergent findings share a shape: **a correct isolation or ordering d
 - An admission cap sized to protect a pool → set larger than the pool.
 
 That is not a code-quality problem — the per-service audit scored D1 at 3.9/5 and it was right to. It is a **systems-composition** problem, and it is invisible to any lens that reads one service at a time.
+
+---
+
+## 3. Availability: the system is built to queue, not to shed
+
+Queuing is how a slow dependency becomes an outage. Shedding is how it stays a slow dependency. This system mostly queues.
+
+### 3.1 The admission cap sits above the resource it protects
+
+`MAX_CONCURRENCY` defaults to **256** (`pkg/natsrouter/guard.go:21`); `MONGO_MAX_POOL_SIZE` defaults to **150** (`pkg/mongoutil/poolconfig.go:25`).
+
+`history-service` is the **only** service that noticed, raising its pool to 384 with a comment saying why (`deploy/docker-compose.yml:28-32`). `room-service`, `search-service`, `media-service` and `room-worker` inherit 256-over-150; `bot-room-service` and `bot-message-handler` explicitly set 200-over-150.
+
+The 50–106 handlers above the pool size are **admitted and then block in the driver's connection checkout** for up to the full `REQUEST_TIMEOUT`. The guard's own doc comment says it exists to "keep a burst from holding pooled connections" — and at these defaults it admits straight past them. **Admission control that admits past the bottleneck is queuing wearing a shedding costume.**
+
+### 3.2 Timeout budgets that cannot be met
+
+| Service | Inner budget | Outer budget | Effect |
+|---|---|---|---|
+| `botplatform-service` | 15 s room-mgmt / DM-ensure (`bot_forwarder.go:75`) | 10 s `REQUEST_TIMEOUT` (`main.go:124`) | The 15 s **never fires**; and `BOT_IDEMPOTENCY_ROOM_MGMT_TTL` is sized against a number the code cannot reach |
+| `translation-service` | up to 70 s (token 5 s + translate 30 s + refresh 5 s + translate 30 s) | **none** — `HandlerTimeout` never installed | Work continues long after the caller left |
+| `auth-service` | 10 s OIDC client | 10 s `WriteTimeout`, no handler deadline | net/http closes the connection at the exact moment the handler is still waiting; the client retries into a service with **no cap at all** |
+| `atrest` DEK fetch | 20 s, tuned for `ACK_WAIT=30s` workers | 10 s in `history-service` | Every first reader of a cold encrypted room burns its full budget during a Vault stall |
+| `client-update-service` | 30 s `ReadTimeout` bounding a 2 GiB body | `admin-service` budgets 10 min | Any upload over ~570 Mbps-equivalent is severed mid-body |
+
+`pkg/natsrouter` provides `DefaultGuarded` **specifically** so the cap and the timeout cannot be applied separately. `translation-service` calls `natsrouter.Default` with `WithMaxConcurrency` and never installs the timeout — the exact split the helper exists to prevent.
+
+### 3.3 Where a shed is silent
+
+`natsrouter.replyBusy` drops fire-and-forget messages silently (`pkg/natsrouter/router.go:148-152`). `user-presence-service` **declines the concurrency cap entirely** because of this — on Hello/Ping/Bye a silent drop would strand users online — and applies the timeout half anyway (`main.go:161-171`). That is the correct answer to the silent-drop question, reasoned explicitly in code, and it is worth naming as the model the rest of the fleet should follow when a shed would be a correctness bug rather than a latency one.
+
+### 3.4 Unbounded buffering before the limit
+
+Three services read or spool the entire request body **before** any size check: `upload-service` (`handler.go:161`, `:237` — spooled to ephemeral disk, then `fh.Size` checked), `botplatform-service` (`middleware_idempotency.go:60` — `io.ReadAll` before the handler's own cap at `bot_handlers.go:193`), and `tcard-service` (`handler.go:148`). `admin-service/client_update.go:316` and `client-update-service/routes.go:27` both cap *before* parsing and document why — so the correct pattern is in the repo, applied inconsistently.
+
+### 3.5 Verified sound
+
+Worth recording, because these are the things that keep the failure modes above from being worse:
+
+- **No bare `Nak()` or `NakWithDelay(0)` exists in any service.** Every settle path goes through `pkg/jsretry`, whose `minNakDelay` floor prevents a degenerate schedule from producing the instant-redelivery storm CLAUDE.md forbids. **The most-cited failure mode in the rulebook is genuinely closed.**
+- `WithOutageRetryBudget` is handed the same schedule the service actually settles with in both users — so the 20×-short-window bug its own comment describes does not exist today.
+- `ginutil.MaxConcurrency` sheds correctly: non-blocking acquire, **429 not 503** (so mesh outlier detection does not eject the host mid-burst), `Retry-After`, and a shed counter rather than a per-rejection log line.
+- `user-service` is the reference implementation, and the only service that gets the whole nesting right: cap **before** auth so a shed request pays nothing, `ginutil.Timeout`, `LimitListener` above the cap, and `config.Load` **enforcing** `WriteTimeout > HandlerTimeout` and `MaxConns > MaxConcurrency` rather than documenting them.
+- `roomlist-worker` validates its flush budget against `EffectiveAckWait()` — the value the server actually enforces after `BackOff[0]` overwrites `AckWait` — not the configured field.
+- `search-sync-worker` and `roomlist-worker` are the two services that treat `MaxAckPending` as a capacity budget and **fail startup on an incoherent config**. That reasoning is correct and belongs in more services.
