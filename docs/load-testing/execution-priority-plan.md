@@ -146,11 +146,11 @@ distribution a target is chosen *from*. Two consequences worth stating plainly:
 |---|---|---|---|
 | **1.0** | **Write the SLO-1a recording rule against counters that already exist** | A rules change, not a code change: `message_worker_persistence_total` ÷ `message_gatekeeper_messages_total{result="accepted"}`. Puts a third of J1 into the calibration window immediately, weeks ahead of the rest | SLO-1a under observation |
 | **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces run-window numbers for **SLO-3/4/5/7**, an approximate indicator for **1a**, and a defensible one-sided bound for **1b/2**, with **no loadgen code change** (SLO-4/5 need #337 merged first): the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`slo-measurement-map.md`](slo-measurement-map.md) §7; operator runbook: [`first-slo-run-runbook.md`](first-slo-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
-| **1.1** | **Ship the remaining P2 work** (#337 landed, so P1 is done) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **3 instruments to add, 1 already exists, 1 to drop**, and only one has a measurable hot-path cost. Full spec, per-instrument cost and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
+| **1.1** | **Ship the remaining P2 work** (#337 landed, so P1 is done) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **four instrument families to add, one already exists, one to drop**, and **two carry a measurable hot-path cost** — an unconditional room-meta lookup in the gatekeeper and an unconditional `msg.Metadata()` parse in broadcast-worker, both of which the brief requires benchmarking. Scope, call sites, tests and acceptance: [`p2-implementation-task.md`](p2-implementation-task.md); rationale and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
-| **1.3** | **Set bounds and targets from 1.0b + 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate, and a **bound that a histogram can actually compute**. Right now they are round numbers, and at least one of them (SLO-5's 300 ms) is not computable at all | Approved SLO bounds + targets, `Revisit date` filled in |
+| **1.3** | **Set bounds and targets from 1.0b + 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate, and a **bound that a histogram can actually compute**. Right now they are round numbers chosen by feel: #337 already moved SLO-5 onto a real bucket boundary (300 ms → 250 ms, 99% → 95%), but that fixed *computability*, not *defensibility* — nothing has yet shown 95% at 250 ms is reachable, and 1.0b exists to produce that evidence | Approved SLO bounds + targets, `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can gate on a **client-observed** ledger of logical messages instead of eyeballing. That is a different instrument from the production counters, and it is what G4 cannot be: loadgen knows which logical message it sent, so it has no redelivery double-count — what it lacks is the production boundary |
-| **1.5** | **Re-run the completed soak + failure round under assertion mode** | The two finished programs produced evidence but no SLO verdict. Replaying them with 1.4 is cheap and converts them into a pass/fail record | First real "we meet our SLOs" statement |
+| **1.5** | **Re-run the completed soak + failure round under assertion mode** | The two finished programs produced evidence but no SLO verdict. Replaying them with 1.4 is cheap and converts them into a pass/fail record | The first **client-observed logical-message verdict** — loadgen knows which message it sent, so no attempt-counting bias, but it is not the production boundary. Not a "we meet our SLOs" statement: that needs a production-side measurement G4 explicitly cannot provide |
 
 > **Interim rule until 1.1 lands:** every J1 verdict is loadgen-L1 observational.
 > Say "E2E publish→delivery p99 was X" — never "SLO-2 passed". They are different
@@ -191,7 +191,7 @@ Full derivation, arithmetic and per-item test design in
 | **3.5** | **X6a** — deployed TWCS `compaction_window_size` vs `MESSAGE_BUCKET_HOURS` | Cassandra | **Config assertion, not a test.** Do this first — it decides whether the completed soak's compaction evidence is interpretable | Minutes |
 | **3.6** | **X6b** — hot-room partition size (bucket is a fixed *time* window; no row cap) | Cassandra | `max-room-size --rooms-per-size=1` exists; never held long enough to fill a bucket | Long single-room hold |
 | **3.7** | **X4** — key-rotation storm on member removal (N × `key.get`) | room-service + Mongo | None | Small addition to 3.3 |
-| **3.8** | **X9** — gatekeeper immediate-Nak burning `MaxDeliver` in ms | NATS | Possibly covered by failure round 1 — **check whether max-delivery advisories were collected**; if not, re-run | Re-run with an advisory consumer |
+| **3.8** | **X9 — largely mitigated, keep only the budget confirmation.** The premise (an immediate `Nak()` burning `MaxDeliver` in milliseconds) is wrong — see correction 7 below. What is left is confirming the *real* budgets under a long outage: gatekeeper and room-worker at the default `MaxDeliver=6` (~12.6 min client-side), and message-worker at **17** / broadcast-worker at **18**, raised by `stream.WithOutageRetryBudget` to span an hour | NATS | Possibly covered by failure round 1 — **check whether max-delivery advisories were collected**; if not, re-run | Re-run with an advisory consumer |
 | **3.9** | **X10** — sparse/aged history walk | Cassandra | None — soak has no historical backfill | New seed span |
 | **3.10** | **X7** — reaction MAP width / collection tombstones (soak F4) | Cassandra | None | Isolated keyspace |
 | **3.11** | **X8** — cross-site membership burst through the `MaxAckPending=1` FIFO lane | NATS federation | **Blocked** — single-site driver | Needs D4 |
@@ -371,6 +371,21 @@ Added in rev 2, from the code review behind
    `message_worker_persistence_total{message_kind,result}` already exists and
    records at every persist site. Tracked in
    [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) §1B.
+9. **Every failure doc assumed `MaxDeliver=6` everywhere. Two services are much
+   higher.** `message-worker` (`main.go:360`) and `broadcast-worker`
+   (`main.go:558`) wrap their settings in `stream.WithOutageRetryBudget`, which
+   raises the cap until the client-side schedule spans
+   `stream.OutageRetryWindow` = 1 hour — **17 and 18 deliveries**, roughly two
+   hours of redelivery, not twelve minutes. `message-gatekeeper` and
+   `room-worker` take the plain default and are 6. This changes how long a
+   failure test must run before a terminal drop is even possible, and it changed
+   the runbook's `t2` cap from ~20 min to ~2 h 16 min. **Fixed in this branch**
+   across `failure/nats-jetstream.md`, `failure/cassandra.md`,
+   `extreme-scenarios.md` (X1) and the runbook.
+10. **X1's drop threshold was wrong for the same reason.** It read "terminally
+   drops after five redeliveries"; the path runs in `message-worker`, so it is
+   seventeen. The longer budget makes the drop slower, **not less total** — each
+   attempt re-runs the same full-partition scan and times out again.
 
 ---
 

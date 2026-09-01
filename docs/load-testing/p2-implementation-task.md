@@ -284,20 +284,37 @@ break the "exactly one outcome per call" criterion, and — worse — they are r
 enqueue failures that would silently leave SLO-1b's numerator, biasing the ratio
 *green* on the encryption path.
 
-Use a named return and a `defer`, so a future early return cannot escape it
-either:
+Use a `defer` over an **outcome sentinel that defaults to `failed`**, and set
+`ok` only on normal completion:
 
 ```go
-func (h *Handler) publishChannelEvent(...) (err error) {
-    defer func() { h.metrics.RecordChannelEnqueue(ctx, enqueueOutcomeFor(err)) }()
+func (h *Handler) publishChannelEvent(...) error {
+    outcome := enqueueFailed                       // every exit path, including a panic
+    defer func() { h.metrics.RecordChannelEnqueue(ctx, outcome) }()
     ...
+    if err := h.publishRoomEvent(...); err != nil {
+        return err
+    }
+    outcome = enqueueOK
+    return nil
 }
 ```
 
+**Do not use a named return and read `err` in the defer.** A panic inside this
+function unwinds with `err` still `nil`, so the defer would record
+`outcome="ok"` — and then `jobguard.Run` recovers the panic and **Acks** the
+message as a poison-pill drop (`pkg/jobguard/jobguard.go:35-45,47-49`, wired at
+`broadcast-worker/main.go:549`). A genuinely lost message would be counted as a
+successful enqueue, biasing SLO-1b *green* on the one path where the loss is
+total. The sentinel defaults to the safe answer, so no exit path — return,
+panic, or one added later — can record success by omission.
+
 Do **not** classify the error further; that is a different metric.
 
-**Test all three failure points**, not just the publish: encryption failure,
-marshal failure, and publish failure each record exactly one `outcome="failed"`.
+**Test all four exit paths**, not just the publish: encryption failure, marshal
+failure, publish failure, and **a panic** each record exactly one
+`outcome="failed"`. The panic case is the one a reviewer will not think to ask
+for and the only one where a wrong answer hides real loss.
 
 **The denominator match is exact, and worth verifying rather than assuming.**
 `publishChannelEvent` has exactly one caller — `handleCreated` at
@@ -325,7 +342,7 @@ Ship separately. Its review is about cost, not about the metric.
 
 `broadcast_channel_enqueue_age_seconds` — a histogram of
 `time.Now() − <the JetStream stream store timestamp>`, recorded at the same point
-as 4.3, i.e. when the room-subject enqueue is accepted.
+as §4.2, i.e. when the room-subject enqueue is accepted.
 
 **The origin is `msg.Metadata().Timestamp`**, not `evt.Timestamp`. `sli-slo.md`
 §2 is explicit about this: `evt.Timestamp` is stamped by the gatekeeper's clock

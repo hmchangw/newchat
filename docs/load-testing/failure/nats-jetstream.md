@@ -25,9 +25,9 @@
 
 | Stream / path | Producer → consumer | Retry and Ack behavior | Loadgen coverage |
 |---|---|---|---|
-| `MESSAGES-{site}` | client publish → message-gatekeeper | Transient gatekeeper errors Nak immediately against `MaxDeliver=5` | **Reconciled**: admission is an observer on every message lane |
+| `MESSAGES-{site}` | client publish → message-gatekeeper | Transient gatekeeper errors Nak on `jsretry.DefaultBackoff` against `MaxDeliver=6` (~12.6 min), not immediately | **Reconciled**: admission is an observer on every message lane |
 | `MESSAGES-CANONICAL-{site}` | gatekeeper, history-service mutations, room-worker system events → message-worker, broadcast-worker, notification-worker, search-sync-worker | Each consumer redelivers independently; downstream side effects must be idempotent | **Partial**: message persistence is reconciled in Cassandra and delivery per recipient when the recipient observer is on. notification and search-sync outcomes are not asserted |
-| `ROOMS-{site}` | room-service → room-worker | JS PubAck on publish; room-worker `MaxDeliver=5`; several side effects follow the Mongo write | **Reconciled**: member add/remove, rename, mute, room create and read receipt settle through `room_state` |
+| `ROOMS-{site}` | room-service → room-worker | JS PubAck on publish; room-worker at the repo default `MaxDeliver=6`; several side effects follow the Mongo write | **Reconciled**: member add/remove, rename, mute, room create and read receipt settle through `room_state` |
 
 | Service | Loadgen coverage | What is not asserted |
 |---|---|---|

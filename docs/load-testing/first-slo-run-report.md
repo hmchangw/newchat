@@ -246,9 +246,9 @@ evidence says, what should happen to the draft.
 
 | SLO | Drafted | Achieved (median) | Margin vs spread | Recommendation |
 |---|---|---|---|---|
-| **1a** | 99.9% | 99.9962% | 26× budget headroom | **Raise the draft to 99.95%** (headroom drops to 13×, still ample). At 99.9% the target would never alert on a real regression. Do this only once P2a makes the measurement exact — raising a target on an approximate indicator is how you get an unfalsifiable SLO |
-| **1b** | 99.9% | ≥ 99.940% (bound) | n/a | **Hold the draft, build P2b.** A bound cannot confirm a target |
-| **2** | 99% | ≥ 99.31% (bound) | n/a | **Hold the draft, build P2b** |
+| **1a** | 99.9% | 99.9962% | 26× budget headroom | **Do not raise the draft yet**, though 26× headroom says 99.9% would never alert on a real regression. P2a does **not** make this exact — both sides stay attempt-based, so a lost message and a redelivered one cancel. Raising a target on an indicator that cannot falsify it is how you get an unfalsifiable SLO. Revisit when P7's logical-outcome ledger lands |
+| **1b** | 99.9% | ≥ 99.940% (bound) | n/a | **Hold the draft, build P2a.** P2a delivers SLO-1b (the `broadcast_path` denominator plus the enqueue counter); P2b is SLO-2 only. A bound cannot confirm a target |
+| **2** | 99% | ≥ 99.31% (bound) | n/a | **Hold the draft, build P2b** — the age histogram |
 | **4** | 95% @ 500 ms | 96.20% | 1.20 pt vs 0.53 pt ✅ | **Confirm 95% @ 500 ms.** Also record that 99.05% @ 1 s is available if a two-tier objective is ever wanted |
 | **5** | 95% @ 250 ms | 95.65% | **0.65 pt vs 1.17 pt ❌** | **Do not confirm.** Two workable rewrites: **98% @ 500 ms** (achieved 99.04%, margin 1.04 pt) or **93% @ 250 ms** (margin 2.65 pt). Both put the margin above the spread. **The draft as written would burn its budget on environment noise alone** |
 | **7** | 99.5% | 99.67% | 0.17 pt vs 0.07 pt ✅ | **Confirm 99.5%**, with the outage-backstop caveat still open |

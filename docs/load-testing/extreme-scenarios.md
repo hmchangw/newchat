@@ -76,9 +76,13 @@ than its live count.
 
 **Verdict: not acceptable as written.** The 15 s backstop converts an unbounded
 partition into a *timeout* rather than into back-pressure, and the timeout fires
-inside a JetStream handler with `AckWait=30s` and `MaxDeliver=5` — so a long
-thread does not degrade, it **terminally drops replies** after five redeliveries
-while the stream looks healthy.
+inside a JetStream handler with `AckWait=30s`. The path runs in `message-worker`
+(`message-worker/store_cassandra.go`), whose `MaxDeliver` is **17**, not the repo
+default 6 — `main.go:360` wraps its settings in `stream.WithOutageRetryBudget`.
+So a long thread does not degrade, it **terminally drops replies** after
+seventeen redeliveries spanning roughly two hours, while the stream looks
+healthy. The longer budget makes the drop slower to arrive, not less total: every
+one of those attempts re-runs the same full-partition scan and times out again.
 
 **Documentation is wrong about this.** `soak/cassandra-soak-plan.md` §1 states the
 count is *"a bounded client-side scan … tallies live rows to `Cap`(99)"*. There is

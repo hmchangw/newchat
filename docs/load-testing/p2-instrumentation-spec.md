@@ -174,7 +174,7 @@ against `MaxDeliver=5`", so "a short fault can burn the whole delivery budget in
 seconds". The code does not do that: `message-gatekeeper/handler.go:212` calls
 `jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, …)`, which is
 `1s / 5s / 30s / 2m / 10m` (`pkg/jsretry/jsretry.go:51`), and `MaxDeliver`
-defaults to **6**, not 5 (`pkg/stream/consumer.go:18`). The client-side budget is
+defaults to **6**, not 5 (`pkg/stream/consumer.go:20`). The client-side budget is
 therefore about **12.6 minutes**, and the server-side `BackOff` for an un-acked
 message is `{30s, 1m, 2m, 4m, 8m}`. A two-second dependency blip cannot exhaust
 either. X9 drops from "highest-severity silent loss path" to "confirm the budget
