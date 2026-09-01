@@ -172,3 +172,55 @@ Worth recording, because these are the things that keep the failure modes above 
 - `user-service` is the reference implementation, and the only service that gets the whole nesting right: cap **before** auth so a shed request pays nothing, `ginutil.Timeout`, `LimitListener` above the cap, and `config.Load` **enforcing** `WriteTimeout > HandlerTimeout` and `MaxConns > MaxConcurrency` rather than documenting them.
 - `roomlist-worker` validates its flush budget against `EffectiveAckWait()` — the value the server actually enforces after `BackOff[0]` overwrites `AckWait` — not the configured field.
 - `search-sync-worker` and `roomlist-worker` are the two services that treat `MaxAckPending` as a capacity budget and **fail startup on an incoherent config**. That reasoning is correct and belongs in more services.
+
+---
+
+## 4. Availability: blast radius, and whether anyone would know
+
+### 4.1 Health checks that report green while the service does nothing
+
+`pkg/natsutil.HealthCheck` reports healthy on `CONNECTED` **or** `RECONNECTING` — i.e. it is green in exactly the failure that kills a consume loop.
+
+Every JetStream worker **except `roomlist-worker`** returns from its `iter.Next()` loop on error and then does nothing: no readiness flip, no exit, and in two cases (`push-notification-service`, `bot-message-worker`) not even a log line. The pod stays Ready and consumes nothing.
+
+`roomlist-worker` is the sole service that closes this, with `consumeState` + `consume.Check()` + a **self-SIGTERM** so the final flush drains (`main.go:171-181`, `:262-278`). The fix is written, correct, and not propagated.
+
+Three more that report healthy while broken:
+
+- **`outbox-worker` with an empty `ALL_SITE_IDS`** builds zero lanes, warns once, and runs as a no-op **while producers keep filling OUTBOX** — and its own compose default collapses to exactly that. The sole OUTBOX owner, silently doing nothing.
+- **`auth-service`'s `/readyz` registers zero checks**, so it is a constant 200 identical to `/healthz`. `docs/health-probes.md` describes it as reporting NATS connectivity — which this service does not hold. A pod that cannot validate a single token reports Ready.
+- **`media-service` and `upload-service` expose `/healthz` only** — a constant `{"status":"ok"}` — so a dead MinIO still receives traffic.
+
+### 4.2 The federation path is entirely unmonitored
+
+Neither `outbox-worker` nor `inbox-worker` imports `pkg/natsmetrics`. No service anywhere reads `ConsumerInfo`/`NumPending` — a repo-wide grep returns nothing. **A site can stop federating completely and every probe and dashboard stays green** until a user reports that a remote member never appeared.
+
+### 4.3 Panic containment
+
+`message-gatekeeper` — the single validation hop every user message crosses — passes a bare closure to `natsmetrics.Start`, which spawns a goroutine per message **with no `recover()`**. Every other MESSAGES-CANONICAL consumer wraps in `jobguard`. A panic in `HandleJetStreamMsg` kills the process with the message un-acked; JetStream redelivers on `{30s,1m,2m,4m,8m}`, so **one malformed payload crash-loops the pod ~6 times over ~15 minutes, during which no message on the site is accepted.** `bot-message-worker` and `push-notification-service` share the gap with smaller radius.
+
+### 4.4 Fail-open where it matters
+
+**Valkey — an explicitly fail-open cache tier — is a fatal startup dependency in all four hot-path services.** `message-gatekeeper`, `broadcast-worker`, `notification-worker` and `room-worker` all `os.Exit(1)` on a failed PING, while `valkeyutil.ConnectOptional` exists for precisely this and is used by `message-worker` with a written justification: *"exiting here would crash-loop the pod over a fail-open cache tier."*
+
+The fault is **latent**. A running pod survives a Valkey outage fine — the tiers fall through to Mongo. But a Valkey outage plus **any** rolling deploy puts ingestion, fan-out, notifications and membership into CrashLoopBackOff simultaneously.
+
+**The push gate is a compound fail-open.** `notification-worker`'s settings and presence snapshots both discard errors into an empty map, and `shouldPush` reads the zero value as "not muted, not DND, push". Worse than uniform: settings chunks run **sequentially under one shared 2 s timeout**, and the first failure returns what it has — so in a large room the *earlier* chunks stay enforced and the later ones fail open. **Mute enforcement becomes a function of account sort order.**
+
+### 4.5 One config change that silently becomes data loss
+
+`WithOutageRetryBudget` returns its settings **unchanged** when `s.MaxDeliver != DefaultMaxDeliver`:
+
+```go
+// pkg/stream/consumer.go:154-156
+if s.MaxDeliver != DefaultMaxDeliver { return s }
+```
+
+So setting `CONSUMER_MAX_DELIVER=10` on `message-worker` — a plausible "give it more retries" change — **bypasses the guard and yields fewer deliveries than the ~17 the hour budget computes.** Blast radius crosses services: `broadcast-worker` has already delivered the message live to every connected client, so the drop leaves a message users saw and that no longer exists in Cassandra. Unrecoverable — the row was never written.
+
+### 4.6 Two cases that cannot self-recover
+
+Everything else here recovers automatically once the fault clears (floored by the 10-minute backoff tail). Two do not:
+
+1. **`hr-sync-worker`** combines `MaxDeliver=-1` with `MaxAckPending=1` and classifies only decode errors as permanent. A Mongo write failure retries forever with one in-flight message and **nothing behind it moving** — the only consumer in the repo that requires operator intervention.
+2. **`outbox-worker`'s ordered lane** wedges permanently on any deterministically-unforwardable event (over `max_payload`, a peer whose INBOX was never provisioned, a decommissioned site still in `ALL_SITE_IDS`). `HandleEvent` wraps every publish failure in a plain `fmt.Errorf`, so **nothing is ever classified permanent**, and `MaxAckPending=1` means the head blocks every membership event to that peer, forever, with no dead-letter and no metric.
