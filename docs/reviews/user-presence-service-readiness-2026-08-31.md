@@ -167,3 +167,36 @@ Small, well-factored files with unusually good WHY-comments, but the `sync/` sib
 - `medium` — Collapse the four connection handlers into one generic helper over a `connRequest` interface (`ConnectionID() string`, already satisfied by `model.Hello/Ping/Activity/ByeRequest`), leaving four two-line registrations; convert `handler_test.go:64-153` to one table.
 - `medium` — Move all store integration tests into `presencestore/` (they already have a `TestMain` there) and delete `user-presence-service/integration_test.go`, keeping `handler_test.go` mock-only.
 - `low` — Generate the Lua status literals from `pkg/model` constants (`fmt.Sprintf` the script tail once at init), or add a unit test asserting each literal equals its `model.PresenceStatus`.
+
+---
+
+## 6. Integration — 3 / 5
+
+Subject builders, `pkg/model` contracts and publish-site `Timestamp` discipline are clean and fully documented, but the bulk-presence RPC that `notification-worker`'s push gate depends on has no responder anywhere in the repo.
+
+**`docs/client-api.md` obligation: BINDS.** Six client-facing handlers on `chat.user.…` are registered (`user-presence-service/main.go:172-178`): four `RegisterVoid` events (`hello`/`ping`/`activity`/`bye`), `chat.user.{account}.request.presence.{siteID}.manual.set`, and `chat.user.presence.{siteID}.query.batch`. All six are documented in §8.1–8.7 (`docs/client-api.md:7170-7355`) with field tables, examples and error cases, and both derived views carry them without drift (`docs/client-api/request-reply.md:2396-2406`, `docs/client-api/events.md:1055-1089`). `chat.server.request.presence.{siteID}.query.batch` is correctly marked server-internal. No documentation gap found.
+
+### Findings
+- `high` — the bulk presence snapshot RPC `chat.presence.{siteID}.request.snapshot` has **no registered responder** in the repo; `user-presence-service` serves only `query.batch` / `query.batch.peer` — `pkg/subject/subject.go:1730`, `user-presence-service/main.go:172-178`
+  `notification-worker`'s push gate requests that subject (`notification-worker/presence.go:61`) and `docs/notification-worker-downstream-contracts.md:318` names this service as its owner. Every request would time out and fail open, so busy/in-call DND suppression never engages. Masked today only by `PRESENCE_RPC_ENABLED` defaulting to false (`notification-worker/main.go:65`); `docs/client-api.md:4874` already promises the behavior "once presence reporting is enabled server-side".
+- `high` — the two sides speak different shapes, so the gate cannot be enabled by config alone: the worker expects `PresenceSnapshotReply{presences: map[account]{aggregatedStatus}}` while the service returns `PresenceQueryResponse{states: []PresenceState}` — `pkg/model/presence.go:8-16` vs `pkg/model/presence.go:91-95`, `user-presence-service/handler.go:340-363`
+  Two parallel bulk-presence contracts in one `pkg/model` file with no adapter between them.
+- `medium` — chunk-size mismatch on that same contract: the worker chunks at 512 accounts (`notification-worker/main.go:63`) while the presence service rejects anything over `PRESENCE_BATCH_MAX=100` (`user-presence-service/main.go:40`, `handler.go:345,375`)
+  Whoever implements the snapshot handler with the existing guard gets `bad_request` on every default-sized chunk.
+- `medium` — `PRESENCE_STALE_THRESHOLD` / `PRESENCE_CONNS_TTL` are declared twice with duplicated `envDefault`s — `user-presence-service/main.go:42,44` and `user-presence-service/sync/main.go:24-25` — instead of once in `presencestore`, which owns the thing they configure (CLAUDE.md §6 "shared knob declared once")
+  Both processes construct a store over the *same* Valkey keyspace (`main.go:125`, `sync/main.go:99`); a drift makes the sweeper and the Teams sync disagree on which connections are live, i.e. flapping effective status — the same failure class the `ROOM_KEY_RETIRED_TTL` rule exists to prevent.
+- `medium` — the sync daemon dials Valkey from its own ad-hoc `VALKEY_ADDRS`/`VALKEY_PASSWORD` fields rather than the shared `valkeyutil.Config` — `user-presence-service/sync/main.go:30-31` vs `user-presence-service/main.go:53`
+  It therefore also skips the instrumented dial the main service deliberately chose (`main.go:116-120`), so half the writes to the presence keyspace are unobservable.
+- `low` — `PRESENCE_HEARTBEAT_INTERVAL` is parsed and validated but never read by any code path — `user-presence-service/main.go:41,92,99`
+  It reads as a server tunable; the cadence is purely client-side. `deploy/docker-compose.yml:19` sets `15s` while `docs/client-api.md:7229` documents ~30 s, so the knob actively misleads.
+- `nitpick` — `QueryBatch` swallows peer errors inside the errgroup and returns `nil` (`handler.go:413-419`), which is correct per §8.6, but the degraded accounts are indistinguishable from genuinely offline ones in the reply; no per-site partial-failure signal reaches the client.
+
+**Verified clean:** every subject comes from a `pkg/subject` builder (no raw `fmt.Sprintf` in the service); `Timestamp` is set at the publish site via `now.UTC().UnixMilli()` for both the handler and sweeper paths (`presencestore/store.go:36-43`); no JetStream, OUTBOX/INBOX, Cassandra bucketing or `idgen` surface applies, and the service correctly ships no `bootstrap.go`.
+
+### Recommendations
+- `high` — Implement `handler.Snapshot` on `subject.PresenceSnapshot(cfg.SiteID)` returning `model.PresenceSnapshotReply`, reusing `store.BatchGet` + the `QueryBatch` fan-out; or delete `subject.PresenceSnapshot` and `PresenceSnapshotRequest/Reply` and repoint `notification-worker` at `PresenceQueryBatch`. Two contracts for one need is the defect.
+- `high` — Whichever direction is chosen, reconcile `PRESENCE_BATCH_SIZE` (512) with `PRESENCE_BATCH_MAX` (100) and add a subject-level contract test that a request built by the worker is accepted by the presence handler.
+- `medium` — Move `StaleThreshold`/`ConnsTTL` into a `presencestore.TTLConfig` mounted as a named field by both `main.go` and `sync/main.go`, so the two processes cannot diverge.
+- `medium` — Switch `sync/main.go` to `valkeyutil.Config` + `valkeyutil.ConnectRaw(..., Instrumented(sdk))` to match the main service's dial policy.
+- `low` — Delete `PRESENCE_HEARTBEAT_INTERVAL` (and its compose entry), or document it as client-advisory and publish it to clients.
+- `low` — Add `aggregatedStatus`-vs-`status` naming to the §8 docs if the snapshot RPC ships, so the two presence views stay traceable to one another.
