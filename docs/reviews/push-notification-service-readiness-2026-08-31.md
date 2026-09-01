@@ -85,3 +85,22 @@ Coverage is **26.9%** (78 statements) — below the 60% critical threshold, with
 - `medium` — extract the loop from `run()` into a testable `consume(ctx, iter, h)` so the 0% block becomes reachable.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+At 63 + 125 lines with trivial complexity, single responsibilities and WHY-style comments, it is easy to change; the only real debt is a hand-rolled copy of shared retry logic.
+
+### Findings
+- `medium` — the settle decision tree is duplicated from `pkg/jsretry`; a future change to the permanent/transient policy must be made in two places — `push-notification-service/handler.go:28-52` vs `pkg/jsretry/jsretry.go:86-141`
+- `low` — `LogDispatcher` (a deployment stub) lives in `handler.go` beside the domain logic; a real dispatcher will want its own file, and the stub then becomes test-only — `push-notification-service/handler.go:54-63`
+- `low` — the consume loop is inline in `run()`, mixing wiring with the hot path and blocking any unit test of the loop — `push-notification-service/main.go:74-89`
+- `nitpick` — comments are appropriately WHY-oriented (`main.go:118-119`, `consumer_config_test.go:12-13`); no dead code or WHAT-restating comments found.
+
+### Recommendations
+- `medium` — delete the duplicated branch in favour of `jsretry.Settle`.
+- `low` — move `LogDispatcher` to `dispatcher_log.go` and add the real dispatcher beside it.
+- `low` — extract `consume(ctx, iter, h, maxWorkers)`; it pays for itself the moment jobguard/logctx/metrics are added.
+
+---
