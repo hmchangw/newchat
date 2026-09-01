@@ -43,3 +43,22 @@ Idiomatic, precisely commented, correct errcode tiering and slog discipline; one
 - `nitpick` — rename to `Handler`/`NewHandler`/`handlerOption` for repo consistency.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook layering for a small Gin service — consumer-owned store interface, constructor DI with functional options, shared knobs mounted as named fields — marred by one dev-path correctness hole and a duplicated site lookup.
+
+### Findings
+- `medium` — dev fallback can return a 200 with an empty `baseUrl`: when `devFallback` is true and the fallback site is absent from `PORTAL_SITE_URLS`, `site` stays the zero value; only `NATSURL` is patched, `BaseURL` is left `""` — `portal-service/handler.go:189-201`, used at `:207` and `:217`. The client gets a syntactically valid response it cannot act on.
+- `low` — `NewPortalHandler` takes six positional parameters, four of them bare strings/bools — `portal-service/handler.go:139`. Adding a seventh dev knob touches every call site; `devMode`/`devFallbackSiteID`/`devFallbackNatsURL` want a single `devConfig` struct.
+- `low` — site-registry lookup plus its error path is written twice — `portal-service/handler.go:189-195` and `:297-301`.
+- Positives verified: `DirectoryStore` defined in the consumer with exactly the two methods used (`store.go:37-45`); `mongoutil.PoolConfig` and `ginutil.TimeoutConfig` mounted as named fields, not re-declared (`main.go:64-65`); routes in `routes.go`; `pkg/shutdown.Wait` with the documented order (`main.go:177-187`); the refresh goroutine has an explicit cancel + `WaitGroup` (`main.go:130-135`, `:181-182`); no `os.Getenv`; no `bootstrap.go` needed since the service touches no stream.
+
+### Recommendations
+- `medium` — in `resolve`, treat "dev-fallback site not in the registry" explicitly: fill `BaseURL` from a `PORTAL_DEV_FALLBACK_BASE_URL` (or require the fallback site to be registered and fail at startup in `run()`), rather than emitting `""`.
+- `low` — extract `func (h *PortalHandler) siteFor(e employee) (siteURL, error)` and call it from both `resolve` and `HandleLogin`.
+- `low` — collapse the four dev/site parameters of `NewPortalHandler` into one options struct.
+
+---
