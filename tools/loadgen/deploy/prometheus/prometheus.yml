@@ -22,6 +22,12 @@ scrape_configs:
     static_configs:
       - targets: ["loadgen:9099"]
 
+  # clientsim is a separate compose project but joins the same chat-local
+  # network, so its service alias is stable and does not need Docker SD.
+  - job_name: clientsim
+    static_configs:
+      - targets: ["clientsim:2112"]
+
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]

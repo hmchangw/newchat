@@ -56,3 +56,15 @@ func TestDisconnectReason_Table(t *testing.T) {
 		})
 	}
 }
+
+func TestSimClient_AsyncSubscriptionErrorDemotesReady(t *testing.T) {
+	m := newMetrics()
+	s := &simClient{account: "user-a", m: m}
+	s.markConnUp()
+	s.markReady()
+
+	s.handleAsyncError(nats.ErrPermissionViolation)
+
+	assert.InDelta(t, 0, promtestutil.ToFloat64(m.ConnsReady), 0.001)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Errors.WithLabelValues("async")), 0.001)
+}

@@ -112,10 +112,6 @@ services:
     networks:
       - chat-local
 
-  room-service:
-    environment:
-      - MAX_ROOM_SIZE=6000
-
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     profiles: [dashboards]

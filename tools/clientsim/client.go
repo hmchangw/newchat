@@ -31,6 +31,10 @@ type simClient struct {
 	conn     simConn
 	closed   bool
 	roomSubs map[string]openSub
+	// missingRooms tracks desired subscriptions whose Subscribe call failed.
+	// roomSubs alone cannot represent that intent, so without this set one
+	// successful repair could incorrectly promote a still-incomplete client.
+	missingRooms map[string]struct{}
 	// touched tracks per-room mutation generations so a resync walk never
 	// reverts a live update that landed while its RPC was in flight.
 	touched map[string]uint64
@@ -42,6 +46,7 @@ type simClient struct {
 	resyncActive  bool
 	resyncPending bool
 	resyncJitter  func() time.Duration // injectable for tests
+	resyncRetry   func(int) time.Duration
 
 	// stateMu guards the gauge-backing connection state, separately from
 	// s.mu so the nats.go async callbacks can flip it without waiting on a
@@ -64,20 +69,22 @@ func newSimClient(account string, cfg *config, mint minter, m *metrics) (*simCli
 		return nil, fmt.Errorf("user nkey public key for %s: %w", account, err)
 	}
 	s := &simClient{
-		account:  account,
-		cfg:      cfg,
-		mint:     mint,
-		m:        m,
-		nkeyPair: kp,
-		nkeyPub:  pub,
-		roomSubs: map[string]openSub{},
-		touched:  map[string]uint64{},
-		roomCh:   make(chan *nats.Msg, cfg.SubPendingMsgs),
+		account:      account,
+		cfg:          cfg,
+		mint:         mint,
+		m:            m,
+		nkeyPair:     kp,
+		nkeyPub:      pub,
+		roomSubs:     map[string]openSub{},
+		missingRooms: map[string]struct{}{},
+		touched:      map[string]uint64{},
+		roomCh:       make(chan *nats.Msg, cfg.SubPendingMsgs),
 	}
 	s.dial = s.realDial
 	s.resyncJitter = func() time.Duration {
 		return time.Duration(secureIntN(int(2 * time.Second)))
 	}
+	s.resyncRetry = defaultResyncRetryDelay
 	return s, nil
 }
 

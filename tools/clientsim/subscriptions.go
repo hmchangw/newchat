@@ -42,8 +42,9 @@ func (s *simClient) subscribeLanes(conn simConn) error {
 			s.gen++
 			s.touched[ch.RoomID] = s.gen
 		}
-		if s.applyChangesLocked(changes) > 0 {
-			s.markNotReady()
+		if len(changes) > 0 {
+			s.applyChangesLocked(changes)
+			s.updateReadyLocked()
 		}
 	}); err != nil {
 		return fmt.Errorf("subscribe update lane for %s: %w", s.account, err)
@@ -61,25 +62,25 @@ func (s *simClient) planViewLocked() map[string]bool {
 	return view
 }
 
-// applyChangesLocked opens/closes room subscriptions and returns the number
-// of opens that failed. Caller holds s.mu; holding the lock across the whole
-// batch is what makes decide+apply atomic with respect to the resync walk
-// (the review's lost-update race).
-func (s *simClient) applyChangesLocked(changes []subChange) int {
+// applyChangesLocked opens/closes room subscriptions. Caller holds s.mu;
+// holding the lock across the whole batch is what makes decide+apply atomic
+// with respect to the resync walk (the review's lost-update race).
+func (s *simClient) applyChangesLocked(changes []subChange) {
 	conn := s.conn
 	if conn == nil {
-		return 0
+		return
 	}
-	failed := 0
 	for _, ch := range changes {
 		switch ch.Op {
 		case subClose:
+			delete(s.missingRooms, ch.RoomID)
 			if open, ok := s.roomSubs[ch.RoomID]; ok {
 				_ = open.sub.Unsubscribe() // conn may already be closing; nothing to recover
 				delete(s.roomSubs, ch.RoomID)
 			}
 		case subOpen:
 			if _, ok := s.roomSubs[ch.RoomID]; ok {
+				delete(s.missingRooms, ch.RoomID)
 				continue
 			}
 			sub, err := conn.SubscribeChan(subject.RoomEvent(ch.RoomID, ch.Global), s.roomCh)
@@ -87,15 +88,26 @@ func (s *simClient) applyChangesLocked(changes []subChange) int {
 				// Not recorded in roomSubs, so the next add/resync retries.
 				// Until then this client is missing the room's traffic, which
 				// is why the caller drops it out of the ready set.
-				failed++
+				s.missingRooms[ch.RoomID] = struct{}{}
 				s.m.Errors.WithLabelValues("room_subscribe").Inc()
 				slog.Warn("open room subscription", "account", s.account, "roomId", ch.RoomID, "error", err)
 				continue
 			}
+			delete(s.missingRooms, ch.RoomID)
 			s.roomSubs[ch.RoomID] = openSub{sub: sub, global: ch.Global}
 		}
 	}
-	return failed
+}
+
+// updateReadyLocked promotes only when every desired room subscription is
+// open. Caller holds s.mu, which makes checking the missing set atomic with
+// the batch that just repaired or removed entries from it.
+func (s *simClient) updateReadyLocked() {
+	if len(s.missingRooms) > 0 {
+		s.markNotReady()
+		return
+	}
+	s.markReady()
 }
 
 // pump drains the shared room-subscription channel — one goroutine per
@@ -145,11 +157,8 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		}
 		kept = append(kept, ch)
 	}
-	if s.applyChangesLocked(kept) > 0 {
-		s.markNotReady()
-		return nil
-	}
-	s.markReady()
+	s.applyChangesLocked(kept)
+	s.updateReadyLocked()
 	return nil
 }
 
@@ -168,30 +177,68 @@ func (s *simClient) resync(ctx context.Context) {
 	}
 	s.resyncActive = true
 	s.resyncMu.Unlock()
-	defer func() {
-		s.resyncMu.Lock()
-		s.resyncActive = false
-		s.resyncMu.Unlock()
-	}()
 
+	attempt := 0
 	for {
-		jitter := time.NewTimer(s.resyncJitter())
+		delay := s.resyncJitter()
+		if attempt > 0 {
+			delay = s.resyncRetry(attempt)
+		}
+		jitter := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			jitter.Stop()
+			s.finishResync()
 			return
 		case <-jitter.C:
 		}
 		if err := s.bootstrapWalk(ctx); err != nil {
 			s.m.Errors.WithLabelValues("resync").Inc()
-			slog.Warn("post-reconnect resync", "account", s.account, "error", err)
+			attempt++
+			slog.Warn("post-reconnect resync; retrying", "account", s.account, "attempt", attempt, "error", err)
+			continue
 		}
+		attempt = 0
 		s.resyncMu.Lock()
-		again := s.resyncPending
-		s.resyncPending = false
-		s.resyncMu.Unlock()
-		if !again {
-			return
+		if s.resyncPending {
+			s.resyncPending = false
+			s.resyncMu.Unlock()
+			continue
 		}
+		// Set inactive while holding the same lock resync() uses to enqueue
+		// follow-ups. This closes the old defer-based lost-wakeup window.
+		s.resyncActive = false
+		s.resyncMu.Unlock()
+		return
 	}
+}
+
+func (s *simClient) finishResync() {
+	s.resyncMu.Lock()
+	s.resyncActive = false
+	s.resyncPending = false
+	s.resyncMu.Unlock()
+}
+
+func defaultResyncRetryDelay(attempt int) time.Duration {
+	const (
+		minDelay = 250 * time.Millisecond
+		maxDelay = 5 * time.Second
+	)
+	delay := minDelay
+	for i := 1; i < attempt && delay < maxDelay/2; i++ {
+		delay *= 2
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	// Add up to 50% jitter so a recovered broker is not hit by every client
+	// on the same backoff boundary.
+	if extraMax := int(delay / 2); extraMax > 0 {
+		delay += time.Duration(secureIntN(extraMax))
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }

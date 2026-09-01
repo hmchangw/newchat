@@ -94,9 +94,10 @@ type fakeConn struct {
 	chanSubs map[string]chan *nats.Msg
 	subs     map[string]*fakeSub
 
-	pages    []subListPage
-	reqCount atomic.Int64
-	reqGate  chan struct{} // when non-nil, Request blocks until it closes
+	pages     []subListPage
+	reqCount  atomic.Int64
+	reqGate   chan struct{} // when non-nil, Request blocks until it closes
+	reqErrors []error       // returned before pages, one error per Request
 	// reqEntered receives once per Request that reaches the gate, so a test
 	// can prove a walk is in flight (and therefore holding resyncMu) rather
 	// than racing the scheduler to guess.
@@ -153,19 +154,33 @@ func (f *fakeConn) Request(ctx context.Context, _ string, _ []byte) (*nats.Msg, 
 			return nil, ctx.Err()
 		}
 	}
-	if len(f.pages) == 0 {
-		f.reqCount.Add(1)
+	i := int(f.reqCount.Add(1)) - 1
+	f.mu.Lock()
+	if len(f.reqErrors) > 0 {
+		err := f.reqErrors[0]
+		f.reqErrors = f.reqErrors[1:]
+		f.mu.Unlock()
+		return nil, err
+	}
+	pages := append([]subListPage(nil), f.pages...)
+	f.mu.Unlock()
+	if len(pages) == 0 {
 		return nil, errors.New("fakeConn: no pages configured")
 	}
-	i := int(f.reqCount.Add(1)) - 1
-	if i >= len(f.pages) {
-		i = len(f.pages) - 1
+	if i >= len(pages) {
+		i = len(pages) - 1
 	}
-	data, err := json.Marshal(f.pages[i])
+	data, err := json.Marshal(pages[i])
 	if err != nil {
 		return nil, err
 	}
 	return &nats.Msg{Data: data}, nil
+}
+
+func (f *fakeConn) failNextRequests(errs ...error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reqErrors = append(f.reqErrors, errs...)
 }
 
 func (f *fakeConn) ForceReconnect() error { f.forceReconnects.Add(1); return nil }
@@ -188,6 +203,7 @@ func newLifecycleClient(t *testing.T, fc *fakeConn, mode string) (*simClient, *c
 	s := newTestSimClient(t, "user-lc", mode, mint)
 	s.dial = func(context.Context) (simConn, error) { return fc, nil }
 	s.resyncJitter = func() time.Duration { return 0 }
+	s.resyncRetry = func(int) time.Duration { return 0 }
 	return s, mint
 }
 

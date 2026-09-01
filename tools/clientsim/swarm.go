@@ -262,7 +262,7 @@ func summarize(m *metrics, runID, configDigest string, target int) (runSummary, 
 		return runSummary{}, fmt.Errorf("gather metrics for summary: %w", err)
 	}
 	s := runSummary{Attrs: []any{"runId", runID, "configDigest", configDigest,
-		"target", target, "readyPeak", m.readyPeak.Load()}}
+		"target", target, "readyPeak", m.readyPeak.Load(), "readyAtDrain", m.readyAtDrain.Load()}}
 	var degradedEvidence float64
 	for _, fam := range families {
 		if len(fam.GetMetric()) == 0 {
@@ -350,9 +350,9 @@ func printSummary(m *metrics, runID, configDigest string, target int) (runSummar
 	return s, nil
 }
 
-// readyGate is the run's validity check: did the harness actually hold the
-// fleet it was asked to hold? It reads the readiness PEAK, not the final
-// value, because SIGTERM drains every client before the summary runs.
+// readyGate is the run's validity check: did the harness reach the requested
+// fleet and recover it before shutdown? The pre-drain snapshot preserves the
+// terminal state that SIGTERM-driven cleanup would otherwise erase.
 //
 // Deliberately separate from the degraded flag. Loss counters describe the
 // system under test — in a failure test they are the result, not a fault —
@@ -370,6 +370,14 @@ func readyGate(m *metrics, target int, minRatio float64) error {
 	if peak < want {
 		return fmt.Errorf("fleet never reached the readiness floor: peak ready %.0f of %d target (%.1f%%), need %.1f%%",
 			peak, target, 100*peak/float64(target), 100*minRatio)
+	}
+	if !m.readyCaptured.Load() {
+		return errors.New("fleet readiness snapshot was not captured before drain")
+	}
+	atDrain := float64(m.readyAtDrain.Load())
+	if atDrain < want {
+		return fmt.Errorf("fleet did not recover the readiness floor before shutdown: ready %.0f of %d target (%.1f%%), need %.1f%%",
+			atDrain, target, 100*atDrain/float64(target), 100*minRatio)
 	}
 	return nil
 }

@@ -25,6 +25,12 @@ services:
       # an operator set in the env_file above.
       DEV_MODE: "${CLIENTSIM_DEV_MODE:-true}"
       PORT: "8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
     networks: [chat-local]
 
   clientsim:
@@ -34,6 +40,9 @@ services:
     # loadgen-style: exec the binary manually so one container serves many
     # differently-parameterised runs.
     entrypoint: ["sleep", "infinity"]
+    depends_on:
+      auth-sideissuer:
+        condition: service_healthy
     environment:
       CLIENTSIM_NATS_WS_URL: "ws://chat-local-nats:9222"
       CLIENTSIM_AUTH_URL: "http://auth-sideissuer:8080"

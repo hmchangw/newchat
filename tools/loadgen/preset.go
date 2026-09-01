@@ -175,6 +175,9 @@ func BuildFixtures(p *Preset, seed int64, siteID string) Fixtures {
 				User:     model.SubscriptionUser{ID: members[j].ID, Account: members[j].Account},
 				RoomID:   rooms[i].ID,
 				SiteID:   siteID,
+				Name:     fixtureSubscriptionName(&rooms[i], members, j),
+				RoomType: rooms[i].Type,
+				Open:     true,
 				Roles:    []model.Role{model.RoleUser},
 				JoinedAt: now,
 			})
@@ -310,6 +313,7 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 					ID:     fmt.Sprintf("sub-%s-%s", roomID, uA.ID),
 					User:   model.SubscriptionUser{ID: uA.ID, Account: uA.Account},
 					RoomID: roomID, SiteID: siteID,
+					Name: uB.Account, RoomType: model.RoomTypeDM, Open: true,
 					Roles:    []model.Role{model.RoleUser},
 					JoinedAt: now,
 				})
@@ -318,6 +322,7 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 						ID:     fmt.Sprintf("sub-%s-%s", roomID, uB.ID),
 						User:   model.SubscriptionUser{ID: uB.ID, Account: uB.Account},
 						RoomID: roomID, SiteID: siteID,
+						Name: uA.Account, RoomType: model.RoomTypeDM, Open: true,
 						Roles:    []model.Role{model.RoleUser},
 						JoinedAt: now,
 					})
@@ -380,11 +385,12 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 		// iterates in randomized order and would make two seed=42 runs
 		// produce different Subscriptions slices.
 		emit := func(u *model.User, rIdx int) {
-			roomID := bandRooms[rIdx].ID
+			room := &bandRooms[rIdx]
 			subs = append(subs, model.Subscription{
-				ID:     fmt.Sprintf("sub-%s-%s", roomID, u.ID),
+				ID:     fmt.Sprintf("sub-%s-%s", room.ID, u.ID),
 				User:   model.SubscriptionUser{ID: u.ID, Account: u.Account},
-				RoomID: roomID, SiteID: siteID,
+				RoomID: room.ID, SiteID: siteID,
+				Name: room.Name, RoomType: room.Type, Open: true,
 				Roles:    []model.Role{model.RoleUser},
 				JoinedAt: now,
 			})
@@ -461,6 +467,16 @@ func buildBandedFixtures(p *Preset, r *rand.Rand, users []model.User, siteID str
 	}
 
 	return Fixtures{Users: users, Rooms: rooms, Subscriptions: subs, RoomKeys: roomKeys}
+}
+
+// fixtureSubscriptionName mirrors the denormalized display-name contract
+// persisted by room-service. Channel subscriptions carry the room name;
+// each DM participant sees the other participant's account.
+func fixtureSubscriptionName(room *model.Room, members []model.User, memberIndex int) string {
+	if room.Type == model.RoomTypeDM && len(members) == 2 {
+		return members[(memberIndex+1)%2].Account
+	}
+	return room.Name
 }
 
 // deterministicRoomKeyPair generates a 32-byte room secret from bytes drawn

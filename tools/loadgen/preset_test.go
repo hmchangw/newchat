@@ -138,6 +138,42 @@ func TestBuildFixtures_RealisticMixesChannelAndDM(t *testing.T) {
 	}
 }
 
+func TestBuildFixtures_SubscriptionsMatchProductionListContract(t *testing.T) {
+	tests := []struct {
+		name  string
+		users int
+	}{
+		{name: "small"},
+		{name: "realistic"},
+		{name: "daily-heavy", users: 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, ok := BuiltinPreset(tt.name)
+			require.True(t, ok)
+			if tt.users > 0 {
+				p.Users = tt.users
+			}
+			fixtures := BuildFixtures(&p, 42, "site-local")
+			rooms := make(map[string]model.Room, len(fixtures.Rooms))
+			for _, room := range fixtures.Rooms {
+				rooms[room.ID] = room
+			}
+
+			for _, sub := range fixtures.Subscriptions {
+				room, exists := rooms[sub.RoomID]
+				require.True(t, exists, "subscription %s references an unknown room", sub.ID)
+				require.Equal(t, room.Type, sub.RoomType,
+					"subscription.list filters on the denormalized roomType")
+				require.True(t, sub.Open,
+					"subscription.list excludes rows explicitly persisted with open=false")
+				require.NotEmpty(t, sub.Name,
+					"subscription.list sorts and displays the denormalized subscription name")
+			}
+		})
+	}
+}
+
 func TestBuildFixtures_FewerUsersThanRooms_PadsToTwoMembers(t *testing.T) {
 	// Synthetic preset: 3 users, 5 rooms — round-robin alone leaves rooms 3
 	// and 4 with fewer than 2 members, exercising the padding branch.

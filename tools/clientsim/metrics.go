@@ -36,9 +36,8 @@ type metrics struct {
 	// which is not the same question — a client can be connected while
 	// missing rooms, and that gap is what the exit gate judges.
 	ConnsReady prometheus.Gauge
-	// ConnsReadyPeak is the high-water mark of ConnsReady. The gate reads
-	// the peak, not the final value, because SIGTERM drains the fleet to
-	// zero before the summary runs.
+	// ConnsReadyPeak is the high-water mark of ConnsReady. The gate requires
+	// both this initial reachability proof and a pre-drain terminal snapshot.
 	ConnsReadyPeak   prometheus.Gauge
 	AuthDuration     prometheus.Histogram
 	ConnectDuration  prometheus.Histogram
@@ -69,8 +68,10 @@ type metrics struct {
 
 	// readyNow backs ConnsReady so the peak can be maintained without
 	// reading a gauge's value back out of the registry.
-	readyNow  atomic.Int64
-	readyPeak atomic.Int64
+	readyNow      atomic.Int64
+	readyPeak     atomic.Int64
+	readyAtDrain  atomic.Int64
+	readyCaptured atomic.Bool
 }
 
 // readyInc/readyDec move the readiness gauge and keep the high-water mark.
@@ -93,6 +94,14 @@ func (m *metrics) readyDec() {
 	m.ConnsReady.Set(float64(m.readyNow.Add(-1)))
 }
 
+// captureReadyAtDrain records the fleet before cancellation drains every
+// connection and drives readyNow to zero. Store the value before publishing
+// the captured flag so readyGate never observes an uninitialized snapshot.
+func (m *metrics) captureReadyAtDrain() {
+	m.readyAtDrain.Store(m.readyNow.Load())
+	m.readyCaptured.Store(true)
+}
+
 func newMetrics() *metrics {
 	r := prometheus.NewRegistry()
 	m := &metrics{
@@ -100,7 +109,7 @@ func newMetrics() *metrics {
 		ConnsActive:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_active", Help: "Connections currently established."}),
 		ConnsConnecting: prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_connecting", Help: "Connections currently dialing the WebSocket transport. The auth exchange precedes this — see clientsim_auth_duration_seconds and clientsim_errors_total{stage=\"auth\"}."}),
 		ConnsReady:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready", Help: "Connections that completed the subscription walk with their full plan applied."}),
-		ConnsReadyPeak:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready_peak", Help: "High-water mark of clientsim_conns_ready; what the fleet-readiness exit gate judges."}),
+		ConnsReadyPeak:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready_peak", Help: "High-water mark of clientsim_conns_ready; paired with a pre-drain snapshot by the fleet-readiness exit gate."}),
 		AuthDuration:    prometheus.NewHistogram(prometheus.HistogramOpts{Name: "clientsim_auth_duration_seconds", Help: "POST /api/v1/auth exchange duration (successes only).", Buckets: handshakeBuckets}),
 		ConnectDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "clientsim_connect_duration_seconds", Help: "NATS WebSocket connect duration.", Buckets: handshakeBuckets}),
 		Disconnects:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_disconnects_total", Help: "Disconnections by reason."}, []string{"reason"}),

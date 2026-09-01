@@ -8,6 +8,11 @@ STEPS            ?=
 # reads ENCRYPTION_ENABLED via env interpolation (defaulting to true). Flip to
 # `ENCRYPTION_ENABLED=false make up` for a plaintext comparison run.
 export ENCRYPTION_ENABLED ?= true
+# Daily presets include rooms above room-service's production default. Export
+# the override into the root compose invocation instead of declaring a partial
+# room-service in this standalone overlay (which makes `docker compose run`
+# invalid because the service has neither image nor build).
+export MAX_ROOM_SIZE ?= 6000
 
 .PHONY: up stack-up overlay-up image seed teardown run run-dashboards run-max-rps run-daily down logs seed-members teardown-members reset-members run-sustained run-capacity seed-roomread teardown-roomread seed-botroom teardown-botroom run-max-room-size soak-seed soak-run soak-teardown
 

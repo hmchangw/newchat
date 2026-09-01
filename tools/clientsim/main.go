@@ -108,7 +108,20 @@ func run(ctx context.Context) error {
 		return newSimClient(account, &cfg, mintClient, m)
 	}
 
-	swarmErr := runSwarm(ctx, shard, cfg.RampRate, cfg.ChurnRate, factory)
+	// Snapshot readiness at the shutdown boundary, then propagate the caller's
+	// cancellation into the swarm. Passing ctx directly would drain every
+	// connection before the gate could distinguish a recovered fleet from one
+	// that remained collapsed after a fault.
+	swarmCtx, cancelSwarm := context.WithCancel(context.WithoutCancel(ctx))
+	captured := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		m.captureReadyAtDrain()
+		cancelSwarm()
+		close(captured)
+	}()
+	swarmErr := runSwarm(swarmCtx, shard, cfg.RampRate, cfg.ChurnRate, factory)
+	<-captured
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

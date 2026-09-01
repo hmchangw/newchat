@@ -258,22 +258,26 @@ func TestReadyGate(t *testing.T) {
 	cases := []struct {
 		name    string
 		peak    int
+		current int
 		target  int
 		ratio   float64
 		wantErr bool
 	}{
-		{"full fleet", 100, 100, 0.95, false},
-		{"within tolerance", 96, 100, 0.95, false},
-		{"exactly at threshold", 95, 100, 0.95, false},
-		{"below threshold", 94, 100, 0.95, true},
-		{"zero connections", 0, 100, 0.95, true},
-		{"gate disabled", 0, 100, 0, false},
-		{"empty shard", 0, 0, 0.95, false},
+		{"full fleet", 100, 100, 100, 0.95, false},
+		{"within tolerance", 100, 96, 100, 0.95, false},
+		{"exactly at threshold", 100, 95, 100, 0.95, false},
+		{"peak reached but fleet collapsed", 100, 20, 100, 0.95, true},
+		{"never reached threshold", 94, 94, 100, 0.95, true},
+		{"zero connections", 0, 0, 100, 0.95, true},
+		{"gate disabled", 0, 0, 100, 0, false},
+		{"empty shard", 0, 0, 0, 0.95, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newMetrics()
 			m.readyPeak.Store(int64(tt.peak))
+			m.readyNow.Store(int64(tt.current))
+			m.captureReadyAtDrain()
 			err := readyGate(m, tt.target, tt.ratio)
 			if tt.wantErr {
 				require.Error(t, err)

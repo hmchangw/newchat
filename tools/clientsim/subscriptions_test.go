@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,6 +67,9 @@ func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
 		defer fc.mu.Unlock()
 		return fc.cbSubs[updSubj] != nil
 	}, 3*time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
 
 	fc.mu.Lock()
 	fc.subChanErr = errors.New("boom")
@@ -75,6 +79,8 @@ func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
 	_, open := s.roomSubs["rX"]
 	s.mu.Unlock()
 	require.False(t, open, "failed open must not be recorded")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"a failed live open must demote readiness")
 
 	// Because roomSubs is the dedupe source of truth, a repeat add retries.
 	fc.deliverCB(t, updSubj, updJSON("added", "rX", "channel", nil))
@@ -82,6 +88,35 @@ func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
 	_, open = s.roomSubs["rX"]
 	s.mu.Unlock()
 	assert.True(t, open, "repeat added must retry after a failed open")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"repairing the last missing room must restore readiness")
+}
+
+func TestSimClient_LiveRepairWaitsForEveryMissingRoom(t *testing.T) {
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+
+	updSubj := subject.SubscriptionUpdate("user-lc")
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	for _, roomID := range []string{"r1", "r2"} {
+		fc.mu.Lock()
+		fc.subChanErr = errors.New("boom")
+		fc.mu.Unlock()
+		fc.deliverCB(t, updSubj, updJSON("added", roomID, "channel", nil))
+	}
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+
+	fc.deliverCB(t, updSubj, updJSON("added", "r1", "channel", nil))
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"one repaired room must not hide another missing room")
+
+	fc.deliverCB(t, updSubj, updJSON("added", "r2", "channel", nil))
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"readiness returns only after every missing room is repaired")
 }
 
 func TestSimClient_BootstrapWalk_DoesNotRevertMidWalkUpdates(t *testing.T) {
@@ -163,6 +198,41 @@ func TestSimClient_Resync_CoalescesConcurrentWalks(t *testing.T) {
 	first.Wait()
 	assert.Equal(t, before+2, fc.reqCount.Load(),
 		"the in-flight walk plus exactly one coalesced follow-up — collapsed, but never dropped")
+}
+
+func TestSimClient_Resync_RetriesUntilResponderRecovers(t *testing.T) {
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}, HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	before := fc.reqCount.Load()
+	fc.failNextRequests(nats.ErrNoResponders)
+	s.markConnDown()
+	s.markConnUp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		s.resync(ctx)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		return fc.reqCount.Load() >= before+2 &&
+			promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 10*time.Millisecond,
+		"a transient no-responders window must not leave the client permanently not-ready")
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("resync did not finish after the responder recovered")
+	}
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("resync")), 0.001)
 }
 
 // A room subscription that fails to open leaves the client silently

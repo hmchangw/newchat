@@ -18,20 +18,19 @@ The two tools live in separate compose projects, so the pool artifact is
 handed over through the host:
 
 ```bash
-# 1. Base stack + fixtures, emitting the pool artifact. The seeder writes
-#    into loadgen's named volume, so keep the container to copy it out of
-#    (no --rm) instead of losing it on exit:
-make up
+# 1. Base stack + fixtures, emitting the pool artifact. Keep the one-off
+#    container so the artifact can be copied from its writable /tmp (no --rm):
+make -C tools/loadgen/deploy stack-up
 docker compose -f tools/loadgen/deploy/docker-compose.yml run \
-  --name clientsim-seed loadgen \
-  seed --preset=medium --pool-out=/var/lib/loadgen/ledger/pool.json
+  --build --entrypoint /loadgen --name clientsim-seed loadgen \
+  seed --preset=medium --pool-out=/tmp/pool.json
 
 # 2. Lift the artifact onto the host, then drop the seeder container:
-docker cp clientsim-seed:/var/lib/loadgen/ledger/pool.json ./pool.json
+docker cp clientsim-seed:/tmp/pool.json ./pool.json
 docker rm clientsim-seed
 
 # 3. clientsim overlay (side issuer + clientsim container):
-docker compose -f tools/clientsim/deploy/docker-compose.yml up -d
+docker compose -f tools/clientsim/deploy/docker-compose.yml up -d --build --wait
 
 # 4. Push the artifact into the clientsim volume and run:
 docker compose -f tools/clientsim/deploy/docker-compose.yml cp \
@@ -48,11 +47,10 @@ address, default `:2112`; the overlay maps it to host `:2113`). The handler
 is mounted at the server root, so any path works — `/metrics` included, for
 a k8s ServiceMonitor.
 
-Nothing scrapes it automatically: the loadgen overlay's Prometheus keeps
-only the `chat-local-services` compose project in its Docker service
-discovery, and this overlay is its own project. Point a scrape config at the
-address yourself (real clusters configure this through ops-owned manifests,
-not the local YAML in this repo).
+The loadgen dashboards profile scrapes it automatically as the static target
+`clientsim:2112`; both compose projects join the `chat-local` network. Real
+clusters configure the equivalent target through ops-owned manifests, not
+the local YAML in this repo.
 
 ## Configuration
 
@@ -117,15 +115,18 @@ of its rooms (`clientsim_errors_total{stage="room_subscribe"}`) is active
 but not ready, and stays that way until a live update or a post-reconnect
 resync repairs it.
 
-`clientsim_conns_ready_peak` is the high-water mark, and it is what the exit
-gate judges — the final value is always zero because SIGTERM drains the
-fleet before the summary runs.
+`clientsim_conns_ready_peak` proves the fleet reached the requested floor.
+The exit gate also snapshots the current ready count immediately before
+SIGTERM drains the fleet, so a fleet that reached the floor and then stayed
+collapsed after a fault does not exit successfully.
 
 ### Exit codes
 
-- **0** — the run held at least `CLIENTSIM_MIN_READY_RATIO` of its shard.
-- **non-zero** — the fleet never reached that floor (a harness failure: the
-  numbers describe nothing), the drain timed out, or startup config was bad.
+- **0** — the run reached at least `CLIENTSIM_MIN_READY_RATIO` of its shard
+  and had recovered that floor at shutdown.
+- **non-zero** — the fleet never reached that floor, had not recovered it at
+  shutdown (both are harness failures: the numbers describe an invalid
+  window), the drain timed out, or startup config was bad.
 
 Loss evidence deliberately does **not** fail the run: in a failure test the
 disconnects and drops are the measurement, not a fault. Set

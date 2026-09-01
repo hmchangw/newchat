@@ -85,5 +85,6 @@ func TestMetrics_ReadyPeakExactUnderConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int64(n), m.readyPeak.Load(), "every increment must be reflected in the peak")
+	m.captureReadyAtDrain()
 	assert.NoError(t, readyGate(m, n, 1.0), "a fully-ready fleet must pass a 100%% gate")
 }

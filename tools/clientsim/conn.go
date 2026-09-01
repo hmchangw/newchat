@@ -97,25 +97,29 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 			s.markConnDown()
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			// Episode semantics only: one increment per Active->SlowConsumer
-			// transition; never add Subscription.Dropped() here (see the
-			// metric's doc comment and pkg/natsutil/slowconsumer.go).
-			if errors.Is(err, nats.ErrSlowConsumer) {
-				s.m.SlowConsumer.Inc()
-				return
-			}
-			// Everything else here is a fault no return value reveals — above
-			// all a subscription permission violation, which arrives on this
-			// channel while Subscribe() already returned nil. Swallowing it
-			// leaves a client counted ready that receives nothing.
-			s.m.Errors.WithLabelValues("async").Inc()
-			slog.Warn("nats async error", "account", s.account, "error", err)
+			s.handleAsyncError(err)
 		}),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &realConn{nc: nc, pendingMsgs: s.cfg.SubPendingMsgs, pendingBytes: s.cfg.SubPendingBytes}, nil
+}
+
+func (s *simClient) handleAsyncError(err error) {
+	// Episode semantics only: one increment per Active->SlowConsumer
+	// transition; never add Subscription.Dropped() here (see the metric's
+	// doc comment and pkg/natsutil/slowconsumer.go).
+	if errors.Is(err, nats.ErrSlowConsumer) {
+		s.m.SlowConsumer.Inc()
+		return
+	}
+	// Subscription permission violations and other asynchronous faults can
+	// arrive after Subscribe returned nil. The client can no longer prove it
+	// carries its full plan, so fail the readiness state closed.
+	s.m.Errors.WithLabelValues("async").Inc()
+	s.markNotReady()
+	slog.Warn("nats async error", "account", s.account, "error", err)
 }
 
 // disconnectReason maps common close errors to a bounded label set so the
