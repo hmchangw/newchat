@@ -11,7 +11,7 @@ import (
 func TestFormatAddedSingle(t *testing.T) {
 	got := formatAddedSingle(
 		&model.User{EngName: "Alice", ChineseName: "愛麗絲"},
-		&model.User{EngName: "Bob", ChineseName: "鮑勃"},
+		"Bob 鮑勃",
 	)
 	assert.Equal(t, `"Alice 愛麗絲" added "Bob 鮑勃" to the chatroom`, got)
 }
@@ -39,12 +39,11 @@ func TestFormatAddedCounts(t *testing.T) {
 
 func TestAddedContent(t *testing.T) {
 	alice := &model.User{EngName: "Alice", ChineseName: "愛"}
-	bob := &model.User{EngName: "Bob", ChineseName: "鮑"}
-	lookup := func(a string) *model.User {
+	lookup := func(a string) string {
 		if a == "bob" {
-			return bob
+			return "Bob 鮑"
 		}
-		return nil
+		return ""
 	}
 	assert.Equal(t, `"Alice 愛" added "Bob 鮑" to the chatroom`,
 		addedContent(alice, []string{"bob"}, nil, lookup))
@@ -80,7 +79,7 @@ func TestWithoutAccount(t *testing.T) {
 func TestFormatRemovedUser(t *testing.T) {
 	got := formatRemovedUser(
 		&model.User{EngName: "Alice", ChineseName: "愛"},
-		&model.User{EngName: "Bob", ChineseName: "鮑勃"},
+		"Bob 鮑勃",
 	)
 	assert.Equal(t, `"Alice 愛" removed "Bob 鮑勃" from the chatroom`, got)
 }
@@ -91,7 +90,7 @@ func TestFormatRemovedOrg(t *testing.T) {
 }
 
 func TestFormatLeft(t *testing.T) {
-	got := formatLeft(&model.User{EngName: "Bob", ChineseName: "鮑勃"})
+	got := formatLeft("Bob 鮑勃")
 	assert.Equal(t, `"Bob 鮑勃" left the chatroom`, got)
 }
 
@@ -145,14 +144,14 @@ func TestDisplayName(t *testing.T) {
 }
 
 func TestFormatLeft_FallsBackToAccount(t *testing.T) {
-	got := formatLeft(&model.User{Account: "alice"})
+	got := formatLeft("alice")
 	assert.Equal(t, `"alice" left the chatroom`, got)
 }
 
 func TestFormatAddedSingle_SingleNameSide(t *testing.T) {
 	got := formatAddedSingle(
 		&model.User{EngName: "Alice"},
-		&model.User{ChineseName: "鮑勃"},
+		"鮑勃",
 	)
 	assert.Equal(t, `"Alice" added "鮑勃" to the chatroom`, got)
 }
