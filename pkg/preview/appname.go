@@ -2,6 +2,8 @@ package preview
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2/expirable"
@@ -41,9 +43,13 @@ func CachedAppNameLookup(inner AppNameLookup) AppNameLookup {
 // fall back to the composed display name.
 type AppNameCache struct {
 	cache *lru.LRU[string, string]
-	sf    singleflight.Group
-	one   AppNameLookup
-	many  AppNamesLookup
+	// sf keys by account, sfMany by miss-set. They are separate groups because the
+	// two carry different result types under keys that would otherwise collide on a
+	// single-account batch.
+	sf     singleflight.Group
+	sfMany singleflight.Group
+	one    AppNameLookup
+	many   AppNamesLookup
 }
 
 // NewAppNameCache builds the shared cache. Either inner may be nil when a caller
@@ -82,9 +88,9 @@ func (c *AppNameCache) Name(ctx context.Context, botAccount string) (string, err
 // rest to their composed names either way. Nothing from a failure is cached, so the
 // next call retries those accounts.
 //
-// Deliberately not singleflighted: the key is a set rather than an account, and this
-// half serves page reads rather than the per-message fan-out the single half sits on.
-// Concurrent pages sharing a cold bot cost one read each, then warm the cache.
+// Concurrent misses on the same set collapse to one read: a TTL expiry lets every
+// in-flight request miss at once, and without coalescing each would issue the same
+// query against a dependency that is, by then, plausibly the slow one.
 func (c *AppNameCache) Names(ctx context.Context, botAccounts []string) (map[string]string, error) {
 	names := make(map[string]string, len(botAccounts))
 	if len(botAccounts) == 0 || c.many == nil {
@@ -106,11 +112,57 @@ func (c *AppNameCache) Names(ctx context.Context, botAccounts []string) (map[str
 		return names, nil
 	}
 
-	fetched, err := c.many(ctx, misses)
+	v, err, _ := c.sfMany.Do(missSetKey(misses), func() (any, error) {
+		return c.loadNames(ctx, misses)
+	})
 	if err != nil {
 		return names, err
 	}
+	fetched, _ := v.(map[string]string)
+	for account, name := range fetched {
+		names[account] = name
+	}
+	return names, nil
+}
+
+// missSetKey canonicalises a miss set so the same accounts in any order share one
+// leader. NUL cannot appear in an account, so no two distinct sets collide.
+func missSetKey(misses []string) string {
+	sorted := append([]string(nil), misses...)
+	slices.Sort(sorted)
+	return strings.Join(sorted, "\x00")
+}
+
+// loadNames is the singleflight leader's body, split out so the recheck below is
+// testable without driving an interleaving from outside.
+//
+// It rechecks the cache because the caller's check and its Do are separate steps: a
+// caller can miss the outer check while a load is in flight, then reach Do after that
+// load finished and released the key, which makes it a NEW leader for an answer
+// already cached. Without this it would read again — the redundant read the cache
+// exists to stop.
+func (c *AppNameCache) loadNames(ctx context.Context, misses []string) (any, error) {
+	names := make(map[string]string, len(misses))
+	var cold []string
 	for _, account := range misses {
+		name, ok := c.cache.Get(account)
+		if !ok {
+			cold = append(cold, account)
+			continue
+		}
+		if name != "" {
+			names[account] = name
+		}
+	}
+	if len(cold) == 0 {
+		return names, nil
+	}
+
+	fetched, err := c.many(ctx, cold)
+	if err != nil {
+		return nil, err
+	}
+	for _, account := range cold {
 		// An account absent from the result has no app — a stable answer, cached as
 		// the empty name it is so one misconfigured bot stops re-reading.
 		name := fetched[account]

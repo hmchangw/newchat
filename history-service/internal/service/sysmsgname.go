@@ -80,7 +80,7 @@ func quoteRemoved(name string) string {
 //
 // An empty return means "nothing resolved": leave the row exactly as stored.
 func removedMemberName(account string, u *model.User, appNames map[string]string) string {
-	if name, ok := appNames[account]; ok && name != "" {
+	if name := appNames[account]; name != "" {
 		return name
 	}
 	if u == nil {

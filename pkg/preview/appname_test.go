@@ -301,3 +301,86 @@ func TestAppNameCache_NilInnersDegrade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
+
+// A cold bot under a burst of concurrent pages is exactly when the extra reads hurt
+// most: a TTL expiry lets every in-flight request miss at once. They must collapse
+// to one read, not one per request.
+func TestAppNameCache_NamesCollapsesConcurrentColdBatches(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		<-release
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+			assert.NoError(t, err)
+			assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+		}()
+	}
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int64(1), calls.Load(), "concurrent misses on one account set must collapse to one read")
+}
+
+// The same accounts in a different order are the same miss set, so they must share a
+// leader rather than each opening their own.
+func TestAppNameCache_NamesCollapsesRegardlessOfAccountOrder(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		<-release
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	orders := [][]string{{"a.bot", "b.bot"}, {"b.bot", "a.bot"}}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := c.Names(context.Background(), orders[i%2])
+			assert.NoError(t, err)
+			assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+		}()
+	}
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int64(1), calls.Load(), "account order must not split one miss set into two reads")
+}
+
+// The cache check and sf.Do are separate steps, so a caller can miss the check while a
+// load is in flight and then reach Do after that load completed and released the key —
+// arriving as a NEW leader for an answer already cached. That interleaving cannot be
+// driven from outside, so this pins the property the leader itself must hold.
+func TestAppNameCache_LoadNamesRechecksTheCacheBeforeReading(t *testing.T) {
+	var asked [][]string
+	c := NewAppNameCache(nil, func(_ context.Context, accounts []string) (map[string]string, error) {
+		asked = append(asked, append([]string(nil), accounts...))
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	// The first leader populates the cache, as the real one does.
+	got, err := c.loadNames(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+
+	// A post-completion leader for a set that is now warm must read nothing.
+	got, err = c.loadNames(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+	require.Len(t, asked, 1, "a leader arriving after the load completed must serve the cached answer")
+
+	// A set that is only partly warm reads just the cold half.
+	_, err = c.loadNames(context.Background(), []string{"a.bot", "c.bot"})
+	require.NoError(t, err)
+	require.Len(t, asked, 2)
+	assert.Equal(t, []string{"c.bot"}, asked[1])
+}
