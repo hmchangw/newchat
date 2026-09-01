@@ -63,3 +63,26 @@ Textbook CLAUDE.md layout — consumer-defined store, constructor DI, `pkg/subje
 - `low` — Add a Mongo readiness check alongside `natsutil.HealthCheck(nc)` at `main.go:104-106`; every request needs Mongo, but readiness only reflects NATS.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is **40.9% (198 stmts)** — below the 60% critical threshold — and the gap is not vanity padding: an entire client-facing handler and the whole Mongo store are at 0%.
+
+### Findings
+- `critical` — 40.9% statement coverage, far under the CLAUDE.md §4 80% floor (per `coverage_by_service.txt`).
+- `critical` — `handleSendDM` is **0.0% covered** — `bot-message-handler/handler.go:78`. Every DM-specific behaviour is untested: the `userID`-missing branch (`:80`), the `idgen.BuildDMRoomID` derivation (`:92`), and the DM-specific `Forbidden`/`BotNotARoomMember` reply (`:96`). `handler_test.go` exercises only `handleSendRoom` (13 of 13 tests).
+- `high` — zero integration tests and no `TestMain`: no `integration_test.go` in the directory, so all of `store_mongo.go` is 0% (`newStoreMongo`, `FindSubscription`, `FindRoom`, `ListMemberIDs`, `FindUser` — `store_mongo.go:21,29,50,70,93`). CLAUDE.md §4 states store implementations are covered by testcontainer integration tests; 29 services have `integration_test.go`, this one does not. The `ErrNotFound` translation at `store_mongo.go:42,62,102` — the exact contract every handler branch keys on — is completely unverified.
+- `medium` — `Register` is 0% (`handler.go:70`), so nothing asserts the two routes are bound to `subject.ServerBotMsgRoomSendPattern` / `ServerBotDMSendPattern`; a copy-paste swap of the two patterns would ship green.
+- `medium` — hand-rolled `fakeStore` (`handler_test.go:26-47`) instead of the mandated `go.uber.org/mock` mock in `mock_store_test.go`; `store.go` carries no `//go:generate mockgen` directive. 25 services follow the mandated pattern.
+- `low` — existing tests are otherwise good quality: table-driven with descriptive subtests (`handler_test.go:169,196`), independent state per test, publisher injected as an interface field, and a real security assertion that client-supplied mention fields are overwritten (`handler_test.go:280`).
+
+### Recommendations
+- `critical` — Add a `handleSendDM` test set mirroring the room suite: missing `userID` param, missing DM subscription → `forbidden/not_a_room_member`, DM room ID equals `idgen.BuildDMRoomID(bot, target)`, happy path publish subject/MsgID.
+- `high` — Add `integration_test.go` (build tag `integration`, `func TestMain(m *testing.M) { testutil.RunTests(m) }`, `testutil.MongoDB(t, "botmsghandler")`) covering the four store methods, both hit and `ErrNotFound` paths, plus `ListMemberIDs` on an empty room.
+- `medium` — Replace `fakeStore` with a mockgen mock: add `//go:generate mockgen` to `store.go` and regenerate into `mock_store_test.go`.
+- `medium` — Test `Register` against a fake router to pin both subject patterns.
+- `low` — Cover the `canonicalizeMentions` store-error branch (`handler.go:267,291`), currently the only untested error path in a 76.2%-covered function.
+
+---
