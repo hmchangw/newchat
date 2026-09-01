@@ -382,3 +382,61 @@ Similarly, the per-service file layout (`handler.go`, `routes.go`) has no sancti
 - `medium` — **Fix the six guarantee-claiming comments in §7.5**, prioritising `auth-service`'s `_INBOX` grant comment — it is the one that would cause a security regression if acted on.
 - `medium` — **Add a CronJob carve-out to §6** for `pkg/shutdown.Wait` and the per-service file layout, so six correct services stop reading as violations.
 - `low` — When a `CLAUDE.md` claim is load-bearing enough to justify deferring work — as §7.1's was — **cite the file and line it rests on**, so the next reader can check it in seconds rather than re-deriving it.
+
+---
+
+## 8. Cross-cutting risk #6 — shutdown races the fleet keeps re-introducing
+
+One defect shape appeared, independently, in **six services**, and in five of them the fix was already written and commented in a sibling:
+
+| Service | The race | Consequence |
+|---|---|---|
+| `notification-worker` | Invalidation goroutine in no `WaitGroup`; shutdown stops the iterator then closes the channel it sends into (`main.go:304-325`, `:416`, `:420`) | **Send on a closed channel panics the process** during a routine rolling restart. Found by 4 of 6 experts |
+| `push-notification-service` | Consume-loop goroutine not counted; `wg.Wait()` can see zero in-flight between `Next()` and `wg.Add(1)` (`main.go:76-89`, `:99-110`) | Handler **acks on a drained connection** — a lost push per restart that lands in the window |
+| `bot-message-worker` | Loop goroutine untracked; a message blocked on `sem <-` is invisible to `wg.Wait()` (`main.go:154-167`, `:179-190`) | Handler runs **against a closed Cassandra session** |
+| `outbox-worker` | Ordered FIFO lane uses `Consume` + `cc.Stop()`, tracked by nothing; `Closed()` never awaited (`main.go:149`, `:173`, `:179`) | A **membership forward races `nc.Drain()`** and fails |
+| `hr-sync-worker` | `cc.Stop()` returns immediately, Mongo disconnected two steps later (`main.go:96-102`, `:105-108`) | In-flight handler **hits a closed Mongo client** |
+| `bot-room-service` | Deferred cache-bust and key rotation run on the **request** context (`handler.go:436`, `:446-458`) | The safety nets fail **exactly when the slow-Mongo failure they exist for occurs** |
+
+The pattern is always the same: `Stop()` does not wait for a message already returned by `Next()`, and the goroutine that received it is outside the `WaitGroup`. **`message-worker/main.go:281-286` and `notification-worker/main.go:337-342` each count the loop itself and carry a comment naming this exact window** — the knowledge exists in the repo and did not propagate.
+
+- `high` — Add the loop goroutine to the `WaitGroup` in all six, and use `Drain()` + `<-Closed()` rather than `Stop()` where the o11y facade exposes it. Then **write it into `CLAUDE.md` §Graceful Shutdown as an explicit rule** — "the consume loop itself must be in the WaitGroup, not only the per-message goroutines" — because six independent implementations got it wrong the same way.
+
+---
+
+## 9. Prioritized fleet-wide action list
+
+Ordered by severity, then by impact ÷ effort. Items 1–4 are things that are wrong in production today. Items 5–8 are the systemic causes behind most of the 1,441 findings. Item 9 is the gate that could not run.
+
+| # | Sev | Action | Where | Why it is ranked here |
+|---|-----|--------|-------|----------------------|
+| 1 | `critical` | **Allow-list `drive_host` against the configured base-URL map** | `upload-service/handler.go:342-358` → `pkg/drive/uploader.go:136-140` | **The fleet's one genuinely `critical` finding.** The client picks, from a query parameter, which host receives the service's Drive API token. The allow-list already exists — `LoadBaseURLs` builds exactly the set of legitimate hosts — so this is a validation, not a design change. Fix `LoadBaseURLs`' fail-open behaviour in the same PR, or the control fails open too. |
+| 2 | `high` | **Make revocation revoke** | `admin-service` (see Chapter 5) | Found **independently by 4 of 6 experts** on that service. A revocation path that returns success without invalidating anything is worse than no revocation path: it is relied upon. |
+| 3 | `high` | **Move both auth-bypass branches behind `//go:build dev`** | `auth-service/handler.go:446-455` selected at `main.go:87`; the nil-validator panic at `handler.go:170` | An **authentication bypass compiled into the production binary**, gated by one boolean env var, on the front door of the entire system. A build tag turns a misconfiguration into an impossibility. Add the nil guard its sibling handler already has while there. |
+| 4 | `high` | **Shed load on the three unauthenticated bcrypt endpoints** | `auth-service` `POST /api/v1/auth`; `admin-service` `/v1/login`; `botplatform-service` `/api/v1/login` — and move `botRateLimit` ahead of `requireBot` (`botplatform-service/routes.go:40`) | ~50–100 ms of CPU per unauthenticated request, with no limiter anywhere in the chain. The botplatform ordering bug is the sharpest: **an invalid token is never rate-limited**, and because the session cache is positive-only, token spraying is an unmetered load generator against the Mongo the breaker exists to protect. `ginutil.MaxConcurrency` already exists and is wired in `user-service`. |
+| 5 | `high` | **Extract `run(ctx, cfg) error` from `main()` — fleet-wide** | Chapter 2; every service below the floor | **34 of 35 services fail the 80% merge gate, and it is one root cause repeated 34 times.** `message-gatekeeper` is the clean illustration: `main.go` at 2.4% while the rest of the package is ~91%. This single refactor clears the gate in most services **without one new container**, and it is what separates `translation-service` — the only passing service — from the rest. Do it as one mechanical PR per service, not as a quality initiative. |
+| 6 | `high` | **Fix the federation seams** | Chapter 4 | The origin pays for ordering guarantees the destination discards; five cross-service contracts are broken or mismatched; a third `chat.roomactivity` lane is undocumented and unowned; destination-axis validation is missing where event-type validation exists. These are the findings that produce **silent, delayed, per-site divergence** — the class hardest to diagnose from a bug report. |
+| 7 | `high` | **Declare each shared knob once, in the package that owns it** | Chapter 3 — nine knobs re-declared across twelve services | The defaults **have already diverged**: `MAX_CONCURRENCY` is 100 in `translation-service` and 256 everywhere else; `MINIO_BUCKET` is `required` in one service, `avatars` in another, empty in a third; `GRAPH_TLS_INSECURE_SKIP_VERIFY` defaults **`true` in three services and `false` in two**. `ROOM_KEY_RETIRED_TTL` is the one with teeth: CLAUDE.md states that a service configured short makes `key.get` **fail permanently for messages already on the wire**, and `bot-room-service` hardcodes it where all three peers take an override. |
+| 8 | `high` | **Fix the six shutdown races, then write the rule down** | Chapter 8 | Six services, one defect shape, and **the correct implementation with an explanatory comment already exists in two siblings.** Knowledge that does not propagate through code review needs to propagate through the rulebook. |
+| 9 | `high` | **Run `make sast` from a network-permitted runner before any of this ships** | `GLOBAL_PREP.md` | `gosec` passes and the 18 repo-owned semgrep rules are clean (0 findings, fixtures 2/2). **`govulncheck` and the semgrep registry packs could not run — `vuln.go.dev` and `semgrep.dev` return 403 under this environment's egress policy.** So the fleet's third-party CVE exposure is **unverified**, and CLAUDE.md §5 makes this a blocking CI gate. This audit cannot substitute for it. |
+| 10 | `high` | **Decide, in the open, what the three unwired capabilities are** | `push-notification-service` (`LogDispatcher` is the only dispatcher — every push is acked and dropped, no APNs/FCM call exists); `user-presence-service` (the snapshot RPC has no responder, incompatible payloads, and a 5× chunk mismatch); `bot-message-worker` (no create pins `USING TIMESTAMP`) | These are not bugs — the code present is fine. They are **capabilities the service name promises and the binary does not deliver**, and in each case nothing in the code says so. Either wire them or make the placeholder impossible to ship silently: fail startup without an explicit opt-in, and say so in the deploy files. |
+| 11 | `medium` | **Reconcile `docs/client-api.md`, its derived views, and `CLAUDE.md` with the code** | Chapter 7 | Eight services have client-contract drift, including **a documented security property that does not exist** and **documented endpoints that 404**. Six of the eight are view-versus-canonical, which CLAUDE.md already forbids — consider generating the views. And correct the `bot-message-worker` exposure note first: it is wrong on both halves and is the stated justification for item 10's third case. |
+| 12 | `medium` | **Add the missing CI pipelines and integration stages** | `bot-message-handler`, `bot-message-worker`, `bot-room-service` have no `deploy/azure-pipelines.yml` (29 of 37 services do); **no service pipeline sets `-tags=integration`** | The three services with no pipeline include the two lowest-scoring in the fleet — that is not a coincidence. And across the fleet, integration tests that already exist and already assert the right invariants (`hr-sync-worker`'s "roles must never be touched", `teams-user-sync`'s whole store layer) **never run in the service's own CI**. For several services, adding the tag alone moves coverage over the floor. |
+
+### Sequencing
+
+**This week:** items 1–4. All four are small, local, and wrong in production now.
+
+**This month:** items 5, 8 and 12 together, as one mechanical pass per service — extract `run()`, fix the shutdown race, add the pipeline stage. They touch the same files, and item 5 makes item 8 testable for the first time.
+
+**This quarter:** items 6 and 7. Both are cross-service and need a single owner each; splitting them per-service is how they diverged in the first place.
+
+**Before any of it ships:** item 9.
+
+### What this audit could not tell you
+
+Three honest gaps, stated so they are not mistaken for clean results:
+
+1. **No dependency-CVE signal exists.** `govulncheck` and the semgrep registry packs were blocked by an organization egress policy (403). Per this environment's own guidance, policy denials are reported rather than routed around. The repo-owned rules and `gosec` did run and are clean.
+2. **`make sast`, the coverage profile and `make generate` were run once repo-wide, not 35 times.** They are repo-scoped tools and the results are identical either way, but it is a deviation from the skill's per-service script and is recorded as one. `make generate` produced **zero diff** — no stale mocks anywhere in the fleet.
+3. **Two `pkg/` tests failed under the loaded parallel run and passed in isolation.** They are classified load-flaky and were excluded from every service's findings so no agent double-counted them — but a flaky test under load is its own small finding, and it is not in the 1,441.
