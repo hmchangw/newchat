@@ -27,6 +27,11 @@
 > | Prefix | Means | Lives in |
 > |---|---|---|
 > | **PRE-n** | A precondition for *this run* — an operator step, checked off before the run starts | this document, §1 |
+>
+> **Watch for the collision.** `PRE-n` and `P<n>` are different things and both
+> appear in this document: `P4` and `P7` in §8 and §5 are **instrumentation
+> tiers**, not preconditions. An earlier revision of this file renamed some of
+> them by mistake.
 > | **Gn** | A **gate** — external work (infra, product, app) that blocks one or more items in the programme, with a named owner | [`execution-priority-plan.md`](execution-priority-plan.md) §"Gate backlog" |
 > | **P1 / P2 / P3** | An **instrumentation priority tier** — how urgent a piece of missing telemetry is | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md), [`slo-measurement-map.md`](slo-measurement-map.md) |
 >
@@ -505,10 +510,24 @@ and denominator across two windows.
 
 Report it as **`SLO-1a approximate (lag-enforced) indicator`**, paired with the
 consumer-lag panel, and read a value near or above 100% as evidence of redelivery
-rather than as a good result. A hard gate on SLO-1a needs one of: logical-outcome
-dedup (the PRE-7 outcome ledger), max-delivery advisories, or loadgen's own
-authoritative read-back of run-owned message IDs — which the soak ledger already
-does per message and which is the cheapest of the three to reach for.
+rather than as a good result.
+
+**A hard gate on SLO-1a needs one of exactly two things**, and max-delivery
+advisories are **not** one of them: an advisory proves the broker stopped
+delivering a message, which says nothing about the ordinary redeliveries that
+double-count the success numerator, and nothing about the case where one message
+is lost and another is processed twice — the two cancel and the ratio reads
+100%.
+
+| Route | What it gives |
+|---|---|
+| **P7's logical-outcome dedup ledger** | One outcome per logical message; the real fix |
+| **loadgen's authoritative read-back** of run-owned message IDs | The soak ledger already does this per message — **the cheapest route**, and the one available now, though it is a client-observed verdict rather than the production boundary |
+| *(a per-window redelivery-bias bound)* | Would work in principle, but nothing exports per-message delivery counts, so it is not constructible today |
+
+Advisories add **terminal-delivery evidence and attribution** — which consumer
+stopped delivering — on top of whichever of those you use. They do not convert
+an attempt-based ratio into a logical one.
 
 ## 6. Read the validity gate *before* the ratios
 
@@ -798,8 +817,8 @@ labelled with. That is why G2 gates the run rather than being resolved during it
 |---|---|---|
 | **SLO-1b, SLO-2** | The enqueue counter and age histogram do not exist | P2a / P2b ([`p2-instrumentation-spec.md`](p2-instrumentation-spec.md)). A short `run --preset=realistic --rate=100` gives SLO-2 a one-sided bound in the meantime |
 | **SLO-3** | The soak connects with backend creds and never touches auth-service's HTTP leg | A separate short `max-rps --workload=login` |
-| **SLO-6** | The notification counter is per message, not per recipient | PRE-4 |
-| **SLO-8** | No `status` on the duration histogram, and the soak has no client-side SLO-8 scoring | PRE-4, or `max-rps --workload=search` for a client-side number |
+| **SLO-6** | The notification counter is per message, not per recipient | **P4** (the instrumentation tier — recipient-granular counters), not PRE-4 |
+| **SLO-8** | No `status` on the duration histogram, and the soak has no client-side SLO-8 scoring | **P4** (the search duration `status` label), or `max-rps --workload=search` for a client-side number |
 | **SLO-9** | Single-site driver | A second site |
 | **Anything about the ceiling** | This is a fixed-load run | Track 2 — the same ratios re-read at each ramp step |
 

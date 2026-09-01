@@ -345,7 +345,10 @@ that. `message-gatekeeper/handler.go:212` calls
 what the failure doc describes, and CLAUDE.md forbids it repo-wide.
 
 **What is left.** An outage *longer than the budget* still ends in terminal
-drops, and those are still invisible from consumer pending alone.
+drops. Those are invisible from **consumer pending** alone — pending returns to
+zero either way — but not invisible outright: the app terminal counter sees the
+handler-error path today, and loadgen's ledger sees the absence end-to-end. It is
+attribution and the un-acked paths that need advisories.
 
 **Verdict: verify the budget, do not hunt the drop.** The residual question is
 arithmetic — does the configured budget exceed the longest outage you intend to
@@ -374,7 +377,7 @@ it is twelve minutes and it exercises the same mechanism.
 |---|---|---|
 | **`chat_nats_terminal_failures_total{reason="max_deliver"}`** (`pkg/natsmetrics`, on `main` today) | The handler returned an error on its **final** delivery — the ordinary exhaustion path | Anything where the handler never completes: pod crash, OOM, hang, an `AckWait` expiry |
 | **loadgen's ledger** (`missing_after_deadline`) | End-to-end absence: the message never arrived, whatever killed it | Which consumer dropped it, and anything outside the run |
-| **Max-delivery advisories** | Completeness and **attribution** — including un-instrumented consumers and the un-acked paths the app counter cannot see | Nothing, but the stream is the platform team's to provision and is not available to us |
+| **Max-delivery advisories** | **Broker-side terminal attribution**: which consumer stopped delivering, including un-instrumented ones and the un-acked paths (crash, hang, `AckWait`) the app counter cannot see | **The business outcome.** An advisory says delivery stopped, not that the work failed — a handler that completed its side effect and then lost its Ack still produces one. Never read it as a loss claim; the ledger or a read-back decides that. Completeness is also platform-dependent: the stream is the platform team's to provision and is not available to us |
 
 
 

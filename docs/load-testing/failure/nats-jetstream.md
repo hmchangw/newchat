@@ -31,7 +31,7 @@
 
 | Service | Loadgen coverage | What is not asserted |
 |---|---|---|
-| message-gatekeeper | **Reconciled** (admission) | Its durable is not sampled; immediate-Nak exhaustion and reply loss are not enumerated |
+| message-gatekeeper | **Reconciled** (admission) | Its durable is not sampled. Delivery-budget exhaustion **is** counted by `chat_nats_terminal_failures_total{reason="max_deliver"}` when the handler errors on the final delivery; the un-acked paths and reply loss are not enumerated |
 | message-worker | **Partial** | Backlog sampling plus soak read-back exist; the Mongo-side thread writes are not read back |
 | broadcast-worker | **Partial** | Per-recipient delivery is exact with the recipient observer on; DM and partial-fanout loss is not |
 | notification-worker | **Traffic only** | Backlog and mute invalidation are not monitored |

@@ -170,7 +170,7 @@ Capturing `$JS.EVENT.ADVISORY.>` needs a stream provisioned on the NATS cluster,
 which is the platform team's territory and not available to us. That constraint
 matters less than it looks, for three reasons.
 
-**The severity was overstated, and the source doc is stale.**
+**The severity was overstated by an earlier revision of the source doc, since fixed in this branch.**
 An earlier revision of `failure/nats-jetstream.md` §3 said message-gatekeeper
 does an "immediate `Nak()` against `MaxDeliver=5`", so "a short fault can burn
 the whole delivery budget in seconds". The code does not do that: `message-gatekeeper/handler.go:212` calls

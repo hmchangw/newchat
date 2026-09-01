@@ -20,7 +20,7 @@
 | Done | Evidence it produced | What it did **not** produce |
 |---|---|---|
 | Cassandra Run A soak on staging (latest loadgen) | Schema/access patterns under sustained *realistic* load; ledger + observer evidence | No ceiling (non-destructive by decision D1/D8); no pathological shape; reads hit only run-generated, shallow, dense data (soak blind spot 11) |
-| Failure round 1 with the NATS / MongoDB / Cassandra teams (latest loadgen) | Per-dependency fault behaviour, recovery classification | No capacity number; no evidence for the silent-drop path X9 unless max-delivery advisories were collected |
+| Failure round 1 with the NATS / MongoDB / Cassandra teams (latest loadgen) | Per-dependency fault behaviour, recovery classification | No capacity number; X9 evidence is partial — `chat_nats_terminal_failures_total{reason="max_deliver"}` covers handler-error exhaustion today, and advisories would add attribution and the un-acked paths |
 
 **So the remaining work is exactly the three gaps below**, plus the pre-production
 set in §3.5:
@@ -191,7 +191,7 @@ Full derivation, arithmetic and per-item test design in
 | **3.5** | **X6a** — deployed TWCS `compaction_window_size` vs `MESSAGE_BUCKET_HOURS` | Cassandra | **Config assertion, not a test.** Do this first — it decides whether the completed soak's compaction evidence is interpretable | Minutes |
 | **3.6** | **X6b** — hot-room partition size (bucket is a fixed *time* window; no row cap) | Cassandra | `max-room-size --rooms-per-size=1` exists; never held long enough to fill a bucket | Long single-room hold |
 | **3.7** | **X4** — key-rotation storm on member removal (N × `key.get`) | room-service + Mongo | None | Small addition to 3.3 |
-| **3.8** | **X9 — largely mitigated, keep only the budget confirmation.** The premise (an immediate `Nak()` burning `MaxDeliver` in milliseconds) is wrong — see correction 7 below. What is left is confirming the *real* budgets under a long outage: gatekeeper and room-worker at the default `MaxDeliver=6` (~12.6 min client-side), and message-worker at **17** / broadcast-worker at **18**, raised by `stream.WithOutageRetryBudget` to span an hour | NATS | Possibly covered by failure round 1 — **check whether max-delivery advisories were collected**; if not, re-run | Re-run with an advisory consumer |
+| **3.8** | **X9 — largely mitigated, keep only the budget confirmation.** The premise (an immediate `Nak()` burning `MaxDeliver` in milliseconds) is wrong — see correction 7 below. What is left is confirming the *real* budgets under a long outage: gatekeeper and room-worker at the default `MaxDeliver=6` (~12.6 min client-side), and message-worker at **17** / broadcast-worker at **18**, raised by `stream.WithOutageRetryBudget` to span an hour | NATS | Partly covered by failure round 1. The three legs and their oracles are in [`extreme-scenarios.md`](extreme-scenarios.md) X9; run the 12-minute gatekeeper leg first | Per-consumer budget confirmation against the app terminal counter and the loadgen ledger. **Advisories are optional here** — they add attribution, not the verdict — and the stream is the platform team's |
 | **3.9** | **X10** — sparse/aged history walk | Cassandra | None — soak has no historical backfill | New seed span |
 | **3.10** | **X7** — reaction MAP width / collection tombstones (soak F4) | Cassandra | None | Isolated keyspace |
 | **3.11** | **X8** — cross-site membership burst through the `MaxAckPending=1` FIFO lane | NATS federation | **Blocked** — single-site driver | Needs D4 |
