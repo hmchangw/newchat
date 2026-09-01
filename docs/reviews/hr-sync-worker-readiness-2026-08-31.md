@@ -47,3 +47,26 @@ Correct-by-CLAUDE.md and worth noting: `errcode.Permanent(errcode.BadRequest(...
 - `low` — extend the `CapturePayload` denylist to `chat.hr.>` (workforce PII) or redact `mail`.
 
 ---
+
+---
+
+## 3. Architecture — 3 / 5
+
+Clean consumer/store/handler separation with proper DI and a `BOOTSTRAP_STREAMS` gate, undermined by a stream-ownership inversion and a shutdown path that never waits for in-flight work.
+
+### Findings
+- `high` — a **consumer creates the producer's stream**. `bootstrapStreams` is the only place in the repo that creates `HR-{siteID}` (`hr-sync-worker/bootstrap.go:29-37`); the publisher `teams-hr-sync` creates nothing (`teams-hr-sync/publisher.go:38,50,67` — no `CreateOrUpdateStream` anywhere in that service), while `search-sync-worker/main.go:306-307` states the model outright: "HR is owned by hr-syncer. search-sync-worker is a pure consumer … and must not create their schemas." Two consumers therefore hold contradictory beliefs about who owns HR.
+- `medium` — shutdown has no `wg.Wait()` equivalent. `cc.Stop()` returns immediately (`main.go:96-102`) and Mongo is disconnected two steps later (`main.go:105-108`), so an in-flight `HandleMessage` can hit a closed client. CLAUDE.md's worker order is `Stop → wg.Wait → Drain → disconnect`; the o11y facade exposes `Drain` for exactly this ("Stop for immediate teardown, Drain for drain-and-wait", `o11y@v0.11.0/nats/jetstream.go:183`) and `outbox-worker/main.go:201` documents the same race it guards with a WaitGroup.
+- `medium` — `bootstrapStreams` does not no-op when disabled; it issues `js.Stream()` per site (`bootstrap.go:39-41`). CLAUDE.md says the helper "no-ops when `Enabled=false`". The fail-fast is defensible engineering but is a deviation from binding project law, and it makes startup depend on all `SITE_IDS` streams pre-existing in the **local** NATS — with no `HRJetStreamDomain` escape hatch of the kind `search-sync-worker/main.go:64` needed for exactly this stream.
+- `low` — the Mongo implementation lives in `store.go:38-118` rather than `store_mongo.go`; peers split it (`roomlist-worker/store_mongo.go`, `message-worker/store_mongo.go`, `bot-message-worker/store_cassandra.go`).
+- `low` — `deploy/Dockerfile:7` copies `teams-hr-sync/transform/`, which this service does not import (its only non-stdlib imports are `pkg/*`, nats, mongo-driver, o11y). Dead build input.
+
+Correct: consumer-owned `Store` interface with three methods (`store.go:25-36`), constructor DI (`handler.go:19`), typed `caarlos0/env` config with `required,notEmpty` on URI/SITE_IDS, `mongoutil.PoolConfig` mounted as a named field (`config.go:20`), `stream.ConsumerSettings` with `envPrefix` (`config.go:22`), `pkg/shutdown.Wait` at 25s.
+
+### Recommendations
+- `high` — move HR stream creation to `teams-hr-sync` (the declared owner) and reduce this service to verify-only, or amend the two contradictory comments so one owner is named.
+- `medium` — replace `cc.Stop()` with `cc.Drain()` + wait on `Closed()` before `nc.Drain()`/Mongo disconnect.
+- `medium` — keep the verify branch but document the deviation in `bootstrap.go`, and add an `HR_JETSTREAM_DOMAIN` knob if this worker is really expected to drain remote sites' streams.
+- `low` — split `store_mongo.go` out; drop the unused `COPY` line in the Dockerfile.
+
+---
