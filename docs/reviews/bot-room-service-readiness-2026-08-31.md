@@ -190,3 +190,32 @@ Verified clean: `pkg/subject` builders used for every subject (no `fmt.Sprintf`)
 - `medium` — Add bot-room-service to the producer list in `pkg/outbox/outbox.go`'s package doc and CLAUDE.md §JetStream Streams OUTBOX bullet.
 - `low` — Delete `ALL_SITE_IDS`, `parsePeers`, and `handler.allSiteIDs`, or use them to reject a federation destination outside the configured peer set (which would also catch a peer outbox-worker has no consumer for).
 - `low` — Derive the sysmsg dedup suffix from stable inputs (sorted user IDs, or the caller's request ID) instead of `now()`, or drop the comment's determinism claim.
+
+---
+
+## 7. Performance — 3 / 5
+
+Clean goroutine hygiene, correct shutdown ordering and a bounded request guard, but every membership RPC is a serial per-user N+1 against Mongo with no batch cap, the room-key fan-out is unbounded inside a 10s deadline, and the two deferred recovery nets inherit that same deadline.
+
+### Findings
+- `high` — N+1 member resolution: `handleAdd` and `handleCreate` do one `FindUser` + one `UpsertSubscription` + one JetStream OUTBOX publish **per user, serially**, with no batch size cap on `req.UserIDs`/`req.Members` — `bot-room-service/handler.go:325`, `:333`, `:350`, `:243`, `:252`, `:263`; `pkg/model/bot.go:74`.
+  A 200-member add is ≥400 sequential Mongo round trips plus 200 blocking PubAcks inside a 10s `REQUEST_TIMEOUT` (`main.go:57`). Prior art for batching exists in-repo: `$in` reads (`room-service/store_mongo.go:867`, `:2014`) and `DeleteMany` (`room-worker/store_mongo.go:468`); `store.go` exposes no batch method at all.
+- `high` — `handleRemove` is the same N+1 (`FindUser` then `FindOneAndDelete` per user) — `bot-room-service/handler.go:466`, `:476`, `store_mongo.go:131`. Removal is the most expensive path because each removal also triggers a full-roster key rotation below.
+- `high` — Both deferred safety nets run on the **cancelled** request context. `defer subauthcache.BustSubs(c, …)` (`handler.go:436`) and the deferred `rotateAndFanOut(c, roomID)` (`handler.go:446-458`) take `c`, whose deadline is set by `HandlerTimeout` (`pkg/natsrouter/middleware.go:191`, wired at `pkg/natsrouter/guard.go:69`, `main.go:76`). The failure mode these defers exist for — a slow/failing Mongo mid-batch — is exactly the one that exhausts the 10s budget, so on timeout the bust and the rotation both fail immediately against `context.DeadlineExceeded`, leaving removed accounts authorized for the L2 TTL and still holding a working key. The N+1 above makes deadline exhaustion likely rather than theoretical.
+- `medium` — Room-key fan-out is O(room size) serial publishes with an unbounded roster load: `ListRoomMemberAccounts` does a `Find` with no limit and `cur.All` into a slice (`store_mongo.go:169-183`), then `fanOutKey` loops `SendData` per account (`handler.go:553-559`), all inside the request path (`handler.go:589`). Removing one member from a 5k-member room does 5k publishes before the RPC replies.
+- `medium` — `ListRoomMemberAccounts` projects `{"u.account": 1}` without `"_id": 0` (`store_mongo.go:171`), so the read cannot be served covered by the `roomId_1_u.account_1` index the service verifies at startup (`store_mongo.go:36`) and must fetch every subscription document. `DeleteSubscription` gets this right (`store_mongo.go:135`).
+- `medium` — Every create/add/remove reply blocks on a JetStream PubAck for a **best-effort, failure-logged-only** system message, with a 2s timeout charged to the client's latency budget — `sysmsg.go:62-68`, called at `handler.go:270`, `:379`, `:520`.
+- `low` — `FindUser` over-projects: `engName`, `chineseName` and `roles` are fetched (`store_mongo.go:155`) but only `ID`/`Account`/`SiteID` are ever read (`handler.go:253-263`, `:334-350`, `:489`); the owner participant comes from the identity header (`handler.go:199`), not the user doc. `roles` is an array — this is per-member on the N+1 path.
+- `low` — `handleAdd` resolves (and may *mint*) the room key before knowing whether any member is new (`handler.go:319`), so an empty or all-duplicate batch still pays a `keyStore.Get` and can write a fresh key into a legacy room.
+- `nitpick` — `fanOutKey` calls `keySender.SendData` (`handler.go:556`), which discards the caller's context via `context.Background()` (`pkg/roomkeysender/roomkeysender.go:63-64`); `SendDataContext` exists and would keep the failure metric trace-correlated.
+
+Not findings, verified: no goroutines are launched in service code, so no leak surface; no `time.Sleep`; no JetStream consumers, so `jsretry`/`BackOff` rules do not apply; `encoding/json` is correct here (not a designated sonic hot-path worker); `FindRoom`/`FindUser`/`DeleteSubscription` project explicitly and handle `mongo.ErrNoDocuments`; no `$lookup`; indexes are ensured at startup with a bounded context (`main.go:107-111`).
+
+### Recommendations
+- `high` — Add `FindUsers(ctx, ids []string) (map[string]*model.User, error)` (`$in`) and a bulk `UpsertSubscriptions` (`BulkWrite`, unordered) to `store.go`; collapse the three loops to one batch read + one bulk write, keeping the per-user newly-added diff from `BulkWriteResult`.
+- `high` — Cap batch size (`len(UserIDs)`/`len(Members)`) with an `errcode.BadRequest` above a configured limit, so a single RPC cannot exceed the request budget.
+- `high` — Run the deferred bust and deferred rotation on a context detached from the request deadline (`context.WithoutCancel(c)` plus a short independent timeout), so the recovery nets survive the timeout they exist to cover.
+- `medium` — Add `"_id": 0` to the `ListRoomMemberAccounts` projection to make it index-covered, and drop `engName`/`chineseName`/`roles` from the `FindUser` projection.
+- `medium` — Bound and parallelize the key fan-out: page `ListRoomMemberAccounts` (or `SetBatchSize`) and publish with a small bounded worker pool joined by `sync.WaitGroup` before returning.
+- `low` — Move `keyPairOrHeal` in `handleAdd` after the first newly-added member is known, so no-op batches cost nothing.
+- `low` — Make the sysmsg publish non-blocking on the reply (publish after responding, or via a bounded worker with an explicit termination path wired into `shutdown.Wait`).
