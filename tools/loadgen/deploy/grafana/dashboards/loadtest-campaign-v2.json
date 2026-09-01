@@ -1,0 +1,5503 @@
+{
+  "uid": "load-test-campaign-v2",
+  "title": "Load Test Campaign (Candidate)",
+  "description": "Candidate decision-first dashboard. It separates historical observation coverage from steady-state throughput and keeps workload-specific diagnostics collapsed.",
+  "tags": [
+    "loadgen",
+    "soak",
+    "failure-test",
+    "stress-test",
+    "candidate"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
+        "type": "textbox",
+        "name": "target_rps",
+        "label": "Target RPS",
+        "query": "50",
+        "current": {
+          "text": "50",
+          "value": "50"
+        },
+        "options": [
+          {
+            "text": "50",
+            "value": "50",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false,
+        "description": "The rate passed to the active loadgen command. The overview uses it to calculate achieved-load percentage across message, soak, member, and bot-room modes."
+      },
+      {
+        "type": "query",
+        "name": "loadgen_job",
+        "label": "Loadgen scrape job",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values({__name__=~\"loadgen_.+\"}, job)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values({__name__=~\"loadgen_.+\"}, job)",
+          "refId": "loadgen_job"
+        },
+      "current": {
+        "selected": true,
+        "text": "loadgen",
+        "value": "loadgen"
+      },
+        "hide": 0,
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "sort": 1,
+        "skipUrlSync": false,
+        "description": "Prometheus scrape job that exports loadgen_* metrics. Runtime process/go panels use the same job so local exporter processes cannot be mistaken for loadgen."
+      },
+      {
+        "type": "query",
+        "name": "namespace",
+        "label": "Namespace",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values({__name__=~\"loadgen_.+\"}, namespace)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values({__name__=~\"loadgen_.+\"}, namespace)",
+          "refId": "namespace"
+        },
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "hide": 0,
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "sort": 1,
+        "skipUrlSync": false,
+        "description": "Namespace the loadgen pod runs in. Every panel is scoped to it, including the kube-state joins for memory and CPU limits, which key on namespace and pod. All is the default and also the only working value outside Kubernetes -- the repo's local docker-compose stack emits no namespace label, and the selector matches series that lack it."
+      },
+      {
+        "type": "textbox",
+        "name": "pod",
+        "label": "Pod name filter",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false,
+        "description": "Regex matched against the pod name. Together with Loadgen scrape job, it scopes the shared process_*, go_* and kube_pod_container_* metrics. The trailing pipe lets the pattern match the bundled local scrape, whose series have no pod label; the job selector still excludes exporter processes. Narrow it to one pod name to isolate a single Kubernetes loadgen process."
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "id": 65,
+      "title": "How to read this campaign",
+      "description": "Start with whether the selected window was observed, then verify steady-state load, impact, latency, errors, backlog, and recovery. Workload-specific diagnostics stay collapsed.",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Read left to right\n1. **Observation coverage** should be at least 95% for the selected window.\n2. **Steady-state attainment** should be at least 95%; startup and shutdown tails are intentionally excluded by the median.\n3. **SOAK ONLY / NOT APPLICABLE** is expected for soak panels during a message, member, or bot-room campaign.\n4. **KUBERNETES METRIC UNAVAILABLE** is expected for Kubernetes-only panels in local Docker.\n5. Error panels show an explicit zero only when matching traffic or telemetry was observed; otherwise they remain **UNKNOWN**.\n6. Check **pipeline, failures, latency, backlog, and recovery**, then open collapsed rows only for diagnosis.\n\nSet **Target RPS** to the rate passed to loadgen. Status cards summarize the selected Prometheus window, not the state after loadgen stopped. Exact completed-run totals remain in the loadgen CLI summary."
+      },
+      "transparent": false
+    },
+    {
+      "type": "row",
+      "id": 4,
+      "title": "1. Campaign summary",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 66,
+      "title": "Observation coverage",
+      "description": "Average scrape health across the selected historical window while loadgen metrics were observable. Unlike a point-in-time freshness check, stopping loadgen after a successful run does not turn the whole campaign into UNKNOWN.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * avg_over_time((min(up{job=~\"$loadgen_job\"}))[$__range:$__interval])",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "observed scrape health"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "UNKNOWN",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "gauge",
+      "id": 67,
+      "title": "Steady-state target attainment",
+      "description": "Median achieved rate across the selected window divided by Target RPS. The median represents sustained load and avoids treating startup or shutdown tail samples as the campaign result. Exact whole-run totals remain in the CLI summary.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * quantile_over_time(0.5, (((sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"sent\"}[$__rate_interval]))) or sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval]))))[$__range:$__interval]) / $target_rps",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "legendFormat": "steady-state attainment"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "UNKNOWN",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "Target vs achieved throughput",
+      "description": "Target and observed send/publish rate. Startup and shutdown tails remain visible for diagnosis; use Steady-state target attainment above for the campaign-level throughput decision.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "vector($target_rps)",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "target/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"sent\"}[$__rate_interval])) or sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "achieved/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": [],
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 68,
+      "title": "Service pipeline throughput",
+      "description": "Service-side processing rates. These counters are attempts/outcomes, not a strict loss-proof funnel: redelivery and fan-out can make stages differ. Use the shape to locate where throughput stops keeping up, then confirm with backlog and terminal failures.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(message_gatekeeper_messages_total{result=\"accepted\"}[$__rate_interval]))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "gatekeeper accepted/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(message_worker_persistence_total{result=\"success\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "Cassandra persistence attempts/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(broadcast_worker_recipient_deliveries_total{result=\"success\"}[$__rate_interval]))",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "broadcast publish attempts/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(notification_worker_outcomes_total[$__rate_interval]))",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "notification outcomes/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": [],
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 69,
+      "title": "Service-side terminal failures",
+      "description": "Production-side work that will receive no further application attempt, grouped by service, consumer, and reason. This is the fastest way to locate an enumerable loss after the loadgen reports impact.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(chat_nats_terminal_failures_total[$__rate_interval])) or on() (0 * ((sum(rate(message_gatekeeper_messages_total{result=\"accepted\"}[$__rate_interval])) > 0) and on() (sum(rate(message_worker_persistence_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(broadcast_worker_recipient_deliveries_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(notification_worker_outcomes_total[$__rate_interval])) > 0)))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "terminal failures/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": [],
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 70,
+      "title": "User-visible latency",
+      "description": "User-visible latency from loadgen histograms. Prometheus histogram quantiles are bucket estimates, so the loadgen CLI summary remains the exact completed-run percentile source.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 18,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum(rate(loadgen_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "message E2 p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum(rate(loadgen_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "message E2 p99"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum(rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "soak RPC p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum(rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "soak RPC p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": [],
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 49,
+      "title": "Errors and retries",
+      "description": "Error and retry rates. Each zero baseline is emitted only when its corresponding traffic series is observed; otherwise the panel remains UNKNOWN rather than claiming a healthy zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 18,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (class) (rate(loadgen_soak_errors_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "soak errors/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(loadgen_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "loadgen publish errors/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(message_gatekeeper_messages_total{result=~\"rejected|retry|failed\"}[$__rate_interval])) or on() (0 * sum(rate(message_gatekeeper_messages_total[$__rate_interval])))",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "gatekeeper rejected/retry/failed/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(message_worker_persistence_total{result=\"error\"}[$__rate_interval])) or on() (0 * sum(rate(message_worker_persistence_total[$__rate_interval])))",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "legendFormat": "persistence errors/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(broadcast_worker_recipient_deliveries_total{result=\"failed\"}[$__rate_interval])) or on() (0 * sum(rate(broadcast_worker_recipient_deliveries_total[$__rate_interval])))",
+          "refId": "E",
+          "range": true,
+          "instant": false,
+          "legendFormat": "broadcast failures/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(notification_worker_outcomes_total{result=~\"publish_failed|failed\"}[$__rate_interval])) or on() (0 * sum(rate(notification_worker_outcomes_total[$__rate_interval])))",
+          "refId": "F",
+          "range": true,
+          "instant": false,
+          "legendFormat": "notification failed/publish_failed/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(loadgen_member_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+          "refId": "G",
+          "range": true,
+          "instant": false,
+          "legendFormat": "member publish errors/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(loadgen_botroom_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+          "refId": "H",
+          "range": true,
+          "instant": false,
+          "legendFormat": "bot-room publish errors/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 40,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "UNKNOWN — NO OBSERVED TRAFFIC",
+          "mappings": [],
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 59,
+      "title": "Consumer backlog and drain",
+      "description": "JetStream messages not yet delivered to each durable. Growth during traffic can be normal; a plateau or continued growth after load stops means the consumer is not catching up. This exporter-backed view works for every workload.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (stream_name, consumer_name) (jetstream_consumer_num_pending)",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{consumer_name}} ({{stream_name}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 56,
+      "title": "Recovery: operations still in flight",
+      "description": "A recovery view, not just a load view. Fault-ledger operations and JetStream pending/in-flight work should return to baseline after traffic or fault injection stops. If the selected window ends first, recovery is unconfirmed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(loadgen_failure_inflight{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\"})",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "legendFormat": "fault observations unresolved"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(jetstream_consumer_num_pending)",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "legendFormat": "JetStream pending"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(jetstream_consumer_num_ack_pending)",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "legendFormat": "JetStream in flight"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "noValue": "NO DATA",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 21,
+      "title": "2. Measurement validity (mode and environment specific)",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "panels": [
+        {
+          "type": "table",
+          "id": 5,
+          "title": "Soak run identity (selected window)",
+          "description": "Bounded run metadata published only in soak mode. SOAK ONLY / NOT APPLICABLE is expected for message, member, and bot-room campaigns. During a soak campaign, an empty result means loadgen was not scraped and all soak evidence is unreliable.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 34
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "last_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "pod",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true,
+                  "__name__": true,
+                  "job": true,
+                  "instance": true,
+                  "namespace": true
+                },
+                "renameByName": {
+                  "environment": "environment",
+                  "scenario": "scenario",
+                  "traffic_profile": "traffic profile",
+                  "pod": "pod",
+                  "Value": "up"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "SOAK ONLY / NOT APPLICABLE",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "id": 7,
+          "title": "OOM-killed loadgen containers (Kubernetes only)",
+          "description": "kube-state-metrics last-terminated reason for loadgen pods. Any non-zero value means a loadgen container was OOM-killed and the run is suspect. KUBERNETES METRIC UNAVAILABLE is expected in local Docker and does not prove that there were no OOM kills.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 43
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(kube_pod_container_status_last_terminated_reason{namespace=~\"$namespace\", pod=~\"$pod\",reason=\"OOMKilled\"})",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "KUBERNETES METRIC UNAVAILABLE",
+              "mappings": [],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "gray",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 8,
+          "title": "Loadgen memory limit utilization (Kubernetes only)",
+          "description": "RSS as a percentage of the Kubernetes container memory limit. KUBERNETES METRIC UNAVAILABLE is expected in local Docker; use the absolute RSS and Go heap panel instead. In Kubernetes, an empty result means kube resource-limit labels cannot be joined and must not be read as 0%.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 43
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "100 * process_resident_memory_bytes{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"} / on (namespace, pod) group_left() sum by (namespace, pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"$pod\",resource=\"memory\"})",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "KUBERNETES METRIC UNAVAILABLE",
+              "mappings": [],
+              "unit": "percent",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 9,
+          "title": "Loadgen memory: RSS, Go heap, next GC",
+          "description": "RSS is what the OOM killer sees. The gap between RSS and heap-in-use is off-heap: cgo, mmap'd WAL pages, and the runtime's own arenas -- invisible to go_memstats_*. A rising gap with a flat heap is the shape that preceded the earlier loadgen OOMs.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 51
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "process_resident_memory_bytes{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "RSS {{pod}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "go_memstats_heap_inuse_bytes{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "heap in use {{pod}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "go_memstats_next_gc_bytes{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "next GC {{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 10,
+          "title": "Loadgen CPU: used vs limit",
+          "description": "Cores consumed against the container CPU limit. Loadgen is an open-loop generator: once it is CPU-saturated it stops being able to offer the configured rate, and the scheduler-underrun series in the throughput row will rise at the same time. Read the two together before blaming the system under test.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 51
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "rate(process_cpu_seconds_total{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "used {{pod}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (namespace, pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"$pod\",resource=\"cpu\"})",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "limit {{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 11,
+          "title": "Loadgen runtime: goroutines and open files",
+          "description": "A goroutine count that climbs and never returns is a leak in a lane; open file descriptors climbing is usually leaked connections or unclosed WAL segments. Both precede an OOM.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 59
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "go_goroutines{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "goroutines {{pod}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "process_open_fds{job=~\"$loadgen_job\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "open fds {{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "id": 12,
+          "title": "Loadgen NATS connection (selected window)",
+          "description": "Worst connection state observed for each loadgen pool in the selected window. DISCONNECTED during an intentional NATS fault can be expected; outside that window it makes in-flight evidence unreliable. UNKNOWN means no connection telemetry was observed in the selected window.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 12,
+            "y": 59
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min_over_time(loadgen_nats_connected{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "legendFormat": "{{pool}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "UNKNOWN",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DISCONNECTED",
+                      "color": "red",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "CONNECTED",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "horizontal"
+          }
+        },
+        {
+          "type": "stat",
+          "id": 14,
+          "title": "Failure observers (selected window)",
+          "description": "Worst asynchronous failure-observer state in the selected soak window. DOWN means affected operations can resolve only as unverified. SOAK ONLY / NOT APPLICABLE is expected for campaigns that do not start failure observers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 64
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min_over_time(loadgen_failure_observer_up{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "legendFormat": "{{observer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "SOAK ONLY / NOT APPLICABLE",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "red",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "horizontal"
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 16,
+          "title": "Soak evidence ledger: WAL durability",
+          "description": "p99 of the grouped fsync barrier, failed append rate, mean group-commit batch size, and evidence-sidecar write rate. The ledger is the only record of what was intended; if appends error or the barrier stalls, operations are lost from the ledger and the campaign is INCONCLUSIVE rather than clean. Correlate latency with batch size before attributing dispatch shortfall to the system under test.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 64
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, result) (rate(loadgen_failure_wal_flush_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "flush p99 {{result}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_failure_wal_append_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "append p99"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (rate(loadgen_failure_wal_appends_total{namespace=~\"$namespace\", pod=~\"$pod\",result!=\"success\"}[$__rate_interval]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "append errors {{result}}/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (rate(loadgen_failure_wal_flush_batch_size_sum{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) / clamp_min(sum by (result) (rate(loadgen_failure_wal_flush_batch_size_count{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])), 0.000000001)",
+              "refId": "D",
+              "range": true,
+              "legendFormat": "flush mean batch {{result}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (claim) (rate(loadgen_failure_evidence_records_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "E",
+              "range": true,
+              "legendFormat": "evidence {{claim}} records/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "ops"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 17,
+          "title": "Soak evidence invalidations by reason",
+          "description": "Every condition that makes this campaign's evidence INCONCLUSIVE, by bounded reason. Any bar here means the Evidence tile at the top of the dashboard should be read as INCONCLUSIVE regardless of what the Impact tile says.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 72
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (increase(loadgen_failure_invalidations_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 18,
+          "title": "Soak ledger WAL size and abandoned journals",
+          "description": "WAL bytes on disk and journals retained from an earlier ledger epoch that will never be replayed. A growing WAL with no drain is what precedes the capacity invalidation; abandoned journals mean operations from a previous process are permanently unresolvable.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 72
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_failure_journal_bytes{namespace=~\"$namespace\", pod=~\"$pod\"} and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "WAL bytes"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_failure_abandoned_journals{namespace=~\"$namespace\", pod=~\"$pod\"} and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "abandoned journals"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "WAL bytes"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "id": 19,
+          "title": "Soak control plane (selected window)",
+          "description": "Worst Mongo-primary reachability and manifest-heartbeat state observed in the selected soak window. SOAK ONLY / NOT APPLICABLE is expected for other campaign modes. During soak, an empty result means the control plane was not observed.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 80
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min_over_time(loadgen_mongo_up{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "legendFormat": "Mongo reachable"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "(1 - max_over_time(loadgen_soak_heartbeat_degraded{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": false,
+              "instant": true,
+              "legendFormat": "manifest heartbeat healthy"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "SOAK ONLY / NOT APPLICABLE",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "red",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "horizontal"
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 20,
+          "title": "Soak control-plane freshness and attempts",
+          "description": "Seconds since the latest successful manifest heartbeat and latest completed Mongo primary Ping, plus both probes' attempt outcomes. A staleness line that climbs without resetting means the corresponding control-plane evidence is frozen; a recovered error counter preserves failures that occurred between scrapes.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 80
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "((time() - loadgen_soak_heartbeat_success_timestamp_seconds{namespace=~\"$namespace\", pod=~\"$pod\"}) and loadgen_soak_heartbeat_success_timestamp_seconds{namespace=~\"$namespace\", pod=~\"$pod\"} > 0) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "staleness"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (outcome) (increase(loadgen_soak_heartbeat_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "heartbeat {{outcome}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "((time() - loadgen_mongo_probe_timestamp_seconds{namespace=~\"$namespace\", pod=~\"$pod\"}) and loadgen_mongo_probe_timestamp_seconds{namespace=~\"$namespace\", pod=~\"$pod\"} > 0) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "mongo probe age"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (outcome) (increase(loadgen_mongo_probe_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"error\"}[2m])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "D",
+              "range": true,
+              "legendFormat": "mongo {{outcome}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 24,
+          "title": "Soak ledger accounting gaps",
+          "description": "untracked (by reason start/observe/abandon) means loadgen could not even record what happened; dropped means recovered operations were discarded at startup because the journal exceeded capacity. Both are strictly worse than bad: the outcome is unknown and unknowable.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 88
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (increase(loadgen_failure_untracked_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "untracked {{reason}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "increase(loadgen_failure_dropped_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "dropped at startup"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 26,
+          "title": "Soak observer validity: unverified vs eligible",
+          "description": "Numerator and denominator of the failure-evidence observer contract, pinned to scenario=message_soak. The interval is invalid when unverified exceeds max(3, ceil(0.001 * eligible)) for a lane and observer. A disabled observer is not eligible; NO DATA remains inconclusive.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 88
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane, observer) (increase(loadgen_failure_observations_total{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\",result=\"unverified\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{lane}} {{observer}} unverified"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane, observer) (increase(loadgen_failure_observer_eligible_total{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "{{lane}} {{observer}} eligible"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 64,
+          "title": "Soak reconcile capacity and lag",
+          "description": "Validity gate for fault windows. A sustained zero idle-claim rate means the reconciler has no spare capacity; p99 lag approaching SOAK_RECONCILE_DEADLINE means operations can expire unverified for want of a probe. Any reconcile_capacity, reconcile_lag_range, or lease_abort invalidation makes the affected interval INCONCLUSIVE.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 96
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (outcome) (rate(loadgen_failure_reconcile_claims_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{outcome}} claims/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(loadgen_failure_reconcile_lag_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "p99 lag"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (increase(loadgen_failure_invalidations_total{namespace=~\"$namespace\", pod=~\"$pod\",reason=~\"reconcile_capacity|reconcile_lag_range|lease_abort\"}[$__range])) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "{{reason}} invalidations"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "short"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 32,
+      "title": "3. Soak correctness (N/A for message runs)",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 34
+      },
+      "panels": [
+        {
+          "type": "stat",
+          "id": 1,
+          "title": "Evidence validity blockers",
+          "description": "Soak/failure only. Any non-zero value makes the affected evidence window INCONCLUSIVE. Zero is meaningful only while Telemetry is LIVE and traffic attainment is valid.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 35,
+            "w": 8,
+            "h": 5
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(increase(loadgen_failure_invalidations_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])) or on() (0 * count(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NOT APPLICABLE / UNKNOWN",
+              "mappings": [
+                {
+                  "type": "special",
+                  "options": {
+                    "match": "null",
+                    "result": {
+                      "text": "NOT APPLICABLE / UNKNOWN",
+                      "color": "gray",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "gray",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "id": 2,
+          "title": "Unrecovered impact",
+          "description": "Soak/failure only. Operations observed wrong or still missing after their deadline. A positive value is impact even if another evidence source is unavailable.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 35,
+            "w": 8,
+            "h": 5
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(increase(loadgen_failure_operations_total{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\",result=~\"bad|missing_after_deadline\"}[$__range])) or on() (0 * count(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NOT APPLICABLE / UNKNOWN",
+              "mappings": [
+                {
+                  "type": "special",
+                  "options": {
+                    "match": "null",
+                    "result": {
+                      "text": "NOT APPLICABLE / UNKNOWN",
+                      "color": "gray",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "gray",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "id": 3,
+          "title": "Correctness violations",
+          "description": "Soak/failure only. Read-back results that were missing, mismatched, or malformed. RPC availability errors are shown separately in Errors and retries.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 35,
+            "w": 8,
+            "h": 5
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(increase(loadgen_soak_verifications_total{namespace=~\"$namespace\", pod=~\"$pod\",class=~\"missing|mismatch|malformed\"}[$__range])) or on() (0 * count(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NOT APPLICABLE / UNKNOWN",
+              "mappings": [
+                {
+                  "type": "special",
+                  "options": {
+                    "match": "null",
+                    "result": {
+                      "text": "NOT APPLICABLE / UNKNOWN",
+                      "color": "gray",
+                      "index": 0
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "gray",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 22,
+          "title": "Terminal operation results",
+          "description": "Every fault-observation operation resolves to exactly one terminal result: good (observed correct), bad (observed wrong), unverified (no observer could decide), not_sent (proven never to have left loadgen), missing_after_deadline (never observed in time). not_sent is not loss -- it is proof the system was never asked. bad and missing_after_deadline are.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 40
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (increase(loadgen_failure_operations_total{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "table",
+          "id": 23,
+          "title": "Unrecovered operations by scenario and lane",
+          "description": "Where the loss landed. Empty means no operation in range finished bad or missing_after_deadline; it does not mean traffic was offered -- confirm that in the throughput row first.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 49
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (scenario, lane, result) (increase(loadgen_failure_operations_total{scenario=\"message_soak\",namespace=~\"$namespace\", pod=~\"$pod\",result=~\"bad|missing_after_deadline\"}[$__range]))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "lane",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "scenario": "scenario",
+                  "lane": "lane",
+                  "result": "result",
+                  "Value": "operations"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "operations",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "table",
+          "id": 25,
+          "title": "Read-back violations by action and field",
+          "description": "Soak wrote something, read it back, and the two disagreed. field names the column that differed. class=missing means the write is not there at all; mismatch means it is there with the wrong value; malformed means it could not be parsed. retryable_rpc and rpc_error are excluded here -- they are availability, not correctness.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 58
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (action, class, field) (increase(loadgen_soak_verifications_total{namespace=~\"$namespace\", pod=~\"$pod\",class=~\"missing|mismatch|malformed\"}[$__range]))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "action",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "action": "action",
+                  "class": "class",
+                  "field": "field",
+                  "Value": "violations"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "violations",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "table",
+          "id": 27,
+          "title": "Observation reasons",
+          "description": "The bounded reason behind each observation result -- this is where a search_index poison-ack or a room_state source disagreement shows up as a named cause rather than a bare unverified.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 67
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "topk(25, sum by (scenario, lane, observer, result, reason) (increase(loadgen_failure_observation_reasons_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "lane",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "scenario": "scenario",
+                  "lane": "lane",
+                  "observer": "observer",
+                  "result": "result",
+                  "reason": "reason",
+                  "Value": "count"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "count",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "stat",
+          "id": 28,
+          "title": "Mutation targets missing",
+          "description": "Soak mutations whose target row was still absent after the dedicated retry policy. Non-zero means a write soak believed it had made is not readable -- count it as loss, not as a slow read.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 76
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "increase(loadgen_soak_mutation_target_missing_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "mappings": [],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "id": 29,
+          "title": "Encryption preflight",
+          "description": "1 once this run proved a message reached Cassandra encrypted with the room DEK wrapped. 0 means not proven: skipped by configuration, still in flight, failed, or a loadgen mode that never runs the check. Treat a sustained 0 during a soak run as a finding, not any single 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 12,
+            "y": 76
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "last_over_time(loadgen_soak_encryption_preflight{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "NOT PROVEN",
+                      "color": "orange",
+                      "index": 0
+                    },
+                    "1": {
+                      "text": "PROVEN",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "stat",
+          "id": 30,
+          "title": "Operations recovered from the ledger",
+          "description": "Unresolved operations replayed from the persistent WAL at startup. Non-zero means loadgen restarted mid-campaign; correlate with the OOM tile above before trusting any before/after comparison across that point.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 12,
+            "x": 0,
+            "y": 81
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "increase(loadgen_failure_recovered_operations_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "mappings": [],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "textMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 53,
+          "title": "Proven not-sent by lane and reason",
+          "description": "Operations loadgen can prove never reached the network, split by lane. These are deliberately excluded from impact; a lane that is mostly not_sent is offering far less load than the pacing table's dispatched column suggests.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 81
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane, reason) (increase(loadgen_failure_not_sent_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{lane}} {{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 41,
+      "title": "4. Workload-specific diagnostics",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "panels": [
+        {
+          "type": "bargauge",
+          "id": 34,
+          "title": "Soak lane dispatch deficit",
+          "description": "Fraction of intended pacing events a lane did not dispatch. A lane with no intent in range is absent rather than 0% -- the ratio is undefined, and showing it as 0 would read as a healthy lane that is in fact not running at all.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 36
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "1 - (sum by (lane) (rate(loadgen_soak_dispatched_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) / sum by (lane) (rate(loadgen_soak_intended_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{lane}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "mappings": [],
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.02
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.1
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "minVizWidth": 8,
+            "minVizHeight": 16,
+            "valueMode": "color"
+          }
+        },
+        {
+          "type": "table",
+          "id": 35,
+          "title": "Soak per-lane pacing (all 14 lanes)",
+          "description": "One row per soak lane, so a lane that has silently stopped is visible as an empty row rather than as a missing line in a 14-series chart. sent, no_target and refused come from loadgen_soak_lane_attempts_total: dispatched counts scheduler slots, which a lane with an exhausted target pool still consumes, so only sent is offered load. underrun means the scheduler was too late to dispatch; lane sat / global sat mean the in-flight budget was full.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 45
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (loadgen_soak_configured_rate{namespace=~\"$namespace\", pod=~\"$pod\"})",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_intended_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "B",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_dispatched_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "C",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"sent\"}[$__rate_interval]))",
+              "refId": "D",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"no_target\"}[$__rate_interval]))",
+              "refId": "E",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"refused\"}[$__rate_interval]))",
+              "refId": "F",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_scheduler_underrun_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "G",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_lane_saturation_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "H",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (lane) (rate(loadgen_soak_global_saturation_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "I",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "lane",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "lane": "lane",
+                  "Value #A": "configured/s",
+                  "Value #B": "intended/s",
+                  "Value #C": "dispatched/s",
+                  "Value #D": "sent/s",
+                  "Value #E": "no target/s",
+                  "Value #F": "refused/s",
+                  "Value #G": "underrun/s",
+                  "Value #H": "lane sat/s",
+                  "Value #I": "global sat/s"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byType",
+                  "options": "number"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "(no target|refused|underrun|lane sat|global sat)/s"
+                },
+                "properties": [
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "text",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 0.01
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 36,
+          "title": "Soak operations by outcome",
+          "description": "Measured-phase operations only (phase=\"run\"; the seed and teardown phases are excluded because their rates say nothing about steady-state behaviour). skipped is loadgen declining to act, not a system failure.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 54
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (outcome) (rate(loadgen_soak_operations_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{outcome}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 40,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 37,
+          "title": "Publish rates by generator",
+          "description": "The non-soak generators. Each is only present in the loadgen mode that runs it, so an absent series here means that mode was not used, not that publishing stopped.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 54
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "message/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "member add/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "bot room/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 38,
+          "title": "Soak member candidate pool and room budget",
+          "description": "Candidates by lifecycle state, the rooms the create lane may still add, and whether the pool is currently degraded. A degraded pool is reversible and clears on its own; what matters is a lane showing no_target in the pacing table at the same time.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 62
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_soak_room_candidates{namespace=~\"$namespace\", pod=~\"$pod\"} and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "candidates {{state}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_soak_room_create_budget_remaining{namespace=~\"$namespace\", pod=~\"$pod\"} and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "room create budget"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_soak_room_pool_degraded{namespace=~\"$namespace\", pod=~\"$pod\"} and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "pool degraded"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 39,
+          "title": "Soak presence lane",
+          "description": "Virtual connections by the status the lane last asked for, the rate of published presence signals, and the result of each presence query comparison. A presence publish is unacknowledged and is never on its own evidence the server saw it -- only the check results are.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 62
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "loadgen_soak_presence_connections{namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "connections {{status}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (signal) (rate(loadgen_soak_presence_signals_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "signal {{signal}}/s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (rate(loadgen_soak_presence_checks_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "check {{result}}/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 40,
+          "title": "Soak room state observer sources",
+          "description": "Which source answered each room-state observation and how it turned out. A shift in source mix during a fault window changes what the room_state observer is actually proving, so read it before trusting that observer's verdicts.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 70
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (source, result) (rate(loadgen_soak_room_state_source_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{source}} {{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 42,
+          "title": "Soak RPC latency",
+          "description": "All soak actions together. Percentiles from Prometheus histograms are diagnostic only: they are interpolated within a bucket and aggregated across pods, so use them to see shape and movement, never as a pass/fail threshold for a campaign.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 70
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.50, sum(rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "p50"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "table",
+          "id": 43,
+          "title": "Soak RPC latency by action",
+          "description": "One row per action so a single slow action is readable at a glance. The top histogram bucket is 5s: an action whose real latency exceeds that reports at the bucket edge, so a p99 pinned near 5s means \"at least 5s\", not \"5s\".",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 78
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.50, sum by (le, action) (rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le, action) (rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, action) (rate(loadgen_soak_rpc_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "C",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (action) (rate(loadgen_soak_rpc_latency_seconds_count{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "D",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "action",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "action": "action",
+                  "Value #A": "p50",
+                  "Value #B": "p95",
+                  "Value #C": "p99",
+                  "Value #D": "rate/s"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "p(50|95|99)"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "p99",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 44,
+          "title": "Message path latency (E1 / E2)",
+          "description": "E1 is the gatekeeper ack; E2 is publish until the message is broadcast-visible. E2 minus E1 is the canonical-stream fan-out. Present only in message mode.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 87
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(loadgen_e1_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "E1 p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_e1_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "E1 p99"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(loadgen_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "E2 p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "D",
+              "range": true,
+              "legendFormat": "E2 p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 45,
+          "title": "Member-add latency (E1 / E2)",
+          "description": "E1 is the room-service reply; E2 is publish until room-worker emits the RoomMemberEvent, which reflects room-worker's ROOMS consumer throughput rather than any broadcast fan-out. A rising E2 with a flat E1 points at the ROOMS durable in the backlog row.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 87
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(loadgen_member_e1_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "E1 p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum(rate(loadgen_member_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "E2 p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_member_e2_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "E2 p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 46,
+          "title": "Bot-room latency by room size",
+          "description": "Publish-to-broadcast and room-service read latency bucketed by room size. This is the fan-out cost curve: if p95 grows with size, the cost is per recipient.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 95
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le, size) (rate(loadgen_botroom_e2e_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "e2e p95 size={{size}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le, size) (rate(loadgen_botroom_read_latency_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "read p95 size={{size}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 47,
+          "title": "Soak evidence durability latency",
+          "description": "The cost loadgen pays to record evidence: WAL append, the grouped fsync barrier, and the recipient sidecar flush. When these rise, measured latency above includes loadgen's own disk, so check here before attributing a regression to the system under test.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 95
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(loadgen_failure_wal_append_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) by (le))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "WAL append p99"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, result) (rate(loadgen_failure_wal_flush_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "WAL flush p99 {{result}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, claim) (rate(loadgen_failure_evidence_flush_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "evidence flush p99 {{claim}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "table",
+          "id": 50,
+          "title": "Soak error reasons",
+          "description": "The service-supplied reason behind each error class. This is the panel that turns \"internal errors are up\" into a named cause you can hand to a service owner.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 103
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "topk(25, sum by (action, class, reason) (increase(loadgen_soak_error_reasons_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__range]))) or on() (0 * max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "action",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "action": "action",
+                  "class": "class",
+                  "reason": "reason",
+                  "Value": "count"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "count",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 52,
+          "title": "Publish-side errors by reason",
+          "description": "Errors on the way out of loadgen, across the message, member and bot-room generators. saturated and underrun are loadgen's own back-pressure, not system failures -- read them together with the pacing table.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 112
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (rate(loadgen_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "message {{reason}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (rate(loadgen_member_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "member {{reason}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (rate(loadgen_botroom_publish_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "bot room {{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 54,
+          "title": "Soak target pool pressure",
+          "description": "Mutations skipped for lack of a usable target, and the result of re-probing quarantined candidates. Sustained exhaustion means the pool never recovers and the affected lanes are offering no load at all.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 112
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (reason) (rate(loadgen_soak_room_pool_exhausted_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "exhausted {{reason}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (rate(loadgen_soak_room_quarantine_probes_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "probe {{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 55,
+          "title": "Loadgen NATS outage duration",
+          "description": "p95 and p99 of completed disconnections per pool. Short reconnects during an injected NATS fault are expected; the question this panel answers is whether loadgen's own connectivity was stable outside the fault window.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 120
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(loadgen_nats_outage_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))) or on (pool) (0 * max by (pool) (max_over_time(loadgen_nats_connected{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "p95 {{pool}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, pool) (rate(loadgen_nats_outage_duration_seconds_bucket{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval]))) or on (pool) (0 * max by (pool) (max_over_time(loadgen_nats_connected{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "p99 {{pool}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 57,
+      "title": "5. Consumer backlog details",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "panels": [
+        {
+          "type": "table",
+          "id": 58,
+          "title": "Consumer telemetry (selected window)",
+          "description": "Worst telemetry availability, last pending value, and peak in-flight, redelivery, and stall values for each durable in the selected window. AVAILABLE THROUGHOUT means the sampler stayed readable; backlog columns determine whether the consumer kept up.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 37
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min by (durable) (min_over_time(loadgen_consumer_up{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (last_over_time(loadgen_consumer_pending{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "B",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (max_over_time(loadgen_consumer_ack_pending{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "C",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (max_over_time(loadgen_consumer_redelivered{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "D",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (max_over_time(loadgen_consumer_ack_floor_stall_seconds{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])) or on (durable) (-1 + 0 * max by (durable) (max_over_time(loadgen_consumer_up{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])))",
+              "refId": "E",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "durable",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true
+                },
+                "renameByName": {
+                  "durable": "durable",
+                  "Value #A": "telemetry throughout window",
+                  "Value #B": "last pending",
+                  "Value #C": "max ack pending",
+                  "Value #D": "max redelivered",
+                  "Value #E": "max ack floor stall (s)"
+                },
+                "indexByName": {}
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "NO DATA",
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              },
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "telemetry throughout window"
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "0": {
+                            "text": "UNAVAILABLE IN WINDOW",
+                            "color": "red",
+                            "index": 0
+                          },
+                          "1": {
+                            "text": "AVAILABLE THROUGHOUT",
+                            "color": "green",
+                            "index": 1
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "max ack floor stall (s)"
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "-1": {
+                            "text": "N/A (NO PENDING WORK)",
+                            "color": "gray",
+                            "index": 0
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "yellow",
+                          "value": 30
+                        },
+                        {
+                          "color": "red",
+                          "value": 120
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "last pending",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 60,
+          "title": "Ack floor stall by durable",
+          "description": "Seconds since the ack floor last advanced while work remained pending. Unlike pending, this cannot be explained by a burst of new traffic: any sustained climb means the durable is not acknowledging.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 46
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (stream, durable) (loadgen_consumer_ack_floor_stall_seconds{namespace=~\"$namespace\", pod=~\"$pod\"})",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{durable}} ({{stream}})"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": [],
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 61,
+          "title": "Ack pending and redelivered by durable",
+          "description": "ack pending is in-flight work; on a FIFO lane with MaxAckPending=1 it is capped at 1 by design and a value of 1 is not a problem. redelivered climbing means messages are being retried, which with MaxDeliver=-1 can continue indefinitely.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 46
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (loadgen_consumer_ack_pending{namespace=~\"$namespace\", pod=~\"$pod\"})",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "ack pending {{durable}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (durable) (loadgen_consumer_redelivered{namespace=~\"$namespace\", pod=~\"$pod\"})",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "redelivered {{durable}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 63,
+          "title": "Consumer sampling errors",
+          "description": "Why the sampler could not read a durable. Any rate here means the backlog panels above are missing data for that durable -- absence of a series is a sampling failure, never a zero backlog.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 54
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (durable, reason) (increase(loadgen_consumer_sample_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])) or on (durable) (0 * max by (durable) (max_over_time(loadgen_consumer_up{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+              "refId": "A",
+              "range": true,
+              "legendFormat": "{{durable}} {{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 60,
+                "showPoints": "auto",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "noValue": "NO DATA",
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
