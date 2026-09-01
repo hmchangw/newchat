@@ -58,16 +58,48 @@ func (a plainIterAdapter) Next(opts ...jetstream.NextOpt) (context.Context, jets
 // review thread; here it is only noise, so the metrics test buys headroom.
 func startEmbeddedCanonicalConsumer(t *testing.T, siteID string, ackWait time.Duration) (jetstream.JetStream, natsmetrics.Iterator, string, int) {
 	t.Helper()
-	// Short AckWait so a message that is NOT acked (left pending or Nak'd)
-	// visibly redelivers within the test window. jobguard Acks the poison
-	// message, so it must NOT redeliver.
+	// AckWait comes from the caller — see the doc comment above for why the two
+	// want opposite things from it. It was hardcoded here for a while, which
+	// silently gave the metrics test a 1s window where it had asked for 30s and
+	// reintroduced exactly the flake this parameter exists to prevent.
 	e := startEmbeddedCanonicalConsumerWith(t, siteID, stream.ConsumerSettings{
-		AckWait:       time.Second,
+		AckWait:       ackWait,
 		MaxDeliver:    10,
 		MaxWaiting:    512,
 		MaxAckPending: 1000,
 	})
 	return e.js, e.iter, e.subject, e.maxDeliver
+}
+
+// TestStartEmbeddedCanonicalConsumer_HonoursAckWait pins the one wire the
+// helper's whole reason for taking a parameter depends on.
+//
+// The parameter was hardcoded away for a while and nothing noticed: Go does not
+// warn on an unused parameter, `unparam` is not enabled, and every test that
+// used the helper still passed — the metrics test just silently ran with a 1s
+// AckWait where it had asked for 30s, which is the flake the parameter exists
+// to prevent, arriving only on a loaded runner. A dead parameter is invisible
+// to the compiler and to the tests that consume it; the only thing that sees it
+// is an assertion on what the server was actually configured with.
+func TestStartEmbeddedCanonicalConsumer_HonoursAckWait(t *testing.T) {
+	const (
+		siteID = "site-ackwait"
+		want   = 7 * time.Second // distinctive: not the 1s or 30s any caller uses
+	)
+
+	// The wrapper, not startEmbeddedCanonicalConsumerWith — the bug lived in the
+	// wrapper's settings literal, and a test of the callee would have stayed
+	// green through it. The wrapper hands back no consumer handle, so look the
+	// durable up on the JetStream handle it does return.
+	js, _, _, _ := startEmbeddedCanonicalConsumer(t, siteID, want)
+
+	cons, err := js.Consumer(context.Background(), stream.MessagesCanonical(siteID).Name, "broadcast-worker")
+	require.NoError(t, err)
+	info, err := cons.Info(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, want, info.Config.AckWait,
+		"the consumer was created with an AckWait the caller did not ask for")
 }
 
 // embeddedConsumer is everything a consumer-behaviour test needs from the
