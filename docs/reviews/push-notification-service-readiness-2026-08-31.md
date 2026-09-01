@@ -64,3 +64,24 @@ The shape is right (constructor DI, consumer-owned `Dispatcher` interface, `pkg/
 - `medium` — add `bootstrap.go` with the standard `bootstrapStreams(ctx, js, siteID, enabled)` no-op-when-disabled helper, verifying the push stream when disabled.
 
 ---
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is **26.9%** (78 statements) — below the 60% critical threshold, with `run()` entirely untested and no integration test.
+
+### Findings
+- `critical` — 26.9% vs the CLAUDE.md §4 80% floor; `main` 0.0% and `run` 0.0% carry the loss, `HandleJetStreamMsg` 93.3%, `buildConsumerConfig` 100% — `covfunc.txt:2481-2486`
+- `high` — no `integration_test.go` and no `TestMain`; nothing exercises the real consumer against `testutil.NATS(t)`, so the durable name, `FilterSubject` binding to `PushInputWildcard`, and the real NAK-redelivery path are unverified. CLAUDE.md §1 lists `integration_test.go` in the per-service layout; `notification-worker/integration_test.go` is the peer precedent — `push-notification-service/`
+- `high` — the nak delay is never asserted: the fake's `NakWithDelay(_ time.Duration)` discards the duration, so the repo's central invariant (never a zero/bare nak) is untested here — `push-notification-service/handler_test.go:53`, `:92`
+- `medium` — uncovered handler branch is the failed-ack path (`handler.go:48-51`); the fake's `Ack()` always returns nil — `push-notification-service/handler_test.go:50`
+- `medium` — four near-identical single-scenario tests instead of the CLAUDE.md-preferred table-driven form, and names break the `Test<Type>_<Method>_<Scenario>` rule (`TestDispatchSuccessAcks`, `TestMalformedJSONAcks`) — `push-notification-service/handler_test.go:65,83,95,106`
+- `low` — `buildConsumerConfig` is asserted only against `DurableConsumerDefaults`; nothing pins `MaxDeliver` against the chosen backoff window, unlike `broadcast-worker/consumer_config_test.go:31` — `push-notification-service/consumer_config_test.go:14-30`
+
+### Recommendations
+- `critical` — table-drive `TestHandler_HandleJetStreamMsg` over {success, transient, permanent, malformed, ack-failure}, asserting the recorded nak delay is `> 0`.
+- `high` — add `integration_test.go` (`//go:build integration`, `TestMain` → `testutil.RunTests(m)`, `testutil.NATS(t)`) covering consumer creation, subject-filter binding, and redelivery after a transient dispatch failure.
+- `medium` — extract the loop from `run()` into a testable `consume(ctx, iter, h)` so the 0% block becomes reachable.
+
+---
