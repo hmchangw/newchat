@@ -11,6 +11,7 @@ func TerminateAll() {
 	TerminateMinIO()
 	TerminateElasticsearch()
 	TerminateNATS()
+	TerminateNATSWebSocket()
 	TerminateVault()
 	TerminateValkey()
 }
