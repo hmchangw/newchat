@@ -63,3 +63,27 @@ Correctly done and worth stating: no JetStream usage at all, so the absence of `
 - `low` — Add a one-line note in the service explaining why there is no `store.go`.
 
 ---
+
+---
+
+## 4. Test coverage — 4 / 5
+
+At **82.3%** this is the **only service in the entire 35-service fleet that clears the CLAUDE.md 80% floor** (34 are under it, 19 under 60%), and the percentage is not vanity — the error taxonomy, transport drops and concurrency are genuinely exercised; the gaps left are narrow but sit on production-only paths.
+
+### Findings
+- No floor finding: 82.3% ≥ 80%. Structure is compliant throughout — `package main` tests, table-driven subtests with descriptive names (`lang_test.go:9-55`, `token_test.go:211-240`, `main_test.go:38-59`), mockgen mock in `mock_translator_test.go` (generated, and repo-wide `make generate` produced zero diff), no real DB/NATS in unit tests, and `integration_test.go:1,25` correctly uses `//go:build integration`, `testutil.RunTests(m)` and `testutil.NATS(t)` with no inline testcontainers.
+- `medium` — the 5s token-exchange clamp is never exercised — `token.go:60-62` uncovered. Every test passes `5*time.Second`, so the branch that actually runs in production (`TRANSLATION_HTTP_TIMEOUT` default 30s → clamp to 5s) is untested; the whole point of that clamp is bounding how long a hung accessToken endpoint holds `p.mu` and every waiting translate.
+- `medium` — the handler never asserts that a typed upstream error survives the wrap — `handler.go:39` wraps in `fmt.Errorf("translate backend: %w", err)` and `handler_test.go:72-86` only feeds it a plain `errors.New`. `docs/client-api.md:6317-6318` promises clients `unavailable`/`upstream_unavailable` and `too_many_requests`/`rate_limited`; nothing tests that contract *through the handler*, only inside `translator_stream_test.go`.
+- `medium` — token-provider transport failure uncovered — `token.go:113-115`. An unreachable accessToken host (the most likely production failure) has no test; only non-200 / malformed-body cases do (`token_test.go:211`).
+- `low` — the double-checked-lock re-entry uncovered — `token.go:81-83`. `TestTokenProvider_ConcurrentReadsNoExtraFetch` (`token_test.go:173`) primes the cache first, so all 50 goroutines take the lock-free fast path and the contended-refresh window never runs.
+- `low` — the second-attempt error path after a forced refresh is uncovered — `translator_stream.go:74-76`.
+- `low` — the integration test builds its own `natsrouter.Default` (`integration_test.go:37`) rather than production wiring, so `WithSiteID`/`WithMetrics`/`WithMaxConcurrency` and the saturation "service busy" reply are never integration-covered; the backend exercised is `mockTranslator`, so no SSE path crosses NATS.
+
+### Recommendations
+- `medium` — Add a `newTokenProvider(url, j1, 30*time.Second, skew)` test asserting the resulting client timeout is 5s.
+- `medium` — Add handler cases where the mock `Translator` returns `errcode.Unavailable(..., WithReason(TranslateUpstreamUnavailable))` and `errcode.TooManyRequests(...)`, asserting `errors.As` still yields those codes after the wrap.
+- `medium` — Cover `token.go:113` with a closed-listener accessToken URL, mirroring `TestStreamTranslator_TransportErrorUnavailable`.
+- `low` — Cover `token.go:81` with a blocking accessToken handler and two concurrent `Token` calls asserting exactly one exchange.
+- `low` — Extend `integration_test.go` to register via the same helper `main` uses, and add a saturation subtest asserting the `unavailable`/"service busy" envelope documented at `docs/client-api.md:6316`.
+
+---
