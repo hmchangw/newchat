@@ -44,3 +44,24 @@ Confirmed clean: `errcode` Tier-1 constructors only (`BadRequest`/`NotFound`/`Un
 - `low` — record the `govulncheck`/registry-pack gap in the PR so the CI `sast` gate is understood to have run partially in this environment.
 
 ---
+
+---
+
+## 3. Architecture — 4 / 5
+
+Textbook consumer-defined interface, constructor DI and file layout; the one substantive breach is re-declaring MinIO connection knobs that two sibling services also declare, with no owning package config.
+
+### Findings
+- `medium` — MinIO knobs are re-declared per service instead of being declared once in the owning package: `MINIO_ENDPOINT`/`ACCESS_KEY`/`SECRET_KEY`/`BUCKET` at `client-update-service/config.go:19-23`, again at `upload-service/main.go:95-99`, again at `media-service/config.go:70-74`; `MINIO_DOWNLOAD_TIMEOUT` at `client-update-service/config.go:24` and `upload-service/main.go:101`. `pkg/minioutil` exposes no `Config` type (`ls pkg/minioutil` — only `minio.go`/`observability.go`).
+  This is exactly the CLAUDE.md §6 shared-knob rule ("declared once, in the package that owns the thing it configures, mounted as a named field"). The drift is already visible: `MINIO_BUCKET` is `required` here, `envDefault:"avatars"` in media-service, and defaulted-to-empty in upload-service.
+- `low` — request-handling logic lives in `version.go`, while `handler.go` holds only the struct and the health probe — the per-service layout in CLAUDE.md §1 puts handling logic in `handler.go` — `client-update-service/version.go:43`, `handler.go:22`
+- `low` — on an early `ListenAndServe` failure `run` returns at `main.go:102` without `<-shutdownDone`, leaving the `shutdown.Wait` goroutine parked; harmless only because `main` then calls `os.Exit(1)` — `client-update-service/main.go:90-103`
+
+Verified correct: `versionStore` defined in the consumer with exactly the two methods used (`store.go:22-28`); `bucketClient` likewise narrowed at its use site (`store_minio.go:62`); `NewHandler` accepts interfaces and returns a struct (`handler.go:17`); `caarlos0/env` typed struct with `required` on every secret/connection string and `envDefault` on every non-critical knob, no `os.Getenv` anywhere; `pkg/shutdown.Wait` with a 25s budget under the 30s grace period (`main.go:93`); no JetStream surface, so `bootstrap.go`/`BOOTSTRAP_STREAMS` is correctly absent; exported `Handler`/`NewHandler` matches the repo-majority convention (16 services export it).
+
+### Recommendations
+- `medium` — add `minioutil.Config` (endpoint, keys, SSL, download timeout) and mount it as `Minio minioutil.Config` in all three services; keep `MINIO_BUCKET` service-local since the buckets genuinely differ.
+- `low` — either rename `version.go` → `handler.go` (folding the current `handler.go` in), or note the split in the service's own doc as a deliberate deviation.
+- `low` — close over `shutdownDone` on every `run` return path (`defer func(){ <-shutdownDone }()` after the goroutine starts).
+
+---
