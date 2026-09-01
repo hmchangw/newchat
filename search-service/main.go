@@ -233,7 +233,21 @@ func main() {
 		slog.Warn("ensure mongo indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
 	ensureCancel()
-	handler := newHandler(store, mongoStore, usersClient, cache, &handlerConfig{
+
+	// The cache fronts only the account-keyed enrichment lookups; enrich.go
+	// sees the same MongoStore either way. Built once here — expirable.LRU's
+	// reaper goroutine lives for the process.
+	cachedMongo := newCachedMongoStore(mongoStore, cacheConfig{
+		HRSize:  cfg.Search.HRCacheSize,
+		HRTTL:   cfg.Search.HRCacheTTL,
+		AppSize: cfg.Search.AppCacheSize,
+		AppTTL:  cfg.Search.AppCacheTTL,
+	})
+	slog.Info("enrichment caches configured",
+		"hr_size", cfg.Search.HRCacheSize, "hr_ttl", cfg.Search.HRCacheTTL,
+		"app_size", cfg.Search.AppCacheSize, "app_ttl", cfg.Search.AppCacheTTL)
+
+	handler := newHandler(store, cachedMongo, usersClient, cache, &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,
 		MaxDocCounts:            cfg.Search.MaxDocCounts,
