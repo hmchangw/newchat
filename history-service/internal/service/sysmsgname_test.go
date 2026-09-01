@@ -264,7 +264,7 @@ func TestResolveRemovedMemberNames_UserWithNoNamesFallsBackToAccount(t *testing.
 }
 
 // The single-message wrapper serves GetMessageByID and the spliced central row.
-func TestResolveRemovedMemberName_SingleMessage(t *testing.T) {
+func TestNormalizeLegacySysMsg_SingleUserMessage(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().
@@ -274,21 +274,10 @@ func TestResolveRemovedMemberName_SingleMessage(t *testing.T) {
 	s := newSysMsgNameService(t, users)
 
 	m := legacyRemoved("bob")
-	s.resolveRemovedMemberName(context.Background(), &m)
+	s.normalizeLegacySysMsg(context.Background(), &m)
 
 	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, m.Msg)
-}
-
-func TestResolveRemovedMemberName_NilAndNonQualifyingAreNoOps(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	users := mocks.NewMockUserStore(ctrl)
-	s := newSysMsgNameService(t, users)
-
-	s.resolveRemovedMemberName(context.Background(), nil)
-
-	m := models.Message{Msg: "hello"}
-	s.resolveRemovedMemberName(context.Background(), &m)
-	assert.Equal(t, "hello", m.Msg)
+	assert.Equal(t, model.MessageTypeMemberRemoved, m.Type)
 }
 
 // A nil user store must degrade, not panic — New accepts one.
@@ -514,4 +503,62 @@ func TestResolveRemovedMemberNames_NilUserStoreStillResolvesBots(t *testing.T) {
 
 	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
 	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[1].Msg)
+}
+
+// The two passes are ordered, and this test is what pins the order: the text
+// rewrite gates on the LEGACY plural type, so normalizing the type first would
+// leave every legacy sentence stuck with its raw account.
+func TestNormalizeLegacySysMsgs_ResolvesNamesThenNormalizesTypes(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), gomock.Len(2)).
+		Return([]model.User{{Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}, nil).
+		Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	left := models.Message{Type: "members_left", Msg: `"bob" has left the channel.`}
+	msgs := []models.Message{legacyRemoved("bob"), legacyRemoved("helper.bot"), left}
+	s.normalizeLegacySysMsgs(context.Background(), msgs)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, msgs[0].Type)
+	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, msgs[0].Msg)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, msgs[1].Type)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[1].Msg)
+
+	// members_left is type-only: its stored sentence is returned verbatim.
+	assert.Equal(t, model.MessageTypeMemberLeft, msgs[2].Type)
+	assert.Equal(t, `"bob" has left the channel.`, msgs[2].Msg)
+}
+
+// The one-message form resolves a bot through `apps` just as the page form does.
+func TestNormalizeLegacySysMsg_SingleBotMessage(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Len(1)).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	m := legacyRemoved("helper.bot")
+	s.normalizeLegacySysMsg(context.Background(), &m)
+
+	assert.Equal(t, model.MessageTypeMemberRemoved, m.Type)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, m.Msg)
+}
+
+func TestNormalizeLegacySysMsg_NilAndNonQualifyingAreNoOps(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	s := newSysMsgNameService(t, users)
+
+	require.NotPanics(t, func() { s.normalizeLegacySysMsg(context.Background(), nil) })
+
+	m := models.Message{Msg: "hello"}
+	s.normalizeLegacySysMsg(context.Background(), &m)
+	assert.Equal(t, "hello", m.Msg)
+	assert.Equal(t, "", m.Type)
 }

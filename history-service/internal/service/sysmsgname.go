@@ -160,13 +160,24 @@ func (s *HistoryService) resolveRemovedMemberNames(ctx context.Context, msgs []m
 	}
 }
 
-// resolveRemovedMemberName is the one-message form, for the handlers that return
-// a single row rather than a page.
-func (s *HistoryService) resolveRemovedMemberName(ctx context.Context, m *models.Message) {
+// normalizeLegacySysMsgs renders migrated system-message rows the way clients
+// expect them: display names in the text, modern types on the wire.
+//
+// The order is load-bearing. extractRemovedAccount gates on the LEGACY plural
+// type, so normalizing first would leave every legacy sentence stuck with its raw
+// account. Both passes live here so no call site can drift them apart.
+func (s *HistoryService) normalizeLegacySysMsgs(ctx context.Context, msgs []models.Message) {
+	s.resolveRemovedMemberNames(ctx, msgs)
+	normalizeLegacySysMsgTypes(msgs)
+}
+
+// normalizeLegacySysMsg is the one-message form, for the handlers that return a
+// single row rather than a page.
+func (s *HistoryService) normalizeLegacySysMsg(ctx context.Context, m *models.Message) {
 	if m == nil {
 		return
 	}
 	one := []models.Message{*m}
-	s.resolveRemovedMemberNames(ctx, one)
+	s.normalizeLegacySysMsgs(ctx, one)
 	*m = one[0]
 }
