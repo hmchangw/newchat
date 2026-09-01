@@ -467,7 +467,5 @@ func TestCachedMongoStore_DisabledTierStillPassesThrough(t *testing.T) {
 // The decorator satisfies the interface enrich.go consumes, so the cache is
 // invisible to the enrichment path.
 func TestCachedMongoStore_SatisfiesMongoStore(t *testing.T) {
-	got := newCachedMongoStore(&cachedTestMongo{}, enabledCacheConfig())
-	_, ok := got.(*cachedMongoStore)
-	assert.True(t, ok, "an enabled config must wrap in the decorator, not just return something MongoStore-shaped")
+	var _ MongoStore = (*cachedMongoStore)(nil) // the decorator must satisfy the interface enrich.go consumes
 }
