@@ -79,27 +79,52 @@ func quoteRemoved(name string) string {
 // on the live path, so a legacy row and a modern one show a bot alike.
 //
 // An empty return means "nothing resolved": leave the row exactly as stored.
-func (s *HistoryService) removedMemberName(ctx context.Context, account string, u *model.User) string {
-	var engName, chineseName string
-	if u != nil {
-		engName, chineseName = u.EngName, u.ChineseName
-	}
-	if model.IsBot(account) {
-		return s.botAwareDisplayName(ctx, engName, chineseName, account)
+func removedMemberName(account string, u *model.User, appNames map[string]string) string {
+	if name, ok := appNames[account]; ok && name != "" {
+		return name
 	}
 	if u == nil {
 		return ""
 	}
-	return displayfmt.CombineWithFallback(engName, chineseName, account)
+	return displayfmt.CombineWithFallback(u.EngName, u.ChineseName, account)
+}
+
+// appNamesFor resolves every bot account among accounts in ONE read, keyed by
+// account. A page with no bots never touches the apps collection.
+//
+// Errors are logged and swallowed into an empty map: a missing app name degrades
+// the row to its composed name or raw account, which is the same outcome a bot
+// with no app row already gets.
+func (s *HistoryService) appNamesFor(ctx context.Context, accounts []string) map[string]string {
+	if s.apps == nil {
+		return nil
+	}
+	bots := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		if model.IsBot(account) {
+			bots = append(bots, account)
+		}
+	}
+	if len(bots) == 0 {
+		return nil
+	}
+	names, err := s.apps.AppNamesByAccounts(ctx, bots)
+	if err != nil {
+		slog.WarnContext(ctx, "resolving removed-member app names, leaving composed names",
+			"accounts", len(bots), "error", err)
+		return nil
+	}
+	return names
 }
 
 // resolveRemovedMemberNames rewrites every legacy members_removed row in msgs,
 // swapping the raw account in its text for the member's display name.
 //
-// One batched read serves the whole page however many rows qualify, and a page
-// with none — the overwhelmingly common case — returns before touching Mongo. Bot
-// accounts stay in that same batch rather than earning a query of their own: a bot
-// may carry a user document, and the batch is issued either way.
+// At most two reads serve the whole page however many rows qualify: one users
+// batch, plus one apps batch when the page holds any bot. A page with no legacy
+// rows — the overwhelmingly common case — returns before touching Mongo at all.
+// Bot accounts stay in the users batch too: a bot may carry a user document, and
+// that batch is issued either way.
 //
 // Best-effort throughout: a failed lookup, or an account matching neither a user
 // nor an app, leaves the row reading exactly as it does today. A display name is
@@ -142,9 +167,11 @@ func (s *HistoryService) resolveRemovedMemberNames(ctx context.Context, msgs []m
 		}
 	}
 
+	appNames := s.appNamesFor(ctx, accounts)
+
 	names := make(map[string]string, len(accounts))
 	for _, account := range accounts {
-		if name := s.removedMemberName(ctx, account, docs[account]); name != "" {
+		if name := removedMemberName(account, docs[account], appNames); name != "" {
 			names[account] = name
 		}
 	}

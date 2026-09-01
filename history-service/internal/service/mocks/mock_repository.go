@@ -1006,3 +1006,18 @@ func (mr *MockAppStoreMockRecorder) AppNameByAccount(ctx, botAccount any) *gomoc
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppNameByAccount", reflect.TypeOf((*MockAppStore)(nil).AppNameByAccount), ctx, botAccount)
 }
+
+// AppNamesByAccounts mocks base method.
+func (m *MockAppStore) AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AppNamesByAccounts", ctx, botAccounts)
+	ret0, _ := ret[0].(map[string]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// AppNamesByAccounts indicates an expected call of AppNamesByAccounts.
+func (mr *MockAppStoreMockRecorder) AppNamesByAccounts(ctx, botAccounts any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppNamesByAccounts", reflect.TypeOf((*MockAppStore)(nil).AppNamesByAccounts), ctx, botAccounts)
+}

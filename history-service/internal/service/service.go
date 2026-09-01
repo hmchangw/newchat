@@ -129,10 +129,14 @@ type UserStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]pkgmodel.User, error)
 }
 
-// AppStore resolves a bot account's app display name for reaction Actor rendering.
+// AppStore resolves bot accounts to their registered app display names.
 type AppStore interface {
-	// AppNameByAccount returns ("", nil) when no app matches botAccount.
+	// AppNameByAccount returns ("", nil) when no app matches botAccount. Used on the
+	// per-actor reaction path, where one account is resolved at a time behind a cache.
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
+	// AppNamesByAccounts resolves many bot accounts in one read, keyed by account.
+	// Accounts with no matching app are simply absent from the map — not an error.
+	AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error)
 }
 
 // PreviewCache fronts the per-room preview resolve on the rooms.get lazy fallback.

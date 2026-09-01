@@ -134,8 +134,7 @@ func newSysMsgNameService(t *testing.T, users UserStore) *HistoryService {
 	return newSysMsgNameServiceWith(t, users, mocks.NewMockAppStore(gomock.NewController(t)))
 }
 
-// newSysMsgNameServiceWith is the two-store form, for the bot cases. Each call builds
-// its own service, so the cache behind s.appName is per-test and lookup counts are real.
+// newSysMsgNameServiceWith is the two-store form, for the bot cases.
 func newSysMsgNameServiceWith(t *testing.T, users UserStore, apps AppStore) *HistoryService {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -367,7 +366,8 @@ func TestResolveRemovedMemberNames_BotResolvesAppName(t *testing.T) {
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot")}
@@ -384,7 +384,8 @@ func TestResolveRemovedMemberNames_BotWithUserDocPrefersAppName(t *testing.T) {
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
 		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot")}
@@ -401,7 +402,8 @@ func TestResolveRemovedMemberNames_BotWithNoAppRowFallsBackToUserDoc(t *testing.
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
 		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot")}
@@ -416,7 +418,8 @@ func TestResolveRemovedMemberNames_BotWithNothingToResolveKeepsRawAccount(t *tes
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot")}
@@ -431,8 +434,8 @@ func TestResolveRemovedMemberNames_BotAppLookupErrorKeepsRawAccount(t *testing.T
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").
-		Return("", errors.New("mongo unavailable")).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(nil, errors.New("mongo unavailable")).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot")}
@@ -449,7 +452,8 @@ func TestResolveRemovedMemberNames_UserStoreErrorStillResolvesBots(t *testing.T)
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).
 		Return(nil, errors.New("mongo unavailable")).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("bob")}
@@ -459,9 +463,9 @@ func TestResolveRemovedMemberNames_UserStoreErrorStillResolvesBots(t *testing.T)
 	assert.Equal(t, `"bob" has been removed from the channel.`, msgs[1].Msg)
 }
 
-// The point of the whole pass: one users batch for the page, and one apps read per
-// DISTINCT bot however many rows that bot occupies.
-func TestResolveRemovedMemberNames_MixedPageOneBatchOneReadPerBot(t *testing.T) {
+// The point of the whole pass: exactly two reads for the page — one users batch and
+// one apps batch — however many rows and however many repeats they hold.
+func TestResolveRemovedMemberNames_MixedPageIsTwoBatchedReads(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().
@@ -472,7 +476,8 @@ func TestResolveRemovedMemberNames_MixedPageOneBatchOneReadPerBot(t *testing.T) 
 		}).
 		Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	msgs := []models.Message{
@@ -495,7 +500,8 @@ func TestResolveRemovedMemberNames_MixedPageOneBatchOneReadPerBot(t *testing.T) 
 func TestResolveRemovedMemberNames_NilUserStoreStillResolvesBots(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, nil, apps)
 
 	msgs := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("bob")}
@@ -516,7 +522,8 @@ func TestNormalizeLegacySysMsgs_ResolvesNamesThenNormalizesTypes(t *testing.T) {
 		Return([]model.User{{Account: "bob", EngName: "Bob", ChineseName: "鮑勃"}}, nil).
 		Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	left := models.Message{Type: "members_left", Msg: `"bob" has left the channel.`}
@@ -540,7 +547,8 @@ func TestNormalizeLegacySysMsg_SingleBotMessage(t *testing.T) {
 	users := mocks.NewMockUserStore(ctrl)
 	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Len(1)).Return(nil, nil).Times(1)
 	apps := mocks.NewMockAppStore(ctrl)
-	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
 	s := newSysMsgNameServiceWith(t, users, apps)
 
 	m := legacyRemoved("helper.bot")
@@ -561,4 +569,19 @@ func TestNormalizeLegacySysMsg_NilAndNonQualifyingAreNoOps(t *testing.T) {
 	s.normalizeLegacySysMsg(context.Background(), &m)
 	assert.Equal(t, "hello", m.Msg)
 	assert.Equal(t, "", m.Type)
+}
+
+// A nil app store must degrade, not panic — New accepts one, and a bot then falls
+// back to whatever the user document composes to.
+func TestResolveRemovedMemberNames_NilAppStoreDegrades(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return([]model.User{{Account: "helper.bot", EngName: "Helper"}}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, nil)
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	require.NotPanics(t, func() { s.resolveRemovedMemberNames(context.Background(), msgs) })
+
+	assert.Equal(t, `"Helper" has been removed from the channel.`, msgs[0].Msg)
 }
