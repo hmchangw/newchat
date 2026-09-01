@@ -87,3 +87,23 @@ At **82.3%** this is the **only service in the entire 35-service fleet that clea
 - `low` — Extend `integration_test.go` to register via the same helper `main` uses, and add a saturation subtest asserting the `unavailable`/"service busy" envelope documented at `docs/client-api.md:6316`.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Seventeen small, single-purpose files with genuinely WHY-shaped comments; only `translateOnce` has outgrown one function's worth of responsibility.
+
+### Findings
+- `medium` — `translateOnce` (88 lines, `translator_stream.go:87-174`) does four distinct jobs: request construction, HTTP status classification, SSE framing/merge, and post-loop error taxonomy — with a labeled loop, a nested `switch`, and a deferred `readErr` check whose ordering subtlety needs its own comment (`:150-152`). Adding one more upstream behaviour (e.g. a `[HEARTBEAT]` sentinel or a size cap) means editing the middle of this loop.
+- `low` — decoded-but-unused response fields: `accessTokenResponse.Username` / `.JwtRequestID` (`token.go:29-30`) and `streamChunk.ReturnMessage` (`token.go`/`translator_stream.go:34`) — the latter is deliberately not propagated (`:142-143`), the former two are simply dead.
+- `nitpick` — `backendRequest.ApplyWiki` is hardcoded `false` at the only call site (`translator_stream.go:95`); if it is never going to vary, it belongs in a comment, and if it will, it belongs in `Config`.
+
+The refactor I would actually do: extract `readStream(r io.Reader) (merged string, sawData, sawDone bool, err error)` from `:120-173`, leaving `translateOnce` as request → status classification → `readStream` → taxonomy. That makes the SSE parser unit-testable against a `strings.Reader` without an `httptest` server and shrinks the largest function by half.
+
+### Recommendations
+- `medium` — Extract the SSE read loop into `readStream` and unit-test it directly.
+- `low` — Delete `Username`/`JwtRequestID` from `accessTokenResponse` unless they are wanted for logging.
+- `nitpick` — Promote `ApplyWiki` to config or document why it is pinned false.
+
+---
