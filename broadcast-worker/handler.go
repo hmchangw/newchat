@@ -85,8 +85,12 @@ type Handler struct {
 	parentFetcher ParentFetcher
 	encrypt       bool
 	encoder       *roomcrypto.Encoder
-	routeMode     subject.RoomRouteMode
-	metrics       *broadcastMetrics
+	// routes resolves the room-route mode per publish. Not a fixed
+	// RoomRouteMode: the answer depends on which lane delivered the work, and on
+	// the home lane on how recently the home connection was restored. One
+	// handler per lane, so the lane never enters a call signature.
+	routes  subject.RouteResolver
+	metrics *broadcastMetrics
 	// threadViewSubject gates the thread-scoped view lane; see publishThreadViewEvent.
 	threadViewSubject bool
 	siteID            string
@@ -144,7 +148,7 @@ func withPreviewSealer(sealer *previewSealer, w *previewWriter) handlerOption {
 	return func(opts *handlerOptions) { opts.sealer, opts.previews = sealer, w }
 }
 
-func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routeMode subject.RoomRouteMode, options ...handlerOption) *Handler {
+func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keyStore RoomKeyProvider, parentFetcher ParentFetcher, encrypt bool, routes subject.RouteResolver, options ...handlerOption) *Handler {
 	var opts handlerOptions
 	for _, option := range options {
 		option(&opts)
@@ -166,7 +170,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		parentFetcher:     parentFetcher,
 		encrypt:           encrypt,
 		encoder:           roomcrypto.NewEncoder(),
-		routeMode:         routeMode,
+		routes:            routes,
 		metrics:           opts.metrics,
 		threadViewSubject: opts.threadViewSubject,
 		siteID:            opts.siteID,
@@ -1075,7 +1079,7 @@ func (h *Handler) publishRoomEvent(ctx context.Context, roomID string, crossSite
 	ctx = withBroadcastMetricLabels(ctx, roomChannel, labels.eventType)
 	now := time.Now().UTC()
 	var pubErr error
-	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, h.routeMode, now) {
+	for _, subj := range subject.RoomEventTargets(roomID, crossSite, crossSiteAt, subject.ResolveMode(h.routes, now), now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {
 			if errors.Is(err, nats.ErrMaxPayload) {
 				// Rejected client-side before the wire: the same payload is oversized
@@ -1134,7 +1138,7 @@ func (h *Handler) publishThreadViewEvent(ctx context.Context, roomID, parentMsgI
 	// Unlabelled, these land in the delivery counter's "unknown" room-kind.
 	ctx = withBroadcastMetricLabels(ctx, roomThread, eventType)
 	now := time.Now().UTC()
-	for _, subj := range subject.RoomThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, h.routeMode, now) {
+	for _, subj := range subject.RoomThreadEventTargets(roomID, parentMsgID, crossSite, crossSiteAt, subject.ResolveMode(h.routes, now), now) {
 		if err := h.pub.Publish(ctx, subj, payload); err != nil {
 			h.metrics.ThreadViewPublishFailed(ctx, eventType)
 			slog.ErrorContext(ctx, "publish thread view event failed",

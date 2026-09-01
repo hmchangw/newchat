@@ -427,7 +427,7 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustAckPending(t *testing.T)
 	js, iter, cons, subj, maxDeliver := e.js, e.iter, e.cons, e.subject, e.maxDeliver
 
 	h := NewHandler(ackPendingStore{}, ackPendingUsers{}, &mockPublisher{}, nil,
-		perParentFetcher{realParentID: realParentID}, false, subject.RouteGlobal)
+		perParentFetcher{realParentID: realParentID}, false, fixedRoutes(subject.RouteGlobal))
 
 	good := make(chan struct{}, 1)
 	var settled atomic.Int32
@@ -537,7 +537,7 @@ func TestConsume_UnresolvableThreadParent_DoesNotExhaustMaxDeliver(t *testing.T)
 	})
 
 	h := NewHandler(ackPendingStore{}, ackPendingUsers{}, &mockPublisher{}, nil,
-		perParentFetcher{realParentID: "real-parent"}, false, subject.RouteGlobal)
+		perParentFetcher{realParentID: "real-parent"}, false, fixedRoutes(subject.RouteGlobal))
 
 	var deliveries atomic.Int32
 	process := func(ctx context.Context, msg jetstream.Msg) {
