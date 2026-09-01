@@ -26,8 +26,9 @@ type cacheEntry[T any] struct {
 }
 
 // newEntryLRU builds the LRU for one cached tier, or returns nil when the tier
-// is disabled by a non-positive size or TTL. Callers treat a nil cache as an
-// unconditional miss, so disabling a tier costs performance and nothing else.
+// is disabled by a non-positive size or TTL. A nil cache bypasses the tier
+// entirely in lookupCached and records nothing, so disabling a tier costs
+// performance and nothing else.
 //
 // expirable.LRU has no Close in v2.0.7 and its reaper goroutine runs for the
 // process lifetime, so build these once at startup — never per request.
@@ -104,7 +105,7 @@ type cacheConfig struct {
 // volatile, and SearchAppsByName is a paged text query, so neither is
 // cacheable by key.
 //
-// Entries are pod-local and TTL-bounced, so a rename is visible to one pod up
+// Entries are pod-local and TTL-bounded, so a rename is visible to one pod up
 // to a TTL after another — enrichment renders a display name, not a decision
 // input, so a brief disagreement costs a stale label and nothing else.
 type cachedMongoStore struct {
@@ -115,10 +116,24 @@ type cachedMongoStore struct {
 	appMet  cacheRecorder
 }
 
+// The decorator satisfies the interface enrich.go consumes, so the cache is
+// invisible to the enrichment path. Checked at package scope rather than a
+// test: embedding MongoStore already satisfies this unconditionally, so the
+// value here is compile-time documentation, not a test that can fail.
+var _ MongoStore = (*cachedMongoStore)(nil)
+
 // newCachedMongoStore wraps inner, or returns it untouched when both tiers are
 // disabled — an operator turning the cache off gets the original store, not a
 // decorator that forwards every call.
+//
+// A nil inner is passed through as nil rather than wrapped: enrich.go treats
+// a nil MongoStore as "enrichment disabled" (h.mongo == nil), and wrapping it
+// would produce a non-nil MongoStore whose embedded nil interface panics on
+// the first call — defeating that check silently.
 func newCachedMongoStore(inner MongoStore, cfg cacheConfig) MongoStore {
+	if inner == nil {
+		return nil
+	}
 	users := newEntryLRU[HRUser](cfg.HRSize, cfg.HRTTL)
 	apps := newEntryLRU[AppRef](cfg.AppSize, cfg.AppTTL)
 	if users == nil && apps == nil {

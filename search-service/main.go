@@ -244,6 +244,7 @@ func main() {
 		AppTTL:  cfg.Search.AppCacheTTL,
 	})
 	slog.Info("enrichment caches configured",
+		"enabled", cachedMongo != mongoStore,
 		"hr_size", cfg.Search.HRCacheSize, "hr_ttl", cfg.Search.HRCacheTTL,
 		"app_size", cfg.Search.AppCacheSize, "app_ttl", cfg.Search.AppCacheTTL)
 

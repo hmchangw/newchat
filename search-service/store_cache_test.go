@@ -125,6 +125,12 @@ func TestLookupCached_PartialHitQueriesOnlyMissingKeys(t *testing.T) {
 		"the merged result must carry the cached key as well as the loaded one")
 	require.Len(t, loader.calls, 2)
 	assert.Equal(t, []string{"bob"}, loader.calls[1], "alice was cached and must not be re-queried")
+	// Pins per-key recording: the first call misses "alice" (1 miss); the
+	// second call hits "alice" and misses "bob" (1 hit, 1 more miss). A
+	// regression to per-call recording would still leave this batch's
+	// single Hit/Miss call pattern indistinguishable without these counts.
+	assert.Equal(t, 1, rec.hits)
+	assert.Equal(t, 2, rec.misses)
 }
 
 // A key with no row is cached as a tombstone: without this, one departed user
@@ -257,7 +263,14 @@ func TestLookupCached_ConcurrentCallersAreRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 
+	// Without singleflight collapsing concurrent misses on the same key, the
+	// number of loader calls is legitimately non-deterministic between 1 (all
+	// 32 goroutines interleave behind the first miss) and 32 (every goroutine
+	// races in before any entry is cached). Both bounds must hold; dropping
+	// either would let a regression - e.g. one loader call per goroutine
+	// no matter what, or the cache never getting populated at all - through.
 	assert.GreaterOrEqual(t, loader.callCount(), 1)
+	assert.LessOrEqual(t, loader.callCount(), 32)
 }
 
 // cachedTestMongo is a MongoStore that answers keyed lookups from fixed tables
@@ -464,8 +477,11 @@ func TestCachedMongoStore_DisabledTierStillPassesThrough(t *testing.T) {
 	assert.Len(t, inner.appCalls, 1, "the app tier is on and must still cache")
 }
 
-// The decorator satisfies the interface enrich.go consumes, so the cache is
-// invisible to the enrichment path.
-func TestCachedMongoStore_SatisfiesMongoStore(t *testing.T) {
-	var _ MongoStore = (*cachedMongoStore)(nil) // the decorator must satisfy the interface enrich.go consumes
+// enrich.go treats a nil MongoStore as "enrichment disabled" (h.mongo == nil);
+// wrapping a nil inner must not produce a non-nil decorator that defeats that
+// check and panics on first use.
+func TestNewCachedMongoStore_NilInnerReturnsNil(t *testing.T) {
+	got := newCachedMongoStore(nil, enabledCacheConfig())
+
+	assert.Nil(t, got)
 }
