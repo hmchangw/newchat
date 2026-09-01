@@ -43,7 +43,27 @@ func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers,
 	if maxWorkers < 1 {
 		maxWorkers = 1
 	}
-	sem := make(chan struct{}, maxWorkers)
+	ConsumeInPool(ctx, iter, consumer, make(chan struct{}, maxWorkers), maxDeliver, wg, classify, process)
+}
+
+// StartInPool is Start over a pool the CALLER owns — the registration contract
+// of Start with the shared-budget contract of ConsumeInPool.
+func StartInPool(ctx context.Context, iter Iterator, consumer *Consumer, sem chan struct{}, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ConsumeInPool(ctx, iter, consumer, sem, maxDeliver, wg, classify, process)
+	}()
+}
+
+// ConsumeInPool is Consume over a pool the CALLER owns, so several loops share
+// one concurrency budget.
+//
+// A service that binds a second loop over the same databases — a failover lane
+// alongside its home lane — must share the budget rather than allocate a second
+// one, or MAX_WORKERS silently becomes 2xMAX_WORKERS against the same MongoDB
+// and Cassandra the moment the second loop binds.
+func ConsumeInPool(ctx context.Context, iter Iterator, consumer *Consumer, sem chan struct{}, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
 	for {
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
