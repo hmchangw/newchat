@@ -8,53 +8,37 @@ import soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
 type soakRPCAction = soakrpc.Action
 
 const (
-	soakRPCSend                    = soakrpc.ActionSend
-	soakRPCThreadReply             = soakrpc.ActionThreadReply
-	soakRPCLoadHistory             = soakrpc.ActionLoadHistory
-	soakRPCLoadNext                = soakrpc.ActionLoadNext
-	soakRPCGetThread               = soakrpc.ActionGetThread
-	soakRPCGetMessage              = soakrpc.ActionGetMessage
-	soakRPCReact                   = soakrpc.ActionReact
-	soakRPCEdit                    = soakrpc.ActionEdit
-	soakRPCDelete                  = soakrpc.ActionDelete
-	soakRPCPin                     = soakrpc.ActionPin
-	soakRPCUnpin                   = soakrpc.ActionUnpin
-	soakRPCPinnedList              = soakrpc.ActionPinnedList
-	soakRPCReadBack                = soakrpc.ActionReadBack
-	soakRPCMarkRead                = soakrpc.ActionMarkRead
-	soakRPCScroll                  = soakrpc.ActionScroll
-	soakRPCMemberAdd               = soakrpc.ActionMemberAdd
-	soakRPCMemberRemove            = soakrpc.ActionMemberRemove
-	soakRPCRoomRename              = soakrpc.ActionRoomRename
-	soakRPCMuteToggle              = soakrpc.ActionMuteToggle
-	soakRPCRoomCreate              = soakrpc.ActionRoomCreate
-	soakRPCMemberList              = soakrpc.ActionMemberList
-	soakRPCRoomsInfo               = soakrpc.ActionRoomsInfo
-	soakRPCSubscriptionList        = soakrpc.ActionSubscriptionList
-	soakRPCRoomStateRead           = soakrpc.ActionRoomStateRead
-	soakRPCMessageRead             = soakrpc.ActionMessageRead
-	soakRPCReadReceiptList         = soakrpc.ActionReadReceiptList
-	soakRPCPresenceQuery           = soakrpc.ActionPresenceQuery
-	soakRPCSearchMessages          = soakrpc.ActionSearchMessages
-	soakRPCSearchRooms             = soakrpc.ActionSearchRooms
-	soakRPCSearchIndexProbe        = soakrpc.ActionSearchIndexProbe
-	soakRPCUserMe                  = soakrpc.ActionUserMe
-	soakRPCUserProfileGet          = soakrpc.ActionUserProfileGet
-	soakRPCUserStatusGet           = soakrpc.ActionUserStatusGet
-	soakRPCUserSettingsGet         = soakrpc.ActionUserSettingsGet
-	soakRPCUserChatlistGet         = soakrpc.ActionUserChatlistGet
-	soakRPCUserPriorityContacts    = soakrpc.ActionUserPriorityContacts
-	soakRPCUserAppsList            = soakrpc.ActionUserAppsList
-	soakRPCUserAppsCategories      = soakrpc.ActionUserAppsCategories
-	soakRPCUserSubscriptionCount   = soakrpc.ActionUserSubscriptionCount
-	soakRPCUserSubscriptionByRoom  = soakrpc.ActionUserSubscriptionByRoom
-	soakRPCUserSubscriptionChannel = soakrpc.ActionUserSubscriptionChannel
-	soakRPCUserSubscriptionDM      = soakrpc.ActionUserSubscriptionDM
-	soakRPCUserThreadList          = soakrpc.ActionUserThreadList
-	soakRPCUserThreadUnread        = soakrpc.ActionUserThreadUnread
+	soakRPCSend             = soakrpc.ActionSend
+	soakRPCThreadReply      = soakrpc.ActionThreadReply
+	soakRPCLoadHistory      = soakrpc.ActionLoadHistory
+	soakRPCLoadNext         = soakrpc.ActionLoadNext
+	soakRPCGetThread        = soakrpc.ActionGetThread
+	soakRPCGetMessage       = soakrpc.ActionGetMessage
+	soakRPCReact            = soakrpc.ActionReact
+	soakRPCEdit             = soakrpc.ActionEdit
+	soakRPCDelete           = soakrpc.ActionDelete
+	soakRPCPin              = soakrpc.ActionPin
+	soakRPCUnpin            = soakrpc.ActionUnpin
+	soakRPCPinnedList       = soakrpc.ActionPinnedList
+	soakRPCReadBack         = soakrpc.ActionReadBack
+	soakRPCMarkRead         = soakrpc.ActionMarkRead
+	soakRPCScroll           = soakrpc.ActionScroll
+	soakRPCMemberAdd        = soakrpc.ActionMemberAdd
+	soakRPCMemberRemove     = soakrpc.ActionMemberRemove
+	soakRPCRoomRename       = soakrpc.ActionRoomRename
+	soakRPCMuteToggle       = soakrpc.ActionMuteToggle
+	soakRPCRoomCreate       = soakrpc.ActionRoomCreate
+	soakRPCMemberList       = soakrpc.ActionMemberList
+	soakRPCRoomsInfo        = soakrpc.ActionRoomsInfo
+	soakRPCSubscriptionList = soakrpc.ActionSubscriptionList
+	soakRPCRoomStateRead    = soakrpc.ActionRoomStateRead
+	soakRPCMessageRead      = soakrpc.ActionMessageRead
+	soakRPCReadReceiptList  = soakrpc.ActionReadReceiptList
+	soakRPCPresenceQuery    = soakrpc.ActionPresenceQuery
+	soakRPCSearchMessages   = soakrpc.ActionSearchMessages
+	soakRPCSearchRooms      = soakrpc.ActionSearchRooms
+	soakRPCSearchIndexProbe = soakrpc.ActionSearchIndexProbe
 )
-
-var soakUserReadActions = soakrpc.UserReadActions()
 
 func validSoakRPCAction(action soakRPCAction) bool {
 	return soakrpc.ValidAction(action)

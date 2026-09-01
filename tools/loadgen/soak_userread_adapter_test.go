@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
+	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
 	soakuserread "github.com/hmchangw/chat/tools/loadgen/internal/soak/userread"
 )
 
@@ -16,11 +17,11 @@ func newSoakUserReadFixture(
 	t *testing.T,
 	transport soakRPCTransport,
 	seed int64,
-) (*soakUserReader, *soakRoomReadRecorder) {
+) (*soakuserread.Reader, *soakRoomReadRecorder) {
 	t.Helper()
 	recorder := &soakRoomReadRecorder{}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers: []model.User{
 				{ID: "u1", Account: "user-a"},
@@ -44,7 +45,7 @@ func newSoakUserReadFixture(
 		newSoakRPCClient(
 			transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil,
 		),
-		recorder,
+		soakUserReadRecorderAdapter{recorder: recorder},
 		rand.New(rand.NewSource(seed)),
 		nil,
 	)
@@ -56,7 +57,7 @@ func TestSoakUserReadRecorderAdapter_MapsEverySampleField(t *testing.T) {
 	recorder := &soakRoomReadRecorder{}
 	adapter := soakUserReadRecorderAdapter{recorder: recorder}
 	want := soakuserread.Sample{
-		Action: soakRPCUserMe, Latency: 2 * time.Second,
+		Action: soakrpc.ActionUserMe, Latency: 2 * time.Second,
 		Messages: 3, RowsCounted: true, ReplyBytes: 4,
 		ErrorClass: soakErrorTimeout, ErrorReason: soakErrorReason("reason"),
 		Retries: 5, Skipped: true,

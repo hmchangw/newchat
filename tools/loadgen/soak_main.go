@@ -24,6 +24,8 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
+	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	soakuserread "github.com/hmchangw/chat/tools/loadgen/internal/soak/userread"
 )
 
 const (
@@ -980,12 +982,12 @@ func runSoakWorkload(
 	)
 	// The read-receipt read needs a real message ID, which only the catalog has.
 	roomReader.SetMessageSource(catalog)
-	userReader, userReaderErr := newSoakUserReader(
-		soakUserReadConfig{
+	userReader, userReaderErr := soakuserread.New(
+		soakuserread.Config{
 			SiteID: cfg.SiteID, PageLimit: opts.PageLimit,
 			RequestTimeout: soakRequestTimeout,
 		},
-		&topology, rpc, recorders.read,
+		&topology, rpc, soakUserReadRecorderAdapter{recorder: recorders.read},
 		rand.New(rand.NewSource(seed+11)),
 		now,
 	)
@@ -1463,8 +1465,9 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 	}
 	// The user lane dispatches uniformly across its reads, so each carries an
 	// equal share of the configured rate.
-	share := cfg.UserReadRate / float64(len(soakUserReadActions))
-	for _, action := range soakUserReadActions {
+	userReadActions := soakrpc.UserReadActions()
+	share := cfg.UserReadRate / float64(len(userReadActions))
+	for _, action := range userReadActions {
 		rates[action] = share
 	}
 	return rates
