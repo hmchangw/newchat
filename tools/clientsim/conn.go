@@ -92,6 +92,10 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 				reason = disconnectReason(err)
 			}
 			s.m.Disconnects.WithLabelValues(reason).Inc()
+			// Separate calls, not one nested helper: invalidatePlan takes
+			// s.mu and markConnDown holds stateMu, and the lock order forbids
+			// stateMu -> s.mu.
+			s.invalidatePlan()
 			// Without this the active gauge would sit at full fleet for the
 			// whole outage — the exact reading a failure test must not get.
 			s.markConnDown()

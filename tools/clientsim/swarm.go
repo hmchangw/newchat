@@ -262,7 +262,8 @@ func summarize(m *metrics, runID, configDigest string, target int) (runSummary, 
 		return runSummary{}, fmt.Errorf("gather metrics for summary: %w", err)
 	}
 	s := runSummary{Attrs: []any{"runId", runID, "configDigest", configDigest,
-		"target", target, "readyPeak", m.readyPeak.Load(), "readyAtDrain", m.readyAtDrain.Load()}}
+		"target", target, "readyPeak", m.readyPeak.Load(),
+		"readyMin", m.readyMin.Load(), "readyAtDrain", m.readyAtDrain.Load()}}
 	var degradedEvidence float64
 	for _, fam := range families {
 		if len(fam.GetMetric()) == 0 {

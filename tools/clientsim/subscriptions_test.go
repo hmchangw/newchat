@@ -277,3 +277,32 @@ func TestBootstrapWalk_FullPlanIsReady(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond, "a fully-subscribed client never became ready")
 	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("room_subscribe")), 0.001)
 }
+
+// A live update repairs the rooms the client knows about; it cannot vouch for
+// the ones it has not learned of yet. After a reconnect whose walk is still
+// failing, the plan is unverified — an empty missing set means "nothing known
+// to be broken", not "plan complete", and promoting on it reports a fleet as
+// ready during exactly the fault window an operator is reading the gauge in.
+func TestSimClient_LiveUpdateDoesNotPromoteAnUnverifiedPlan(t *testing.T) {
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}, HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	// Reconnect. The walk that would re-verify the plan has not run yet —
+	// deliberately not started here, so the assertion turns on the invariant
+	// rather than on whether a background resync got scheduled in time.
+	s.invalidatePlan() // what the disconnect handler does alongside markConnDown
+	s.markConnDown()
+	s.markConnUp()
+	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"a reconnected client has not re-verified its plan yet")
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r9", "channel", nil))
+
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"one successful live open must not stand in for a completed walk")
+}

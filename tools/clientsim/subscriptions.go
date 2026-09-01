@@ -99,11 +99,11 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 	}
 }
 
-// updateReadyLocked promotes only when every desired room subscription is
-// open. Caller holds s.mu, which makes checking the missing set atomic with
-// the batch that just repaired or removed entries from it.
+// updateReadyLocked promotes only when a walk has verified the plan AND every
+// desired room subscription is open. Caller holds s.mu, which makes both
+// checks atomic with the batch that just repaired or removed entries.
 func (s *simClient) updateReadyLocked() {
-	if len(s.missingRooms) > 0 {
+	if !s.planVerified || len(s.missingRooms) > 0 {
 		s.markNotReady()
 		return
 	}
@@ -157,6 +157,7 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		}
 		kept = append(kept, ch)
 	}
+	s.planVerified = true
 	s.applyChangesLocked(kept)
 	s.updateReadyLocked()
 	return nil

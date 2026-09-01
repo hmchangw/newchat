@@ -35,6 +35,11 @@ type simClient struct {
 	// roomSubs alone cannot represent that intent, so without this set one
 	// successful repair could incorrectly promote a still-incomplete client.
 	missingRooms map[string]struct{}
+	// planVerified records that a bootstrap walk has completed since the
+	// current connection came up. missingRooms answers "is anything known to
+	// be broken"; only a completed walk answers "is the plan complete at all",
+	// and a live update can satisfy the first while the second is still false.
+	planVerified bool
 	// touched tracks per-room mutation generations so a resync walk never
 	// reverts a live update that landed while its RPC was in flight.
 	touched map[string]uint64

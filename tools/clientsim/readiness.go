@@ -5,6 +5,15 @@ package main
 // optional: nats.go fires DisconnectedErrCB on an explicit Close() as well
 // as on a real drop (nats.go@v1.50.0 close()), so close() and the handler
 // both arrive for the same event and a bare Dec in each would double-count.
+// invalidatePlan marks the subscription plan unverified. Called when the
+// connection drops: whatever the server's plan is now, this client has not
+// checked it since, so only a completed walk may promote it again.
+func (s *simClient) invalidatePlan() {
+	s.mu.Lock()
+	s.planVerified = false
+	s.mu.Unlock()
+}
+
 func (s *simClient) markConnUp() {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()

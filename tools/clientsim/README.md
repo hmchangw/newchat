@@ -115,10 +115,21 @@ of its rooms (`clientsim_errors_total{stage="room_subscribe"}`) is active
 but not ready, and stays that way until a live update or a post-reconnect
 resync repairs it.
 
+A client is ready only once a bootstrap walk has verified its plan. A live
+update can repair a room the client already knows about, but it cannot vouch
+for rooms the client has not learned of, so after a reconnect readiness waits
+for the walk rather than for the next update.
+
 `clientsim_conns_ready_peak` proves the fleet reached the requested floor.
 The exit gate also snapshots the current ready count immediately before
 SIGTERM drains the fleet, so a fleet that reached the floor and then stayed
 collapsed after a fault does not exit successfully.
+
+`clientsim_conns_ready_min` is the trough after the fleet first came up.
+Those other two are single instants, so a fleet that collapsed mid-run and
+recovered before shutdown clears both — the trough is the only series that
+says how bad it got. Reported, never gated: in a failure test a dip is the
+measurement, not a fault.
 
 ### Exit codes
 

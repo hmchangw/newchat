@@ -38,7 +38,11 @@ type metrics struct {
 	ConnsReady prometheus.Gauge
 	// ConnsReadyPeak is the high-water mark of ConnsReady. The gate requires
 	// both this initial reachability proof and a pre-drain terminal snapshot.
-	ConnsReadyPeak   prometheus.Gauge
+	ConnsReadyPeak prometheus.Gauge
+	// ConnsReadyMin is the low-water mark once the fleet has first reached
+	// its peak. Peak and the pre-drain snapshot are two instants; without a
+	// trough a fleet that collapsed mid-window and recovered looks perfect.
+	ConnsReadyMin    prometheus.Gauge
 	AuthDuration     prometheus.Histogram
 	ConnectDuration  prometheus.Histogram
 	Disconnects      *prometheus.CounterVec
@@ -70,6 +74,8 @@ type metrics struct {
 	// reading a gauge's value back out of the registry.
 	readyNow      atomic.Int64
 	readyPeak     atomic.Int64
+	readyMin      atomic.Int64
+	readyMinSet   atomic.Bool
 	readyAtDrain  atomic.Int64
 	readyCaptured atomic.Bool
 }
@@ -91,7 +97,29 @@ func (m *metrics) readyInc() {
 }
 
 func (m *metrics) readyDec() {
-	m.ConnsReady.Set(float64(m.readyNow.Add(-1)))
+	n := m.readyNow.Add(-1)
+	m.ConnsReady.Set(float64(n))
+	m.recordTrough(n)
+}
+
+// recordTrough keeps the low-water mark. Seeded on the first decrement rather
+// than at zero, so the ramp up from an empty fleet is not itself the trough.
+func (m *metrics) recordTrough(n int64) {
+	if m.readyMinSet.CompareAndSwap(false, true) {
+		m.readyMin.Store(n)
+		m.ConnsReadyMin.Set(float64(n))
+		return
+	}
+	for {
+		low := m.readyMin.Load()
+		if n >= low {
+			return
+		}
+		if m.readyMin.CompareAndSwap(low, n) {
+			m.ConnsReadyMin.Set(float64(n))
+			return
+		}
+	}
 }
 
 // captureReadyAtDrain records the fleet before cancellation drains every
@@ -110,6 +138,7 @@ func newMetrics() *metrics {
 		ConnsConnecting: prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_connecting", Help: "Connections currently dialing the WebSocket transport. The auth exchange precedes this — see clientsim_auth_duration_seconds and clientsim_errors_total{stage=\"auth\"}."}),
 		ConnsReady:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready", Help: "Connections that completed the subscription walk with their full plan applied."}),
 		ConnsReadyPeak:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready_peak", Help: "High-water mark of clientsim_conns_ready; paired with a pre-drain snapshot by the fleet-readiness exit gate."}),
+		ConnsReadyMin:   prometheus.NewGauge(prometheus.GaugeOpts{Name: "clientsim_conns_ready_min", Help: "Low-water mark of clientsim_conns_ready after the fleet first came up; a mid-run collapse that recovered is invisible in the peak and the pre-drain snapshot alike."}),
 		AuthDuration:    prometheus.NewHistogram(prometheus.HistogramOpts{Name: "clientsim_auth_duration_seconds", Help: "POST /api/v1/auth exchange duration (successes only).", Buckets: handshakeBuckets}),
 		ConnectDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "clientsim_connect_duration_seconds", Help: "NATS WebSocket connect duration.", Buckets: handshakeBuckets}),
 		Disconnects:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_disconnects_total", Help: "Disconnections by reason."}, []string{"reason"}),
@@ -137,7 +166,7 @@ func newMetrics() *metrics {
 	m.deliveredUser = m.Delivered.WithLabelValues("user")
 	m.deliveredChannel = m.Delivered.WithLabelValues("channel")
 	r.MustRegister(
-		m.ConnsActive, m.ConnsConnecting, m.ConnsReady, m.ConnsReadyPeak,
+		m.ConnsActive, m.ConnsConnecting, m.ConnsReady, m.ConnsReadyPeak, m.ConnsReadyMin,
 		m.AuthDuration, m.ConnectDuration,
 		m.Disconnects, m.Reconnects, m.JWTRefreshes, m.Delivered,
 		m.BroadcastLatency, m.CanonicalLatency,

@@ -165,6 +165,11 @@ func TestBuildFixtures_SubscriptionsMatchProductionListContract(t *testing.T) {
 				require.True(t, exists, "subscription %s references an unknown room", sub.ID)
 				require.Equal(t, room.Type, sub.RoomType,
 					"subscription.list filters on the denormalized roomType")
+				// The filter is roomType $in [dm, channel]; asserting only
+				// that the two agree would still pass for a type production
+				// drops (user-service/mongorepo/subscriptions.go).
+				require.Contains(t, []model.RoomType{model.RoomTypeDM, model.RoomTypeChannel}, sub.RoomType,
+					"a roomType outside the list filter is seeded but never returned")
 				require.True(t, sub.Open,
 					"subscription.list excludes rows explicitly persisted with open=false")
 				require.NotEmpty(t, sub.Name,

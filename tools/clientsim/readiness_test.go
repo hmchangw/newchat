@@ -88,3 +88,25 @@ func TestMetrics_ReadyPeakExactUnderConcurrency(t *testing.T) {
 	m.captureReadyAtDrain()
 	assert.NoError(t, readyGate(m, n, 1.0), "a fully-ready fleet must pass a 100%% gate")
 }
+
+// peak and the pre-drain snapshot are two instants. A fleet that collapsed in
+// the middle of the window and recovered before shutdown clears both, which is
+// precisely the shape a failure test exists to catch.
+func TestMetrics_ReadyMinTracksTheTrough(t *testing.T) {
+	m := newMetrics()
+	for i := 0; i < 10; i++ {
+		m.readyInc()
+	}
+	for i := 0; i < 8; i++ {
+		m.readyDec() // the fleet collapses to 2
+	}
+	for i := 0; i < 8; i++ {
+		m.readyInc() // and recovers before shutdown
+	}
+	m.captureReadyAtDrain()
+
+	assert.Equal(t, int64(10), m.readyPeak.Load())
+	assert.Equal(t, int64(10), m.readyAtDrain.Load())
+	assert.Equal(t, int64(2), m.readyMin.Load(),
+		"the trough must survive the recovery, or a mid-run collapse is invisible")
+}
