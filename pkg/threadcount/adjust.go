@@ -34,10 +34,12 @@ import (
 // threads through Paxos on one row to buy an exactness no reader needs.
 // ShouldReanchor bounds how far the estimate wanders.
 //
-// redelivered marks a JetStream retry, which above the limit re-stamps what is
-// already there instead of adjusting again: the reply may already be counted,
-// and counting it twice is worse than the at-most-one undercount a re-anchor
-// erases. Below the limit it is irrelevant, since recounting is idempotent.
+// redelivered marks a JetStream retry, which re-stamps what is already there
+// instead of adjusting again: the reply may already be counted, and counting it
+// twice is worse than the at-most-one undercount a re-anchor erases. It is
+// irrelevant only to a recount that reached the end of the partition, which
+// replaces the stamped value outright and so cannot double-count; a recount
+// truncated by its cap adjusts instead, and takes the same guard.
 //
 // Both rows are written in one batch: messages_by_id is the authority and
 // messages_by_room its mirror, and they are always stamped together.

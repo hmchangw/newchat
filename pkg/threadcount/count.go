@@ -5,10 +5,16 @@
 // the three writers cannot drift apart.
 //
 // Maintenance is circuit-broken on thread length: a thread shorter than
-// Policy.ScanLimit is recounted exactly from its partition, and past that the
-// stamped count is adjusted by one instead, keeping per-reply cost independent
-// of thread length. The resulting count is approximate above the limit; see
+// Policy.ScanLimit is recounted from its partition, and past that the stamped
+// count is adjusted by one instead, keeping per-reply cost independent of
+// thread length. The resulting count is approximate above the limit; see
 // Maintain and ShouldReanchor.
+//
+// The recount below the limit is exact, and idempotent under redelivery, only
+// when the read reached the end of the partition. Soft-deleted replies keep
+// their rows, so a read can fill its cap on tombstones alone while live replies
+// survive past it; such a read cannot recount and falls back to adjusting, with
+// the same redelivery guard the approximate path uses.
 package threadcount
 
 import (
