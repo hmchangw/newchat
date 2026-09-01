@@ -463,3 +463,42 @@ func boundedSemconvKeys(ctx context.Context, c metric.Int64Counter, v string) {
 	// ruleid: metrics-no-per-call-attribute-set
 	c.Add(ctx, 1, metric.WithAttributes(semconv.HTTPRequestMethodKey.String(v)))
 }
+
+// msg and thread. The literal-key branch listed message but neither shorthand,
+// while the camel branch and pkg/obs's entityArg both carried Msg and Thread —
+// three hand-maintained halves of one vocabulary, and the odd one out was the
+// branch that sees the most common spelling. This repo has thread rooms, so
+// thread_id is not hypothetical.
+func msgAndThreadKeys(ctx context.Context, c metric.Int64Counter, v string) {
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("thread_id", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("msg_id", v)))
+	// Lowercase camel: no separator for the qualified branch, and no capital
+	// root for the camel branch — it needs the literal list to carry the root.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("threadId", v)))
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("msgId", v)))
+	// The bare root, no tail.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("thread", v)))
+	// Qualified.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("chat.thread.id", v)))
+	// Already caught by the camel branch — kept so a later edit to that branch
+	// cannot quietly drop it while the literal fix masks the loss.
+	// ruleid: metrics-no-per-call-attribute-set, metrics-no-unbounded-label
+	c.Add(ctx, 1, metric.WithAttributes(attribute.String("parentThreadID", v)))
+}
+
+// Bounded keys built from the same two roots. thread_count is the shape that
+// matters: pkg/threadcount is a real package and a count is not an identity.
+func boundedMsgAndThreadKeys(ctx context.Context, c metric.Int64Counter, n int64) {
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("thread_count", n)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("msg_size_bytes", n)))
+	// ruleid: metrics-no-per-call-attribute-set
+	c.Add(ctx, 1, metric.WithAttributes(attribute.Int64("threadDepth", n)))
+}

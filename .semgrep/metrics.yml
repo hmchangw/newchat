@@ -195,4 +195,4 @@ rules:
               # form is the one most likely to be reached for. Widening the
               # separator does not widen what matches: the tails are still a closed
               # set, so error.type, user.agent and org.name stay outside it.
-              regex: ^(?:(?:[A-Za-z0-9]+[._])*(?:(?:room|account|user|message|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)|[A-Za-z0-9]*(?:Room|Account|User|Message|Request|Trace|Doc|Span|Session|Device|Tenant|Org|Run|Recipient|Inbox|Pod))(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$
+              regex: ^(?:(?:[A-Za-z0-9]+[._])*(?:(?:room|account|user|message|msg|thread|request|trace|doc|span|session|device|tenant|org|run|recipient|inbox|pod)|[A-Za-z0-9]*(?:Room|Account|User|Message|Msg|Thread|Request|Trace|Doc|Span|Session|Device|Tenant|Org|Run|Recipient|Inbox|Pod))(?:[._]?[uU]?[iI][dD])?|.*[sS]ubject|index|(?:[rR]aw)?[._]?[eE]rr(?:or)?(?:[._]?(?:[tT]e?xt|[mM]essage|[mM]sg|[sS]tring|[sS]tr))?|(?:[eE]rr(?:or)?[._]?)?[sS]tack(?:[._]?[tT]race)?)$

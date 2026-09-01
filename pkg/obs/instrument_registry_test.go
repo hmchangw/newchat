@@ -491,6 +491,69 @@ var entityArg = regexp.MustCompile(
 		`Request|Trace|Doc|Span|Tenant|Org|Run|Inbox|Pod)` +
 		`)(?:[._]?[uU]?[iI][dD])?$`)
 
+// identityRoots is the vocabulary the forbidden-label rules enforce, and the
+// thing four separate lists were each keeping their own copy of.
+//
+// Two in `.semgrep/metrics.yml` (the literal-key branch's lowercase and camel
+// alternations), one more there for semconv key constants, and entityArg above.
+// They drifted exactly as you would expect: msg and thread reached the semconv
+// list and entityArg and never reached the two literal ones, so
+// attribute.String("thread_id", …) passed a gate whose own documentation said
+// it would not — in a repo that has thread rooms.
+//
+// Adding the two missing words fixes today. TestIdentityRootsAgree is what
+// fixes tomorrow, because the next word will be added to one list by someone
+// who has no reason to know the other three exist.
+var identityRoots = []string{
+	"room", "account", "user", "message", "msg", "thread", "device", "session",
+	"recipient", "request", "trace", "doc", "span", "tenant", "org", "run",
+	"inbox", "pod",
+}
+
+// semgrepRootLists pulls every identity-root alternation out of the semgrep
+// rule file. The three are spelled differently — lowercase, camel, and camel
+// again for semconv constants — so they are compared as lowercased sets.
+var semgrepRootLists = regexp.MustCompile(`\(\?:([Rr]oom\|[^)]*)\)`)
+
+// TestIdentityRootsAgree fails when any of the lists drifts from the others.
+//
+// It reads the rule file rather than a copy of it: a test asserting that two
+// Go constants match would have said nothing here, because the lists that
+// disagreed were in YAML.
+func TestIdentityRootsAgree(t *testing.T) {
+	repo := repoFS(t)
+	rules, err := fs.ReadFile(repo, ".semgrep/metrics.yml")
+	require.NoError(t, err)
+
+	want := make(map[string]struct{}, len(identityRoots))
+	for _, r := range identityRoots {
+		want[r] = struct{}{}
+	}
+
+	found := semgrepRootLists.FindAllStringSubmatch(string(rules), -1)
+	require.NotEmpty(t, found, "no identity-root alternation found in .semgrep/metrics.yml — "+
+		"the rule was restructured and this guard no longer reads it")
+
+	for i, m := range found {
+		got := make(map[string]struct{})
+		for _, w := range strings.Split(m[1], "|") {
+			got[strings.ToLower(w)] = struct{}{}
+		}
+		assert.Equal(t, want, got,
+			"identity-root list %d in .semgrep/metrics.yml disagrees with identityRoots in %s.\n"+
+				"Every list of these roots must carry the same words: a rule that enforces a "+
+				"smaller vocabulary than its siblings is a gate with a published way around it.",
+			i+1, "pkg/obs/instrument_registry_test.go")
+	}
+
+	// entityArg is built from a hand-written alternation too, so check it the
+	// same way rather than trusting that it was updated alongside.
+	for _, root := range identityRoots {
+		assert.True(t, entityArg.MatchString(root+"ID"),
+			"entityArg does not know the root %q, which identityRoots lists", root)
+	}
+}
+
 // TestBoundedSubjectArg pins the guard's own decisions.
 //
 // Without this, TestEverySubscriptionSubjectIsBounded passing proves only that
