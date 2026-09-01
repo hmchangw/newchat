@@ -123,3 +123,22 @@ Stream, subject and event-contract wiring are fully compliant — no raw `fmt.Sp
 - `low` — assert the resolved stream/filter pair in the new integration test for both `user` and `bot` modes.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+The high-throughput consumer pattern, semaphore sizing and `jsretry.Nak` usage are correct, but shutdown has a real in-flight race, dispatch is unbounded in time, and the backoff schedule is the non-latency-sensitive one.
+
+### Findings
+- `high` — shutdown race: the consume-loop goroutine is not counted in `wg`, so between `iter.Next()` returning a message and the `wg.Add(1)` two lines later, `wg.Wait()` can observe zero in-flight, let `nc.Drain()` proceed, and the handler then acks on a drained connection. `notification-worker/main.go:337-342` adds the loop itself to the WaitGroup with an explicit comment naming exactly this window — `push-notification-service/main.go:76-89`, `:99-110`
+- `medium` — no per-dispatch deadline: the message context is passed straight to `Dispatcher.Dispatch` with no `context.WithTimeout`, so a hung APNs/FCM call holds a semaphore slot indefinitely and will silently blow past `AckWait` (30s default, `pkg/stream/consumer.go:19`) — `push-notification-service/handler.go:36`
+- `medium` — user-visible push delivery retries on `jsretry.DefaultBackoff` (first retry 1s), while `LowLatencyBackoff` (first retry 200ms) is documented for exactly this class of fan-out/delivery worker and is what `broadcast-worker` uses — `push-notification-service/handler.go:45`, `pkg/jsretry/jsretry.go:47-81`, `broadcast-worker/consumeloop_test.go:545`
+- `low` — `MaxWorkers=100` and `MaxAckPending=1000` are defaults never validated against each other or against push-provider concurrency limits — `push-notification-service/main.go:25`, `pkg/stream/consumer.go:22`
+- Verified clean: no bare `Nak()` / `NakWithDelay(0)` (`handler.go:45` routes through `jsretry.Nak`); no hardcoded `cc.BackOff` — derived by `stream.DurableConsumerDefaults` (`main.go:121`); `PullMaxMessages(2*MaxWorkers)` matches the documented high-throughput pattern (`main.go:69`); no MongoDB, Cassandra, `$lookup`, or `time.Sleep` anywhere in the service; `encoding/json` is correct here — CLAUDE.md's sonic list does not include this service.
+
+### Recommendations
+- `high` — `wg.Add(1)` around the consume-loop goroutine itself, `defer wg.Done()` on exit, so drain cannot overtake an in-flight message.
+- `medium` — wrap each dispatch in `context.WithTimeout` sized well under `CONSUMER_ACK_WAIT`.
+- `medium` — switch to `jsretry.LowLatencyBackoff` and size `MaxDeliver` against it via `jsretry.DeliveriesFor(...)`, pinned in `consumer_config_test.go` as `broadcast-worker` does.
+- `low` — add `natsmetrics` loop/consumer instrumentation so ack-pending saturation and dispatch latency are observable before a real provider is wired in.
