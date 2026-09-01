@@ -5288,6 +5288,25 @@ func TestIsSystemMessageType(t *testing.T) {
 	assert.False(t, model.IsSystemMessageType("unknown"), "unknown is not a system type")
 }
 
+// Migrated rows carry plural member types nothing produces any more. They are still
+// system messages, and the paths that read Cassandra directly — the room-list preview
+// walk and the search backfill — classify by the STORED type, so leaving them out
+// makes a membership notice eligible as a room preview and as searchable content.
+func TestIsSystemMessageType_LegacyMigratedTypes(t *testing.T) {
+	for _, st := range []string{
+		model.MessageTypeLegacyMembersRemoved,
+		model.MessageTypeLegacyMembersLeft,
+	} {
+		assert.True(t, model.IsSystemMessageType(st), "%q is a legacy system type", st)
+	}
+	assert.Equal(t, "members_removed", model.MessageTypeLegacyMembersRemoved)
+	assert.Equal(t, "members_left", model.MessageTypeLegacyMembersLeft)
+
+	// members_added is NOT legacy despite being plural — it is the current type for
+	// an add, so the plural/singular shape is not the rule.
+	assert.Equal(t, "members_added", model.MessageTypeMembersAdded)
+}
+
 func TestSendMessageRequest_TypeRoundTripAndOmitEmpty(t *testing.T) {
 	// omitempty: absent Type serializes to no "type" key (json + bson).
 	jbytes, err := json.Marshal(&model.SendMessageRequest{ID: "m1", Content: "hi", RequestID: "r1"})
