@@ -132,6 +132,76 @@ a working precedent.
 Phases 1 to 3 are also the correct reading order: the 14-lane registry in
 `soak_workload.go` cannot be understood before `Metrics` and `pacer` are.
 
+### 5.0 PR breakdown and why failure cannot come last
+
+Measured coupling to `failure_*.go`, by soak group:
+
+| Group | Distinct `failure_*` identifiers referenced |
+|---|---|
+| Engine (`soak_main`, `soak_workload`, `soak_config`, `soak_topology`, …) | **27** |
+| Lanes (12 files) | **26** |
+| Store (`soak_store`, `soak_catalog`, `soak_seed`, `soak_teardown`) | **0** |
+
+The engine's 27 include `failureLedger`, `newSoakFailureObservationRuntime`,
+`openSoakFailureObservationLedger`, `newNATSFailureRecipientConnection` and
+three `invalidReason*` constants. The lanes' 26 include the whole ledger
+lifecycle — `Activate`, `Observe`, `ObserveWithReason`, `Abandon`,
+`AbandonWithReason`, `ClaimDueLanes`, `ReleaseClaim` — plus each lane's
+`*ExpectedEffects`.
+
+So an `internal/soak` engine cannot be moved while `failure_*.go` is still in
+`package main`: it would need a temporary interface bridge spanning roughly 40
+symbols, which the failure PR then deletes. That rules out "engine first,
+failure last".
+
+Not every lane is coupled, though, which gives a cleaner split than a single
+soak PR. Measured per lane: `userread` 0, `read` 0, `roomread` 0, `search` 2,
+`send` 5, and the mutation/member/room/presence lanes higher.
+
+| PR | Content | ~Lines |
+|---|---|---|
+| 1 | Foundation + one failure-free lane as a vertical slice (`userread`) | — |
+| 2 | Remaining failure-free read lanes (`read`, `roomread`) + `soak/store`, `soak/rpc`, `soak/wire` | 4 000 |
+| 3 | Failure boundary: break the reverse edges, move `internal/failure` | 5 118 |
+| 4 | Engine + failure-coupled lanes | 9 000 |
+
+PRs 2 and 3 have no dependency on each other and may land in either order.
+Both must precede PR 4.
+
+The vertical slice in PR 1 matters more than it looks: a foundation with no
+consumer cannot demonstrate that its boundaries are right. Moving one lane
+end-to-end through the new packages proves the layering before 6 000 lines of
+lanes commit to it.
+
+### 5.0.1 The soak/failure cycle is four point welds, not a tangle
+
+`failure_*.go` reaches back into soak in exactly four places:
+
+| Site | Reference | Resolution |
+|---|---|---|
+| `failure_ledger.go:922` | `soakFailureExpiryInterval()` (`soak_failure.go:52`) | Move into `failure` — it is ledger expiry policy |
+| `failure_nats.go:480` | `waitSoakDrain(closed, budget)` | Inject or move |
+| `failure_recipient.go:239,:267` | `*soakTopology`, `isSoakRoomMember()` | **Dissolved by PR #460** — `topology` is now a leaf package (`pkg/idgen`, `pkg/model`, `pkg/subject` only), so `internal/failure` can import it with no cycle |
+| `failure_observation_runtime.go` (109 lines) | `soakConfig`, `soakTopology`, `openSoakFailureLedger`, `recordFailureObserverConfiguration` | This file *is* the soak↔failure adapter. It belongs in `internal/soak`, not `internal/failure` |
+
+Two of the four are already gone. The remaining two are a pure function and a
+single helper.
+
+**`failure_nats.go` is not failure code.** It defines `dialNATSWithMetrics`,
+`dialNATSPoolWithMetrics`, `loadgenNATSHealth` and `loadgenNATSPoolState`, and
+its consumers are `main.go`, `daily_pool.go`, `consumerlag.go` and
+`metrics.go` — the outer CLI, not soak. It belongs in `harness` (Phase 1), not
+in `internal/failure`.
+
+### 5.0.2 Naming convention inside extracted packages
+
+Drop the `soak`/`soakRPC` prefixes once the package name carries the meaning:
+`distribution.RoomPicker`, not `distribution.SoakRoomPicker`. PR #460's
+`distribution` package does this (0 old-style identifiers remain); its `rpc`
+package keeps 73 and layers exported aliases over them, leaving two naming
+systems in one package. Settle on the `distribution` form before the remaining
+eleven lanes copy either one.
+
 ### 5.1 Phase 1 detail — `metric`
 
 `metrics.go` is 766 lines defining one struct with **84 Prometheus fields**,
@@ -214,18 +284,25 @@ per-workload column specs.
 
 ## 7. Hazards
 
-**The Makefile coverage gates fail silently.** `make coverage-loadgen-soak` and
-`coverage-loadgen-failure` select files by path prefix:
+**The Makefile coverage gates break on every move.** `make coverage-loadgen-soak`
+and `coverage-loadgen-failure` select files by path prefix:
 
 ```
 coveragecheck -profile … -include tools/loadgen/soak_    -min 80
 coveragecheck -profile … -include tools/loadgen/failure_ -min 80
 ```
 
-After Phases 2 and 3 those prefixes match nothing, and a gate that inspects
-zero files passes. Both phases must update the prefixes **and** add a
-"fail if the include pattern matched no files" guard to `tools/coveragecheck`.
-Without the guard the gate is worse than removed — it reports success.
+After Phases 2 and 3 those prefixes stop matching the moved files, so every
+phase that moves code must update them in the same commit. `coveragecheck`
+already fails when an include pattern matches no statements
+(`tools/coveragecheck/main.go`, "coverage include pattern %q matched no
+statements"), so a stale prefix fails loudly rather than passing an empty
+gate — but a prefix that still matches the *remaining* files silently stops
+covering the moved ones. That is the case to watch: after a partial move,
+verify the gate's `total=` count did not drop.
+
+`-include` is repeatable as of PR #460, so a phase that splits one prefix into
+several passes each one rather than widening to a prefix that over-matches.
 
 **Every new package with integration tests needs its own `TestMain`.** One
 `testutil.RunTests(m)` in `integration_test.go` currently serves the whole
