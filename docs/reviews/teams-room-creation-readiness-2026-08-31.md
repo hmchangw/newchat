@@ -92,3 +92,27 @@ Verified compliant: table-driven with named subtests (`config_test.go:20-28`); t
 - `low` — Add an `env.ParseAs[Config]` test with `t.Setenv` covering the defaults.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+973 lines across 12 small files with no function over ~45 lines and comments that consistently explain WHY; the blemishes are three redundant passes over the same slice and two stale subject doc-comments.
+
+### Findings
+- `medium` — `chatIDs(b.chats)` allocates a full `[]string` per batch and is then used **only** for its length — `runner.go:82`, consumed at `:86` and `:91` as `len(ids)`, which equals `len(b.chats)`
+  The whole helper (`runner.go:149-156`) plus its `//nolint` exists to serve two log lines.
+- `medium` — Two doc-comments name a subject that does not exist: `chat.room.canonical.{siteId}.teams.create` — `teams-room-creation/main.go:4` and `pkg/model/teamsroom.go:6`. The real subject is `chat.teams.room.canonical.{siteID}.create` (`pkg/subject/subject.go:213`). The `pkg/model` one is worse: it misleads every future consumer of the shared type.
+- `low` — `publishBatch` walks `b.chats` three times through three near-identical `//nolint:gocritic // rangeValCopy` helpers (`buildEvent` `:128`, `chatIDs` `:152`, `roomCreatedRefs` `:163`), copying a heavy struct each pass. One loop building both the event and the refs removes two helpers and two nolints.
+- `low` — Dead error branch: `json.Marshal` on `TeamsRoomCreateEvent` cannot fail — `runner.go:77-81`.
+- `nitpick` — `RoomCreatedRef` (`store.go:17`) is the only exported type in `package main` and nothing outside consumes it; CLAUDE.md §3 says export only what other packages consume. Harmless, but mockgen forced it.
+
+Adding a feature here is easy: a new projected field is a one-line change in the projection (`store_mongo.go:36`), the model, and `buildEvent`. No leaky abstractions; the store hides both clients behind two methods.
+
+### Recommendations
+- `medium` — Fix both stale subject doc-comments to `chat.teams.room.canonical.{siteID}.create`; the `pkg/model` one is the shared contract.
+- `medium` — Delete `chatIDs` and log `len(b.chats)` directly.
+- `low` — Merge `buildEvent`/`roomCreatedRefs` into one pass over `b.chats`, dropping two `//nolint` directives.
+- `low` — Drop the unreachable marshal-error branch.
+
+---
