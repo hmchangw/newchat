@@ -39,8 +39,7 @@ func TestSubscriptionRepo_ReadPreferenceRouting(t *testing.T) {
 		assert.NotSame(t, r.subscriptions.Raw(), r.subscriptionsSecondary.Raw())
 		// GetAppSubscription (dedup guard) must keep using the primary handle.
 		assert.NotSame(t, r.subscriptions.Raw(), r.subscriptionsSecondary.Raw())
-		// The sort-key read is already allowed to lag by SUBS_SORTKEY_CACHE_TTL, so it
-		// takes the secondary; the page baseline read stays on the primary handle.
+		// The sort-key read takes the secondary; the page baseline read does not.
 		assert.NotSame(t, r.rooms, r.roomsSecondary)
 	})
 }

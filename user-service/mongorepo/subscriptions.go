@@ -41,14 +41,11 @@ type SubscriptionRepo struct {
 	// showTeamsAccounts (SHOW_TEAMS_ROOM_ACCOUNTS) allowlists accounts that see
 	// Teams rooms even when showTeamsRoom is false.
 	showTeamsAccounts map[string]bool
-	// rooms backs the page baseline read, which both seeds the sort-key cache and
-	// produces the row's user-visible room fields. The collection belongs to
-	// room-service; we only name it.
+	// rooms backs the page baseline read, which seeds both the sort-key cache and
+	// the row's room fields. Owned by room-service; we only name it.
 	rooms *mongo.Collection
-	// roomsSecondary serves the sort-key read alone — the one rooms read whose $in
-	// is sized by the account's whole subscription set rather than by the page, and
-	// one whose value the cache already lets lag by its TTL. resolveSortKeys
-	// documents what a replica adds on top of that.
+	// roomsSecondary serves the sort-key read alone: the one rooms read sized by the
+	// account's whole set, and already lag-tolerant. See resolveSortKeys.
 	roomsSecondary *mongo.Collection
 	sortKeys       *sortKeyCache
 }
@@ -273,11 +270,10 @@ func dedupeStrings(in []string) []string {
 //  4. Two reads sized to the page: its rooms and its full subscription
 //     documents. Only rows that made the page are fetched in full.
 //
-// Only the ordering may lag, by up to the cache TTL plus the replication lag of
-// the secondary the sort-key read is served from. Whether a subscription appears
-// is decided by the two subscription reads, which keep the client preference. A
-// cached key that falls outside the window is re-read first, and the fresh room
-// read drops any room soft-deleted meanwhile.
+// Only the ordering may lag: the cache TTL plus the sort-key read's replica lag.
+// Visibility is the two subscription reads', which keep the client preference. A
+// cached key outside the window is re-read first, and the fresh room read drops
+// any room soft-deleted meanwhile.
 func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, listType string, favorite bool, withinDays *int, page mongoutil.OffsetPageRequest) (mongoutil.OffsetPageHasMore[model.EnrichedSubscription], error) {
 	var zero mongoutil.OffsetPageHasMore[model.EnrichedSubscription]
 	match := bson.M{"u.account": account}
@@ -305,8 +301,7 @@ func (r *SubscriptionRepo) AggregateSubscriptions(ctx context.Context, account, 
 		match["origin"] = f
 	}
 	// Both subscription reads keep the client preference: they decide whether a row
-	// appears at all, and the list must show a subscription the caller just changed.
-	// Only the sort-key read is routed to a secondary.
+	// appears, and must show a subscription the caller just changed.
 	cur, err := r.subscriptions.Raw().Find(ctx, match,
 		options.Find().SetProjection(subscriptionLiteProjection()))
 	if err != nil {
@@ -494,17 +489,11 @@ func fillBatchSize(need, collected, candidates int64) int64 {
 //
 // A cached key outside the activity window is treated as a miss and read again.
 // lastMsgAt only moves forward, so a key that passes the window is still in it,
-// but one that fails may have just gone stale. Ordering may lag the TTL; whether
-// a subscription appears at all is not decided here — except under a withinDays
-// window, which drops undated rows.
+// but one that fails may have just gone stale. Ordering may lag the TTL; so may
+// inclusion, but only under a withinDays window, which drops undated rows.
 //
-// This read is served from a secondary (roomsSecondary), so its absences are not
-// authoritative: a room created within the replica's lag reads as absent, and the
-// Missing caching below then holds that verdict for the TTL. Undated rows sort
-// last, so the visible cost is a just-created room at the bottom of the sidebar
-// until the entry expires — or, under a window, out of it. The page baseline read
-// keeps the primary preference and writes the real key back for any such room that
-// reaches the page.
+// Served from a secondary, so absences are not authoritative: a room created
+// inside the replica's lag caches as Missing for the TTL and sorts last.
 //
 // Rooms the read doesn't return are cached as Missing, so rooms owned by another
 // site aren't queried on every list. Those are never re-read — there is no local
