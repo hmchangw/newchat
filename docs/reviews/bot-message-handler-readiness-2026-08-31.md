@@ -23,3 +23,24 @@ Textbook CLAUDE.md layout — consumer-defined store, constructor DI, `pkg/subje
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
 | Count | 2 | 4 | 9 | 15 | 2 | **32** |
+
+---
+
+## 2. Go code quality — 4 / 5
+
+Idiomatic, well-wrapped, no logging or `errors.Is` violations; one genuine `pkg/errcode` tiering breach and an unvalidated numeric header keep it off 5.
+
+### Findings
+- `medium` — infra publish failure is dressed up as an errcode instead of a raw wrapped error: `errcode.Internal("publish canonical", errcode.WithCause(err))` — `bot-message-handler/handler.go:200`. CLAUDE.md Tier 1 is explicit: "For an infra failure, `return fmt.Errorf("…: %w", err)` … do NOT dress it up as an errcode." Every other error site in the file gets this right (`handler.go:65,99,147,267,291`).
+- `medium` — `parseHeaderIDs` accepts any `int64` unix-ms from `X-Bot-Created-At` with no range sanity check — `bot-message-handler/handler.go:237-242`. That value becomes `Message.CreatedAt` and is the Cassandra partition/clustering input downstream (`bot-message-worker/store_cassandra.go:70,111`), so a negative or year-3000 value writes a message into an unreachable bucket.
+- `low` — `Subscription.SiteID`, `Room.Type/Name/SiteID` are decoded and projected but never read; all three call sites discard the value (`_, err :=`) — `bot-message-handler/store.go:28-39`, `handler.go:59,94,142`. Either enforce `sub.SiteID == h.siteID` (real defence-in-depth, the comment at `handler.go:57` implies it) or shrink the types to an existence check.
+- `low` — SAST audit-coverage gap: gosec and repo-owned semgrep are clean repo-wide, but `govulncheck` and the semgrep registry packs could not run (blocked egress, per GLOBAL_PREP). Environmental, not a service defect.
+- `nitpick` — `publishTimeout` is a hardcoded 2s const while every other timing knob is env-driven — `bot-message-handler/handler.go:28`.
+
+### Recommendations
+- `medium` — Replace `handler.go:200` with `fmt.Errorf("publish canonical message: %w", err)`; the boundary already collapses it to `internal`.
+- `medium` — Bound `createdAt` in `parseHeaderIDs` (e.g. reject > ±24h from `time.Now()`), returning `BotInvalidHeader`.
+- `low` — Assert `sub.SiteID == h.siteID` in both handlers, or delete the unused fields and their projections.
+- `nitpick` — Move `publishTimeout` into `config` with an `envDefault:"2s"`.
+
+---
