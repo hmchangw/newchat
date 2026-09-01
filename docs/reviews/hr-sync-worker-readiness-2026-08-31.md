@@ -138,3 +138,24 @@ Correct: stream name/subjects from `stream.OrgSyncStream` (`main.go:117`, `boots
 - `low` — use the builders in the integration test.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+No allocation, N+1 or goroutine problems at this volume, and `jsretry` is used correctly — but the retry/concurrency configuration turns any permanent store error into an indefinite stall of the site's lane.
+
+### Findings
+- `high` — **poison-message lane wedge.** Every store failure is classified transient (`handler.go:31-33,42-44,53-55`), `MaxDeliver` is forced to `-1` (`main.go:142`, via `stream.WithUnlimitedRedelivery`, `pkg/stream/consumer.go:174-176`) and `MaxAckPending=1` (`main.go:144`). A non-retryable Mongo error therefore retries forever while blocking every subsequent batch on that stream. It is reachable: `portal-service` enforces a **unique `account` index on `hr_employee`** (`portal-service/store_mongo.go:27-34`) while this worker upserts keyed on `_id = employeeId` (`store.go:58-60`) — a rehire (same account, new employeeId) yields a permanent E11000 that never becomes permanent to the worker.
+- `medium` — no delivery-count ceiling or alerting on the wedge: `msg.Metadata().NumDelivered` is available inside `jsretry` but nothing in this service escalates a message to `errcode.Permanent` after N attempts, and the only health check is NATS liveness (`main.go:87`), which stays green while the lane is stuck.
+- `medium` — whole-batch processing with no chunking: the entire array is unmarshalled (`handler.go:24,35`) and turned into one `WriteModel` slice (`store.go:52,70`); a daily full-workforce sync retried on the 10-minute tail of `jsretry.DefaultBackoff` (`pkg/jsretry/jsretry.go:52-58`) re-does all of it every attempt.
+- `low` — no index is asserted by this service on the fields it writes/filters (`account` on `hr_employee`, `account` on `users`); it depends on `portal-service`/`user-service` `EnsureIndexes` having run first, which is nowhere documented here. `QuitTeamsEmployees`' `DeleteMany` on `account` (`store.go:112`) is a collection scan without it.
+
+Correct: `jsretry.Settle` everywhere, no bare `Nak()`/`NakWithDelay(0)` (`main.go:128,131`); `BackOff` derived by `stream.DurableConsumerDefaults`, never hardcoded (`main.go:142`); no `time.Sleep` in production code; `jobguard.Run` contains handler panics (`main.go:123`); one round-trip per subject (unordered BulkWrite, `pkg/mongoutil/collection.go:173`), no `$lookup`, no reads needing projection; `encoding/json` is correct here (not a designated sonic hot-path worker).
+
+### Recommendations
+- `high` — classify non-retryable Mongo errors as permanent: `mongo.IsDuplicateKeyError` / document-validation failures should return `errcode.Permanent(...)` from the store error path so the lane drains instead of wedging.
+- `high` — pair `MaxDeliver=-1` with a `NumDelivered` ceiling that escalates to permanent (plus a metric/log at the threshold), so an unresolvable batch cannot block the site forever.
+- `medium` — reconcile the `hr_employee` key: upsert on `account` (matching the unique index and the README) or drop the unique index — today the write key and the enforced constraint disagree.
+- `medium` — chunk large batches (e.g. 1k `WriteModel`s per BulkWrite) so a retry is not all-or-nothing.
+- `low` — document (or assert) the index prerequisite for `account` on both collections.
