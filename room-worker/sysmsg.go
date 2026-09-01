@@ -27,14 +27,14 @@ func plural(n int, singular, pluralForm string) string {
 	return strconv.Itoa(n) + " " + pluralForm
 }
 
-func formatAddedSingle(requester *model.User, addedName string) string {
-	return quoted(displayName(requester)) + " added " + quoted(addedName) + " to the chatroom"
+func formatAddedSingle(requesterName, addedName string) string {
+	return quoted(requesterName) + " added " + quoted(addedName) + " to the chatroom"
 }
 
 // formatAddedCounts renders the count form. At least one of people/orgs is > 0
 // (callers skip emitting the message when both are zero).
-func formatAddedCounts(requester *model.User, people, orgs int) string {
-	who := quoted(displayName(requester))
+func formatAddedCounts(requesterName string, people, orgs int) string {
+	who := quoted(requesterName)
 	switch {
 	case people > 0 && orgs > 0:
 		return who + " added " + plural(people, "person", "people") +
@@ -48,13 +48,13 @@ func formatAddedCounts(requester *model.User, people, orgs int) string {
 
 // addedContent renders members_added Content for both add and create: named form
 // for a lone individual (no orgs), else counts. nameOf returns "" if unresolved.
-func addedContent(requester *model.User, individuals, orgs []string, nameOf func(string) string) string {
+func addedContent(requesterName string, individuals, orgs []string, nameOf func(string) string) string {
 	if len(individuals) == 1 && len(orgs) == 0 {
 		if name := nameOf(individuals[0]); name != "" {
-			return formatAddedSingle(requester, name)
+			return formatAddedSingle(requesterName, name)
 		}
 	}
-	return formatAddedCounts(requester, len(individuals), len(orgs))
+	return formatAddedCounts(requesterName, len(individuals), len(orgs))
 }
 
 // nonNil returns s, or a non-nil empty slice so JSON marshals "[]" not "null".
@@ -77,12 +77,12 @@ func withoutAccount(accounts []string, account string) []string {
 	return out
 }
 
-func formatRemovedUser(requester *model.User, removedName string) string {
-	return quoted(displayName(requester)) + " removed " + quoted(removedName) + " from the chatroom"
+func formatRemovedUser(requesterName, removedName string) string {
+	return quoted(requesterName) + " removed " + quoted(removedName) + " from the chatroom"
 }
 
-func formatRemovedOrg(requester *model.User, name, tcName, orgID string) string {
-	return quoted(displayName(requester)) + " removed " + quoted(displayOrg(name, tcName, orgID)) + " from the chatroom"
+func formatRemovedOrg(requesterName, name, tcName, orgID string) string {
+	return quoted(requesterName) + " removed " + quoted(displayOrg(name, tcName, orgID)) + " from the chatroom"
 }
 
 func formatLeft(name string) string {

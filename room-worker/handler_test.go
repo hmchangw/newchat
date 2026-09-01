@@ -5741,43 +5741,68 @@ func TestHandler_ProcessAddMembers_Content_Single(t *testing.T) {
 	assert.Equal(t, `"Alice 愛" added "U1 一" to the chatroom`, sysMsg.Content)
 }
 
-// Single added individual is a bot: Content substitutes the registered app name.
-func TestHandler_ProcessAddMembers_Content_SingleBot(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-
-	roomID := "r1"
-	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
-		Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
-	store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{"helper.bot"}, roomID).
-		Return([]AddMemberCandidate{{Account: "helper.bot"}}, nil)
-	store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
-		Return([]model.User{{ID: "bot_id", Account: "helper.bot", SiteID: "site-a"}}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
-	expectGetRoom(store, roomID, "Chan")
-	store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
-	store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
-	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
-
-	var published []publishedMsg
-	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}, keyStore: testKeyStore, keySender: testKeySender}
-	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
-
-	req := model.AddMembersRequest{
-		RoomID: roomID, RequesterID: "u_a", RequesterAccount: "alice",
-		Users: []string{"helper.bot"}, Timestamp: 1,
+// Bot on either side of a single add: Content substitutes the registered app
+// name for whichever participant (member or requester) is the bot.
+func TestHandler_ProcessAddMembers_Content_BotAware(t *testing.T) {
+	botUser := model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"}
+	tests := []struct {
+		name      string
+		requester model.User
+		member    model.User
+		want      string
+	}{
+		{
+			name:      "bot member",
+			requester: model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice"},
+			member:    botUser,
+			want:      `"Alice" added "Helper Bot" to the chatroom`,
+		},
+		{
+			name:      "bot requester",
+			requester: botUser,
+			member:    model.User{ID: "u1_id", Account: "u1", SiteID: "site-a", EngName: "U1"},
+			want:      `"Helper Bot" added "U1" to the chatroom`,
+		},
 	}
-	data, _ := json.Marshal(req)
-	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
-	require.NoError(t, h.processAddMembers(ctx, data))
 
-	sysMsg := findSysMsg(t, published, "site-a", "members_added")
-	assert.True(t, strings.HasSuffix(sysMsg.Content, `added "Helper Bot" to the chatroom`))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+
+			roomID := "r1"
+			store.EXPECT().GetRoomMeta(gomock.Any(), roomID).
+				Return(&model.Room{ID: roomID, Name: "Chan", SiteID: "site-a", Type: model.RoomTypeChannel}, nil)
+			store.EXPECT().ListAddMemberCandidates(gomock.Any(), []string(nil), []string{tt.member.Account}, roomID).
+				Return([]AddMemberCandidate{{Account: tt.member.Account}}, nil)
+			store.EXPECT().FindUsersByAccounts(gomock.Any(), []string{tt.member.Account}).
+				Return([]model.User{tt.member}, nil)
+			store.EXPECT().GetUser(gomock.Any(), tt.requester.Account).Return(&tt.requester, nil)
+			store.EXPECT().HasAnyRoomMembers(gomock.Any(), roomID).Return(false, nil)
+			expectGetRoom(store, roomID, "Chan")
+			store.EXPECT().BulkCreateSubscriptions(gomock.Any(), gomock.Any()).Return(nil)
+			store.EXPECT().ApplyMemberCountDelta(gomock.Any(), roomID, gomock.Any(), gomock.Any(), gomock.Any()).Return(false, nil)
+			store.EXPECT().GetApp(gomock.Any(), botUser.Account).Return(&model.App{Name: "Helper Bot"}, nil)
+
+			var published []publishedMsg
+			h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, keyStore: testKeyStore, keySender: testKeySender}
+			h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+
+			req := model.AddMembersRequest{
+				RoomID: roomID, RequesterID: tt.requester.ID, RequesterAccount: tt.requester.Account,
+				Users: []string{tt.member.Account}, Timestamp: 1,
+			}
+			data, _ := json.Marshal(req)
+			ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+			require.NoError(t, h.processAddMembers(ctx, data))
+
+			sysMsg := findSysMsg(t, published, "site-a", "members_added")
+			assert.Equal(t, tt.want, sysMsg.Content)
+		})
+	}
 }
 
 // B2: len(subs)>=2 → multi form.
@@ -6092,38 +6117,60 @@ func TestHandler_ProcessRemoveIndividual_RemovedByOther_Content(t *testing.T) {
 	assert.Equal(t, `"Alice 愛" removed "Bob 鮑" from the chatroom`, sysMsg.Content)
 }
 
-// Removed member is a bot: Content substitutes the registered app name for the
-// raw bot account. The requester side stays composed-name as always.
-func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotContent(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	store := NewMockSubscriptionStore(ctrl)
-	expectThreadCleanupAny(store)
+// Bot on either side of a forced removal: Content substitutes the registered
+// app name for whichever participant (removed member or requester) is the bot.
+func TestHandler_ProcessRemoveIndividual_RemovedByOther_BotAware(t *testing.T) {
+	botUser := model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"}
+	tests := []struct {
+		name      string
+		requester model.User
+		removed   model.User
+		want      string
+	}{
+		{
+			name:      "bot removed",
+			requester: model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice"},
+			removed:   botUser,
+			want:      `"Alice" removed "Helper Bot" from the chatroom`,
+		},
+		{
+			name:      "bot requester",
+			requester: botUser,
+			removed:   model.User{ID: "u_b", Account: "bob", SiteID: "site-a", EngName: "Bob"},
+			want:      `"Helper Bot" removed "Bob" from the chatroom`,
+		},
+	}
 
-	roomID := "r1"
-	store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, "helper.bot").
-		Return(&UserWithMembership{
-			User: model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"},
-		}, nil)
-	store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, "u_bot").Return(nil)
-	store.EXPECT().DeleteSubscription(gomock.Any(), roomID, "helper.bot").Return(int64(1), nil)
-	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
-	store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
-	store.EXPECT().GetUser(gomock.Any(), "alice").
-		Return(&model.User{ID: "u_a", Account: "alice", SiteID: "site-a", EngName: "Alice", ChineseName: "愛"}, nil)
-	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			store := NewMockSubscriptionStore(ctrl)
+			expectThreadCleanupAny(store)
 
-	var published []publishedMsg
-	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
-		published = append(published, publishedMsg{subj: subj, data: data})
-		return nil
-	}, keyStore: testKeyStore, keySender: testKeySender}
-	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+			roomID := "r1"
+			store.EXPECT().GetUserWithMembership(gomock.Any(), roomID, tt.removed.Account).
+				Return(&UserWithMembership{User: tt.removed}, nil)
+			store.EXPECT().DeleteRoomMember(gomock.Any(), roomID, model.RoomMemberIndividual, tt.removed.ID).Return(nil)
+			store.EXPECT().DeleteSubscription(gomock.Any(), roomID, tt.removed.Account).Return(int64(1), nil)
+			store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+			store.EXPECT().GetSubscriptionAccounts(gomock.Any(), roomID).Return([]string{}, nil)
+			store.EXPECT().GetUser(gomock.Any(), tt.requester.Account).Return(&tt.requester, nil)
+			store.EXPECT().GetApp(gomock.Any(), botUser.Account).Return(&model.App{Name: "Helper Bot"}, nil)
 
-	req := model.RemoveMemberRequest{RoomID: roomID, Requester: "alice", Account: "helper.bot", Timestamp: 1}
-	require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+			var published []publishedMsg
+			h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+				published = append(published, publishedMsg{subj: subj, data: data})
+				return nil
+			}, keyStore: testKeyStore, keySender: testKeySender}
+			h.appName = preview.CachedAppNameLookup(h.appNameLookup)
 
-	sysMsg := findSysMsg(t, published, "site-a", "member_removed")
-	assert.Equal(t, `"Alice 愛" removed "Helper Bot" from the chatroom`, sysMsg.Content)
+			req := model.RemoveMemberRequest{RoomID: roomID, Requester: tt.requester.Account, Account: tt.removed.Account, Timestamp: 1}
+			require.NoError(t, h.processRemoveIndividual(context.Background(), &req, nil))
+
+			sysMsg := findSysMsg(t, published, "site-a", "member_removed")
+			assert.Equal(t, tt.want, sysMsg.Content)
+		})
+	}
 }
 
 // Self-leave by a bot: Content uses the registered app name when GetApp resolves it,
@@ -7021,6 +7068,39 @@ func TestProcessRoomRename_TransientSubscriptionUpdateError(t *testing.T) {
 	err := h.processRoomRename(ctx, body)
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, errPermanent), "expected transient (non-permanent) error, got %v", err)
+}
+
+// Rename requested by a bot: the sys-message label substitutes the registered app name.
+func TestProcessRoomRename_BotRequester_Content(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	store := NewMockSubscriptionStore(ctrl)
+
+	const roomID, newName = "r1", "renamed"
+
+	store.EXPECT().UpdateRoomName(gomock.Any(), roomID, newName).Return(nil)
+	store.EXPECT().UpdateSubscriptionNamesForRoom(gomock.Any(), roomID, newName, gomock.Any()).Return(nil)
+	store.EXPECT().GetUser(gomock.Any(), "helper.bot").
+		Return(&model.User{ID: "u_bot", Account: "helper.bot", SiteID: "site-a"}, nil)
+	store.EXPECT().GetApp(gomock.Any(), "helper.bot").Return(&model.App{Name: "Helper Bot"}, nil)
+	store.EXPECT().ListByRoom(gomock.Any(), roomID).Return(nil, nil)
+	store.EXPECT().GetRoomMeta(gomock.Any(), roomID).Return(&model.Room{ID: roomID}, nil)
+
+	var published []publishedMsg
+	h := &Handler{store: store, siteID: "site-a", publish: func(_ context.Context, subj string, data []byte, _ string) error {
+		published = append(published, publishedMsg{subj: subj, data: data})
+		return nil
+	}}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+
+	ctx := natsutil.WithRequestID(context.Background(), testRequestID)
+	body, _ := json.Marshal(model.RenameRoomRequest{
+		RoomID: roomID, NewName: newName, Account: "helper.bot", Timestamp: 1700000000000,
+	})
+	require.NoError(t, h.processRoomRename(ctx, body))
+
+	sysMsg := findSysMsg(t, published, "site-a", "room_renamed")
+	assert.Equal(t, `"Helper Bot" renamed the channel to "renamed"`, sysMsg.Content)
 }
 
 func TestProcessRoomRename_PublishesRoomRenamedEvent(t *testing.T) {
