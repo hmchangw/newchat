@@ -21,3 +21,25 @@ What holds it at 3.7 is that the outbound path has **no deadline and no connecti
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
 | Count | 0 | 3 | 5 | 13 | 3 | **24** |
+
+---
+
+## 2. Go code quality — 4 / 5
+
+Idiomatic, well-commented Go with correct `errcode` tiering, clean error wrapping and zero logging violations; only small linting-grade blemishes and one sloppy SAST suppression.
+
+### Findings
+- `low` — duplicate, mutually contradictory `#nosec G304` justifications stacked on one statement — `translation-service/j1source.go:26-27`. Only the line directly above the statement is honoured by gosec, so line 26's correct justification ("operator-configured token mount") is inert; the effective one is the copy-pasted "developer-supplied path in dev tooling, not attacker-controlled", which is false for a production service (that boilerplate otherwise appears only in `tools/loadgen` and `_test.go` files).
+- `low` — `readErr == io.EOF` direct comparison instead of `errors.Is` — `translation-service/translator_stream.go:154`. Works today because `bufio.ReadString` returns the sentinel unwrapped, but a wrapped EOF would fall through to the `Unavailable` branch and misclassify a clean stream end as an upstream outage.
+- `low` — `pkg/model/translation.go:11,20` carries `json` tags only; CLAUDE.md §3 requires both `json` and `bson` on all model structs. The doc comment argues wire-only, but CLAUDE.md states no such carve-out — the exception should be added to CLAUDE.md rather than asserted in a comment.
+- `nitpick` — `fmt.Errorf` with no format verbs where `errors.New` is correct — `translator_stream.go:171`, `token.go:124`, `main.go:54,57,71`, `j1source.go:54`.
+- `nitpick` — `main.go:61` `fmt.Errorf("%w when TRANSLATION_BACKEND=stream", err)` leads with the wrapped error rather than describing what this function was doing.
+- `low` — audit-coverage gap, not a service defect: gosec and the repo-owned semgrep rules are clean repo-wide, but `govulncheck` and the semgrep registry packs could not run (egress blocked, per GLOBAL_PREP).
+
+### Recommendations
+- `low` — Delete `j1source.go:27`; keep one accurate justification directly above `os.ReadFile`.
+- `low` — Switch to `errors.Is(readErr, io.EOF)`.
+- `low` — Either add the wire-only-struct exception to CLAUDE.md §3 or add `bson` tags to `pkg/model/translation.go`.
+- `nitpick` — Replace verb-less `fmt.Errorf` calls with `errors.New`.
+
+---
