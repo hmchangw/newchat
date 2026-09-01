@@ -86,3 +86,23 @@ Coverage is **40.9% (198 stmts)** — below the 60% critical threshold — and t
 - `low` — Cover the `canonicalizeMentions` store-error branch (`handler.go:267,291`), currently the only untested error path in a 76.2%-covered function.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+At 1080 lines across 8 files with small, single-purpose functions it is easy to hold in the head; the one real smell is a 25-line message-construction block duplicated verbatim between the two handlers.
+
+### Findings
+- `medium` — `handleSendDM` (`handler.go:110-124`) and `handleSendRoom` (`handler.go:163-183`) build an identical 13-field `model.Message` and repeat the same identity/header/validate/canonicalize/publish sequence. A new `Message` field must be added in two places, and the `TShow && ThreadParentMessageID != ""` rule is written twice (`:118`, `:175`).
+- `low` — asymmetric defence: `handleSendRoom` calls `verifyRoomExists` (`:150`) but `handleSendDM` does not, and neither rejects a self-DM (`ident.ID == targetUserID`) even though the contract names `cannot_dm_self` (`docs/client-api.md:8543`). The asymmetry is undocumented at the DM site.
+- `low` — dead surface: `Subscription`/`Room` carry five fields no caller reads (`store.go:28-39`), and the Mongo projections fetch them (`store_mongo.go:39,59`).
+- `nitpick` — the `roomID == ""` / `targetUserID == ""` guards (`handler.go:80,129`) are unreachable through the router: NATS subject tokens cannot be empty for a `{param}` match.
+- `low` — comment discipline is good throughout: comments explain *why* (e.g. `handler.go:57`, `:126`, `:225`, `bootstrap.go:23`), not what.
+
+### Recommendations
+- `medium` — Extract `func (h *handler) buildAndPublish(c *natsrouter.Context, roomID string, ident *BotIdentity, messageID string, createdAt time.Time, req BotSendRoomRequest) (*BotSendResponse, error)` holding the validate → canonicalize → construct → publish tail; both handlers shrink to their auth-specific prologue.
+- `low` — Add an explicit self-DM rejection in `handleSendDM` with `errcode.BadRequest(..., WithReason(...))`, or a one-line comment stating BP owns it.
+- `low` — Delete the unused struct fields and narrow the projections to `_id`-only existence checks.
+
+---
