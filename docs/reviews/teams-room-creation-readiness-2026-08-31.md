@@ -147,3 +147,29 @@ Not applicable, verified: no `chat.user.…` subject and no HTTP route, so `docs
 - `low` — Add a comment at `room-worker/teamsroomcreate.go:62` recording why migrated DMs deviate from `BuildDMRoomID`.
 
 ---
+
+---
+
+## 7. Performance — 4 / 5
+
+Bounded concurrency, a precisely projected index-backed read, one bulk write, and zstd on the wire — the residual risks are an unbounded result set on the first migration run and a permanently-stalling oversize batch.
+
+### Findings
+- `medium` — `ListChatsNeedingRoom` loads **every** flagged chat into memory with no `WithLimit`/pagination — `store_mongo.go:34-38`
+  On the first migration pass this is the entire Teams chat corpus, each with a `members` array, decoded into `[]model.TeamsChat` by `cursor.All` (`pkg/mongoutil/collection.go:65`). Fleet-consistent (every `teams-*` sibling does the same), but this is the one job whose cold-start set is unbounded by design.
+- `medium` — A batch too large for the NATS `max_payload` fails, is logged at WARN, and is retried identically on every subsequent run forever — `runner.go:84-88` with a static `BatchSize` default of 100 (`config.go:26`)
+  Nothing splits, dead-letters, or alerts; the chats simply never leave `needCreateRoom=true`. With no metrics (D2) this is invisible.
+- `medium` — `MarkRoomsCreated` discards the `*BulkResult`, so a CAS that matches nothing is indistinguishable from a clean clear — `store_mongo.go:63`
+  `pkg/mongoutil/collection.go:169` returns matched/modified counts. A chat whose `updatedAt` churns every run (member-sync racing) stays flagged and republished indefinitely with zero signal.
+- `low` — `MarkRoomsCreated` is called with the same `ctx` that SIGTERM cancels (`runner.go:89`), so a shutdown arriving between a successful PubAck and the flag clear guarantees the mark fails and the whole batch republishes next run. Idempotent downstream (documented at `publisher.go:26-28`), but `context.WithoutCancel` here would avoid the redundant fan-out.
+- `low` — The dispatch loop never checks `ctx.Err()` (`runner.go:60-68`), so after cancellation it still spawns a goroutine per remaining batch, each of which fails its publish.
+- `low` — Per-batch waste: a `[]string` allocated only to be measured (`runner.go:82`) and three copying passes over the same heavy slice (see D4).
+
+Verified sound: goroutines are bounded by a `chan struct{}` sized from `MaxWorkers` and every one is joined by `wg.Wait()` (`runner.go:58-69`) — no leak, no `time.Sleep`; the read is served by `teams-chat-sync`'s partial compound index `needCreateRoom:1,_id:1`, which also serves the `_id` sort without an in-memory pass (`teams-chat-sync/integration_test.go:99-103`); the projection is explicit and minimal (`store_mongo.go:35-37`); no `$lookup`; no N+1 — one read, one bulk write per batch; payloads are zstd-compressed (`publisher.go:31`); `mongo.ErrNoDocuments` is not applicable (list, not point-read). `jsretry`/`BackOff` rules do not apply: this service has no JetStream consumer, and the CronJob re-run is the retry.
+
+### Recommendations
+- `medium` — Add a configurable `LIST_LIMIT` via `mongoutil.WithLimit` and let the CronJob drain across runs; the `_id` sort already makes this deterministic.
+- `medium` — Log the `BulkResult` matched/modified counts and emit a counter for `matched < len(refs)`; without it, a permanently stuck chat is silent.
+- `medium` — On a publish failure, detect `nats.ErrMaxPayload` and split the batch (or refuse to build a batch whose marshalled size exceeds a configured cap) so an oversize batch cannot stall forever.
+- `low` — Use `context.WithoutCancel(ctx)` for the `MarkRoomsCreated` call at `runner.go:89`, and `break` the dispatch loop on `ctx.Err()`.
+- `low` — Drop the `chatIDs` allocation and merge the three slice passes.
