@@ -116,9 +116,9 @@ missing beyond shared cache/key counters.
 | portal-service | ✅ | ✅ | — | — | — | — | — | account-lookup outcomes |
 | upload-service | ✅ | ✅ | — | — | — | — | — | upload count/bytes, MinIO put/get outcomes |
 | media-service | ✅ | ✅ | — | — | spans | — | — | avatar/emoji upload count/bytes, MinIO put/get outcomes |
-| message-gatekeeper | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`message_gatekeeper_messages_total`** | — |
+| message-gatekeeper | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`message_gatekeeper_messages_total`**, **`messages_canonical_published_total`** (SLO-1a/1b denominator), **`messages_canonical_publish_duplicate_total`** | — |
 | message-worker | — | ✅ | — | ✅ | spans + `chat_nats_*` | — | shared `cache_*_total`, **`message_worker_persistence_total`** | thread-sub upserts |
-| broadcast-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`broadcast_worker_fanout_recipients`**, **`broadcast_worker_recipient_deliveries_total`** | E2E-key hits |
+| broadcast-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`broadcast_worker_fanout_recipients`**, **`broadcast_worker_recipient_deliveries_total`**, **`broadcast_channel_enqueue_total`** (SLO-1b numerator) | E2E-key hits |
 | notification-worker | — | ✅ | ✅ | — | spans + `chat_nats_*` | — | shared `cache_*_total`, **`notification_worker_outcomes_total`** | — |
 | outbox-worker | — | — | — | — | spans | — | — | forwarded/dropped/retried events by destination and type |
 | search-sync-worker | — | — | — | — | spans (Fetch) | spans | **`search_sync_worker_bulk_flush_duration_seconds`, `search_sync_worker_bulk_flush_actions`, `search_sync_worker_bulk_item_failures_total`, `search_sync_worker_messages_total`, `search_sync_worker_parent_resolve_duration_seconds`** (all labeled by `collection`) | (bulk outcomes covered 2026-08-19) |
