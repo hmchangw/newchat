@@ -528,6 +528,29 @@ func TestMaintain_TruncatedScan_NeverStampsAnExactCount(t *testing.T) {
 		assert.Equal(t, t0.UnixMilli(), gotTLM.UnixMilli())
 	})
 
+	// The truncated branch is the only one that applies a delta AND cannot
+	// recount to check itself: the complete branch is idempotent by
+	// construction, and the approximate branch guards on redelivered. Without
+	// the same guard here a retry re-applies the +1 — reachable whenever the
+	// handler fails after Maintain already stamped (message-worker publishes
+	// the reply event after the store call, and a failed publish NAKs).
+	t.Run("a redelivery does not re-apply the delta", func(t *testing.T) {
+		t0 := base.Add(-time.Hour)
+		seedStamp(t, sess, "parent-1", 4, &t0)
+		replyAt := newer.Add(time.Hour)
+
+		res, err := Maintain(ctx, sess, "thread-1", testParent, pol, +1, &replyAt, true)
+		require.NoError(t, err)
+		assert.Equal(t, 4, res.Count, "the reply may already be counted; a retry must not count it again")
+
+		gotN, gotTLM := readStamped(t, sess, "parent-1")
+		require.NotNil(t, gotN)
+		assert.Equal(t, 4, *gotN)
+		require.NotNil(t, gotTLM)
+		assert.Equal(t, replyAt.UnixMilli(), gotTLM.UnixMilli(),
+			"the timestamp is idempotent, so the retry still advances it")
+	})
+
 	t.Run("an unstamped parent is not zeroed", func(t *testing.T) {
 		require.NoError(t, sess.Query(
 			`DELETE FROM messages_by_id WHERE message_id = ?`, "parent-1").Exec())
