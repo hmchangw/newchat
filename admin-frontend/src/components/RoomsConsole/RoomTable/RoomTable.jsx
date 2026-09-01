@@ -1,22 +1,17 @@
-import { ondutyMinMembers } from '@/lib/runtimeConfig'
 import './style.css'
 
 // Presentational — no state, no api/ imports. All actions bubble up via
 // callbacks so RoomsPage owns which dialog (if any) is open.
-export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }) {
+export default function RoomTable({ rooms, loading, minMembers, onSetOnDuty, onUnsetOnDuty }) {
   if (loading) {
-    return <div className="rooms-table-status">Loading…</div>
+    return <div className="data-table-status">Loading…</div>
   }
   if (rooms.length === 0) {
-    return <div className="rooms-table-status">No rooms found.</div>
+    return <div className="data-table-status">No rooms found.</div>
   }
 
-  // room-service refuses the off→on transition below this floor, so a room it
-  // would reject gets no button rather than a guaranteed error.
-  const minMembers = ondutyMinMembers()
-
   return (
-    <div className="rooms-table-wrap">
+    <div className="data-table-wrap">
       <table className="data-table rooms-table">
         <thead>
           <tr>
@@ -38,7 +33,7 @@ export default function RoomTable({ rooms, loading, onSetOnDuty, onUnsetOnDuty }
               <td>
                 {room.onDuty && <span className="status-badge is-onduty">onduty</span>}
               </td>
-              <td className="rooms-table-actions">
+              <td className="data-table-actions">
                 {/* Channels only — room-service rejects a DM with non_channel_operation. */}
                 {room.type === 'channel' &&
                   (room.onDuty ? (

@@ -5,7 +5,7 @@ import { useDebouncedSearch } from '@/hooks/useDebouncedSearch'
 import { useLatestRequest } from '@/hooks/useLatestRequest'
 import './style.css'
 
-const SEARCH_LIMIT = 10
+export const SEARCH_LIMIT = 10
 
 // Search-to-select account field: typing queries the admin users API (debounced) and only an
 // account present in the results can be selected — free-typed text is never committed via

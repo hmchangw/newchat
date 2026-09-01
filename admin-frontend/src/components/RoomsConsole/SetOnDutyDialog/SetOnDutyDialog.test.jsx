@@ -38,6 +38,18 @@ async function typeOwner(text) {
   })
 }
 
+/** Types a query and clicks the matching option, owning the fake-timer swap the
+ * debounce needs — four tests repeated this dance verbatim. */
+async function pickOwner(query, name) {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    await typeOwner(query)
+    fireEvent.click(await screen.findByRole('option', { name }))
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
 describe('SetOnDutyDialog', () => {
   it('loads the room members on open', async () => {
     render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={vi.fn()} />)
@@ -67,13 +79,7 @@ describe('SetOnDutyDialog', () => {
     const onDone = vi.fn()
     render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={onDone} />)
     await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      await typeOwner('ali')
-      fireEvent.click(await screen.findByRole('option', { name: /alice/i }))
-    } finally {
-      vi.useRealTimers()
-    }
+    await pickOwner('ali', /alice/i)
     fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
     await waitFor(() =>
       expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
@@ -91,13 +97,7 @@ describe('SetOnDutyDialog', () => {
     const onDone = vi.fn()
     render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={onDone} />)
     await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      await typeOwner('ali')
-      fireEvent.click(await screen.findByRole('option', { name: /alice/i }))
-    } finally {
-      vi.useRealTimers()
-    }
+    await pickOwner('ali', /alice/i)
     fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
     expect(await screen.findByText(/fewer members/i)).toBeInTheDocument()
     expect(onDone).not.toHaveBeenCalled()
@@ -112,13 +112,7 @@ describe('SetOnDutyDialog', () => {
   it('accepts exactly one owner — picking one removes the field that could add a second', async () => {
     render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={vi.fn()} onDone={vi.fn()} />)
     await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      await typeOwner('ali')
-      fireEvent.click(await screen.findByRole('option', { name: /alice/i }))
-    } finally {
-      vi.useRealTimers()
-    }
+    await pickOwner('ali', /alice/i)
     // No field remains through which a second account could be added.
     expect(screen.queryByLabelText(/owner/i)).not.toBeInTheDocument()
     expect(screen.getByText('alice')).toBeInTheDocument()

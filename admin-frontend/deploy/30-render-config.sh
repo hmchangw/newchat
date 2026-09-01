@@ -7,10 +7,9 @@ set -eu
 : "${ADMIN_SERVICE_URL:?ADMIN_SERVICE_URL is required (admin-service base URL)}"
 # Deploy-gated sections default off; only the literal string "true" enables.
 : "${PERMISSIONS_ENABLED:=false}"
-# Must match room-service's RESTRICTED_ROOM_MIN_MEMBERS: the console hides
-# "set onduty" below this count, room-service is what actually enforces it.
-: "${ROOM_ONDUTY_MIN_MEMBERS:=5}"
 : "${UPDATES_ENABLED:=false}"
+# Not a gate — the Rooms tab's member floor. See src/lib/runtimeConfig.js.
+: "${ROOM_ONDUTY_MIN_MEMBERS:=5}"
 export ADMIN_SERVICE_URL PERMISSIONS_ENABLED UPDATES_ENABLED ROOM_ONDUTY_MIN_MEMBERS
 
 envsubst '${ADMIN_SERVICE_URL} ${PERMISSIONS_ENABLED} ${UPDATES_ENABLED} ${ROOM_ONDUTY_MIN_MEMBERS}' \

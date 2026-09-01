@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState } from 'react'
 import { listRooms } from '@/api'
 import { useAuth } from '@/context/AuthContext'
+import { ondutyMinMembers } from '@/lib/runtimeConfig'
 import { usePagedAdminList } from '@/hooks/usePagedAdminList'
 import LazyFallback from '@/components/shared/LazyFallback'
 import Pager from '@/components/shared/Pager'
@@ -55,6 +56,9 @@ export default function RoomsPage() {
       <RoomTable
         rooms={rooms}
         loading={loading}
+        // room-service refuses the off→on transition below this floor, so a room
+        // it would reject gets no button rather than a guaranteed error.
+        minMembers={ondutyMinMembers()}
         onSetOnDuty={setOnDutyTarget}
         onUnsetOnDuty={setOffDutyTarget}
       />

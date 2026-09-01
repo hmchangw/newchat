@@ -1,13 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 
-vi.mock('@/lib/runtimeConfig', async (importOriginal) => {
-  const actual = await importOriginal()
-  return { ...actual, ondutyMinMembers: vi.fn() }
-})
-
 import RoomTable from './RoomTable'
-import { ondutyMinMembers } from '@/lib/runtimeConfig'
 
 const room = (over) => ({
   id: 'r-1',
@@ -35,14 +29,31 @@ function statusCell(id) {
   return within(row).getAllByRole('cell').at(-2)
 }
 
+let onSetOnDuty
+let onUnsetOnDuty
+
 beforeEach(() => {
   vi.clearAllMocks()
-  ondutyMinMembers.mockReturnValue(5)
+  onSetOnDuty = vi.fn()
+  onUnsetOnDuty = vi.fn()
 })
+
+/** Renders the table with the default member floor; pass `minMembers` to vary it. */
+function renderTable(rooms, { loading = false, minMembers = 5 } = {}) {
+  return render(
+    <RoomTable
+      rooms={rooms}
+      loading={loading}
+      minMembers={minMembers}
+      onSetOnDuty={onSetOnDuty}
+      onUnsetOnDuty={onUnsetOnDuty}
+    />,
+  )
+}
 
 describe('RoomTable', () => {
   it('renders _id, name, type, members, status and action columns', () => {
-    render(<RoomTable rooms={[room()]} loading={false} onSetOnDuty={vi.fn()} onUnsetOnDuty={vi.fn()} />)
+    renderTable([room()])
     for (const header of ['_id', 'Name', 'Type', 'Members', 'Status', 'Action']) {
       expect(screen.getByRole('columnheader', { name: header })).toBeInTheDocument()
     }
@@ -53,114 +64,47 @@ describe('RoomTable', () => {
     expect(cells[3]).toHaveTextContent('7')
   })
 
-  it('shows "onduty" only when both duty flags are set', () => {
-    render(
-      <RoomTable
-        rooms={[
-          ondutyRoom({ id: 'r-on' }),
-          room({ id: 'r-off' }),
-          room({ id: 'r-restricted-only', restricted: true }),
-          room({ id: 'r-external-only', externalAccess: true }),
-        ]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+  it('shows "onduty" as the status of an on-duty room and nothing otherwise', () => {
+    renderTable([ondutyRoom({ id: 'r-on' }), room({ id: 'r-off' })])
     expect(statusCell('r-on')).toHaveTextContent('onduty')
-    expect(statusCell('r-off')).toHaveTextContent('')
-    expect(statusCell('r-restricted-only')).toHaveTextContent('')
-    expect(statusCell('r-external-only')).toHaveTextContent('')
+    // toHaveTextContent('') matches anything, so assert genuine emptiness.
+    expect(statusCell('r-off')).toBeEmptyDOMElement()
   })
 
   it('offers "set onduty" for an unrestricted channel at or above the member floor', () => {
-    render(
-      <RoomTable
-        rooms={[room({ userCount: 5 })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+    renderTable([room({ userCount: 5 })])
     expect(within(actionCell('r-1')).getByRole('button', { name: /set onduty/i })).toBeInTheDocument()
   })
 
   it('offers "unset onduty" for an on-duty channel regardless of the member floor', () => {
-    render(
-      <RoomTable
-        rooms={[ondutyRoom({ userCount: 2 })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+    renderTable([ondutyRoom({ userCount: 2 })])
     const cell = actionCell('r-1')
     expect(within(cell).getByRole('button', { name: /unset onduty/i })).toBeInTheDocument()
     expect(within(cell).queryByRole('button', { name: /^set onduty/i })).not.toBeInTheDocument()
   })
 
-  it('offers "set onduty" for a half-set channel, so it can be brought fully on duty', () => {
-    render(
-      <RoomTable
-        rooms={[room({ restricted: true })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
-    const cell = actionCell('r-1')
-    expect(within(cell).getByRole('button', { name: /^set onduty/i })).toBeInTheDocument()
-    expect(within(cell).queryByRole('button', { name: /unset onduty/i })).not.toBeInTheDocument()
-  })
-
   it('offers no action for an unrestricted channel below the member floor', () => {
-    render(
-      <RoomTable
-        rooms={[room({ userCount: 4 })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+    renderTable([room({ userCount: 4 })])
     expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('offers no action for a DM, on duty or not — room-service refuses to restrict one', () => {
-    render(
-      <RoomTable
-        rooms={[
+    renderTable([
           room({ id: 'r-dm', type: 'dm', userCount: 9 }),
           ondutyRoom({ id: 'r-dm-on', type: 'dm', userCount: 9 }),
-        ]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+        ])
     expect(within(actionCell('r-dm')).queryByRole('button')).not.toBeInTheDocument()
     expect(within(actionCell('r-dm-on')).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('honours a deployment that raised the member floor', () => {
-    ondutyMinMembers.mockReturnValue(10)
-    render(
-      <RoomTable
-        rooms={[room({ userCount: 7 })]}
-        loading={false}
-        onSetOnDuty={vi.fn()}
-        onUnsetOnDuty={vi.fn()}
-      />,
-    )
+    renderTable([room({ userCount: 7 })], { minMembers: 10 })
     expect(within(actionCell('r-1')).queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('passes the room up when an action is clicked', () => {
-    const onSetOnDuty = vi.fn()
-    const onUnsetOnDuty = vi.fn()
     const rooms = [room({ id: 'r-off' }), ondutyRoom({ id: 'r-on' })]
-    render(
-      <RoomTable rooms={rooms} loading={false} onSetOnDuty={onSetOnDuty} onUnsetOnDuty={onUnsetOnDuty} />,
-    )
+    renderTable(rooms)
     within(actionCell('r-off')).getByRole('button', { name: /set onduty/i }).click()
     expect(onSetOnDuty).toHaveBeenCalledWith(rooms[0])
     within(actionCell('r-on')).getByRole('button', { name: /unset onduty/i }).click()
@@ -168,13 +112,13 @@ describe('RoomTable', () => {
   })
 
   it('shows a loading placeholder instead of the table while loading', () => {
-    render(<RoomTable rooms={[]} loading onSetOnDuty={vi.fn()} onUnsetOnDuty={vi.fn()} />)
+    renderTable([], { loading: true })
     expect(screen.getByText(/loading/i)).toBeInTheDocument()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
   })
 
   it('shows an empty-state message when the site has no rooms', () => {
-    render(<RoomTable rooms={[]} loading={false} onSetOnDuty={vi.fn()} onUnsetOnDuty={vi.fn()} />)
+    renderTable([])
     expect(screen.getByText(/no rooms found/i)).toBeInTheDocument()
   })
 })

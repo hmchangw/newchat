@@ -1,25 +1,7 @@
-/* Chrome comes from the shared .data-table base; only these columns need more. */
-
-/* Horizontal scroll for narrow viewports — the table keeps its natural width
-   instead of squeezing cells out of alignment. */
-.rooms-table-wrap {
-  overflow-x: auto;
-}
+/* Chrome comes from the shared .data-table base; only this column needs more. */
 
 /* Room ids are opaque base62/concat strings — a monospace column keeps them
    scannable next to the human-readable name. */
 .rooms-table-id {
-  font-family: var(--font-mono, monospace);
-}
-
-/* Must stay a real table-cell: display:flex on a <td> detaches it from the
-   row's vertical rhythm (the whole column drifts upward). */
-.rooms-table-actions {
-  white-space: nowrap;
-}
-
-.rooms-table-status {
-  padding: var(--space-xl);
-  text-align: center;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
 }

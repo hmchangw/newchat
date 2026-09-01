@@ -129,10 +129,7 @@ a:focus-visible,
   font-size: var(--text-xs);
   font-weight: var(--font-medium);
 }
-.status-badge.is-granted {
-  background: var(--status-success-bg);
-  color: var(--status-success);
-}
+.status-badge.is-granted,
 .status-badge.is-not-granted {
   background: var(--status-error-bg);
   color: var(--status-error);
@@ -160,6 +157,22 @@ a:focus-visible,
 }
 .data-table td {
   color: var(--text-primary);
+}
+/* Horizontal scroll for narrow viewports — the table keeps its natural width
+   instead of squeezing cells out of alignment. */
+.data-table-wrap {
+  overflow-x: auto;
+}
+/* Must stay a real table-cell: display:flex on a <td> detaches it from the
+   row's vertical rhythm (the whole column drifts upward). */
+.data-table-actions {
+  white-space: nowrap;
+}
+/* The loading / empty placeholder each console shows in place of the table. */
+.data-table-status {
+  padding: var(--space-xl);
+  text-align: center;
+  color: var(--text-muted);
 }
 
 /* Custom scrollbar so dark mode doesn't show OS chrome. */

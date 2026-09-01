@@ -18,6 +18,7 @@ chat client.
 | `VITE_ADMIN_SERVICE_URL` | admin-service base URL (REST API) | `http://localhost:8082` |
 | `VITE_PERMISSIONS_ENABLED` | shows the Permissions tab when the literal string `true` | unset (hidden) |
 | `VITE_UPDATES_ENABLED` | shows the Updates tab when the literal string `true` | unset (hidden) |
+| `VITE_ROOM_ONDUTY_MIN_MEMBERS` | member floor below which the Rooms tab hides "set onduty" — must equal room-service's `RESTRICTED_ROOM_MIN_MEMBERS` | `5` |
 
 **Container (nginx runtime, `/config.js` rendered by `deploy/30-render-config.sh`)**:
 
@@ -26,6 +27,7 @@ chat client.
 | `ADMIN_SERVICE_URL` | admin-service base URL | yes — container fails to start if unset |
 | `PERMISSIONS_ENABLED` | shows the Permissions tab when the literal string `true` | no — defaults to `false` (tab hidden) |
 | `UPDATES_ENABLED` | shows the Updates tab when the literal string `true` | no — defaults to `false` (tab hidden) |
+| `ROOM_ONDUTY_MIN_MEMBERS` | member floor below which the Rooms tab hides "set onduty". Must equal room-service's `RESTRICTED_ROOM_MIN_MEMBERS`, which is the real enforcement | no — defaults to `5` |
 
 `src/lib/runtimeConfig.js` reads `window.__APP_CONFIG__` first (prod), falling
 back to the `VITE_*` env vars (dev), falling back to the literal defaults

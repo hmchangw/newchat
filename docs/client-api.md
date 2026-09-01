@@ -8300,22 +8300,19 @@ still gets an envelope rather than a dropped connection: that value < that value
 still waiting on. Raising one without the others reintroduces a window where a
 published upload is reported as a failure.
 
----
-
-
 ### 9.18 List rooms
 
 **Endpoint:** `GET /v1/admin/rooms`
 **Auth:** `Authorization: Bearer <authToken>`, admin role + same-site required.
 
-Lists the rooms homed at admin-service's own site, newest paging first by `_id`. Site-scoped, unlike [§9.1 List users](#91-list-users), which spans every site: a room is managed only where it lives, and the duty toggle (§9.12) is same-site only. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
+Lists the rooms homed at admin-service's own site, ordered by `_id` and paged. Site-scoped, unlike [§9.1 List users](#91-list-users), which spans every site: a room is managed only where it lives, and the duty toggle (§9.12) is same-site only. Each row is projected to the fields the admin console renders — no message previews, no member arrays, no room keys.
 
 #### Query parameters
 
 | Param | Type | Required | Notes |
 |---|---|---|---|
-| `page` | number | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
-| `limit` | number | no | Rows per page. Defaults to `20`, capped at `100`. |
+| `page` | integer | no | 1-based page. Defaults to `1`; a non-numeric or `< 1` value is ignored. |
+| `limit` | integer | no | Rows per page. Defaults to `20`, capped at `100`. |
 
 #### Success response
 
@@ -8324,7 +8321,7 @@ Lists the rooms homed at admin-service's own site, newest paging first by `_id`.
 | Field | Type | Notes |
 |---|---|---|
 | `rooms` | [AdminRoomView](#adminroomview)[] | This page of rooms. Empty array when the site has none. |
-| `total` | number | Rooms at this site, unpaged. |
+| `total` | integer | Rooms at this site, unpaged. |
 
 ##### AdminRoomView
 
@@ -8333,7 +8330,7 @@ Lists the rooms homed at admin-service's own site, newest paging first by `_id`.
 | `id` | string | Room `_id`. |
 | `name` | string | Room name. |
 | `type` | string | `channel`, `dm`, `botDM`, or `discussion`. |
-| `userCount` | number | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
+| `userCount` | integer | Members counted toward the `RESTRICTED_ROOM_MIN_MEMBERS` floor (§9.12). |
 | `restricted` | boolean | Only owners may change the roster. Always present, including when `false`. |
 | `externalAccess` | boolean | Members may connect from outside the company network. Always present, including when `false`. |
 | `onDuty` | boolean | `restricted && externalAccess`, derived server-side — the inverse of the mapping [§9.12](#912-set-room-on-duty) writes. Branch on this rather than re-deriving it. Always present, including when `false`. |
@@ -8415,6 +8412,8 @@ An unknown `roomId` is not an error: it has no subscriptions, so the result is a
 #### Triggered events
 
 `None — HTTP-only.`
+
+---
 
 ## 10. Botplatform Service
 

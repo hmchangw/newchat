@@ -9,8 +9,7 @@ services:
       ADMIN_SERVICE_URL: ${ADMIN_SERVICE_URL:-http://localhost:${ADMIN_SERVICE_HOST_PORT:-8082}}
       PERMISSIONS_ENABLED: ${PERMISSIONS_ENABLED:-false}
       UPDATES_ENABLED: ${UPDATES_ENABLED:-false}
-      # Mirror room-service's RESTRICTED_ROOM_MIN_MEMBERS — the console only
-      # offers "set onduty" at or above this count; room-service enforces it.
+      # Must equal room-service's RESTRICTED_ROOM_MIN_MEMBERS — see README.
       ROOM_ONDUTY_MIN_MEMBERS: ${ROOM_ONDUTY_MIN_MEMBERS:-5}
     ports:
       - "${ADMIN_FRONTEND_HOST_PORT:-3001}:80"

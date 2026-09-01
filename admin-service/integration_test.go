@@ -1408,6 +1408,7 @@ func TestIntegration_WithTransaction_SurvivesNonPrimaryClientReadPreference(t *t
 	assert.Equal(t, "txn-probe", got["account"])
 }
 
+// -------------------------------------------------------------------------
 // ListRooms / ListRoomMembers
 // -------------------------------------------------------------------------
 

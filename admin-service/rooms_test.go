@@ -28,6 +28,17 @@ func doRoomsGet(h *Handler, path string) *httptest.ResponseRecorder {
 	return w
 }
 
+// firstRoom unwraps the single room a one-row listing response carries.
+func firstRoom(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	rooms, ok := body["rooms"].([]any)
+	require.True(t, ok)
+	require.Len(t, rooms, 1)
+	room, ok := rooms[0].(map[string]any)
+	require.True(t, ok)
+	return room
+}
+
 // -------------------------------------------------------------------------
 // listRooms tests
 // -------------------------------------------------------------------------
@@ -53,11 +64,7 @@ func TestHandler_listRooms(t *testing.T) {
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {
 				assert.Equal(t, float64(1), body["total"])
-				rooms, ok := body["rooms"].([]any)
-				require.True(t, ok)
-				require.Len(t, rooms, 1)
-				room, ok := rooms[0].(map[string]any)
-				require.True(t, ok)
+				room := firstRoom(t, body)
 				assert.Equal(t, "r1", room["id"])
 				assert.Equal(t, "general", room["name"])
 				assert.Equal(t, "channel", room["type"])
@@ -102,11 +109,7 @@ func TestHandler_listRooms(t *testing.T) {
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {
-				rooms, ok := body["rooms"].([]any)
-				require.True(t, ok)
-				require.Len(t, rooms, 1)
-				room, ok := rooms[0].(map[string]any)
-				require.True(t, ok)
+				room := firstRoom(t, body)
 				// The console branches on these, so they must always be present.
 				assert.Contains(t, room, "restricted")
 				assert.Equal(t, false, room["restricted"])
@@ -128,11 +131,7 @@ func TestHandler_listRooms(t *testing.T) {
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {
-				rooms, ok := body["rooms"].([]any)
-				require.True(t, ok)
-				require.Len(t, rooms, 1)
-				room, ok := rooms[0].(map[string]any)
-				require.True(t, ok)
+				room := firstRoom(t, body)
 				assert.Equal(t, true, room["restricted"])
 				assert.Equal(t, false, room["externalAccess"])
 				// Half-set is not on duty — this is the case a copy-pasted
@@ -152,11 +151,7 @@ func TestHandler_listRooms(t *testing.T) {
 			},
 			wantStatus: http.StatusOK,
 			checkBody: func(t *testing.T, body map[string]any) {
-				rooms, ok := body["rooms"].([]any)
-				require.True(t, ok)
-				require.Len(t, rooms, 1)
-				room, ok := rooms[0].(map[string]any)
-				require.True(t, ok)
+				room := firstRoom(t, body)
 				assert.Equal(t, false, room["restricted"])
 				assert.Equal(t, true, room["externalAccess"])
 				assert.Equal(t, false, room["onDuty"])
