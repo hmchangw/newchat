@@ -165,3 +165,34 @@ Clean file layout and unusually good WHY-comments, but a 11-parameter constructo
 - `medium` — Collapse `TestDownload_*` / `TestDownloadV3_*` into one table over `{name, invoke func(*Handler, *gin.Context), wantStatus}`, and split `handler_test.go` into `handler_upload_test.go` / `handler_download_test.go`. Same coverage, roughly 200 fewer lines to maintain.
 - `low` — Use `defaultUploadContentType` at `handler.go:418` instead of the literal.
 - `low` — Extract the dev-mode and OIDC branches of `authMiddleware` into `ssoUser(ctx, token)`, matching the existing `sessionUser`, so the middleware body reads as three symmetric credential paths.
+
+---
+
+## 6. Integration — 2 / 5
+
+The service publishes no NATS events so most federation rules are moot, but its one genuinely cross-service trust boundary — the client-supplied `drive_host` — is unvalidated and leaks the Drive API token, and the attachment it mints can exceed the size contract message-gatekeeper enforces.
+
+**`docs/client-api.md` obligation:** the CLAUDE.md trigger is NATS `chat.user.…` handlers or `auth-service` HTTP routes — upload-service has neither (no `nats`/`jetstream`/`pkg/subject`/`pkg/stream` import at all; only `natsutil.RequestIDHeader`, `middleware.go:60-66`). It therefore does **not** literally bind. In practice it does: all six routes (`routes.go:7-20`) are documented in `docs/client-api.md` §2.4 and mirrored in `docs/client-api/request-reply.md:28-33`, so that pairing must be maintained. No OUTBOX/INBOX, `Timestamp`, `msgbucket`, `ROOM_KEY_RETIRED_TTL` or `idgen` entity-ID obligations apply; request IDs correctly use `idgen.IsValidUUID`/`GenerateRequestID`.
+
+### Findings
+- `critical` — `drive_host` is taken verbatim from the client query string and used as the upstream base URL, with the Drive `api-token` header attached — `upload-service/handler.go:342-358` → `pkg/drive/uploader.go:136-140`
+  Any authenticated room member can point it at an attacker host and receive `DRIVE_API_TOKEN` (and `LEGACY_DRIVE_API_TOKEN` via `/api/v3`, `handler.go:324-326`); the response body is then streamed back, making it a full read-SSRF into the cluster. The allowlist to validate against already exists in-process (`cfg.Drive.BaseURLMap`, `pkg/drive/config.go:15`) and is never consulted.
+- `high` — upload-service can mint an `Attachment` that message-gatekeeper will refuse: `description` is copied from the form with no length cap — `upload-service/handler.go:313`
+  `message-gatekeeper` rejects when the summed raw blob bytes exceed `MAX_ATTACHMENT_BYTES` (default 8192) — `message-gatekeeper/handler.go:367-379`, `main.go:44`, documented as "≤ 8 KiB total" at `docs/client-api.md:6355`. The file is already committed to Drive when the `msg.send` is rejected, so the failure mode is an orphaned upload with no client recourse.
+- `medium` — the two upload endpoints enforce disjoint type contracts; `/upload/images` never consults `h.mimeFilter` — `upload-service/handler.go:459` vs `handler.go:277`
+  `FILE_UPLOAD_MEDIA_TYPE_BLACKLIST` (default `image/svg+xml`) and the byte-sniffing `resolveMediaType` guard only the file endpoint; the image endpoint trusts the filename extension alone (`drive.AllowedImageFileTypes`, `pkg/drive/images_file.go:9-14`), so a mistyped payload named `.png` bypasses the deny list entirely. Mitigated on download by `Content-Disposition: attachment` + `default-src 'none'` (`handler.go:367-371`), not at ingest.
+- `medium` — the canonical client contract has broken/incorrect internal references to this service's own section — `docs/client-api.md:45`, `:882`, `:6355`
+  TOC anchor `#24-http--protected-image-uploaddownload` no longer matches the heading `### 2.4 HTTP — Protected file/image upload/download` (`:427`); both the `Attachment` schema and the `msg.send` `attachments` field cite "§2.3", which is `GET /api/userInfo` (`:274`). §2.4 is also filed after a §2.5 (`:356`) and a second `### 2.5` exists at `:809`. The derived view uses the correct anchor (`docs/client-api/request-reply.md:99`), so the canonical doc is the drifted one.
+- `medium` — `MINIO_BUCKET` carries neither `envDefault` nor `required`; the real default is a silent in-code fallback — `upload-service/main.go:99,152-155`
+  The bucket must match whatever wrote `uploads.AmazonS3.path` (a doc "written outside this repo", `main.go:55-57`). An unset/mismatched value yields `chat-{SITE_ID}` and turns every legacy download into a 503 with no startup signal. The `chat-{siteID}` convention is not stated in `docs/client-api.md` §2.4 or anywhere else.
+- `medium` — a missing or malformed Drive base-URL map degrades to warn-only empty, silently routing every cross-site room's upload/download at the local Drive — `pkg/drive/config.go:23-40`, called and unchecked at `upload-service/main.go:125-126`
+- `low` — `DRIVE_URL` / `DRIVE_API_TOKEN` are untagged (`pkg/drive/config.go:11-13`), against CLAUDE.md's "never default secrets or connection strings — mark them `required`"; the service starts fine and fails on first upload.
+- `nitpick` — `fileURL` builds the returned `relativePath` with raw `fmt.Sprintf` and no escaping of `roomID`/`fileID`/`driveHost` — `upload-service/attachment.go:19-21`.
+
+### Recommendations
+- `critical` — Reject any `drive_host` not present in `cfg.Drive.BaseURLMap` (resp. `LegacyDrive`) before calling `GetGroupImage`; better, drop the parameter from the contract and re-derive the host from the room's subscription `siteID` as the upload path already does (`handler.go:192`), then update `docs/client-api.md:677`.
+- `high` — Cap `description` in `HandleUploadFile` (and/or marshal the attachment and reject over `MAX_ATTACHMENT_BYTES`) so a 200 from upload-service guarantees a `msg.send` gatekeeper will accept; declare the shared cap once rather than in two services.
+- `medium` — Run the resolved MIME through `h.mimeFilter` on `/upload/images` too, so one deny list governs both ingest paths.
+- `medium` — Fix the §2.3/§2.4 cross-references and TOC anchor in `docs/client-api.md`, renumber the duplicate §2.5, and re-verify the two derived views.
+- `medium` — Give `MINIO_BUCKET` an explicit `envDefault` (or mark it `required`) instead of the in-code `chat-`+SiteID fallback, and document the bucket convention beside the `/api/v1/file-upload` endpoint.
+- `medium` — Make `LoadBaseURLs` return an error and fail startup when the map is required (i.e. whenever more than one site is served).
