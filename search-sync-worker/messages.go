@@ -48,7 +48,13 @@ type messageCollection struct {
 	// MESSAGES-TEAMS instead of a canonical stream, filters to only the teams batch
 	// subject, and skips the template/mapping pushes the primary (user) collection
 	// already owns for the same indexPrefix.
-	teamsOnly      bool
+	teamsOnly bool
+	// failoverOnly binds MESSAGES-CANONICAL-FAILOVER on the buddy cluster instead
+	// of the home canonical stream, filtering the failover subject root. Indexing
+	// is otherwise identical — Elasticsearch is up during a NATS outage — and the
+	// template/mapping pushes are skipped because the primary (user) collection
+	// already owns them for the same indexPrefix.
+	failoverOnly   bool
 	streamCfg      func(siteID string) jetstream.StreamConfig
 	consumerName   string
 	parentResolver parentCreatedAtResolver
@@ -96,6 +102,21 @@ func newTeamsMessageCollection(indexPrefix, siteID string, devMode bool) *messag
 	}
 }
 
+// newFailoverMessageCollection is a fourth consumer over messageCollection, bound
+// to the buddy-hosted MESSAGES-CANONICAL-FAILOVER. Messages a site validates
+// while its own NATS is down still need indexing, and Elasticsearch is unaffected
+// by that outage, so the only thing that changes is where the events come from.
+func newFailoverMessageCollection(indexPrefix, siteID string, devMode bool) *messageCollection {
+	return &messageCollection{
+		indexPrefix:  indexPrefix,
+		siteID:       siteID,
+		devMode:      devMode,
+		failoverOnly: true,
+		streamCfg:    failoverMessagesStreamCfg,
+		consumerName: "message-sync-failover",
+	}
+}
+
 func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 	cfg := stream.MessagesCanonical(siteID)
 	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
@@ -103,6 +124,11 @@ func userMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 
 func botMessagesStreamCfg(siteID string) jetstream.StreamConfig {
 	cfg := stream.BotMessagesCanonical(siteID)
+	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
+}
+
+func failoverMessagesStreamCfg(siteID string) jetstream.StreamConfig {
+	cfg := stream.MessagesCanonicalFailover(siteID)
 	return jetstream.StreamConfig{Name: cfg.Name, Subjects: cfg.Subjects}
 }
 
@@ -120,6 +146,10 @@ func (c *messageCollection) ConsumerName() string {
 }
 
 func (c *messageCollection) FilterSubjects(siteID string) []string {
+	if c.failoverOnly {
+		// Same single-token message events, on the failover root.
+		return []string{subject.FailoverMsgCanonicalMessageWildcard(siteID)}
+	}
 	if c.teamsOnly {
 		// Own stream (MESSAGES-TEAMS), own subject — no message wildcard here.
 		return []string{subject.MsgTeamsCanonicalBatch(siteID)}
@@ -130,7 +160,7 @@ func (c *messageCollection) FilterSubjects(siteID string) []string {
 }
 
 func (c *messageCollection) TemplateName() string {
-	if c.teamsOnly {
+	if c.teamsOnly || c.failoverOnly {
 		// The user collection already owns/pushes the template for this indexPrefix.
 		return ""
 	}
@@ -138,7 +168,7 @@ func (c *messageCollection) TemplateName() string {
 }
 
 func (c *messageCollection) TemplateBody() json.RawMessage {
-	if c.teamsOnly {
+	if c.teamsOnly || c.failoverOnly {
 		return nil
 	}
 	return searchindex.MessageTemplateBody(c.indexPrefix, c.devMode)
