@@ -134,3 +134,37 @@ Handler-level tests are genuinely strong (table-driven, error-path-first, reason
 - `low` — Add a `/readyz` request test asserting 200 and the response shape, so the route is covered rather than merely registered.
 - `low` — Either add `//go:generate mockgen` for `TokenValidator`/`BotplatformValidator`, or add a one-line comment in `handler_test.go` recording why hand-written fakes are used, so the Section 4 deviation is explicit.
 - `nitpick` — Inject the randomness source into `cryptoRandFloat` (or accept the 66.7%) rather than leaving an untestable error branch; `WithRandFloat` already establishes the seam pattern at `handler.go:92`.
+
+---
+
+## 5. Maintainability — 4 / 5
+
+A small, cleanly-layered service whose production code reads well and comments mostly say *why*; the maintainability debt is concentrated in one asymmetric nil-guard, a three-way-duplicated mint tail, and an 846-line test file built from 28 copy-pasted request blocks.
+
+### Findings
+- `high` — `handleSSO` dereferences `h.validator` with no nil guard, while its sibling `handleSession` has exactly that guard for `h.bpValidator` — `auth-service/handler.go:170` vs `auth-service/handler.go:222`. `main.go:89` wires `NewAuthHandler(nil, …)` in dev mode, so a dev-mode request carrying `ssoToken` nil-panics into `gin.Recovery()` → 500. `HandleAuth`'s own doc comment (`handler.go:132`) promises "a dev-mode request carrying a token still validates normally". No test catches it: `TestHandleAuth_DevMode_WithSSOToken_UsesSSO` injects a **non-nil** fake (`handler_test.go:368-369`), so it exercises a wiring that production never produces.
+  Two optional dependencies, two different nil policies, is the exact shape a future edit trips over.
+
+- `medium` — the identity-stamp + sign + error-write tail is copy-pasted verbatim across all three branch handlers — `auth-service/handler.go:193-200`, `:252-258`, `:283-289`. Adding a fourth auth branch (or one new stamped attribute, e.g. `siteID` into `obs.ContextWithIdentity`, currently `""` in all three) means three synchronized edits.
+
+- `medium` — 28 near-identical 5-line HTTP request blocks (`NewRecorder` / `NewRequest` / `Header.Set` / `ServeHTTP`) across `auth-service/handler_test.go` — e.g. `:266-272`, `:372-376`, `:663-667`, `:701-705`. The file already has three helpers (`mustAccountKP`, `mustUserNKey`, `setupRouter`, `handler_test.go:65,75,85`); the request block is the obvious fourth that was never extracted. `mustAccountKP(t)` alone appears 28 times.
+  The boilerplate is why the file is 846 lines and still only 61.9% covered — the cost per new case is high enough to discourage adding one.
+
+- `medium` — near-duplicate single-scenario tests that want to be one table: `TestHandleAuth_ExpiredToken` / `_InvalidToken` / `_MissingAccountClaim` (`handler_test.go:147,165,553`) differ only in fake state and expected reason; `_SessionToken_Bot_HappyPath` / `_Admin` (`:649,688`) differ only in the principal. CLAUDE.md §4 prefers table-driven for input/output variations of the same logic, and the file already does this correctly at `:199` and `:571`.
+
+- `low` — `WithRandFloat` (`auth-service/handler.go:92`) exists in production code purely as a test seam; its sole caller is `handler_test.go:528`. CLAUDE.md §4 bars test helpers in production code. Not a real violation (it is a functional option, not a helper), but it is unexported-by-intent leakage of test needs into the public option set.
+
+- `low` — `run()` (`auth-service/main.go:53-153`) is 100 lines doing config parse, nkey validation, o11y init, two-branch handler construction, gin wiring, server start, and shutdown orchestration. Below the pain threshold today; the dev/prod branch at `:87-106` is the seam that will split first.
+
+- `nitpick` — `signNATSJWT`'s doc comment (`handler.go:309-315`) restates the NATS grant list as a third copy alongside `docker-local/setup.sh:72-74` and `docs/client-api.md:170-174`, self-declaring "a platform-team template change must mirror both". Verified consistent today; nothing enforces it.
+
+- `nitpick` — `main.go:63-64` discards the `PublicKey()` error into a generic message, so a malformed seed and a wrong key *type* produce the same startup line.
+
+### Recommendations
+- `high` — Give `handleSSO` the symmetric guard `if h.validator == nil { errhttp.Write(…, errcode.Unavailable(…)) }` at `handler.go:170`, and add a test constructing the handler exactly as `main.go:89` does (nil validator, `devMode=true`, body carrying `ssoToken`) asserting a non-500.
+- `medium` — Extract `func (h *AuthHandler) mintAndRespond(ctx, c, account, resp userInfoResp)` covering `handler.go:193-200`/`:252-258`/`:283-289`; the three branch handlers then reduce to validate-then-delegate.
+- `medium` — Add `postAuth(t *testing.T, r *gin.Engine, body string) *httptest.ResponseRecorder` and `newTestHandler(t, opts...)` to `handler_test.go`; mechanically collapses ~140 lines of boilerplate and makes new cases one line.
+- `medium` — Fold `_ExpiredToken`/`_InvalidToken`/`_MissingAccountClaim` into one table keyed by fake-validator state → expected status + `errcode` reason; likewise the two session-token happy paths into a principal table.
+- `low` — Split `run()` into `newHandler(ctx, cfg) (*AuthHandler, error)` and `newServer(cfg, h) *http.Server`, leaving `run()` as wiring; this also makes the dev/prod branch unit-testable.
+- `nitpick` — Replace the grant list in `handler.go:309-315` with a pointer to `docs/client-api.md §2.1` rather than a third transcription.
+- `nitpick` — Wrap the key-type error at `main.go:63` so the seed-parse and key-type failures are distinguishable at startup.
