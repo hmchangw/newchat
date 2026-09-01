@@ -200,3 +200,37 @@ Subject builders, `pkg/model` contracts and publish-site `Timestamp` discipline 
 - `medium` — Switch `sync/main.go` to `valkeyutil.Config` + `valkeyutil.ConnectRaw(..., Instrumented(sdk))` to match the main service's dial policy.
 - `low` — Delete `PRESENCE_HEARTBEAT_INTERVAL` (and its compose entry), or document it as client-advisory and publish it to clients.
 - `low` — Add `aggregatedStatus`-vs-`status` naming to the §8 docs if the snapshot RPC ships, so the two presence views stay traceable to one another.
+
+---
+
+## 7. Performance — 3 / 5
+
+Careful hot-path design (single-round-trip Lua recompute, deduped pipelined `BatchGet`, precise Mongo projection via `pkg/userstore`, clean sweeper termination), undermined by a single-slot global sweep index that every heartbeat writes to and a sweep loop that cannot drain a mass-disconnect.
+
+### Findings
+- `high` — The sweep index is one untagged cluster key, `presence:sweep`, while all per-account keys are hash-tagged `{account}` — `presencestore/store.go:18,20-23`. Every mutating op ends in `reschedule` → `ZAdd`/`ZRem` on that one key (`presencestore/store.go:216-227,236`), so 100% of heartbeat, hello, activity and bye traffic for the whole site funnels into one Valkey master's single-threaded loop, on a ZSET whose cardinality is the online-user count. This is the service's scaling ceiling and it is invisible until the shard saturates.
+
+- `high` — Every presence mutation costs two sequential Valkey round trips, not one: the script, then a separate `reschedule` — `presencestore/store.go:230-240`. The split is forced by the finding above (the script's KEYS are all one slot, `sweepKey` is another), so fixing the hot key also halves heartbeat RTT. Note `pingScript` was already optimised to skip a status GET (`presencestore/store.go:120-138`) — a saving an order of magnitude smaller than the extra RTT it sits beside.
+
+- `high` — `Sweep` drains at most 500 accounts per tick, each at 2 serial round trips, with no inner loop until the backlog clears — `presencestore/store.go:317-339`. At the default `SWEEP_INTERVAL=5s` that is 100 stale accounts/sec. A gateway pod restart dropping 50k connections leaves those users displayed as online for ~8 minutes, long past `STALE_THRESHOLD=45s`.
+
+- `medium` — Every replica runs its own sweeper over the same global ZSET (`main.go:180-186`, `sweeper.go:29-40`) with no lease or atomic claim, so Valkey sweep load is N× replicas. Correctness survives only because the Lua CAS at `presencestore/store.go:111-116` makes exactly one replica see `changed=1`; the wasted round trips land on the already-hot sweep slot.
+
+- `medium` — A single unreachable peer site adds `PEER_TIMEOUT` (3s) to *every* `QueryBatch`, because `errgroup.Wait` blocks on the slowest branch — `handler.go:212-224`, `peer_client.go:47-58`. There is no breaker, no negative cache and no failure memory, so the notification hot path pays the full timeout on each request for the whole outage, and `slog.Error` at `handler.go:218` amplifies it into one log line per request per failed peer.
+
+- `medium` — No admission cap on the fire-and-forget routes (`main.go:158-170`); `natsrouter` spawns one goroutine per message unbounded (`pkg/natsrouter/doc.go:6-11`). The trade-off is deliberate and well-argued in the comment (a saturated semaphore silently drops presence updates), but the consequence is unbudgeted: a reconnect storm creates unbounded goroutines each contending for the Valkey pool. Goroutines do terminate — `HandlerTimeout(10s)` bounds them — so this is a saturation risk, not a leak.
+
+- `low` — `statusKey` is `SET` with no expiry and never deleted, including on the offline transition (`presencestore/store.go:111-116`); the account is `ZREM`'d from the sweep index at the same moment (`presencestore/store.go:216-221`), so nothing ever revisits the key. Bounded by lifetime user population rather than truly unbounded, but never reclaimed.
+
+- `low` — `Store.mutate` hardcodes `time.Now()` (`presencestore/store.go:231`) while `Handler` and `Sweeper` both carry an injectable `now` (`handler.go:29`, `sweeper.go:23`). That asymmetry is why the integration test resorts to `time.Sleep(40ms)` to age a connection (`integration_test.go:115`).
+
+- `nitpick` — `PRESENCE_HEARTBEAT_INTERVAL` is parsed and validated (`main.go:41,92`) but read nowhere; operators tuning it change nothing.
+
+### Recommendations
+- `high` — Shard the sweep index into `presence:sweep:{N}` buckets (hash the account), one ZSET per slot. This removes the single hot node and lets each bucket's ZADD be folded into the account's own script only if co-located; otherwise keep the two-RTT shape but spread it.
+- `high` — Make `Sweep` loop until the due-set is empty (or a per-tick deadline), and pipeline the per-account script + reschedule pairs instead of issuing them serially.
+- `medium` — Add a per-peer circuit breaker (or short negative cache) around `natsPeerPresenceClient.QueryPeer` so a down site fails fast instead of costing 3s per query, and rate-limit the peer-failure log.
+- `medium` — Take a sweep lease (e.g. `SET NX PX` on a lock key) so one replica sweeps per interval.
+- `low` — Expire `statusKey` with a TTL comfortably above `CONNS_TTL`, refreshed on each write.
+- `low` — Inject `now` into `presencestore.Store` and delete the `time.Sleep` in `integration_test.go:115`.
+- `nitpick` — Remove `HEARTBEAT_INTERVAL` or wire it (e.g. derive `STALE_THRESHOLD` from it) so the two cannot be configured into disagreement.
