@@ -492,3 +492,42 @@ func TestNewCachedMongoStore_NilInnerReturnsNil(t *testing.T) {
 
 	assert.Nil(t, got)
 }
+
+// A tombstone must never overwrite a positive entry a concurrent fill already
+// cached: the row was created while this load was in flight, and clobbering it
+// would render a bare account name for a whole TTL — a day at the default.
+func TestLookupCached_TombstoneDoesNotClobberConcurrentPositiveFill(t *testing.T) {
+	c := newEntryLRU[HRUser](8, time.Minute)
+
+	// Answer "absent", but seed a positive entry from inside the load — that is
+	// exactly the interleaving: our query started before the row existed, and a
+	// concurrent request cached it before our fill ran.
+	load := func(context.Context, []string) (map[string]HRUser, error) {
+		c.Add("alice", cacheEntry[HRUser]{val: hrUser("alice"), found: true})
+		return map[string]HRUser{}, nil
+	}
+
+	got, err := lookupCached(context.Background(), c, &countingRecorder{}, []string{"alice"}, load)
+
+	require.NoError(t, err)
+	assert.Empty(t, got, "this caller's own result still reflects what its query saw")
+
+	e, live := c.Get("alice")
+	require.True(t, live)
+	assert.True(t, e.found, "the newer positive entry must survive")
+	assert.Equal(t, hrUser("alice"), e.val)
+}
+
+// The guard is scoped to that race: with no positive entry present, a miss is
+// still cached as a tombstone.
+func TestLookupCached_TombstoneStillWrittenWithoutConcurrentFill(t *testing.T) {
+	loader := &recordingLoad{table: map[string]HRUser{}}
+	c := newEntryLRU[HRUser](8, time.Minute)
+
+	_, err := lookupCached(context.Background(), c, &countingRecorder{}, []string{"ghost"}, loader.load)
+	require.NoError(t, err)
+
+	e, live := c.Get("ghost")
+	require.True(t, live, "a tombstone must still be cached")
+	assert.False(t, e.found)
+}

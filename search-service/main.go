@@ -81,6 +81,26 @@ type SearchConfig struct {
 	AppCacheTTL  time.Duration `env:"APP_CACHE_TTL"              envDefault:"24h"`
 }
 
+// Validate rejects a positive-but-tiny cache TTL. expirable.LRU derives its
+// reaper tick as ttl/100 and passes it to time.NewTicker, which panics on zero
+// in a goroutine nothing recovers — so an operator typo like "50ns" would crash
+// the process at startup instead of failing cleanly here. Zero stays legal: it
+// is the documented disable switch.
+func (c *SearchConfig) Validate() error {
+	for _, k := range []struct {
+		name string
+		ttl  time.Duration
+	}{
+		{"SEARCH_HR_CACHE_TTL", c.HRCacheTTL},
+		{"SEARCH_APP_CACHE_TTL", c.AppCacheTTL},
+	} {
+		if k.ttl > 0 && k.ttl < minCacheTTL {
+			return fmt.Errorf("%s must be 0 (disabled) or at least %s, got %s", k.name, minCacheTTL, k.ttl)
+		}
+	}
+	return nil
+}
+
 // Config is the root service config. Note that ES and Search share the
 // `SEARCH_` env prefix — the fields on the two structs (URL/BACKEND vs
 // DOC_COUNTS/MAX_DOC_COUNTS/RECENT_WINDOW/REQUEST_TIMEOUT/…) don't
@@ -147,6 +167,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := cfg.Guard.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Search.Validate(); err != nil {
 		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}

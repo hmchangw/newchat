@@ -25,10 +25,21 @@ type cacheEntry[T any] struct {
 	found bool
 }
 
+// minCacheTTL is the smallest TTL a tier may be configured with. expirable.LRU
+// derives its reaper interval as ttl/100 and calls time.NewTicker with it, so
+// any TTL under 100ns yields NewTicker(0), which panics in a goroutine nothing
+// recovers — an operator typo would take the process down. The floor is set far
+// above that boundary because a sub-second reaper tick is pathological anyway.
+// Config validation rejects violations at startup; see SearchConfig.Validate.
+const minCacheTTL = time.Second
+
 // newEntryLRU builds the LRU for one cached tier, or returns nil when the tier
 // is disabled by a non-positive size or TTL. A nil cache bypasses the tier
 // entirely in lookupCached and records nothing, so disabling a tier costs
 // performance and nothing else.
+//
+// A positive TTL below minCacheTTL never reaches here — SearchConfig.Validate
+// fails startup first, so this cannot silently clamp a misconfiguration.
 //
 // expirable.LRU has no Close in v2.0.7 and its reaper goroutine runs for the
 // process lifetime, so build these once at startup — never per request.
@@ -92,6 +103,17 @@ func lookupCached[T any](
 	}
 	for _, k := range missing {
 		v, found := loaded[k]
+		if !found {
+			// Our load started before a concurrent one that has since cached a
+			// positive value — the row was created while our query was in
+			// flight. Writing this tombstone over it would render a bare
+			// account name for a whole TTL (a day at the default) even though
+			// this pod has already seen the row. Outside that race the key is
+			// absent or a tombstone, so this check no-ops.
+			if e, live := c.Get(k); live && e.found {
+				continue
+			}
+		}
 		c.Add(k, cacheEntry[T]{val: v, found: found})
 		if found {
 			out[k] = v

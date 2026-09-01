@@ -131,3 +131,42 @@ func TestConfig_EnrichmentCacheKnobs(t *testing.T) {
 		assert.Equal(t, time.Duration(0), cfg.Search.AppCacheTTL)
 	})
 }
+
+// expirable.LRU ticks its reaper at ttl/100 via time.NewTicker, which panics on
+// zero in an unrecovered goroutine — so a tiny positive TTL must fail startup
+// cleanly rather than crash the process.
+func TestSearchConfig_ValidateRejectsTinyCacheTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     SearchConfig
+		wantErr string
+	}{
+		{"hr ttl below floor", SearchConfig{HRCacheTTL: 50 * time.Nanosecond}, "SEARCH_HR_CACHE_TTL"},
+		{"app ttl below floor", SearchConfig{AppCacheTTL: 50 * time.Nanosecond}, "SEARCH_APP_CACHE_TTL"},
+		{"hr ttl just under the floor", SearchConfig{HRCacheTTL: minCacheTTL - time.Nanosecond}, "SEARCH_HR_CACHE_TTL"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestSearchConfig_ValidateAcceptsDisabledAndSaneTTLs(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SearchConfig
+	}{
+		{"both zero (disabled)", SearchConfig{}},
+		{"exactly the floor", SearchConfig{HRCacheTTL: minCacheTTL, AppCacheTTL: minCacheTTL}},
+		{"the shipped defaults", SearchConfig{HRCacheTTL: 24 * time.Hour, AppCacheTTL: 24 * time.Hour}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NoError(t, tc.cfg.Validate())
+		})
+	}
+}
