@@ -12,3 +12,8 @@ export const permissionsEnabled = () => {
   const runtimeNow = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {}
   return (runtimeNow.PERMISSIONS_ENABLED ?? import.meta.env.VITE_PERMISSIONS_ENABLED) === 'true'
 }
+
+export const updatesEnabled = () => {
+  const runtimeNow = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {}
+  return (runtimeNow.UPDATES_ENABLED ?? import.meta.env.VITE_UPDATES_ENABLED) === 'true'
+}
