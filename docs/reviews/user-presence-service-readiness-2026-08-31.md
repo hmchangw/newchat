@@ -105,3 +105,35 @@ The core binary is exemplary DI (consumer-owned interfaces, constructor injectio
 - `medium` — Promote the sync to a repo-root service (`user-presence-sync/`) and move `presencestore` to `pkg/presencestore`, restoring the flat-service + shared-code-in-`pkg` convention.
 - `medium` — Shard or lease the sweep: hash-tag per-shard sweep ZSETs (`presence:sweep:{n}`) with replicas claiming shards, or run the sweeper as a singleton; and make the `500` cap a config knob with a "sweep backlog" metric.
 - `low` — Either wire `PRESENCE_HEARTBEAT_INTERVAL` into a server-side expectation or delete it, and have `main` own the Valkey client's `Close` rather than `store.Close()`.
+
+---
+
+## 4. Test coverage — 1 / 5
+
+Coverage is 45.1% — below the 60% CLAUDE.md floor — and the gap is not cosmetic: the entire Valkey presence store, the sweeper loop and every handler store-error branch are unexercised by the default test gate.
+
+### Findings
+- `critical` — Coverage is **45.1% (459 statements)**, far under the CLAUDE.md §4 80% minimum and under 60%. — `user-presence-service/` (per `coverage_by_service.txt`)
+- `high` — The whole `presencestore` package scores **0.0% on all 20 functions** in the default profile: it has no untagged tests at all, so every assertion about the Lua precedence ladder, CAS status write and sweep index lives behind `//go:build integration` and is invisible to `make test`. — `user-presence-service/presencestore/store.go:36-341`, `presencestore/integration_test.go:1`
+  This is the service's entire business logic; a Lua edit can ship green through the normal gate.
+- `high` — `Sweeper.Run` is **0%**: the ticker loop, the `ctx.Done()` return and the `slog.Error` branch on a failed tick are never run. `main.go` blocks shutdown on `sweepDone` closing when `Run` returns, so the graceful-shutdown contract is asserted nowhere. — `user-presence-service/sweeper.go:27`, `main.go:193-201`
+- `medium` — No test drives a **store error** through `Hello`, `Ping`, `Activity` or `Bye` (each ~88.9%; `Bye` 77.8%, also missing its unchanged/no-publish path). Only `QueryBatchPeer`/`QueryBatch` cover store failure. — `handler.go:48`, `handler.go:66`, `handler.go:82`, `handler.go:98`
+- `medium` — `peer_client_test.go` is an **untagged unit test that boots a real NATS server on a TCP port**, contrary to "Never connect to real databases, NATS, or external services in unit tests". It also makes `make test` port- and timing-dependent (`TestNATSPeerPresenceClient_Timeout`). — `user-presence-service/peer_client_test.go:193-206`
+- `medium` — Integration tests use `testutil.StartValkeyCluster` (per-test container) rather than the mandated default `SharedValkeyCluster` + `t.Cleanup(FlushValkey)`. The in-code justification is self-refuting — it invokes the "store wrapper that calls `Close()`" exception and then states the test never calls `Close()`. 14 call sites spin 14 clusters. — `integration_test.go:18-26`, `presencestore/integration_test.go:19-23`, `sync/valkey_integration_test.go:16,33`
+- `medium` — `presencestore.PublishState`'s two failure branches (marshal error, publish error) are never exercised: the shared `capturedPublish.fn` unconditionally returns `nil`, so no test asserts a publish failure is swallowed rather than propagated. — `presencestore/store.go:39-45`, `handler_test.go:25-29`
+- `low` — `Store.ActiveAccounts` and `Store.Close` have **no test at any build tag** — `ActiveAccounts` is the sole entry point of the Teams sync, mocked in `sync/` but never run against Valkey. — `presencestore/store.go:279`, `presencestore/store.go:341`
+- `low` — `main()` is a single 140-line untestable function (0%); the fail-fast config validation at `main.go:77-106` (six positivity checks, read-preference parse) has no test, unlike `sync/main.go` which at least extracts `run() error`. — `main.go:69-106`
+- `low` — `BatchGet`'s duplicate-account dedupe and `run`'s arity guard are unreachable from any existing test. — `presencestore/store.go:295-297`, `presencestore/store.go:206`
+- `low` — Staleness is waited on with `time.Sleep(40ms)` against a 10ms threshold; wall-clock-dependent and flaky under a loaded CI runner. — `integration_test.go:115`
+- `nitpick` — `NewSweeper(store, ..., 0)` in three tests passes a zero interval; safe only because `Run` is never called, and it will panic `time.NewTicker` the moment someone adds the missing `Run` test. — `sweeper_test.go:20,38,48`
+
+Positives worth preserving: `sync/reconcile.go` is at **100%** with genuine degradation coverage (Graph lookup failure, id-map persist failure, per-account apply failure, index add/remove failure); `handler_test.go` covers the federation fan-out fallbacks (peer error → offline, unknown account → offline, local-store error fatal) properly, table-driven where it matters, with `NewMockPresenceStore` and an injected publish func rather than a live NATS conn.
+
+### Recommendations
+- `high` — Add an untagged `presencestore/store_test.go` using a `redis` test double or `miniredis`-equivalent for the pure Go paths (`run` arity guard, `reschedule` ZREM-vs-ZADD selection, `BatchGet` dedupe/`redis.Nil`/error, `PublishState` marshal+publish failures), so the package is not 0% under `make test`.
+- `high` — Test `Sweeper.Run`: a real ticker at a small interval plus a cancelled context, asserting `Run` returns and that a `tick` error does not terminate the loop. This is the graceful-shutdown precondition `main.go` relies on.
+- `medium` — Extend the four fire-and-forget handler tests into one table-driven suite covering `{store error, changed=false, empty account, empty connID}` per handler — closes `Bye` (77.8%) and the `88.9%` trio.
+- `medium` — Convert `peer_client_test.go` to an interface-level test (or move it under `//go:build integration` with `testutil.NATS(t)`); no untagged test should bind a port.
+- `medium` — Switch all four Valkey integration files to `testutil.SharedValkeyCluster(t)` + `t.Cleanup(func(){ testutil.FlushValkey(t) })` and delete the self-refuting justification comment.
+- `medium` — Add integration coverage for `ActiveAccounts` (write two connections, drop one, assert sweep-index membership) — it is the sync's contract with the store.
+- `low` — Extract `main()` into `run(cfg Config) error` + a `validate(cfg) error`, mirroring `sync/main.go`, and table-test the six positivity checks and the read-preference parse.
