@@ -236,3 +236,67 @@ The same shape appears three times, each on a login endpoint:
 - `medium` — Drop the raw ES `error.reason` from the bulk-failure log; project `FindUsersByAccounts`; move `setImageCacheHeaders` after a successful blob fetch and emit `no-store` on error paths; gate `emoji.delete` on admin; add a `DecodeConfig` dimension pre-check to the avatar upload.
 - `high` — **Run `make sast` (govulncheck + registry packs) from a network-permitted runner before any of this ships.** It is the one blocking CI gate this audit could not exercise.
 
+
+---
+
+## 6. Complete fleet scorecard — all 35 services
+
+All 35 audits are now complete. This table supersedes the partial scorecard in Chapter 1; nothing in it changed the cross-cutting findings, which were already robust across the first 20.
+
+| Rank | Service | Overall | D1 Qual | D2 Arch | D3 Test | D4 Maint | D5 Integ | D6 Perf | Coverage | crit | high |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `roomlist-worker` | **3.7** | 4 | 4 | 2 | 4 | 4 | 4 | 65.9% | 0 | 1 |
+| 2 | `translation-service` | **3.7** | 4 | 3 | 4 | 4 | 4 | 3 | **82.3%** ✅ | 0 | 3 |
+| 3 | `broadcast-worker` | **3.5** | 4 | 4 | 2 | 3 | 4 | 4 | 67.7% | 0 | 5 |
+| 4 | `tcard-service` | **3.5** | 4 | 4 | 2 | 4 | 4 | 3 | 69.7% | 0 | 4 |
+| 5 | `teams-chat-sync` | **3.5** | 4 | 4 | 2 | 4 | 4 | 3 | 67.6% | 0 | 3 |
+| 6 | `teams-room-creation` | **3.5** | 4 | 4 | 1 | 4 | 4 | 4 | 55.9% | 1 | 1 |
+| 7 | `teams-room-verify` | **3.5** | 4 | 4 | 2 | 4 | 4 | 3 | 78.9% | 0 | 2 |
+| 8 | `client-update-service` | **3.3** | 4 | 4 | 2 | 4 | 3 | 3 | 76.8% | 0 | 4 |
+| 9 | `media-service` | **3.3** | 4 | 4 | 2 | 3 | 4 | 3 | 70.0% | 0 | 3 |
+| 10 | `message-gatekeeper` | **3.3** | 4 | 4 | 2 | 3 | 3 | 4 | 65.5% | 0 | 7 |
+| 11 | `room-worker` | **3.3** | 4 | 4 | 2 | 2 | 4 | 4 | 62.8% | 0 | 9 |
+| 12 | `search-service` | **3.3** | 4 | 4 | 2 | 3 | 4 | 3 | 66.9% | 0 | 11 |
+| 13 | `teams-room-inspector` | **3.3** | 4 | 4 | 1 | 4 | 4 | 3 | 47.7% | 1 | 1 |
+| 14 | `user-service` | **3.3** | 4 | 4 | 2 | 3 | 3 | 4 | 53.2% | 1 | 6 |
+| 15 | `admin-service` | **3.2** | 4 | 3 | 2 | 3 | 4 | 3 | 68.9% | 0 | 10 |
+| 16 | `auth-service` | **3.2** | 4 | 3 | 2 | 4 | 3 | 3 | 61.9% | 0 | 12 |
+| 17 | `bot-message-handler` | **3.2** | 4 | 4 | 1 | 4 | 3 | 3 | 40.9% | 2 | 4 |
+| 18 | `history-service` | **3.2** | 4 | 4 | 1 | 3 | 3 | 4 | 55.0% | 1 | 6 |
+| 19 | `message-worker` | **3.2** | 4 | 4 | 1 | 3 | 4 | 3 | 56.8% | 1 | 9 |
+| 20 | `notification-worker` | **3.2** | 4 | 4 | 1 | 3 | 3 | 4 | 59.0% | 2 | 12 |
+| 21 | `outbox-worker` | **3.2** | 4 | 4 | 1 | 3 | 4 | 3 | 36.9% | 1 | 8 |
+| 22 | `portal-service` | **3.2** | 4 | 4 | 1 | 4 | 3 | 3 | 58.6% | 1 | 2 |
+| 23 | `room-service` | **3.2** | 4 | 3 | 1 | 3 | 4 | 4 | 57.2% | 1 | 10 |
+| 24 | `search-sync-worker` | **3.2** | 4 | 4 | 2 | 3 | 2 | 4 | 67.7% | 1 | 12 |
+| 25 | `teams-chat-member-sync` | **3.2** | 4 | 4 | 2 | 4 | 2 | 3 | 60.3% | 0 | 4 |
+| 26 | `teams-user-sync` | **3.2** | 4 | 4 | 1 | 4 | 3 | 3 | 53.4% | 1 | 5 |
+| 27 | `upload-service` | **3.0** | 4 | 4 | 2 | 3 | 2 | 3 | 76.5% | 1 | 7 |
+| 28 | `bot-room-service` | **2.8** | 4 | 3 | 1 | 3 | 3 | 3 | 49.0% | 1 | 12 |
+| 29 | `botplatform-service` | **2.8** | 3 | 3 | 1 | 4 | 3 | 3 | 56.5% | 1 | 14 |
+| 30 | `hr-sync-worker` | **2.8** | 4 | 3 | 1 | 3 | 3 | 3 | 21.1% | 1 | 6 |
+| 31 | `inbox-worker` | **2.8** | 4 | 3 | 1 | 3 | 3 | 3 | 44.1% | 1 | 11 |
+| 32 | `teams-hr-sync` | **2.8** | 4 | 4 | 1 | 3 | 3 | 2 | 57.5% | 2 | 5 |
+| 33 | `user-presence-service` | **2.8** | 4 | 3 | 1 | 3 | 3 | 3 | 45.1% | 1 | 14 |
+| 34 | `push-notification-service` | **2.7** | 3 | 2 | 1 | 4 | 3 | 3 | 26.9% | 1 | 6 |
+| 35 | `bot-message-worker` | **2.5** | 3 | 3 | 1 | 3 | 2 | 3 | **13.6%** | 1 | 10 |
+
+**Fleet mean: 3.2 / 5.** Range 2.5–3.7. Mean coverage **58.1%**.
+
+### Finding totals across all 210 expert reports
+
+| Severity | critical | high | medium | low | nitpick | **Total** |
+|---|---|---|---|---|---|---|
+| Count | **24** | **239** | 514 | 470 | 194 | **1,441** |
+
+### What the completed picture confirms
+
+**The band did not widen.** With all 35 in, the spread is 2.5 to 3.7 — narrower than most fleets of this size, and the shape of the distribution is the finding. Nobody is failing; nobody is excellent. Every service is competent code held back by the same three things.
+
+**Dimension-by-dimension, the fleet is bimodal.** D1 (code quality) averages **3.9** and drops below 4 exactly three times. D2 (architecture) averages **3.6**. D4 (maintainability) **3.4**, D5 (integration) **3.4**, D6 (performance) **3.3**. And D3 (test coverage) averages **1.5** — sixteen services floored at 1, seventeen at 2, one at 4. *The inside of the functions is good. The wiring around them is untested, and the contracts between them are unenforced.*
+
+**The three lowest scores share a shape.** `bot-message-worker` (2.5), `push-notification-service` (2.7) and `user-presence-service` (2.8) are all services where a **capability the name promises is partially or wholly unwired**: an unimplemented Cassandra write-timestamp contract, a dispatcher that logs instead of dispatching, and an RPC responder that does not exist. In each case the code that *is* there is fine. What is missing is not quality — it is completion, and in two of the three cases nothing in the service says so out loud.
+
+**The two highest scores share the opposite shape.** `roomlist-worker` (3.7) and `translation-service` (3.7) both have small, dependency-injected, `main()`-light surfaces. `translation-service` is the fleet's only service over the coverage floor, and it is not the smallest or the simplest — it is the one whose logic is not trapped behind wiring. That is the entire argument of Chapter 2, visible as a single data point.
+
+**Where coverage and score diverge, read the score.** `teams-room-creation` scores 3.5 at 55.9% coverage; `upload-service` scores 3.0 at 76.5%. Coverage measures how much of a service is exercised; it says nothing about whether the service is doing the right thing. `upload-service` carries the fleet's one genuinely `critical` security finding **in well-tested code**.
