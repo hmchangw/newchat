@@ -130,3 +130,29 @@ Not applicable / verified N/A: no `pkg/subject` usage (no NATS subjects are cons
 - `low` — export the object prefix as a documented constant (or a tiny `pkg/` type shared with `admin-service`), so the relay and the store agree by construction rather than by string.
 
 ---
+
+---
+
+## 7. Performance — 3 / 5
+
+The streaming upload path and the singleflight LRU are well-engineered and proven by tests, but a hardcoded 30s read deadline caps every real upload and the cache's memory budget is bounded by entry count rather than bytes.
+
+### Findings
+- `high` — `ReadTimeout: 30 * time.Second` (`client-update-service/main.go:80`) bounds reading the **entire request including the body**, so any upload taking longer than 30s is severed mid-body. With `UPLOAD_MAX_BYTES` defaulting to 2 GiB (`config.go:47`), a full-size artifact needs a sustained ~570 Mbps to finish in time; a 200 MiB artifact needs ~57 Mbps. `HTTP_WRITE_TIMEOUT` (10m, `config.go:40`) does not help — it governs the response. The sibling service gets this right and says why: "equal because WriteTimeout starts at end-of-header and so must cover the body", `upload-service/main.go:38`, with `ReadTimeout: httpTimeout` at `:206`. Uncovered by tests, because `run()` is 0%.
+- `medium` — the download cache is bounded by entry count, not bytes: `CACHE_MAX_ENTRIES` 4 × `CACHE_MAX_OBJECT_BYTES` 512 MiB = **2 GiB** of resident heap at steady state, plus in-flight fills — `config.go:49-51`, `cache.go:31-37`, allocation at `version.go:173` (`make([]byte, info.Size)`). Nothing couples these defaults to the pod memory limit, and `deploy/docker-compose.yml:26-28` ships exactly those values.
+- `medium` — every download of an object above `CACHE_MAX_OBJECT_BYTES` performs two `GetObject`+`Stat` round trips: `loadObject` opens and closes it to learn the size (`version.go:164-178`), then `streamObject` re-opens it (`version.go:159`, `:181-195`). The oversize case is precisely the latency-sensitive one.
+- `low` — no `ReadHeaderTimeout` is set (`main.go:77-82`); `upload-service/main.go:205` sets 5s. Today `ReadTimeout` covers slowloris, but that stops being true the moment the read deadline is raised to fix the finding above.
+- `low` — the unauthenticated `GET /api/v1/version/:fileName` has no rate limit (`routes.go:17`); a cache miss or a cache-disabled deployment turns each request into a MinIO round trip.
+
+Verified good: the upload never buffers the artifact — parts stream from `*multipart.FileHeader` straight into `Put` (`version.go:97-115`) with `MaxMultipartMemory` lowered to 1 MiB (`config.go:75`), proven by a peak-heap assertion at 48 MiB artifact / 24 MiB ceiling (`version_test.go:383-424`); concurrent cache misses collapse through `singleflight` with a generation counter that prevents an upload-racing fill from reviving stale bytes (`cache.go:65-91`, tested at `cache_test.go:104`); `Open` bounds itself with `MINIO_DOWNLOAD_TIMEOUT` and releases the context on `Close` (`store_minio.go:37`, `:93-97`); no `time.Sleep` synchronization and no goroutine without a termination path apart from the D2 shutdown note. `pkg/jsretry`, consumer `BackOff`, `MaxAckPending`/`MAX_WORKERS`, sonic codec and the Cassandra `USING TIMESTAMP` rules are all inapplicable — the service has no JetStream or Cassandra surface.
+
+### Recommendations
+- `high` — introduce `HTTP_READ_TIMEOUT` defaulting to the same value as `HTTP_WRITE_TIMEOUT` (10m) and set `ReadHeaderTimeout: 5s` alongside it, mirroring `upload-service/main.go:205-207`; assert the matrix in the `newServer` unit test from D3.
+- `medium` — bound the cache by total bytes, not entries: either add a `CACHE_MAX_TOTAL_BYTES` budget enforced in `blobCache.add`, or document `CACHE_MAX_ENTRIES × CACHE_MAX_OBJECT_BYTES` as the pod's required memory headroom in the compose/deploy manifests.
+- `medium` — return the already-open reader from `loadObject` when the object is oversized, so the stream path reuses it instead of re-opening.
+- `low` — add a modest per-IP rate limit (or rely on the ingress) for the unauthenticated download route, and set `nosniff` while doing so.
+- `low` — surface `MINIO_DOWNLOAD_TIMEOUT` (5m) and `HTTP_WRITE_TIMEOUT` (10m) in one startup log line, so an operator can see the two deadlines that bound a large download.
+
+---
+
+**Consolidated summary.** `client-update-service` is a small, unusually well-crafted service: consumer-defined store interface, constructor DI, streaming-proven upload path, singleflight-and-generation cache, constant-time credential comparison, and comments that explain *why*. Three items are worth fixing before it carries production traffic, in order: (1) the hardcoded 30s `ReadTimeout` that caps every real artifact upload and silently breaks `admin-service`'s documented 10m relay budget (`main.go:80`); (2) the 76.8% coverage floor breach, which is 50 statements of untested `main.go` wiring — the same wiring that hides finding (1), fixable by extracting `newServer`; (3) the re-declared MinIO knobs, which the CLAUDE.md §6 shared-knob rule forbids and which have already drifted across three services (`MINIO_BUCKET` is required here, defaulted to `avatars` in media-service). Everything else is `low` or `nitpick`.
