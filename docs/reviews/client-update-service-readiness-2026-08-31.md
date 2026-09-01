@@ -89,3 +89,23 @@ Quality is otherwise strong: table-driven subtests with descriptive names (`conf
 - `low` — soften the peak-heap assertion to a ratio of the artifact size rather than a fixed 24 MiB, to keep it meaningful without being load-fragile.
 
 ---
+
+---
+
+## 5. Maintainability — 4 / 5
+
+Small, single-purpose files with genuinely WHY-shaped comments and no dead code; one comment has gone stale and one cross-service invariant survives only as prose.
+
+### Findings
+- `low` — stale comment: "Only `CacheMaxObjectBytes` is an int64 here" is no longer true — `UploadMaxBytes` is also `int64` and therefore also routed through `parseByteSize` — `client-update-service/config.go:57-59` vs `config.go:47`
+- `low` — the upload/download deadline invariant is documented in *prose in another service* ("client-update-service's own `HTTP_WRITE_TIMEOUT` should be at least this value", `admin-service/config.go:78-80`) with nothing on either side enforcing it; `admin-service` has a `checkHandlerTimeout` validator for its own knobs (`admin-service/config.go:124`) but none spans the pair.
+- `nitpick` — the oversize-object path opens the object twice (`loadObject` then `streamObject`, `version.go:159` → `:181`); intentional and commented, but a `loadOrStream` that returns the still-open reader would remove the second `Stat` round trip and one code path.
+
+Positives worth recording: largest file is 207 lines (`version.go`); largest function is `run` at ~50 statements and is pure wiring; every non-obvious decision carries a WHY comment that a reviewer can check (`config.go:26-37` on the `,`/`:` separator behaviour of caarlos0/env v11.4.0; `routes.go:20-24` on middleware ordering; `cache.go:78-83` on the generation counter; `config.go:70-75` on `MaxMultipartMemory`). No duplicated logic, no dead code (`bytesBufferString`, `rc`, `testTokens`, `enabled`, `maxInt64AsFloat` all have live callers).
+
+### Recommendations
+- `low` — fix the `config.go:57-59` comment to name both int64 fields.
+- `low` — add a startup check that `HTTP_WRITE_TIMEOUT` (and the read timeout, once configurable) is at least the artifact-transfer budget, so the admin-service constraint is enforced rather than described.
+- `nitpick` — consider collapsing `loadObject`/`streamObject` into one function returning `(cachedBlob, io.ReadCloser, blobInfo, error)` to drop the double `Stat`.
+
+---
