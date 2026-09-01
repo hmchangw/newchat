@@ -89,14 +89,16 @@ func removedMemberName(account string, u *model.User, appNames map[string]string
 	return displayfmt.CombineWithFallback(u.EngName, u.ChineseName, account)
 }
 
-// appNamesFor resolves every bot account among accounts in ONE read, keyed by
-// account. A page with no bots never touches the apps collection.
+// appNamesFor resolves every bot account among accounts, keyed by account. It runs
+// through the shared app-name cache, so a page costs at most one apps read — only
+// for the bots the cache cannot already answer — and a page with no bots never
+// touches the collection at all.
 //
-// Errors are logged and swallowed into an empty map: a missing app name degrades
-// the row to its composed name or raw account, which is the same outcome a bot
-// with no app row already gets.
+// An error keeps whatever the cache did answer and is logged, not returned: a
+// missing app name degrades that row to its composed name or raw account, the same
+// outcome a bot with no app row already gets.
 func (s *HistoryService) appNamesFor(ctx context.Context, accounts []string) map[string]string {
-	if s.apps == nil {
+	if s.appNames == nil {
 		return nil
 	}
 	bots := make([]string, 0, len(accounts))
@@ -108,11 +110,10 @@ func (s *HistoryService) appNamesFor(ctx context.Context, accounts []string) map
 	if len(bots) == 0 {
 		return nil
 	}
-	names, err := s.apps.AppNamesByAccounts(ctx, bots)
+	names, err := s.appNames(ctx, bots)
 	if err != nil {
 		slog.WarnContext(ctx, "resolving removed-member app names, leaving composed names",
 			"accounts", len(bots), "error", err)
-		return nil
 	}
 	return names
 }

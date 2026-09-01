@@ -71,6 +71,10 @@ func Eligible(deleted bool, msgType string) bool {
 // AppNameLookup resolves a bot account's app display name; ("", nil) means no match.
 type AppNameLookup func(ctx context.Context, botAccount string) (string, error)
 
+// AppNamesLookup resolves many bot accounts in one read, keyed by account. An
+// account with no matching app is absent from the map rather than an error.
+type AppNamesLookup func(ctx context.Context, botAccounts []string) (map[string]string, error)
+
 // BotAwareDisplayName prefers a bot's app name, degrading to the composed name on miss.
 func BotAwareDisplayName(ctx context.Context, lookup AppNameLookup, engName, chineseName, account string) string {
 	name := displayfmt.CombineWithFallback(engName, chineseName, account)

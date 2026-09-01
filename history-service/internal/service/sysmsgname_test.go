@@ -585,3 +585,65 @@ func TestResolveRemovedMemberNames_NilAppStoreDegrades(t *testing.T) {
 
 	assert.Equal(t, `"Helper" has been removed from the channel.`, msgs[0].Msg)
 }
+
+// Scroll-back: a second page carrying the same bot must not re-read `apps`. The
+// cache is shared and built once in New, so the read happens on the first page only.
+func TestResolveRemovedMemberNames_SecondPageServesBotFromCache(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(nil, nil).Times(2)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+		Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	for range 2 {
+		msgs := []models.Message{legacyRemoved("helper.bot")}
+		s.resolveRemovedMemberNames(context.Background(), msgs)
+		assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+	}
+}
+
+// A page mixing a warm bot with a cold one reads only the cold one.
+func TestResolveRemovedMemberNames_SecondPageQueriesOnlyTheNewBot(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return(nil, nil).Times(2)
+	apps := mocks.NewMockAppStore(ctrl)
+	gomock.InOrder(
+		apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"helper.bot"}).
+			Return(map[string]string{"helper.bot": "Helper Bot"}, nil).Times(1),
+		apps.EXPECT().AppNamesByAccounts(gomock.Any(), []string{"weather.bot"}).
+			Return(map[string]string{"weather.bot": "Weather Bot"}, nil).Times(1),
+	)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	first := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), first)
+
+	second := []models.Message{legacyRemoved("helper.bot"), legacyRemoved("weather.bot")}
+	s.resolveRemovedMemberNames(context.Background(), second)
+
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, second[0].Msg)
+	assert.Equal(t, `"Weather Bot" has been removed from the channel.`, second[1].Msg)
+}
+
+// A reaction actor and a legacy sys-msg row share one cache: the single-account
+// lookup warms the bot, so the page's batch has nothing left to read.
+func TestResolveRemovedMemberNames_ReusesNameWarmedByTheReactionPath(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	users := mocks.NewMockUserStore(ctrl)
+	users.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"helper.bot"}).Return(nil, nil).Times(1)
+	apps := mocks.NewMockAppStore(ctrl)
+	apps.EXPECT().AppNameByAccount(gomock.Any(), "helper.bot").Return("Helper Bot", nil).Times(1)
+	apps.EXPECT().AppNamesByAccounts(gomock.Any(), gomock.Any()).Times(0)
+	s := newSysMsgNameServiceWith(t, users, apps)
+
+	// The reaction path resolves the actor first.
+	assert.Equal(t, "Helper Bot", s.botAwareDisplayName(context.Background(), "", "", "helper.bot"))
+
+	msgs := []models.Message{legacyRemoved("helper.bot")}
+	s.resolveRemovedMemberNames(context.Background(), msgs)
+	assert.Equal(t, `"Helper Bot" has been removed from the channel.`, msgs[0].Msg)
+}

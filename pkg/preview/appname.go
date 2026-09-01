@@ -31,22 +31,95 @@ func CachedAppNameLookup(inner AppNameLookup) AppNameLookup {
 	if inner == nil {
 		return nil
 	}
-	cache := lru.NewLRU[string, string](appNameCacheSize, nil, appNameCacheTTL)
-	var sf singleflight.Group
+	return NewAppNameCache(inner, nil).Name
+}
 
-	return func(ctx context.Context, botAccount string) (string, error) {
-		if name, ok := cache.Get(botAccount); ok {
-			return name, nil
-		}
-		v, err, _ := sf.Do(botAccount, func() (any, error) {
-			return loadAppName(ctx, cache, inner, botAccount)
-		})
-		if err != nil {
-			return "", err
-		}
-		name, _ := v.(string)
+// AppNameCache resolves bot app names one at a time or many at once over a SINGLE
+// shared cache, so a name either half fetches is free to the other.
+//
+// Both halves degrade rather than fail: a nil inner resolves nothing, and callers
+// fall back to the composed display name.
+type AppNameCache struct {
+	cache *lru.LRU[string, string]
+	sf    singleflight.Group
+	one   AppNameLookup
+	many  AppNamesLookup
+}
+
+// NewAppNameCache builds the shared cache. Either inner may be nil when a caller
+// only needs the other half.
+func NewAppNameCache(one AppNameLookup, many AppNamesLookup) *AppNameCache {
+	return &AppNameCache{
+		cache: lru.NewLRU[string, string](appNameCacheSize, nil, appNameCacheTTL),
+		one:   one,
+		many:  many,
+	}
+}
+
+// Name resolves one bot account, collapsing concurrent cold reads of the same key.
+func (c *AppNameCache) Name(ctx context.Context, botAccount string) (string, error) {
+	if c.one == nil {
+		return "", nil
+	}
+	if name, ok := c.cache.Get(botAccount); ok {
 		return name, nil
 	}
+	v, err, _ := c.sf.Do(botAccount, func() (any, error) {
+		return loadAppName(ctx, c.cache, c.one, botAccount)
+	})
+	if err != nil {
+		return "", err
+	}
+	name, _ := v.(string)
+	return name, nil
+}
+
+// Names resolves many bot accounts, reading ONLY the ones the cache cannot answer —
+// so a page of warm bots costs nothing and a page of cold ones costs one read.
+//
+// On a failed fetch it returns the cache hits it already gathered alongside the
+// error: a partial answer renders more names than none, and the caller degrades the
+// rest to their composed names either way. Nothing from a failure is cached, so the
+// next call retries those accounts.
+//
+// Deliberately not singleflighted: the key is a set rather than an account, and this
+// half serves page reads rather than the per-message fan-out the single half sits on.
+// Concurrent pages sharing a cold bot cost one read each, then warm the cache.
+func (c *AppNameCache) Names(ctx context.Context, botAccounts []string) (map[string]string, error) {
+	names := make(map[string]string, len(botAccounts))
+	if len(botAccounts) == 0 || c.many == nil {
+		return names, nil
+	}
+
+	var misses []string
+	for _, account := range botAccounts {
+		name, ok := c.cache.Get(account)
+		if !ok {
+			misses = append(misses, account)
+			continue
+		}
+		if name != "" {
+			names[account] = name
+		}
+	}
+	if len(misses) == 0 {
+		return names, nil
+	}
+
+	fetched, err := c.many(ctx, misses)
+	if err != nil {
+		return names, err
+	}
+	for _, account := range misses {
+		// An account absent from the result has no app — a stable answer, cached as
+		// the empty name it is so one misconfigured bot stops re-reading.
+		name := fetched[account]
+		c.cache.Add(account, name)
+		if name != "" {
+			names[account] = name
+		}
+	}
+	return names, nil
 }
 
 // loadAppName is the singleflight leader's body, split out so the recheck below is
