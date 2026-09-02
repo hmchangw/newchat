@@ -246,3 +246,71 @@ pre-header messages is only half true.
 `Account`; the label value is whatever BP stamped. Bounded by trust, not by code.
 The contract note already names the mitigation (known-accounts cap) — worth a
 `TODO` referencing it.
+
+---
+
+# Go expert
+
+Both packages build clean; error wrapping, struct tags, concurrency rules and
+interface placement are compliant with CLAUDE.md §3 throughout.
+
+**high — the other producer on this subject was not migrated, and it publishes a
+different wire shape.** `bot-room-service/sysmsg.go:65` publishes to
+`subject.BotCanonicalCreated(siteID)` — the exact subject `bot-message-worker`
+filters on (`bot-message-worker/main.go:208`) — but marshals a raw
+`model.Message` (`sysmsg.go:55`), while the worker decodes `model.MessageEvent`,
+which nests it (`pkg/model/event.go:31`). `json.Unmarshal` succeeds and yields a
+zero `evt.Message`. The mismatch predates this branch, but this branch is where
+it should have surfaced: every sysmsg now lands with no `X-Bot-Identity`, an
+empty payload `UserAccount`, and is billed to `unknown` — the new counter absorbs
+the bug instead of exposing it. Either migrate `bot-room-service` to the same
+envelope and headers, or the attribution story covers only half the stream.
+
+**medium — the deliberately-swallowed error is documented but untested.**
+`bot-message-worker/handler.go:44` discards the unmarshal error. The doc comment
+satisfies CLAUDE.md §3 ("comment if intentionally discarded"). But no test drives
+it: `TestHandleJetStreamMsg_UnattributableFailureCountsAsUnknown` covers an
+*absent* header, never a *malformed* one — the error path CLAUDE.md §4 explicitly
+requires. Add a case with `h.Set(model.HeaderBotIdentity, "{not-json")`. Consider
+also distinguishing the two in the log: a malformed header is a BP wiring bug
+(`bot-message-handler/handler.go:231` treats it as `BadRequest`) and currently
+vanishes with zero signal.
+
+**medium — the `Publisher` interface's stated justification is now stale.**
+`bot-message-handler/handler.go:31-37`. `jetstream.WithMsgID` only sets the
+`Nats-Msg-Id` header on the message you hand it (nats.go
+`jetstream/publish.go:187`). Once the parameter is a `*nats.Msg`, a fake can
+assert the dedup id off `msg.Header` — so the "pubOpts is unexported" rationale,
+and with it the whole `Publisher`/`JetStreamPublisher` indirection over
+`jetStreamAPI`, no longer earns its keep. The shape is fine; the comment argues
+for something that stopped being true. Related: nats.go mutates the caller's
+`Header`, and the fake stores it by reference (`handler_test.go:66`) while
+defensively copying `Data` — copy both.
+
+**low — the request id is returned, discarded, then re-derived four times.**
+`bot-message-worker/handler.go:72` does `ctx, _ =`; lines 82, 94, 101 and 108
+then each call `natsutil.RequestIDFromContext(ctx)`. Bind it once.
+
+On the broader question: the repeated `"request_id", natsutil.RequestIDFromContext(ctx)`
+key *is* house convention (`message-worker/handler.go:113`,
+`broadcast-worker/handler.go:209`) — do **not** hoist a `slog.Default().With(...)`
+logger, that would diverge from every sibling. The 4× `botID`/`botAccount` pair
+is new to the repo and is the part actually worth hoisting, but only if bound
+alongside the id.
+
+**low — naming divergence is acceptable as-is.** `PublishMsgWithID` versus
+`bot-room-service/handler.go:54`'s `PublishWithMsgID`. Each is a consumer-defined
+interface per CLAUDE.md §3, and the new name correctly mirrors nats.go's
+`Publish`/`PublishMsg`. Not worth churning; converging them falls out of fixing
+the high finding above.
+
+**nitpick — `orElse` reads as Scala.** `bot-message-worker/handler.go:52`. The
+value receiver returning a copy is the right call (don't mutate), but name it
+`fillFrom`/`withFallback`, and take `*model.Message` — two adjacent `string`
+parameters invite a silent argument swap. Zero-value semantics are adequately
+documented.
+
+**nitpick — duplicated nil-header guard.** `bot-message-handler/handler.go:212-214`
+reimplements the guard `natsutil.NewMsgEncoded` already owns
+(`pkg/natsutil/request_id.go:82-85`). A `natsutil.NewMsgWithHeader` would keep the
+"NewMsg returns nil Header" quirk in one place.
