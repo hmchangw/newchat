@@ -1,0 +1,63 @@
+/* Owner picker. The roster is bounded by room-service's MAX_ROOM_SIZE, so the
+   list scrolls rather than growing the dialog past the viewport. */
+.onduty-owner {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md) var(--space-md);
+  min-width: 0;
+}
+
+.onduty-owner legend {
+  padding: 0 var(--space-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+}
+
+.onduty-owner-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 208px;
+  overflow-y: auto;
+}
+
+.onduty-owner-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  /* Cancels .dialog label's block/margin so the row reads as one control. */
+  margin-bottom: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-regular);
+  cursor: pointer;
+}
+
+.onduty-owner-option:hover {
+  background: var(--bg-hover);
+}
+
+.onduty-owner-option input {
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.onduty-owner-option span:first-of-type {
+  overflow-wrap: anywhere;
+}
+
+/* A bot can legally own a room, so the tag informs rather than blocks. */
+.onduty-owner-bot {
+  margin-left: auto;
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-pill);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.onduty-owner-empty {
+  color: var(--text-muted);
+}

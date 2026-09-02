@@ -1,1 +1,1 @@
-export { default, SEARCH_LIMIT } from './AccountPicker'
+export { default } from './AccountPicker'

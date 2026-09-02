@@ -5,24 +5,13 @@ import { useDebouncedSearch } from '@/hooks/useDebouncedSearch'
 import { useLatestRequest } from '@/hooks/useLatestRequest'
 import './style.css'
 
-export const SEARCH_LIMIT = 10
+const SEARCH_LIMIT = 10
 
 // Search-to-select account field: typing queries the admin users API (debounced) and only an
 // account present in the results can be selected — free-typed text is never committed via
 // `onChange`, so it can never reach a submit payload. `multiple` renders removable chips backed
 // by an array `value`; single mode holds one account string and hides the input once set.
-// `searchAccounts(q)` overrides where candidates come from — pass one to scope the picker to a
-// narrower population (e.g. a single room's members) instead of every user on the platform.
-export default function AccountPicker({
-  id,
-  label,
-  authToken,
-  multiple = false,
-  value,
-  onChange,
-  disabled,
-  searchAccounts,
-}) {
+export default function AccountPicker({ id, label, authToken, multiple = false, value, onChange, disabled }) {
   const [options, setOptions] = useState([])
   const [open, setOpen] = useState(false)
   // Index into `options`, not a selected account: this is the ARIA-1.2 combobox active
@@ -46,11 +35,9 @@ export default function AccountPicker({
       return
     }
     try {
-      const found = searchAccounts
-        ? await searchAccounts(q)
-        : (await listUsers(authToken, { q, page: 1, limit: SEARCH_LIMIT })).users
+      const result = await listUsers(authToken, { q, page: 1, limit: SEARCH_LIMIT })
       if (!isCurrent(token)) return // superseded by a newer query
-      setOptions(found.filter((u) => !selected.includes(u.account)))
+      setOptions(result.users.filter((u) => !selected.includes(u.account)))
       setHighlight(0)
       setOpen(true)
     } catch (err) {
