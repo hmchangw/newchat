@@ -688,6 +688,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is not a configured Drive host" }` — `drive_host` must be one of the Drive base URLs this deployment is configured for. Send back the value the upload response gave you; it is not a free-form URL. The rejected value is not echoed. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
@@ -736,6 +737,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | Status | `code` | `reason` | Example body |
 |---|---|---|---|
 | 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is required" }` — also `roomId is required`, `fileId is required`. |
+| 400 | `bad_request` | — | `{ "code": "bad_request", "error": "drive_host is not a configured Drive host" }` — `drive_host` must be one of the Drive base URLs this deployment is configured for. Send back the value the upload response gave you; it is not a free-form URL. The rejected value is not echoed. |
 | 401 | `unauthenticated` | `invalid_sso_token` / `sso_token_expired` / `missing_fields` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid sso token" }` |
 | 403 | `forbidden` | `not_room_member` | `{ "code": "forbidden", "reason": "not_room_member", "error": "user alice is not in room abc123" }` |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — user missing in context. |
