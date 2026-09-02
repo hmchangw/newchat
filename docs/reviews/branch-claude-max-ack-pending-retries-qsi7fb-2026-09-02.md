@@ -388,3 +388,77 @@ propagation through the real `logctx.ConsumeContext` by capturing the ctx the
 store actually received. `TestHandleJetStreamMsg_HeaderIdentityWinsOverPayloadAccount`
 (`:233`) pins the precedence rule the code comment claims. The handler-side tests
 are weaker — they only prove the fake was handed the right header.
+
+---
+
+# Bug & security
+
+Build clean, both services' unit tests pass, `make sast-gosec` = 0 findings,
+repo-owned semgrep = 0 findings over 19 rules and 1800 files. `govulncheck` and
+the remote semgrep rulesets could not run in this environment (proxy-blocked) and
+are not reported as findings.
+
+## Cardinality DoS — answered concretely: bounded today, unvalidated by construction
+
+Traced end to end. `bot_account` resolves from `X-Bot-Identity`, which
+`bot-message-handler/handler.go:181,215` forwards verbatim; its only origin is
+`botplatform-service/bot_forwarder.go:62,116` and `dm_ensurer.go:43`, which build
+it from `sess.Account` — a Mongo-backed session record
+(`botplatform-service/handler.go:140`, `Account: u.Account`), never a client
+field. Publish rights on `chat.server.bot.request.>` are unreachable from chat
+clients: the scoped user template grants pub only on
+`chat.user.{{tag(account)}}.>` and `chat.user.presence.*.query.batch`
+(`docker-local/setup.sh:68-73`). Publish rights on
+`chat.bot.canonical.{siteID}.created` are held by backend credentials only
+(`bot-message-handler`, `bot-room-service/sysmsg.go:65`). **No external attacker
+can drive distinct label values.** The exception documented in
+`docs/specs/o11y/nats-metrics-contract.md` is materially correct.
+
+**medium — nothing validates the label value itself.**
+`bot-message-handler/handler.go:235` checks only that `Account` is non-empty;
+`FindSubscription` validates `ident.ID`, never `Account`.
+`bot-message-worker/handler.go:63-68` then uses that free-form string as a
+Prometheus label with no length cap, charset check, or known-account bound. A BP
+bug, or a compromise of any backend-credentialed publisher, yields unbounded and
+unrecoverable series. Cheap fix: cap length and allowlist the charset, or bucket
+unrecognised accounts to `other`.
+
+**medium — the payload fallback is a strictly weaker source than the header.**
+`bot-message-worker/handler.go:87`, `sender.orElse(m.UserID, m.UserAccount)`,
+takes the label from an unauthenticated JSON body field. Stating the trust
+question plainly: for the *header* the worker's trust is equal to the handler's
+(re-stamped after `parseIdentity`), but the *fallback* is not — it is a payload
+field on a stream that carries at least one publisher (`sysmsg.go`) that never
+stamps the header at all. The metric's guarantee is therefore "bounded by BP's
+session records **or** by whatever any canonical publisher wrote in the body".
+
+## Other findings
+
+**medium — `bot-room-service/sysmsg.go:55,65` publishes a bare `model.Message`
+onto the same subject the worker decodes as `model.MessageEvent`**
+(`bot-message-worker/handler.go:77-78`). Pre-existing, not introduced here, but it
+defeats this branch: the mismatch does not error, it decodes to a zero
+`MessageEvent`, so the worker writes an empty message and the new counter never
+fires — `orElse` sees `""`/`""` → `unknown`.
+
+**low — `senderFromHeader` swallows the unmarshal error silently**
+(`bot-message-worker/handler.go:44-46`). A malformed BP header degrades
+attribution with zero signal; the handler treats the same condition as
+`BotInvalidHeader` (`handler.go:231`). Count it under an outcome, or log once.
+
+**nitpick — `unknown` (`metrics.go:22`) can collide with a real bot account of
+that name.** Prefix it (`__unattributed__`).
+
+**nitpick — `bot-message-worker` never calls `logctx.SetupDefault`/`Configure`,**
+so the X-Debug rung that `ConsumeContext` now admits can never emit.
+
+## Cleared
+
+- **No secret or body leakage.** `logctx.ConsumeContext` → `CapturePayload` is
+  double-gated (`pkg/logctx/limiter.go:86-90`): `capturePayloads` defaults false
+  and this service never calls `Configure`, so payload capture is inert. The new
+  log lines carry `botID`/`botAccount`/`request_id` only — no tokens, no bodies.
+- **No nil-pointer risk.** `nats.Header.Get` is nil-safe (`nats.go:4134`), and
+  `jetstream.PublishMsg` initialises a nil `Header` before `Set`
+  (`jetstream/publish.go:173`), so the "NewMsg returns nil Header" path at
+  `bot-message-handler/handler.go:210-216` is safe on both branches.
