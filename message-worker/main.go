@@ -206,25 +206,36 @@ func main() {
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
-	handler := NewHandler(store, us, threadStore, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
-		// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
-		// verbose-tracing intent ride onto downstream badge/inbox events.
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if msgID == "" {
-			err := nc.PublishMsg(ctx, msg)
-			publishMetrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
+	// newLanePublish binds a lane's outbound traffic to the connection that lane
+	// consumes on. Each lane needs its own: the failover lane exists because the
+	// home cluster is unreachable, so reusing the home lane's publisher there
+	// would drop every badge broadcast and every federated event it produced.
+	newLanePublish := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream) PublishFunc {
+		return func(ctx context.Context, subj string, data []byte, msgID string) error {
+			// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
+			// verbose-tracing intent ride onto downstream badge/inbox events.
+			msg := natsutil.NewMsg(ctx, subj, data)
+			if msgID == "" {
+				err := conn.PublishMsg(ctx, msg)
+				publishMetrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
+				if err != nil {
+					return fmt.Errorf("publish nats message to %s: %w", subj, err)
+				}
+				return nil
+			}
+			_, err := laneJS.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
+			publishMetrics.Failure(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
 			if err != nil {
-				return fmt.Errorf("publish nats message to %s: %w", subj, err)
+				return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
 			}
 			return nil
 		}
-		_, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-		publishMetrics.Failure(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
-		if err != nil {
-			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
-		}
-		return nil
-	}, withPersistenceMetrics(domainMetrics))
+	}
+	newLaneHandler := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, failover bool) *Handler {
+		return NewHandler(store, us, threadStore, cfg.SiteID, newLanePublish(conn, laneJS),
+			withPersistenceMetrics(domainMetrics), withOutboxLane(failover))
+	}
+	handler := newLaneHandler(nc, js, false)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -296,11 +307,17 @@ func main() {
 	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile,
 		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			// Its own handler, bound to the BUDDY connection and the failover
+			// outbox lane: the home cluster is the one that is down, so a badge
+			// broadcast or federated event published there would be lost.
+			// teamsMigration is home-only (no standby stream), so this lane never
+			// runs the migration path.
+			buddyHandler := newLaneHandler(bconn, bjs, true)
 			var bErr error
 			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
 				Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
 				Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
-			}, process)
+			}, canonicalProcessor(buddyHandler, nil, ""))
 			return bErr
 		})
 
@@ -378,8 +395,10 @@ func canonicalProcessor(h *Handler, teams *teamsBatchHandler, teamsBatchSubj str
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
 			// Dispatch by subject: the one-time .teams.batch migration writes
-			// straight to Cassandra; the live .created feed runs the normal pipeline.
-			if msg.Subject() == teamsBatchSubj {
+			// straight to Cassandra; the live .created feed runs the normal
+			// pipeline. A nil teams handler means this lane has no migration
+			// path at all (the failover lane), so never dispatch into it.
+			if teams != nil && msg.Subject() == teamsBatchSubj {
 				teams.consume(handlerCtx, msg)
 				return
 			}

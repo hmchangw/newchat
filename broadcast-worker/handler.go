@@ -96,6 +96,10 @@ type Handler struct {
 	siteID            string
 	// publish relays onto the OUTBOX; nil disables the cross-site mention fan-out.
 	publish PublishFunc
+	// outboxFailover targets the buddy-hosted OUTBOX-FAILOVER instead of the
+	// live OUTBOX. Set on the failover lane, whose whole reason to exist is that
+	// the cluster hosting the live OUTBOX is unreachable.
+	outboxFailover bool
 	// activity announces a room's position to remote sites; nil disables it.
 	activity *roomActivityRefresher
 	// sealer seals the room-doc preview; nil means previews are not persisted.
@@ -115,6 +119,7 @@ type handlerOptions struct {
 	threadViewSubject bool
 	siteID            string
 	publish           PublishFunc
+	outboxFailover    bool
 	activity          *roomActivityRefresher
 	sealer            *previewSealer
 	previews          *previewWriter
@@ -129,10 +134,13 @@ func withThreadViewSubject(enabled bool) handlerOption {
 }
 
 // withOutboxFederation enables the cross-site mention fan-out from siteID.
-func withOutboxFederation(siteID string, publish PublishFunc) handlerOption {
+// failover selects the buddy-hosted OUTBOX-FAILOVER lane, which is how this site
+// keeps federating outward while its own NATS is down.
+func withOutboxFederation(siteID string, publish PublishFunc, failover bool) handlerOption {
 	return func(opts *handlerOptions) {
 		opts.siteID = siteID
 		opts.publish = publish
+		opts.outboxFailover = failover
 	}
 }
 
@@ -175,6 +183,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		threadViewSubject: opts.threadViewSubject,
 		siteID:            opts.siteID,
 		publish:           opts.publish,
+		outboxFailover:    opts.outboxFailover,
 		activity:          opts.activity,
 		sealer:            opts.sealer,
 		previews:          opts.previews,
@@ -500,8 +509,8 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := outbox.Publish(fanoutCtx, h.publish, h.siteID, roomID, destSiteID,
-				model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
+			if err := outbox.PublishTo(fanoutCtx, h.publish, h.siteID, roomID, destSiteID,
+				model.InboxSubscriptionMention, payload, dedupID, now, h.outboxFailover); err != nil {
 				slog.ErrorContext(ctx, "federate subscription_mention failed",
 					"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
 					"request_id", natsutil.RequestIDFromContext(ctx))
