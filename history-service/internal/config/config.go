@@ -157,10 +157,13 @@ type Config struct {
 	// Background writer that stores walk-resolved previews back onto the room doc,
 	// off the request path. Queue depth is what bounds the memory a burst of cold
 	// rooms can pin; overflow sheds the write, which the next read re-derives.
-	// Non-positive takes the built-in default for either — warm-back is what keeps
-	// the lazy walk from repeating forever, so there is no disable value.
-	PreviewWarmBackWorkers int `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
-	PreviewWarmBackQueue   int `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`
+	// Non-positive takes the built-in default for either.
+	//
+	// Enabled is a kill switch, not a tuning knob: off trades the write for a re-walk
+	// per preview-cache TTL. persistMutatedPreview's repair is correctness, so unaffected.
+	PreviewWarmBackEnabled bool `env:"PREVIEW_WARMBACK_ENABLED" envDefault:"true"`
+	PreviewWarmBackWorkers int  `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
+	PreviewWarmBackQueue   int  `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`
 
 	Atrest atrest.Config      // env vars are already prefixed ATREST_*
 	Vault  atrest.VaultConfig // env vars are already prefixed (VAULT_*, ATREST_VAULT_*)

@@ -25,6 +25,7 @@ func baseValid() Config {
 		PreviewKeyEpoch:        1,
 		PreviewCacheSize:       50000,
 		PreviewCacheTTL:        10 * time.Second,
+		PreviewWarmBackEnabled: true,
 		PreviewWarmBackWorkers: 8,
 		PreviewWarmBackQueue:   1024,
 		// ServerSelectionTimeout is this branch's: a stopped Mongo goes quiet
@@ -141,12 +142,14 @@ func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
 	}
 }
 
-// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
-// repeating forever, so the wiring never turns it off.
+// Zero is "take the default"; disabling is PREVIEW_WARMBACK_ENABLED's job, which validate ignores.
 func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
 	cfg := baseValid()
 	cfg.PreviewWarmBackWorkers = 0
 	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+
+	cfg.PreviewWarmBackEnabled = false
 	require.NoError(t, validate(&cfg))
 }
 
@@ -476,4 +479,31 @@ func TestLoad_KeyReadPreferenceWireName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "nearest", cfg.Mongo.KeyReadPreference,
 		"the field must bind to MONGO_KEY_READ_PREFERENCE via the MONGO_ envPrefix")
+}
+
+// On unless an operator turns it off, so a fresh deployment self-heals cold rooms.
+func TestLoad_PreviewWarmBackEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{name: "defaults to enabled", env: "", want: true},
+		{name: "disabled by the operator", env: "false", want: false},
+		{name: "explicitly enabled", env: "true", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			if tc.env == "" {
+				testutil.UnsetEnv(t, "PREVIEW_WARMBACK_ENABLED")
+			} else {
+				t.Setenv("PREVIEW_WARMBACK_ENABLED", tc.env)
+			}
+
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.PreviewWarmBackEnabled)
+		})
+	}
 }

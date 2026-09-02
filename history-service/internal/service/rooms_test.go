@@ -27,7 +27,7 @@ import (
 
 // newRoomsService builds a service with bare mocks; WithPreviewCache exercises the cache.
 func newRoomsService(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
-	return newRoomsServiceWithWarmer(t, 0, 0, opts...)
+	return newRoomsServiceWithConfig(t, nil, opts...)
 }
 
 // newRoomsServiceWithWarmer sizes the background preview writer, for the tests that assert
@@ -35,6 +35,16 @@ func newRoomsService(t *testing.T, opts ...service.Option) (*service.HistoryServ
 // so every caller drains on cleanup — that is what makes the mock's call count
 // deterministic. Registered after gomock's own cleanup so it runs first (LIFO).
 func newRoomsServiceWithWarmer(t *testing.T, warmWorkers, warmQueue int, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
+	return newRoomsServiceWithConfig(t, func(c *config.Config) {
+		c.PreviewWarmBackWorkers, c.PreviewWarmBackQueue = warmWorkers, warmQueue
+	}, opts...)
+}
+
+// disableWarmBack turns the background preview writer off, the way an operator does.
+func disableWarmBack(c *config.Config) { c.PreviewWarmBackEnabled = false }
+
+// newRoomsServiceWithConfig lets a caller adjust the config first; nil takes the defaults.
+func newRoomsServiceWithConfig(t *testing.T, tweak func(*config.Config), opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
 	subs := mocks.NewMockSubscriptionRepository(ctrl)
@@ -46,7 +56,10 @@ func newRoomsServiceWithWarmer(t *testing.T, warmWorkers, warmQueue int, opts ..
 	apps := mocks.NewMockAppStore(ctrl)
 	cfg := &config.Config{
 		MessageHistoryFloorDays: 90, LargeRoomThreshold: 500, MaxPinnedPerRoom: 10, PinEnabled: true,
-		PreviewWarmBackWorkers: warmWorkers, PreviewWarmBackQueue: warmQueue,
+		PreviewWarmBackEnabled: true,
+	}
+	if tweak != nil {
+		tweak(cfg)
 	}
 	svc := closeOnCleanup(t, service.New(msgs, subs, rooms, pub, threadRooms, threadSubs, users, apps, cfg, opts...))
 	return svc, msgs, rooms
@@ -636,4 +649,30 @@ func TestHistoryService_RoomsGet_CancellationDuringTheWalkIsAnErrorNotAPartialAn
 	_, err := svc.RoomsGet(rc, models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.Error(t, err, "a cancelled request must not return a partial map as success")
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// The toggle withholds the write, not the read; unlike the after-Close test, this pins the no-op.
+func TestHistoryService_RoomsGet_WarmBackDisabledStillServesTheWalkedPreview(t *testing.T) {
+	svc, msgs, rooms := newRoomsServiceWithConfig(t, disableWarmBack)
+	walked := walkedMsg("r1", "m-walked", "resolved lazily")
+
+	rooms.EXPECT().GetRoomTimesByIDs(gomock.Any(), gomock.Any()).
+		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
+	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(makePage([]models.Message{walked}, false), nil)
+	// No SetPreviewMessage expectation: gomock fails if the write is attempted.
+
+	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
+	require.NoError(t, err)
+	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID)
+}
+
+// The no-op has nothing to drain: Close must stay fast and safe to call twice.
+func TestHistoryService_Close_DisabledWarmBackDrainsImmediately(t *testing.T) {
+	svc, _, _ := newRoomsServiceWithConfig(t, disableWarmBack)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, svc.Close(ctx))
+	require.NoError(t, svc.Close(ctx))
 }

@@ -362,6 +362,9 @@ func main() {
 	} else {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
+	if !cfg.PreviewWarmBackEnabled {
+		slog.Warn("preview warm-back DISABLED — rooms without a stored preview re-walk Cassandra once per preview-cache TTL")
+	}
 	opts = append(opts, service.WithPageBudget(pageBudget))
 
 	// The service reads the tier on the degraded path; the seeder above writes it.

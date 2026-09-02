@@ -62,6 +62,19 @@ func newWarmBackMetrics(m metric.Meter) warmBackMetrics {
 	return warmBackMetrics{stored: stored, dropped: dropped, failed: failed}
 }
 
+// previewWriter is the warm-back writer; PREVIEW_WARMBACK_ENABLED=false installs the no-op.
+// An interface so "off" never encodes as closed: Close is nil-channel-safe only via that guard.
+type previewWriter interface {
+	Submit(ctx context.Context, job *warmBackJob)
+	Close(ctx context.Context) error
+}
+
+// nopPreviewWarmer is the disabled form: no queue, no workers, nothing for Close to drain.
+type nopPreviewWarmer struct{}
+
+func (nopPreviewWarmer) Submit(context.Context, *warmBackJob) {}
+func (nopPreviewWarmer) Close(context.Context) error          { return nil }
+
 // previewWarmer stores walk-resolved previews off the request path.
 //
 // The write is optional; the reply is not. Running it inline made the two share a budget,
@@ -86,9 +99,7 @@ type previewWarmer struct {
 	closed bool
 }
 
-// newPreviewWarmer starts the writer's workers. Non-positive sizes take the defaults:
-// warm-back is what stops the lazy walk repeating forever, so "off" is not an option the
-// wiring offers.
+// newPreviewWarmer starts the writer's workers; non-positive sizes take the defaults.
 func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Duration) *previewWarmer {
 	if workers <= 0 {
 		workers = defaultWarmBackWorkers
