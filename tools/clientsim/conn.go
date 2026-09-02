@@ -154,8 +154,8 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 			// whole outage — the exact reading a failure test must not get.
 			s.markConnDown()
 		}),
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			s.handleAsyncError(err)
+		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			s.handleAsyncError(sub, err)
 		}),
 	)
 	if err != nil {
@@ -172,7 +172,11 @@ func (s *simClient) nextReconnectDelay(int) time.Duration {
 	return reconnectDelay(s.nextReconnectAttempt())
 }
 
-func (s *simClient) handleAsyncError(err error) {
+// handleAsyncError takes the subscription nats.go blames, because a fault
+// that fails readiness closed until the next reconnect is unusable to an
+// operator without the subject that caused it. It is nil for connection-level
+// faults.
+func (s *simClient) handleAsyncError(sub *nats.Subscription, err error) {
 	// Episode semantics only: one increment per Active->SlowConsumer
 	// transition; never add Subscription.Dropped() here (see the metric's
 	// doc comment and pkg/natsutil/slowconsumer.go).
@@ -189,7 +193,11 @@ func (s *simClient) handleAsyncError(err error) {
 	s.asyncFault = true
 	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
 	s.mu.Unlock()
-	slog.Warn("nats async error", "account", s.account, "error", err)
+	subj := ""
+	if sub != nil {
+		subj = sub.Subject
+	}
+	slog.Warn("nats async error", "account", s.account, "subject", subj, "error", err)
 }
 
 // disconnectReason maps common close errors to a bounded label set so the

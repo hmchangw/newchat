@@ -435,7 +435,7 @@ func TestAsyncFault_SurvivesAnUnrelatedLiveUpdate(t *testing.T) {
 		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
 	}, 2*time.Second, 10*time.Millisecond, "client never became ready")
 
-	s.handleAsyncError(errors.New("nats: Permissions Violation for Subscription to \"chat.room.r1.event.member\""))
+	s.handleAsyncError(nil, errors.New("nats: Permissions Violation for Subscription to \"chat.room.r1.event.member\""))
 	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
 		"an async fault must demote the client")
 
@@ -462,7 +462,7 @@ func TestAsyncFault_ClearsWithTheConnectionItBelongedTo(t *testing.T) {
 		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
 	}, 2*time.Second, 10*time.Millisecond)
 
-	s.handleAsyncError(errors.New("nats: Permissions Violation for Subscription"))
+	s.handleAsyncError(nil, errors.New("nats: Permissions Violation for Subscription"))
 	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
 
 	s.invalidatePlan() // what the disconnect handler does

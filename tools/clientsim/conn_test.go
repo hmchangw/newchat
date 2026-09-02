@@ -60,14 +60,34 @@ func TestDisconnectReason_Table(t *testing.T) {
 
 func TestSimClient_AsyncSubscriptionErrorDemotesReady(t *testing.T) {
 	m := newMetrics()
-	s := &simClient{account: "user-a", m: m}
+	s := &simClient{account: "user-a", m: m, planVerified: true}
 	s.markConnUp()
 	s.markReady()
 
-	s.handleAsyncError(nats.ErrPermissionViolation)
+	// nats.go names the offending subscription; without it an operator facing
+	// a permanently not-ready client has no way to find the denied subject.
+	s.handleAsyncError(&nats.Subscription{Subject: "chat.room.r1.event.member"},
+		nats.ErrPermissionViolation)
 
 	assert.InDelta(t, 0, promtestutil.ToFloat64(m.ConnsReady), 0.001)
 	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Errors.WithLabelValues("async")), 0.001)
+	assert.True(t, s.asyncFault, "the fault must outlive the demote itself")
+}
+
+func TestSimClient_SlowConsumerIsNotAReadinessFault(t *testing.T) {
+	// A slow consumer is a throughput symptom that resolves itself; treating
+	// it as a permission-class fault would park the client until its next
+	// reconnect for what is a transient backlog.
+	m := newMetrics()
+	s := &simClient{account: "user-a", m: m, planVerified: true}
+	s.markConnUp()
+	s.markReady()
+
+	s.handleAsyncError(nil, nats.ErrSlowConsumer)
+
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.ConnsReady), 0.001, "still ready")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.SlowConsumer), 0.001)
+	assert.False(t, s.asyncFault)
 }
 
 // --- connection name: the ops-facing discriminator ---
