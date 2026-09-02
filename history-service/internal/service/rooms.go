@@ -296,7 +296,7 @@ func (s *HistoryService) toPreviewMessage(ctx context.Context, m *models.Message
 		}
 	}
 
-	// Through preview.Build, as the insert path does: otherwise a room's snippet length
+	// Through preview.Build, as the insert path does: otherwise a room's preview shape
 	// would depend on whether its preview last came from an insert or an edit.
 	return preview.Build(models.PreviewMessage{
 		MessageID:   m.MessageID,

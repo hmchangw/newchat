@@ -89,16 +89,13 @@ func TestPreviewSealer_SealInserted_CarriesTheMessageWithoutReadingAnything(t *t
 	assert.NotContains(t, string(body), "hello", "the body must not leak into the plaintext meta")
 }
 
-func TestPreviewSealer_SealInserted_TruncatesLongContent(t *testing.T) {
-	long := make([]rune, preview.MaxContentRunes+50)
-	for i := range long {
-		long[i] = 'x'
-	}
-	msg := &model.Message{ID: "m-1", Content: string(long), CreatedAt: time.Now().UTC()}
+func TestPreviewSealer_SealInserted_KeepsLongContent(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	msg := &model.Message{ID: "m-1", Content: long, CreatedAt: time.Now().UTC()}
 
 	sealed, err := testSealer(fakeCipher{}).sealInserted(context.Background(), msg, nil, nil)
 	require.NoError(t, err)
-	assert.Len(t, []rune(openSealed(t, sealed).Msg), preview.MaxContentRunes)
+	assert.Equal(t, long, openSealed(t, sealed).Msg, "the sealed body is the full content, never a snippet")
 }
 
 func TestPreviewSealer_SealInserted_RejectsUndecodableAttachment(t *testing.T) {

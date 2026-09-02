@@ -134,9 +134,9 @@ type RoomsGetRequest struct {
 }
 
 // PreviewMessage is a room's most-recent eligible message, enriched for the room-list
-// preview. Content is a snippet capped at preview.MaxContentRunes (500 runes) — no longer
-// the full body, so user-service's PREVIEW_CONTENT_CHARS truncation now narrows an
-// already-capped snippet. Sender/mentions carry render-ready wire Participants (a bot
+// preview. Content is the full message body (bounded only by the gatekeeper's message size
+// limit); user-service's PREVIEW_CONTENT_CHARS truncation is the only read-time narrowing.
+// Sender/mentions carry render-ready wire Participants (a bot
 // sender's displayName is its app name). Shared wire type: history-service's rooms.get RPC
 // produces it, user-service's subscription.list embeds it (SubscriptionRoom.PreviewMessage).
 // It is never stored — the room doc holds the split PreviewMeta + sealed body instead.

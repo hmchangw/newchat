@@ -1064,7 +1064,7 @@ that preview.
 |---|---|---|
 | `messageId` | string | |
 | `sender` | [Participant](#participant) | `chineseName` is the sender's company name; `displayName` is the composed render-ready name (a bot sender's is its app name). |
-| `content` | string | Message content snippet, capped at 500 runes (longer bodies are truncated). On `subscription.list` (both transports) it is truncated further to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
+| `content` | string | Full message content (never truncated server-side beyond the message size limit). On `subscription.list` (both transports) it is truncated to a short preview — 50 characters by default, whole characters only, no ellipsis appended. |
 | `createdAt` | string | RFC 3339 timestamp. |
 | `attachments` | [Attachment](#attachment)[] | Optional. Omitted when the message has none. At most 10 — the room list renders a count, not the set. |
 | `mentions` | [Participant](#participant)[] | Optional. Mentioned users as wire Participants. Omitted when none. At most 20. |
@@ -3479,7 +3479,7 @@ The payload is flat (no zero-valued room fields):
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the edited message is a thread reply — its presence lets the client tell a thread-reply edit from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this edit (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply edits (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), or when the recompute could not complete. An edit never empties a room, so unlike `message_deleted` an omission here never means "no eligible message left". See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {
@@ -3575,7 +3575,7 @@ The payload is flat:
 | `updatedAt` | string | RFC 3339 timestamp. |
 | `threadParentMessageId` | string | Optional. Set when the deleted message is a thread reply — its presence lets the client tell a thread-reply delete from a top-level one. Omitted for top-level messages. |
 | `tshow` | boolean | Optional. For a thread reply, whether it is also shown in the main room timeline. Omitted when `false`. |
-| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the 500-rune snippet, which list rows truncate further). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
+| `previewMessage` | [PreviewMessage](#previewmessage) | Optional. The room's current preview after this delete (same resolution as `subscription.list`; `content` carries the full body, which list rows truncate). **Omitted** for hidden thread-reply deletes (`threadParentMessageId` set with `tshow` not true — not shown in the room timeline), when the room has no eligible message left (e.g. the deleted message was the last one), or when the recompute could not complete. See [Reacting to a preview change](#reacting-to-a-preview-change). |
 
 ```json
 {

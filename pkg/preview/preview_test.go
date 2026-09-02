@@ -17,33 +17,10 @@ import (
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 )
 
-func TestTruncateContent_RuneBoundaries(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"short passes through", "hello", "hello"},
-		{"exactly at cap unchanged", strings.Repeat("a", MaxContentRunes), strings.Repeat("a", MaxContentRunes)},
-		{"over cap truncated", strings.Repeat("a", MaxContentRunes+1), strings.Repeat("a", MaxContentRunes)},
-		{"multi-byte runes counted as runes not bytes", strings.Repeat("好", MaxContentRunes+3), strings.Repeat("好", MaxContentRunes)},
-		// 3 bytes per rune, so this is 3x over the cap in BYTES but exactly at it
-		// in runes: it must come back untouched.
-		{"multi-byte exactly at cap unchanged", strings.Repeat("好", MaxContentRunes), strings.Repeat("好", MaxContentRunes)},
-		{"multi-byte over the byte cap but under the rune cap", strings.Repeat("好", 200), strings.Repeat("好", 200)},
-		{"empty stays empty", "", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, truncateContent(tt.in))
-		})
-	}
-}
-
-func TestBuild_TruncatesAndNormalizesUTC(t *testing.T) {
+func TestBuild_KeepsContentAndNormalizesUTC(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Taipei")
 	require.NoError(t, err)
-	long := strings.Repeat("x", MaxContentRunes+50)
+	long := strings.Repeat("好", 5000)
 	got := Build(model.PreviewMessage{
 		MessageID: "m1",
 		Sender:    model.Participant{Account: "alice"},
@@ -51,7 +28,7 @@ func TestBuild_TruncatesAndNormalizesUTC(t *testing.T) {
 		CreatedAt: time.Date(2026, 8, 5, 18, 0, 0, 0, loc),
 	})
 	assert.Equal(t, "m1", got.MessageID)
-	assert.Equal(t, strings.Repeat("x", MaxContentRunes), got.Content)
+	assert.Equal(t, long, got.Content, "content is never truncated: the room list gets the full body")
 	assert.Equal(t, time.UTC, got.CreatedAt.Location())
 }
 
