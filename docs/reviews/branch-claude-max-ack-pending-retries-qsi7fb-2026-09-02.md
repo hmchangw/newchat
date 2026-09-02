@@ -462,3 +462,74 @@ so the X-Debug rung that `ConsumeContext` now admits can never emit.
   `jetstream.PublishMsg` initialises a nil `Header` before `Set`
   (`jetstream/publish.go:173`), so the "NewMsg returns nil Header" path at
   `bot-message-handler/handler.go:210-216` is safe on both branches.
+
+---
+
+# Performance
+
+Measured on the branch with a throwaway benchmark in `package main` of
+bot-message-worker (Xeon @2.8 GHz; benchmark since deleted, tree clean):
+
+| bench | ns/op | B/op | allocs |
+|---|---|---|---|
+| `senderFromHeader` (167-B header) | 2801 | 592 | 13 |
+| `logctx.ConsumeContext` (inbound req-id) | 268 | 64 | 2 |
+| `logctx.ConsumeContext` (minting) | 438 | 128 | 4 |
+| `botFailureTotal.WithLabelValues(...).Inc()` | 63 | 0 | 0 |
+| body `json.Unmarshal` (218-B event) | 3566 | 760 | 13 |
+
+**low — eager header parse on every message, consumed only on failure**
+(`bot-message-worker/handler.go:75`, helper at `:38`). `senderFromHeader` costs
+2.8 µs / 592 B / 13 allocs per consumed message — about 78% of the body unmarshal
+— paid on 100% of traffic, while `sender` is read only in the three failure
+branches (`:79`, `:91`, `:98`) and the ack-failed log. **The comment at `:73`
+claims the parse must precede the unmarshal for malformed-payload attribution; it
+does not.** `msg.Headers()` is still readable after the decode fails, so calling
+`senderFromHeader` inside the `if err := json.Unmarshal` branch (and once after
+`orElse` in the write-error branch) attributes exactly the same and costs nothing
+on the success path. `orElse` at `:87` is likewise dead work on success.
+
+Absolute impact is small — at 5k msg/s that is ~14 ms CPU/s (1.4% of one core) and
+~3 MB/s of garbage, against a Cassandra `LocalQuorum` write measured in
+milliseconds (~0.1% of per-message wall time) — but the fix is moving two lines,
+so the cost/benefit as written is clearly negative.
+
+**negligible — `logctx.ConsumeContext`** (`handler.go:72`). 268 ns / 64 B on the
+normal path; bot-message-handler now always stamps `X-Request-ID`, so the 438 ns
+UUIDv7 minting path is the exception rather than the rule. `Admit` is two header
+lookups; `CapturePayload` short-circuits in `ShouldCapture` because
+`logctx.capturePayloads` is false by default and this service never calls
+`logctx.Configure`, so no payload copy or string conversion ever happens. Under
+0.02% of per-message cost.
+
+*Non-performance note carried from this lens:* because `Configure` is never
+called, the limiter is `denyAll`, so the X-Debug rung this change now admits is
+never actually honored in this service. The request-id half works. (Cross-listed
+in Observability.)
+
+**negligible — `WithLabelValues`** (`metrics.go:31`, three call sites). Confirmed
+failure-only: no increment on the success path, which
+`TestHandleJetStreamMsg_SuccessRecordsNoFailure` pins. 63 ns, zero allocations;
+even in a full Cassandra outage NAKing every message, that is noise beside the
+write attempt and the Warn log.
+
+**negligible — `*nats.Msg` + header map per publish**
+(`bot-message-handler/handler.go:210-215`). One to three allocations on a
+request/reply path that already does a Mongo find, a JSON marshal and a JetStream
+publish RTT under a 2 s timeout. Forwarding the identity as the raw header string
+rather than re-marshalling from the message is the right call.
+
+**Note, pre-existing, not a finding — `encoding/json` vs sonic.**
+bot-message-worker was already on `encoding/json`; this diff adds a second decode,
+taking JSON from ~3.6 µs to ~6.4 µs per message. Still under 1% of per-message
+wall time, and fixing the finding above removes most of the increment, so adopting
+sonic here is not justified — especially given the `cassandra.Message.Reactions`
+struct-keyed map that already forced a workaround in message-gatekeeper.
+
+**Note, pre-existing, untouched** — `canonicalizeMentions` does one `FindUser` per
+mention (`bot-message-handler/handler.go:302`), an N+1 bounded by mention count.
+Not made worse by this diff.
+
+No goroutine leaks, no new blocking calls in the consume loop, no batching or
+pagination regressions: `main.go`'s semaphore + WaitGroup pool and the shutdown
+ordering are unchanged, and everything added to the per-message path is CPU-only.
