@@ -17,8 +17,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/metric"
 
+	o11ynats "github.com/flywindy/o11y/nats"
+
 	"github.com/hmchangw/chat/pkg/badgecache"
 	"github.com/hmchangw/chat/pkg/botauth"
+
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/ginutil"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/memlimit"
@@ -32,6 +36,7 @@ import (
 	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/restyutil"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-service/config"
 	"github.com/hmchangw/chat/user-service/historyclient"
@@ -217,8 +222,18 @@ func main() {
 	} else {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg,
-		service.WithPageBudget(pageBudget))
+	// One service per lane. The repos, badge cache and SSO store are site-local
+	// and up whichever lane is serving; only the NATS clients and publishers are
+	// rebuilt, because a lane's outbound RPCs and events have to leave on the
+	// connection its requests arrived on — the failover lane exists precisely
+	// because the home cluster is unreachable.
+	newLaneService := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, opts ...service.Option) *service.UserService {
+		return service.New(subRepo, userRepo, appRepo, threadSubRepo,
+			roomclient.New(conn, cfg.SiteID), historyclient.New(conn), presenceclient.New(conn),
+			publisher.New(laneJS), publisher.NewCore(conn),
+			badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, opts...)
+	}
+	svc := newLaneService(nc, js, service.WithPageBudget(pageBudget))
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
 	// the NATS clients, publishers, badge cache -- is shared and stateless. It is
@@ -239,19 +254,31 @@ func main() {
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
-	router := natsrouter.New(nc, "user-service", routerOpts...)
-	router.Use(natsrouter.Recovery())
-	// RequestID must precede any handler that reads request_id from ctx —
-	// otherwise Classify's log line records an empty value.
-	router.Use(natsrouter.RequestID())
-	router.Use(natsrouter.Logging())
-	// After Logging so the timeout wraps the handler chain; bounds the Mongo
-	// aggregations from hanging past the configured deadline. user-service uses
-	// its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as the single per-request
-	// deadline.
-	router.Use(natsrouter.HandlerTimeout(cfg.HandlerTimeout))
-
-	svc.RegisterHandlers(router)
+	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NATS.CredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
+			laneSvc := svc
+			if lane == subject.LaneFailover {
+				laneSvc = newLaneService(conn, laneJS, service.WithPageBudget(pageBudget))
+			}
+			r := natsrouter.New(conn, "user-service", routerOpts...)
+			r.Use(natsrouter.Recovery())
+			// RequestID must precede any handler that reads request_id from ctx —
+			// otherwise Classify's log line records an empty value.
+			r.Use(natsrouter.RequestID())
+			r.Use(natsrouter.Logging())
+			// After Logging so the timeout wraps the handler chain; bounds the Mongo
+			// aggregations from hanging past the configured deadline. user-service uses
+			// its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as the single per-request
+			// deadline.
+			r.Use(natsrouter.HandlerTimeout(cfg.HandlerTimeout))
+			laneSvc.RegisterHandlers(r)
+			return r, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Set when the listener dies on its own; read after the drain so the pod still
 	// exits non-zero and gets restarted.
@@ -290,7 +317,7 @@ func main() {
 	// The HTTP drain is bounded: shutdown.Wait shares one budget across every step
 	// and a handler may run for HTTP_HANDLER_TIMEOUT, so an unbounded drain would
 	// skip the NATS drain and the database disconnects entirely.
-	shutdown.Wait(ctx, 25*time.Second,
+	hooks := []func(context.Context) error{
 		func(context.Context) error { draining.Store(true); return nil },
 		func(ctx context.Context) error {
 			drainCtx, cancel := context.WithTimeout(ctx, httpDrainTimeout)
@@ -302,7 +329,11 @@ func main() {
 			cancelInFlight()
 			return err
 		},
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	}
+	// Both lane routers stop and the buddy drains before the home connection, so
+	// neither lane accepts new work while the other is still finishing.
+	hooks = append(hooks, routers.ShutdownHooks()...)
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, httpMongoClient); return nil },
@@ -315,6 +346,7 @@ func main() {
 		healthStop,
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 
 	if serveFailed.Load() {
 		os.Exit(1)

@@ -4,7 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
+
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
@@ -19,6 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -33,6 +37,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomtimescache"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/subauthcache"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/userstore"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -354,7 +359,6 @@ func main() {
 		slog.Info("preview cache enabled", "size", cfg.PreviewCacheSize, "ttl", cfg.PreviewCacheTTL)
 	}
 
-	pub := publisher.New(js, publisher.WithMetrics(publishMetrics))
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
 	pageBudget := pagefit.Budget{}
 	if cfg.PageTrimming {
@@ -372,7 +376,22 @@ func main() {
 		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
 
-	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
+	// One service per lane. Everything but the publisher is shared: the stores and
+	// caches are site-local and up whichever lane is serving, but a canonical
+	// event published on the failover lane has to reach the standby stream on the
+	// buddy, because the live one is on the cluster that is down.
+	newLaneService := func(laneJS o11ynats.JetStream, lane subject.Lane, shareWarmBackFrom *service.HistoryService) *service.HistoryService {
+		laneOpts := append(slices.Clone(opts), service.WithLane(lane))
+		if shareWarmBackFrom != nil {
+			// The warm-back pool writes to Mongo, so it is not per-lane; a second
+			// set of workers would be overhead for a lane that is idle almost always.
+			laneOpts = append(laneOpts, service.WithSharedWarmBack(shareWarmBackFrom))
+		}
+		return service.New(cassRepo, subSource, roomSource,
+			publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
+			threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, laneOpts...)
+	}
+	svc := newLaneService(js, subject.LaneHome, nil)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
 	// per-site + metrics router options and the guard's admission cap; the
@@ -381,10 +400,23 @@ func main() {
 		natsrouter.WithSiteID(cfg.SiteID),
 		natsrouter.WithMetrics(publishMetrics),
 	}, cfg.Guard.Options()...)
-	router := natsrouter.Default(nc, "history-service", routerOpts...)
-	router.Use(cfg.Guard.TimeoutMiddleware()...)
 
-	svc.RegisterHandlers(router, cfg.SiteID)
+	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NATS.CredsFile,
+		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
+			laneSvc := svc
+			if lane == subject.LaneFailover {
+				laneSvc = newLaneService(laneJS, lane, svc)
+			}
+			r := natsrouter.Default(conn, "history-service", routerOpts...)
+			r.Use(cfg.Guard.TimeoutMiddleware()...)
+			laneSvc.RegisterHandlers(r, cfg.SiteID)
+			return r, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -396,8 +428,10 @@ func main() {
 
 	slog.Info("history-service running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// new work while the other is still finishing.
+	hooks := routers.ShutdownHooks()
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		// After the router stops (no new warm-backs queued), before Mongo closes under them.
 		// On its own sub-budget: the drain is optional work, and letting a deep queue on a
@@ -420,4 +454,5 @@ func main() {
 		func(_ context.Context) error { valkeyutil.Disconnect(subValkey); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }

@@ -248,7 +248,18 @@ flowchart LR
     RS[room-service] -.->|"on no-responders"| OUTBOXFO
     OUTBOXFO -.-> OW[outbox-worker]
     OUTBOX --> OW
+    HS -.->|edited/deleted/pinned/reacted| CANONFO
+    Client -.->|"request/reply<br/>(displaced client)"| BuddyRouters["buddy routers:<br/>room-service, history-service, user-service"]
 ```
+
+The three request/reply services each bind a **second router** on the buddy
+connection (`pkg/failoverlane.BindRouters`), subscribed to the same site-scoped
+subjects as their home router. A displaced client's RPC can therefore still be
+answered by this site's instance against this site's databases — the buddy
+site's own copy of those services is not subscribed to another site's subjects.
+Each lane gets its own service instance so its outbound RPCs, publishes and
+OUTBOX writes leave on the connection the request arrived on; the stores and
+caches are shared, being site-local and unaffected by a NATS outage.
 
 `roomlist-worker` consumes `MESSAGES-CANONICAL` on its own durable consumer
 and owns every room-level MongoDB write derived from a canonical message event

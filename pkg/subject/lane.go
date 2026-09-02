@@ -1,6 +1,9 @@
 package subject
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Lane identifies which NATS connection a unit of work arrived on. Room-event
 // routing depends on it: a failover-lane publish must reach clients scattered
@@ -101,4 +104,36 @@ func (r LaneRouter) Mode(now time.Time) RoomRouteMode {
 		restored = r.restoredAt()
 	}
 	return EffectiveRouteMode(r.configured, r.lane, restored, r.grace, now)
+}
+
+// CanonicalEvent is the tail token of a per-message canonical subject. Typed so
+// a lane-aware builder cannot be handed an arbitrary string that would land on a
+// subject no consumer filters for.
+type CanonicalEvent string
+
+const (
+	CanonicalCreated  CanonicalEvent = "created"
+	CanonicalUpdated  CanonicalEvent = "updated"
+	CanonicalDeleted  CanonicalEvent = "deleted"
+	CanonicalPinned   CanonicalEvent = "pinned"
+	CanonicalUnpinned CanonicalEvent = "unpinned"
+	CanonicalReacted  CanonicalEvent = "reacted"
+)
+
+// canonicalRoot is the subject root each lane's canonical stream is built on.
+// One place, so a new canonical event type gains its failover twin for free
+// rather than needing a second named builder that someone must remember to add.
+func (l Lane) canonicalRoot() string {
+	if l == LaneFailover {
+		return "chat.failover.msg.canonical"
+	}
+	return "chat.msg.canonical"
+}
+
+// MsgCanonical returns the canonical subject for a per-message event on this
+// lane. A failover-lane event must not be published to the live canonical
+// stream: that stream lives on the cluster that is down, so the event would be
+// accepted by nothing and silently lost.
+func (l Lane) MsgCanonical(siteID string, evt CanonicalEvent) string {
+	return fmt.Sprintf("%s.%s.%s", l.canonicalRoot(), siteID, evt)
 }

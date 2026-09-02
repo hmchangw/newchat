@@ -570,7 +570,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 	// must not leave the mutation invisible to every canonical consumer.
 	pvw := s.previewAfterMutation(c, msg, roomID)
 	canonicalEvt.PreviewMessage = pvw.EventPreview()
-	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUpdated(siteID), &canonicalEvt)
+	s.publishCanonicalBestEffort(c, siteID, subject.CanonicalUpdated, &canonicalEvt)
 	s.persistMutatedPreview(c, roomID, msg.MessageID, &pvw, editedAt)
 
 	return &models.EditMessageResponse{
@@ -650,7 +650,7 @@ func (s *HistoryService) DeleteMessage(c *natsrouter.Context, siteID string, req
 	// Resolve, publish, then persist — see EditMessage.
 	pvw := s.previewAfterMutation(c, msg, roomID)
 	canonicalEvt.PreviewMessage = pvw.EventPreview()
-	s.publishCanonicalBestEffort(c, subject.MsgCanonicalDeleted(siteID), &canonicalEvt)
+	s.publishCanonicalBestEffort(c, siteID, subject.CanonicalDeleted, &canonicalEvt)
 	s.persistMutatedPreview(c, roomID, msg.MessageID, &pvw, actualDeletedAt)
 
 	return &models.DeleteMessageResponse{
@@ -742,8 +742,16 @@ func (s *HistoryService) writeMutatedPreview(ctx context.Context, roomID string,
 	}
 }
 
-// publishCanonicalBestEffort publishes a canonical event; failures are logged and swallowed (Cassandra is source of truth).
-func (s *HistoryService) publishCanonicalBestEffort(c *natsrouter.Context, subj string, evt *model.MessageEvent) {
+// publishCanonicalBestEffort publishes a canonical event on this service's lane;
+// failures are logged and swallowed (Cassandra is source of truth).
+//
+// It takes the event rather than a subject so the lane cannot be forgotten at a
+// call site: a failover-lane publish to the live canonical subject would reach
+// nothing, because that stream is on the cluster that is down.
+func (s *HistoryService) publishCanonicalBestEffort(c *natsrouter.Context, siteID string,
+	event subject.CanonicalEvent, evt *model.MessageEvent,
+) {
+	subj := s.lane.MsgCanonical(siteID, event)
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		slog.Warn("canonical marshal failed",
