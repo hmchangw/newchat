@@ -84,10 +84,10 @@ var knownEventTypes = func() map[model.InboxEventType]struct{} {
 func Publish(ctx context.Context, publish func(ctx context.Context, subj string, data []byte, msgID string) error,
 	originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64,
 ) error {
-	return PublishTo(ctx, publish, originSiteID, roomID, destSiteID, eventType, payload, dedupID, ts, false)
+	return PublishTo(ctx, publish, subject.LaneHome, originSiteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
-// PublishTo is Publish with an explicit lane. failover=true targets the
+// PublishTo is Publish with an explicit lane. The failover lane targets the
 // buddy-hosted OUTBOX-FAILOVER stream, which is how a site keeps federating
 // outward while its own NATS is down: the live OUTBOX buffer lives on the
 // cluster that is gone, so an event published there would go nowhere.
@@ -96,8 +96,8 @@ func Publish(ctx context.Context, publish func(ctx context.Context, subj string,
 // filter set has no consumer on either stream and would sit until retention
 // deleted it.
 func PublishTo(ctx context.Context, publish func(ctx context.Context, subj string, data []byte, msgID string) error,
-	originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64,
-	failover bool,
+	lane subject.Lane, originSiteID, roomID, destSiteID string, eventType model.InboxEventType,
+	payload []byte, dedupID string, ts int64,
 ) error {
 	if destSiteID == "" || destSiteID == originSiteID {
 		return nil
@@ -127,11 +127,7 @@ func PublishTo(ctx context.Context, publish func(ctx context.Context, subj strin
 	if err != nil {
 		return errcode.MarshalFailed("outbox event", err)
 	}
-	subj := subject.Outbox(originSiteID, destSiteID, eventType)
-	if failover {
-		subj = subject.FailoverOutbox(originSiteID, destSiteID, eventType)
-	}
-	if err := publish(ctx, subj, data, dedupID); err != nil {
+	if err := publish(ctx, lane.Outbox(originSiteID, destSiteID, eventType), data, dedupID); err != nil {
 		return fmt.Errorf("publish outbox event for %s: %w", destSiteID, err)
 	}
 	return nil

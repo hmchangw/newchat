@@ -238,28 +238,16 @@ func main() {
 	} else {
 		slog.Info("room-meta-cache disabled", "size", cfg.RoomMetaCacheSize)
 	}
+	// An empty msgID is an ephemeral client delivery on core NATS; otherwise
+	// the publish is JetStream-backed (MESSAGES-CANONICAL, INBOX), blocking on
+	// PubAck with msgID as the Nats-Msg-Id the server dedups on.
+	corePublish := natsutil.CorePublishFunc(nc, publishMetrics)
+	jsPublish := natsutil.JetStreamPublishFunc(js, publishMetrics)
 	handler := NewHandler(store, cfg.SiteID, func(ctx context.Context, subj string, data []byte, msgID string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		// Classify only when a publish fails: this closure runs on every room
-		// event and PublishLabelsFromSubject allocates.
-		recordFailure := func(err error) {
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Failure(ctx, destination, operation, err)
-		}
 		if msgID == "" {
-			// Ephemeral client-delivery — core NATS, not persisted.
-			if err := nc.PublishMsg(ctx, msg); err != nil {
-				recordFailure(err)
-				return fmt.Errorf("publish to %q: %w", subj, err)
-			}
-			return nil
+			return corePublish(ctx, subj, data)
 		}
-		// JetStream-backed (MESSAGES-CANONICAL, INBOX) — block on PubAck; server honors Nats-Msg-Id for dedup.
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
-			recordFailure(err)
-			return fmt.Errorf("publish to %q: %w", subj, err)
-		}
-		return nil
+		return jsPublish(ctx, subj, data, msgID)
 	}, keyStore, keySender, roomRouteMode)
 	handler.SetKeyFanoutWorkers(cfg.KeyFanoutWorkers)
 	// Teams room-reconcile's external-user-identity fanout (chat.hr.{siteID}.users.upsert),

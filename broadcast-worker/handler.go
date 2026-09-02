@@ -96,10 +96,9 @@ type Handler struct {
 	siteID            string
 	// publish relays onto the OUTBOX; nil disables the cross-site mention fan-out.
 	publish PublishFunc
-	// outboxFailover targets the buddy-hosted OUTBOX-FAILOVER instead of the
-	// live OUTBOX. Set on the failover lane, whose whole reason to exist is that
-	// the cluster hosting the live OUTBOX is unreachable.
-	outboxFailover bool
+	// lane selects which OUTBOX the mention relay buffers on; the failover
+	// lane's live OUTBOX is on the cluster that is down. Zero is LaneHome.
+	lane subject.Lane
 	// activity announces a room's position to remote sites; nil disables it.
 	activity *roomActivityRefresher
 	// sealer seals the room-doc preview; nil means previews are not persisted.
@@ -119,7 +118,7 @@ type handlerOptions struct {
 	threadViewSubject bool
 	siteID            string
 	publish           PublishFunc
-	outboxFailover    bool
+	lane              subject.Lane
 	activity          *roomActivityRefresher
 	sealer            *previewSealer
 	previews          *previewWriter
@@ -133,14 +132,13 @@ func withThreadViewSubject(enabled bool) handlerOption {
 	return func(opts *handlerOptions) { opts.threadViewSubject = enabled }
 }
 
-// withOutboxFederation enables the cross-site mention fan-out from siteID.
-// failover selects the buddy-hosted OUTBOX-FAILOVER lane, which is how this site
-// keeps federating outward while its own NATS is down.
-func withOutboxFederation(siteID string, publish PublishFunc, failover bool) handlerOption {
+// withOutboxFederation enables the cross-site mention fan-out from siteID onto
+// lane's OUTBOX.
+func withOutboxFederation(siteID string, publish PublishFunc, lane subject.Lane) handlerOption {
 	return func(opts *handlerOptions) {
 		opts.siteID = siteID
 		opts.publish = publish
-		opts.outboxFailover = failover
+		opts.lane = lane
 	}
 }
 
@@ -183,7 +181,7 @@ func NewHandler(store Store, userStore userstore.UserStore, pub Publisher, keySt
 		threadViewSubject: opts.threadViewSubject,
 		siteID:            opts.siteID,
 		publish:           opts.publish,
-		outboxFailover:    opts.outboxFailover,
+		lane:              opts.lane,
 		activity:          opts.activity,
 		sealer:            opts.sealer,
 		previews:          opts.previews,
@@ -509,8 +507,8 @@ func (h *Handler) federateMentions(ctx context.Context, roomID, msgID string, pa
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := outbox.PublishTo(fanoutCtx, h.publish, h.siteID, roomID, destSiteID,
-				model.InboxSubscriptionMention, payload, dedupID, now, h.outboxFailover); err != nil {
+			if err := outbox.PublishTo(fanoutCtx, h.publish, h.lane, h.siteID, roomID, destSiteID,
+				model.InboxSubscriptionMention, payload, dedupID, now); err != nil {
 				slog.ErrorContext(ctx, "federate subscription_mention failed",
 					"error", err, "room_id", roomID, "dest_site", destSiteID, "accounts", len(accounts),
 					"request_id", natsutil.RequestIDFromContext(ctx))

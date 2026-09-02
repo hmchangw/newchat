@@ -123,6 +123,10 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -206,36 +210,25 @@ func main() {
 	if err := threadStore.EnsureIndexes(ctx); err != nil {
 		slog.Warn("ensure thread store indexes failed; continuing (indexes are best-effort)", "error", err)
 	}
-	// newLanePublish binds a lane's outbound traffic to the connection that lane
-	// consumes on. Each lane needs its own: the failover lane exists because the
-	// home cluster is unreachable, so reusing the home lane's publisher there
-	// would drop every badge broadcast and every federated event it produced.
-	newLanePublish := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream) PublishFunc {
-		return func(ctx context.Context, subj string, data []byte, msgID string) error {
-			// NewMsg re-stamps X-Request-ID and X-Debug from ctx so correlation and
-			// verbose-tracing intent ride onto downstream badge/inbox events.
-			msg := natsutil.NewMsg(ctx, subj, data)
+	// One handler per lane; see failoverlane.HandlerFor for why nothing that
+	// speaks NATS may be shared between them. An empty msgID is an ephemeral
+	// client delivery on core NATS; otherwise the publish is JetStream-backed,
+	// blocking on PubAck with msgID as the Nats-Msg-Id the server dedups on.
+	newLaneHandler := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) *Handler {
+		core := natsutil.CorePublishFunc(conn, publishMetrics,
+			natsutil.WithPublishLabels(natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount))
+		js := natsutil.JetStreamPublishFunc(laneJS, publishMetrics,
+			natsutil.WithPublishLabels(natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish))
+		publish := func(ctx context.Context, subj string, data []byte, msgID string) error {
 			if msgID == "" {
-				err := conn.PublishMsg(ctx, msg)
-				publishMetrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationThreadTCount, err)
-				if err != nil {
-					return fmt.Errorf("publish nats message to %s: %w", subj, err)
-				}
-				return nil
+				return core(ctx, subj, data)
 			}
-			_, err := laneJS.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
-			publishMetrics.Failure(ctx, natsmetrics.DestinationOutbox, natsmetrics.OperationRecipientPublish, err)
-			if err != nil {
-				return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
-			}
-			return nil
+			return js(ctx, subj, data, msgID)
 		}
+		return NewHandler(store, us, threadStore, cfg.SiteID, publish,
+			withPersistenceMetrics(domainMetrics), withLane(lane))
 	}
-	newLaneHandler := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, failover bool) *Handler {
-		return NewHandler(store, us, threadStore, cfg.SiteID, newLanePublish(conn, laneJS),
-			withPersistenceMetrics(domainMetrics), withOutboxLane(failover))
-	}
-	handler := newLaneHandler(nc, js, false)
+	handler := newLaneHandler(nc, js, subject.LaneHome)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Mode, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -295,31 +288,20 @@ func main() {
 	natsutil.RunPool(iter, sem, &wg, process,
 		natsutil.WithLaneMetrics(consumerMetrics, consumerCfg.MaxDeliver))
 
-	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
-	// nil and the service runs home-only. Default mode only: teams is a one-time
-	// migration path with no standby stream.
+	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
+	// the service runs home-only. Default mode only: teams is a one-time
+	// migration path with no standby stream, so the lane never runs it.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(cfg.Mode != "teams"),
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
 		Sem: sem, WG: &wg, Metrics: sharedMetrics,
 	}
-	var buddyLane *natsutil.Lane
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(cfg.Mode != "teams"), cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			// Its own handler, bound to the BUDDY connection and the failover
-			// outbox lane: the home cluster is the one that is down, so a badge
-			// broadcast or federated event published there would be lost.
-			// teamsMigration is home-only (no standby stream), so this lane never
-			// runs the migration path.
-			buddyHandler := newLaneHandler(bconn, bjs, true)
-			var bErr error
-			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
-				Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
-				Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
-			}, canonicalProcessor(buddyHandler, nil, ""))
-			return bErr
-		})
+	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
+		Stream:   stream.MessagesCanonicalFailover(cfg.SiteID),
+		Consumer: buildFailoverConsumerConfig(cfg.Consumer, cfg.SiteID),
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		return canonicalProcessor(newLaneHandler(conn, laneJS, lane), nil, ""), nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),

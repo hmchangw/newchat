@@ -248,10 +248,13 @@ func main() {
 		failoverMsgColl = newFailoverMessageCollection(cfg.MsgIndexPrefix, cfg.SiteID, cfg.DevMode)
 		failoverMsgColl.parentResolver = newESParentResolver(engine, cfg.MsgIndexPrefix)
 
-		// BindBuddy never fails startup — on any failure buddyJS stays nil, the
+		// The buddy dial never fails startup — on any failure buddyJS stays nil, the
 		// failover collection is skipped and the home lanes keep indexing.
-		buddyConn = natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
-			sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+		dialer := natsutil.BuddyDialer{
+			Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+			TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+		}
+		buddyConn = dialer.Bind(ctx,
 			func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 				if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(bjs),
 					stream.MessagesCanonicalFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {

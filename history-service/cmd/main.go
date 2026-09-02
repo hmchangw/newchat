@@ -135,6 +135,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -376,41 +380,29 @@ func main() {
 		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
 
-	// One service per lane. Everything but the publisher is shared: the stores and
-	// caches are site-local and up whichever lane is serving, but a canonical
-	// event published on the failover lane has to reach the standby stream on the
-	// buddy, because the live one is on the cluster that is down.
-	newLaneService := func(laneJS o11ynats.JetStream, lane subject.Lane, shareWarmBackFrom *service.HistoryService) *service.HistoryService {
-		laneOpts := append(slices.Clone(opts), service.WithLane(lane))
-		if shareWarmBackFrom != nil {
-			// The warm-back pool writes to Mongo, so it is not per-lane; a second
-			// set of workers would be overhead for a lane that is idle almost always.
-			laneOpts = append(laneOpts, service.WithSharedWarmBack(shareWarmBackFrom))
-		}
-		return service.New(cassRepo, subSource, roomSource,
-			publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
-			threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, laneOpts...)
+	// One service per lane; see failoverlane.RouterFor for why nothing that
+	// speaks NATS may be shared between them. The stores, caches and the preview
+	// warm-back pool are site-local and up whichever lane is serving, so they are
+	// built once and shared; only the publisher is per lane.
+	// Nil when the kill switch is off: New then installs its no-op writer, and
+	// the shutdown hook below has nothing to drain.
+	var warmer *service.PreviewWarmer
+	if cfg.PreviewWarmBackEnabled {
+		warmer = service.NewPreviewWarmer(roomSource, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue)
+		opts = append(opts, service.WithPreviewWarmer(warmer))
 	}
-	svc := newLaneService(js, subject.LaneHome, nil)
-
-	// Default middleware chain (Recovery, RequestID, Logging) plus this service's
-	// per-site + metrics router options and the guard's admission cap; the
-	// per-request timeout (free a connection stuck on a slow op) is applied after.
-	routerOpts := append([]natsrouter.Option{
-		natsrouter.WithSiteID(cfg.SiteID),
-		natsrouter.WithMetrics(publishMetrics),
-	}, cfg.Guard.Options()...)
-
-	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NATS.CredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
+	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
 		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
-			laneSvc := svc
-			if lane == subject.LaneFailover {
-				laneSvc = newLaneService(laneJS, lane, svc)
-			}
-			r := natsrouter.Default(conn, "history-service", routerOpts...)
-			r.Use(cfg.Guard.TimeoutMiddleware()...)
-			laneSvc.RegisterHandlers(r, cfg.SiteID)
+			svc := service.New(cassRepo, subSource, roomSource,
+				publisher.New(laneJS, publisher.WithMetrics(publishMetrics)),
+				threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg,
+				append(slices.Clone(opts), service.WithLane(lane))...)
+			// Default middleware chain plus the guard's admission cap and
+			// per-request timeout, so a burst or a slow dependency cannot
+			// saturate the Mongo pool.
+			r := natsrouter.DefaultGuarded(conn, "history-service", cfg.Guard, routerOpts...)
+			svc.RegisterHandlers(r, cfg.SiteID)
 			return r, nil
 		})
 	if err != nil {
@@ -438,9 +430,12 @@ func main() {
 		// slow Mongo spend the shared window would starve the steps below it — Mongo,
 		// Cassandra, Vault, and the telemetry flush that reports this shutdown at all.
 		func(ctx context.Context) error {
+			if warmer == nil {
+				return nil
+			}
 			ctx, cancel := context.WithTimeout(ctx, previewDrainTimeout)
 			defer cancel()
-			return svc.Close(ctx)
+			return warmer.Close(ctx)
 		},
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { cassutil.Close(cassSession); return nil },

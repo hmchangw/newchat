@@ -102,7 +102,7 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	// startFailoverLane creates the standby stream itself under Bootstrap.Enabled,
 	// which is the dev path — production verifies and asserts placement instead.
 	binder := &failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID, Dialer: &natsutil.BuddyDialer{Config: cfg.Buddy},
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
 	buddyLane, err := startFailoverLane(ctx, buddyJS, &cfg, handler, binder, sem, &wg)

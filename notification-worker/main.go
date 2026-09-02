@@ -80,12 +80,9 @@ type config struct {
 	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
-// natsLane is every HandlerDeps field bound to one NATS connection. Split out
-// so a lane cannot be built by copying another lane's deps and swapping a single
-// field: the failover lane runs because this site's own NATS is unreachable, so
-// any inherited field would keep talking to a dead connection — the thread
-// parent, presence and badge RPCs would stall for their whole timeout and the
-// push would go to a stream nobody can reach.
+// natsLane is every HandlerDeps field bound to one NATS connection, split out
+// so a lane cannot be built by copying another lane's deps and swapping a
+// single field; see failoverlane.HandlerFor.
 type natsLane struct {
 	Parent   ParentFetcher
 	Presence PresenceSnapshotter
@@ -207,6 +204,10 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 
 	otelJS, err := nc.JetStream()
 	if err != nil {
@@ -236,14 +237,14 @@ func main() {
 	}
 	// laneNATS builds every connection-bound dependency from one connection, so
 	// both lanes are wired the same way and neither can inherit the other's.
-	laneNATS := func(conn *o11ynats.Conn, js o11ynats.JetStream, pushSubject string) natsLane {
+	laneNATS := func(conn *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) natsLane {
 		l := natsLane{
 			Parent: newHistoryParentFetcher(conn, publishMetrics),
 			// The broker advertises max_payload in its INFO on connect, so this
 			// is always in step with the server. An env var was a second source
 			// of truth that silently dropped batches whenever it drifted below
 			// the real limit.
-			Emitter:  newMobileEmitter(&jsPublisher{js: js, metrics: publishMetrics}, pushSubject, clampPayloadCap(conn.NatsConn().MaxPayload())),
+			Emitter:  newMobileEmitter(&jsPublisher{js: js, metrics: publishMetrics}, wiring.PushSend(lane), clampPayloadCap(conn.NatsConn().MaxPayload())),
 			Presence: noopPresenceSnapshotter{},
 		}
 		if cfg.PresenceEnabled {
@@ -303,7 +304,7 @@ func main() {
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 		Metrics:            domainMetrics,
 	}
-	handler := NewHandler(laneNATS(nc, otelJS, wiring.PushSendSubject).bind(&baseDeps))
+	handler := NewHandler(laneNATS(nc, otelJS, subject.LaneHome).bind(&baseDeps))
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
@@ -372,39 +373,23 @@ func main() {
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		notifyProcessor(handler, domainMetrics))
 
-	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
-	// nil and the service runs home-only. HasFailover gates the bot pipeline out
-	// without a mode check here.
-	//
-	// The failover lane needs its OWN emitter: a notification derived from a
-	// failover-lane message must be published to the failover push stream on the
-	// buddy, because the live push stream sits on the cluster that is down.
+	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
+	// the service runs home-only. HasFailover gates the bot pipeline out.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
 		Sem: sem, WG: &wg, Metrics: sharedMetrics,
 	}
-	var buddyLane *natsutil.Lane
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			// Its own connection-bound deps: a notification derived from a
-			// failover-lane message must reach the failover push stream on the
-			// buddy, and its thread-parent, presence and badge RPCs must go out
-			// over the buddy too — the home cluster is the one that is down.
-			failoverDeps := laneNATS(bconn, bjs, wiring.PushFailoverSendSubject).bind(&baseDeps)
-
-			var bErr error
-			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
-				Stream: wiring.CanonicalFailoverStream,
-				// The push standby stream is published to, not consumed: it must
-				// exist before the first failover notification is built.
-				AlsoEnsure: []stream.Config{wiring.PushFailoverStream},
-				Consumer: buildConsumerConfig(cfg.Consumer,
-					cfg.Mode.FailoverConsumerName("notification-worker"), wiring.CanonicalFailoverCreated),
-			}, notifyHandler(NewHandler(failoverDeps), domainMetrics))
-			return bErr
-		})
+	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
+		Stream: wiring.CanonicalFailoverStream,
+		// The push standby stream is published to, not consumed: it must exist
+		// before the first failover notification is built.
+		AlsoEnsure: []stream.Config{wiring.PushFailoverStream},
+		Consumer: buildConsumerConfig(cfg.Consumer,
+			cfg.Mode.FailoverConsumerName("notification-worker"), wiring.CanonicalFailoverCreated),
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		return notifyHandler(NewHandler(laneNATS(conn, laneJS, lane).bind(&baseDeps)), domainMetrics), nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),

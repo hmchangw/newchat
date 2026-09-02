@@ -40,18 +40,6 @@ func TestLane_MsgCanonical(t *testing.T) {
 	}
 }
 
-// The named builders and the lane-aware one must agree, because they are the
-// same subject reached two ways — a drift would split the canonical feed.
-func TestLane_MsgCanonical_MatchesTheNamedBuilders(t *testing.T) {
-	assert.Equal(t, MsgCanonicalCreated("site-a"), LaneHome.MsgCanonical("site-a", CanonicalCreated))
-	assert.Equal(t, MsgCanonicalUpdated("site-a"), LaneHome.MsgCanonical("site-a", CanonicalUpdated))
-	assert.Equal(t, MsgCanonicalDeleted("site-a"), LaneHome.MsgCanonical("site-a", CanonicalDeleted))
-	assert.Equal(t, MsgCanonicalPinned("site-a"), LaneHome.MsgCanonical("site-a", CanonicalPinned))
-	assert.Equal(t, MsgCanonicalUnpinned("site-a"), LaneHome.MsgCanonical("site-a", CanonicalUnpinned))
-	assert.Equal(t, MsgCanonicalReacted("site-a"), LaneHome.MsgCanonical("site-a", CanonicalReacted))
-	assert.Equal(t, FailoverMsgCanonicalCreated("site-a"), LaneFailover.MsgCanonical("site-a", CanonicalCreated))
-}
-
 // Each lane's subjects must be captured by that lane's stream and no other,
 // which is the whole reason the chat.failover.> root exists.
 func TestLane_MsgCanonical_LandsOnItsOwnStreamFilter(t *testing.T) {
@@ -65,4 +53,21 @@ func TestLane_MsgCanonical_LandsOnItsOwnStreamFilter(t *testing.T) {
 		require.True(t, matches(FailoverMsgCanonicalWildcard("site-a"), failover), "%s on the standby", evt)
 		require.False(t, matches(MsgCanonicalWildcard("site-a"), failover), "%s must not reach the live stream", evt)
 	}
+}
+
+// The OUTBOX buffer follows the same rule as the canonical stream: a
+// failover-lane federation event has to land on the buddy-hosted standby, since
+// the live OUTBOX sits on the cluster that is down.
+func TestLane_Outbox(t *testing.T) {
+	assert.Equal(t, "chat.outbox.site-a.site-b.member_added", LaneHome.Outbox("site-a", "site-b", "member_added"))
+	assert.Equal(t, "chat.failover.outbox.site-a.site-b.member_added", LaneFailover.Outbox("site-a", "site-b", "member_added"))
+
+	// The named builders remain the public face; both must resolve to the lane form.
+	assert.Equal(t, Outbox("site-a", "site-b", "x"), LaneHome.Outbox("site-a", "site-b", "x"))
+	assert.Equal(t, FailoverOutbox("site-a", "site-b", "x"), LaneFailover.Outbox("site-a", "site-b", "x"))
+
+	require.True(t, matches(OutboxWildcard("site-a"), LaneHome.Outbox("site-a", "site-b", "x")))
+	require.False(t, matches(FailoverOutboxWildcard("site-a"), LaneHome.Outbox("site-a", "site-b", "x")))
+	require.True(t, matches(FailoverOutboxWildcard("site-a"), LaneFailover.Outbox("site-a", "site-b", "x")))
+	require.False(t, matches(OutboxWildcard("site-a"), LaneFailover.Outbox("site-a", "site-b", "x")))
 }

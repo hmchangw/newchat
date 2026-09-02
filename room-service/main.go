@@ -10,8 +10,6 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	"github.com/nats-io/nats.go/jetstream"
-
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/atrest"
@@ -236,6 +234,10 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -367,32 +369,6 @@ func main() {
 	// this service over the buddy did so because the home cluster is down, and
 	// its reply events have to go back out the way they came. Both lanes report
 	// to the same publish metrics — a failover publish is still a publish.
-	jsPublisher := func(pjs o11ynats.JetStream) func(context.Context, string, []byte, string) error {
-		return func(ctx context.Context, subj string, data []byte, msgID string) error {
-			msg := natsutil.NewMsg(ctx, subj, data)
-			var opts []jetstream.PublishOpt
-			if msgID != "" {
-				opts = append(opts, jetstream.WithMsgID(msgID))
-			}
-			if _, err := pjs.PublishMsg(ctx, msg, opts...); err != nil {
-				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-				publishMetrics.Failure(ctx, destination, operation, err)
-				return fmt.Errorf("publish to %q: %w", subj, err)
-			}
-			return nil
-		}
-	}
-	corePublisher := func(pnc *o11ynats.Conn) func(context.Context, string, []byte) error {
-		return func(ctx context.Context, subj string, data []byte) error {
-			if err := pnc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
-				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-				publishMetrics.Failure(ctx, destination, operation, err)
-				return fmt.Errorf("publish core to %q: %w", subj, err)
-			}
-			return nil
-		}
-	}
-
 	// buildHandler assembles a handler bound to one connection and one route
 	// resolver. Two are built — home and buddy — sharing every store and client,
 	// because the only thing that differs between the lanes is where events go.
@@ -405,8 +381,8 @@ func main() {
 			NewNATSMemberListClient(pnc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics)),
 			newHistoryMessageReader(pnc, cfg.SiteID, withHistoryMetrics(publishMetrics)),
 			cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
-			jsPublisher(pjs),
-			corePublisher(pnc),
+			natsutil.JetStreamPublishFunc(pjs, publishMetrics),
+			natsutil.CorePublishFunc(pnc, publishMetrics),
 			cfg.LegacyRoomOrigins.byID,
 			nc.NatsConn().MaxPayload(),
 			routes,
@@ -425,35 +401,28 @@ func main() {
 		return h
 	}
 
-	// The home lane consults the restore tracker so it dual-publishes through the
-	// window in which clients are still finding their way back; the failover lane
-	// always routes global, because every client of a site whose NATS is down is
-	// on some other cluster.
+	// One handler per lane; see failoverlane.RouterFor for why nothing that
+	// speaks NATS may be shared between them. The restore tracker drives the
+	// home lane's dual-publish window after recovery; the router ignores it on
+	// the failover lane, which always routes global.
 	homeRestores := natsutil.TrackRestores(ctx, nc)
 	var handler *Handler
-	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
 		func(ctx context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
-			restoredAt := homeRestores.RestoredAt
-			if lane == subject.LaneFailover {
+			laneHandler := buildHandler(laneJS, conn,
+				subject.NewLaneRouter(roomRouteMode, lane, homeRestores.RestoredAt, cfg.FailoverRevertGrace))
+			if lane == subject.LaneHome {
+				handler = laneHandler
+			} else {
 				// The standby OUTBOX has to exist before the first federated
-				// event is buffered onto it.
+				// event is buffered onto it. Both lanes get its publisher: the
+				// failover lane buffers there by definition, and the home lane
+				// needs it to fall back when a publish finds its own OUTBOX gone.
 				if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(laneJS),
 					stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
 					return nil, err
 				}
-				restoredAt = nil
-			}
-			laneHandler := buildHandler(laneJS, conn,
-				subject.NewLaneRouter(roomRouteMode, lane, restoredAt, cfg.FailoverRevertGrace))
-			switch lane {
-			case subject.LaneHome:
-				handler = laneHandler
-			case subject.LaneFailover:
-				// Both lanes get the standby publisher: the failover lane
-				// buffers there by definition, and the home lane needs it to
-				// fall back when a federated publish finds its own OUTBOX gone.
-				failoverPublish := jsPublisher(laneJS)
+				failoverPublish := natsutil.JetStreamPublishFunc(laneJS, publishMetrics)
 				handler.SetFailoverPublisher(failoverPublish)
 				laneHandler.SetFailoverPublisher(failoverPublish)
 			}
