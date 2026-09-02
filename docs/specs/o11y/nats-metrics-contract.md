@@ -831,9 +831,22 @@ to this contract.
 | `search_sync_worker_bulk_item_failures_total`<br><sub>`search_sync_worker_bulk_item_failures`</sub> | counter | search-sync-worker | on first item failure | none — 429 visibility exists nowhere else | ES rejection attribution |
 | `search_sync_worker_messages_total`<br><sub>`search_sync_worker_messages`</sub> | counter | search-sync-worker | on first message | partial: `jetstream_consumer_num_redelivered` counts redeliveries but not their cause | redelivery-source attribution |
 | `search_sync_worker_parent_resolve_duration_seconds`<br><sub>`search_sync_worker_parent_resolve_duration`</sub> | histogram | search-sync-worker | on first thread reply | none | consumer-loop drag attribution |
+| `bot_msg_worker_failure_total` | counter | bot-message-worker | on first failed settle | partial: `jetstream_consumer_num_redelivered` counts the bot lane's redeliveries but attributes none of them to a sender | which bot is filling the bot lane's ack-pending budget. Labelled `bot_account` plus a closed `outcome` enum — see the exception note below the table |
 | `preview_warmback_stored_total` | counter | history-service | on first successful warm-back write | none | warm-back repair health, and the denominator that makes the two failure counters a rate rather than an absolute count |
 | `preview_warmback_dropped_total` | counter | history-service | on first shed job | none — the job is shed before any store call, so no driver metric sees it | warm-back saturation. The writer queue is bounded and a full queue drops the job, so a rising share means rooms stay on the lazy bucket walk — which is SLO-4's cost model, making this a leading indicator for the walk-depth tail `sli-slo.md` §3 Caveats names |
 | `preview_warmback_failed_total` | counter | history-service | on first failed warm-back write | partial: Mongo driver metrics cover write I/O broadly, not this operation | the same outcome as `dropped` reached the other way — the write was attempted and lost. Separate because saturation and a broken store need different responses |
+
+**`bot_msg_worker_failure_total` carries an account label by exception.**
+§13.4 step 3 forbids an account identifier as a label because one series per
+account grows without limit. A *bot* account is not that: bots are provisioned
+records in botplatform, a bounded set orders of magnitude smaller than the user
+base, and the label is emitted only on failure paths, so a healthy fleet adds no
+series at all. The exception is what makes the metric answer its question — one
+poison message per second from a single bot saturates the lane's ack-pending
+budget, and an outcome-only series says the lane is failing without saying who
+is failing it, which leaves the on-call engineer grepping logs during the
+incident. If bot provisioning ever becomes self-service or per-install, that
+bound stops holding and the label has to go behind a known-accounts cap.
 
 **The three `preview_warmback_*` rows are provisional in their Read-by column.**
 They arrived with #406, which merged before this registry existed, so nobody was

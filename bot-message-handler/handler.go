@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -28,20 +29,22 @@ type (
 const publishTimeout = 2 * time.Second
 
 // Publisher is the narrow JetStream publish surface; tests substitute a fake.
-// MsgID is a first-class parameter so the fake can assert on it (jetstream.pubOpts is unexported).
+// It takes a *nats.Msg so the sender identity and request id ride the canonical
+// message as headers, and MsgID is a first-class parameter so the fake can
+// assert on it (jetstream.pubOpts is unexported).
 type Publisher interface {
-	PublishWithMsgID(ctx context.Context, subj string, data []byte, msgID string) (*jetstream.PubAck, error)
+	PublishMsgWithID(ctx context.Context, msg *nats.Msg, msgID string) (*jetstream.PubAck, error)
 }
 
 type jetStreamAPI interface {
-	Publish(ctx context.Context, subj string, data []byte, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+	PublishMsg(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 }
 
 // JetStreamPublisher adapts o11ynats.JetStream to Publisher.
 type JetStreamPublisher struct{ JS jetStreamAPI }
 
-func (j JetStreamPublisher) PublishWithMsgID(ctx context.Context, subj string, data []byte, msgID string) (*jetstream.PubAck, error) {
-	return j.JS.Publish(ctx, subj, data, jetstream.WithMsgID(msgID))
+func (j JetStreamPublisher) PublishMsgWithID(ctx context.Context, msg *nats.Msg, msgID string) (*jetstream.PubAck, error) {
+	return j.JS.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID))
 }
 
 type handler struct {
@@ -117,7 +120,7 @@ func (h *handler) handleSendDM(c *natsrouter.Context, req BotSendRoomRequest) (*
 		ThreadParentMessageCreatedAt: req.ThreadParentMessageCreatedAt,
 		TShow:                        req.TShow && req.ThreadParentMessageID != "",
 	}
-	if err := h.publishCanonical(c, &msg); err != nil {
+	if err := h.publishCanonical(c, &msg, c.Msg.Header.Get(model.HeaderBotIdentity)); err != nil {
 		return nil, err
 	}
 	return &BotSendResponse{Message: msg}, nil
@@ -175,15 +178,21 @@ func (h *handler) handleSendRoom(c *natsrouter.Context, req BotSendRoomRequest) 
 		TShow:                        req.TShow && req.ThreadParentMessageID != "",
 	}
 
-	if err := h.publishCanonical(c, &msg); err != nil {
+	if err := h.publishCanonical(c, &msg, c.Msg.Header.Get(model.HeaderBotIdentity)); err != nil {
 		return nil, err
 	}
 
 	return &BotSendResponse{Message: msg}, nil
 }
 
-// publishCanonical wraps msg in the shared MessageEvent envelope and publishes to BOT-MESSAGES-CANONICAL.
-func (h *handler) publishCanonical(ctx context.Context, msg *model.Message) error {
+// publishCanonical wraps msg in the shared MessageEvent envelope and publishes
+// to BOT-MESSAGES-CANONICAL, carrying the request id and the sender's
+// X-Bot-Identity forward as headers.
+//
+// The identity is forwarded verbatim rather than re-encoded from the message:
+// it is the authenticated value BP stamped, and it is the ONLY attribution a
+// consumer has when the body fails to decode.
+func (h *handler) publishCanonical(ctx context.Context, msg *model.Message, identityRaw string) error {
 	evt := model.MessageEvent{
 		Event:     model.EventCreated,
 		Message:   *msg,
@@ -196,7 +205,16 @@ func (h *handler) publishCanonical(ctx context.Context, msg *model.Message) erro
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
-	if _, err := h.pub.PublishWithMsgID(pubCtx, subject.BotCanonicalCreated(h.siteID), data, msg.ID); err != nil {
+	// NewMsg returns a nil Header when ctx carries no request id, so the identity
+	// stamp owns that guard.
+	out := natsutil.NewMsg(pubCtx, subject.BotCanonicalCreated(h.siteID), data)
+	if identityRaw != "" {
+		if out.Header == nil {
+			out.Header = nats.Header{}
+		}
+		out.Header.Set(model.HeaderBotIdentity, identityRaw)
+	}
+	if _, err := h.pub.PublishMsgWithID(pubCtx, out, msg.ID); err != nil {
 		return errcode.Internal("publish canonical", errcode.WithCause(err))
 	}
 	return nil

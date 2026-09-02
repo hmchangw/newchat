@@ -16,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 type fakeStore struct {
@@ -24,12 +25,14 @@ type fakeStore struct {
 	lastSaved      *model.Message
 	lastThread     *model.Message
 	lastThreadRoom string
+	lastCtx        context.Context // captured so tests can assert on request-id propagation
 	err            error
 	permanentErr   bool
 }
 
-func (f *fakeStore) SaveMessage(_ context.Context, m *model.Message, _ string) error {
+func (f *fakeStore) SaveMessage(ctx context.Context, m *model.Message, _ string) error {
 	atomic.AddInt32(&f.saveCalls, 1)
+	f.lastCtx = ctx
 	f.lastSaved = m
 	if f.err != nil {
 		return maybePermanent(f.err, f.permanentErr)
@@ -37,8 +40,9 @@ func (f *fakeStore) SaveMessage(_ context.Context, m *model.Message, _ string) e
 	return nil
 }
 
-func (f *fakeStore) SaveThreadMessage(_ context.Context, m *model.Message, _ string, threadRoomID string) error {
+func (f *fakeStore) SaveThreadMessage(ctx context.Context, m *model.Message, _ string, threadRoomID string) error {
 	atomic.AddInt32(&f.threadCalls, 1)
+	f.lastCtx = ctx
 	f.lastThread = m
 	f.lastThreadRoom = threadRoomID
 	if f.err != nil {
@@ -57,6 +61,7 @@ func maybePermanent(err error, permanent bool) error {
 type fakeJSMsg struct {
 	subject  string
 	data     []byte
+	headers  nats.Header
 	acks     int32
 	naks     int32
 	nakDelay time.Duration
@@ -64,7 +69,7 @@ type fakeJSMsg struct {
 
 func (f *fakeJSMsg) Metadata() (*jetstream.MsgMetadata, error) { return nil, nil }
 func (f *fakeJSMsg) Data() []byte                              { return f.data }
-func (f *fakeJSMsg) Headers() nats.Header                      { return nil }
+func (f *fakeJSMsg) Headers() nats.Header                      { return f.headers }
 func (f *fakeJSMsg) Subject() string                           { return f.subject }
 func (f *fakeJSMsg) Reply() string                             { return "" }
 func (f *fakeJSMsg) Ack() error                                { atomic.AddInt32(&f.acks, 1); return nil }
@@ -168,4 +173,114 @@ func TestHandleJetStreamMsg_PermanentErrorAcks(t *testing.T) {
 
 	after := testutil.ToFloat64(permanentErrorTotal)
 	assert.Equal(t, float64(1), after-before, "poison metric must bump exactly once")
+}
+
+// identityHeader builds the X-Bot-Identity header bot-message-handler stamps on
+// every canonical publish.
+func identityHeader(t *testing.T, id, account string) nats.Header {
+	t.Helper()
+	raw, err := json.Marshal(model.BotIdentity{ID: id, Account: account, SiteID: "site-a"})
+	require.NoError(t, err)
+	h := nats.Header{}
+	h.Set(model.HeaderBotIdentity, string(raw))
+	return h
+}
+
+// failureCount reads the per-bot failure counter for one label pair.
+func failureCount(t *testing.T, account, outcome string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(botFailureTotal.WithLabelValues(account, outcome))
+}
+
+func TestHandleJetStreamMsg_TransientFailureCountsAgainstSender(t *testing.T) {
+	store := &fakeStore{err: errors.New("cassandra timeout")}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "payload.bot", "nak")
+	msg := &model.Message{ID: "m1", RoomID: "r1", UserID: "bot-1", UserAccount: "payload.bot", CreatedAt: time.Now().UTC()}
+	jsm := &fakeJSMsg{data: encode(t, msg)}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(1), failureCount(t, "payload.bot", "nak")-before,
+		"a naked message is counted against the bot that sent it; with no header the payload is the fallback")
+}
+
+func TestHandleJetStreamMsg_PermanentFailureCountsAgainstSender(t *testing.T) {
+	store := &fakeStore{err: errors.New("schema violation"), permanentErr: true}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "payload.bot", "permanent")
+	msg := &model.Message{ID: "m1", RoomID: "r1", UserAccount: "payload.bot", CreatedAt: time.Now().UTC()}
+	jsm := &fakeJSMsg{data: encode(t, msg)}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(1), failureCount(t, "payload.bot", "permanent")-before,
+		"an ack-dropped poison message is counted against its sender")
+}
+
+func TestHandleJetStreamMsg_MalformedPayloadAttributesSenderFromHeader(t *testing.T) {
+	store := &fakeStore{}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "header.bot", "malformed")
+	jsm := &fakeJSMsg{data: []byte(`{not-json`), headers: identityHeader(t, "bot-1", "header.bot")}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(1), failureCount(t, "header.bot", "malformed")-before,
+		"the header is the only attribution available when the body cannot be decoded")
+}
+
+func TestHandleJetStreamMsg_HeaderIdentityWinsOverPayloadAccount(t *testing.T) {
+	store := &fakeStore{err: errors.New("cassandra timeout")}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "header.bot", "nak")
+	msg := &model.Message{ID: "m1", RoomID: "r1", UserAccount: "payload.bot", CreatedAt: time.Now().UTC()}
+	jsm := &fakeJSMsg{data: encode(t, msg), headers: identityHeader(t, "bot-1", "header.bot")}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(1), failureCount(t, "header.bot", "nak")-before,
+		"the header is stamped from the authenticated identity, so it outranks the body")
+}
+
+func TestHandleJetStreamMsg_UnattributableFailureCountsAsUnknown(t *testing.T) {
+	store := &fakeStore{}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "unknown", "malformed")
+	jsm := &fakeJSMsg{data: []byte(`{not-json`)}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(1), failureCount(t, "unknown", "malformed")-before,
+		"a failure with no identity anywhere is still counted, under a reserved label")
+}
+
+func TestHandleJetStreamMsg_SuccessRecordsNoFailure(t *testing.T) {
+	store := &fakeStore{}
+	h := newHandler(store, "site-a")
+
+	before := failureCount(t, "payload.bot", "nak")
+	msg := &model.Message{ID: "m1", RoomID: "r1", UserAccount: "payload.bot", CreatedAt: time.Now().UTC()}
+	jsm := &fakeJSMsg{data: encode(t, msg)}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	assert.Equal(t, float64(0), failureCount(t, "payload.bot", "nak")-before,
+		"a healthy bot must never appear in the failure counter")
+}
+
+func TestHandleJetStreamMsg_StampsRequestIDFromMessageHeader(t *testing.T) {
+	store := &fakeStore{}
+	h := newHandler(store, "site-a")
+
+	const requestID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	hdr := identityHeader(t, "bot-1", "header.bot")
+	hdr.Set(natsutil.RequestIDHeader, requestID)
+
+	msg := &model.Message{ID: "m1", RoomID: "r1", UserAccount: "header.bot", CreatedAt: time.Now().UTC()}
+	jsm := &fakeJSMsg{data: encode(t, msg), headers: hdr}
+	h.HandleJetStreamMsg(context.Background(), jsm)
+
+	require.NotNil(t, store.lastCtx)
+	assert.Equal(t, requestID, natsutil.RequestIDFromContext(store.lastCtx),
+		"the inbound request id must reach the handler ctx so worker logs correlate with the bot's API call")
 }

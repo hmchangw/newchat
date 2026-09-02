@@ -19,6 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -47,18 +48,20 @@ func (f *fakeStore) FindUser(ctx context.Context, userID string) (*model.User, e
 }
 
 type fakePublisher struct {
-	calls     int32
-	lastSubj  string
-	lastData  []byte
-	lastMsgID string
-	err       error
+	calls      int32
+	lastSubj   string
+	lastData   []byte
+	lastMsgID  string
+	lastHeader nats.Header
+	err        error
 }
 
-func (f *fakePublisher) PublishWithMsgID(_ context.Context, subj string, data []byte, msgID string) (*jetstream.PubAck, error) {
+func (f *fakePublisher) PublishMsgWithID(_ context.Context, msg *nats.Msg, msgID string) (*jetstream.PubAck, error) {
 	atomic.AddInt32(&f.calls, 1)
-	f.lastSubj = subj
-	f.lastData = append([]byte(nil), data...)
+	f.lastSubj = msg.Subject
+	f.lastData = append([]byte(nil), msg.Data...)
 	f.lastMsgID = msgID
+	f.lastHeader = msg.Header
 	return &jetstream.PubAck{Stream: "BOT-MESSAGES-CANONICAL-test", Sequence: 1}, f.err
 }
 
@@ -374,4 +377,51 @@ func requireErrcode(t *testing.T, err error, wantCode errcode.Code, wantReason s
 	require.Truef(t, errors.As(err, &ec), "want *errcode.Error, got %T (%v)", err, err)
 	assert.Equal(t, wantCode, ec.Code)
 	assert.Equal(t, wantReason, string(ec.Reason))
+}
+
+func TestHandleSendRoom_StampsSenderIdentityOnCanonicalPublish(t *testing.T) {
+	store := &fakeStore{
+		FindSubscriptionFn: func(_ context.Context, _, _ string) (*Subscription, error) {
+			return &Subscription{RoomID: "r1", UserID: "bot-1", SiteID: "site-a"}, nil
+		},
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
+		},
+	}
+	pub := &fakePublisher{}
+	h := newHandler(store, pub, "site-a")
+
+	headers := validHeaders(t, botIdent(), idgen.GenerateMessageID(), time.Now().UnixMilli())
+	c := newCtx(t, "r1", headers, nil)
+
+	_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})
+	require.NoError(t, err)
+
+	require.NotNil(t, pub.lastHeader, "the canonical publish must carry headers")
+	assert.Equal(t, headers.Get(model.HeaderBotIdentity), pub.lastHeader.Get(model.HeaderBotIdentity),
+		"sender identity rides the canonical message so a consumer can attribute a failure without decoding the body")
+}
+
+func TestHandleSendRoom_StampsRequestIDOnCanonicalPublish(t *testing.T) {
+	store := &fakeStore{
+		FindSubscriptionFn: func(_ context.Context, _, _ string) (*Subscription, error) {
+			return &Subscription{RoomID: "r1", UserID: "bot-1", SiteID: "site-a"}, nil
+		},
+		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
+			return &Room{ID: "r1", Type: "c", SiteID: "site-a"}, nil
+		},
+	}
+	pub := &fakePublisher{}
+	h := newHandler(store, pub, "site-a")
+
+	const requestID = "01970a4f-8c2d-7c9a-abcd-e0123456789f"
+	c := newCtx(t, "r1", validHeaders(t, botIdent(), idgen.GenerateMessageID(), time.Now().UnixMilli()), nil)
+	c.SetContext(natsutil.WithRequestID(context.Background(), requestID))
+
+	_, err := h.handleSendRoom(c, BotSendRoomRequest{Content: "hi"})
+	require.NoError(t, err)
+
+	require.NotNil(t, pub.lastHeader)
+	assert.Equal(t, requestID, pub.lastHeader.Get(natsutil.RequestIDHeader),
+		"the request id must cross the stream boundary or the worker's failure log cannot be traced back to the bot's call")
 }
