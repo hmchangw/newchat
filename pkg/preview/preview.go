@@ -14,11 +14,9 @@ import (
 )
 
 // MaxAttachments and MaxMentions cap the collections the room list renders as a count or
-// a couple of chips. Content is deliberately NOT capped: the room list gets the full body
-// (bounded upstream by the gatekeeper's message size limit). Attachments and mentions ride
-// uncapped from the message, so a single wide message could size the coalescer's buffered
-// entry, the stored document and every reader's materialization of it at once. One cap at
-// compose time bounds both (#290).
+// a couple of chips. They ride uncapped from the message, so a single wide message could
+// size the coalescer's buffered entry, the stored document and every reader's
+// materialization of it at once. One cap at compose time bounds both (#290).
 const (
 	MaxAttachments = 10
 	MaxMentions    = 20

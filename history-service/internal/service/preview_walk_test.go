@@ -364,7 +364,7 @@ func TestPreviewWalk_ReadFailure_IsNotGone(t *testing.T) {
 	assert.False(t, gone)
 }
 
-// The preview carries render-ready enrichment: mapped participants, content capped.
+// The preview carries render-ready enrichment: mapped participants, full content.
 func TestPreviewWalk_EnrichesAndKeepsFullContent(t *testing.T) {
 	m := msgAt("m-1", 1)
 	m.Msg = strings.Repeat("x", 900)

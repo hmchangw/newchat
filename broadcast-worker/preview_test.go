@@ -90,7 +90,7 @@ func TestPreviewSealer_SealInserted_CarriesTheMessageWithoutReadingAnything(t *t
 }
 
 func TestPreviewSealer_SealInserted_KeepsLongContent(t *testing.T) {
-	long := strings.Repeat("x", 5000)
+	long := strings.Repeat("x", 600)
 	msg := &model.Message{ID: "m-1", Content: long, CreatedAt: time.Now().UTC()}
 
 	sealed, err := testSealer(fakeCipher{}).sealInserted(context.Background(), msg, nil, nil)

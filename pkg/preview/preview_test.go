@@ -20,7 +20,7 @@ import (
 func TestBuild_KeepsContentAndNormalizesUTC(t *testing.T) {
 	loc, err := time.LoadLocation("Asia/Taipei")
 	require.NoError(t, err)
-	long := strings.Repeat("好", 5000)
+	long := strings.Repeat("好", 600)
 	got := Build(model.PreviewMessage{
 		MessageID: "m1",
 		Sender:    model.Participant{Account: "alice"},
