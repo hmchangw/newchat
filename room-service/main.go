@@ -16,6 +16,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/badgecache"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -424,42 +425,47 @@ func main() {
 		return h
 	}
 
+	// The home lane consults the restore tracker so it dual-publishes through the
+	// window in which clients are still finding their way back; the failover lane
+	// always routes global, because every client of a site whose NATS is down is
+	// on some other cluster.
 	homeRestores := natsutil.TrackRestores(ctx, nc)
-	handler := buildHandler(js, nc,
-		subject.NewLaneRouter(roomRouteMode, subject.LaneHome, homeRestores.RestoredAt, cfg.FailoverRevertGrace))
-
-	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
-		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	handler.Register(router)
-
-	// Buddy lane: keeps this site federating OUTWARD, and answering displaced
-	// clients' RPCs, while its own NATS is down. BindBuddy never fails startup —
-	// on any failure federation stays on the live lane only, which is also the
-	// correct single-site behaviour.
-	var buddyRouter *natsrouter.Router
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
+	var handler *Handler
+	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NatsCredsFile,
 		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(bjs),
-				stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
-				return err
+		func(ctx context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
+			restoredAt := homeRestores.RestoredAt
+			if lane == subject.LaneFailover {
+				// The standby OUTBOX has to exist before the first federated
+				// event is buffered onto it.
+				if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(laneJS),
+					stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+					return nil, err
+				}
+				restoredAt = nil
 			}
-			failoverPublish := jsPublisher(bjs)
-			handler.SetFailoverPublisher(failoverPublish)
-
-			// A displaced client sends its RPCs to the buddy cluster, so this
-			// service has to be listening there too. The subjects are already
-			// site-scoped, so the buddy site's own room-service is not
-			// subscribed to them — this site's request can only be answered by
-			// this site's instance, against this site's Mongo.
-			buddyHandler := buildHandler(bjs, bconn,
-				subject.NewLaneRouter(roomRouteMode, subject.LaneFailover, nil, cfg.FailoverRevertGrace))
-			buddyHandler.SetFailoverPublisher(failoverPublish)
-			buddyRouter = natsrouter.DefaultGuarded(bconn, "room-service", cfg.Guard,
+			laneHandler := buildHandler(laneJS, conn,
+				subject.NewLaneRouter(roomRouteMode, lane, restoredAt, cfg.FailoverRevertGrace))
+			switch lane {
+			case subject.LaneHome:
+				handler = laneHandler
+			case subject.LaneFailover:
+				// Both lanes get the standby publisher: the failover lane
+				// buffers there by definition, and the home lane needs it to
+				// fall back when a federated publish finds its own OUTBOX gone.
+				failoverPublish := jsPublisher(laneJS)
+				handler.SetFailoverPublisher(failoverPublish)
+				laneHandler.SetFailoverPublisher(failoverPublish)
+			}
+			r := natsrouter.DefaultGuarded(conn, "room-service", cfg.Guard,
 				natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-			buddyHandler.Register(buddyRouter)
-			return nil
+			laneHandler.Register(r)
+			return r, nil
 		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -471,16 +477,11 @@ func main() {
 
 	slog.Info("room-service running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
-		func(ctx context.Context) error {
-			if buddyRouter == nil {
-				return nil
-			}
-			return buddyRouter.Shutdown(ctx)
-		},
+	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// new work while the other is still finishing.
+	hooks := routers.ShutdownHooks()
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
-		natsutil.DrainBuddy(buddyConn),
 		func(ctx context.Context) error {
 			if closer, ok := keyStore.(interface{ Close() error }); ok {
 				return closer.Close()
@@ -504,4 +505,5 @@ func main() {
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }

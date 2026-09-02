@@ -136,7 +136,7 @@ func (s *HistoryService) PinMessage(c *natsrouter.Context, siteID string, req mo
 		SiteID:    siteID,
 		Timestamp: pinnedAtMs,
 	}
-	s.publishCanonicalBestEffort(c, subject.MsgCanonicalPinned(siteID), &evt)
+	s.publishCanonicalBestEffort(c, siteID, subject.CanonicalPinned, &evt)
 
 	return &models.PinMessageResponse{MessageID: msg.MessageID, PinnedAt: pinnedAtMs}, nil
 }
@@ -178,7 +178,7 @@ func (s *HistoryService) UnpinMessage(c *natsrouter.Context, siteID string, req 
 		SiteID:    siteID,
 		Timestamp: time.Now().UTC().UnixMilli(),
 	}
-	s.publishCanonicalBestEffort(c, subject.MsgCanonicalUnpinned(siteID), &evt)
+	s.publishCanonicalBestEffort(c, siteID, subject.CanonicalUnpinned, &evt)
 
 	return &models.UnpinMessageResponse{MessageID: msg.MessageID}, nil
 }

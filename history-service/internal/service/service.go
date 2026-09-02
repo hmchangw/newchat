@@ -187,8 +187,15 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
+	// lane is the NATS lane this service's router serves; it selects the root
+	// every canonical publish goes to. The zero value is LaneHome, so a
+	// single-site service needs no option.
+	lane subject.Lane
 	// warmer stores walk-resolved previews off the request path; never nil, so no guard needed.
 	warmer previewWriter
+	// borrowedWarmer marks a pool owned by another lane's service, so Close
+	// leaves it running for its owner.
+	borrowedWarmer bool
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
@@ -215,6 +222,31 @@ type nopRoomTimesCache struct{}
 func (nopRoomTimesCache) Store(context.Context, string, time.Time) {}
 func (nopRoomTimesCache) Fallback(context.Context, string) (time.Time, bool) {
 	return time.Time{}, false
+}
+
+// WithLane binds this service to the NATS lane its router serves. The failover
+// lane's canonical publishes must reach the standby stream on the buddy: the
+// live one sits on the cluster whose outage put the client on that lane.
+func WithLane(lane subject.Lane) Option {
+	return func(s *HistoryService) { s.lane = lane }
+}
+
+// WithSharedWarmBack reuses another service's preview warm-back pool instead of
+// starting a second one. A site serves its home and failover lanes from one
+// process, each with its own service because their publishers leave on different
+// connections — but the warm-back pool writes to Mongo, which is up whichever
+// lane is serving, so a second set of workers and queue would be pure overhead
+// for a lane that is idle almost always.
+//
+// The borrower's Close is a no-op; the owner's Close drains the pool.
+func WithSharedWarmBack(from *HistoryService) Option {
+	return func(s *HistoryService) {
+		if from == nil || from.warmer == nil {
+			return
+		}
+		s.warmer = from.warmer
+		s.borrowedWarmer = true
+	}
 }
 
 // WithRoomTimesCache enables the room-times L2 fallback. A nil cache leaves the
@@ -255,10 +287,6 @@ func New(
 		pinEnabled:         cfg.PinEnabled,
 		roomTimes:          nopRoomTimesCache{},
 	}
-	s.warmer = nopPreviewWarmer{}
-	if cfg.PreviewWarmBackEnabled {
-		s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
-	}
 	// A method value derefs its receiver where written, so this is guarded, not eager.
 	if apps != nil {
 		appCache := preview.NewAppNameCache(apps.AppNameByAccount, apps.AppNamesByAccounts)
@@ -267,13 +295,27 @@ func New(
 	for _, opt := range opts {
 		opt(s)
 	}
+	// After the options, so WithSharedWarmBack can supply a pool instead of this
+	// starting a second set of workers only to drop it on the floor.
+	if s.warmer == nil {
+		s.warmer = nopPreviewWarmer{}
+		if cfg.PreviewWarmBackEnabled {
+			s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+		}
+	}
 	return s
 }
 
 // Close stops the background preview writer and waits for its queue to drain. Call once
 // the router has stopped accepting requests and before the Mongo client closes; ctx bounds
 // the drain, and an expired one abandons the remaining writes rather than holding shutdown.
+//
+// A service that borrowed its pool (WithSharedWarmBack) closes nothing: the pool
+// belongs to the service that created it, whose own Close drains it.
 func (s *HistoryService) Close(ctx context.Context) error {
+	if s.borrowedWarmer {
+		return nil
+	}
 	return s.warmer.Close(ctx)
 }
 

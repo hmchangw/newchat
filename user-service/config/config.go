@@ -7,6 +7,7 @@ import (
 	"github.com/caarlos0/env/v11"
 
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -65,6 +66,10 @@ type NATSConfig struct {
 
 // Config is the top-level configuration for user-service.
 type Config struct {
+	// Buddy is the cluster hosting this site's standby failover lanes. A second
+	// router binds there so a client displaced by this site's NATS outage still
+	// reaches this site's user-service, against this site's databases.
+	Buddy natsutil.BuddyConfig `envPrefix:"BUDDY_"`
 	// SiteID is required: baked into subscription subjects and inbox routing; missing it would silently federate under a wrong ID.
 	SiteID                   string        `env:"SITE_ID,notEmpty"`
 	AllSiteIDs               []string      `env:"ALL_SITE_IDS"           envDefault:"" envSeparator:","`
