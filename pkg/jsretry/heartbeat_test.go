@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,16 +70,6 @@ func TestHeartbeat_CancelledContextStops(t *testing.T) {
 	}, time.Second, 25*time.Millisecond)
 }
 
-// A failing InProgress means the message is gone; retrying would spam the log.
-func TestHeartbeat_StopsAfterFailure(t *testing.T) {
-	msg := &countingHeartbeatMsg{fail: errors.New("consumer deleted")}
-	stop := Heartbeat(context.Background(), msg, 2*time.Millisecond)
-	t.Cleanup(stop)
-
-	require.Eventually(t, func() bool { return msg.calls() >= 1 }, time.Second, time.Millisecond)
-	assert.Never(t, func() bool { return msg.calls() > 1 }, 50*time.Millisecond, 5*time.Millisecond)
-}
-
 func TestHeartbeat_NonPositiveIntervalIsDisabled(t *testing.T) {
 	for _, every := range []time.Duration{0, -time.Second} {
 		msg := &countingHeartbeatMsg{}
@@ -106,4 +97,49 @@ func TestHeartbeatInterval(t *testing.T) {
 			assert.Equal(t, tt.want, HeartbeatInterval(tt.ackWait))
 		})
 	}
+}
+
+type funcHeartbeatMsg struct{ fn func() error }
+
+func (m *funcHeartbeatMsg) InProgress() error { return m.fn() }
+
+// stop is what main defers before settling the message, so it must not return
+// while a heartbeat is still in flight — otherwise InProgress races the Ack.
+func TestHeartbeat_StopWaitsForInFlightHeartbeat(t *testing.T) {
+	var once sync.Once
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var returned atomic.Bool
+
+	msg := &funcHeartbeatMsg{fn: func() error {
+		once.Do(func() { close(entered) })
+		<-release
+		returned.Store(true)
+		return nil
+	}}
+	stop := Heartbeat(context.Background(), msg, time.Millisecond)
+	<-entered
+
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a heartbeat was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-stopped
+	assert.True(t, returned.Load(), "stop must wait for the in-flight heartbeat to finish")
+}
+
+// InProgress cannot say whether a failure is terminal or a transport blip, so
+// the safe reading is transient: keep extending rather than silently stop.
+func TestHeartbeat_RetriesAfterTransientFailure(t *testing.T) {
+	msg := &countingHeartbeatMsg{fail: errors.New("connection reset")}
+	stop := Heartbeat(context.Background(), msg, 2*time.Millisecond)
+	t.Cleanup(stop)
+
+	require.Eventually(t, func() bool { return msg.calls() >= 3 }, time.Second, time.Millisecond,
+		"a failing InProgress must not end the heartbeat")
 }

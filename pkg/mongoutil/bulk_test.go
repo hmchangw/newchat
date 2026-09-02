@@ -1,6 +1,10 @@
 package mongoutil
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -184,4 +188,55 @@ func TestBulkResult_MergeUnacknowledged(t *testing.T) {
 	acc.merge(&mongo.BulkWriteResult{Acknowledged: true}, 0)
 	acc.merge(&mongo.BulkWriteResult{Acknowledged: false}, 10)
 	assert.False(t, acc.Acknowledged)
+}
+
+// A size larger than the input must yield one chunk, not overflow the capacity
+// computation into a negative make().
+func TestChunkWriteModels_HugeSizeDoesNotOverflow(t *testing.T) {
+	// Two or more models are needed: len+size-1 is what wraps past MaxInt.
+	models := []mongo.WriteModel{
+		UpsertModel(bson.M{"_id": 1}, bson.M{"$set": bson.M{"n": 1}}),
+		UpsertModel(bson.M{"_id": 2}, bson.M{"$set": bson.M{"n": 2}}),
+	}
+
+	assert.NotPanics(t, func() {
+		chunks := chunkWriteModels(models, math.MaxInt)
+		require.Len(t, chunks, 1)
+		assert.Len(t, chunks[0], 2)
+	})
+}
+
+// Unordered BulkWrite keeps going past per-model write errors, so chunking must
+// not turn one bad model into a barrier for every later chunk.
+func TestTerminalBulkError(t *testing.T) {
+	writeErr := mongo.BulkWriteException{WriteErrors: []mongo.BulkWriteError{{}}}
+	wcErr := mongo.BulkWriteException{
+		WriteErrors:       []mongo.BulkWriteError{{}},
+		WriteConcernError: &mongo.WriteConcernError{Name: "wc"},
+	}
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"per-model write errors keep unordered semantics", context.Background(), writeErr, false},
+		{"wrapped per-model write errors are still per-model", context.Background(), fmt.Errorf("chunk: %w", writeErr), false},
+		{"a write-concern failure is terminal", context.Background(), wcErr, true},
+		{"an exception carrying no write errors is terminal", context.Background(), mongo.BulkWriteException{}, true},
+		{"a transport error is terminal", context.Background(), errors.New("connection reset"), true},
+		{"a cancelled context is terminal whatever the error", canceledCtx(), writeErr, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, terminalBulkError(tt.ctx, tt.err))
+		})
+	}
+}
+
+func canceledCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }

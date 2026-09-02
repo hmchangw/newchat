@@ -31,12 +31,20 @@ func Heartbeat(ctx context.Context, msg InProgressMsg, every time.Duration) (sto
 		return func() {}
 	}
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	var once sync.Once
-	stop = func() { once.Do(func() { close(done) }) }
+	// stop waits for the goroutine: callers settle the message immediately
+	// after, and an InProgress landing past the Ack would race it.
+	stop = func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
 
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(every)
 		defer ticker.Stop()
+		var reported bool
 		for {
 			select {
 			case <-done:
@@ -44,9 +52,12 @@ func Heartbeat(ctx context.Context, msg InProgressMsg, every time.Duration) (sto
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := msg.InProgress(); err != nil {
-					slog.DebugContext(ctx, "ack heartbeat stopped; message no longer in flight", "error", err)
-					return
+				// InProgress cannot distinguish a settled message from a
+				// transport blip, so keep extending and log only the first
+				// failure rather than giving the deadline up silently.
+				if err := msg.InProgress(); err != nil && !reported {
+					reported = true
+					slog.DebugContext(ctx, "ack heartbeat failed; still retrying", "error", err)
 				}
 			}
 		}
