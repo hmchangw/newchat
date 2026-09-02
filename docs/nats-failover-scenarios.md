@@ -124,6 +124,27 @@ A user's connection *is* the load, so spreading users spreads load. A service's
 connection is just a pipe to the streams, so spreading services spreads nothing
 and costs latency.
 
+### Request/reply services listen on the buddy too
+
+Streams are only half the story. A displaced user does not just publish messages
+— it also asks questions: load this room's history, list my subscriptions, who
+is in this room. Those are request/reply RPCs on site-scoped subjects, and the
+user is now sending them to the buddy cluster.
+
+So `room-service`, `history-service` and `user-service` each bind a **second
+router** on the buddy connection, subscribed to the same subjects as their home
+router. Because the subjects carry the site ID, the buddy site's own copy of
+those services is not subscribed to them: a US user's `history.load` on the EU
+cluster can still only be answered by the US instance, reading the US Cassandra.
+Without that second router the request would find no responder at all.
+
+Each lane builds its own service instance, because everything that speaks over
+NATS — the outbound RPC clients, the canonical publisher, the OUTBOX buffer —
+has to leave on the connection the request arrived on. Everything else (Mongo,
+Cassandra, Valkey, the caches) is shared: those are site-local and unaffected by
+a NATS outage. The shared plumbing lives in `pkg/failoverlane.BindRouters`, so
+the two-lane wiring is written once rather than per service.
+
 ---
 
 ## 7. The subtle part: local vs global rooms
@@ -188,12 +209,23 @@ was introduced to capture.
 | Messages to and from users at other sites | ✅ Works |
 | Federation events *out* to other sites | ✅ Works |
 | Federation events *in* from other sites | ✅ Works — redirected to a standby inbox |
-| Creating rooms, inviting members | ❌ Stalls until recovery |
+| Editing, deleting, pinning, reacting | ✅ Works |
+| Reading history and chat lists from the buddy | ✅ Works |
+| Creating rooms, inviting members, renaming | ❌ Fails until recovery |
 | Search index updates for federation events | ❌ Stalls until recovery |
+| The HTTP API's outbound RPCs (`user-service`) | ❌ Fail until recovery |
 
-Room creation and invites are deliberately left out of the first version. It's a
-smaller, separate piece of work that can be added later if the stall turns out
-to matter.
+Room creation, invites and renames were deliberately left out of the first
+version. `room-service` answers those RPCs on the buddy, but they publish to the
+`ROOMS` stream, which has no standby — so the publish is refused and the client
+gets an error rather than a silent stall. Adding a `ROOMS` standby and a
+`room-worker` failover lane is a smaller, separate piece of work.
+
+`user-service` also serves an HTTP API, and that listener keeps working — but
+the RPCs it makes on the way (room info, history previews, presence) go out over
+the home connection only. HTTP has no notion of which lane a request arrived on,
+so there is nothing to pick a connection by. Those calls fail fast rather than
+hang, and the affected endpoints degrade rather than the whole API.
 
 ---
 
@@ -238,7 +270,8 @@ recovery or adding permanent complexity to the message hot path.
 | Where do displaced services connect? | The buddy, always |
 | Does a user's app know about buddies? | No — it never sees the concept |
 | Does another site need to know who my buddy is? | No — it publishes to an address, and the network finds the stream |
-| What does each site need configured? | Its own buddy. Two values. Never the full map |
+| What does each site need configured? | Its own buddy. Two values (`BUDDY_SITE_ID`, `BUDDY_NATS_URL`). Never the full map |
+| Can a displaced user still ask this site questions? | Yes — `room-service`, `history-service` and `user-service` each listen on the buddy as well |
 | Can two sites use the same stream name? | No — names are unique across the whole supercluster |
 | Where does data written during an outage go? | The outage site's own databases, as always |
 | Can a stream be moved to another cluster mid-incident? | No. That's why the standby streams are created ahead of time |

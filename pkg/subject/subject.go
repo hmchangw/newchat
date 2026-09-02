@@ -411,7 +411,7 @@ func FailoverMsgSendWildcard(siteID string) string {
 // message on the failover lane. The live canonical stream lives on the cluster
 // that is down, so a failover-lane message must not be published to it.
 func FailoverMsgCanonicalCreated(siteID string) string {
-	return fmt.Sprintf("chat.failover.msg.canonical.%s.created", siteID)
+	return LaneFailover.MsgCanonical(siteID, CanonicalCreated)
 }
 
 // FailoverMsgCanonicalWildcard is the MESSAGES-CANONICAL-FAILOVER-{siteID}
@@ -473,7 +473,7 @@ func InboxMemberEventSubjects(siteID string) []string {
 }
 
 func MsgCanonicalCreated(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.created", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalCreated)
 }
 
 // MsgTeamsCanonicalBatch is the server-only publish/consume subject for Teams
@@ -491,11 +491,11 @@ func MsgTeamsCanonicalWildcard(siteID string) string {
 }
 
 func MsgCanonicalUpdated(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.updated", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalUpdated)
 }
 
 func MsgCanonicalDeleted(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.deleted", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalDeleted)
 }
 
 // MigrationInternalMsgEdit is the server-only request subject for applying a migrated
@@ -510,15 +510,15 @@ func MigrationInternalMsgDelete(siteID string) string {
 }
 
 func MsgCanonicalPinned(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.pinned", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalPinned)
 }
 
 func MsgCanonicalUnpinned(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.unpinned", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalUnpinned)
 }
 
 func MsgCanonicalReacted(siteID string) string {
-	return fmt.Sprintf("chat.msg.canonical.%s.reacted", siteID)
+	return LaneHome.MsgCanonical(siteID, CanonicalReacted)
 }
 
 func RoomEvent(roomID string, global bool) string {
