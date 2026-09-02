@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakuserread "github.com/hmchangw/chat/tools/loadgen/internal/soak/userread"
 )
 
 // The list types user-service accepts (user-service/service/subscriptions.go).
@@ -73,8 +74,8 @@ func TestSoakUserReader_SubscriptionChannelsAsksForARealCoMember(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscriptions":[]}`)}
 	// user-c is active but belongs to no channel, so a picker that draws any
 	// active account will name it and produce a permanently empty page.
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers: []model.User{
 				{ID: "u1", Account: "user-a"},
@@ -90,7 +91,7 @@ func TestSoakUserReader_SubscriptionChannelsAsksForARealCoMember(t *testing.T) {
 			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
+		soakUserReadRecorderAdapter{recorder: &soakRoomReadRecorder{}},
 		rand.New(rand.NewSource(1)),
 		nil,
 	)
@@ -159,10 +160,10 @@ func newSoakUserReadDMFixture(
 	t *testing.T,
 	transport soakRPCTransport,
 	seed int64,
-) *soakUserReader {
+) *soakuserread.Reader {
 	t.Helper()
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers: []model.User{
 				{ID: "u1", Account: "user-a"},
@@ -183,7 +184,7 @@ func newSoakUserReadDMFixture(
 			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
+		soakUserReadRecorderAdapter{recorder: &soakRoomReadRecorder{}},
 		rand.New(rand.NewSource(seed)),
 		nil,
 	)
@@ -249,8 +250,8 @@ func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
 			recorder := &soakRoomReadRecorder{}
-			reader, err := newSoakUserReader(
-				soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+			reader, err := soakuserread.New(
+				soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 				&soakTopology{
 					ActiveUsers: []model.User{
 						{ID: "u1", Account: "user-a"},
@@ -260,7 +261,7 @@ func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
 					Subscriptions: tt.subscriptions,
 				},
 				newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-				recorder,
+				soakUserReadRecorderAdapter{recorder: recorder},
 				rand.New(rand.NewSource(3)),
 				nil,
 			)
@@ -281,8 +282,8 @@ func TestSoakUserReader_RoomPairsUseExistingDMMembershipRows(t *testing.T) {
 // lane touches — a change in what the lane measures that nothing would flag.
 func TestSoakUserReader_SubscriptionDMAsksFromTheActiveSide(t *testing.T) {
 	transport := &soakRoomOpsTransport{reply: []byte(`{"subscription":{"id":"dm-1"}}`)}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers: []model.User{{ID: "u1", Account: "user-a"}},
 			Rooms:       []model.Room{{ID: "dm-1", Type: model.RoomTypeDM}},
@@ -295,7 +296,7 @@ func TestSoakUserReader_SubscriptionDMAsksFromTheActiveSide(t *testing.T) {
 			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
+		soakUserReadRecorderAdapter{recorder: &soakRoomReadRecorder{}},
 		rand.New(rand.NewSource(5)),
 		nil,
 	)
@@ -325,8 +326,8 @@ func TestSoakUserReader_ChannelPairsFindActiveMembersBeyondTheFirstTwo(t *testin
 			User: model.SubscriptionUser{ID: account, Account: account},
 		}
 	}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers: []model.User{{ID: "active-a", Account: "active-a"}},
 			Rooms:       []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
@@ -335,7 +336,7 @@ func TestSoakUserReader_ChannelPairsFindActiveMembersBeyondTheFirstTwo(t *testin
 			},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
+		soakUserReadRecorderAdapter{recorder: &soakRoomReadRecorder{}},
 		rand.New(rand.NewSource(7)),
 		nil,
 	)
@@ -362,15 +363,15 @@ func TestSoakUserReader_ChannelPairsSkipRoomsWithASingleDistinctMember(t *testin
 		RoomID: "room-1", RoomType: model.RoomTypeChannel, IsSubscribed: true,
 		User: model.SubscriptionUser{ID: "active-a", Account: "active-a"},
 	}
-	reader, err := newSoakUserReader(
-		soakUserReadConfig{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
+	reader, err := soakuserread.New(
+		soakuserread.Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		&soakTopology{
 			ActiveUsers:   []model.User{{ID: "active-a", Account: "active-a"}},
 			Rooms:         []model.Room{{ID: "room-1", Type: model.RoomTypeChannel}},
 			Subscriptions: []model.Subscription{duplicated, duplicated},
 		},
 		newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		&soakRoomReadRecorder{},
+		soakUserReadRecorderAdapter{recorder: &soakRoomReadRecorder{}},
 		rand.New(rand.NewSource(11)),
 		nil,
 	)

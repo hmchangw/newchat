@@ -1,4 +1,4 @@
-package main
+package rpc
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestSoakErrorAttrs_CarriesTheRequestIdentity(t *testing.T) {
 		Reason:   soakErrorReason(soakReasonResponseTooLarge),
 		Attempts: 3,
 		Retries:  2,
-		err:      cause,
+		Cause:    cause,
 	}
 
 	got := attrMap(t, soakErrorAttrs(err))
@@ -64,7 +64,7 @@ func TestSoakErrorAttrs_OmitsEmptyFields(t *testing.T) {
 	err := &soakRequestError{
 		Action: soakRPCUserMe,
 		Class:  soakErrorTimeout,
-		err:    errors.New("boom"),
+		Cause:  errors.New("boom"),
 	}
 
 	got := attrMap(t, soakErrorAttrs(err))
@@ -100,7 +100,7 @@ func TestSoakErrorAttrs_FindsTheCarrierThroughWrapping(t *testing.T) {
 		Action:  soakRPCSubscriptionList,
 		Account: "bob",
 		Class:   soakErrorTimeout,
-		err:     errors.New("deadline"),
+		Cause:   errors.New("deadline"),
 	}
 	wrapped := fmt.Errorf("issue %s request: %w", soakRPCSubscriptionList, inner)
 
@@ -114,7 +114,7 @@ func TestSoakErrorAttrs_FindsTheCarrierThroughWrapping(t *testing.T) {
 // break errors.Is by swallowing what it wraps.
 func TestSoakRequestError_UnwrapsToItsCause(t *testing.T) {
 	cause := fmt.Errorf("%w: %s", errSoakRetryExhausted, "subscription_list")
-	err := &soakRequestError{Action: soakRPCSubscriptionList, err: cause}
+	err := &soakRequestError{Action: soakRPCSubscriptionList, Cause: cause}
 
 	assert.ErrorIs(t, err, errSoakRetryExhausted)
 	assert.Equal(t, cause, errors.Unwrap(err))
@@ -125,26 +125,9 @@ func TestSoakRequestError_UnwrapsToItsCause(t *testing.T) {
 // "issue subscription_list request: subscription_list: ..." on every line.
 func TestSoakRequestError_ErrorIsTheCauseVerbatim(t *testing.T) {
 	cause := errors.New("nats request: context deadline exceeded")
-	err := &soakRequestError{Action: soakRPCSubscriptionList, err: cause}
+	err := &soakRequestError{Action: soakRPCSubscriptionList, Cause: cause}
 
 	assert.Equal(t, cause.Error(), err.Error())
-}
-
-// Driven through the real lane rather than a hand-built wrapper: the
-// duplication this guards against lives in how the layers compose, so a test
-// that composes them itself would keep passing after a regression.
-func TestSoakRoomReader_LaneFailureNamesTheActionOnce(t *testing.T) {
-	transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{
-		{err: context.DeadlineExceeded},
-	}}
-	reader, _, _ := newSoakRoomReadFixture(t, transport, 1)
-
-	err := reader.SubscriptionList(context.Background())
-
-	require.Error(t, err)
-	assert.Equal(t, 1,
-		strings.Count(err.Error(), string(soakRPCSubscriptionList)),
-		"got %q", err.Error())
 }
 
 // A carrier with no cause would be a programming error, but it must not panic
@@ -360,20 +343,6 @@ func (t *soakCancelingTransport) Request(
 ) ([]byte, error) {
 	defer t.cancel()
 	return t.inner.Request(ctx, requestSubject, data, timeout)
-}
-
-// The whole chain, driven through a real lane: an interrupted read must reach
-// the collector as a failure rather than padding the success count.
-func TestSoakRoomReader_ACanceledReadIsRecordedAsAFailure(t *testing.T) {
-	reader, _, recorder := newSoakRoomReadFixture(t, &soakRPCFakeTransport{}, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	require.Error(t, reader.SubscriptionList(ctx))
-
-	require.Len(t, recorder.samples, 1)
-	assert.Equal(t, soakErrorCanceled, recorder.samples[0].ErrorClass,
-		"an empty class makes soakReadCollectorRecorder count this as succeeded")
 }
 
 // Keeping the failed attempt's class while reporting only the cancellation

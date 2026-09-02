@@ -1,4 +1,4 @@
-package main
+package rpc
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
 type soakRPCFakeReply struct {
@@ -104,11 +105,11 @@ func TestSoakRPCClient_RetriesSafeTransientErrorsWithBoundedBackoff(t *testing.T
 		Jitter:      0,
 	}, sleeper, func() float64 { return 0.5 })
 
-	var response soakUnpinMessageResponse
+	var response soakwire.UnpinMessageResponse
 	result, err := client.Call(context.Background(), soakRPCRequest{
 		Action:    soakRPCGetMessage,
 		Subject:   "chat.test",
-		Body:      soakGetMessageByIDRequest{MessageID: "m1"},
+		Body:      soakwire.GetMessageByIDRequest{MessageID: "m1"},
 		Timeout:   time.Second,
 		RetryMode: soakRetrySafe,
 	}, &response)
@@ -136,10 +137,10 @@ func TestSoakRPCClient_JitterStaysWithinConfiguredRange(t *testing.T) {
 	_, err := client.Call(context.Background(), soakRPCRequest{
 		Action:    soakRPCGetMessage,
 		Subject:   "chat.test",
-		Body:      soakGetMessageByIDRequest{MessageID: "m1"},
+		Body:      soakwire.GetMessageByIDRequest{MessageID: "m1"},
 		Timeout:   time.Second,
 		RetryMode: soakRetrySafe,
-	}, &soakUnpinMessageResponse{})
+	}, &soakwire.UnpinMessageResponse{})
 
 	require.NoError(t, err)
 	require.Len(t, sleeper.delays, 1)
@@ -161,10 +162,10 @@ func TestSoakRPCClient_DoesNotRetryTerminalEnvelope(t *testing.T) {
 			result, err := client.Call(context.Background(), soakRPCRequest{
 				Action:    soakRPCEdit,
 				Subject:   "chat.test",
-				Body:      soakEditMessageRequest{MessageID: "m1", NewMsg: "new"},
+				Body:      soakwire.EditMessageRequest{MessageID: "m1", NewMsg: "new"},
 				Timeout:   time.Second,
 				RetryMode: soakRetrySafe,
-			}, &soakEditMessageResponse{})
+			}, &soakwire.EditMessageResponse{})
 
 			require.Error(t, err)
 			assert.Equal(t, 1, result.Attempts)
@@ -189,10 +190,10 @@ func TestSoakRPCClient_ReportsRetryExhaustion(t *testing.T) {
 	result, err := client.Call(context.Background(), soakRPCRequest{
 		Action:    soakRPCLoadHistory,
 		Subject:   "chat.test",
-		Body:      soakLoadHistoryRequest{Limit: 50},
+		Body:      soakwire.LoadHistoryRequest{Limit: 50},
 		Timeout:   time.Second,
 		RetryMode: soakRetrySafe,
-	}, &soakLoadHistoryResponse{})
+	}, &soakwire.LoadHistoryResponse{})
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errSoakRetryExhausted)
@@ -216,10 +217,10 @@ func TestSoakRPCClient_ContextCancellationStopsImmediately(t *testing.T) {
 	result, err := client.Call(ctx, soakRPCRequest{
 		Action:    soakRPCLoadHistory,
 		Subject:   "chat.test",
-		Body:      soakLoadHistoryRequest{Limit: 50},
+		Body:      soakwire.LoadHistoryRequest{Limit: 50},
 		Timeout:   time.Second,
 		RetryMode: soakRetrySafe,
-	}, &soakLoadHistoryResponse{})
+	}, &soakwire.LoadHistoryResponse{})
 
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, result.Attempts)
@@ -241,10 +242,10 @@ func TestSoakRPCClient_ReactionTimeoutIsNotBlindlyRetried(t *testing.T) {
 	result, err := client.Call(context.Background(), soakRPCRequest{
 		Action:    soakRPCReact,
 		Subject:   "chat.test",
-		Body:      soakReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
+		Body:      soakwire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
 		Timeout:   time.Second,
 		RetryMode: soakRetryAmbiguous,
-	}, &soakReactMessageResponse{})
+	}, &soakwire.ReactMessageResponse{})
 
 	require.Error(t, err)
 	assert.Equal(t, soakErrorAmbiguous, result.ErrorClass)
@@ -291,13 +292,13 @@ func TestSoakRPCClient_ReactionResolverControlsRetry(t *testing.T) {
 			result, err := client.Call(context.Background(), soakRPCRequest{
 				Action:    soakRPCReact,
 				Subject:   "chat.test",
-				Body:      soakReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
+				Body:      soakwire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
 				Timeout:   time.Second,
 				RetryMode: soakRetryAmbiguous,
 				ResolveAmbiguity: func(context.Context) (bool, error) {
 					return tt.retryNeeded, nil
 				},
-			}, &soakReactMessageResponse{})
+			}, &soakwire.ReactMessageResponse{})
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -316,7 +317,7 @@ func TestSoakRPCClient_ClassifiesDecodeAndAssertionErrors(t *testing.T) {
 		client := newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil)
 		result, err := client.Call(context.Background(), soakRPCRequest{
 			Action: soakRPCGetMessage, Subject: "chat.test",
-			Body: soakGetMessageByIDRequest{MessageID: "m1"}, Timeout: time.Second,
+			Body: soakwire.GetMessageByIDRequest{MessageID: "m1"}, Timeout: time.Second,
 		}, &cannedSoakResponse{})
 		require.Error(t, err)
 		assert.Equal(t, soakErrorResponseDecode, result.ErrorClass)
@@ -367,21 +368,6 @@ func TestClassifySoakRPCError_PlainInternalStaysInternal(t *testing.T) {
 	assert.Equal(t, soakErrorInternal, classifySoakRPCError(plain))
 }
 
-// The class has to be in the reported set or it is counted and never shown.
-func TestSoakAllErrorClasses_IncludesResponseTooLarge(t *testing.T) {
-	assert.Contains(t, soakAllErrorClasses[:], soakErrorResponseTooLarge)
-}
-
-// A class that aggregate reporting counts but validation rejects would be
-// dropped somewhere between the two. Assert the two sets agree rather than
-// spot-checking one entry.
-func TestValidSoakErrorClass_AgreesWithTheReportedSet(t *testing.T) {
-	for _, class := range soakAllErrorClasses {
-		assert.True(t, validSoakErrorClass(class),
-			"%q is reported but rejected by validation", class)
-	}
-}
-
 func TestValidSoakRPCAction_AcceptsRoomAndMemberActions(t *testing.T) {
 	for _, action := range []soakRPCAction{
 		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename, soakRPCMuteToggle,
@@ -411,7 +397,7 @@ func TestSoakRPCClient_ClassifiesEncodeAndDecodeSeparately(t *testing.T) {
 		&soakRPCFakeTransport{replies: []soakRPCFakeReply{{data: []byte(`{"messageId":`)}}},
 		soakRetryConfig{MaxAttempts: 1}, nil, nil,
 	)
-	var response soakGetMessageByIDRequest
+	var response soakwire.GetMessageByIDRequest
 	result, err = decoding.Call(context.Background(), soakRPCRequest{
 		Action: soakRPCGetMessage,
 	}, &response)

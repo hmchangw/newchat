@@ -31,10 +31,10 @@ func (s coverageStats) meets(minimum float64) bool {
 
 func readCoverageProfile(
 	reader io.Reader,
-	include string,
+	includes []string,
 	excludes map[string]struct{},
 ) (coverageStats, error) {
-	if include == "" {
+	if len(includes) == 0 {
 		return coverageStats{}, fmt.Errorf("coverage include pattern is required")
 	}
 	scanner := bufio.NewScanner(reader)
@@ -46,6 +46,7 @@ func readCoverageProfile(
 	}
 
 	var stats coverageStats
+	matched := make(map[string]bool, len(includes))
 	lineNumber := 1
 	for scanner.Scan() {
 		lineNumber++
@@ -64,7 +65,14 @@ func readCoverageProfile(
 			)
 		}
 		source := strings.ReplaceAll(fields[0][:separator], "\\", "/")
-		if !strings.Contains(source, include) {
+		hit := false
+		for _, include := range includes {
+			if strings.Contains(source, include) {
+				matched[include] = true
+				hit = true
+			}
+		}
+		if !hit {
 			continue
 		}
 		if _, excluded := excludes[path.Base(source)]; excluded {
@@ -94,13 +102,45 @@ func readCoverageProfile(
 	if err := scanner.Err(); err != nil {
 		return coverageStats{}, fmt.Errorf("read coverage profile: %w", err)
 	}
+	// Every include is checked, not just the set as a whole. With repeatable
+	// -include, one live pattern would otherwise mask a misspelled or stale
+	// sibling: the gate reports passing coverage for a scope it never measured.
+	var unmatched []string
+	for _, include := range includes {
+		if !matched[include] {
+			unmatched = append(unmatched, include)
+		}
+	}
+	if len(unmatched) > 0 {
+		return coverageStats{}, fmt.Errorf(
+			"coverage include pattern(s) %q matched no statements",
+			strings.Join(unmatched, ","),
+		)
+	}
+	// Reachable when every matched file is also excluded. percent() would
+	// report 0.00% and fail the threshold anyway, but as a coverage number
+	// rather than as the scoping mistake it is.
 	if stats.total == 0 {
 		return coverageStats{}, fmt.Errorf(
-			"coverage include pattern %q matched no statements",
-			include,
+			"coverage include pattern(s) %q matched only excluded files",
+			strings.Join(includes, ","),
 		)
 	}
 	return stats, nil
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(value string) error {
+	if value == "" {
+		return errors.New("include pattern cannot be empty")
+	}
+	*f = append(*f, value)
+	return nil
 }
 
 type stringSetFlag map[string]struct{}
@@ -125,7 +165,8 @@ func run(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("coveragecheck", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	profilePath := fs.String("profile", "", "Go coverage profile")
-	include := fs.String("include", "", "source path substring to include")
+	var includes stringListFlag
+	fs.Var(&includes, "include", "source path substring to include; repeatable")
 	minimum := fs.Float64("min", 0, "minimum statement coverage percentage")
 	excludes := make(stringSetFlag)
 	fs.Var(excludes, "exclude", "source base filename to exclude; repeatable")
@@ -147,14 +188,14 @@ func run(args []string, stdout io.Writer) error {
 	}
 	defer func() { _ = file.Close() }()
 
-	stats, err := readCoverageProfile(file, *include, excludes)
+	stats, err := readCoverageProfile(file, includes, excludes)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(
 		stdout,
 		"coverage include=%q covered=%d total=%d percent=%.2f required=%.2f\n",
-		*include,
+		strings.Join(includes, ","),
 		stats.covered,
 		stats.total,
 		stats.percent(),

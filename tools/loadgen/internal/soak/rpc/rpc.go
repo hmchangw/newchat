@@ -1,4 +1,4 @@
-package main
+package rpc
 
 import (
 	"context"
@@ -405,7 +405,7 @@ func (c *soakRPCClient) Call(
 			Account: request.Account, RoomID: request.RoomID,
 			Class: result.ErrorClass, Reason: result.ErrorReason,
 			Attempts: result.Attempts, Retries: result.Retries,
-			err: err,
+			Cause: err,
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -567,4 +567,144 @@ func (c *soakRPCClient) backoff(retry int) time.Duration {
 	base = min(base, float64(c.retry.MaxBackoff))
 	factor := 1 + c.retry.Jitter*(2*min(max(c.random(), 0), 1)-1)
 	return time.Duration(base * factor)
+}
+
+type Action = soakRPCAction
+
+const (
+	ActionSend                    = soakRPCSend
+	ActionThreadReply             = soakRPCThreadReply
+	ActionLoadHistory             = soakRPCLoadHistory
+	ActionLoadNext                = soakRPCLoadNext
+	ActionGetThread               = soakRPCGetThread
+	ActionGetMessage              = soakRPCGetMessage
+	ActionReact                   = soakRPCReact
+	ActionEdit                    = soakRPCEdit
+	ActionDelete                  = soakRPCDelete
+	ActionPin                     = soakRPCPin
+	ActionUnpin                   = soakRPCUnpin
+	ActionPinnedList              = soakRPCPinnedList
+	ActionReadBack                = soakRPCReadBack
+	ActionMarkRead                = soakRPCMarkRead
+	ActionScroll                  = soakRPCScroll
+	ActionMemberAdd               = soakRPCMemberAdd
+	ActionMemberRemove            = soakRPCMemberRemove
+	ActionRoomRename              = soakRPCRoomRename
+	ActionMuteToggle              = soakRPCMuteToggle
+	ActionRoomCreate              = soakRPCRoomCreate
+	ActionMemberList              = soakRPCMemberList
+	ActionRoomsInfo               = soakRPCRoomsInfo
+	ActionSubscriptionList        = soakRPCSubscriptionList
+	ActionRoomStateRead           = soakRPCRoomStateRead
+	ActionMessageRead             = soakRPCMessageRead
+	ActionReadReceiptList         = soakRPCReadReceiptList
+	ActionPresenceQuery           = soakRPCPresenceQuery
+	ActionSearchMessages          = soakRPCSearchMessages
+	ActionSearchRooms             = soakRPCSearchRooms
+	ActionSearchIndexProbe        = soakRPCSearchIndexProbe
+	ActionUserMe                  = soakRPCUserMe
+	ActionUserProfileGet          = soakRPCUserProfileGet
+	ActionUserStatusGet           = soakRPCUserStatusGet
+	ActionUserSettingsGet         = soakRPCUserSettingsGet
+	ActionUserChatlistGet         = soakRPCUserChatlistGet
+	ActionUserPriorityContacts    = soakRPCUserPriorityContacts
+	ActionUserAppsList            = soakRPCUserAppsList
+	ActionUserAppsCategories      = soakRPCUserAppsCategories
+	ActionUserSubscriptionCount   = soakRPCUserSubscriptionCount
+	ActionUserSubscriptionByRoom  = soakRPCUserSubscriptionByRoom
+	ActionUserSubscriptionChannel = soakRPCUserSubscriptionChannel
+	ActionUserSubscriptionDM      = soakRPCUserSubscriptionDM
+	ActionUserThreadList          = soakRPCUserThreadList
+	ActionUserThreadUnread        = soakRPCUserThreadUnread
+)
+
+type ErrorClass = soakErrorClass
+
+const (
+	ErrorTimeout               = soakErrorTimeout
+	ErrorNoResponder           = soakErrorNoResponder
+	ErrorDisconnected          = soakErrorDisconnected
+	ErrorUnavailable           = soakErrorUnavailable
+	ErrorInternal              = soakErrorInternal
+	ErrorNotFound              = soakErrorNotFound
+	ErrorForbidden             = soakErrorForbidden
+	ErrorBadRequest            = soakErrorBadRequest
+	ErrorConflict              = soakErrorConflict
+	ErrorRequestEncode         = soakErrorRequestEncode
+	ErrorResponseDecode        = soakErrorResponseDecode
+	ErrorAssertion             = soakErrorAssertion
+	ErrorAmbiguous             = soakErrorAmbiguous
+	ErrorMutationTargetMissing = soakErrorMutationTargetMissing
+	ErrorResponseTooLarge      = soakErrorResponseTooLarge
+	ErrorCanceled              = soakErrorCanceled
+)
+
+type ErrorReason = soakErrorReason
+
+const (
+	ErrorReasonUnknown     = soakErrorReasonUnknown
+	ReasonResponseTooLarge = soakReasonResponseTooLarge
+)
+
+type RetryMode = soakRetryMode
+
+const (
+	RetryNever     = soakRetryNever
+	RetrySafe      = soakRetrySafe
+	RetryAmbiguous = soakRetryAmbiguous
+)
+
+type RetryConfig = soakRetryConfig
+type Transport = soakRPCTransport
+type Sleeper = soakSleeper
+type TimerSleeper = soakTimerSleeper
+type Request = soakRPCRequest
+type Result = soakRPCResult
+type Client = soakRPCClient
+
+var ErrRetryExhausted = errSoakRetryExhausted
+
+func NewClient(
+	transport Transport,
+	retry RetryConfig,
+	sleeper Sleeper,
+	random func() float64,
+) *Client {
+	return newSoakRPCClient(transport, retry, sleeper, random)
+}
+
+func UserReadActions() []Action {
+	return slices.Clone(soakUserReadActions)
+}
+
+func ValidAction(action Action) bool {
+	return validSoakRPCAction(action)
+}
+
+func ValidErrorClass(class ErrorClass) bool {
+	return validSoakErrorClass(class)
+}
+
+func ValidErrorReason(reason ErrorReason) bool {
+	return validSoakErrorReason(reason)
+}
+
+func NewAssertionError(message string) error {
+	return newSoakAssertionError(message)
+}
+
+func ParseErrorEnvelope(data []byte) error {
+	return parseSoakErrorEnvelope(data)
+}
+
+func ClassifyError(err error) ErrorClass {
+	return classifySoakRPCError(err)
+}
+
+func ClassifyReason(err error) ErrorReason {
+	return classifySoakRPCReason(err)
+}
+
+func IsTransientError(class ErrorClass) bool {
+	return transientSoakError(class)
 }
