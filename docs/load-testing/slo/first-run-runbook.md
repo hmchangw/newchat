@@ -6,7 +6,7 @@
 > called.
 >
 > Why it works and which SLOs it covers:
-> [`slo-measurement-map.md`](slo-measurement-map.md) §7.
+> [`measurement-map.md`](measurement-map.md) §7.
 
 | | |
 |---|---|
@@ -19,6 +19,25 @@
 
 ---
 
+## Contents
+
+**Before the run** — §1 preconditions · §1a what a busy site changes ·
+§2 the defaults are a shape, not a baseline · §3 the values overlay ·
+§4 the dashboard · §4a why this run gates nothing
+
+**Doing the run** — §5 the measurement method and the queries ·
+§6 the validity gate · §7 the run protocol · §7b which knobs may move between runs
+
+**After the run** — §7a what it produces · §8 what it cannot answer
+
+**Sequencing** — §9 order of operations and the dry-run ·
+§9a **what changes once the P2 metrics land** · §10 siblings
+
+> New here? Read **§9 first** — it says what to do in what order, and everything
+> else is detail hung off it.
+
+---
+
 ## 1. Preconditions
 
 > **Reading the identifiers.** Three prefixes appear across these documents and
@@ -27,8 +46,8 @@
 > | Prefix | Means | Lives in |
 > |---|---|---|
 > | **PRE-n** | A precondition for *this run* — an operator step, checked off before the run starts | this document, §1 |
-> | **Gn** | A **gate** — external work (infra, product, app) that blocks one or more items in the programme, with a named owner | [`execution-priority-plan.md`](execution-priority-plan.md) §"Gate backlog" |
-> | **P1 / P2 / P3** | An **instrumentation priority tier** — how urgent a piece of missing telemetry is | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md), [`slo-measurement-map.md`](slo-measurement-map.md) |
+> | **Gn** | A **gate** — external work (infra, product, app) that blocks one or more items in the programme, with a named owner | [`execution-priority-plan.md`](../execution-priority-plan.md) §"Gate backlog" |
+> | **P1 / P2 / P3** | An **instrumentation priority tier** — how urgent a piece of missing telemetry is | [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md), [`measurement-map.md`](measurement-map.md) |
 >
 > The ones this run actually waits on: **G1** (isolated site — same thing as
 > PRE-3), **G2** (workload shape — same thing as PRE-7), **G6** (backlog
@@ -728,7 +747,7 @@ draft this run exists to inform.
 Not "a number for the SLOs". Six artefacts, of which only the first is a
 measurement. **A filled-in worked example of all six — with an invented but
 internally consistent set of numbers — is
-[`first-slo-run-report.md`](first-slo-run-report.md).** Fill that template in
+[`first-run-report.md`](first-run-report.md).** Fill that template in
 with blanks *before* the run: a blank you cannot see how to fill is a missing
 step in this SOP.
 
@@ -789,7 +808,7 @@ Two rules make it structurally hard:
    target that is smaller than the spread is not "met"** — it means the target
    sits inside the environment's noise. That is a separate, sharper test than
    the 10%-of-value bar below, and both apply. This is execution rule 10 in
-   [`execution-priority-plan.md`](execution-priority-plan.md), applied here. If
+   [`execution-priority-plan.md`](../execution-priority-plan.md), applied here. If
    the spread exceeds ~10% of the value, the result is INCONCLUSIVE until the
    variance is explained.
 
@@ -896,11 +915,80 @@ nothing.
 
 ---
 
+## 9a. After the P2 metrics land: what changes
+
+§9 sequences the run **against today's instruments**. Once
+[`p2-implementation-task.md`](p2-implementation-task.md) ships, four things
+change and three deliberately do not.
+
+### What becomes possible
+
+| | Before P2 | After P2a | After P2b |
+|---|---|---|---|
+| **SLO-1b** (channel enqueue) | one-sided bound from a separate short `run` | **A real ratio** — `broadcast_channel_enqueue_total{outcome="ok"}` over `messages_canonical_published_total{broadcast_path="room_subject"}` | unchanged |
+| **SLO-2** (enqueue ≤ 1 s) | one-sided bound | unchanged | **A real ratio**, from `broadcast_channel_enqueue_age_seconds` |
+| **SLO-1a** | approximate, attempt-based | **still approximate** — see below | still approximate |
+
+**P2 does not make SLO-1a exact, and does not make any of the three a hard
+gate.** Every numerator stays consumer-side and attempt-based, so a lost message
+and a redelivered one still cancel. Nothing here changes §4a: the run is
+calibration evidence, and `common/sli-slo.md` stays the contract.
+
+### The three new preconditions
+
+Add these to §1 for any run that intends to report 1b or 2:
+
+| # | Precondition | Why |
+|---|---|---|
+| **PRE-10** | The deployed build carries the P2a commit, and **`broadcast_path` has all four values in Prometheus** — including `unknown` | A missing label value is indistinguishable from "no traffic of that shape". Exercise a channel message, a thread reply and a DM in the smoke run |
+| **PRE-11** | **`broadcast_path="unknown"` is zero over a quiet window** before the run | §3.3 of the task brief makes any non-zero `unknown` an `INCONCLUSIVE` for SLO-1b/2. Establish the baseline is clean *before* you spend a measurement run |
+| **PRE-12** | The **`le` boundaries on `broadcast_channel_enqueue_age_seconds` include `1`** | SLO-2's bound is 1 s. If it is not a real boundary the good-ratio cannot be read at the bound |
+
+### The queries to add to §5
+
+Both are synchronous-shaped in the sense that matters — numerator and denominator
+move together — but the **denominator is upstream** (gatekeeper) while the
+**numerator is downstream** (broadcast-worker), so they need the async
+treatment: take both at `t2`, not `t1`.
+
+```promql
+# 5 — SLO-1b   (both sides @t2 - @t0-async)
+sum(broadcast_channel_enqueue_total{site="$site", outcome="ok"})
+sum(messages_canonical_published_total{site="$site", broadcast_path="room_subject"})
+
+# 6 — SLO-2: good-ratio at every boundary, le kept as a dimension
+sum by (le) (broadcast_channel_enqueue_age_seconds_bucket{site="$site"})
+sum(broadcast_channel_enqueue_age_seconds_count{site="$site"})
+
+# 7 — the validity gate for both of the above
+sum(increase(messages_canonical_published_total{
+      site="$site", broadcast_path="unknown"}[$window]))     # must be 0
+sum(increase(broadcast_channel_enqueue_age_invalid_total{site="$site"}[$window]))
+```
+
+**The last two are gates, not results.** Read them before the ratios, exactly as
+§6 says for the existing checks. A non-zero `unknown` makes SLO-1b/2
+`INCONCLUSIVE` for the window unless the worst case is shown to pass; a non-zero
+`_age_invalid_total` means the SLO-2 measurement itself is broken and the number
+is not reportable.
+
+### What does not change
+
+- **The loadgen invocation.** Still no code change and no new flags — P2 adds
+  production-side instruments, and loadgen is the traffic source either way.
+- **§7's run protocol.** Same marks, same restart procedure, same caps. SLO-1b/2
+  ride the `t0-async`/`t2` pair that SLO-1a already uses.
+- **§7b's iteration rules.** A new instrument is a change to the *measurement
+  apparatus*, so the first run after P2 lands is a **shakedown run**, not a
+  measurement run. Do not report numbers from it.
+
+---
+
 ## 10. Sibling documents
 
-- [`first-slo-run-report.md`](first-slo-run-report.md) — **the output contract**, as a filled-in worked example
-- [`slo-measurement-map.md`](slo-measurement-map.md) §7 — why this works, per SLO
+- [`first-run-report.md`](first-run-report.md) — **the output contract**, as a filled-in worked example
+- [`measurement-map.md`](measurement-map.md) §7 — why this works, per SLO
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what unlocks SLO-1b/2
-- [`execution-priority-plan.md`](execution-priority-plan.md) — Track 1.0b
-- [`loadgen/dashboard-contract.md`](loadgen/dashboard-contract.md) — the validity rules in §6
+- [`execution-priority-plan.md`](../execution-priority-plan.md) — Track 1.0b
+- [`loadgen/dashboard-contract.md`](../loadgen/dashboard-contract.md) — the validity rules in §6
 - `tools/loadgen/deploy/k8s/README.md` — the chart's own operational runbook

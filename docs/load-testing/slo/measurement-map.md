@@ -574,7 +574,7 @@ partial.
 
 ## 9. Sibling documents
 
-- [`common/sli-slo.md`](common/sli-slo.md) — the SLO definitions this maps
+- [`common/sli-slo.md`](../common/sli-slo.md) — the SLO definitions this maps
 - [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what to build for J1's gaps
-- [`execution-priority-plan.md`](execution-priority-plan.md) — where this sits in the schedule
+- [`execution-priority-plan.md`](../execution-priority-plan.md) — where this sits in the schedule
 - `docs/specs/o11y/nats-metrics-contract.md` — the instrument registry

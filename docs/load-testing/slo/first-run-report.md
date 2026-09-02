@@ -1,7 +1,7 @@
 # First SLO Run — Report Template, with a Worked Example
 
 > The output contract for the run described in
-> [`first-slo-run-runbook.md`](first-slo-run-runbook.md). That document is the
+> [`first-run-runbook.md`](first-run-runbook.md). That document is the
 > **SOP** — what to set, when to mark, what to read. **This** document is what
 > the run has to hand back.
 >
@@ -294,7 +294,7 @@ the thing that would unblock it.**
 
 | | |
 |---|---|
-| The SOP this reports on | [`first-slo-run-runbook.md`](first-slo-run-runbook.md) |
-| Why each SLO is or is not measurable | [`slo-measurement-map.md`](slo-measurement-map.md) |
-| The acceptance contract being calibrated | [`common/sli-slo.md`](common/sli-slo.md) |
-| Where this run sits in the programme | [`execution-priority-plan.md`](execution-priority-plan.md) Track 1.0b |
+| The SOP this reports on | [`first-run-runbook.md`](first-run-runbook.md) |
+| Why each SLO is or is not measurable | [`measurement-map.md`](measurement-map.md) |
+| The acceptance contract being calibrated | [`common/sli-slo.md`](../common/sli-slo.md) |
+| Where this run sits in the programme | [`execution-priority-plan.md`](../execution-priority-plan.md) Track 1.0b |

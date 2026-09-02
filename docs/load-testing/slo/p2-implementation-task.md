@@ -6,8 +6,8 @@
 > `grep` before editing, as line numbers drift.
 >
 > Background, if wanted: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md)
-> (why), [`slo-measurement-map.md`](slo-measurement-map.md) (what it unblocks),
-> [`common/sli-slo.md`](common/sli-slo.md) (the SLO definitions being served).
+> (why), [`measurement-map.md`](measurement-map.md) (what it unblocks),
+> [`common/sli-slo.md`](../common/sli-slo.md) (the SLO definitions being served).
 
 ---
 
@@ -193,7 +193,7 @@ sum(increase(broadcast_channel_enqueue_total{outcome="ok"}[$w]))
 
 **This rule has three homes and P2a must update all three:** the label set and
 the rule in `common/sli-slo.md`; the validity gate in
-[`first-slo-run-runbook.md`](first-slo-run-runbook.md) §6, beside the backlog and
+[`first-run-runbook.md`](first-run-runbook.md) §6, beside the backlog and
 dispatch-ratio checks; and any SLO-1b/2 recording rule, which must carry the
 worst-case denominator rather than the bare `room_subject` slice.
 

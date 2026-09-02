@@ -2,7 +2,7 @@
 
 > **This document is rationale only. The executable contract is
 > [`p2-implementation-task.md`](p2-implementation-task.md), and above it
-> [`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract".**
+> [`common/sli-slo.md`](../common/sli-slo.md) §"Denominator & outcome contract".**
 >
 > Everything below that names a *specific* instrument, label, PromQL expression,
 > diff or ordering has been superseded and removed — it disagreed with the
@@ -23,7 +23,7 @@
 | | |
 |---|---|
 | **Status** | Rationale only — superseded on every implementation detail by [`p2-implementation-task.md`](p2-implementation-task.md) |
-| **Net change** | **Four instrument families to add, one already exists, one to drop.** Two additions carry a measurable hot-path cost and both are benchmarked. SLO-1a has an *approximate, attempt-based* indicator today with no code change — it is **not** a hard gate, and P2 does not make it one (see the G4 note in [`execution-priority-plan.md`](execution-priority-plan.md)) |
+| **Net change** | **Four instrument families to add, one already exists, one to drop.** Two additions carry a measurable hot-path cost and both are benchmarked. SLO-1a has an *approximate, attempt-based* indicator today with no code change — it is **not** a hard gate, and P2 does not make it one (see the G4 note in [`execution-priority-plan.md`](../execution-priority-plan.md)) |
 | **Not in scope** | Anything that needs a JetStream advisory consumer — see §6 |
 
 ---
@@ -56,7 +56,7 @@ as a finished result.
 
 **The live design is [`p2-implementation-task.md`](p2-implementation-task.md)**
 (§3 placement and classification, §4 the counters, §5 the age histogram), under
-[`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract".
+[`common/sli-slo.md`](../common/sli-slo.md) §"Denominator & outcome contract".
 
 What survives from §2 and is worth keeping in mind while implementing:
 
@@ -92,7 +92,7 @@ What survives from §2 and is worth keeping in mind while implementing:
 Every instrument added here must appear in `docs/specs/o11y/nats-metrics-contract.md`
 next to *what reads it*, or the `pkg/obs` registry test fails. For these the reader
 is named: the SLO-1a/1b/2 recording rules. **Not a hard gate** — see G4 in
-[`execution-priority-plan.md`](execution-priority-plan.md) for why an
+[`execution-priority-plan.md`](../execution-priority-plan.md) for why an
 attempt-based numerator cannot be one.
 
 ---
@@ -107,10 +107,10 @@ which is current.
 
 | What it said | Where it lives now |
 |---|---|
-| PromQL for SLO-1a/1b/2 | [`first-slo-run-runbook.md`](first-slo-run-runbook.md) §5, against the shipped series |
+| PromQL for SLO-1a/1b/2 | [`first-run-runbook.md`](first-run-runbook.md) §5, against the shipped series |
 | Order of work, PR split | [`p2-implementation-task.md`](p2-implementation-task.md) §1 |
 | File-by-file diff, call sites, tests | [`p2-implementation-task.md`](p2-implementation-task.md) §3–§6 |
-| Which label goes where, and its name | [`common/sli-slo.md`](common/sli-slo.md) §"Denominator & outcome contract" — the contract, above both |
+| Which label goes where, and its name | [`common/sli-slo.md`](../common/sli-slo.md) §"Denominator & outcome contract" — the contract, above both |
 
 ---
 
@@ -128,7 +128,7 @@ signals survive.
   precisely because the v1 ratios are approximate.
 - `chat.nats.client.connected` / `_connection_events_total` — the connection-risk
   backstop for the core-NATS hop.
-- loadgen's one-sided bound in a test window (`slo-measurement-map.md` §7).
+- loadgen's one-sided bound in a test window (`measurement-map.md` §7).
 
 **What you lose, specifically:**
 
@@ -156,7 +156,7 @@ signals survive.
    by N + 6. (Calibrated, not enforceable — see item 1.)
 5. **Every load-test verdict on 1b/2 stays one-sided.** A pass is conclusive; a
    miss is unattributable. Good enough for the first achievability run
-   (`slo-measurement-map.md` §7), not good enough for a release gate.
+   (`measurement-map.md` §7), not good enough for a release gate.
 
 **The honest summary:** without P2 you can still tell that something is wrong on
 the J1 delivery path. You cannot say *how often*, cannot set a budget, cannot
@@ -209,8 +209,8 @@ advisory completeness".
 
 ## 7. Sibling documents
 
-- [`slo-measurement-map.md`](slo-measurement-map.md) — every journey's path, hop by hop, and which instrument sits where
-- [`common/sli-slo.md`](common/sli-slo.md) §2, §8 — the SLO definitions and the roadmap line this spec implements
-- [`execution-priority-plan.md`](execution-priority-plan.md) — Track 1.1
-- [`extreme-scenarios.md`](extreme-scenarios.md) X9 — the delivery-budget scenario
+- [`measurement-map.md`](measurement-map.md) — every journey's path, hop by hop, and which instrument sits where
+- [`common/sli-slo.md`](../common/sli-slo.md) §2, §8 — the SLO definitions and the roadmap line this spec implements
+- [`execution-priority-plan.md`](../execution-priority-plan.md) — Track 1.1
+- [`extreme-scenarios.md`](../extreme-scenarios.md) X9 — the delivery-budget scenario
 - `docs/specs/o11y/nats-metrics-contract.md` — where every instrument must be registered

@@ -30,7 +30,7 @@ set in §3.5:
    has ever asserted against the production predicates. For five of the nine the
    counters genuinely do not exist yet; for the rest, including **SLO-1a, which is
    computable on `main` today**, nobody has looked. Hop-by-hop coverage:
-   [`slo-measurement-map.md`](slo-measurement-map.md).
+   [`measurement-map.md`](slo/measurement-map.md).
 2. **No ceiling exists for anything.** Both completed programs are
    non-destructive by design. Nothing has been ramped to a breach.
 3. **No extreme shape has been exercised.** See
@@ -77,7 +77,7 @@ What exists decides what can be *asserted*, not just what can be *driven*.
 | loadgen `soak` (Cassandra Run A + room/member/user/search/presence lanes, durable ledger) | **Exists** | Run A is implementation-ready; gated on environment only |
 | loadgen `daily`, `max-room-size`, `members-*`, `presence-*` | **Exists** | Track 2; `max-room-size --rooms-per-size=1` also serves 3.6 |
 | P1 — RPC server duration histogram | **Delivered.** #337 merged 2026-08-30 (`bf0ea62`), so `main` carries `rpc_server_call_duration_seconds{rpc_method, error_type}` with `channel_history` / `thread_open` as separate methods | SLO-4/5 become computable on merge — as a **server-side proxy**: the timer stops after `Respond`, so a server→client partition moves the SLI toward green. SLO-5's bound moved 300 ms → 250 ms and its target 99% → 95% to sit on a real bucket boundary |
-| P2 — J1 counters | **More present than the roadmap says.** `message_gatekeeper_messages_total{result="accepted"}` is the denominator and `message_worker_persistence_total{message_kind,result}` the SLO-1a numerator — **both on `main` today**. Missing: a `broadcast_path`-scoped denominator at the gatekeeper's publish site, a per-message channel enqueue counter, and the age histogram. #337 does not touch P2. Implementable brief: [`p2-implementation-task.md`](p2-implementation-task.md) | **SLO-1a is computable now** (with a `message_kind` filter). SLO-1b/2 remain unmeasurable, so a J1 run still gates on loadgen L1 E2E correlation for those two — a *different, downstream* boundary. Never report it as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md); full path coverage: [`slo-measurement-map.md`](slo-measurement-map.md) |
+| P2 — J1 counters | **More present than the roadmap says.** `message_gatekeeper_messages_total{result="accepted"}` is the denominator and `message_worker_persistence_total{message_kind,result}` the SLO-1a numerator — **both on `main` today**. Missing: a `broadcast_path`-scoped denominator at the gatekeeper's publish site, a per-message channel enqueue counter, and the age histogram. #337 does not touch P2. Implementable brief: [`p2-implementation-task.md`](slo/p2-implementation-task.md) | **SLO-1a is computable now** (with a `message_kind` filter). SLO-1b/2 remain unmeasurable, so a J1 run still gates on loadgen L1 E2E correlation for those two — a *different, downstream* boundary. Never report it as "SLO-2 passed". Scope and cost: [`p2-instrumentation-spec.md`](slo/p2-instrumentation-spec.md); full path coverage: [`measurement-map.md`](slo/measurement-map.md) |
 | `search_service_requests_total{kind,status}` | **Exists** | SLO-7 scorable (partial-failure only) |
 | `search_service_request_duration_seconds` `status` label (P4) | **Still absent after #337** — the PR adds `status` to the *counter*, but `durationOptFor(kind)` keeps the histogram on `kind` alone | SLO-8 client-side only (loadgen `--workload=search` scores it); not enforceable from production recording rules |
 | JetStream Prometheus exporter with `is_consumer_leader` filtering (P3) | Local overlay only (`nats-exporter` sidecar) | Backlog is the primary enforcement signal for every async SLO — a staging run without it has no backstop |
@@ -145,8 +145,8 @@ distribution a target is chosen *from*. Two consequences worth stating plainly:
 | # | Item | Why it is first | Output |
 |---|---|---|---|
 | **1.0** | **Write the SLO-1a recording rule against counters that already exist** | A rules change, not a code change: `message_worker_persistence_total` ÷ `message_gatekeeper_messages_total{result="accepted"}`. Puts a third of J1 into the calibration window immediately, weeks ahead of the rest | SLO-1a under observation |
-| **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces run-window numbers for **SLO-3/4/5/7**, an approximate indicator for **1a**, and a defensible one-sided bound for **1b/2**, with **no loadgen code change** (SLO-4/5 need #337 merged first): the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`slo-measurement-map.md`](slo-measurement-map.md) §7; operator runbook: [`first-slo-run-runbook.md`](first-slo-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
-| **1.1** | **Ship the remaining P2 work** (#337 landed, so P1 is done) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **four instrument families to add, one already exists, one to drop**, and **two carry a measurable hot-path cost** — an unconditional room-meta lookup in the gatekeeper and an unconditional `msg.Metadata()` parse in broadcast-worker, both of which the brief requires benchmarking. Scope, call sites, tests and acceptance: [`p2-implementation-task.md`](p2-implementation-task.md); rationale and the "what not to add" list: [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
+| **1.0b** | **First SLO-measuring run — loadgen as traffic source, production counters as the instrument** | Produces run-window numbers for **SLO-3/4/5/7**, an approximate indicator for **1a**, and a defensible one-sided bound for **1b/2**, with **no loadgen code change** (SLO-4/5 need #337 merged first): the docker-local overlay already scrapes the o11y SDK endpoint on every service plus a JetStream exporter. Answers the question calibration actually needs — *is the drafted target reachable at all* — before anyone commits to it. Method and per-SLO verdict: [`measurement-map.md`](slo/measurement-map.md) §7; operator runbook: [`first-run-runbook.md`](slo/first-run-runbook.md) | Achievability evidence for 7 of 9 SLOs |
+| **1.1** | **Ship the remaining P2 work** (#337 landed, so P1 is done) | SLO-1b and 2 remain unmeasurable, and SLO-2 has nothing even close — the existing processing histogram excludes the stream wait, which is the interval SLO-2 is about. After reading the code the work is smaller than the roadmap line suggests: **four instrument families to add, one already exists, one to drop**, and **two carry a measurable hot-path cost** — an unconditional room-meta lookup in the gatekeeper and an unconditional `msg.Metadata()` parse in broadcast-worker, both of which the brief requires benchmarking. Scope, call sites, tests and acceptance: [`p2-implementation-task.md`](slo/p2-implementation-task.md); rationale and the "what not to add" list: [`p2-instrumentation-spec.md`](slo/p2-instrumentation-spec.md) | SLO-1a/1b/2 become computable |
 | **1.2** | **Observational calibration window (4–6 weeks, sli-slo §0.2)** | Run the counters against *real staging traffic and the soak*, with **no paging**, and record the achieved distribution per SLI | The empirical p50/p95/p99 and good-ratio per journey |
 | **1.3** | **Set bounds and targets from 1.0b + 1.2, not from feel** | A target is defensible when it is (achieved distribution) − (headroom), with the error budget the business will actually tolerate, and a **bound that a histogram can actually compute**. Right now they are round numbers chosen by feel: #337 already moved SLO-5 onto a real bucket boundary (300 ms → 250 ms, 99% → 95%), but that fixed *computability*, not *defensibility* — nothing has yet shown 95% at 250 ms is reachable, and 1.0b exists to produce that evidence | Approved SLO bounds + targets, `Revisit date` filled in |
 | **1.4** | **SLO assertion mode in loadgen** (sli-slo §10 "required before *validates*") | Counts `eligible` / `good` / `missing-after-deadline` against the **production predicates** over isolated run-window deltas, with warm-up drain + baseline snapshot | Runs can gate on a **client-observed** ledger of logical messages instead of eyeballing. That is a different instrument from the production counters, and it is what G4 cannot be: loadgen knows which logical message it sent, so it has no redelivery double-count — what it lacks is the production boundary |
@@ -220,9 +220,9 @@ Answering *"what else before prod"*. These are not capacity questions; they are
 > **Identifiers used across these documents.** **Gn** — a gate: external work
 > with a named owner that blocks programme items (this section). **PRE-n** — a
 > precondition for one specific run, an operator checklist item
-> ([`first-slo-run-runbook.md`](first-slo-run-runbook.md) §1). **P1/P2/P3** — an
+> ([`first-run-runbook.md`](slo/first-run-runbook.md) §1). **P1/P2/P3** — an
 > instrumentation *priority tier*, i.e. how urgent a piece of missing telemetry
-> is ([`p2-instrumentation-spec.md`](p2-instrumentation-spec.md)). A gate and a
+> is ([`p2-instrumentation-spec.md`](slo/p2-instrumentation-spec.md)). A gate and a
 > precondition can name the same work: G1 is PRE-3, G2 is PRE-7.
 
 Gates are the schedulable unit for everything above that is blocked. Ordered by
@@ -237,7 +237,7 @@ so it now gates the first SLO run rather than following it. **G9 closed on
 code — it is G6.** The backlog observer that `t0-async` and `t2` depend on lives
 inside the loadgen pod and dies with it, so a run cannot mark either boundary
 without the JetStream exporter or an equivalent out-of-band reader
-([`first-slo-run-runbook.md`](first-slo-run-runbook.md) PRE-4). That is infra work,
+([`first-run-runbook.md`](slo/first-run-runbook.md) PRE-4). That is infra work,
 and it is now the thing standing between here and a first number.
 
 | Gate | Work | Unblocks | Owner |
@@ -245,7 +245,7 @@ and it is now the thing standing between here and a first number.
 | **G1** | Isolated staging tenant: dedicated `SITE_ID`, Mongo DB, Cassandra keyspace, NATS account | All of Track 2, every staging item in Track 3 | Infra + us |
 | **G2** ⬆ | Confirm workload-model inputs: I8 meaning, I10 scope, **I12**; and S1–S4 (fan-out, concurrent members, notification eligibility, cross-site share). Then split the soak presets three ways — `realistic`, `hot-room`, `stress` | **Now gates 1.0b**, not just B1/B3. At the chart defaults, I12 derives to **4 320 messages per active user per day** and the Zipf shape puts **20.8% of all sends into one room** (51% into ten). The soak's own `logSoakAssumptions` already logs this as `provisional: true`. A number measured under that shape is not "the system at expected load" | Product + infra |
 | **G3** | Managed pre-run coordination: peak load declared, blast radius recorded, abort thresholds agreed, L3 dashboards confirmed | Every staging run. **Now higher-stakes than before** — Track 2 ramps to a breach, unlike the two completed programs | Us → infra |
-| **G4** ⬆ | **P2 J1 counters — narrowed** (gatekeeper `messages_canonical_published_total{broadcast_path}` + `_duplicate_total`; broadcast-worker `broadcast_channel_enqueue_total{outcome}`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`). Implementable brief: [`p2-implementation-task.md`](p2-implementation-task.md) | Makes SLO-1a/1b/2 **computable and calibration-ready** in B1 — **not hard-gateable**. Every numerator here is consumer-side and counts *delivery attempts*, so compensating errors cancel: one logical message lost and another processed twice under a failed Ack reads as `good=2 / valid=2 = 100%`, with the backlog draining to zero and the P3 lag signal clean. A hard gate needs either **P7's logical-outcome dedup ledger**, or a per-window redelivery-bias bound that the window can actually produce — and where neither exists, the verdict is `INCONCLUSIVE`, not a number. Until then every J1 verdict stays loadgen-L1 observational | App |
+| **G4** ⬆ | **P2 J1 counters — narrowed** (gatekeeper `messages_canonical_published_total{broadcast_path}` + `_duplicate_total`; broadcast-worker `broadcast_channel_enqueue_total{outcome}`, `broadcast_channel_enqueue_age_seconds` from the JetStream metadata timestamp, `_age_invalid_total{reason}`). Implementable brief: [`p2-implementation-task.md`](slo/p2-implementation-task.md) | Makes SLO-1a/1b/2 **computable and calibration-ready** in B1 — **not hard-gateable**. Every numerator here is consumer-side and counts *delivery attempts*, so compensating errors cancel: one logical message lost and another processed twice under a failed Ack reads as `good=2 / valid=2 = 100%`, with the backlog draining to zero and the P3 lag signal clean. A hard gate needs either **P7's logical-outcome dedup ledger**, or a per-window redelivery-bias bound that the window can actually produce — and where neither exists, the verdict is `INCONCLUSIVE`, not a number. Until then every J1 verdict stays loadgen-L1 observational | App |
 | **G5** | Cassandra storage control: pick and verify **one** of — run-scoped disposable keyspace with snapshot clearing, or bounded TTL + storage budget (both over an isolated keyspace) | B4 (repeat runs), D3 | Owner decision + infra |
 | **G6** ⬆ | JetStream exporter on staging with `{is_consumer_leader="true"}` recording rules; custom oldest-pending-age monitor (P3) | The enforcement backstop for every async SLO in Tracks 1–3 — **and, since G9 closed, the blocker on Track 1.0b itself**: without it neither `t0-async` nor `t2` can be marked | Infra |
 | **G7** | ES: run-scoped index, named owner, expiry, verified teardown **and** an ES telemetry contract (shards, thread-pool rejection, circuit breaker, merge, watermarks) | D1 | Us |
@@ -306,7 +306,7 @@ These are not new criteria — they are the ones easiest to get wrong.
       run-to-run spread has not met it — the target is inside the environment's
       noise. This is sharper than the 10%-of-value bar above and catches cases
       that bar passes; both apply. Worked example:
-      [`first-slo-run-report.md`](first-slo-run-report.md) Part 4.
+      [`first-run-report.md`](slo/first-run-report.md) Part 4.
 
 ---
 
@@ -370,7 +370,7 @@ Added in rev 2, from the code review behind
 8. **`sli-slo.md` §8 lists SLO-1a's numerator as outstanding P2 work.**
    `message_worker_persistence_total{message_kind,result}` already exists and
    records at every persist site. Tracked in
-   [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) §1B.
+   [`p2-instrumentation-spec.md`](slo/p2-instrumentation-spec.md) §1B.
 9. **Every failure doc assumed `MaxDeliver=6` everywhere. Two services are much
    higher.** `message-worker` (`main.go:360`) and `broadcast-worker`
    (`main.go:558`) wrap their settings in `stream.WithOutageRetryBudget`, which
@@ -394,8 +394,8 @@ Added in rev 2, from the code review behind
 
 - [`README.md`](README.md) — program index
 - [`extreme-scenarios.md`](extreme-scenarios.md) — code-derived worst-case shapes (Track 3)
-- [`p2-instrumentation-spec.md`](p2-instrumentation-spec.md) — what to build for Track 1.1, and what deliberately not to build
-- [`slo-measurement-map.md`](slo-measurement-map.md) — every journey's path hop by hop, which instrument sits where, and which segments are dark
+- [`p2-instrumentation-spec.md`](slo/p2-instrumentation-spec.md) — what to build for Track 1.1, and what deliberately not to build
+- [`measurement-map.md`](slo/measurement-map.md) — every journey's path hop by hop, which instrument sits where, and which segments are dark
 - [`common/sli-slo.md`](common/sli-slo.md) — acceptance criteria
 - [`common/workload-model.md`](common/workload-model.md) — shared inputs (I1–I13)
 - [`common/environments-and-data-ownership.md`](common/environments-and-data-ownership.md) — what may be pushed, blast radius, cleanup
