@@ -21,6 +21,11 @@ var handshakeBuckets = []float64{
 	1.000, 2.500, 5.000, 7.500, 10.000, 15.000,
 }
 
+// reconnectAttemptBuckets straddle the client's backoff bands (2s to 5,
+// 5s to 10, exponential to 17, then flat), so a quantile says which band
+// the fleet is sitting in.
+var reconnectAttemptBuckets = []float64{1, 2, 3, 5, 8, 10, 14, 17, 25, 50, 100}
+
 var latencyBuckets = []float64{
 	0.001, 0.002, 0.005, 0.010, 0.025, 0.050,
 	0.100, 0.250, 0.500, 1.000, 2.500, 5.000,
@@ -42,11 +47,15 @@ type metrics struct {
 	// ConnsReadyMin is the low-water mark once the fleet has first reached
 	// its peak. Peak and the pre-drain snapshot are two instants; without a
 	// trough a fleet that collapsed mid-window and recovered looks perfect.
-	ConnsReadyMin    prometheus.Gauge
-	AuthDuration     prometheus.Histogram
-	ConnectDuration  prometheus.Histogram
-	Disconnects      *prometheus.CounterVec
-	Reconnects       prometheus.Counter
+	ConnsReadyMin   prometheus.Gauge
+	AuthDuration    prometheus.Histogram
+	ConnectDuration prometheus.Histogram
+	Disconnects     *prometheus.CounterVec
+	Reconnects      prometheus.Counter
+	// ReconnectAttempt records how deep into the backoff curve each
+	// successful reconnect went. The counter behind it only resets after the
+	// stability window, so a flapping fleet shows up here as a rising tail.
+	ReconnectAttempt prometheus.Histogram
 	JWTRefreshes     *prometheus.CounterVec
 	Delivered        *prometheus.CounterVec
 	BroadcastLatency prometheus.Histogram
@@ -60,7 +69,7 @@ type metrics struct {
 	SlowConsumer prometheus.Counter
 	AuthFailures prometheus.Counter
 	// Errors counts stage failures (stage: auth|connect|walk|resync|
-	// room_subscribe) so
+	// room_subscribe|async|conn_closed) so
 	// error RATE is queryable, not just grep-able from logs.
 	Errors  *prometheus.CounterVec
 	RunInfo *prometheus.GaugeVec
@@ -161,7 +170,11 @@ func newMetrics() *metrics {
 		ConnectDuration: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "clientsim_connect_duration_seconds", Help: "NATS WebSocket connect duration.", Buckets: handshakeBuckets}),
 		Disconnects:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_disconnects_total", Help: "Disconnections by reason."}, []string{"reason"}),
 		Reconnects:      prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_reconnects_total", Help: "Successful reconnects."}),
-		JWTRefreshes:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_jwt_refreshes_total", Help: "JWT re-mints by lifecycle mode."}, []string{"mode"}),
+		ReconnectAttempt: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "clientsim_reconnect_attempt", Buckets: reconnectAttemptBuckets,
+			Help: "Attempt number each successful reconnect landed on; the counter resets only after the stability window, so this is the depth into the backoff curve.",
+		}),
+		JWTRefreshes: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_jwt_refreshes_total", Help: "JWT re-mints by lifecycle mode."}, []string{"mode"}),
 		Delivered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "clientsim_msgs_delivered_total",
 			Help: "Fan-out copies received, by lane (user | channel | member). Per-connection copies — NOT comparable to loadgen's logical send counters.",
@@ -187,7 +200,7 @@ func newMetrics() *metrics {
 	r.MustRegister(
 		m.ConnsActive, m.ConnsConnecting, m.ConnsReady, m.ConnsReadyPeak, m.ConnsReadyMin,
 		m.AuthDuration, m.ConnectDuration,
-		m.Disconnects, m.Reconnects, m.JWTRefreshes, m.Delivered,
+		m.Disconnects, m.Reconnects, m.ReconnectAttempt, m.JWTRefreshes, m.Delivered,
 		m.BroadcastLatency, m.CanonicalLatency,
 		m.DecodeFailures, m.InvalidTimestamp, m.SlowConsumer,
 		m.AuthFailures, m.Errors, m.RunInfo,

@@ -105,7 +105,7 @@ func run(ctx context.Context) error {
 
 	mintClient := newAuthClient(cfg.AuthURL, devProvider{}, m)
 	factory := func(account string) (runnable, error) {
-		return newSimClient(account, &cfg, mintClient, m)
+		return newSimClient(account, pool.RunID, &cfg, mintClient, m)
 	}
 
 	// Snapshot readiness at the shutdown boundary, then propagate the caller's

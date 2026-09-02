@@ -63,3 +63,58 @@ func TestSimClient_RunFailsCleanlyWhenWalkFails(t *testing.T) {
 	assert.Equal(t, int64(1), fc.closes.Load(), "a failed startup must not leave a zombie conn")
 	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsActive), 0.001)
 }
+
+func TestSimClient_HealthCheckExitsOnAPermanentlyClosedConnection(t *testing.T) {
+	// nats.go closes a connection for good after repeated auth failures even
+	// with MaxReconnects(-1). Without the health tick run() would sit in hold
+	// forever holding a dead socket: never ready, never reported as exited,
+	// so the swarm never restarts it and the fleet silently shrinks.
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.healthInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.run(ctx) }()
+
+	require.Eventually(t, func() bool { return s.connSnapshot() != nil }, 3*time.Second, 5*time.Millisecond)
+	fc.closed.Store(true)
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a permanently closed connection must end the client, not park it")
+		assert.Contains(t, err.Error(), "closed permanently")
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return after the connection was closed permanently")
+	}
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("conn_closed")), 0.001)
+}
+
+func TestSimClient_HealthCheckLeavesAReconnectingConnectionAlone(t *testing.T) {
+	// nats.ws reports isClosed()=false while it is still retrying, and the
+	// real client treats that as alive so the health check never shortcuts
+	// the backoff curve.
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.healthInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.run(ctx) }()
+
+	require.Eventually(t, func() bool { return s.connSnapshot() != nil }, 3*time.Second, 5*time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("health check ended a live client: %v", err)
+	case <-time.After(100 * time.Millisecond): // many ticks, no exit
+	}
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit on cancel")
+	}
+}

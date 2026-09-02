@@ -69,7 +69,7 @@ func TestSimClient_EndToEnd_WSSubscribeWalkAndCount(t *testing.T) {
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 	}
 	m := newMetrics()
-	sc, err := newSimClient(account, &cfg, fixedMinter{jwt: mintTestJWT(t, time.Now().Add(time.Hour))}, m)
+	sc, err := newSimClient(account, "run-integration", &cfg, fixedMinter{jwt: mintTestJWT(t, time.Now().Add(time.Hour))}, m)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -30,6 +30,11 @@ type simConn interface {
 	SubscribeChan(subj string, ch chan *nats.Msg) (simSub, error)
 	Request(ctx context.Context, subj string, data []byte) (*nats.Msg, error)
 	ForceReconnect() error
+	// IsClosed reports a permanently closed connection. With
+	// MaxReconnects(-1) nats.go never gives up on its own, so this is only
+	// true once it has closed the connection for good (repeated auth
+	// failures) — the health check's whole purpose.
+	IsClosed() bool
 	Close()
 }
 
@@ -65,22 +70,68 @@ func (r *realConn) Request(ctx context.Context, subj string, data []byte) (*nats
 }
 
 func (r *realConn) ForceReconnect() error { return r.nc.ForceReconnect() }
+func (r *realConn) IsClosed() bool        { return r.nc.IsClosed() }
 func (r *realConn) Close()                { r.nc.Close() }
+
+// connNamePrefix is the whole ops-facing contract: a connection whose name
+// starts with this is a simulated one. Deliberately not configurable —
+// a knob here would let a fleet disguise itself as real traffic.
+const connNamePrefix = "clientsim-"
+
+// connName mirrors the desktop client's desktop-{account}[-{hostname}]
+// shape, so tooling that splits on the first dash keeps working while the
+// leading token still tells the two apart. The run and shard take the slot
+// hostname occupies for a real client: together they say which load run and
+// which replica a connection in /connz belongs to.
+func connName(account, runID string, shardIndex int) string {
+	return fmt.Sprintf("%s%s-%s-s%d", connNamePrefix, account, runID, shardIndex)
+}
+
+// reconnectBackoffBase is the nats.ws client's curve, band for band:
+// attempts 1-5 wait 2s, 6-10 wait 5s, 11+ double from 10s to a 60s cap,
+// and everything past that long-polls at 60s. nats.go's own ReconnectWait
+// is a single flat delay, so a fleet using it would hammer a recovering
+// broker far harder than the real one does.
+func reconnectBackoffBase(attempt int) time.Duration {
+	const cap60 = 60 * time.Second
+	switch {
+	case attempt <= 5:
+		return 2 * time.Second
+	case attempt <= 10:
+		return 5 * time.Second
+	case attempt >= 14:
+		return cap60
+	default:
+		// 11 -> 10s, 12 -> 20s, 13 -> 40s.
+		return 10 * time.Second << (attempt - 11)
+	}
+}
+
+// reconnectDelay adds the client's jitter: up to +50%, never negative, so
+// the band floor is preserved while a fleet does not retry in lockstep.
+func reconnectDelay(attempt int) time.Duration {
+	base := reconnectBackoffBase(attempt)
+	return base + time.Duration(secureIntN(int(base/2)))
+}
 
 // realDial opens the production WebSocket connection.
 func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 	nc, err := nats.Connect(s.cfg.NATSWSURL,
 		nats.UserJWT(s.userCB, s.sigCB),
+		nats.Name(connName(s.account, s.runID, s.cfg.ShardIndex)),
 		nats.MaxReconnects(-1),
 		nats.ReconnectBufSize(s.cfg.ReconnectBufBytes),
 		nats.PingInterval(s.cfg.PingInterval),
-		// Spread the herd: 10k clients reconnecting after a NATS bounce
-		// must not re-dial (and, in expiry mode, re-mint) in lockstep.
-		nats.ReconnectWait(2*time.Second),
-		nats.ReconnectJitter(2*time.Second, 2*time.Second),
+		// Supersedes ReconnectWait/ReconnectJitter: the attempt counter is
+		// ours, not nats.go's, because nats.go resets its own on the first
+		// successful reconnect and the real client only resets after five
+		// minutes of stability.
+		nats.CustomReconnectDelay(s.nextReconnectDelay),
 		nats.ReconnectHandler(func(_ *nats.Conn) {
 			s.m.Reconnects.Inc()
+			s.m.ReconnectAttempt.Observe(float64(s.currentReconnectAttempt()))
 			s.markConnUp()
+			s.armStability()
 			go s.resync(ctx)
 		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
@@ -95,6 +146,9 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 			// Separate calls, not one nested helper: invalidatePlan takes
 			// s.mu and markConnDown holds stateMu, and the lock order forbids
 			// stateMu -> s.mu.
+			// A reconnect that did not survive the stability window leaves the
+			// attempt counter where it is, so a flapping link climbs the curve.
+			s.cancelStability()
 			s.invalidatePlan()
 			// Without this the active gauge would sit at full fleet for the
 			// whole outage — the exact reading a failure test must not get.
@@ -108,6 +162,14 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 		return nil, err
 	}
 	return &realConn{nc: nc, pendingMsgs: s.cfg.SubPendingMsgs, pendingBytes: s.cfg.SubPendingBytes}, nil
+}
+
+// nextReconnectDelay is nats.go's CustomReconnectDelay callback. Its own
+// attempt argument is ignored: nats.go resets that counter on the first
+// successful reconnect, and the real client only resets after the stability
+// window, so the fleet must carry its own.
+func (s *simClient) nextReconnectDelay(int) time.Duration {
+	return reconnectDelay(s.nextReconnectAttempt())
 }
 
 func (s *simClient) handleAsyncError(err error) {

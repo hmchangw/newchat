@@ -18,6 +18,7 @@ import (
 // never diverge and a failed open is retried by the next add/resync.
 type simClient struct {
 	account string
+	runID   string // from the pool artifact; only ever used in the conn name
 	cfg     *config
 	mint    minter
 	m       *metrics
@@ -64,12 +65,80 @@ type simClient struct {
 	// (subscriptions.go does exactly that when a failed room subscribe
 	// demotes readiness); the reverse must never happen, and nothing under
 	// stateMu takes s.mu today.
+	// reconnectMu guards the reconnect-attempt counter and its stability
+	// timer. Separate again from s.mu: nats.go asks for the next delay from
+	// its own reconnect goroutine, which must not queue behind a walk.
+	reconnectMu       sync.Mutex
+	reconnectAttempts int
+	stabilityTimer    *time.Timer
+	// stabilityGen invalidates a timer whose episode has already ended, so a
+	// late fire cannot reset a counter that has moved on.
+	stabilityGen    uint64
+	stabilityWindow time.Duration
+	healthInterval  time.Duration
+
 	stateMu sync.Mutex
 	connUp  bool
 	ready   bool
 }
 
-func newSimClient(account string, cfg *config, mint minter, m *metrics) (*simClient, error) {
+// stabilityWindow / healthInterval defaults, matching the real client: a
+// reconnect counts as recovered only after five uninterrupted minutes, and
+// a three-minute tick is what notices a connection nats.go gave up on.
+const (
+	defaultStabilityWindow = 5 * time.Minute
+	defaultHealthInterval  = 3 * time.Minute
+)
+
+// nextReconnectAttempt advances and returns the attempt number nats.go's
+// delay callback should price. It is never reset by a successful reconnect
+// alone — only armStability's window does that.
+func (s *simClient) nextReconnectAttempt() int {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	s.reconnectAttempts++
+	return s.reconnectAttempts
+}
+
+func (s *simClient) currentReconnectAttempt() int {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	return s.reconnectAttempts
+}
+
+// armStability starts the window after a successful reconnect. Surviving it
+// resets the attempt counter; dropping first does not.
+func (s *simClient) armStability() {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	s.stabilityGen++
+	gen := s.stabilityGen
+	if s.stabilityTimer != nil {
+		s.stabilityTimer.Stop()
+	}
+	s.stabilityTimer = time.AfterFunc(s.stabilityWindow, func() {
+		s.reconnectMu.Lock()
+		defer s.reconnectMu.Unlock()
+		if s.stabilityGen != gen {
+			return // this episode ended; a newer one owns the counter
+		}
+		s.reconnectAttempts = 0
+	})
+}
+
+// cancelStability ends the current episode. Bumping the generation is what
+// makes an already-firing timer a no-op, which Stop alone cannot guarantee.
+func (s *simClient) cancelStability() {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	s.stabilityGen++
+	if s.stabilityTimer != nil {
+		s.stabilityTimer.Stop()
+		s.stabilityTimer = nil
+	}
+}
+
+func newSimClient(account, runID string, cfg *config, mint minter, m *metrics) (*simClient, error) {
 	kp, err := nkeys.CreateUser()
 	if err != nil {
 		return nil, fmt.Errorf("create user nkey for %s: %w", account, err)
@@ -80,6 +149,7 @@ func newSimClient(account string, cfg *config, mint minter, m *metrics) (*simCli
 	}
 	s := &simClient{
 		account:      account,
+		runID:        runID,
 		cfg:          cfg,
 		mint:         mint,
 		m:            m,
@@ -89,6 +159,9 @@ func newSimClient(account string, cfg *config, mint minter, m *metrics) (*simCli
 		missingRooms: map[string]struct{}{},
 		touched:      map[string]uint64{},
 		roomCh:       make(chan *nats.Msg, cfg.SubPendingMsgs),
+
+		stabilityWindow: defaultStabilityWindow,
+		healthInterval:  defaultHealthInterval,
 	}
 	s.dial = s.realDial
 	s.resyncJitter = func() time.Duration {
@@ -140,10 +213,48 @@ func (s *simClient) run(ctx context.Context) error {
 		return err
 	}
 
-	if s.cfg.JWTMode == jwtModeProactive {
-		s.proactiveRefreshLoop(ctx)
-	} else {
-		<-ctx.Done()
+	return s.hold(ctx)
+}
+
+// hold is the steady state: the JWT refresh schedule and the health check on
+// one goroutine, so neither costs a per-client goroutine of its own.
+//
+// The health check is what keeps a client from becoming a zombie. nats.go
+// closes a connection for good after repeated auth failures even with
+// MaxReconnects(-1); before this, run() would sit here forever with a dead
+// connection, never reporting an exit, so the swarm never restarted it and
+// the fleet silently shrank.
+func (s *simClient) hold(ctx context.Context) error {
+	health := time.NewTicker(s.healthInterval)
+	defer health.Stop()
+	for {
+		var refresh <-chan time.Time
+		var timer *time.Timer
+		if s.cfg.JWTMode == jwtModeProactive {
+			timer = time.NewTimer(s.nextRefreshDelay())
+			refresh = timer.C
+		}
+		select {
+		case <-ctx.Done():
+			stopTimer(timer)
+			return nil
+		case <-health.C:
+			stopTimer(timer)
+			if conn := s.connSnapshot(); conn != nil && conn.IsClosed() {
+				s.m.Errors.WithLabelValues("conn_closed").Inc()
+				// Returning hands the account back to the swarm, which
+				// restarts it at the ramp rate — a far longer wait than the
+				// 60s backoff ceiling, which is the point.
+				return fmt.Errorf("connection for %s was closed permanently", s.account)
+			}
+		case <-refresh:
+			s.refreshAndReconnect(ctx)
+		}
 	}
-	return nil
+}
+
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
+	}
 }

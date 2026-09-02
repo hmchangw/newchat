@@ -68,6 +68,7 @@ func TestNewMetrics_RegistersAllSeries(t *testing.T) {
 		"clientsim_disconnects_total",
 		"clientsim_reconnects_total",
 		"clientsim_jwt_refreshes_total",
+		"clientsim_reconnect_attempt",
 		"clientsim_msgs_delivered_total",
 		"clientsim_broadcast_to_client_latency_seconds",
 		"clientsim_canonical_to_client_latency_seconds",

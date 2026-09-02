@@ -3,10 +3,18 @@
 Real-WSS connection soak tool. Per simulated user it walks the full
 production client edge path — NKey generation → `POST /api/v1/auth` (via a
 dev-mode side issuer) → NATS **WebSocket** connect with the minted user JWT
-→ the frontend's subscription walk (user event lane + paginated
-`subscription.list` + per-room channel subscriptions, kept live via
-`subscription.update`) — then holds the connection, counting deliveries and
-observing client-edge latency.
+→ the client's subscription walk (user event lane + paginated
+`subscription.list` + per-room subscriptions on both the message and member
+lanes, kept live via `subscription.update`) — then holds the connection,
+counting deliveries and observing client-edge latency.
+
+**Two fidelity gaps, both deliberate.** The real client fetches its
+subscription list over `GET /api/v1/subscriptions` and falls back to the
+NATS RPC; that route requires an `ssoToken` (or a bot session), which the
+dev-mode auth exchange does not issue, so clientsim exercises the **fallback
+path only** — the HTTP primary is not covered. And presence
+(`chat.user.{account}.event.presence.{siteID}.*`) is not emitted at all; it
+currently lives in `tools/loadgen`.
 
 Design: `docs/superpowers/specs/2026-08-29-clientsim-design.md`.
 Companion to `tools/loadgen` (which generates the traffic); the only data
@@ -89,11 +97,59 @@ connection (~640 MiB at 10k), plus ~17 KiB of TLS state for `wss://`. The
 shared room channel is ~4 KiB by comparison. Budget for the connection, not
 for the queue.
 
+## Connection identity
+
+Every connection sets a NATS name so a simulated fleet is never mistaken for
+real traffic in `/connz` or `$SYS`:
+
+```
+clientsim-{account}-{runId}-s{shardIndex}
+```
+
+It mirrors the desktop client's `desktop-{account}[-{hostname}]` shape, so
+tooling that splits on the first dash keeps working. The `clientsim-` prefix
+is the whole contract — filter on it — and it is deliberately **not**
+configurable: a knob there would let a fleet disguise itself.
+
+## Reconnect behaviour
+
+Matched to the real client's `nats.ws` curve rather than nats.go's flat
+`ReconnectWait`, because a fleet that retries every 2 s would hammer a
+recovering broker far harder than production does.
+
+| attempt | delay (before jitter) |
+|---|---|
+| 1–5 | 2s |
+| 6–10 | 5s |
+| 11–13 | 10s → 20s → 40s |
+| 14+ | 60s |
+
+Jitter adds up to +50%, never subtracts. `MaxReconnects` is unlimited.
+
+The attempt counter is **ours, not nats.go's**: nats.go resets its own on
+the first successful reconnect, whereas the real client only resets after
+five uninterrupted minutes (`stability window`). A link that flaps every
+minute therefore keeps climbing the curve, as it should.
+
+A three-minute health tick checks whether nats.go has closed the connection
+for good — it does that after repeated auth failures even with unlimited
+reconnects. A client in that state ends its run and the swarm restarts it at
+the ramp rate, which is a far longer wait than the 60 s ceiling. Without
+this the client would hold a dead socket forever: never ready, never
+reported as exited, so the fleet would silently shrink.
+
 ## Reading the metrics
 
 - `clientsim_msgs_delivered_total{lane}` counts **per-connection fan-out
   copies** — a different unit from loadgen's logical send counters; the two
   sit side by side as diagnostics and are never divided into a loss ratio.
+  The lanes are `user` (`chat.user.{account}.event.room`, which carries all
+  DM and thread traffic), `channel` (`chat.room.{id}.event`) and `member`
+  (`chat.room.{id}.event.member`).
+- `clientsim_reconnect_attempt` is how deep into the backoff curve each
+  successful reconnect landed. The counter behind it resets only after the
+  stability window, so a flapping link shows up as a rising tail rather than
+  as a flat series of first attempts.
 - `clientsim_broadcast_to_client_latency_seconds` (receive −
   `RoomEvent.Timestamp`) and `clientsim_canonical_to_client_latency_seconds`
   (receive − `EventTimestamp`) span hosts and carry inter-host clock skew:

@@ -76,9 +76,18 @@ func newTestSimClient(t *testing.T, account, mode string, mint minter) *simClien
 		SubPendingMsgs: 512, SubPendingBytes: 1 << 20,
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 	}
-	sc, err := newSimClient(account, cfg, mint, newMetrics())
+	sc, err := newSimClient(account, "run-test", cfg, mint, newMetrics())
 	require.NoError(t, err)
+	// Tests drive these explicitly; the production defaults are minutes long.
+	sc.healthInterval = time.Hour
 	return sc
+}
+
+// reconnectAttemptsForTest reads the counter the stability window resets.
+func (s *simClient) reconnectAttemptsForTest() int {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	return s.reconnectAttempts
 }
 
 type fakeSub struct{ unsubs atomic.Int64 }
@@ -107,6 +116,7 @@ type fakeConn struct {
 	subChanErrOn    map[string]error // persistent per-subject SubscribeChan failures
 	forceReconnects atomic.Int64
 	closes          atomic.Int64
+	closed          atomic.Bool // what IsClosed reports, set by tests
 }
 
 func newFakeConn(pages ...subListPage) *fakeConn {
@@ -199,6 +209,8 @@ func (f *fakeConn) failSubscribeChanOn(subj string, err error) {
 }
 
 func (f *fakeConn) ForceReconnect() error { f.forceReconnects.Add(1); return nil }
+
+func (f *fakeConn) IsClosed() bool { return f.closed.Load() }
 
 func (f *fakeConn) Close() { f.closes.Add(1) }
 

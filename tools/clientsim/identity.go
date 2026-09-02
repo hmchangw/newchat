@@ -106,36 +106,31 @@ func (s *simClient) sigCB(nonce []byte) ([]byte, error) {
 	return s.nkeyPair.Sign(nonce)
 }
 
-// proactiveRefreshLoop re-mints at ~80% ±5% of the JWT's remaining life,
-// then forces a reconnect so the fresh JWT is presented (frontend parity).
-func (s *simClient) proactiveRefreshLoop(ctx context.Context) {
-	for {
-		_, expiresAt := s.cache.get()
-		var delay time.Duration
-		if expiresAt.IsZero() {
-			delay = time.Hour // no expiry claim: idle heartbeat re-check
-		} else {
-			delay = refreshDelay(expiresAt, time.Now(), secureFloat64)
-			if delay <= 0 {
-				delay = time.Second
-			}
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-		if err := s.refreshJWT(ctx); err != nil {
-			s.m.Errors.WithLabelValues("auth").Inc()
-			slog.Warn("proactive JWT refresh", "account", s.account, "error", err)
-			continue // retry on the next loop pass
-		}
-		if conn := s.connSnapshot(); conn != nil {
-			if err := conn.ForceReconnect(); err != nil {
-				slog.Warn("force reconnect after refresh", "account", s.account, "error", err)
-			}
+// nextRefreshDelay is the frontend's proactive schedule for the cached JWT.
+// A token with no expiry claim gets an idle re-check rather than a busy loop.
+func (s *simClient) nextRefreshDelay() time.Duration {
+	_, expiresAt := s.cache.get()
+	if expiresAt.IsZero() {
+		return time.Hour
+	}
+	if delay := refreshDelay(expiresAt, time.Now(), secureFloat64); delay > 0 {
+		return delay
+	}
+	return time.Second
+}
+
+// refreshAndReconnect re-mints and then forces a reconnect so the fresh JWT
+// is presented (frontend parity). A failed mint is counted and left for the
+// next tick — the cached token is still valid until its own expiry.
+func (s *simClient) refreshAndReconnect(ctx context.Context) {
+	if err := s.refreshJWT(ctx); err != nil {
+		s.m.Errors.WithLabelValues("auth").Inc()
+		slog.Warn("proactive JWT refresh", "account", s.account, "error", err)
+		return
+	}
+	if conn := s.connSnapshot(); conn != nil {
+		if err := conn.ForceReconnect(); err != nil {
+			slog.Warn("force reconnect after refresh", "account", s.account, "error", err)
 		}
 	}
 }
