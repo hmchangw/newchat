@@ -824,8 +824,8 @@ func TestCollections_FilterSubjectsAreCapturedByTheirStream(t *testing.T) {
 			require.NotEmpty(t, streamCfg.Subjects, "a collection must name the stream it binds")
 
 			for _, f := range filters {
-				assert.True(t, anySubjectCovers(streamCfg.Subjects, f),
-					"consumer %q filters on %q, which no subject of its stream %q (%v) captures — "+
+				assert.True(t, anySubjectIntersects(streamCfg.Subjects, f),
+					"consumer %q filters on %q, which shares no subject with its stream %q (%v) — "+
 						"the consumer would match nothing and index nothing, silently",
 					tt.coll.ConsumerName(), f, streamCfg.Name, streamCfg.Subjects)
 			}
@@ -833,31 +833,76 @@ func TestCollections_FilterSubjectsAreCapturedByTheirStream(t *testing.T) {
 	}
 }
 
-func TestSubjectCovers(t *testing.T) {
+// bot-room-service/sysmsg.go publishes a bare model.Message on the bot canonical
+// subject this collection now consumes. It must be skipped as filtered, not
+// Ack-dropped as poison — the error log per membership change would be the only
+// trace, and it would mean nothing.
+func TestMessageCollection_BuildAction_BareSystemMessageIsFiltered(t *testing.T) {
+	bare := func(id, msgType string) []byte {
+		b, err := json.Marshal(model.Message{
+			ID: id, RoomID: "room1", UserID: "u1", Type: msgType,
+			CreatedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+		return b
+	}
 	tests := []struct {
 		name    string
-		pattern string
-		filter  string
-		want    bool
+		data    []byte
+		wantErr string
 	}{
-		{"exact match", "chat.bot.canonical.s.created", "chat.bot.canonical.s.created", true},
-		{"tail wildcard covers a single-token filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.*", true},
-		{"tail wildcard covers a literal leaf", "chat.bot.canonical.s.>", "chat.bot.canonical.s.created", true},
-		{"tail wildcard covers a deeper filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.a.b", true},
-		{"token wildcard covers one token", "chat.msg.canonical.*.created", "chat.msg.canonical.s.created", true},
-		{"token wildcard covers a wildcard token", "chat.msg.canonical.*.created", "chat.msg.canonical.*.created", true},
-
-		{"the bug: different tree is not covered", "chat.bot.canonical.s.>", "chat.msg.canonical.s.*", false},
-		{"different site is not covered", "chat.bot.canonical.s.>", "chat.bot.canonical.other.*", false},
-		{"shorter filter is not covered", "chat.bot.canonical.s.>", "chat.bot.canonical", false},
-		{"token wildcard does not span two tokens", "chat.msg.canonical.*.created", "chat.msg.canonical.a.b.created", false},
-		{"token wildcard does not cover a tail wildcard", "chat.msg.canonical.*.created", "chat.msg.canonical.>", false},
-		{"deeper filter without a tail wildcard is not covered", "chat.a.b", "chat.a.b.c", false},
-		{"empty filter is not covered", "chat.a.>", "", false},
+		{"bare members_added is filtered", bare("m1", model.MessageTypeMembersAdded), ""},
+		{"bare member_removed is filtered", bare("m2", model.MessageTypeMemberRemoved), ""},
+		// Only the system shape is tolerated: a bare ORDINARY message means a
+		// publisher skipped the envelope, which must stay loud.
+		{"bare ordinary message is still poison", bare("m3", ""), "missing message id"},
+		{"an empty envelope is still poison", []byte(`{}`), "missing message id"},
+		{"malformed json is still an error", []byte(`{`), "unmarshal message event"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, subjectCovers(tt.pattern, tt.filter))
+			actions, err := newBotMessageCollection("chat", false).BuildAction(tt.data)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Empty(t, actions, "system messages are not indexable content")
+		})
+	}
+}
+
+func TestSubjectsIntersect(t *testing.T) {
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{"exact match", "chat.bot.canonical.s.created", "chat.bot.canonical.s.created", true},
+		{"tail wildcard meets a single-token filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.*", true},
+		{"tail wildcard meets a literal leaf", "chat.bot.canonical.s.>", "chat.bot.canonical.s.created", true},
+		{"tail wildcard meets a deeper filter", "chat.bot.canonical.s.>", "chat.bot.canonical.s.a.b", true},
+		{"token wildcard meets one token", "chat.msg.canonical.*.created", "chat.msg.canonical.s.created", true},
+		{"token wildcard meets a wildcard token", "chat.msg.canonical.*.created", "chat.msg.canonical.*.created", true},
+		// A filter may be broader than the stream in places and still consume it:
+		// overlap is the question, not containment.
+		{"a literal stream leaf meets a wildcard filter", "chat.events.created", "chat.events.*", true},
+		{"a token wildcard meets a tail wildcard", "chat.msg.canonical.*.created", "chat.msg.canonical.>", true},
+		{"overlap is symmetric", "chat.events.*", "chat.events.created", true},
+
+		{"the bug: a different tree never overlaps", "chat.bot.canonical.s.>", "chat.msg.canonical.s.*", false},
+		{"a different site never overlaps", "chat.bot.canonical.s.>", "chat.bot.canonical.other.*", false},
+		{"a filter too short for the stream never overlaps", "chat.bot.canonical.s.>", "chat.bot.canonical", false},
+		{"a token wildcard does not span two tokens", "chat.msg.canonical.*.created", "chat.msg.canonical.a.b.created", false},
+		{"a deeper filter with no tail wildcard never overlaps", "chat.a.b", "chat.a.b.c", false},
+		{"an empty filter never overlaps", "chat.a.>", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, subjectsIntersect(tt.a, tt.b))
+			assert.Equal(t, tt.want, subjectsIntersect(tt.b, tt.a), "intersection must be symmetric")
 		})
 	}
 }

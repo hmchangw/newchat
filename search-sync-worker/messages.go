@@ -204,6 +204,16 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	if err := json.Unmarshal(data, &evt); err != nil {
 		return nil, fmt.Errorf("unmarshal message event: %w", err)
 	}
+	// bot-room-service/sysmsg.go publishes a BARE model.Message on the same
+	// canonical subject as the MessageEvent envelope every other publisher uses
+	// (its own comment states the wire shape). It carries no "message" key, so it
+	// decodes into an empty event and would fail the id check below — Ack-dropped
+	// as poison with an error log per membership change. It is a system message,
+	// and those are not indexed either way, so account for it as filtered rather
+	// than as corruption. Anything else that decodes empty stays poison.
+	if evt.Message.ID == "" && isBareSystemMessage(data) {
+		return nil, nil
+	}
 	if evt.Message.ID == "" {
 		return nil, fmt.Errorf("build message action: missing message id")
 	}
@@ -229,6 +239,17 @@ func (c *messageCollection) BuildAction(data []byte) ([]searchengine.BulkAction,
 	}
 	c.resolveThreadParentCreatedAt(&evt)
 	return []searchengine.BulkAction{buildMessageAction(&evt, c.indexPrefix)}, nil
+}
+
+// isBareSystemMessage reports whether data is a bare model.Message carrying a
+// system message type, rather than the MessageEvent envelope. A bare message of
+// any OTHER type is still a publisher bug worth surfacing, so it stays poison.
+func isBareSystemMessage(data []byte) bool {
+	var m model.Message
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	return m.ID != "" && model.IsSystemMessageType(m.Type)
 }
 
 // resolveThreadParentCreatedAt fills the parent createdAt for a thread reply; the gatekeeper's
