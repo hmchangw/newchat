@@ -308,7 +308,7 @@ func (h *Handler) handleThreadCreated(ctx context.Context, evt *model.MessageEve
 	parsed := mention.Parse(msg.Content)
 
 	// Fetch room type first so DM/BotDM rooms skip the thread-subscription query
-	// entirely — their fan-out uses ListRoomMembers, not thread subscribers.
+	// entirely — their fan-out uses ListSubscriptions, not thread subscribers.
 	meta, err := h.store.GetRoomMeta(ctx, msg.RoomID)
 	if err != nil {
 		return fmt.Errorf("get room meta %s: %w", msg.RoomID, err)
@@ -1145,12 +1145,11 @@ func debugTraceDelivered(ctx context.Context, account, roomID string) {
 func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta, clientMsg *model.ClientMessage, timestamp int64, mentionedAccounts []string, roomEventType model.RoomEventType) error {
 	labels := broadcastLabels(ctx)
 	ctx = withBroadcastMetricLabels(ctx, roomKind(meta.Type), labels.eventType)
-	// Cache-fronted: a DM's membership is fixed at its two participants for the
-	// room's lifetime, so TTL staleness cannot misroute here — and a warm entry
-	// keeps DMs flowing when Mongo is down.
-	subs, err := h.store.ListRoomMembers(ctx, meta.ID)
+	// Read straight from Mongo so callers see whole subscription documents.
+	// This read gates DM delivery: a Mongo outage stops DM fan-out entirely.
+	subs, err := h.store.ListSubscriptions(ctx, meta.ID)
 	if err != nil {
-		return fmt.Errorf("list members for DM room %s: %w", meta.ID, err)
+		return fmt.Errorf("list subscriptions for DM room %s: %w", meta.ID, err)
 	}
 
 	mentionSet := make(map[string]struct{}, len(mentionedAccounts))
@@ -1160,7 +1159,7 @@ func (h *Handler) publishDMEvents(ctx context.Context, meta *roommetacache.Meta,
 
 	recipients, failed := 0, 0
 	for i := range subs {
-		account := subs[i].Account
+		account := subs[i].User.Account
 		// Skip bots: live UI events go to human clients only, consistent with
 		// publishMutation and publishThreadMetadata. Bots receive messages via
 		// their own server-side integration, not the websocket event channel.

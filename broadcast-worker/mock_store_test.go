@@ -16,7 +16,6 @@ import (
 
 	model "github.com/hmchangw/chat/pkg/model"
 	roommetacache "github.com/hmchangw/chat/pkg/roommetacache"
-	roomsubcache "github.com/hmchangw/chat/pkg/roomsubcache"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -104,17 +103,17 @@ func (mr *MockStoreMockRecorder) GetThreadFollowers(ctx, parentMessageID any) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetThreadFollowers", reflect.TypeOf((*MockStore)(nil).GetThreadFollowers), ctx, parentMessageID)
 }
 
-// ListRoomMembers mocks base method.
-func (m *MockStore) ListRoomMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
+// ListSubscriptions mocks base method.
+func (m *MockStore) ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ListRoomMembers", ctx, roomID)
-	ret0, _ := ret[0].([]roomsubcache.Member)
+	ret := m.ctrl.Call(m, "ListSubscriptions", ctx, roomID)
+	ret0, _ := ret[0].([]model.Subscription)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// ListRoomMembers indicates an expected call of ListRoomMembers.
-func (mr *MockStoreMockRecorder) ListRoomMembers(ctx, roomID any) *gomock.Call {
+// ListSubscriptions indicates an expected call of ListSubscriptions.
+func (mr *MockStoreMockRecorder) ListSubscriptions(ctx, roomID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListRoomMembers", reflect.TypeOf((*MockStore)(nil).ListRoomMembers), ctx, roomID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListSubscriptions", reflect.TypeOf((*MockStore)(nil).ListSubscriptions), ctx, roomID)
 }

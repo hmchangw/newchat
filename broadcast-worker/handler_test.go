@@ -27,7 +27,6 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomcrypto"
 	"github.com/hmchangw/chat/pkg/roommetacache"
-	"github.com/hmchangw/chat/pkg/roomsubcache"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -95,9 +94,9 @@ var (
 		ID: "dm-1", Name: "", Type: model.RoomTypeDM,
 		SiteID: "site-a", UserCount: 2,
 	}
-	testDMSubs = []roomsubcache.Member{
-		{ID: "alice-id", Account: "alice", RoomType: model.RoomTypeDM},
-		{ID: "bob-id", Account: "bob", RoomType: model.RoomTypeDM},
+	testDMSubs = []model.Subscription{
+		{ID: "alice-id", User: model.SubscriptionUser{Account: "alice"}, RoomType: model.RoomTypeDM},
+		{ID: "bob-id", User: model.SubscriptionUser{Account: "bob"}, RoomType: model.RoomTypeDM},
 	}
 	testUsers = []model.User{
 		{ID: "u-alice", Account: "alice", EngName: "Alice Wang", ChineseName: "愛麗絲", EmployeeID: "E001", SiteID: "site-a"},
@@ -348,7 +347,7 @@ func TestHandler_HandleMessage_DMRoom(t *testing.T) {
 			data, _ := json.Marshal(evt)
 
 			store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-			store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+			store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 
 			// Single user lookup: sender first, then mentioned accounts.
 			if len(tc.mentionedUsers) > 0 {
@@ -452,7 +451,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		assert.Empty(t, pub.records)
 	})
 
-	t.Run("list members fails for DM", func(t *testing.T) {
+	t.Run("list subscriptions fails for DM", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		store := NewMockStore(ctrl)
 		us := NewMockUserStore(ctrl)
@@ -460,7 +459,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 
 		store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
 		us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"sender"}).Return(nil, nil) // sender lookup
-		store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(nil, errors.New("db error"))
+		store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(nil, errors.New("db error"))
 
 		keyStore := NewMockRoomKeyProvider(ctrl)
 		h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, subject.RouteGlobal)
@@ -475,7 +474,7 @@ func TestHandler_HandleMessage_Errors(t *testing.T) {
 		data, _ := json.Marshal(evt)
 		err := h.HandleMessage(context.Background(), data)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "list members")
+		assert.Contains(t, err.Error(), "list subscriptions")
 		assert.Empty(t, pub.records)
 	})
 
@@ -559,7 +558,7 @@ func TestHandler_HandleMessage_DMRoom_PublishError(t *testing.T) {
 
 	us := NewMockUserStore(ctrl)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil) // sender lookup
 
 	keyStore := NewMockRoomKeyProvider(ctrl)
@@ -2477,7 +2476,7 @@ func TestHandleThreadCreated_DMRoom_FansOutToAllMembers(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 11, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2525,7 +2524,7 @@ func TestHandleThreadCreated_BotDMRoom_EmitsNewThreadMessage(t *testing.T) {
 	// production branch handles RoomTypeBotDM too.
 	botDMRoom := &model.Room{ID: "dm-1", Type: model.RoomTypeBotDM, SiteID: "site-a", UserCount: 2}
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(botDMRoom), nil)
-	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil)
 
 	evt := model.MessageEvent{
@@ -2564,7 +2563,7 @@ func TestHandleThreadCreated_DMRoom_WithMention(t *testing.T) {
 	// performs no subscription writes at all — its Store interface has none —
 	// so a mentioned DM thread reply still just fans out to both members.
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil)
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil)
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice", "bob"}).Return(testUsers, nil)
 
 	evt := model.MessageEvent{
@@ -3577,7 +3576,7 @@ func TestHandleThreadCreated_DMRoom_PublishesNoThreadViewSubject(t *testing.T) {
 	msgTime := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil)
-	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
+	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), gomock.Any()).Return([]model.User{testUsers[0]}, nil)
 
 	data, err := json.Marshal(model.MessageEvent{
