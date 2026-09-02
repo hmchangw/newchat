@@ -212,29 +212,69 @@ history-service) with at most `MAX_SITE_FANOUT` (**8**) concurrent RPCs *per
 request* (`user-service/config/config.go:75,83`; `subscriptions.go:535`). Each
 resolved preview is a Cassandra read.
 
-**Amplification.** Per user opening the app with M subscribed rooms:
-`⌈M/100⌉` history RPCs, each resolving up to 100 previews. The concurrency bound
-is **per request** — nothing bounds the aggregate when U users do it at once.
+**Amplification — and the first version of this table understated it.** A real
+client does **not** fetch its sidebar in one call: `SUBSCRIPTION_DEFAULT_LIMIT`
+is **40** (`user-service/config/config.go:72`; max 1000), and the frontend pages
+at that default. So a user with M rooms issues `⌈M/40⌉` **`subscription.list`
+RPCs** — each its own user-service call and Mongo aggregation — and each page
+enriches ≤40 rooms, costing `⌈40/100⌉` = **one** history RPC per page. The
+concurrency bound (`MAX_SITE_FANOUT` = 8) is **per request**; nothing bounds the
+aggregate when U users do it at once.
 
-| Users reconnecting | M (daily-power ≈ 83) | history RPCs in the burst | Preview reads |
-|---:|---:|---:|---:|
-| 1 000 | 83 | 1 000 | 83 000 |
-| 5 000 | 83 | 5 000 | 415 000 |
-| 5 000 | 500 (power/bot-heavy) | 25 000 | 2 500 000 |
+| Users | M | `subscription.list` RPCs | history RPCs | Preview reads |
+|---:|---:|---:|---:|---:|
+| 1 000 | 83 (daily-power) | 3 000 | 3 000 | 83 000 |
+| 5 000 | 83 | 15 000 | 15 000 | 415 000 |
+| 5 000 | 500 (power/bot-heavy) | 65 000 | 65 000 | 2 500 000 |
+
+Preview reads are unchanged — M per user either way — but the **RPC count is
+~3× what the single-call model gave**, and it lands on user-service and Mongo as
+well as on history-service. Pagination does not spread the burst either: a
+client issues its pages back to back.
 
 **Verdict: the most likely real production incident on this list.** It is a
 *normal* daily event (09:00 login peak, or a gateway blip reconnecting everyone
-at once), it is unbounded in aggregate, and **no loadgen mode drives it** —
+at once), it is unbounded in aggregate, and **no loadgen mode drives it** (`clientsim` does — see below) —
 `daily` ramps N with a warm-up, which is the opposite of a cold-start burst, and
 `presence-storm` reconnects presence only, not the initial-data legs.
 
-**Test.** New scenario: cold-start storm. U users each issue
-`subscription.list` + the resulting `rooms.get` fan-out inside a short window;
-ramp U through 500 / 1k / 2k / 5k. Measure history-service p99, Cassandra read
-latency, NATS request/reply timeouts, and the `includeLastMessage=false` A/B
-(the soak already exposes `SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE` to
-isolate exactly this fan-out). This is also the only realistic way to exercise
-SLO-3's declared journey (auth → connect → initial data) end to end.
+**Which tool drives this.** `clientsim` (PR #444), not loadgen — and the gap is
+not close:
+
+| | loadgen | `clientsim` |
+|---|---|---|
+| Connection | shared `backend.creds` over core NATS TCP; deliberately "not an auth benchmark" | **the real client edge**: NKey → `POST /api/v1/auth` → NATS **WebSocket** |
+| `subscription.list` | a steady-rate lane (`RoomReadRate × 0.18`, `soak_main.go:1454`) and `daily`'s `refreshRoomList` | **the frontend's paginated bootstrap walk**, at the server's own 40-row page size (`tools/clientsim/subwalk.go:14,60`) |
+| Enrichment fan-out | controllable via `SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE` | **triggered by default** — `subListRequest` carries no `includeLastMessage`, so `withLastMsg` resolves true (`subscriptions.go:87`) |
+| Shape | steady rate, or `daily`'s warm-up ramp — the opposite of a cold start | U clients arriving under `CLIENTSIM_RAMP_RATE` |
+
+**Two things to set, because clientsim's defaults are built for a soak, not a
+storm.**
+
+1. **`CLIENTSIM_RAMP_RATE` defaults to 50/s** — a paced ramp, which is what a
+   connection-plane soak wants and the opposite of what this scenario is. Raise
+   it: 5 000 clients at 2 000/s arrive in 2.5 s.
+2. **The *reconnect* variant is better driven by a fault than by a ramp.** Hold
+   the fleet at target, then drop the WebSocket listener or the LB and let every
+   client reconnect and re-walk at once. That is the actual production mechanism
+   (a gateway blip), and it is already clientsim's own path — post-reconnect
+   resync with bounded backoff. Pair it with the failure programme rather than
+   running it as a fresh ramp.
+
+**loadgen still has three jobs here**: it seeds the fixture and emits the pool
+artifact clientsim reads (`seed --pool-out`); it runs the background message
+traffic so the storm lands on a live system rather than an idle one; and
+`SOAK_SUBSCRIPTION_LIST_INCLUDE_LAST_MESSAGE=false` gives the A/B that isolates
+how much of the cost is the preview fan-out.
+
+**Test.** Cold-start storm, `clientsim`-driven. Step U through 500 / 1k / 2k /
+5k at a burst ramp rate, with loadgen seeding and running background traffic.
+Measure `subscription.list` and `channel_history` p99 (both are
+`rpc_server_call_duration_seconds` methods since #337), Cassandra read latency,
+NATS request/reply timeouts, and the `includeLastMessage` A/B. Then repeat the
+reconnect variant under a listener fault. This is also the only realistic way to
+exercise SLO-3's declared journey (auth → connect → initial data) end to end —
+which loadgen cannot do at all, since it never touches auth-service's HTTP leg.
 
 ---
 
