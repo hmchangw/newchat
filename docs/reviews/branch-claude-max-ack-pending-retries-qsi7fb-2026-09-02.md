@@ -314,3 +314,77 @@ documented.
 reimplements the guard `natsutil.NewMsgEncoded` already owns
 (`pkg/natsutil/request_id.go:82-85`). A `natsutil.NewMsgWithHeader` would keep the
 "NewMsg returns nil Header" quirk in one place.
+
+---
+
+# Test automation
+
+Both suites pass (`make test SERVICE=…`) and the full-repo `go test -race ./...`
+is green. No `store.go` appears in the diff, so the mock-staleness check does not
+apply — `make generate` was not run.
+
+**high — `JetStreamPublisher.PublishMsgWithID` has no test at all**
+(`bot-message-handler/handler.go:46`, 0.0% coverage). The diff changed both the
+`Publisher` interface and this adapter from `Publish`/`PublishWithMsgID` to
+`PublishMsg`/`PublishMsgWithID`. Every new test asserts against `fakePublisher`
+(`handler_test.go:59`), so the only production code that actually converts a
+`*nats.Msg` + msgID into a JetStream call is unexercised — dropping
+`jetstream.WithMsgID(msgID)` there would kill JS-layer dedup and no test would
+fail. `jetStreamAPI` (`handler.go:39`) is already an interface field, so a
+15-line fake makes this testable. TDD violation per CLAUDE.md §4.
+
+**high — the DM path's new identity stamping is untested**
+(`bot-message-handler/handler.go:123`; `handleSendDM` at `:81` is 0.0% covered).
+The diff added the `c.Msg.Header.Get(model.HeaderBotIdentity)` argument to both
+call sites but only `handleSendRoom` got tests (`handler_test.go:382`, `:405`).
+`handleSendDM` has zero tests in the whole file. A DM sent by a bot would lose
+attribution silently.
+
+**medium — malformed `X-Bot-Identity` is the one branch the feature exists for,
+and it is uncovered** (`bot-message-worker/handler.go:44-46`, the
+`json.Unmarshal` error return; confirmed uncovered by coverprofile). Tests cover
+header-present-and-valid (`handler_test.go:221`) and header-absent (`:246`), never
+present-but-undecodable. That path must still count under `unknown`/`malformed`
+rather than panic or mislabel.
+
+**medium — `orElse` partial fill is untested** (`bot-message-worker/handler.go:52-61`).
+Both existing cases are all-header (`handler_test.go:233`) or all-payload
+(`:195`). The mixed case — header carries `ID` but an empty `Account`, so
+`label()` must fall through to the payload account — is exactly where the two
+sources interleave and is never asserted. `orElse` shows 100% statement coverage
+only because each `if` body is hit by a different test; the combination is not.
+
+**medium — the six new worker tests are one logic shape and should be a table**
+(`bot-message-worker/handler_test.go:195-269`). Each varies only
+(payload, headers) → (expected account label, outcome, delta). CLAUDE.md §4
+"Table-Driven Tests" prefers a table here; as written, adding a seventh outcome
+means a seventh copy-pasted ten-line function.
+
+**medium — the delta approach is order-independent but not parallel-safe, and two
+tests share a label pair.** `TestHandleJetStreamMsg_TransientFailureCountsAgainstSender`
+(`:199`) and `TestHandleJetStreamMsg_SuccessRecordsNoFailure` (`:262`) both key on
+`("payload.bot","nak")`, one asserting delta 1 and the other delta 0.
+Sequentially this is sound; `botFailureTotal` children are atomic, so adding
+`t.Parallel()` would produce a silent flake rather than a `-race` report — the
+worst failure mode. Fix by deriving the account label from `t.Name()` so each test
+owns its own series; parallelism is then free and the before/after snapshot
+becomes redundant.
+
+**low — `f.lastCtx = ctx` is an unsynchronized write**
+(`bot-message-worker/handler_test.go:35,45`) while sibling counters use `atomic`.
+Harmless today (one handler call per test) but inconsistent, and it becomes a real
+race the moment anyone parallelizes or fans out the fake.
+
+**nitpick — `failureCount` materializes a zero series as a side effect**
+(`handler_test.go:190-193`): `WithLabelValues` creates the child before reading
+it, so snapshotting a never-hit label pair adds phantom series. Use
+`testutil.ToFloat64` on a `GetMetricWithLabelValues` result, or accept it and note
+why.
+
+**Assertion quality (positive).** The worker tests assert real behaviour, not mock
+behaviour: the Prometheus counter is the production `botFailureTotal`, and
+`TestHandleJetStreamMsg_StampsRequestIDFromMessageHeader` (`:271`) proves
+propagation through the real `logctx.ConsumeContext` by capturing the ctx the
+store actually received. `TestHandleJetStreamMsg_HeaderIdentityWinsOverPayloadAccount`
+(`:233`) pins the precedence rule the code comment claims. The handler-side tests
+are weaker — they only prove the fake was handed the right header.
