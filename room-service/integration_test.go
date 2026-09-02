@@ -162,6 +162,24 @@ func TestMongoStore_GetRoomAppRead_ProjectionFields_Integration(t *testing.T) {
 	assert.Zero(t, got.UserCount)
 }
 
+// A missing room must come back as the ErrRoomNotFound sentinel, never a raw
+// driver error — handlers map the sentinel to a 404 and would otherwise 500.
+func TestMongoStore_GetRoom_MissingRoom_Integration(t *testing.T) {
+	ctx := context.Background()
+	db := setupMongo(t)
+	store := NewMongoStore(db)
+
+	_, err := store.GetRoom(ctx, "nope")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRoomNotFound)
+	assert.NotErrorIs(t, err, mongo.ErrNoDocuments, "the driver error must not leak past the store boundary")
+
+	_, err = store.GetRoomAppRead(ctx, "nope")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRoomNotFound)
+	assert.NotErrorIs(t, err, mongo.ErrNoDocuments, "the driver error must not leak past the store boundary")
+}
+
 // TestMongoStore_GetSubscription_ProjectionFields_Integration pins the field
 // set that GetSubscription's projection must return: every Subscription field
 // read by any handler call site. Same guard rationale as the GetRoom variant.

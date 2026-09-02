@@ -1375,7 +1375,7 @@ The fields `requesterId`, `requesterAccount`, `timestamp`, and `historySharedSin
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added).
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. requester not in room, room is full, room is restricted and requester is not owner, unrecognized `history.mode`). A `users` entry that is a bot is rejected with `"bot not available"` (`bot_not_available`) when it has no app record or its assistant is disabled; a bot whose home site differs from the room's site is admitted (cross-site bot membership is allowed). Any `orgs` entry that matches zero users (no user with `sectId == orgId` or `deptId == orgId`) is rejected with `org "<orgId>": invalid org`, and any `users` entry that has no matching user document is rejected with `user "<account>": user not found` (each wrapped with the offending account/org ID) — in both cases the request is not queued and no members are added. Bots resolved from `channels` / `orgs` expansion are silently filtered (only explicitly listed bots are added). When no room matches the subject `{roomID}` the reply is `"room not found"` (`not_found`).
 
 ```json
 { "code": "conflict", "reason": "max_room_size_reached", "error": "room is at maximum capacity" }
@@ -1565,7 +1565,7 @@ Exactly one of `account` or `orgId` must be set. The fields `requester`, `roomTy
 
 ##### Error response
 
-See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard.
+See [Error envelope](#6-error-envelope-reference). Returned synchronously when validation or authorization fails (e.g. neither or both of `account`/`orgId` set, requester is not an owner, target is the last member, or org member cannot leave individually). The last-member guard counts **human** members only: removing the last human is rejected even when bot members remain, while removing a bot never trips the guard. When no room matches the subject `{roomID}` the reply is `"room not found"` (`not_found`).
 
 ```json
 { "code": "bad_request", "error": "exactly one of account or orgId must be set" }
@@ -1676,6 +1676,7 @@ See [Error envelope](#6-error-envelope-reference). Returned synchronously when v
 - Last-owner guard: an owner cannot demote themselves if they are the only owner.
 - Promote attempt on a bot account — rejected with `"bots cannot be room owners"` (demoting a bot stays allowed).
 - Promote attempt on an org-only member (individual subscription required).
+- `"room not found"` (`not_found`) — no room matches the subject `{roomID}`.
 
 ```json
 { "code": "forbidden", "error": "only owners can update roles" }
@@ -1989,6 +1990,7 @@ See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — caller has no subscription in the room (sentinel reused across membership-gated RPCs).
 - `"limit must be > 0 and <= room user count"` — limit was `0`, negative, or larger than the room's current `userCount`.
+- `"room not found"` — no room matches the subject `{roomID}`.
 
 ##### Triggered events — success path
 
@@ -2110,6 +2112,7 @@ The subject already carries `account` and `roomID`, so no body fields are requir
 See [Error envelope](#6-error-envelope-reference). Common errors:
 
 - `"only room members can perform this action"` — the user has no subscription in the room (sentinel reused across membership-gated RPCs).
+- `"room not found"` — no room matches the subject `{roomID}`.
 - A malformed subject surfaces as a generic `"internal error"` (the specific reason is sanitized away). Not normally reachable — the wildcard subscription guarantees a well-formed subject.
 
 ```json
