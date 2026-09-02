@@ -84,6 +84,12 @@ func TestRunMessages_SkipsSystemMessages(t *testing.T) {
 				{MessageID: "m1", RoomID: "room1", CreatedAt: now},
 				{MessageID: "sys1", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeMembersAdded},
 				{MessageID: "sys2", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeRoomRenamed},
+				// Migrated rows. The backfill streams Cassandra directly, so these
+				// arrive with their stored plural type and must be filtered like any
+				// other membership notice — the live path never indexes their modern
+				// equivalents, and the backfill has to match.
+				{MessageID: "sys3", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeLegacyMembersRemoved},
+				{MessageID: "sys4", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeLegacyMembersLeft},
 				{MessageID: "m2", RoomID: "room1", CreatedAt: now, Type: model.MessageTypeImportant},
 			} {
 				if err := fn(m); err != nil {

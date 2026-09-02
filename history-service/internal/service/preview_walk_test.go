@@ -280,6 +280,10 @@ func TestPreviewWalk_SkipsEverySystemType(t *testing.T) {
 		model.MessageTypeRoomRenamed,
 		model.MessageTypeRoomRestricted,
 		model.MessageTypeTeamsMeetStarted,
+		// Migrated rows. The walk reads Cassandra directly, so it classifies by the
+		// STORED type — the wire-side rewrite in normalizeLegacySysMsgs never runs here.
+		model.MessageTypeLegacyMembersRemoved,
+		model.MessageTypeLegacyMembersLeft,
 	}
 	for _, st := range systemTypes {
 		t.Run(st, func(t *testing.T) {
