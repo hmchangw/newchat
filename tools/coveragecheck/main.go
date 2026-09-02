@@ -46,6 +46,7 @@ func readCoverageProfile(
 	}
 
 	var stats coverageStats
+	matched := make(map[string]bool, len(includes))
 	lineNumber := 1
 	for scanner.Scan() {
 		lineNumber++
@@ -64,7 +65,14 @@ func readCoverageProfile(
 			)
 		}
 		source := strings.ReplaceAll(fields[0][:separator], "\\", "/")
-		if !matchesAny(source, includes) {
+		hit := false
+		for _, include := range includes {
+			if strings.Contains(source, include) {
+				matched[include] = true
+				hit = true
+			}
+		}
+		if !hit {
 			continue
 		}
 		if _, excluded := excludes[path.Base(source)]; excluded {
@@ -94,22 +102,31 @@ func readCoverageProfile(
 	if err := scanner.Err(); err != nil {
 		return coverageStats{}, fmt.Errorf("read coverage profile: %w", err)
 	}
+	// Every include is checked, not just the set as a whole. With repeatable
+	// -include, one live pattern would otherwise mask a misspelled or stale
+	// sibling: the gate reports passing coverage for a scope it never measured.
+	var unmatched []string
+	for _, include := range includes {
+		if !matched[include] {
+			unmatched = append(unmatched, include)
+		}
+	}
+	if len(unmatched) > 0 {
+		return coverageStats{}, fmt.Errorf(
+			"coverage include pattern(s) %q matched no statements",
+			strings.Join(unmatched, ","),
+		)
+	}
+	// Reachable when every matched file is also excluded. percent() would
+	// report 0.00% and fail the threshold anyway, but as a coverage number
+	// rather than as the scoping mistake it is.
 	if stats.total == 0 {
 		return coverageStats{}, fmt.Errorf(
-			"coverage include pattern %q matched no statements",
+			"coverage include pattern(s) %q matched only excluded files",
 			strings.Join(includes, ","),
 		)
 	}
 	return stats, nil
-}
-
-func matchesAny(source string, includes []string) bool {
-	for _, include := range includes {
-		if strings.Contains(source, include) {
-			return true
-		}
-	}
-	return false
 }
 
 type stringListFlag []string
