@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -34,22 +33,26 @@ func (r *recordedBuild) build(_ context.Context, _ *o11ynats.Conn, _ o11ynats.Je
 	return nil, nil
 }
 
-func noopTracing() (trace.TracerProvider, propagation.TextMapPropagator) {
-	return noop.NewTracerProvider(), propagation.TraceContext{}
+func dialer(cfg natsutil.BuddyConfig) *natsutil.BuddyDialer {
+	return &natsutil.BuddyDialer{Config: cfg, TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}}
+}
+
+// bind runs BindRouters with no live connections — every lane the builder sees
+// is recorded, so a test asserts which lanes were built rather than what came back.
+func bind(cfg natsutil.BuddyConfig, rec *recordedBuild) (*Routers, error) {
+	return BindRouters(context.Background(), nil, nil, dialer(cfg), rec.build)
 }
 
 // The overwhelmingly common deployment is single-site: with no buddy configured
 // the home router must still be built, and nothing must be dialed.
 func TestBindRouters_NoBuddyBuildsHomeOnly(t *testing.T) {
 	rec := &recordedBuild{}
-	tp, prop := noopTracing()
 
-	routers, err := BindRouters(context.Background(), nil, nil,
-		natsutil.BuddyConfig{}, "", tp, prop, false, rec.build)
+	routers, err := bind(natsutil.BuddyConfig{}, rec)
 
 	require.NoError(t, err)
 	assert.Equal(t, []subject.Lane{subject.LaneHome}, rec.lanes)
-	assert.False(t, routers.HasBuddy())
+	assert.Nil(t, routers.Buddy)
 }
 
 // A home-lane build failure is fatal — the service cannot serve its own site —
@@ -57,10 +60,8 @@ func TestBindRouters_NoBuddyBuildsHomeOnly(t *testing.T) {
 // lane does.
 func TestBindRouters_HomeBuildErrorIsReturned(t *testing.T) {
 	rec := &recordedBuild{err: errors.New("register failed")}
-	tp, prop := noopTracing()
 
-	_, err := BindRouters(context.Background(), nil, nil,
-		natsutil.BuddyConfig{}, "", tp, prop, false, rec.build)
+	_, err := bind(natsutil.BuddyConfig{}, rec)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "register failed")
@@ -71,24 +72,19 @@ func TestBindRouters_HomeBuildErrorIsReturned(t *testing.T) {
 // would turn it into an outage of its own.
 func TestBindRouters_UnreachableBuddyDoesNotFailStartup(t *testing.T) {
 	rec := &recordedBuild{}
-	tp, prop := noopTracing()
 
-	routers, err := BindRouters(context.Background(), nil, nil,
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"},
-		"", tp, prop, false, rec.build)
+	routers, err := bind(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"}, rec)
 
 	require.NoError(t, err)
 	assert.Equal(t, []subject.Lane{subject.LaneHome}, rec.lanes, "the buddy lane is never reached")
-	assert.False(t, routers.HasBuddy())
+	assert.Nil(t, routers.Buddy)
 }
 
 // Shutdown must be safe on a service that never bound a buddy — the single-site
 // case — so every caller can list the hooks unconditionally.
 func TestRouters_ShutdownHooks_ToleratesNoBuddy(t *testing.T) {
 	rec := &recordedBuild{}
-	tp, prop := noopTracing()
-	routers, err := BindRouters(context.Background(), nil, nil,
-		natsutil.BuddyConfig{}, "", tp, prop, false, rec.build)
+	routers, err := bind(natsutil.BuddyConfig{}, rec)
 	require.NoError(t, err)
 
 	hooks := routers.ShutdownHooks()

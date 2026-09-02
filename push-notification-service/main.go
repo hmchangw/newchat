@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type config struct {
@@ -80,32 +81,29 @@ func run() error {
 	var wg sync.WaitGroup
 	natsutil.RunPool(iter, sem, &wg, h.HandleJetStreamMsg)
 
-	// Buddy lane. BindBuddy never fails startup — on any failure buddyIter stays
-	// nil and the service runs home-only. HasFailover gates the bot pipeline out
-	// without a mode check here.
+	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
+	// the service runs home-only. HasFailover gates the bot pipeline out.
 	//
-	// APNs and FCM are external and unaffected by a site's NATS outage, so a
-	// push built from a failover-lane request goes out exactly as usual.
+	// APNs and FCM are external and unaffected by a site's NATS outage, so the
+	// one handler serves both lanes: nothing in it speaks NATS.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
-		MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
+		SiteID: cfg.SiteID, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
+		Dialer: &natsutil.BuddyDialer{
+			Config: cfg.Buddy.OnlyIf(wiring.HasFailover()), CredsFile: cfg.NatsCredsFile,
+			TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+		},
 	}
-	var buddyLane *natsutil.Lane
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			var bErr error
-			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
-				Stream: wiring.PushFailoverStream,
-				// notification-worker owns the push stream and asserts its
-				// placement; binding here is this service's existence check.
-				Ownership: failoverlane.BorrowsStreams,
-				Consumer: buildConsumerConfig(cfg.Consumer,
-					cfg.Mode.FailoverConsumerName("push-notification-service"),
-					wiring.PushFailoverInputWildcard),
-			}, h.HandleJetStreamMsg)
-			return bErr
-		})
+	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
+		Stream: wiring.PushFailoverStream,
+		// notification-worker owns the push stream and asserts its placement;
+		// binding here is this service's existence check.
+		Ownership: failoverlane.BorrowsStreams,
+		Consumer: buildConsumerConfig(cfg.Consumer,
+			cfg.Mode.FailoverConsumerName("push-notification-service"),
+			wiring.PushFailoverInputWildcard),
+	}, func(context.Context, *o11ynats.Conn, o11ynats.JetStream, subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		return h.HandleJetStreamMsg, nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),

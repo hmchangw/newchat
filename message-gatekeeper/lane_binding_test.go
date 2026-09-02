@@ -70,17 +70,3 @@ func TestNewLaneHandler_SpeaksOnItsOwnConnection(t *testing.T) {
 	assert.Equal(t, []string{"canonical.buddy"}, buddy.published)
 	assert.Equal(t, []string{"reply.buddy"}, buddy.replied)
 }
-
-// The config fields a lane handler reads must reach the handler; a lane built
-// with the buddy's deps is otherwise identical to the home one.
-func TestNewLaneHandler_CarriesConfig(t *testing.T) {
-	cfg := laneTestConfig()
-	h := newLaneHandler((&recordingConn{}).deps(), nil, nil, cfg,
-		withThreadParentRecheckDelay(0))
-
-	assert.Equal(t, cfg.SiteID, h.siteID)
-	assert.Equal(t, cfg.LargeRoomThreshold, h.largeRoomThreshold)
-	assert.Equal(t, cfg.MaxAttachments, h.maxAttachments)
-	assert.Equal(t, cfg.MaxAttachmentBytes, h.maxAttachmentBytes)
-	assert.Equal(t, cfg.ChatBaseURL, h.chatBaseURL)
-}

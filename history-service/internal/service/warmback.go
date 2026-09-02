@@ -75,7 +75,7 @@ type nopPreviewWarmer struct{}
 func (nopPreviewWarmer) Submit(context.Context, *warmBackJob) {}
 func (nopPreviewWarmer) Close(context.Context) error          { return nil }
 
-// previewWarmer stores walk-resolved previews off the request path.
+// PreviewWarmer stores walk-resolved previews off the request path.
 //
 // The write is optional; the reply is not. Running it inline made the two share a budget,
 // so it was skipped whenever the request had less than a couple of seconds left — which is
@@ -87,7 +87,7 @@ func (nopPreviewWarmer) Close(context.Context) error          { return nil }
 // Bounded on both axes, because unbounded background work would trade the latency problem
 // for a memory one: workers cap concurrent writes, the queue caps what a burst can pin, and
 // a full queue sheds the job rather than blocking the reply behind it.
-type previewWarmer struct {
+type PreviewWarmer struct {
 	rooms   RoomRepository
 	jobs    chan *warmBackJob
 	wg      sync.WaitGroup
@@ -99,15 +99,26 @@ type previewWarmer struct {
 	closed bool
 }
 
-// newPreviewWarmer starts the writer's workers; non-positive sizes take the defaults.
-func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Duration) *previewWarmer {
+// NewPreviewWarmer starts the writer's workers. Non-positive sizes take the defaults.
+// "Off" is not this constructor's concern: PREVIEW_WARMBACK_ENABLED=false makes New
+// install nopPreviewWarmer instead of calling it.
+//
+// Exported so main can build one pool and hand it to both lanes' services with
+// WithPreviewWarmer: the pool writes to Mongo, which is up whichever lane is
+// serving, so a second set of workers would be overhead for a lane that is idle
+// almost always. A service built without the option starts its own.
+func NewPreviewWarmer(rooms RoomRepository, workers, queue int) *PreviewWarmer {
+	return newPreviewWarmerWithTimeout(rooms, workers, queue, warmBackTimeout)
+}
+
+func newPreviewWarmerWithTimeout(rooms RoomRepository, workers, queue int, timeout time.Duration) *PreviewWarmer {
 	if workers <= 0 {
 		workers = defaultWarmBackWorkers
 	}
 	if queue <= 0 {
 		queue = defaultWarmBackQueue
 	}
-	w := &previewWarmer{rooms: rooms, jobs: make(chan *warmBackJob, queue), timeout: timeout}
+	w := &PreviewWarmer{rooms: rooms, jobs: make(chan *warmBackJob, queue), timeout: timeout}
 	w.wg.Add(workers)
 	for range workers {
 		go w.run()
@@ -118,7 +129,7 @@ func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Dur
 // Submit queues a warm-back, dropping it when the writer is saturated. Never blocks: the
 // reply it precedes must not wait on an optional write, and a dropped job is self-
 // correcting — the next read re-walks the room and submits again.
-func (w *previewWarmer) Submit(ctx context.Context, job *warmBackJob) {
+func (w *PreviewWarmer) Submit(ctx context.Context, job *warmBackJob) {
 	job.requestID = natsutil.RequestIDFromContext(ctx)
 
 	w.mu.RLock()
@@ -135,7 +146,7 @@ func (w *previewWarmer) Submit(ctx context.Context, job *warmBackJob) {
 	}
 }
 
-func (w *previewWarmer) run() {
+func (w *PreviewWarmer) run() {
 	defer w.wg.Done()
 	for job := range w.jobs {
 		w.store(job)
@@ -143,7 +154,7 @@ func (w *previewWarmer) run() {
 }
 
 // store performs one write on a fresh budget, detached from the request that produced it.
-func (w *previewWarmer) store(job *warmBackJob) {
+func (w *PreviewWarmer) store(job *warmBackJob) {
 	ctx, cancel := context.WithTimeout(natsutil.WithRequestID(context.Background(), job.requestID), w.timeout)
 	defer cancel()
 	if err := w.rooms.SetPreviewMessage(ctx, job.roomID, job.preview, job.forMsgID, job.asOf); err != nil {
@@ -158,7 +169,7 @@ func (w *previewWarmer) store(job *warmBackJob) {
 // Close stops accepting work and waits for the queue to drain, giving up when ctx expires
 // so a wedged Mongo cannot hold the whole shutdown past its deadline — the writes are
 // optional, and a later read re-derives what they would have stored. Idempotent.
-func (w *previewWarmer) Close(ctx context.Context) error {
+func (w *PreviewWarmer) Close(ctx context.Context) error {
 	w.mu.Lock()
 	if !w.closed {
 		w.closed = true

@@ -55,9 +55,9 @@ func TestGatekeeper_FailoverLanePublishesToFailoverCanonical(t *testing.T) {
 		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789f",
 	}
 
-	// failoverLane=true is what the failover consumer's lane binding passes
-	// through to HandleJetStreamMsg.
-	_, err := handler.processMessage(ctx, "alice", "r1", "site-a", &req, true)
+	// The failover lane is fixed on the handler by its lane binding.
+	handler.lane = subject.LaneFailover
+	_, err := handler.processMessage(ctx, "alice", "r1", "site-a", &req)
 	require.NoError(t, err)
 
 	msg := captured()
@@ -84,7 +84,7 @@ func TestGatekeeper_HomeLanePublishesToLiveCanonical(t *testing.T) {
 		RequestID: "01970a4f-8c2d-7c9a-abcd-e0123456789a",
 	}
 
-	_, err := handler.processMessage(ctx, "bob", "r2", "site-a", &req, false)
+	_, err := handler.processMessage(ctx, "bob", "r2", "site-a", &req)
 	require.NoError(t, err)
 
 	msg := captured()

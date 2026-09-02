@@ -137,3 +137,21 @@ func (l Lane) canonicalRoot() string {
 func (l Lane) MsgCanonical(siteID string, evt CanonicalEvent) string {
 	return fmt.Sprintf("%s.%s.%s", l.canonicalRoot(), siteID, evt)
 }
+
+// outboxRoot is the subject root each lane's OUTBOX stream is built on.
+func (l Lane) outboxRoot() string {
+	if l == LaneFailover {
+		return "chat.failover.outbox"
+	}
+	return "chat.outbox"
+}
+
+// Outbox returns the OUTBOX subject for a federation event on this lane. The
+// failover form is how a site keeps federating outward while its own NATS is
+// down: the live OUTBOX buffer lives on the cluster that is gone, so an event
+// published there would go nowhere. Destination and event type ride the subject
+// so outbox-worker's per-destination consumers filter on one peer exactly as
+// they do on the live stream.
+func (l Lane) Outbox(originSiteID, destSiteID, eventType string) string {
+	return fmt.Sprintf("%s.%s.%s.%s", l.outboxRoot(), originSiteID, destSiteID, eventType)
+}

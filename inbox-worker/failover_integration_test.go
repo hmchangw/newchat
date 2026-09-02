@@ -95,14 +95,17 @@ func TestFailoverLane_BothLanesApplyToSameStore(t *testing.T) {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
-	homeLane, err := startInboxLane(ctx, homeCons, &cfg, handler, sem, &wg)
+	homeConsInfo := homeCons.CachedInfo()
+	require.NotNil(t, homeConsInfo)
+
+	homeLane, err := startInboxLane(ctx, homeCons, &cfg, handler, homeConsInfo.Config.MaxDeliver, sem, &wg)
 	require.NoError(t, err)
 	t.Cleanup(homeLane.Stop)
 
 	// startFailoverLane creates the standby stream itself under Bootstrap.Enabled,
 	// which is the dev path — production verifies and asserts placement instead.
 	binder := &failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID, Dialer: &natsutil.BuddyDialer{Config: cfg.Buddy},
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
 	buddyLane, err := startFailoverLane(ctx, buddyJS, &cfg, handler, binder, sem, &wg)

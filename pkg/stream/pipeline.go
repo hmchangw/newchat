@@ -66,6 +66,17 @@ type Wiring struct {
 // service can skip binding one without testing the pipeline mode itself.
 func (w *Wiring) HasFailover() bool { return w.CanonicalFailoverStream.Name != "" }
 
+// PushSend is the push-request subject for a lane, so a service that emits on
+// both lanes selects by the lane it already holds rather than carrying the raw
+// subject as a stand-in for lane identity. Empty for a pipeline with no
+// failover lane.
+func (w *Wiring) PushSend(lane subject.Lane) string {
+	if lane == subject.LaneFailover {
+		return w.PushFailoverSendSubject
+	}
+	return w.PushSendSubject
+}
+
 // Resolve returns the full wiring for a pipeline at a site.
 func Resolve(p Pipeline, siteID string) Wiring {
 	if p == PipelineBot {

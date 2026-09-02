@@ -141,9 +141,16 @@ Without that second router the request would find no responder at all.
 Each lane builds its own service instance, because everything that speaks over
 NATS — the outbound RPC clients, the canonical publisher, the OUTBOX buffer —
 has to leave on the connection the request arrived on. Everything else (Mongo,
-Cassandra, Valkey, the caches) is shared: those are site-local and unaffected by
-a NATS outage. The shared plumbing lives in `pkg/failoverlane.BindRouters`, so
-the two-lane wiring is written once rather than per service.
+Cassandra, Valkey, the caches, history-service's preview warm-back pool) is
+shared: those are site-local and unaffected by a NATS outage. The shared
+plumbing lives in `pkg/failoverlane` — `BindRouters` for request/reply
+services, `Binder.BindLane` for stream workers — so the two-lane wiring is
+written once rather than per service.
+
+One consequence worth knowing when tuning: each lane's router carries its own
+admission cap, so `MAX_CONCURRENCY` bounds in-flight handlers *per lane*. In the
+recovery window, when both lanes are busy at once, the shared Mongo and
+Cassandra pools can see up to twice the configured number.
 
 ---
 

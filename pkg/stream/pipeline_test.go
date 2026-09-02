@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 func TestPipeline_UnmarshalText(t *testing.T) {
@@ -110,4 +111,19 @@ func TestPipeline_FailoverConsumerNameDiffersFromHome(t *testing.T) {
 	for _, p := range []stream.Pipeline{stream.PipelineUser, stream.PipelineBot} {
 		assert.NotEqual(t, p.ConsumerName("svc"), p.FailoverConsumerName("svc"))
 	}
+}
+
+// The push request subject is the one wiring value that differs per lane, so
+// notification-worker asks the wiring for it by lane rather than carrying the
+// raw subject string as a stand-in for lane identity.
+func TestWiring_PushSend(t *testing.T) {
+	w := stream.Resolve(stream.PipelineUser, "site-a")
+	assert.Equal(t, w.PushSendSubject, w.PushSend(subject.LaneHome))
+	assert.Equal(t, w.PushFailoverSendSubject, w.PushSend(subject.LaneFailover))
+	assert.NotEqual(t, w.PushSend(subject.LaneHome), w.PushSend(subject.LaneFailover))
+
+	// The bot pipeline has no failover lane; asking for it must not invent a subject.
+	bot := stream.Resolve(stream.PipelineBot, "site-a")
+	assert.Equal(t, bot.PushSendSubject, bot.PushSend(subject.LaneHome))
+	assert.Empty(t, bot.PushSend(subject.LaneFailover))
 }

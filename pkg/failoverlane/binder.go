@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // StreamOwnership says whether this service is responsible for the standby
@@ -74,11 +75,12 @@ type Binder struct {
 	// SiteID labels the lane's metrics. The service itself is identified by the
 	// meter the Metrics were built from.
 	SiteID string
-	// Buddy names the cluster the standby streams must be hosted by. Placement
-	// is asserted against it in production — names are unique supercluster-wide,
-	// so a standby stream sitting on the very cluster it exists to outlive would
-	// pass an existence check and fail only during the outage it was built for.
-	Buddy natsutil.BuddyConfig
+	// Dialer reaches the buddy cluster the standby streams must be hosted by.
+	// Placement is asserted against its site in production — names are unique
+	// supercluster-wide, so a standby stream sitting on the very cluster it
+	// exists to outlive would pass an existence check and fail only during the
+	// outage it was built for.
+	Dialer *natsutil.BuddyDialer
 	// Bootstrap creates the streams instead of verifying them. Dev only.
 	Bootstrap bool
 	// MaxWorkers sizes the pull batch.
@@ -91,6 +93,15 @@ type Binder struct {
 	// Metrics is optional; a service that is not instrumented binds its lane
 	// without consumer metrics rather than not at all.
 	Metrics *natsmetrics.Metrics
+}
+
+// buddySiteID is the cluster placement is asserted against; empty when no
+// buddy is configured, which EnsureFailoverStream treats as nothing to verify.
+func (b *Binder) buddySiteID() string {
+	if b.Dialer == nil {
+		return ""
+	}
+	return b.Dialer.Config.SiteID
 }
 
 // MetricsIdentity is the metric labelling for one lane. The attributes name the
@@ -111,7 +122,7 @@ func (b *Binder) MetricsIdentity(spec *LaneSpec) natsmetrics.ConsumerConfig {
 func (b *Binder) BindConsumer(ctx context.Context, bjs o11ynats.JetStream, spec *LaneSpec) (o11ynats.Consumer, error) {
 	fjs := stream.FailoverJS(bjs)
 	for _, c := range spec.StreamsToEnsure() {
-		if err := stream.EnsureFailoverStream(ctx, fjs, c, b.Bootstrap, b.Buddy.SiteID); err != nil {
+		if err := stream.EnsureFailoverStream(ctx, fjs, c, b.Bootstrap, b.buddySiteID()); err != nil {
 			return nil, err
 		}
 	}
@@ -154,4 +165,34 @@ func (b *Binder) Bind(ctx context.Context, bjs o11ynats.JetStream, spec *LaneSpe
 		func(msgCtx context.Context, msg *natsmetrics.Message) { handle(msgCtx, msg) })
 	laneMetrics.LoopStarted(ctx)
 	return natsutil.NewLane(iter, b.WG), nil
+}
+
+// HandlerFor builds one lane's message handler from the connection that lane
+// consumes on. It is BindRouters' RouterFor for a worker: the same function
+// builds both lanes, so the failover handler cannot be a home handler that
+// still publishes, replies or does request/reply over the dead connection.
+type HandlerFor func(ctx context.Context, conn *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error)
+
+// BindLane dials the buddy and binds spec there with a handler built by build
+// for the failover lane. It is the worker-side twin of BindRouters, holding the
+// choreography every worker used to copy: dial, build the lane's handler on the
+// buddy connection, Bind, capture the Lane for shutdown.
+//
+// It never fails startup (see BuddyDialer.Bind). The returned Lane is nil-safe
+// and the Conn is nil exactly when no connection was established, so a service
+// lists both in its shutdown hooks unconditionally.
+func (b *Binder) BindLane(ctx context.Context, spec *LaneSpec, build HandlerFor) (*natsutil.Lane, *o11ynats.Conn) {
+	if b.Dialer == nil {
+		return nil, nil
+	}
+	var lane *natsutil.Lane
+	conn := b.Dialer.Bind(ctx, func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+		handle, err := build(ctx, bconn, bjs, subject.LaneFailover)
+		if err != nil {
+			return fmt.Errorf("build failover handler: %w", err)
+		}
+		lane, err = b.Bind(ctx, bjs, spec, handle)
+		return err
+	})
+	return lane, conn
 }
