@@ -9,15 +9,13 @@ type soakUserReadRecorderAdapter struct {
 	recorder soakReadSampleRecorder
 }
 
+// Record converts rather than copies field by field: the two sample types have
+// identical underlying types, so the conversion is what pins them together. A
+// field added to one and not the other stops compiling here instead of being
+// silently dropped on the way to the recorder.
 func (a soakUserReadRecorderAdapter) Record(sample *soakuserread.Sample) {
 	if a.recorder == nil {
 		return
 	}
-	a.recorder.Record(&soakReadSample{
-		Action: sample.Action, Latency: sample.Latency,
-		Messages: sample.Messages, RowsCounted: sample.RowsCounted,
-		ReplyBytes: sample.ReplyBytes, ErrorClass: sample.ErrorClass,
-		ErrorReason: sample.ErrorReason, Retries: sample.Retries,
-		Skipped: sample.Skipped,
-	})
+	a.recorder.Record((*soakReadSample)(sample))
 }
