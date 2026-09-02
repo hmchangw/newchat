@@ -62,6 +62,25 @@ func newWarmBackMetrics(m metric.Meter) warmBackMetrics {
 	return warmBackMetrics{stored: stored, dropped: dropped, failed: failed}
 }
 
+// previewWriter stores walk-resolved previews. previewWarmer is the live implementation;
+// nopPreviewWarmer is what PREVIEW_WARMBACK_ENABLED=false installs. An interface rather
+// than a disabled-shaped previewWarmer because "off" and "shut down" must not share an
+// encoding: previewWarmer.Close is nil-channel-safe only because it guards on closed, so
+// a warmer born closed puts a close(nil) panic one idiomatic refactor away — and it would
+// leave shutdown indistinguishable from off at every future log, metric and fast path.
+type previewWriter interface {
+	Submit(ctx context.Context, job *warmBackJob)
+	Close(ctx context.Context) error
+}
+
+// nopPreviewWarmer is the disabled form: it stores nothing, so a walk-resolved room simply
+// stays on the lazy path. Holds no queue and no workers, which is why Close has nothing to
+// drain and cannot fail.
+type nopPreviewWarmer struct{}
+
+func (nopPreviewWarmer) Submit(context.Context, *warmBackJob) {}
+func (nopPreviewWarmer) Close(context.Context) error          { return nil }
+
 // previewWarmer stores walk-resolved previews off the request path.
 //
 // The write is optional; the reply is not. Running it inline made the two share a budget,
@@ -86,17 +105,10 @@ type previewWarmer struct {
 	closed bool
 }
 
-// newPreviewWarmer starts the writer's workers, or returns an inert one when the operator
-// has turned warm-back off. Non-positive sizes take the defaults.
-//
-// Disabled is expressed as already-closed rather than as worker-less: closed is exactly
-// "not accepting work", so Submit sheds instead of filling a queue nothing drains, Close
-// waits on no workers and never closes the nil channel, and neither gains a branch on the
-// hot path. A drop counter is not touched either — an operator's off is not a shed job.
-func newPreviewWarmer(rooms RoomRepository, enabled bool, workers, queue int, timeout time.Duration) *previewWarmer {
-	if !enabled {
-		return &previewWarmer{rooms: rooms, timeout: timeout, closed: true}
-	}
+// newPreviewWarmer starts the writer's workers. Non-positive sizes take the defaults.
+// PREVIEW_WARMBACK_ENABLED=false is not expressed here: it selects nopPreviewWarmer
+// instead, so this constructor never builds a warmer that cannot do its job.
+func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Duration) *previewWarmer {
 	if workers <= 0 {
 		workers = defaultWarmBackWorkers
 	}

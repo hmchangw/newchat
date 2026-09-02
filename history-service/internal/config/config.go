@@ -161,7 +161,9 @@ type Config struct {
 	//
 	// PreviewWarmBackEnabled is an operator kill switch, on by default: warm-back is
 	// what stops the lazy walk repeating forever, so turning it off leaves every room
-	// without a stored preview re-walking Cassandra on every rooms.get. It exists for
+	// without a stored preview re-walking Cassandra once per preview-cache TTL — on
+	// every read where that cache is off, or where the walk resolves nothing (only
+	// positives are cached). It exists for
 	// the case where that read cost is preferable to the write cost — an ailing Mongo,
 	// or a site where the eager writer is being re-cut — not as a tuning knob. Off
 	// withholds only this optional write: the walk still runs and the client still

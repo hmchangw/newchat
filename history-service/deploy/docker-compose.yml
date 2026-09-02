@@ -17,8 +17,8 @@ services:
       # falls back to its response_too_large retry.
       - PAGE_TRIMMING_ENABLED=${PAGE_TRIMMING_ENABLED:-true}
       # false withholds the background write that stores a walk-resolved preview
-      # back onto the room doc; rooms.get still serves it, but every room without
-      # a stored preview re-walks Cassandra on every read.
+      # back onto the room doc; rooms.get still serves it, but a room without a
+      # stored preview re-walks Cassandra once per HISTORY_PREVIEW_CACHE_TTL.
       - PREVIEW_WARMBACK_ENABLED=${PREVIEW_WARMBACK_ENABLED:-true}
       # Dev-only pprof profiling on the health port (off by default). Flip on
       # stack-wide for a profiling session with `PPROF_ENABLED=true make up`.

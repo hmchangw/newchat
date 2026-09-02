@@ -27,7 +27,7 @@ import (
 
 // newRoomsService builds a service with bare mocks; WithPreviewCache exercises the cache.
 func newRoomsService(t *testing.T, opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
-	return newRoomsServiceWithWarmer(t, 0, 0, opts...)
+	return newRoomsServiceWithConfig(t, nil, opts...)
 }
 
 // newRoomsServiceWithWarmer sizes the background preview writer, for the tests that assert
@@ -652,9 +652,9 @@ func TestHistoryService_RoomsGet_CancellationDuringTheWalkIsAnErrorNotAPartialAn
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-// PREVIEW_WARMBACK_ENABLED=false is an operator kill switch for the optional write, not
-// for the read: the walk still resolves and the client still gets its preview. Only the
-// self-healing write back onto the room doc is withheld, so the room re-walks next time.
+// PREVIEW_WARMBACK_ENABLED=false withholds the optional write, not the read. Distinct from
+// the after-Close test above: that one sheds inside a live warmer, this one pins that the
+// no-op is what New installs.
 func TestHistoryService_RoomsGet_WarmBackDisabledStillServesTheWalkedPreview(t *testing.T) {
 	svc, msgs, rooms := newRoomsServiceWithConfig(t, disableWarmBack)
 	walked := walkedMsg("r1", "m-walked", "resolved lazily")
@@ -671,8 +671,8 @@ func TestHistoryService_RoomsGet_WarmBackDisabledStillServesTheWalkedPreview(t *
 	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID)
 }
 
-// A disabled writer starts no workers, so shutdown must not wait on any — and Close must
-// stay safe to call, twice, rather than becoming conditional at the call site.
+// The no-op holds no queue and no workers, so shutdown must not wait on any — and Close
+// must stay safe to call, twice, rather than becoming conditional at the call site.
 func TestHistoryService_Close_DisabledWarmBackDrainsImmediately(t *testing.T) {
 	svc, _, _ := newRoomsServiceWithConfig(t, disableWarmBack)
 

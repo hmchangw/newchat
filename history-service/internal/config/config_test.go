@@ -142,12 +142,16 @@ func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
 	}
 }
 
-// Zero is "take the default", not "disable": warm-back is what stops the lazy walk
-// repeating forever, so the wiring never turns it off.
+// Zero is "take the default", not "disable" — disabling is PREVIEW_WARMBACK_ENABLED's job,
+// and validate says nothing about it: the sizes are genuinely ignored when it is off, so
+// rejecting the combination would invent a constraint.
 func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
 	cfg := baseValid()
 	cfg.PreviewWarmBackWorkers = 0
 	cfg.PreviewWarmBackQueue = 0
+	require.NoError(t, validate(&cfg))
+
+	cfg.PreviewWarmBackEnabled = false
 	require.NoError(t, validate(&cfg))
 }
 
@@ -505,14 +509,4 @@ func TestLoad_PreviewWarmBackEnabled(t *testing.T) {
 			assert.Equal(t, tc.want, cfg.PreviewWarmBackEnabled)
 		})
 	}
-}
-
-// Sizes are ignored when the toggle is off, so an off deployment must not be held
-// to the same bounds — validate has nothing extra to say about the combination.
-func TestValidate_AcceptsDisabledWarmBack(t *testing.T) {
-	cfg := baseValid()
-	cfg.PreviewWarmBackEnabled = false
-	cfg.PreviewWarmBackWorkers = 0
-	cfg.PreviewWarmBackQueue = 0
-	require.NoError(t, validate(&cfg))
 }

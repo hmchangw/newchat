@@ -181,8 +181,9 @@ type HistoryService struct {
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
 	// warmer stores walk-resolved previews off the request path; Close drains it. Never
-	// nil — PREVIEW_WARMBACK_ENABLED=false yields an inert one, so Submit needs no guard.
-	warmer *previewWarmer
+	// nil — PREVIEW_WARMBACK_ENABLED=false installs the no-op, so the read path needs no
+	// guard and shutdown stays unconditional.
+	warmer previewWriter
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
@@ -249,8 +250,10 @@ func New(
 		pinEnabled:         cfg.PinEnabled,
 		roomTimes:          nopRoomTimesCache{},
 	}
-	s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackEnabled,
-		cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+	s.warmer = nopPreviewWarmer{}
+	if cfg.PreviewWarmBackEnabled {
+		s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+	}
 	// A method value derefs its receiver where written, so this is guarded, not eager.
 	if apps != nil {
 		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
