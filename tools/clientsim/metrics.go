@@ -9,9 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// latencyBuckets are loadgen's shared histogram buckets verbatim (its
-// metrics.go hand-picked 1-2-5 series), so histogram_quantile lines up
-// across the two tools' Grafana panels.
 // handshakeBuckets cover the auth client's 10s timeout. Deliberately not
 // latencyBuckets: those mirror loadgen so histogram_quantile lines up across
 // the two tools' panels, and nothing compares handshake timings to loadgen —
@@ -26,6 +23,9 @@ var handshakeBuckets = []float64{
 // the fleet is sitting in.
 var reconnectAttemptBuckets = []float64{1, 2, 3, 5, 8, 10, 14, 17, 25, 50, 100}
 
+// latencyBuckets are loadgen's shared histogram buckets verbatim (its
+// metrics.go hand-picked 1-2-5 series), so histogram_quantile lines up
+// across the two tools' Grafana panels.
 var latencyBuckets = []float64{
 	0.001, 0.002, 0.005, 0.010, 0.025, 0.050,
 	0.100, 0.250, 0.500, 1.000, 2.500, 5.000,

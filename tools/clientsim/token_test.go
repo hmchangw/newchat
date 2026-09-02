@@ -20,11 +20,19 @@ func TestDevProvider_SendsAccountOnly(t *testing.T) {
 }
 
 func TestAuthClient_Mint(t *testing.T) {
+	// The handler runs on the httptest server's goroutine, where require's
+	// FailNow (runtime.Goexit) is undefined behaviour: it would kill the
+	// handler mid-response and surface as a confusing Mint error instead of
+	// the real cause. Record what the request carried and assert on the test
+	// goroutine — the same rule fixtures_test.go's mintTestJWT documents.
 	var gotBody map[string]string
+	var gotPath, gotMethod string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/auth", r.URL.Path)
-		require.Equal(t, http.MethodPost, r.Method)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		gotPath, gotMethod = r.URL.Path, r.Method
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode auth request body: %v", err)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"natsJwt":"eyJ.fake.jwt","user":{"account":"user-7"}}`))
 	}))
@@ -33,6 +41,8 @@ func TestAuthClient_Mint(t *testing.T) {
 	c := newAuthClient(srv.URL, devProvider{}, newMetrics())
 	jwtStr, err := c.Mint(context.Background(), "user-7", "UABCDEF")
 	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/auth", gotPath)
+	assert.Equal(t, http.MethodPost, gotMethod)
 	assert.Equal(t, "eyJ.fake.jwt", jwtStr)
 	assert.Equal(t, "user-7", gotBody["account"])
 	assert.Equal(t, "UABCDEF", gotBody["natsPublicKey"])
