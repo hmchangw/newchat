@@ -8010,14 +8010,28 @@ func TestHandler_ProcessRemoveIndividual_ReconcilesWhenDeltaReportsDue(t *testin
 	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
 }
 
-// A redelivery finds the sub already gone; a second decrement would drift it.
-func TestHandler_ProcessRemoveIndividual_RedeliveryAppliesNoDelta(t *testing.T) {
+// A zero delete cannot distinguish a completed prior delivery from one that
+// failed before adjusting the counters, so it must recompute authoritatively
+// rather than assume the first delivery already decremented.
+func TestHandler_ProcessRemoveIndividual_ZeroDeleteReconcilesAuthoritatively(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	const roomID, account, siteID = "room-1", "alice", "site-a"
 	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 0)
-	// No count expectations at all: either call fails as unexpected.
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(nil)
+	// No ApplyMemberCountDelta: a second decrement would drift the counter.
 
 	require.NoError(t, runRemoveIndividual(t, store, roomID, account, siteID))
+}
+
+func TestHandler_ProcessRemoveIndividual_ZeroDeleteReconcileErrorPropagates(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	const roomID, account, siteID = "room-1", "alice", "site-a"
+	store := removeIndividualStore(t, ctrl, roomID, account, siteID, 0)
+	store.EXPECT().ReconcileMemberCounts(gomock.Any(), roomID).Return(fmt.Errorf("write failed"))
+
+	err := runRemoveIndividual(t, store, roomID, account, siteID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reconcile member counts")
 }
 
 func TestHandler_ProcessRemoveOrg_AppliesCountDeltaForDeletedAccounts(t *testing.T) {

@@ -417,7 +417,6 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		return err
 	}
 
-	// deleted==0 is a redelivery: the first delivery already decremented.
 	if deleted > 0 {
 		userDelta, appDelta := -1, 0
 		if subIsBot(req.Account) {
@@ -426,6 +425,10 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		if err := h.applyMemberRemovalCounts(ctx, req.RoomID, userDelta, appDelta); err != nil {
 			return err
 		}
+	} else if err := h.store.ReconcileMemberCounts(ctx, req.RoomID); err != nil {
+		// A zero delete cannot tell a completed prior delivery from one that
+		// failed before counting, so recompute instead of assuming.
+		return fmt.Errorf("reconcile member counts: %w", err)
 	}
 	h.bustRoomMeta(ctx, req.RoomID)
 
@@ -1532,9 +1535,6 @@ func subIsBot(account string) bool {
 // applyMemberRemovalCounts $inc's an exact delta, recomputing only when the TTL
 // says drift is due: ReconcileMemberCounts scans the whole room twice.
 func (h *Handler) applyMemberRemovalCounts(ctx context.Context, roomID string, userDelta, appDelta int) error {
-	if userDelta == 0 && appDelta == 0 {
-		return nil
-	}
 	reconcileDue, err := h.store.ApplyMemberCountDelta(ctx, roomID, userDelta, appDelta, h.reconcileTTL)
 	if err != nil {
 		return fmt.Errorf("apply member count delta: %w", err)
