@@ -1,0 +1,17 @@
+# Provisions the repository's dashboards into the local Grafana.
+#
+# foldersFromFilesStructure keeps the on-disk layout, and allowUiUpdates lets
+# the dashboards be edited in the UI: iterating on a board visually and saving
+# the result back into deploy/grafana/dashboards is the intended workflow. The
+# file stays the source of truth, so export the edit before the next
+# provisioning pass overwrites it.
+apiVersion: 1
+providers:
+  - name: chat
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

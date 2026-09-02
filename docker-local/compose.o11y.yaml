@@ -84,6 +84,11 @@ services:
       - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
       - ./o11y/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./o11y/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      # Read-write: the provider allows UI updates, and Grafana writes the
+      # edited dashboard back to this file so a visual change survives the
+      # container.
+      - ../deploy/grafana/dashboards:/var/lib/grafana/dashboards
     ports:
       # :3000/:3001 are the UIs, :3002 the obs-up Grafana.
       - "3003:3000"
