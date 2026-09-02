@@ -537,6 +537,83 @@ make -C tools/loadgen/deploy teardown-roomread PRESET=medium
 - Presets are the messages presets (`small`/`medium`/`large`/`realistic`); room
   size distribution drives floor-write contention.
 
+## Subscription-list workload (sidebar cold-open benchmark)
+
+Finds the maximum sustainable RPS for `subscription.list`
+(`user-service.ListSubscriptions`, the
+`chat.user.{account}.request.user.{siteID}.subscription.list` request/reply
+RPC). Every request is the call a client makes on connect — `type=current`,
+`limit=200`, `includeLastMessage=true`, `offset=0` — because the reconnect
+burst, not steady browsing, is what this endpoint has to survive.
+
+Accounts are picked **uniformly**, unlike the room-read workload's Zipf skew: a
+client cold-opens its sidebar once per connect, so there is no hot-account
+concentration to model. The skew that matters is across rooms *within* one
+account's page, and the preset fixtures already carry it.
+
+### Quick start
+
+```
+make -C tools/loadgen/deploy up
+make -C tools/loadgen/deploy seed-sublist PRESET=medium
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=medium
+```
+
+Override the ramp with `STEPS` (default `200,500,1000,2000,5000`):
+
+```
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=medium STEPS=500,1k,2k,5k
+```
+
+Tear down the fixtures:
+
+```
+make -C tools/loadgen/deploy teardown-sublist PRESET=medium
+```
+
+### Why this workload seeds its own fixtures
+
+`seed --workload=subscription-list` is **not** interchangeable with the plain
+`seed`. `BuildFixtures` leaves three fields at their zero value that
+`subscription.list`'s match filter reads, and a miss on any of them returns an
+empty page rather than an error — so the stock fixtures would produce a ramp
+measuring the cost of finding nothing:
+
+| Field | Why the zero value fails |
+|---|---|
+| `open` | no bson `omitempty`, so `false` persists as `open:false` and `match["open"]={$ne:false}` drops the row |
+| `roomType` | the `current` match needs `dm`/`channel` (or a subscribed `botDM`); `""` matches no branch |
+| `name` | `subLite` projects it for the self-DM pin and the name tiebreak |
+
+The seeder also spreads each room's `lastMsgAt` and each member's `lastSeenAt`.
+Both matter: an all-equal sort key would collapse the list comparator onto its
+name tiebreak and hide the real sort cost, and a uniform `lastSeenAt` would make
+every row resolve `hasUnread` the same way.
+
+### Notes
+
+- Synchronous request/reply: gated on p95/p99 latency and error rate only (no
+  consumer-pending signal). Defaults: `--slo-p95=100ms`, `--slo-p99=250ms`,
+  `--slo-error-rate=0.001`.
+- **Empty pages count as failures.** Every seeded account owns subscriptions, so
+  a zero-row reply means the fixtures or `--list-type` are wrong. An empty page
+  is also the fastest possible reply, so scoring it as a success would let a
+  misconfigured run report a record-breaking ramp. A service error envelope and
+  a `{}` body are kept distinct from it — both decode to zero rows, and folding
+  them together would report an outage as a healthy empty sidebar.
+- **`--list-limit=200` can exceed the NATS payload ceiling.** `docs/client-api.md`
+  recommends 200 for the HTTP form, which has no ceiling; the NATS reply is
+  capped at 128 KB and the handler does not truncate. When a page overflows, the
+  service cannot publish the reply and the request times out — so a ramp that
+  reports timeouts at *every* step, including the lowest, is likely hitting the
+  cap rather than a capacity limit. Lower `--list-limit` to confirm.
+- The NATS page is additionally capped server-side by `MAX_SUBSCRIPTION_LIMIT`
+  (default 1000), so `--list-limit` above that is silently clamped.
+- Single-site only: all seeded users are local.
+- Presets are the messages presets (`small`/`medium`/`large`/`realistic`).
+  `realistic` is the most representative — its mixed room sizes and DM rows
+  exercise the per-row app/HR enrichment branches that a uniform preset skips.
+
 ## History workload (LoadHistory / GetThreadMessages benchmark)
 
 Benchmarks the synchronous read path:
@@ -746,7 +823,7 @@ list of steps, holds at each step for a measurement window, evaluates SLO
 signals, and reports the largest step at which every signal passed.
 
 ```bash
-loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|login|search --preset=<name> [flags]
+loadgen max-rps --workload=messages|history|read-receipt|room-read|thread-read|subscription-list|login|search --preset=<name> [flags]
 ```
 
 ### Quick start
@@ -768,6 +845,10 @@ loadgen max-rps --workload=login --preset=medium
 
 # search: drive search-service request/reply (reads the existing index)
 loadgen max-rps --workload=search --preset=medium
+
+# subscription-list: seed the list-shaped fixtures first, then ramp
+loadgen seed --workload=subscription-list --preset=medium
+loadgen max-rps --workload=subscription-list --preset=medium --steps=200,500,1k,2k
 ```
 
 Via the deploy Makefile:
@@ -781,10 +862,13 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, `login`, or `search` |
+| `--workload` | `messages` | `messages`, `history`, `read-receipt`, `room-read`, `thread-read`, `subscription-list`, `login`, or `search` |
 | `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` and `search` reuse the message presets for their account set) |
-| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt `200,500,1k,2k,5k` / login `50,100,200,500,1k` / search `100,200,500,1k,2k` | explicit ordered RPS list; `k` suffix = ×1000 |
-| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / login / search**: per-request reply timeout |
+| `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt+subscription-list `200,500,1k,2k,5k` / login `50,100,200,500,1k` / search `100,200,500,1k,2k` | explicit ordered RPS list; `k` suffix = ×1000 |
+| `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / subscription-list / login / search**: per-request reply timeout |
+| `--list-type` | `current` | **subscription-list only**: `current`, `rooms`, or `apps` |
+| `--list-limit` | `200` | **subscription-list only**: page size; see the NATS payload-ceiling note above |
+| `--include-last-message` | `true` | **subscription-list only**: request the per-room `previewMessage` enrichment; `=false` isolates the query from the enrichment cost |
 | `--auth-url` | `$AUTH_URL` | **login only**: auth-service base URL |
 | `--login-key-pool` | `256` | **login only**: pre-generated NKey pool size |
 | `--search-mix` | `messages:60,rooms:30,users:10` | **search only**: endpoint mix |
