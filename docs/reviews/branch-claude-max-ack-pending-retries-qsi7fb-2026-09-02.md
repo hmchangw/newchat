@@ -158,3 +158,91 @@ owns no `auth-service` HTTP route. The changed publish subject
 `chat.bot.canonical.{siteID}.created` is an internal JetStream hop. No
 request/response schema, error code, or client-facing `pkg/model` struct changed,
 so leaving `docs/client-api.md` untouched is correct.
+
+---
+
+# Service: bot-message-worker
+
+## (a) Diff correctness vs. service conventions
+
+**low** — `logctx.ConsumeContext` is called inside the handler
+(`bot-message-worker/handler.go:72`); every other stream consumer in the repo
+calls it in the `main.go` consume loop before dispatch
+(`message-worker/main.go:380`, `roomlist-worker/main.go:365`,
+`outbox-worker/main.go:105`, nine more). Defensible here — it is what makes the
+request-id test possible without a NATS connection — but it is the only such site
+in the repo and deserves a one-line comment saying why, as
+`room-worker/main.go:425` does for its own deviation.
+
+Otherwise correct: the explicit `"request_id", natsutil.RequestIDFromContext(ctx)`
+on each line matches `message-worker/handler.go:81`; the settle paths themselves
+are unchanged.
+
+## (b) Scope drift
+
+No drift. The service is still consume → decode → Cassandra write; the additions
+are observability on paths that already existed. `store.go` and
+`store_cassandra.go` are untouched. Nothing here argues for a split.
+
+## (c) The `botSender` abstraction
+
+**nitpick** — Justified but slightly over-shaped. `senderFromHeader` earns its
+place: it must run before the unmarshal for a malformed body to be attributable,
+which a payload-only read cannot do. `orElse` and `label` are each three lines
+with a real test. The only excess is `unknownBot` being an untyped sentinel that
+can collide with a real bot account literally named `unknown`; a reserved form
+(`__unattributed__`) removes the ambiguity.
+
+(The performance lens disputes the *placement* — see that chapter. The helper
+must exist; it need not run on the success path.)
+
+## (d) Design coherence
+
+Fits. Counting only failures (`metrics.go:32-38`) is the right call — throughput
+is already on `jetstream_consumer_*`, and it keeps the vector empty for a healthy
+fleet.
+
+## (e) Project patterns
+
+Clean: `subject.BotCanonicalCreated` (`main.go:208`),
+`stream.BotMessagesCanonical` (`bootstrap.go:24`),
+`stream.DurableConsumerDefaults` (`main.go:204`), `cons.Messages()` + semaphore
+(`main.go:143-160`), `jsretry.Nak` with `DefaultBackoff` (`handler.go:100`), no
+bare `Nak()`. No raw `fmt.Sprintf` subjects, no inline stream config.
+
+## (f) Client-API doc rule
+
+**Not applicable.** This worker's only subject is
+`chat.bot.canonical.{siteID}.created` (`main.go:208`). No `chat.user.` handler and
+no client-facing `pkg/model` struct changed — the `Publisher` interface change is
+internal. No violation.
+
+## Cardinality exception — holds today, for a reason the diff does not state
+
+Exactly two publishers reach `BotCanonicalCreated`:
+`bot-message-handler/handler.go:210` and `bot-room-service/sysmsg.go:65`. Both
+derive the account from `parseIdentity`, which rejects an empty `Account`
+(`bot-message-handler/handler.go:224`, `bot-room-service/handler.go:705`) and is
+reachable only over the NATS-gated `chat.server.bot.request.>`. On the handler
+path the header and the payload `UserAccount` are the *same* `BotIdentity` value
+(`handler.go:115`, `:170`), so `orElse` cannot widen the set. The exception holds.
+
+**high (pre-existing, not introduced here, but it silently defeats the fallback)** —
+`bot-room-service/sysmsg.go:55` marshals a bare `model.Message`, while this worker
+decodes `model.MessageEvent`, whose message is a nested `"message"` key
+(`pkg/model/event.go:31`). A system message therefore decodes to a **zero**
+`evt.Message`: `orElse("","")` leaves the sender empty and every sysmsg failure
+lands under `unknown` — and `h.write` (`handler.go:113`) persists a row with an
+empty `ID`/`RoomID`. `search-sync-worker/messages.go:180` decodes the same shape,
+so the mismatch is real rather than a misreading. Until the publisher's envelope
+is fixed, the metrics-contract note's claim that the payload fallback attributes
+pre-header messages is only half true.
+
+*Confirmed independently against primary sources during synthesis: `sysmsg.go:55`
+`json.Marshal(msg)` on a `model.Message`, versus `pkg/model/event.go:29-31`
+`MessageEvent.Message Message \`json:"message"\``.*
+
+**low** — `senderFromHeader` re-parses the forwarded header without validating
+`Account`; the label value is whatever BP stamped. Bounded by trust, not by code.
+The contract note already names the mitigation (known-accounts cap) — worth a
+`TODO` referencing it.
