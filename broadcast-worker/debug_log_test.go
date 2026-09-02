@@ -95,7 +95,7 @@ func TestHandler_DMFanout_DebugBreadcrumbs(t *testing.T) {
 	us := NewMockUserStore(ctrl)
 	pub := &mockPublisher{}
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil).AnyTimes()
-	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
+	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
 
 	h := NewHandler(store, us, pub, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
@@ -149,7 +149,7 @@ func TestHandler_DMFanout_NoContentLeak(t *testing.T) {
 	store := NewMockStore(ctrl)
 	us := NewMockUserStore(ctrl)
 	store.EXPECT().GetRoomMeta(gomock.Any(), "dm-1").Return(metaOf(testDMRoom), nil).AnyTimes()
-	store.EXPECT().ListSubscriptions(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
+	store.EXPECT().ListRoomMembers(gomock.Any(), "dm-1").Return(testDMSubs, nil).AnyTimes()
 	us.EXPECT().FindUsersByAccounts(gomock.Any(), []string{"alice"}).Return([]model.User{testUsers[0]}, nil).AnyTimes()
 	h := NewHandler(store, us, &mockPublisher{}, NewMockRoomKeyProvider(ctrl), defaultParentFetcher, false, subject.RouteGlobal)
 

@@ -106,22 +106,14 @@ var roomWithoutPreview = options.FindOne().SetProjection(bson.M{
 	"previewMeta": 0, "previewCiphertext": 0, "previewNonce": 0,
 })
 
-// ListSubscriptions reads the room's subscription documents unprojected.
-// $lookup justification: none needed — this is a plain find. The CLAUDE.md
-// "project precisely" rule is deliberately not applied: the return type is the
-// full model.Subscription and callers consume fields beyond the fan-out set, so
-// a narrow projection would zero them silently rather than fail loudly.
-func (m *mongoStore) ListSubscriptions(ctx context.Context, roomID string) ([]model.Subscription, error) {
-	cursor, err := m.subCol.Find(ctx, bson.M{"roomId": roomID})
+// ListRoomMembers reads through the shared roomsubcache. The Lookup owns the
+// Mongo fallback, so during an outage a warm room still fans out from L2.
+func (m *mongoStore) ListRoomMembers(ctx context.Context, roomID string) ([]roomsubcache.Member, error) {
+	members, err := m.members.GetMembers(ctx, roomID)
 	if err != nil {
-		return nil, fmt.Errorf("query subscriptions for room %s: %w", roomID, err)
+		return nil, fmt.Errorf("list members for room %s: %w", roomID, err)
 	}
-	defer cursor.Close(ctx)
-	var subs []model.Subscription
-	if err := cursor.All(ctx, &subs); err != nil {
-		return nil, fmt.Errorf("decode subscriptions for room %s: %w", roomID, err)
-	}
-	return subs, nil
+	return members, nil
 }
 
 // GetRoomMeta fences only the Mongo fetch, never the L2 read in front of it: an
