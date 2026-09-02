@@ -21,6 +21,7 @@ var memberFindOpts = options.Find().SetProjection(bson.M{
 	"roomType":           1,
 	"muted":              1,
 	"historySharedSince": 1,
+	"isSubscribed":       1,
 })
 
 // homeSiteFindOpts projects the users lookup down to the two fields the
@@ -62,6 +63,7 @@ func NewMongoLoader(subscriptions, users *mongo.Collection) Loader {
 				RoomType           model.RoomType `bson:"roomType"`
 				Muted              bool           `bson:"muted"`
 				HistorySharedSince *time.Time     `bson:"historySharedSince"`
+				IsSubscribed       bool           `bson:"isSubscribed"`
 			}
 			if err := cur.Decode(&doc); err != nil {
 				return nil, fmt.Errorf("decode subscription: %w", err)
@@ -78,6 +80,7 @@ func NewMongoLoader(subscriptions, users *mongo.Collection) Loader {
 				IsBot:              doc.User.IsBot,
 				Muted:              doc.Muted,
 				HistorySharedSince: hssMs,
+				IsSubscribed:       doc.IsSubscribed,
 			})
 		}
 		if err := cur.Err(); err != nil {
