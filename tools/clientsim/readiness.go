@@ -11,6 +11,9 @@ package main
 func (s *simClient) invalidatePlan() {
 	s.mu.Lock()
 	s.planVerified = false
+	// The fault belonged to the connection that just went away; the next one
+	// re-subscribes and raises its own if the denial is still there.
+	s.asyncFault = false
 	s.planEpoch++
 	s.mu.Unlock()
 }

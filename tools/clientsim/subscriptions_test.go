@@ -416,3 +416,63 @@ func TestRoomLane_SplitsMemberEventsOntoTheirOwnCounter(t *testing.T) {
 	assert.Equal(t, "channel", roomLane(subject.RoomEvent("r4", true)))
 	assert.Equal(t, "channel", roomLane(subject.RoomEvent("r4", false)))
 }
+
+// --- an async subscription fault is sticky for the life of the connection ---
+
+func TestAsyncFault_SurvivesAnUnrelatedLiveUpdate(t *testing.T) {
+	// A SUB permission violation arrives after Subscribe already returned nil,
+	// so nothing is recorded in missingRooms. A one-shot markNotReady is then
+	// undone by the next live update that produces any change at all, because
+	// updateReadyLocked only asks about planVerified and missingRooms.
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}},
+		HasMore:       false,
+	})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 2*time.Second, 10*time.Millisecond, "client never became ready")
+
+	s.handleAsyncError(errors.New("nats: Permissions Violation for Subscription to \"chat.room.r1.event.member\""))
+	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"an async fault must demote the client")
+
+	// An unrelated room is added. It says nothing about the denied subscription.
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r2", "channel", nil))
+
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"an unrelated update must not vouch for a subscription the server denied")
+}
+
+func TestAsyncFault_ClearsWithTheConnectionItBelongedTo(t *testing.T) {
+	// The fault is scoped to one connection: its permissions came from that
+	// connection's JWT. A reconnect re-subscribes, so a still-denied room
+	// raises the fault again within milliseconds — but a transient fault must
+	// not poison the client forever.
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}},
+		HasMore:       false,
+	})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	s.handleAsyncError(errors.New("nats: Permissions Violation for Subscription"))
+	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+
+	s.invalidatePlan() // what the disconnect handler does
+	s.mu.Lock()
+	faulted := s.asyncFault
+	s.mu.Unlock()
+	assert.False(t, faulted, "the fault belonged to the connection that went away")
+
+	// A fresh walk on the new connection may promote again.
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"a clean connection with a verified plan is ready again")
+}

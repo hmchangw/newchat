@@ -136,11 +136,12 @@ func (s *simClient) openRoomLanes(conn simConn, roomID string, global bool) (ope
 	return openSub{msg: msg, member: member, global: global}, nil
 }
 
-// updateReadyLocked promotes only when a walk has verified the plan AND every
-// desired room subscription is open. Caller holds s.mu, which makes both
-// checks atomic with the batch that just repaired or removed entries.
+// updateReadyLocked promotes only when a walk has verified the plan AND no
+// asynchronous fault is outstanding AND every desired room subscription is
+// open. Caller holds s.mu, which makes the checks atomic with the batch that
+// just repaired or removed entries.
 func (s *simClient) updateReadyLocked() {
-	if !s.planVerified || len(s.missingRooms) > 0 {
+	if !s.planVerified || s.asyncFault || len(s.missingRooms) > 0 {
 		s.markNotReady()
 		return
 	}

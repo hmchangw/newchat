@@ -41,6 +41,18 @@ type simClient struct {
 	// be broken"; only a completed walk answers "is the plan complete at all",
 	// and a live update can satisfy the first while the second is still false.
 	planVerified bool
+	// asyncFault records that the server rejected something asynchronously —
+	// a SUB permission violation arrives after Subscribe already returned nil,
+	// so it leaves no trace in missingRooms. Without it a one-shot demote is
+	// undone by the very next live update, because updateReadyLocked would
+	// still see a verified plan and nothing missing.
+	//
+	// Scoped to the connection, because that is what its permissions came
+	// from: invalidatePlan clears it, and a still-denied room raises it again
+	// as soon as the new connection re-subscribes. Nothing weaker works — the
+	// client cannot prove a SUB is authorized (a successful walk says nothing
+	// about it), so readiness fails closed until the connection is replaced.
+	asyncFault bool
 	// planEpoch advances on every disconnect. A walk reads it before its RPC
 	// and again before applying: the RPC happens with no lock held, so without
 	// this a walk whose reply arrived over a now-dead connection could set

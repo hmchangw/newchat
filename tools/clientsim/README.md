@@ -8,7 +8,12 @@ dev-mode side issuer) → NATS **WebSocket** connect with the minted user JWT
 lanes, kept live via `subscription.update`) — then holds the connection,
 counting deliveries and observing client-edge latency.
 
-**Two fidelity gaps, both deliberate.** The real client fetches its
+**Fidelity caveats.** The reference is the production client, not this repo's
+`chat-frontend` (a test frontend). Two behaviours are copied from
+`chat-frontend` and are **unverified** against the real client: the JWT
+proactive-refresh schedule (`0.80 * (1 ± 0.05)` of remaining life, i.e.
+76%–84%, from `useJwtRefresh.js`) and the `crossSite` tri-state rule. Two more
+are deliberate gaps. The real client fetches its
 subscription list over `GET /api/v1/subscriptions` and falls back to the
 NATS RPC; that route requires an `ssoToken` (or a bot session), which the
 dev-mode auth exchange does not issue, so clientsim exercises the **fallback
@@ -110,6 +115,20 @@ It mirrors the desktop client's `desktop-{account}[-{hostname}]` shape, so
 tooling that splits on the first dash keeps working. The `clientsim-` prefix
 is the whole contract — filter on it — and it is deliberately **not**
 configurable: a knob there would let a fleet disguise itself.
+
+## Readiness and asynchronous faults
+
+A subscription permission violation arrives *after* `Subscribe()` already
+returned nil, so it leaves no trace in the missing-room set. clientsim records
+it as a fault scoped to the connection it happened on: readiness fails closed
+and stays closed until that connection is replaced. Nothing weaker is sound —
+the client cannot prove a SUB is authorized (a successful `subscription.list`
+walk says nothing about it), and a bare one-shot demote would be undone by the
+next live update that happens to change anything.
+
+A reconnect clears the fault because the permissions came from that
+connection's JWT. If the denial is still there, the new connection's
+re-subscribe raises it again within milliseconds.
 
 ## Reconnect behaviour
 

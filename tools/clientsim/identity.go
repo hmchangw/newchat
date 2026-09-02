@@ -48,15 +48,27 @@ func (c *jwtCache) get() (string, time.Time) {
 	return c.token, c.expiresAt
 }
 
-// refreshDelay is the frontend's proactive schedule: ~80% of the JWT's
-// remaining life with ±5% jitter (useJwtRefresh.js REFRESH_FRACTION /
-// REFRESH_JITTER), so a fleet does not re-mint in lockstep.
+// jwtRefreshFraction / jwtRefreshJitter mirror useJwtRefresh.js's
+// REFRESH_FRACTION and REFRESH_JITTER. The jitter is MULTIPLICATIVE on the
+// fraction — 0.80 * (1 ± 0.05), i.e. 76%-84% of remaining life — not ±5
+// percentage points, which would be 75%-85% and is a different convention.
+//
+// UNVERIFIED against the production client: chat-frontend is a test frontend,
+// not the reference. If the real client's schedule differs, the fleet's
+// re-mint cadence against auth-service is off by that much.
+const (
+	jwtRefreshFraction = 0.80
+	jwtRefreshJitter   = 0.05
+)
+
+// refreshDelay is the proactive schedule: a share of the JWT's remaining life,
+// jittered so a fleet does not re-mint in lockstep.
 func refreshDelay(expiresAt, now time.Time, randFloat func() float64) time.Duration {
 	remaining := expiresAt.Sub(now)
 	if remaining <= 0 {
 		return 0
 	}
-	frac := 0.75 + 0.10*randFloat()
+	frac := jwtRefreshFraction * (1 + jwtRefreshJitter*(2*randFloat()-1))
 	return time.Duration(float64(remaining) * frac)
 }
 

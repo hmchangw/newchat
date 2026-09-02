@@ -16,11 +16,13 @@ func TestRefreshDelay_EightyPercentWithJitter(t *testing.T) {
 		d := refreshDelay(expires, now, func() float64 { return 0.5 })
 		assert.InDelta(t, (96 * time.Minute).Seconds(), d.Seconds(), 1)
 	})
-	t.Run("jitter bounds are +/-5 percent of remaining life", func(t *testing.T) {
+	t.Run("jitter is multiplicative on the fraction, so 76-84 percent", func(t *testing.T) {
+		// 0.80 * (1 +/- 0.05), matching useJwtRefresh.js. NOT 80 +/- 5
+		// percentage points, which would be 75-85 and is a different rule.
 		lo := refreshDelay(expires, now, func() float64 { return 0 })
 		hi := refreshDelay(expires, now, func() float64 { return 1 })
-		assert.InDelta(t, (2 * time.Hour * 75 / 100).Seconds(), lo.Seconds(), 1)
-		assert.InDelta(t, (2 * time.Hour * 85 / 100).Seconds(), hi.Seconds(), 1)
+		assert.InDelta(t, (2 * time.Hour * 76 / 100).Seconds(), lo.Seconds(), 1)
+		assert.InDelta(t, (2 * time.Hour * 84 / 100).Seconds(), hi.Seconds(), 1)
 	})
 	t.Run("already expired means immediate", func(t *testing.T) {
 		d := refreshDelay(now.Add(-time.Minute), now, func() float64 { return 0.5 })

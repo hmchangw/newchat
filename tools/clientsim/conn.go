@@ -182,9 +182,13 @@ func (s *simClient) handleAsyncError(err error) {
 	}
 	// Subscription permission violations and other asynchronous faults can
 	// arrive after Subscribe returned nil. The client can no longer prove it
-	// carries its full plan, so fail the readiness state closed.
+	// carries its full plan, so fail the readiness state closed — and record
+	// it, because a bare demote is undone by the next live update.
 	s.m.Errors.WithLabelValues("async").Inc()
-	s.markNotReady()
+	s.mu.Lock()
+	s.asyncFault = true
+	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
+	s.mu.Unlock()
 	slog.Warn("nats async error", "account", s.account, "error", err)
 }
 
