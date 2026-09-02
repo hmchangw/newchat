@@ -615,3 +615,84 @@ comments (`:22-25`, `:29-31`); move them into `Help`.
 
 **Clean:** no tokens, passwords or message bodies are logged; `slog` JSON
 discipline holds throughout.
+
+---
+
+# Prioritized action list
+
+Ordered by severity, then impact ÷ effort.
+
+### 1. `high` — Make the metric reachable by a scraper
+`bot-message-worker/metrics.go:32`; evidence `pkg/health/health.go:121-122`,
+`docs/specs/o11y/o11y-metrics-inventory.md:232-243`.
+The branch's entire deliverable is an alertable per-bot series, and a promauto
+family in this service is exposed on no endpoint. Move it to the OTel meter as
+`search-service/metrics.go:22-26` did (which also gets `service_name`/`site` for
+free), or mount `promhttp` beside the health probes. Without this the change
+buys only the log fields. **Highest impact ÷ effort in the list.**
+
+### 2. `high` — Name what reads the metric, or hold it
+`docs/specs/o11y/nats-metrics-contract.md:834`.
+§13.4 step 1 is a hard rule and the honest answer today is "nothing yet". Ship a
+Grafana panel or an alert rule with the metric. Pairs naturally with item 1.
+
+### 3. `high` — Fix the `bot-room-service` canonical envelope
+`bot-room-service/sysmsg.go:55,65` vs `pkg/model/event.go:29-31`.
+Pre-existing and outside this branch's diff, but it is a live data bug — system
+messages decode to a zero `MessageEvent`, so `bot-message-worker` persists a row
+with an empty `ID`/`RoomID` — and it silently defeats the payload fallback this
+branch documents. Marshal a `model.MessageEvent` and stamp the same headers.
+Raised independently by four of the seven lenses.
+
+### 4. `high` — Test `JetStreamPublisher.PublishMsgWithID`
+`bot-message-handler/handler.go:46` (0.0% coverage).
+It is the only production code that attaches `jetstream.WithMsgID`; losing that
+line silently disables JS-layer dedup. `jetStreamAPI` is already an interface, so
+a ~15-line fake closes it.
+
+### 5. `high` — Test the DM path's identity stamping
+`bot-message-handler/handler.go:123`; `handleSendDM` at `:81` is 0.0% covered.
+The diff edited this line and no test exercises the handler at all. Bot DMs would
+lose attribution silently.
+
+### 6. `low` (but do it first among the cheap ones) — Move `senderFromHeader` off the success path
+`bot-message-worker/handler.go:73-75`.
+Two lines. It costs 2.8 µs / 592 B / 13 allocs on 100% of messages while being
+read only on failure, and the comment justifying the placement is factually wrong
+— `msg.Headers()` remains readable after the body unmarshal fails. Fix the code
+and the comment together.
+
+### 7. `medium` — Cover the malformed-header branch and the `orElse` partial fill
+`bot-message-worker/handler.go:44-46` and `:52-61`.
+The malformed-header path is the exact case the feature exists for and is
+untested; the mixed header/payload case is where the two sources interleave.
+Both are single table rows once item 8 lands.
+
+### 8. `medium` — Make the worker tests a table, and give each its own label pair
+`bot-message-worker/handler_test.go:195-269`.
+Six near-identical functions varying only in (payload, headers) → (label,
+outcome, delta). Deriving the account from `t.Name()` also removes the shared
+`("payload.bot","nak")` key between two tests, which would flake silently — not
+under `-race` — if anyone adds `t.Parallel()`.
+
+### 9. `medium` — Bound the label value defensively
+`bot-message-worker/handler.go:63-68`.
+No external actor can reach it today (see Bug & security), but nothing caps
+length, restricts charset, or checks the account against a known set. A BP bug
+produces unbounded, unrecoverable series. Cap and bucket to `other`; this is also
+the trip-wire the contract note already promises.
+
+### 10. `medium` — Add `obs.ContextWithIdentity`, and finish the `logctx` wiring
+`bot-message-worker/handler.go:84` and `main.go:77`.
+Four sibling workers call `ContextWithIdentity` at the same position, and the span
+is where room and message id belong given the metric deliberately omits them.
+Separately, without `obs.InitWithLoggerHandler` + a `logctx.Config`, the X-Debug
+rung this branch now admits can never emit — only the request-id half works.
+
+---
+
+## Note on this file
+
+Per CLAUDE.md §5, everything under `docs/reviews/` must be deleted from the branch
+before a PR is opened — these are working notes for the author, not shippable
+artifacts.
