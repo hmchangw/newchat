@@ -89,7 +89,7 @@ Verified compliant (no finding): sole OUTBOX ownership — only `outbox-worker` 
 
 ## 4. Test coverage — 1 / 5
 
-Statement coverage is 36.9% — far below the CLAUDE.md 60% critical floor — and the uncovered mass is exactly the durable-retry wiring (message disposition, dedup publish, lane pump), even though the handler-level tests that do exist are genuinely good.
+Statement coverage is 36.9% — far below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%) — and the uncovered mass is exactly the durable-retry wiring (message disposition, dedup publish, lane pump), even though the handler-level tests that do exist are genuinely good.
 
 ### Findings
 - `critical` — Coverage 36.9% (141 stmts), below the 60% floor and the 80% requirement. Structurally: `main.go` holds 118 of the 141 statements and 89 of them are uncovered; `handler.go` + `bootstrap.go` (23 stmts) are at 100% — `outbox-worker/main.go:46`

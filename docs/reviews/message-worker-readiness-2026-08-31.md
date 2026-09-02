@@ -18,7 +18,7 @@ The sole persister of message history, and it gets the genuinely dangerous part 
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 1 | 12 | 17 | 15 | 6 | **51** |
+| Count | 1 | 9 | 19 | 19 | 6 | **54** |
 
 ---
 

@@ -95,7 +95,7 @@ Strong, deliberate architecture — consumer-defined interfaces, constructor DI,
 
 ## 4. Test coverage — 1 / 5
 
-Coverage is 59.0% (373/632 statements) — below the CLAUDE.md 60% line, so the dimension is capped at 1 despite genuinely excellent `handler.go` test work (96.7%); the entire wiring layer, the migration ack-drop branch, and the Mongo settings/thread readers carry no unit coverage.
+Coverage is 59.0% (373/632 statements) — below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%), so the dimension is capped at 1 despite genuinely excellent `handler.go` test work (96.7%); the entire wiring layer, the migration ack-drop branch, and the Mongo settings/thread readers carry no unit coverage.
 
 ### Findings
 - `critical` — Service coverage is **59.0% (373/632 stmts)**, below the CLAUDE.md Section 4 60% line and far below the 80% merge floor. Per-file: `handler.go` 96.7% (202/209), `main.go` **2.0% (4/196)**, `usersettings.go` 51.1% (23/45), `threads.go` **0% (0/15)**, `emit.go` 75%, `presence.go` 79.4% — `/tmp/.../scratchpad/pr/coverage_by_service.txt`

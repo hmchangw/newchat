@@ -18,7 +18,7 @@ Thoughtful abstractions (`Collection`, `msgFetcher`, `flushPipeline`) and a genu
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 1 | 12 | 18 | 13 | 5 | **49** |
+| Count | 1 | 12 | 18 | 12 | 6 | **49** |
 
 ---
 

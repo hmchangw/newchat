@@ -93,10 +93,10 @@ Correctly clean: no `os.Getenv`, no raw `fmt.Sprintf` subject building (all via 
 
 ## 4. Test coverage — 1 / 5
 
-At **56.5% (545 stmts)** botplatform-service is below CLAUDE.md Section 4's 60% floor, and the shortfall is concentrated exactly where it hurts — the bot auth/authorization error branches, the cross-site routing decision, and both NATS federation forwarders are 0% or asserted-not-at-all.
+At **56.5% (545 stmts)** botplatform-service is below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%), and the shortfall is concentrated exactly where it hurts — the bot auth/authorization error branches, the cross-site routing decision, and both NATS federation forwarders are 0% or asserted-not-at-all.
 
 ### Findings
-- `critical` — Coverage 56.5% (545 stmts), under the 60% floor; 80% is the merge requirement — `/home/user/newchat/botplatform-service/` (per `coverage_by_service.txt`)
+- `critical` — Coverage 56.5% (545 stmts), under the 60% floor; 80% is the merge requirement — `botplatform-service/` (per `coverage_by_service.txt`)
 - `high` — `dm_ensurer.go` is 0% end-to-end (`newNATSDMEnsurer`, `Ensure`) — `botplatform-service/dm_ensurer.go:31-74`
   The first-time-DM federation fallback: missing-session 500, `marshal identity`, timeout→`Unavailable`, and the `errcode.Parse` decode of a remote error reply are never executed. `bot_forwarder_test.go:20` already has a `fakeRequester` seam that makes this directly testable — this is an omission, not a hard case.
 - `high` — All four room-management forwarders are 0% — `botplatform-service/bot_forwarder.go:57,94,98,102`
@@ -132,9 +132,9 @@ At **56.5% (545 stmts)** botplatform-service is below CLAUDE.md Section 4's 60% 
 Small, well-organized, unusually well-commented service (comments genuinely say WHY), let down by a staged handler assembly, a duplicated-and-diverged forwarder, and two config knobs that do nothing.
 
 ### Findings
-- `medium` — `handler` is assembled in three stages: `newHandler(st, &cfg)` sets only store/cfg, then `h.subs`, `h.forwarder`, `h.dmEnsurer` are poked in afterwards — `/home/user/newchat/botplatform-service/main.go:105`, `:114`, `:116`. Nothing (compiler or constructor) forces those three to be set, and every bot handler dereferences them unguarded (`bot_handlers.go:41`, `:51`, `:78`). Adding a sixth dependency means remembering a fourth assignment site; a missed one is a nil-panic on the first bot request, not a startup failure. CLAUDE.md ("Handler structs hold dependencies injected via constructor") wants all five in `newHandler`.
+- `medium` — `handler` is assembled in three stages: `newHandler(st, &cfg)` sets only store/cfg, then `h.subs`, `h.forwarder`, `h.dmEnsurer` are poked in afterwards — `botplatform-service/main.go:105`, `:114`, `:116`. Nothing (compiler or constructor) forces those three to be set, and every bot handler dereferences them unguarded (`bot_handlers.go:41`, `:51`, `:78`). Adding a sixth dependency means remembering a fourth assignment site; a missed one is a nil-panic on the first bot request, not a startup failure. CLAUDE.md ("Handler structs hold dependencies injected via constructor") wants all five in `newHandler`.
 
-- `medium` — `forwardRoomMgmt` hardcodes `15*time.Second` and ignores the `f.timeout` field the constructor was given — `/home/user/newchat/botplatform-service/bot_forwarder.go:75` vs the field set at `:35`. So `newBotForwarder(nc, 3*time.Second)` (`main.go:114`) silently configures only half the forwarder, and the room-mgmt budget is unreachable from config while its twin — the DM-ensure 15s — *is* a constructor argument (`main.go:116`). Two identical magic numbers, one injectable, one not.
+- `medium` — `forwardRoomMgmt` hardcodes `15*time.Second` and ignores the `f.timeout` field the constructor was given — `botplatform-service/bot_forwarder.go:75` vs the field set at `:35`. So `newBotForwarder(nc, 3*time.Second)` (`main.go:114`) silently configures only half the forwarder, and the room-mgmt budget is unreachable from config while its twin — the DM-ensure 15s — *is* a constructor argument (`main.go:116`). Two identical magic numbers, one injectable, one not.
 
 - `medium` — `forward` (`bot_forwarder.go:106-156`) and `forwardRoomMgmt` (`:57-92`) are ~85% the same code: nil-session guard, `BotIdentity` marshal, `natsutil.NewMsg` + nil-header dance, header set, `WithTimeout`, the identical timeout/`nats.ErrTimeout` → `errcode.Unavailable` branch, and the identical `errcode.Parse` reconstruction. They differ only in three headers, the timeout, one error string, and whether the reply is decoded. `dm_ensurer.go:35-74` is a *third* copy of the same skeleton. Any change to bot RPC framing (a new header, a trace attribute, a retry) must be made in three places.
 

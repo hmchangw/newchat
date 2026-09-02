@@ -18,7 +18,7 @@ The best-behaved service in the fleet on code discipline: **zero Section-3 viola
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 1 | 8 | 18 | 12 | 5 | **44** |
+| Count | 1 | 6 | 20 | 13 | 7 | **47** |
 
 > **Audit-coverage caveat.** `gosec` and the 18 repo-owned `semgrep` rules are clean repo-wide. `govulncheck` and the semgrep registry packs could not run (egress blocks `vuln.go.dev` / `semgrep.dev`); dependency-CVE coverage is unverified.
 

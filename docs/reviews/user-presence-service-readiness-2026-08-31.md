@@ -110,7 +110,7 @@ The core binary is exemplary DI (consumer-owned interfaces, constructor injectio
 
 ## 4. Test coverage — 1 / 5
 
-Coverage is 45.1% — below the 60% CLAUDE.md floor — and the gap is not cosmetic: the entire Valkey presence store, the sweeper loop and every handler store-error branch are unexercised by the default test gate.
+Coverage is 45.1% — below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%) — and the gap is not cosmetic: the entire Valkey presence store, the sweeper loop and every handler store-error branch are unexercised by the default test gate.
 
 ### Findings
 - `critical` — Coverage is **45.1% (459 statements)**, far under the CLAUDE.md §4 80% minimum and under 60%. — `user-presence-service/` (per `coverage_by_service.txt`)

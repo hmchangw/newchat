@@ -18,7 +18,7 @@
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 0 | 6 | 19 | 17 | 8 | **50** |
+| Count | 0 | 5 | 18 | 17 | 8 | **48** |
 
 ---
 

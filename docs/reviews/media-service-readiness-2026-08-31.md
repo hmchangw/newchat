@@ -48,7 +48,7 @@ Idiomatic, consistently wrapped, precisely projected Go with clean errcode Tier-
 - `low` — audit-coverage gap, not a service defect: gosec and the repo-owned semgrep rules are clean repo-wide, but `govulncheck` and the semgrep registry packs could not run (egress blocked), so dependency-CVE and third-party-pattern coverage is unverified for this service.
 - `nitpick` — two spellings of the same conditional-GET guard: `emoji_serve.go:60` guards `e.ETag != ""` on the stored side, `handler.go:76` guards `m != ""` on the request side, and `handler.go:65` guards neither.
 
-Notable strengths, verified: no `fmt.Println`/`log.Println` anywhere; no error comparison by string; `errors.Is(err, mongo.ErrNoDocuments)` at all seven miss-expected sites; a proper sentinel + `errors.Is(err, errBlobNotFound)` across the blob boundary (`minio.go:15`, `handler.go:82`); an explicit projection on every single find (`store_mongo.go:39,55,71,84,96,142,155,203`) and no `$lookup`; no `os.Getenv`; shared knobs mounted as named fields (`config.go:68,110`), not re-declared.
+Notable strengths, verified: no `fmt.Println`/`log.Println` anywhere; no error comparison by string; `errors.Is(err, mongo.ErrNoDocuments)` at all seven miss-expected sites; a proper sentinel + `errors.Is(err, errBlobNotFound)` across the blob boundary (`minio.go:15`, `handler.go:82`); an explicit projection on every find but `Avatar` (`store_mongo.go:39,55,71,84,96,142,155,203`) and no `$lookup`; no `os.Getenv`; shared knobs mounted as named fields (`config.go:68,110`), not re-declared.
 
 ### Recommendations
 - `medium` — wrap both startup validations: `fmt.Errorf("validate mongo pool config: %w", err)` and `fmt.Errorf("validate nats guard config: %w", err)` at `main.go:53,56`.

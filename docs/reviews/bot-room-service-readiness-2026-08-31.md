@@ -87,7 +87,7 @@ Boundaries are genuinely good — narrow consumer-defined `RoomStore`/`RoomKeySt
 
 ## 4. Test coverage — 1 / 5
 
-Coverage is 49.0% (410 stmts) — below the 60% CLAUDE.md floor, so the dimension is floored at 1; the remove/key-rotation suite is genuinely good, but the whole Mongo store, the identity gate, and every DM/create error path have zero coverage.
+Coverage is 49.0% (410 stmts) — below the 60% line this audit scores as `critical` (CLAUDE.md §4 requires 80%), so the dimension is floored at 1; the remove/key-rotation suite is genuinely good, but the whole Mongo store, the identity gate, and every DM/create error path have zero coverage.
 
 ### Findings
 - `critical` — 49.0% statement coverage (410 stmts), far under the CLAUDE.md §4 80% floor and under 60% — `scratchpad/pr/coverage_by_service.txt`

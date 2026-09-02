@@ -18,7 +18,7 @@ Idiomatic, exceptionally well-commented Gin service with textbook route/middlewa
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 0 | 9 | 21 | 15 | 4 | **49** |
+| Count | 0 | 10 | 21 | 14 | 6 | **51** |
 
 ---
 

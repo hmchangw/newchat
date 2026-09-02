@@ -18,7 +18,7 @@ The first hop on every user message, and the hot path is genuinely well-engineer
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 0 | 8 | 20 | 15 | 9 | **52** |
+| Count | 0 | 7 | 22 | 15 | 6 | **50** |
 
 ---
 

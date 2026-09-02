@@ -18,7 +18,7 @@ Small files, clean layering, excellent WHY-comments, and **exemplary client-API 
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 0 | 12 | 20 | 12 | 7 | **51** |
+| Count | 0 | 11 | 22 | 17 | 6 | **56** |
 
 ---
 

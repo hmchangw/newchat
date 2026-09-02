@@ -18,7 +18,7 @@
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 1 | 13 | 20 | 12 | 6 | **52** |
+| Count | 1 | 11 | 21 | 13 | 5 | **51** |
 
 ---
 
@@ -113,7 +113,7 @@ Excellent WHY-comment discipline and well-factored small units (`roomsubcache.go
 | medium | `HandleEvent`'s switch mixes 9 bare string literals with 12 `model.Inbox*` constants — for keys that **all exist as constants**. `InboxEventType` is a **type alias for `string`**, so there is no compile-time check: a typo or a constant-value change routes to `default:` and **silently Acks**. `isMembershipSubject` already uses the constants, so the two dispatch points can drift apart | `handler.go:224`; `pkg/model/event.go:164`, `:167-187` |
 | medium | Dead interface method: `CreateSubscription` is declared, implemented (the only method in the file returning a bare unwrapped `err`), and stubbed in tests — but **no handler calls it** | `handler.go:23`; `main.go:132` |
 | medium | `InboxStore` has **30 methods over five collections** and `HandleEvent` fans to 22 event types. The five `user_*` appliers replicate identity/settings/permissions/chatlist and **share nothing with room membership** — clear responsibility creep past the service's original remit | `handler.go:22`, `:671-741` |
-| medium | The watermark filter `$or: [{x: {$exists: false}}, {x: {$lt|$lte: t}}]` is **hand-written 13 times**. A mistyped field name is a **permanently silent no-op with no test that would notice.** The already-extracted `threadReadGuard`/`threadReadUpdate` prove the pattern is extractable — it was just applied once | `main.go:146`, `:175`, `:265`, `:267`, `:286`, `:313`, `:331`, `:349`, `:421`, … |
+| medium | The watermark filter `$or: [{x: {$exists: false}}, {x: {$lt\|$lte: t}}]` is **hand-written 13 times**. A mistyped field name is a **permanently silent no-op with no test that would notice.** The already-extracted `threadReadGuard`/`threadReadUpdate` prove the pattern is extractable — it was just applied once | `main.go:146`, `:175`, `:265`, `:267`, `:286`, `:313`, `:331`, `:349`, `:421`, … |
 | low | **Orphaned doc comment**: `handleMemberRemoved`'s six-line doc block sits directly above `handleMemberJoinedAtRefreshed`'s own comment and function, so godoc **describes a different function**, and the real `handleMemberRemoved` is undocumented | `handler.go:366-375`, `:394` |
 | low | `handler_test.go` is 3,426 lines / 100 top-level tests in one file, mirroring `handler.go`'s breadth | `handler_test.go:1` |
 | nitpick | `handleMemberRemoved` performs six actions with **three different failure policies** (return-error, log-and-continue, nil-checked no-op) interleaved; the ordering constraints live only in comments | `handler.go:394-435` |

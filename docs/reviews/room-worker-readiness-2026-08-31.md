@@ -18,7 +18,7 @@ The federation plumbing is correct and unusually well-reasoned — every OUTBOX 
 
 | Severity | critical | high | medium | low | nitpick | Total |
 |----------|---|---|---|---|---|---|
-| Count | 0 | 12 | 22 | 15 | 6 | **55** |
+| Count | 0 | 9 | 24 | 14 | 8 | **55** |
 
 > **Audit-coverage caveat.** `gosec` and the repo-owned `semgrep` rules are clean repo-wide; `govulncheck` and the registry packs could not run (blocked egress), so dependency-CVE coverage is unverified.
 
