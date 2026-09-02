@@ -37,13 +37,24 @@ type Handler struct {
 	threadStore ThreadStore
 	siteID      string
 	publish     PublishFunc
-	metrics     *persistenceMetrics
+	// outboxFailover targets the buddy-hosted OUTBOX-FAILOVER instead of the
+	// live OUTBOX. Set on the failover lane, whose whole reason to exist is that
+	// the cluster hosting the live OUTBOX is unreachable.
+	outboxFailover bool
+	metrics        *persistenceMetrics
 }
 
 type messageWorkerHandlerOption func(*messageWorkerHandlerOptions)
 
 type messageWorkerHandlerOptions struct {
-	metrics *persistenceMetrics
+	metrics        *persistenceMetrics
+	outboxFailover bool
+}
+
+// withOutboxLane selects the buddy-hosted OUTBOX-FAILOVER lane, which is how
+// this site keeps federating outward while its own NATS is down.
+func withOutboxLane(failover bool) messageWorkerHandlerOption {
+	return func(opts *messageWorkerHandlerOptions) { opts.outboxFailover = failover }
 }
 
 func withPersistenceMetrics(metrics *persistenceMetrics) messageWorkerHandlerOption {
@@ -59,12 +70,13 @@ func NewHandler(store Store, userStore userstore.UserStore, threadStore ThreadSt
 		opts.metrics = newPersistenceMetrics(otel.Meter("message-worker"))
 	}
 	return &Handler{
-		store:       store,
-		userStore:   userStore,
-		threadStore: threadStore,
-		siteID:      siteID,
-		publish:     publish,
-		metrics:     opts.metrics,
+		store:          store,
+		userStore:      userStore,
+		threadStore:    threadStore,
+		siteID:         siteID,
+		publish:        publish,
+		outboxFailover: opts.outboxFailover,
+		metrics:        opts.metrics,
 	}
 }
 
@@ -756,7 +768,7 @@ func (h *Handler) fanOutThreadUnread(ctx context.Context, roomID, parentMessageI
 			return errcode.MarshalFailed("thread_unread_added event", err)
 		}
 		dedupID := fmt.Sprintf("thread-unread:%s:%s:%s", parentMessageID, msgID, site)
-		if err := outbox.Publish(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now); err != nil {
+		if err := outbox.PublishTo(ctx, h.publish, h.siteID, roomID, site, model.InboxThreadUnreadAdded, payload, dedupID, now, h.outboxFailover); err != nil {
 			return fmt.Errorf("federate thread_unread_added to %s: %w", site, err)
 		}
 	}
@@ -795,8 +807,8 @@ func (h *Handler) publishThreadSubInboxIfRemote(ctx context.Context, sub *model.
 	// swallow the mention update). It rides the OUTBOX publish as its Nats-Msg-Id
 	// AND the forward's Nats-Msg-Id at the destination.
 	dedupID := fmt.Sprintf("thread-sub-inbox:%s:%s:%s:%t:%s", sub.ThreadRoomID, sub.UserID, msgID, sub.HasMention, ownerSiteID)
-	if err := outbox.Publish(ctx, h.publish, h.siteID, sub.RoomID, ownerSiteID,
-		model.InboxThreadSubscriptionUpserted, payload, dedupID, time.Now().UTC().UnixMilli()); err != nil {
+	if err := outbox.PublishTo(ctx, h.publish, h.siteID, sub.RoomID, ownerSiteID,
+		model.InboxThreadSubscriptionUpserted, payload, dedupID, time.Now().UTC().UnixMilli(), h.outboxFailover); err != nil {
 		return fmt.Errorf("publish thread subscription outbox to %s: %w", ownerSiteID, err)
 	}
 	return nil

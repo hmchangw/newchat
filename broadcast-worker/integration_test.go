@@ -596,7 +596,7 @@ func TestBroadcastWorker_MentionFederation_Integration(t *testing.T) {
 		withOutboxFederation("site-a", func(ctx context.Context, subj string, data []byte, msgID string) error {
 			_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
 			return err
-		}))
+		}, false))
 
 	msgTime := time.Now().UTC().Truncate(time.Millisecond)
 	data, err := json.Marshal(model.MessageEvent{
