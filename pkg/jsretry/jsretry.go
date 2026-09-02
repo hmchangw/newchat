@@ -232,3 +232,14 @@ func DeliveriesFor(schedule []time.Duration, want time.Duration) int {
 	}
 	return n
 }
+
+// IsFinalDelivery reports whether numDelivered has reached maxDeliver, so a
+// further nak is discarded by the server rather than redelivered. A consumer
+// that wants its give-up logged has to know this before it settles.
+// maxDeliver <= 0 is unlimited, so never final.
+func IsFinalDelivery(numDelivered uint64, maxDeliver int) bool {
+	if maxDeliver <= 0 {
+		return false
+	}
+	return numDelivered >= uint64(maxDeliver)
+}

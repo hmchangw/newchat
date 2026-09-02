@@ -337,3 +337,24 @@ func TestShippedSchedules_CanSpanAnHour(t *testing.T) {
 func TestLowLatencyBackoff_StillOpensFast(t *testing.T) {
 	assert.Less(t, LowLatencyBackoff[0], time.Second)
 }
+
+func TestIsFinalDelivery(t *testing.T) {
+	tests := []struct {
+		name         string
+		numDelivered uint64
+		maxDeliver   int
+		want         bool
+	}{
+		{name: "below the cap", numDelivered: 5, maxDeliver: 6},
+		{name: "at the cap", numDelivered: 6, maxDeliver: 6, want: true},
+		{name: "past the cap", numDelivered: 7, maxDeliver: 6, want: true},
+		{name: "unlimited is never final", numDelivered: 10_000, maxDeliver: -1},
+		{name: "zero is unlimited server-side", numDelivered: 10_000, maxDeliver: 0},
+		{name: "no delivery yet", numDelivered: 0, maxDeliver: 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsFinalDelivery(tt.numDelivered, tt.maxDeliver))
+		})
+	}
+}
