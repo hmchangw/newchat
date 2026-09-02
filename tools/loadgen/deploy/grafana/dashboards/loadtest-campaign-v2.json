@@ -1,7 +1,7 @@
 {
   "uid": "load-test-campaign-v2",
   "title": "Load Test Campaign (Candidate)",
-  "description": "Candidate decision-first dashboard. It separates historical observation coverage from steady-state throughput and keeps workload-specific diagnostics collapsed.",
+  "description": "Candidate decision-first dashboard. It separates historical observation coverage from steady-state throughput and keeps workload-specific diagnostics collapsed. Loadgen and Kubernetes panels are scoped by loadgen job, namespace, and pod; service-side panels follow their metric contract labels and assume the selected per-site Prometheus datasource represents one site.",
   "tags": [
     "loadgen",
     "soak",
@@ -58,7 +58,7 @@
         ],
         "hide": 0,
         "skipUrlSync": false,
-        "description": "The rate passed to the active loadgen command. The overview uses it to calculate achieved-load percentage across message, soak, member, and bot-room modes."
+        "description": "Fallback rate for message, member, and bot-room commands. Soak mode uses the aggregate loadgen_soak_configured_rate exported by loadgen when that telemetry exists."
       },
       {
         "type": "query",
@@ -81,8 +81,7 @@
       },
         "hide": 0,
         "refresh": 2,
-        "includeAll": true,
-        "allValue": ".*",
+        "includeAll": false,
         "multi": false,
         "sort": 1,
         "skipUrlSync": false,
@@ -138,7 +137,7 @@
         ],
         "hide": 0,
         "skipUrlSync": false,
-        "description": "Regex matched against the pod name. Together with Loadgen scrape job, it scopes the shared process_*, go_* and kube_pod_container_* metrics. The trailing pipe lets the pattern match the bundled local scrape, whose series have no pod label; the job selector still excludes exporter processes. Narrow it to one pod name to isolate a single Kubernetes loadgen process."
+        "description": "Regex matched against the pod name. The default .* also matches the bundled local scrape, whose series have no pod label; the loadgen job selector still excludes exporter processes. Narrow it to one pod name to isolate a single Kubernetes loadgen process."
       }
     ]
   },
@@ -172,7 +171,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "### Read left to right\n1. **Observation coverage** should be at least 95% for the selected window.\n2. **Steady-state attainment** should be at least 95%; startup and shutdown tails are intentionally excluded by the median.\n3. **SOAK ONLY / NOT APPLICABLE** is expected for soak panels during a message, member, or bot-room campaign.\n4. **KUBERNETES METRIC UNAVAILABLE** is expected for Kubernetes-only panels in local Docker.\n5. Error panels show an explicit zero only when matching traffic or telemetry was observed; otherwise they remain **UNKNOWN**.\n6. Check **pipeline, failures, latency, backlog, and recovery**, then open collapsed rows only for diagnosis.\n\nSet **Target RPS** to the rate passed to loadgen. Status cards summarize the selected Prometheus window, not the state after loadgen stopped. Exact completed-run totals remain in the loadgen CLI summary."
+        "content": "### Read left to right\n1. **Observation coverage** should be at least 95% for the selected window.\n2. **Steady-state attainment** should be at least 95%; startup and shutdown tails are intentionally excluded by the median.\n3. **SOAK ONLY / NOT APPLICABLE** is expected for soak panels outside soak mode.\n4. **KUBERNETES METRIC UNAVAILABLE** is expected for Kubernetes-only panels in local Docker.\n5. Error panels show an explicit zero only when matching traffic or telemetry was observed; otherwise they remain **UNKNOWN**.\n6. Check **pipeline, failures, latency, backlog, and recovery**, then open collapsed rows only for diagnosis.\n\nSoak mode uses loadgen's exported aggregate configured rate. For message, member, and bot-room modes, set **Target RPS** to the rate passed to loadgen. Status cards summarize the selected Prometheus window, not the state after loadgen stopped. Exact completed-run totals remain in the loadgen CLI summary."
       },
       "transparent": false
     },
@@ -267,7 +266,7 @@
       "type": "gauge",
       "id": 67,
       "title": "Steady-state target attainment",
-      "description": "Median achieved rate across the selected window divided by Target RPS. The median represents sustained load and avoids treating startup or shutdown tail samples as the campaign result. Exact whole-run totals remain in the CLI summary.",
+      "description": "Median achieved rate across the selected window divided by the median configured soak rate when soak telemetry exists, otherwise Target RPS. The median represents sustained load and avoids treating startup or shutdown tail samples as the campaign result. Exact whole-run totals remain in the CLI summary.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -285,7 +284,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * quantile_over_time(0.5, (((sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"sent\"}[$__rate_interval]))) or sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval]))))[$__range:$__interval]) / $target_rps",
+          "expr": "100 * quantile_over_time(0.5, (((sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\",outcome=\"sent\"}[$__rate_interval]))) or sum(rate(loadgen_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_member_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or sum(rate(loadgen_botroom_published_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval]))))[$__range:$__interval]) / (quantile_over_time(0.5, (sum(loadgen_soak_configured_rate{namespace=~\"$namespace\", pod=~\"$pod\"}))[$__range:$__interval]) or vector($target_rps))",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -357,7 +356,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "vector($target_rps)",
+          "expr": "sum(loadgen_soak_configured_rate{namespace=~\"$namespace\", pod=~\"$pod\"}) or vector($target_rps)",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -475,7 +474,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(notification_worker_outcomes_total[$__rate_interval]))",
+          "expr": "sum(rate(notification_worker_outcomes_total{result=\"sent\"}[$__rate_interval]))",
           "refId": "D",
           "range": true,
           "instant": false,
@@ -527,7 +526,7 @@
       "type": "timeseries",
       "id": 69,
       "title": "Service-side terminal failures",
-      "description": "Production-side work that will receive no further application attempt, grouped by service, consumer, and reason. This is the fastest way to locate an enumerable loss after the loadgen reports impact.",
+      "description": "Production-side work that will receive no further application attempt, grouped by service, consumer, and reason. The explicit zero is fail-closed: it appears only while accepted, persisted, broadcast-delivered, and notification-sent traffic are all observed. Other campaign modes remain PIPELINE NOT OBSERVED rather than claiming a healthy zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -545,11 +544,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(chat_nats_terminal_failures_total[$__rate_interval])) or on() (0 * ((sum(rate(message_gatekeeper_messages_total{result=\"accepted\"}[$__rate_interval])) > 0) and on() (sum(rate(message_worker_persistence_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(broadcast_worker_recipient_deliveries_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(notification_worker_outcomes_total[$__rate_interval])) > 0)))",
+          "expr": "sum by (service_name, consumer, reason) (rate(chat_nats_terminal_failures_total[$__rate_interval])) or on() (0 * ((sum(rate(message_gatekeeper_messages_total{result=\"accepted\"}[$__rate_interval])) > 0) and on() (sum(rate(message_worker_persistence_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(broadcast_worker_recipient_deliveries_total{result=\"success\"}[$__rate_interval])) > 0) and on() (sum(rate(notification_worker_outcomes_total{result=\"sent\"}[$__rate_interval])) > 0)))",
           "refId": "A",
           "range": true,
           "instant": false,
-          "legendFormat": "terminal failures/s"
+          "legendFormat": "{{service_name}} {{consumer}} {{reason}}"
         }
       ],
       "fieldConfig": {
@@ -571,7 +570,7 @@
           "color": {
             "mode": "palette-classic"
           },
-          "noValue": "NO DATA",
+          "noValue": "PIPELINE NOT OBSERVED",
           "mappings": [],
           "unit": "reqps"
         },
@@ -721,7 +720,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (class) (rate(loadgen_soak_errors_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
+          "expr": "sum by (class) (rate(loadgen_soak_errors_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or on() (0 * sum(rate(loadgen_soak_lane_attempts_total{namespace=~\"$namespace\", pod=~\"$pod\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -810,6 +809,18 @@
           "range": true,
           "instant": false,
           "legendFormat": "bot-room publish errors/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (action) (rate(loadgen_soak_retries_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])) or on (action) (0 * sum by (action) (rate(loadgen_soak_operations_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval])))",
+          "refId": "I",
+          "range": true,
+          "instant": false,
+          "legendFormat": "loadgen retry {{action}}/s"
         }
       ],
       "fieldConfig": {
@@ -956,7 +967,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(jetstream_consumer_num_pending)",
+          "expr": "sum(max by (stream_name, consumer_name) (jetstream_consumer_num_pending))",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -968,7 +979,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(jetstream_consumer_num_ack_pending)",
+          "expr": "sum(max by (stream_name, consumer_name) (jetstream_consumer_num_ack_pending))",
           "refId": "C",
           "range": true,
           "instant": false,
@@ -1145,7 +1156,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(kube_pod_container_status_last_terminated_reason{namespace=~\"$namespace\", pod=~\"$pod\",reason=\"OOMKilled\"})",
+              "expr": "sum(kube_pod_container_status_last_terminated_reason{namespace=~\"$namespace\", pod=~\"$pod\",reason=\"OOMKilled\"} and on (namespace, pod) count by (namespace, pod) (process_resident_memory_bytes{job=~\"$loadgen_job\"}))",
               "refId": "A",
               "range": true
             }
@@ -2280,8 +2291,8 @@
         {
           "type": "timeseries",
           "id": 26,
-          "title": "Soak observer validity: unverified vs eligible",
-          "description": "Numerator and denominator of the failure-evidence observer contract, pinned to scenario=message_soak. The interval is invalid when unverified exceeds max(3, ceil(0.001 * eligible)) for a lane and observer. A disabled observer is not eligible; NO DATA remains inconclusive.",
+          "title": "Soak observer validity and queue pressure",
+          "description": "Numerator and denominator of the failure-evidence observer contract, plus the live observer queue depth on the right axis. The interval is invalid when unverified exceeds max(3, ceil(0.001 * eligible)) for a lane and observer. Queue depth should repeatedly drain to zero; sustained growth means the observer is alive but falling behind. A disabled observer is not eligible; NO DATA remains inconclusive.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2314,6 +2325,17 @@
               "refId": "B",
               "range": true,
               "legendFormat": "{{lane}} {{observer}} eligible"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (observer) (loadgen_failure_observer_queue_depth{namespace=~\"$namespace\", pod=~\"$pod\"}) and on() max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range]))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "{{observer}} queue depth"
             }
           ],
           "fieldConfig": {
@@ -2338,7 +2360,35 @@
               "noValue": "NO DATA",
               "mappings": []
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "line"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.stacking",
+                    "value": {
+                      "mode": "none",
+                      "group": "B"
+                    }
+                  }
+                ]
+              }
+            ]
           },
           "options": {
             "legend": {
@@ -2465,7 +2515,7 @@
     {
       "type": "row",
       "id": 32,
-      "title": "3. Soak correctness (N/A for message runs)",
+      "title": "3. Soak correctness (soak mode only)",
       "collapsed": true,
       "gridPos": {
         "h": 1,
@@ -3677,7 +3727,7 @@
           "type": "timeseries",
           "id": 36,
           "title": "Soak operations by outcome",
-          "description": "Measured-phase operations only (phase=\"run\"; the seed and teardown phases are excluded because their rates say nothing about steady-state behaviour). skipped is loadgen declining to act, not a system failure.",
+          "description": "Measured-phase operations only (phase=\"measured\"; warmup is excluded because its rates say nothing about steady-state behaviour). skipped is loadgen declining to act, not a system failure.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3695,7 +3745,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (outcome) (rate(loadgen_soak_operations_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__rate_interval]))",
+              "expr": "sum by (outcome) (rate(loadgen_soak_operations_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
               "legendFormat": "{{outcome}}"
@@ -4710,7 +4760,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "topk(25, sum by (action, class, reason) (increase(loadgen_soak_error_reasons_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"run\"}[$__range]))) or on() (0 * max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])))",
+              "expr": "topk(25, sum by (action, class, reason) (increase(loadgen_soak_error_reasons_total{namespace=~\"$namespace\", pod=~\"$pod\",phase=\"measured\"}[$__range]))) or on() (0 * max(max_over_time(loadgen_run_info{namespace=~\"$namespace\", pod=~\"$pod\"}[$__range])))",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -4960,7 +5010,7 @@
           "type": "timeseries",
           "id": 55,
           "title": "Loadgen NATS outage duration",
-          "description": "p95 and p99 of completed disconnections per pool. Short reconnects during an injected NATS fault are expected; the question this panel answers is whether loadgen's own connectivity was stable outside the fault window.",
+          "description": "p95 and p99 of completed disconnections per pool, plus the duration of any outage still in progress. Short reconnects during an injected NATS fault are expected; a growing current-outage line means loadgen remains disconnected and the completed-outage histogram cannot yet describe it.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -4993,6 +5043,17 @@
               "refId": "B",
               "range": true,
               "legendFormat": "p99 {{pool}}"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (pool) (loadgen_nats_current_outage_seconds{namespace=~\"$namespace\", pod=~\"$pod\"}) or on (pool) (0 * max by (pool) (loadgen_nats_connected{namespace=~\"$namespace\", pod=~\"$pod\"}))",
+              "refId": "C",
+              "range": true,
+              "legendFormat": "current {{pool}}"
             }
           ],
           "fieldConfig": {

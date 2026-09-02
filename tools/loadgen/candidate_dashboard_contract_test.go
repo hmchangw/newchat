@@ -35,13 +35,16 @@ type candidateDashboardPanel struct {
 }
 
 type candidateDashboard struct {
-	UID        string                    `json:"uid"`
-	Title      string                    `json:"title"`
-	Panels     []candidateDashboardPanel `json:"panels"`
-	Templating struct {
+	UID         string                    `json:"uid"`
+	Title       string                    `json:"title"`
+	Description string                    `json:"description"`
+	Panels      []candidateDashboardPanel `json:"panels"`
+	Templating  struct {
 		List []struct {
-			Name    string `json:"name"`
-			Current struct {
+			Name        string `json:"name"`
+			IncludeAll  bool   `json:"includeAll"`
+			Description string `json:"description"`
+			Current     struct {
 				Text  any `json:"text"`
 				Value any `json:"value"`
 			} `json:"current"`
@@ -226,7 +229,7 @@ func TestCandidateDashboardContract_ZeroStatesRequireObservedEvidence(t *testing
 		panel := requireCandidatePanel(t, dashboard.Panels, title)
 		require.NotEmpty(t, panel.Targets)
 		for _, target := range panel.Targets {
-			assert.Contains(t, target.Expr, "or on()", "panel=%s query=%s", title, target.Expr)
+			assert.Contains(t, target.Expr, "or on", "panel=%s query=%s", title, target.Expr)
 		}
 	}
 
@@ -330,7 +333,7 @@ func TestCandidateDashboardContract_DefaultViewCollapsesDiagnostics(t *testing.T
 
 	for _, title := range []string{
 		"2. Measurement validity (mode and environment specific)",
-		"3. Soak correctness (N/A for message runs)",
+		"3. Soak correctness (soak mode only)",
 		"4. Workload-specific diagnostics",
 		"5. Consumer backlog details",
 	} {
@@ -341,11 +344,80 @@ func TestCandidateDashboardContract_DefaultViewCollapsesDiagnostics(t *testing.T
 		}
 	}
 
-	correctness := requireCandidatePanel(t, dashboard.Panels, "3. Soak correctness (N/A for message runs)")
+	correctness := requireCandidatePanel(t, dashboard.Panels, "3. Soak correctness (soak mode only)")
 	for _, title := range []string{"Evidence validity blockers", "Unrecovered impact", "Correctness violations"} {
 		panel := requireCandidatePanel(t, correctness.Panels, title)
 		assert.Contains(t, panel.FieldConfig.Defaults.NoValue, "NOT APPLICABLE")
 		require.NotEmpty(t, panel.FieldConfig.Defaults.Thresholds.Steps)
 		assert.Equal(t, "gray", panel.FieldConfig.Defaults.Thresholds.Steps[0].Color)
 	}
+}
+
+func TestCandidateDashboardContract_OperationalQueriesDoNotMisclassifyTraffic(t *testing.T) {
+	_, dashboard, _ := loadCandidateDashboard(t)
+
+	oom := requireCandidatePanel(t, dashboard.Panels, "OOM-killed loadgen containers (Kubernetes only)")
+	require.Len(t, oom.Targets, 1)
+	assert.Contains(t, oom.Targets[0].Expr, "and on (namespace, pod)")
+	assert.Contains(t, oom.Targets[0].Expr, `process_resident_memory_bytes{job=~"$loadgen_job"}`)
+
+	pipeline := requireCandidatePanel(t, dashboard.Panels, "Service pipeline throughput")
+	require.Len(t, pipeline.Targets, 4)
+	assert.Contains(t, pipeline.Targets[3].Expr, `notification_worker_outcomes_total{result="sent"}`)
+
+	recovery := requireCandidatePanel(t, dashboard.Panels, "Recovery: operations still in flight")
+	require.Len(t, recovery.Targets, 3)
+	for _, target := range recovery.Targets[1:] {
+		assert.Contains(t, target.Expr, "sum(max by (stream_name, consumer_name)", "query=%s", target.Expr)
+	}
+
+	terminal := requireCandidatePanel(t, dashboard.Panels, "Service-side terminal failures")
+	require.Len(t, terminal.Targets, 1)
+	assert.Contains(t, terminal.Targets[0].Expr, "sum by (service_name, consumer, reason)")
+	assert.Contains(t, terminal.Targets[0].Expr, " and on() ", "the explicit zero remains fail-closed on the full message pipeline")
+	assert.Contains(t, terminal.FieldConfig.Defaults.NoValue, "PIPELINE NOT OBSERVED")
+}
+
+func TestCandidateDashboardContract_TargetAndVariablesCannotSilentlyBroadenScope(t *testing.T) {
+	_, dashboard, _ := loadCandidateDashboard(t)
+
+	attainment := requireCandidatePanel(t, dashboard.Panels, "Steady-state target attainment")
+	require.Len(t, attainment.Targets, 1)
+	assert.Contains(t, attainment.Targets[0].Expr, "loadgen_soak_configured_rate")
+	assert.Contains(t, attainment.Targets[0].Expr, "or vector($target_rps)")
+
+	throughput := requireCandidatePanel(t, dashboard.Panels, "Target vs achieved throughput")
+	require.Len(t, throughput.Targets, 2)
+	assert.Contains(t, throughput.Targets[0].Expr, "loadgen_soak_configured_rate")
+	assert.Contains(t, throughput.Targets[0].Expr, "or vector($target_rps)")
+
+	for _, variable := range dashboard.Templating.List {
+		switch variable.Name {
+		case "loadgen_job":
+			assert.False(t, variable.IncludeAll)
+		case "pod":
+			assert.NotContains(t, strings.ToLower(variable.Description), "trailing pipe")
+		}
+	}
+}
+
+func TestCandidateDashboardContract_RequiredDiagnosticsAreVisible(t *testing.T) {
+	encoded, dashboard, queries := loadCandidateDashboard(t)
+
+	for _, metric := range []string{
+		"loadgen_failure_observer_queue_depth",
+		"loadgen_nats_current_outage_seconds",
+		"loadgen_soak_retries_total",
+	} {
+		requireCandidateQuery(t, queries, metric)
+	}
+
+	assert.NotContains(t, encoded, `phase=\"run\"`)
+	requireCandidateQuery(t, queries, "loadgen_soak_errors_total", `phase="measured"`)
+	requireCandidateQuery(t, queries, "loadgen_soak_operations_total", `phase="measured"`)
+	requireCandidateQuery(t, queries, "loadgen_soak_error_reasons_total", `phase="measured"`)
+
+	soakRow := requireCandidatePanel(t, dashboard.Panels, "3. Soak correctness (soak mode only)")
+	assert.True(t, soakRow.Collapsed)
+	assert.Contains(t, strings.ToLower(dashboard.Description), "per-site prometheus")
 }
