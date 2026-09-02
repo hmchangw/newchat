@@ -182,25 +182,11 @@ func main() {
 		"user_cache_size", cfg.UserCacheSize, "user_cache_ttl", cfg.UserCacheTTL,
 		"sub_l2_ttl", cfg.SubL2.TTL,
 	)
-	pub := func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
-		ack, err := js.PublishMsg(ctx, msg, opts...)
-		publishMetrics.Failure(ctx, natsmetrics.DestinationCanonical, natsmetrics.OperationCanonicalPublish, err)
-		if err != nil {
-			return nil, fmt.Errorf("publish to %q: %w", msg.Subject, err)
-		}
-		return ack, nil
+	handlerOpts := []gatekeeperHandlerOption{
+		withGatekeeperMetrics(domainMetrics),
+		withThreadParentRecheckDelay(cfg.ThreadParentRecheckDelay),
 	}
-	reply := func(ctx context.Context, msg *nats.Msg) error {
-		err := nc.PublishMsg(ctx, msg)
-		publishMetrics.Failure(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
-		if err != nil {
-			return fmt.Errorf("reply to %q: %w", msg.Subject, err)
-		}
-		return nil
-	}
-	parentFetcher := newHistoryParentFetcher(nc, cfg.ChatBaseURL, publishMetrics)
-	handler := NewHandler(store, users, pub, reply, cfg.SiteID, parentFetcher, cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL,
-		withGatekeeperMetrics(domainMetrics), withThreadParentRecheckDelay(cfg.ThreadParentRecheckDelay))
+	handler := newLaneHandler(newLaneDeps(nc, js, cfg.ChatBaseURL, publishMetrics), store, users, &cfg, handlerOpts...)
 
 	if err := bootstrapStreams(ctx, js, cfg.SiteID, cfg.Bootstrap.Enabled); err != nil {
 		slog.Error("bootstrap streams failed", "error", err)
@@ -247,6 +233,11 @@ func main() {
 	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
 		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
+			// Its own handler, bound to the buddy connection: this lane runs
+			// because the home cluster is unreachable, so publishing the
+			// validated message or answering the client over the home
+			// connection would drop both.
+			buddyHandler := newLaneHandler(newLaneDeps(bconn, bjs, cfg.ChatBaseURL, publishMetrics), store, users, &cfg, handlerOpts...)
 			var bErr error
 			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
 				Stream: stream.MessagesFailover(cfg.SiteID),
@@ -254,7 +245,7 @@ func main() {
 				// validated failover send must have somewhere to go.
 				AlsoEnsure: []stream.Config{stream.MessagesCanonicalFailover(cfg.SiteID)},
 				Consumer:   buildFailoverConsumerConfig(cfg.Consumer),
-			}, gatekeeperHandler(handler, true))
+			}, gatekeeperHandler(buddyHandler, true))
 			return bErr
 		})
 
@@ -288,11 +279,49 @@ func main() {
 	)
 }
 
-// buildConsumerConfig returns the durable consumer config for
-// message-gatekeeper. Centralized so it is unit-testable without NATS.
-// gatekeeperProcessor is the per-message body both lanes run. failoverLane is
-// fixed by the consumer that delivered the message, so it is bound once here
-// rather than re-derived from every message's subject.
+// laneDeps are the dependencies of one gatekeeper lane that are bound to a
+// specific NATS connection: where a validated message is published, where the
+// client is answered, and where a thread parent is looked up.
+type laneDeps struct {
+	publish publishFunc
+	reply   replyFunc
+	parent  ParentMessageFetcher
+}
+
+// newLaneDeps binds a lane's outbound traffic to the connection that lane
+// consumes on. Each lane needs its own — the failover lane exists because the
+// home cluster is unreachable, so reusing the home lane's deps there would
+// validate a send and then drop both the canonical publish and the client's
+// reply into a dead connection, with the send appearing to hang.
+func newLaneDeps(nc *o11ynats.Conn, js o11ynats.JetStream, chatBaseURL string, metrics natsmetrics.Publisher) laneDeps {
+	return laneDeps{
+		publish: func(ctx context.Context, msg *nats.Msg, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+			ack, err := js.PublishMsg(ctx, msg, opts...)
+			metrics.Failure(ctx, natsmetrics.DestinationCanonical, natsmetrics.OperationCanonicalPublish, err)
+			if err != nil {
+				return nil, fmt.Errorf("publish to %q: %w", msg.Subject, err)
+			}
+			return ack, nil
+		},
+		reply: func(ctx context.Context, msg *nats.Msg) error {
+			err := nc.PublishMsg(ctx, msg)
+			metrics.Failure(ctx, natsmetrics.DestinationClientResponse, natsmetrics.OperationClientResponse, err)
+			if err != nil {
+				return fmt.Errorf("reply to %q: %w", msg.Subject, err)
+			}
+			return nil
+		},
+		parent: newHistoryParentFetcher(nc, chatBaseURL, metrics),
+	}
+}
+
+// newLaneHandler builds one lane's handler from that lane's connection-bound
+// deps and the service-wide config, which the lanes share.
+func newLaneHandler(deps laneDeps, store Store, users UserGetter, cfg *config, options ...gatekeeperHandlerOption) *Handler {
+	return NewHandler(store, users, deps.publish, deps.reply, cfg.SiteID, deps.parent,
+		cfg.LargeRoomThreshold, cfg.MaxAttachments, cfg.MaxAttachmentBytes, cfg.ChatBaseURL, options...)
+}
+
 // gatekeeperHandler is gatekeeperProcessor for callers that hand back a plain
 // jetstream.Msg — the failover binder's handler shape.
 func gatekeeperHandler(handler *Handler, failoverLane bool) func(context.Context, jetstream.Msg) {
@@ -301,6 +330,9 @@ func gatekeeperHandler(handler *Handler, failoverLane bool) func(context.Context
 	}
 }
 
+// gatekeeperProcessor is the per-message body both lanes run. failoverLane is
+// fixed by the consumer that delivered the message, so it is bound once here
+// rather than re-derived from every message's subject.
 func gatekeeperProcessor(handler *Handler, failoverLane bool) natsmetrics.ProcessMessage {
 	return func(msgCtx context.Context, msg *natsmetrics.Message) {
 		gatekeeperSettle(msgCtx, msg, handler, failoverLane)
@@ -313,6 +345,8 @@ func gatekeeperSettle(msgCtx context.Context, msg jetstream.Msg, handler *Handle
 	handler.HandleJetStreamMsg(handlerCtx, msg, failoverLane)
 }
 
+// buildConsumerConfig returns the durable consumer config for
+// message-gatekeeper. Centralized so it is unit-testable without NATS.
 func buildConsumerConfig(s stream.ConsumerSettings) jetstream.ConsumerConfig {
 	cc := stream.DurableConsumerDefaults(s)
 	cc.Durable = "message-gatekeeper"

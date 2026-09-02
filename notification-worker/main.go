@@ -80,6 +80,31 @@ type config struct {
 	PProfEnabled            bool                    `env:"PPROF_ENABLED" envDefault:"false"`
 }
 
+// natsLane is every HandlerDeps field bound to one NATS connection. Split out
+// so a lane cannot be built by copying another lane's deps and swapping a single
+// field: the failover lane runs because this site's own NATS is unreachable, so
+// any inherited field would keep talking to a dead connection — the thread
+// parent, presence and badge RPCs would stall for their whole timeout and the
+// push would go to a stream nobody can reach.
+type natsLane struct {
+	Parent   ParentFetcher
+	Presence PresenceSnapshotter
+	Badge    badgeClient
+	Emitter  Emitter
+}
+
+// bind returns a copy of base with every connection-bound field replaced by
+// this lane's. base is taken by pointer only to avoid copying it twice; it is
+// never mutated, so both lanes can bind the same base.
+func (l natsLane) bind(base *HandlerDeps) HandlerDeps {
+	deps := *base
+	deps.Parent = l.Parent
+	deps.Presence = l.Presence
+	deps.BadgeClient = l.Badge
+	deps.Emitter = l.Emitter
+	return deps
+}
+
 func main() {
 	pretouchJSON()
 
@@ -209,25 +234,31 @@ func main() {
 		slog.Error("create consumer failed", "error", err)
 		os.Exit(1)
 	}
-	// The broker advertises max_payload in its INFO on connect, so this is
-	// always in step with the server. An env var was a second source of truth
-	// that silently dropped batches whenever it drifted below the real limit.
-	emitter := newMobileEmitter(&jsPublisher{js: otelJS, metrics: publishMetrics}, wiring.PushSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
-
-	var presence PresenceSnapshotter = noopPresenceSnapshotter{}
-	if cfg.PresenceEnabled {
-		presence = newBulkPresenceSource(
-			&natsPresenceRequester{nc: nc.NatsConn()},
-			cfg.SiteID,
-			cfg.PresenceBatchSize,
-			cfg.PresenceRPCTimeout,
-			publishMetrics,
-		)
-	}
-
-	var badge badgeClient
-	if cfg.BadgeCountEnabled {
-		badge = newNatsBadgeClient(nc)
+	// laneNATS builds every connection-bound dependency from one connection, so
+	// both lanes are wired the same way and neither can inherit the other's.
+	laneNATS := func(conn *o11ynats.Conn, js o11ynats.JetStream, pushSubject string) natsLane {
+		l := natsLane{
+			Parent: newHistoryParentFetcher(conn, publishMetrics),
+			// The broker advertises max_payload in its INFO on connect, so this
+			// is always in step with the server. An env var was a second source
+			// of truth that silently dropped batches whenever it drifted below
+			// the real limit.
+			Emitter:  newMobileEmitter(&jsPublisher{js: js, metrics: publishMetrics}, pushSubject, clampPayloadCap(conn.NatsConn().MaxPayload())),
+			Presence: noopPresenceSnapshotter{},
+		}
+		if cfg.PresenceEnabled {
+			l.Presence = newBulkPresenceSource(
+				&natsPresenceRequester{nc: conn.NatsConn()},
+				cfg.SiteID,
+				cfg.PresenceBatchSize,
+				cfg.PresenceRPCTimeout,
+				publishMetrics,
+			)
+		}
+		if cfg.BadgeCountEnabled {
+			l.Badge = newNatsBadgeClient(conn)
+		}
+		return l
 	}
 
 	var settings UserSettingsSnapshotter = noopUserSettings{}
@@ -257,24 +288,22 @@ func main() {
 		slog.Info("mention display names disabled", "reason", "MENTION_NAMES_ENABLED=false")
 	}
 
-	// Hoisted so the failover lane can reuse every dependency and swap only the
-	// emitter, which must target the buddy's push stream.
-	deps := HandlerDeps{
+	// Everything a handler needs that is the same on both lanes. The
+	// connection-bound fields (Parent, Presence, BadgeClient, Emitter) are left
+	// zero here and filled in per lane by natsLane.bind — Mongo and Valkey are
+	// still up when NATS is not, so only the NATS-facing deps are rebuilt.
+	baseDeps := HandlerDeps{
 		Members:            memberLookup,
 		Followers:          newMongoThreadFollowers(threadRoomCol),
-		Parent:             newHistoryParentFetcher(nc, publishMetrics),
-		Presence:           presence,
 		Settings:           settings,
 		Hook:               noopVetoer{},
-		Emitter:            emitter,
 		RoomMeta:           roomMetaCache,
 		MentionNames:       mentionNames,
-		BadgeClient:        badge,
 		LargeRoomThreshold: cfg.LargeRoomThreshold,
 		RecipientBatchSize: cfg.PushRecipientBatchSize,
 		Metrics:            domainMetrics,
 	}
-	handler := NewHandler(deps)
+	handler := NewHandler(laneNATS(nc, otelJS, wiring.PushSendSubject).bind(&baseDeps))
 
 	// Bounded worker drains the channel so slow Valkey doesn't block NATS dispatch; drops are safe because TTLs reconcile staleness.
 	invalCtx, invalCancel := context.WithCancel(ctx)
@@ -359,12 +388,11 @@ func main() {
 	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile,
 		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			// Its own emitter: a notification derived from a failover-lane
-			// message must reach the failover push stream on the buddy. deps is
-			// copied, so the home lane keeps the live push subject.
-			failoverDeps := deps
-			failoverDeps.Emitter = newMobileEmitter(&jsPublisher{js: bjs},
-				wiring.PushFailoverSendSubject, clampPayloadCap(nc.NatsConn().MaxPayload()))
+			// Its own connection-bound deps: a notification derived from a
+			// failover-lane message must reach the failover push stream on the
+			// buddy, and its thread-parent, presence and badge RPCs must go out
+			// over the buddy too — the home cluster is the one that is down.
+			failoverDeps := laneNATS(bconn, bjs, wiring.PushFailoverSendSubject).bind(&baseDeps)
 
 			var bErr error
 			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
