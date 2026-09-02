@@ -11,7 +11,7 @@ import (
 
 func defaultSteps(workload string) string {
 	switch workload {
-	case "history", "read-receipt", "room-read", "thread-read":
+	case "history", "read-receipt", "room-read", "thread-read", "subscription-list":
 		return "200,500,1000,2000,5000"
 	case "login":
 		// Login is a low-rate journey — one per session, not per message — and
@@ -85,7 +85,7 @@ func validateSLORatio(name string, r sloRatio, wantBound bool) bool {
 // the report. Returns the process exit code.
 func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	fs := flag.NewFlagSet("max-rps", flag.ExitOnError)
-	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|login|search")
+	workload := fs.String("workload", "messages", "messages|thread|history|read-receipt|room-read|thread-read|subscription-list|login|search")
 	preset := fs.String("preset", "", "preset name")
 	seed := fs.Int64("seed", 42, "RNG seed")
 	stepsFlag := fs.String("steps", "", "ascending RPS list, e.g. 500,1k,2k,5k,10k (default depends on workload)")
@@ -107,12 +107,16 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	beforeModeFlag := fs.String("before-mode", "open:70,scrollback:30", "history only: before-cursor mix")
 	scrollbackPages := fs.Int("scrollback-pages", 5, "history only: pages per scrollback chain")
 	pageLimit := fs.Int("page-limit", 20, "history only: page limit")
-	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/thread-read/login/search: per-request timeout")
+	requestTimeout := fs.Duration("request-timeout", 5*time.Second, "history/read-receipt/room-read/thread-read/subscription-list/login/search: per-request timeout")
 	// login-only tunables:
 	authURL := fs.String("auth-url", "", "login only: auth-service base URL (default AUTH_URL)")
 	loginKeyPool := fs.Int("login-key-pool", 256, "login only: pre-generated NKey pool size")
 	// search-only tunable:
 	searchMixFlag := fs.String("search-mix", "messages:60,rooms:30,users:10", "search only: endpoint mix")
+	// subscription-list-only tunables:
+	listType := fs.String("list-type", "current", "subscription-list only: current|rooms|apps")
+	listLimit := fs.Int("list-limit", 200, "subscription-list only: page size (docs/client-api.md recommends 200)")
+	includeLastMessage := fs.Bool("include-last-message", true, "subscription-list only: request the per-room previewMessage enrichment")
 	csvPath := fs.String("csv", "", "optional CSV output path")
 	_ = fs.Parse(args)
 
@@ -295,6 +299,33 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			return 1
 		}
 		w, cleanup, presetID = rw, clean, p.Name
+	case "subscription-list":
+		p, ok := BuiltinPreset(*preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
+			return 2
+		}
+		if !validSubscriptionListTypes[*listType] {
+			fmt.Fprintln(os.Stderr, "--list-type must be one of current|rooms|apps")
+			return 2
+		}
+		if *listLimit <= 0 {
+			fmt.Fprintln(os.Stderr, "--list-limit must be > 0")
+			return 2
+		}
+		if *requestTimeout <= 0 {
+			fmt.Fprintln(os.Stderr, "--request-timeout must be > 0")
+			return 2
+		}
+		slw, clean, err := newSubscriptionListWorkload(ctx, cfg, &p, *seed, subscriptionListParams{
+			ListType: *listType, Limit: *listLimit,
+			IncludeLastMessage: includeLastMessage, RequestTimeout: *requestTimeout,
+		})
+		if err != nil {
+			slog.Error("init subscription-list workload", "error", err)
+			return 1
+		}
+		w, cleanup, presetID = slw, clean, p.Name
 	case "thread-read":
 		p, ok := BuiltinHistoryPreset(*preset)
 		if !ok {
