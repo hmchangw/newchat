@@ -533,3 +533,85 @@ Not made worse by this diff.
 No goroutine leaks, no new blocking calls in the consume loop, no batching or
 pagination regressions: `main.go`'s semaphore + WaitGroup pool and the shutdown
 ordering are unchanged, and everything added to the per-message path is CPU-only.
+
+---
+
+# Observability
+
+**high — the metric is not scraped anywhere.** `bot-message-worker/metrics.go:32`
+registers on the `promauto` default registry, but `bot-message-worker/main.go:77`
+calls `obs.Init` and the health server (`pkg/health/health.go:121-122`) serves only
+`/healthz` and `/readyz`; the only `promhttp` handler in the repo is
+`tools/loadgen/metrics.go:731`. `docs/specs/o11y/o11y-metrics-inventory.md:232-243`
+states that these promauto families are **not** on the SDK `:2112` endpoint and
+carry no `service_name`/`site` attributes — and lists this file's sibling
+`bot_msg_worker_permanent_error_total` as one of them.
+`search-service/metrics.go:22-26` is the precedent that migrated off
+`client_golang` for exactly this reason. As shipped, an on-call engineer cannot
+query the series at all, and with no `site` label it would be ambiguous across
+sites even if it were scraped.
+
+*Verified independently against primary sources during synthesis.*
+
+**high — §13.4 rule 1 is not satisfied.** No dashboard or alert consumes the
+metric: nothing under `tools/observability/grafana/dashboards`, nothing in §11
+Required Alerts. The Read-by cell (`nats-metrics-contract.md:834`) is a prose
+argument, the same shape §13.3 already flags as provisional for
+`preview_warmback_*` ("if the honest answer is that nothing reads these, §13.4
+step 1 applies"). The honest answer here is "nothing yet". Ship a panel or alert
+with it, or hold the metric.
+
+**medium — the exception is defensible but unenforced and split across docs.** The
+argument (bounded provisioned set, failure-path-only emission, named trip-wire if
+provisioning becomes self-service) is sound and correctly placed beside the row.
+But the guard it claims exception from never applies:
+`.semgrep/metrics.yml:110-114,198` taints only
+`metric.WithAttributes`/`attribute.NewSet`, and
+`pkg/obs/instrument_registry_test.go:28-34` matches only OTel constructors — a
+promauto label slice trips neither. So the row is unenforced. Its sibling
+`bot_msg_worker_permanent_error_total` also lives in the *other* document
+(`o11y-metrics-inventory.md:243`), whose "Seven application metrics" (`:234`) is
+now stale at eight.
+
+**medium — `obs.ContextWithIdentity` is missing and should be added.** Siblings
+call it at the identical position: `message-worker/handler.go:100`,
+`broadcast-worker/handler.go:189`, `notification-worker/handler.go:123`,
+`roomlist-worker/main.go:375`. Add
+`ctx = obs.ContextWithIdentity(ctx, sender.Account, m.RoomID, evt.SiteID)` after
+`handler.go:84`. This matters more here than elsewhere: the metric deliberately
+omits room and message id, so the span is where they belong — and this worker
+currently emits neither.
+
+**medium — `ConsumeContext` adopted, but only a third of it works.**
+`handler.go:72` stamps the request id, yet `main.go:77` uses `obs.Init` rather
+than `obs.InitWithLoggerHandler(ctx, logctx.LevelTrace, logctx.NewHandler)` and
+the config declares no `logctx.Config \`envPrefix:"DEBUG_LOG_"\`` (compare
+`message-worker/main.go:71,75,83,109`). So `Admit`'s X-Debug rung is inert and
+`CapturePayload` is permanently off (`pkg/logctx/limiter.go:78`).
+
+**medium — remaining propagation gap: a second producer.**
+`bot-room-service/sysmsg.go:65` publishes to `BotCanonicalCreated` with no headers
+— no `X-Request-ID` (the worker mints a fresh one, breaking the chain) and no
+`X-Bot-Identity`. Worse, it marshals a bare `model.Message`, not
+`model.MessageEvent` (`pkg/model/event.go:29-31`), so the worker decodes a zero
+`Message` and the payload fallback (`handler.go:85`) yields nothing — every such
+failure lands in `bot_account="unknown"`. The envelope mismatch is pre-existing;
+the new metric surfaces it. botplatform → handler → worker is otherwise complete
+(`botplatform-service/bot_forwarder.go:124` → `natsrouter` `RequireRequestID` →
+`bot-message-handler/handler.go:210`).
+
+**low — field-name mixing is pre-existing.** `botAccount` already exists at
+`room-worker/handler.go:2210,2220`; `messageID`/`roomID` match the file's prior
+lines; `request_id` is the repo-wide form (165 sites). No new inconsistency is
+introduced.
+
+**low — doc drift:** `pkg/logctx/consume.go:24-27` still lists bot-message-worker
+as stamping "nothing at all".
+
+**nitpick — help text.** `metrics.go:35` explains the outcome enum well but omits
+the reserved `unknown` value and the fact that successes are uncounted, so no
+ratio is derivable from this family alone. Both facts currently live only in code
+comments (`:22-25`, `:29-31`); move them into `Help`.
+
+**Clean:** no tokens, passwords or message bodies are logged; `slog` JSON
+discipline holds throughout.
