@@ -163,8 +163,15 @@ func runSeed(ctx context.Context, cfg *config, args []string) int {
 	// every send. Zero (default) means use the preset's built-in count.
 	users := fs.Int("users", 0, "override preset.Users for the messages workload (0 = use preset default; must match `loadgen daily --users` if you use both)")
 	parentsPerRoom := fs.Int("parents-per-room", 0, "thread workload: parent messages seeded per room (0 = default 8; must match the runtime default used by `loadgen max-rps`)")
-	poolOut := fs.String("pool-out", "", "write the clientsim pool artifact (ordered accounts) to this path; empty = skip")
+	poolOut := fs.String("pool-out", "", "write the clientsim pool artifact (ordered accounts) to this path; supported by --workload=messages and soak only; empty = skip")
 	_ = fs.Parse(args)
+	// Rejected rather than ignored: a seed that silently skips the artifact
+	// leaves clientsim with no pool file, and the failure surfaces one step
+	// later with nothing pointing back at the flag.
+	if *poolOut != "" && *workload != "messages" && *workload != "soak" {
+		fmt.Fprintf(os.Stderr, "--pool-out is supported only with --workload=messages or soak, got %q\n", *workload)
+		return 2
+	}
 	if *workload == "soak" {
 		return runSoakPhase(ctx, cfg, soakPhaseSeed, soakOptions{Seed: *seed, PageLimit: soakDefaultPageLimit, PoolOut: *poolOut})
 	}

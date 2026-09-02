@@ -43,7 +43,11 @@ docker cp clientsim-seed:/tmp/pool.json ./pool.json
 docker rm clientsim-seed
 
 # 3. clientsim overlay (side issuer + clientsim container):
-docker compose -f tools/clientsim/deploy/docker-compose.yml up -d --build --wait
+# CLIENTSIM_DEV_MODE is required, not defaulted: the side issuer it turns on
+# mints a NATS JWT for ANY account the caller names, so starting it has to be
+# a deliberate act. Only ever set it on a throwaway local stack.
+CLIENTSIM_DEV_MODE=true \
+  docker compose -f tools/clientsim/deploy/docker-compose.yml up -d --build --wait
 
 # 4. Push the artifact into the clientsim volume and run:
 docker compose -f tools/clientsim/deploy/docker-compose.yml cp \
@@ -107,7 +111,7 @@ for the queue.
 Every connection sets a NATS name so a simulated fleet is never mistaken for
 real traffic in `/connz` or `$SYS`:
 
-```
+```text
 clientsim-{account}-{runId}-s{shardIndex}
 ```
 

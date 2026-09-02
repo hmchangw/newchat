@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -50,4 +51,14 @@ func TestSeedConfigDigest_DeterministicAndInputSensitive(t *testing.T) {
 	assert.NotEqual(t, d1, seedConfigDigest("medium", 43, 1000), "seed-sensitive")
 	assert.NotEqual(t, d1, seedConfigDigest("medium", 42, 2000), "users-sensitive")
 	assert.NotEqual(t, d1, seedConfigDigest("large", 42, 1000), "preset-sensitive")
+}
+
+func TestSeedRejectsPoolOutOnUnsupportedWorkload(t *testing.T) {
+	// The flag reaches only the messages and soak seeders. Accepting it
+	// elsewhere returned success without an artifact, so clientsim would then
+	// fail to start with nothing pointing back at this flag.
+	code := runSeed(context.Background(), &config{}, []string{
+		"--workload=members", "--preset=small", "--pool-out=/tmp/should-not-be-written.json",
+	})
+	assert.Equal(t, 2, code)
 }

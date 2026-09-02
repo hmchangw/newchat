@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -208,6 +209,9 @@ func (s *simClient) run(ctx context.Context) error {
 	if err := s.connect(ctx); err != nil {
 		return err
 	}
+	// Every exit from here owns its teardown, rather than trusting the swarm
+	// to call close(). Idempotent, so the swarm's own close() is still safe.
+	defer s.close()
 	pumpCtx, stopPump := context.WithCancel(ctx)
 	defer stopPump()
 	go s.pump(pumpCtx)
@@ -217,10 +221,11 @@ func (s *simClient) run(ctx context.Context) error {
 		return fmt.Errorf("client %s closed during startup", s.account)
 	}
 	if err := s.subscribeLanes(conn); err != nil {
-		s.close()
 		return err
 	}
-	if err := s.bootstrapWalk(ctx); err != nil {
+	// A walk whose connection died mid-RPC is a race the resync already owns;
+	// only a real failure ends the client.
+	if err := s.bootstrapWalk(ctx); err != nil && !errors.Is(err, errPlanEpochChanged) {
 		s.close()
 		return err
 	}

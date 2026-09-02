@@ -107,3 +107,34 @@ func TestWrite_FailsOnUnwritablePath(t *testing.T) {
 	err := Write(filepath.Join(t.TempDir(), "no-such-dir", "pool.json"), validArtifact())
 	assert.ErrorContains(t, err, "write pool artifact")
 }
+
+func TestLoad_RejectsArtifactsMissingRunCorrelation(t *testing.T) {
+	// Write requires both fields; Load accepting them empty let clientsim
+	// start with blank run-correlation metadata, so a run's connections could
+	// not be tied back to the seed that produced them.
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "no runId",
+			raw:  `{"schemaVersion":1,"runId":"","siteId":"site-a","configDigest":"d","accounts":["u1"]}`,
+			want: "no runID",
+		},
+		{
+			name: "no configDigest",
+			raw:  `{"schemaVersion":1,"runId":"r","siteId":"site-a","configDigest":"","accounts":["u1"]}`,
+			want: "no configDigest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "pool.json")
+			require.NoError(t, os.WriteFile(path, []byte(tt.raw), 0o600))
+			_, err := Load(path, "site-a")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}

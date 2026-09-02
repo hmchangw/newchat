@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -74,6 +75,14 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// Not rejected: the local throwaway stack legitimately runs plain ws://.
+	// But a JWT on the wire in cleartext against anything shared is a real
+	// exposure, so it must never be silent.
+	if strings.HasPrefix(cfg.NATSWSURL, "ws://") {
+		slog.Warn("connecting over cleartext WebSocket; the NATS user JWT is sent unencrypted — use wss:// against any shared cluster",
+			"url", cfg.NATSWSURL)
+	}
+
 	pool, err := poolartifact.Load(cfg.PoolFile, cfg.SiteID)
 	if err != nil {
 		return fmt.Errorf("load pool artifact: %w", err)
@@ -96,7 +105,15 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("bind metrics endpoint %s: %w", cfg.MetricsAddr, err)
 	}
-	metricsSrv := &http.Server{Handler: m.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	// ReadHeaderTimeout alone does not bound the body: a client can declare one
+	// and then dribble it while the server drains it after the handler returns.
+	metricsSrv := &http.Server{
+		Handler:           m.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
 		if err := metricsSrv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("metrics server stopped mid-run", "error", err)

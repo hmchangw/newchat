@@ -21,9 +21,12 @@ services:
     env_file:
       - ../../../docker-local/.env
     environment:
-      # Overridable: a hardcoded "true" here silently wins over a DEV_MODE=false
-      # an operator set in the env_file above.
-      DEV_MODE: "${CLIENTSIM_DEV_MODE:-true}"
+      # Required, not defaulted: dev mode mints a NATS JWT for ANY account the
+      # caller names, so bringing this up must be a deliberate act rather than
+      # something `docker compose up` does on its own. Also overridable rather
+      # than hardcoded, so a DEV_MODE=false in the env_file above is not
+      # silently ignored.
+      DEV_MODE: "${CLIENTSIM_DEV_MODE:?set CLIENTSIM_DEV_MODE=true only on a throwaway local stack — dev mode signs any account}"
       PORT: "8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]

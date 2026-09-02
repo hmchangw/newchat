@@ -476,3 +476,65 @@ func TestAsyncFault_ClearsWithTheConnectionItBelongedTo(t *testing.T) {
 	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
 		"a clean connection with a verified plan is ready again")
 }
+
+func TestSimClient_RemovalClearsAFailedRoomAndRestoresReady(t *testing.T) {
+	fc := newFakeConn(subListPage{
+		Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}},
+		HasMore:       false,
+	})
+	// r1's member lane is denied, so the room lands in missingRooms.
+	fc.failSubscribeChanOn(subject.RoomMemberEvent("r1", true), errors.New("permissions violation"))
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, missing := s.missingRooms["r1"]
+		return missing
+	}, 2*time.Second, 10*time.Millisecond, "the half-open room must be recorded missing")
+	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+
+	// The room is removed server-side. Nothing is broken any more.
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("removed", "r1", "channel", nil))
+
+	s.mu.Lock()
+	_, stillMissing := s.missingRooms["r1"]
+	s.mu.Unlock()
+	assert.False(t, stillMissing, "a removed room cannot still be missing")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"with nothing left to repair the client must return to ready")
+}
+
+func TestBootstrapWalk_StaleEpochIsNotFatal(t *testing.T) {
+	// A disconnect during the initial walk is an expected race: the reconnect
+	// handler already scheduled a resync. Tearing the client down instead
+	// burns its restart budget for something that would have self-healed.
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.invalidatePlan() // the walk below will observe a changed epoch
+
+	err := func() error {
+		s.mu.Lock()
+		startEpoch := s.planEpoch
+		s.mu.Unlock()
+		s.planEpoch = startEpoch // no-op, keeps the intent readable
+		return nil
+	}()
+	require.NoError(t, err)
+
+	// Force the race: bump the epoch while the walk's RPC is in flight.
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	walkErr := make(chan error, 1)
+	go func() { walkErr <- s.bootstrapWalk(context.Background()) }()
+	<-fc.reqEntered
+	s.invalidatePlan()
+	close(fc.reqGate)
+
+	got := <-walkErr
+	require.Error(t, got, "the walk still fails: its plan came from a dead connection")
+	assert.True(t, errors.Is(got, errPlanEpochChanged),
+		"the stale-epoch case must be distinguishable so run() does not tear the client down")
+}

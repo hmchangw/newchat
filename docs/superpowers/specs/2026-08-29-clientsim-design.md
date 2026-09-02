@@ -328,7 +328,7 @@ overlay Prometheus and the k8s stack):
 - Loss visibility (mandatory, so received-only histograms can't
   silently survive a drop storm with a *better* p99):
   - slow-consumer **episodes** via the existing
-    `pkg/natsutil` helper (`nats_slow_consumer_events_total`) — the
+    `pkg/natsutil` helper (`clientsim_slow_consumer_events_total`) — the
     nats.go async error callback fires once per Active→SlowConsumer
     transition, not per dropped message, and `Subscription.Dropped()` is
     a lifetime cumulative (the helper's comment documents the

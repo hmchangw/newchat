@@ -92,6 +92,15 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	if a.SiteID != wantSiteID {
 		return nil, fmt.Errorf("pool artifact siteID %q does not match configured site %q", a.SiteID, wantSiteID)
 	}
+	// Symmetric with Write: an artifact missing either field is unmatchable to
+	// the run that produced it, and JSON unmarshalling leaves both silently
+	// empty rather than failing.
+	if a.RunID == "" {
+		return nil, errors.New("pool artifact has no runID")
+	}
+	if a.ConfigDigest == "" {
+		return nil, errors.New("pool artifact has no configDigest")
+	}
 	if len(a.Accounts) == 0 {
 		return nil, errors.New("pool artifact has no accounts")
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/hmchangw/chat/pkg/subject"
 )
+
+// errPlanEpochChanged marks a walk whose connection went away mid-RPC. It is
+// an expected race, not a failure: the reconnect handler has already scheduled
+// a resync, so run() must leave the client alive rather than spend one of its
+// five restart attempts on something that self-heals.
+var errPlanEpochChanged = errors.New("connection changed during the walk")
 
 // openSub is one subscribed room: the two lanes a real client opens on it,
 // plus the namespace they were opened on. Storing global here (instead of
@@ -193,7 +200,7 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		// reconcile against a dead snapshot, and marking it verified would
 		// vouch for a connection that no longer exists; the resync driving the
 		// new connection redoes the work.
-		return fmt.Errorf("bootstrap walk for %s: connection changed during the walk", s.account)
+		return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
 	}
 	changes := diffPlans(s.planViewLocked(), plan)
 	kept := changes[:0]

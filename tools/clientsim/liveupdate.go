@@ -53,9 +53,15 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, er
 		plan[roomID] = global
 		return []subChange{{Op: subOpen, RoomID: roomID, Global: global}}, nil
 	case "removed":
-		if _, open := plan[roomID]; !open {
+		if roomID == "" {
 			return nil, nil
 		}
+		// Close even for a room the plan does not know about. A room whose
+		// subscribe failed is in missingRooms but absent from the plan view
+		// (which is derived from the open subscriptions), so skipping it here
+		// left the client permanently not-ready over a room that no longer
+		// exists. applyChangesLocked's close path clears missingRooms first
+		// and tolerates having nothing to unsubscribe.
 		delete(plan, roomID)
 		return []subChange{{Op: subClose, RoomID: roomID}}, nil
 	default:

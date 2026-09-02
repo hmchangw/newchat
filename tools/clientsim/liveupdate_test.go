@@ -42,9 +42,13 @@ func TestApplySubscriptionUpdate(t *testing.T) {
 			updJSON("removed", "r1", "channel", nil),
 			map[string]bool{},
 			[]subChange{{Op: subClose, RoomID: "r1"}}},
-		{"removed unknown room is a no-op", map[string]bool{},
+		// Deliberately NOT a no-op: a room whose subscribe failed is absent
+		// from the plan view but present in missingRooms, and only a close
+		// clears it. See TestSimClient_RemovalClearsAFailedRoomAndRestoresReady.
+		{"removed room absent from the plan still closes", map[string]bool{},
 			updJSON("removed", "rX", "channel", nil),
-			map[string]bool{}, nil},
+			map[string]bool{},
+			[]subChange{{Op: subClose, RoomID: "rX"}}},
 		{"crossSite flip closes old namespace, opens new", map[string]bool{"r1": true},
 			updJSON("added", "r1", "channel", &fa),
 			map[string]bool{"r1": false},
@@ -85,4 +89,25 @@ func TestDiffPlans_Resync(t *testing.T) {
 func TestDiffPlans_Identical(t *testing.T) {
 	p := map[string]bool{"r1": true}
 	assert.Empty(t, diffPlans(p, map[string]bool{"r1": true}))
+}
+
+func TestApplySubscriptionUpdate_RemovalClearsARoomThatNeverOpened(t *testing.T) {
+	// A room whose subscribe failed is in missingRooms but NOT in the plan
+	// view (which is derived from roomSubs). Treating its removal as
+	// "unknown room, nothing to do" emitted no subClose, so nothing ever
+	// deleted the missingRooms entry and the client stayed not-ready for the
+	// rest of the run — for a room that no longer exists.
+	plan := map[string]bool{}
+	changes, err := applySubscriptionUpdate(plan, updJSON("removed", "gone", "channel", nil))
+	require.NoError(t, err)
+	require.Len(t, changes, 1, "a removal must still close, so missingRooms is cleared")
+	assert.Equal(t, subClose, changes[0].Op)
+	assert.Equal(t, "gone", changes[0].RoomID)
+}
+
+func TestApplySubscriptionUpdate_RemovalWithoutARoomIDIsIgnored(t *testing.T) {
+	plan := map[string]bool{}
+	changes, err := applySubscriptionUpdate(plan, updJSON("removed", "", "channel", nil))
+	require.NoError(t, err)
+	assert.Empty(t, changes)
 }
