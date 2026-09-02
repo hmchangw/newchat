@@ -129,10 +129,14 @@ type UserStore interface {
 	FindUsersByAccounts(ctx context.Context, accounts []string) ([]pkgmodel.User, error)
 }
 
-// AppStore resolves a bot account's app display name for reaction Actor rendering.
+// AppStore resolves bot accounts to their registered app display names.
 type AppStore interface {
-	// AppNameByAccount returns ("", nil) when no app matches botAccount.
+	// AppNameByAccount returns ("", nil) when no app matches botAccount. Used on the
+	// per-actor reaction path, where one account is resolved at a time behind a cache.
 	AppNameByAccount(ctx context.Context, botAccount string) (string, error)
+	// AppNamesByAccounts resolves many bot accounts in one read, keyed by account.
+	// Accounts with no matching app are simply absent from the map — not an error.
+	AppNamesByAccounts(ctx context.Context, botAccounts []string) (map[string]string, error)
 }
 
 // PreviewCache fronts the per-room preview resolve on the rooms.get lazy fallback.
@@ -171,10 +175,13 @@ type HistoryService struct {
 	threadSubs    ThreadSubscriptionRepository
 	users         UserStore
 	apps          AppStore
-	// appName is apps.AppNameByAccount behind a shared TTL cache, built ONCE here: a
-	// per-call wrapper would mint a fresh empty cache each time and never hit (#366).
-	// Nil when no app store is wired — BotAwareDisplayName degrades on a nil lookup.
+	// appName / appNames are the app store behind ONE shared TTL cache, built ONCE
+	// here: a per-call wrapper would mint a fresh empty cache each time and never hit
+	// (#366). Sharing means a bot resolved for a reaction actor is free to the legacy
+	// sys-msg page, and the reverse. Both nil when no app store is wired —
+	// BotAwareDisplayName degrades on a nil lookup.
 	appName            preview.AppNameLookup
+	appNames           preview.AppNamesLookup
 	historyFloor       time.Duration // from MESSAGE_HISTORY_FLOOR_DAYS
 	largeRoomThreshold int
 	maxPinnedPerRoom   int
@@ -251,7 +258,8 @@ func New(
 	s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
 	// A method value derefs its receiver where written, so this is guarded, not eager.
 	if apps != nil {
-		s.appName = preview.CachedAppNameLookup(apps.AppNameByAccount)
+		appCache := preview.NewAppNameCache(apps.AppNameByAccount, apps.AppNamesByAccounts)
+		s.appName, s.appNames = appCache.Name, appCache.Names
 	}
 	for _, opt := range opts {
 		opt(s)

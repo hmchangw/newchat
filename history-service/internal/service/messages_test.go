@@ -3145,6 +3145,8 @@ func TestHistoryService_LoadHistory_ResolvesRemovedMemberNames(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Messages, 1)
 	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, resp.Messages[0].Msg)
+	// The legacy plural type must not reach the client.
+	assert.Equal(t, model.MessageTypeMemberRemoved, resp.Messages[0].Type)
 }
 
 // The ordinary page must not acquire a Mongo round trip: gomock fails the test
