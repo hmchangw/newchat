@@ -6,6 +6,7 @@ bin/
 demo
 /seed-sample-data
 /loadgen
+/clientsim
 /nats-debug
 # `go build ./...` run from inside a service dir writes the executable there
 /search-sync-worker/search-sync-worker
