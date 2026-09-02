@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -54,4 +55,26 @@ func ForwardWithFailover(ctx context.Context, publish PublishFunc,
 // cross-stream duplicate this rule exists to prevent.
 func IsNoResponders(err error) bool {
 	return errors.Is(err, nats.ErrNoResponders) || errors.Is(err, jetstream.ErrNoStreamResponse)
+}
+
+// PublishWithFailover is PublishTo's producer-side twin of ForwardWithFailover:
+// it buffers the event on the live OUTBOX and, when — and only when — that
+// publish finds no responders, re-buffers it on the buddy-hosted failover
+// OUTBOX. That is the signal that this site's own NATS is down, so the local
+// buffer is unreachable and the site would otherwise stop federating outward.
+//
+// The same no-responders-only gate as ForwardWithFailover, for the same reason:
+// the two OUTBOX streams have independent dedup windows, so redirecting a timed
+// out publish that may already have landed would enqueue the event twice.
+//
+// A nil failover publisher (a single-site deployment, or a buddy that never
+// bound) returns the live publish's error unchanged.
+func PublishWithFailover(ctx context.Context, live, failover PublishFunc,
+	originSiteID, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupID string, ts int64,
+) error {
+	err := PublishTo(ctx, live, subject.LaneHome, originSiteID, roomID, destSiteID, eventType, payload, dedupID, ts)
+	if err == nil || failover == nil || !IsNoResponders(err) {
+		return err
+	}
+	return PublishTo(ctx, failover, subject.LaneFailover, originSiteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }

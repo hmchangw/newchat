@@ -3826,7 +3826,7 @@ func TestHandler_HandleCreated_FederatesMentions(t *testing.T) {
 
 			var opts []handlerOption
 			if !tc.noFederate {
-				opts = append(opts, withOutboxFederation("site-a", rec.publish, false))
+				opts = append(opts, withOutboxFederation("site-a", rec.publish, subject.LaneHome))
 			}
 			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal), opts...)
 
@@ -3897,7 +3897,7 @@ func TestHandler_HandleUpdated_FederatesMentions(t *testing.T) {
 			}
 
 			h := NewHandler(store, us, pub, keyStore, defaultParentFetcher, true, fixedRoutes(subject.RouteGlobal),
-				withOutboxFederation("site-a", rec.publish, false))
+				withOutboxFederation("site-a", rec.publish, subject.LaneHome))
 
 			data, err := json.Marshal(model.MessageEvent{
 				Event:  model.EventUpdated,

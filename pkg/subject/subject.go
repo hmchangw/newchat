@@ -229,7 +229,7 @@ func RoomCanonicalMemberEvent(siteID, eventType string) string {
 // destination site's INBOX. Destination and event type ride the subject so a
 // per-destination consumer can filter (or pause) on a single peer.
 func Outbox(originSiteID, destSiteID, eventType string) string {
-	return fmt.Sprintf("chat.outbox.%s.%s.%s", originSiteID, destSiteID, eventType)
+	return LaneHome.Outbox(originSiteID, destSiteID, eventType)
 }
 
 // OutboxWildcard matches every event on a site's OUTBOX stream:
@@ -402,12 +402,9 @@ func FailoverPushNotificationFilter(siteID string) string {
 	return fmt.Sprintf("chat.failover.push.%s.>", siteID)
 }
 
-// FailoverOutbox mirrors Outbox on the failover lane, keeping a site federating
-// outward while its own NATS is down. Destination and event type ride the
-// subject so outbox-worker's per-destination consumers filter on one peer
-// exactly as they do on the live stream.
+// FailoverOutbox is Outbox on the failover lane; see Lane.Outbox.
 func FailoverOutbox(originSiteID, destSiteID, eventType string) string {
-	return fmt.Sprintf("chat.failover.outbox.%s.%s.%s", originSiteID, destSiteID, eventType)
+	return LaneFailover.Outbox(originSiteID, destSiteID, eventType)
 }
 
 // FailoverOutboxWildcard is the OUTBOX-FAILOVER-{originSiteID} stream's subject.

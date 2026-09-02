@@ -191,11 +191,11 @@ type HistoryService struct {
 	// every canonical publish goes to. The zero value is LaneHome, so a
 	// single-site service needs no option.
 	lane subject.Lane
-	// warmer stores walk-resolved previews off the request path; never nil, so no guard needed.
-	warmer previewWriter
-	// borrowedWarmer marks a pool owned by another lane's service, so Close
-	// leaves it running for its owner.
-	borrowedWarmer bool
+	// warmer stores walk-resolved previews off the request path; never nil (the
+	// kill switch installs a no-op). ownsWarmer says New created it, so Close
+	// drains it; an injected pool is its creator's to close.
+	warmer     previewWriter
+	ownsWarmer bool
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.
 	pageBudget pagefit.Budget
@@ -231,21 +231,13 @@ func WithLane(lane subject.Lane) Option {
 	return func(s *HistoryService) { s.lane = lane }
 }
 
-// WithSharedWarmBack reuses another service's preview warm-back pool instead of
-// starting a second one. A site serves its home and failover lanes from one
-// process, each with its own service because their publishers leave on different
-// connections — but the warm-back pool writes to Mongo, which is up whichever
-// lane is serving, so a second set of workers and queue would be pure overhead
-// for a lane that is idle almost always.
-//
-// The borrower's Close is a no-op; the owner's Close drains the pool.
-func WithSharedWarmBack(from *HistoryService) Option {
+// WithPreviewWarmer injects a preview warm-back pool built by NewPreviewWarmer,
+// so both lanes' services share one. The caller closes it.
+func WithPreviewWarmer(w *PreviewWarmer) Option {
 	return func(s *HistoryService) {
-		if from == nil || from.warmer == nil {
-			return
+		if w != nil {
+			s.warmer = w
 		}
-		s.warmer = from.warmer
-		s.borrowedWarmer = true
 	}
 }
 
@@ -295,13 +287,14 @@ func New(
 	for _, opt := range opts {
 		opt(s)
 	}
-	// After the options, so WithSharedWarmBack can supply a pool instead of this
+	// After the options, so WithPreviewWarmer can supply a pool instead of this
 	// starting a second set of workers only to drop it on the floor.
 	if s.warmer == nil {
 		s.warmer = nopPreviewWarmer{}
 		if cfg.PreviewWarmBackEnabled {
-			s.warmer = newPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue, warmBackTimeout)
+			s.warmer = NewPreviewWarmer(rooms, cfg.PreviewWarmBackWorkers, cfg.PreviewWarmBackQueue)
 		}
+		s.ownsWarmer = true
 	}
 	return s
 }
@@ -310,10 +303,10 @@ func New(
 // the router has stopped accepting requests and before the Mongo client closes; ctx bounds
 // the drain, and an expired one abandons the remaining writes rather than holding shutdown.
 //
-// A service that borrowed its pool (WithSharedWarmBack) closes nothing: the pool
-// belongs to the service that created it, whose own Close drains it.
+// A service handed its pool by WithPreviewWarmer closes nothing: the pool is its
+// creator's to drain.
 func (s *HistoryService) Close(ctx context.Context) error {
-	if s.borrowedWarmer {
+	if !s.ownsWarmer {
 		return nil
 	}
 	return s.warmer.Close(ctx)

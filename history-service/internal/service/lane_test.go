@@ -17,54 +17,64 @@ func laneTestConfig() *config.Config {
 	return &config.Config{
 		MessageHistoryFloorDays: 730, LargeRoomThreshold: 500,
 		MaxPinnedPerRoom: 10, PinEnabled: true,
-		PreviewWarmBackWorkers: 4, PreviewWarmBackQueue: 8,
+		PreviewWarmBackEnabled: true, PreviewWarmBackWorkers: 4, PreviewWarmBackQueue: 8,
 	}
 }
 
-// A site serves both its home and its failover lane from one process, and each
-// lane needs its own service because their publishers go out on different
-// connections. The preview warm-back pool is not per-lane, though: it writes to
-// Mongo, which is still up. Left unshared, the failover lane would double this
-// service's warm-back workers and queue for a lane that is idle almost always.
-func TestNew_WithSharedWarmBack_ReusesThePool(t *testing.T) {
-	home := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig())
-	t.Cleanup(func() { _ = home.Close(context.Background()) })
-
-	failover := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig(),
-		WithSharedWarmBack(home))
-
-	require.NotNil(t, home.warmer)
-	assert.Same(t, home.warmer, failover.warmer, "the second lane must not start its own pool")
+// newLaneService builds a service with nil stores for wiring tests and closes it
+// with the test, so each case is two lines rather than four.
+func newLaneService(t *testing.T, opts ...Option) *HistoryService {
+	t.Helper()
+	s := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig(), opts...)
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	return s
 }
 
-// Without the option each service owns its pool, so the sharing is opt-in and a
-// single-lane service is unaffected.
-func TestNew_WithoutSharedWarmBack_OwnsItsPool(t *testing.T) {
-	first := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig())
-	t.Cleanup(func() { _ = first.Close(context.Background()) })
-	second := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig())
-	t.Cleanup(func() { _ = second.Close(context.Background()) })
+// Both lanes' services share one injected warm-back pool: it writes to Mongo,
+// which is up whichever lane is serving, so a second set of workers and queue
+// would be overhead for a lane that is idle almost always. Closing either
+// service leaves the pool running — it is its creator's to close.
+func TestNew_WithPreviewWarmer_SharesThePool(t *testing.T) {
+	pool := NewPreviewWarmer(nil, 2, 4)
+	t.Cleanup(func() { _ = pool.Close(context.Background()) })
 
-	require.NotNil(t, first.warmer)
-	require.NotNil(t, second.warmer)
-	assert.NotSame(t, first.warmer, second.warmer)
-}
-
-// Closing the borrowing service must not stop the pool out from under its owner:
-// shutdown closes each service it built, and the home lane's warm-backs have to
-// keep draining until the home service itself closes.
-func TestClose_OnABorrowedPool_LeavesTheOwnerRunning(t *testing.T) {
-	home := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig())
-	t.Cleanup(func() { _ = home.Close(context.Background()) })
-	failover := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig(),
-		WithSharedWarmBack(home))
+	home := newLaneService(t, WithPreviewWarmer(pool))
+	failover := newLaneService(t, WithPreviewWarmer(pool))
+	assert.Same(t, pool, home.warmer)
+	assert.Same(t, pool, failover.warmer)
 
 	require.NoError(t, failover.Close(context.Background()))
+	pool.mu.RLock()
+	closed := pool.closed
+	pool.mu.RUnlock()
+	assert.False(t, closed, "an injected pool must survive its borrowers' Close")
+}
 
-	home.warmer.mu.RLock()
-	closed := home.warmer.closed
-	home.warmer.mu.RUnlock()
-	assert.False(t, closed, "the owner's pool must still accept warm-backs")
+// Without the option each service starts and owns its pool, so a single-lane
+// service — and every existing test — is unaffected.
+func TestNew_WithoutPreviewWarmer_OwnsItsPool(t *testing.T) {
+	first := newLaneService(t)
+	second := newLaneService(t)
+	firstPool, ok := first.warmer.(*PreviewWarmer)
+	require.True(t, ok, "an enabled service must start a real pool")
+	secondPool, ok := second.warmer.(*PreviewWarmer)
+	require.True(t, ok)
+	assert.NotSame(t, firstPool, secondPool)
+	assert.True(t, first.ownsWarmer)
+}
+
+// PREVIEW_WARMBACK_ENABLED=false installs the no-op writer; an injected pool is
+// the caller's decision and is still honoured, since main only builds one when
+// the switch is on.
+func TestNew_WarmBackDisabled_InstallsNoop(t *testing.T) {
+	cfg := laneTestConfig()
+	cfg.PreviewWarmBackEnabled = false
+	s := New(nil, nil, nil, nil, nil, nil, nil, nil, cfg)
+	t.Cleanup(func() { _ = s.Close(context.Background()) })
+
+	_, isNoop := s.warmer.(nopPreviewWarmer)
+	assert.True(t, isNoop)
+	assert.True(t, s.ownsWarmer)
 }
 
 // lanePublisher records the subjects a service published to.
@@ -97,8 +107,8 @@ func TestPublishCanonical_UsesTheServiceLane(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &lanePublisher{}
-			s := New(nil, nil, nil, pub, nil, nil, nil, nil, laneTestConfig(), WithLane(tc.lane))
-			t.Cleanup(func() { _ = s.Close(context.Background()) })
+			s := newLaneService(t, WithLane(tc.lane))
+			s.publisher = pub
 
 			var want []string
 			for _, evt := range events {
@@ -114,8 +124,5 @@ func TestPublishCanonical_UsesTheServiceLane(t *testing.T) {
 // The lane defaults to home, so a service built without the option — every
 // single-site deployment — keeps publishing to the live canonical stream.
 func TestNew_DefaultsToTheHomeLane(t *testing.T) {
-	s := New(nil, nil, nil, nil, nil, nil, nil, nil, laneTestConfig())
-	t.Cleanup(func() { _ = s.Close(context.Background()) })
-
-	assert.Equal(t, subject.LaneHome, s.lane)
+	assert.Equal(t, subject.LaneHome, newLaneService(t).lane)
 }

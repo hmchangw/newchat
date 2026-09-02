@@ -71,7 +71,7 @@ func TestHandler_HandleJetStreamMsg_RecordsRejectedOutcome(t *testing.T) {
 	h := NewHandler(nil, nil, nil, func(context.Context, *nats.Msg) error { return nil }, "site-a", nil, 500, 1, 8192, "", withGatekeeperMetrics(metrics))
 	msg := &fakeJSMsg{subject: "chat.invalid", data: []byte(`{}`)}
 
-	h.HandleJetStreamMsg(context.Background(), msg, false)
+	h.HandleJetStreamMsg(context.Background(), msg)
 
 	assert.True(t, msg.acked)
 	assert.False(t, msg.naked)
@@ -122,7 +122,7 @@ func TestHandler_HandleJetStreamMsg_RecordsAcceptedAndRetryOutcomes(t *testing.T
 				ctx = tracked.Context(ctx)
 			}
 
-			h.HandleJetStreamMsg(ctx, delivery, false)
+			h.HandleJetStreamMsg(ctx, delivery)
 
 			assert.Equal(t, tt.wantAck, msg.acked)
 			assert.Equal(t, tt.wantNak, msg.naked)
@@ -159,7 +159,7 @@ func TestHandler_HandleJetStreamMsg_PermanentFault_RecordsFailedNotRejected(t *t
 	require.NoError(t, err)
 	msg := &fakeJSMsg{subject: "chat.user.alice.room.room-1.site-a.msg.send", data: data}
 
-	h.HandleJetStreamMsg(context.Background(), msg, false)
+	h.HandleJetStreamMsg(context.Background(), msg)
 
 	assert.True(t, msg.acked, "a permanent fault can never succeed on redelivery — Ack-drop it")
 	assert.False(t, msg.naked)
@@ -189,7 +189,7 @@ func TestHandler_HandleJetStreamMsg_OversizedCanonicalPublish_IsPermanent(t *tes
 	require.NoError(t, err)
 	msg := &fakeJSMsg{subject: "chat.user.weather_bot.room.room-1.site-a.msg.send", data: data}
 
-	h.HandleJetStreamMsg(context.Background(), msg, false)
+	h.HandleJetStreamMsg(context.Background(), msg)
 
 	assert.True(t, msg.acked, "an oversized message can never be published — Ack-drop it")
 	assert.False(t, msg.naked)

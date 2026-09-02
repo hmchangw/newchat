@@ -892,24 +892,15 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 // federateOne durably relays one cross-site event onto the local OUTBOX stream
 // (the durability boundary — only a local publish failure reaches the client);
 // outbox-worker forwards it to destSiteID's INBOX. No-op when destSiteID is
-// empty or local (outbox.Publish owns that guard, and the envelope build). The
+// empty or local (outbox.PublishWithFailover owns that guard, the envelope
+// build, and the redirect onto the buddy OUTBOX when the local one is gone). The
 // dedupID derived from dedupSeed is the OUTBOX publish's Nats-Msg-Id too, so a
 // client retry can't double-enqueue the same (destination, event) into the
 // outbox.
 func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupSeed string, ts int64) error {
 	dedupID := natsutil.InboxDedupID(ctx, destSiteID, dedupSeed)
-	err := outbox.PublishTo(ctx, h.publishToStream, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts, false)
-	if err == nil || h.publishToFailoverStream == nil || !outbox.IsNoResponders(err) {
-		return err
-	}
-	// The local OUTBOX is unreachable — this site's own NATS is down. Republish
-	// onto the buddy-hosted failover outbox so the site keeps federating outward.
-	//
-	// Gated on no-responders alone: a timeout may already have landed, and the
-	// two outbox streams have independent dedup windows, so a shared
-	// Nats-Msg-Id would not collapse a duplicate across them.
-	return outbox.PublishTo(ctx, h.publishToFailoverStream, h.siteID, roomID, destSiteID,
-		eventType, payload, dedupID, ts, true)
+	return outbox.PublishWithFailover(ctx, h.publishToStream, h.publishToFailoverStream,
+		h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
 // SetFailoverPublisher installs the buddy-lane publisher. Called from main once

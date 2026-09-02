@@ -1023,16 +1023,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
+	// Buddy lane. The buddy dial never fails startup — on any failure buddyLane stays
 	// nil and the service runs home-only, which beats refusing to boot over a
 	// peer cluster we only need during an outage.
 	var buddyLane *natsutil.Lane
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID,
+		Dialer: &natsutil.BuddyDialer{
+			Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+			TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+		},
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers, Sem: sem, WG: &wg,
 	}
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy, cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
+	buddyConn := binder.Dialer.Bind(ctx,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 			var bErr error
 			buddyLane, bErr = startFailoverLane(ctx, bjs, &cfg, handler, &binder, sem, &wg)

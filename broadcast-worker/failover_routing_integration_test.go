@@ -17,6 +17,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
@@ -98,7 +99,7 @@ func TestFailoverLane_SameSiteRoomReachesRemoteSubscriber(t *testing.T) {
 
 	// The failover-lane handler: publishes on the buddy, resolver pinned to the
 	// failover lane. Configured mode is local, which is the case that breaks.
-	h := NewHandler(store, us, &natsPublisher{nc: buddy}, &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneFailover, nil,
 			subject.DefaultFailoverRevertGrace))
@@ -138,7 +139,7 @@ func TestHomeLane_SameSiteRoomStaysOnTheLocalRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, client.Flush())
 
-	h := NewHandler(store, us, &natsPublisher{nc: buddy}, &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome, nil,
 			subject.DefaultFailoverRevertGrace))
@@ -173,7 +174,7 @@ func TestHomeLane_DualPublishesDuringTheRevertGraceWindow(t *testing.T) {
 	require.NoError(t, client.Flush())
 
 	restored := time.Now().UTC().Add(-time.Minute)
-	h := NewHandler(store, us, &natsPublisher{nc: buddy}, &fakeRoomKeyProvider{pair: key},
+	h := NewHandler(store, us, corePublisher(natsutil.CorePublishFunc(buddy, natsmetrics.Publisher{})), &fakeRoomKeyProvider{pair: key},
 		defaultParentFetcher, true,
 		subject.NewLaneRouter(subject.RouteLocal, subject.LaneHome,
 			func() time.Time { return restored }, subject.DefaultFailoverRevertGrace))

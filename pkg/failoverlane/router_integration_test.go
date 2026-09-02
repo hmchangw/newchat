@@ -54,8 +54,8 @@ func TestBindRouters_BuddyRouterAnswersOnTheBuddyCluster(t *testing.T) {
 	const pattern = "chat.user.*.request.failoverlane.echo"
 	var order []subject.Lane
 	routers, err := BindRouters(ctx, homeConn, nil,
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: buddyURL}, "",
-		noop.NewTracerProvider(), propagation.TraceContext{}, false,
+		&natsutil.BuddyDialer{Config: natsutil.BuddyConfig{SiteID: "site-b", NatsURL: buddyURL},
+			TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}},
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
 			order = append(order, lane)
 			r := natsrouter.Default(conn, "failoverlane-test")
@@ -68,7 +68,7 @@ func TestBindRouters_BuddyRouterAnswersOnTheBuddyCluster(t *testing.T) {
 	// Builders capture home-lane state for the failover build (room-service hands
 	// the home handler the standby publisher), so the order is part of the contract.
 	require.Equal(t, []subject.Lane{subject.LaneHome, subject.LaneFailover}, order)
-	require.True(t, routers.HasBuddy(), "the buddy lane must bind against a live buddy server")
+	require.NotNil(t, routers.Buddy, "the buddy lane must bind against a live buddy server")
 	t.Cleanup(func() {
 		for _, hook := range routers.ShutdownHooks() {
 			_ = hook(context.Background())
@@ -92,7 +92,7 @@ func TestBindRouters_NoBuddyStillServesHome(t *testing.T) {
 
 	const pattern = "chat.user.*.request.failoverlane.homeonly"
 	routers, err := BindRouters(context.Background(), homeConn, nil,
-		natsutil.BuddyConfig{}, "", noop.NewTracerProvider(), propagation.TraceContext{}, false,
+		&natsutil.BuddyDialer{TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{}},
 		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
 			r := natsrouter.Default(conn, "failoverlane-test-homeonly")
 			natsrouter.Register(r, pattern, func(_ *natsrouter.Context, _ echoReq) (*echoResp, error) {
@@ -101,7 +101,7 @@ func TestBindRouters_NoBuddyStillServesHome(t *testing.T) {
 			return r, nil
 		})
 	require.NoError(t, err)
-	require.False(t, routers.HasBuddy())
+	require.Nil(t, routers.Buddy)
 	t.Cleanup(func() {
 		for _, hook := range routers.ShutdownHooks() {
 			_ = hook(context.Background())

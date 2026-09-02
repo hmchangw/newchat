@@ -16,8 +16,13 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
-func bindArgs() (noop.TracerProvider, propagation.TraceContext) {
-	return noop.NewTracerProvider(), propagation.TraceContext{}
+// dialer builds the test dialer for cfg with tracing off. The dialer is the one
+// value every service builds from its config and passes to whatever binds a lane,
+// in place of the five-argument tuple that used to be copied to each call.
+func dialer(cfg natsutil.BuddyConfig) *natsutil.BuddyDialer {
+	return &natsutil.BuddyDialer{
+		Config: cfg, TracerProvider: noop.NewTracerProvider(), Propagator: propagation.TraceContext{},
+	}
 }
 
 // The env block is copied into nine services; parsing it here is what stops the
@@ -56,10 +61,9 @@ func TestBuddyConfig_Enabled(t *testing.T) {
 }
 
 func TestBindBuddy_UnconfiguredSkipsTheBind(t *testing.T) {
-	tp, prop := bindArgs()
 	called := false
 
-	conn := natsutil.BindBuddy(context.Background(), natsutil.BuddyConfig{}, "", tp, prop, false,
+	conn := dialer(natsutil.BuddyConfig{}).Bind(context.Background(),
 		func(context.Context, *o11ynats.Conn, o11ynats.JetStream) error { called = true; return nil })
 
 	assert.Nil(t, conn)
@@ -67,11 +71,9 @@ func TestBindBuddy_UnconfiguredSkipsTheBind(t *testing.T) {
 }
 
 func TestBindBuddy_UnreachableBuddySkipsTheBind(t *testing.T) {
-	tp, prop := bindArgs()
 	called := false
 
-	conn := natsutil.BindBuddy(context.Background(),
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"}, "", tp, prop, false,
+	conn := dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://127.0.0.1:1"}).Bind(context.Background(),
 		func(context.Context, *o11ynats.Conn, o11ynats.JetStream) error { called = true; return nil })
 
 	assert.Nil(t, conn, "an unreachable buddy must never block startup")
@@ -80,11 +82,9 @@ func TestBindBuddy_UnreachableBuddySkipsTheBind(t *testing.T) {
 
 func TestBindBuddy_ReachableBuddyRunsTheBind(t *testing.T) {
 	url := startTestNATSURL(t)
-	tp, prop := bindArgs()
 
 	var gotJS o11ynats.JetStream
-	conn := natsutil.BindBuddy(context.Background(),
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}, "", tp, prop, false,
+	conn := dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}).Bind(context.Background(),
 		func(_ context.Context, _ *o11ynats.Conn, js o11ynats.JetStream) error { gotJS = js; return nil })
 
 	require.NotNil(t, conn)
@@ -96,10 +96,8 @@ func TestBindBuddy_ReachableBuddyRunsTheBind(t *testing.T) {
 // still has to come back so shutdown drains it instead of leaking it.
 func TestBindBuddy_BindErrorStillReturnsTheConnToDrain(t *testing.T) {
 	url := startTestNATSURL(t)
-	tp, prop := bindArgs()
 
-	conn := natsutil.BindBuddy(context.Background(),
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}, "", tp, prop, false,
+	conn := dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}).Bind(context.Background(),
 		func(context.Context, *o11ynats.Conn, o11ynats.JetStream) error { return errors.New("stream missing") })
 
 	require.NotNil(t, conn)
@@ -112,10 +110,8 @@ func TestDrainBuddy_NilConnIsANoOp(t *testing.T) {
 
 func TestDrainBuddy_DrainsAConnectedBuddy(t *testing.T) {
 	url := startTestNATSURL(t)
-	tp, prop := bindArgs()
 
-	conn := natsutil.BindBuddy(context.Background(),
-		natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}, "", tp, prop, false,
+	conn := dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: url}).Bind(context.Background(),
 		func(context.Context, *o11ynats.Conn, o11ynats.JetStream) error { return nil })
 	require.NotNil(t, conn)
 
@@ -138,4 +134,13 @@ func TestBuddyConfig_OnlyIf(t *testing.T) {
 // not configure.
 func TestBuddyConfig_OnlyIfCannotEnableAnUnconfiguredBuddy(t *testing.T) {
 	assert.False(t, natsutil.BuddyConfig{}.OnlyIf(true).Enabled())
+}
+
+// OnlyIf narrows on the dialer exactly as it does on the config, so a service
+// gates its lane on the value it already passes around.
+func TestBuddyDialer_OnlyIf(t *testing.T) {
+	d := dialer(natsutil.BuddyConfig{SiteID: "site-b", NatsURL: "nats://b:4222"})
+	assert.True(t, d.OnlyIf(true).Config.Enabled())
+	assert.False(t, d.OnlyIf(false).Config.Enabled())
+	assert.NotNil(t, d.OnlyIf(false).TracerProvider, "narrowing must not blank the tracing wiring")
 }

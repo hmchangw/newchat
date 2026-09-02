@@ -123,6 +123,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -222,18 +226,16 @@ func main() {
 	} else {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
-	// One service per lane. The repos, badge cache and SSO store are site-local
-	// and up whichever lane is serving; only the NATS clients and publishers are
-	// rebuilt, because a lane's outbound RPCs and events have to leave on the
-	// connection its requests arrived on — the failover lane exists precisely
-	// because the home cluster is unreachable.
-	newLaneService := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream, opts ...service.Option) *service.UserService {
+	// One service per lane; see failoverlane.RouterFor for why nothing that
+	// speaks NATS may be shared between them. The repos, badge cache and SSO
+	// store are site-local and shared; the NATS clients and publishers are
+	// rebuilt on the lane's connection.
+	newLaneService := func(conn *o11ynats.Conn, laneJS o11ynats.JetStream) *service.UserService {
 		return service.New(subRepo, userRepo, appRepo, threadSubRepo,
 			roomclient.New(conn, cfg.SiteID), historyclient.New(conn), presenceclient.New(conn),
 			publisher.New(laneJS), publisher.NewCore(conn),
-			badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, opts...)
+			badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg, service.WithPageBudget(pageBudget))
 	}
-	svc := newLaneService(nc, js, service.WithPageBudget(pageBudget))
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
 	// the NATS clients, publishers, badge cache -- is shared and stateless. It is
@@ -254,25 +256,15 @@ func main() {
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
-	routers, err := failoverlane.BindRouters(ctx, nc, js, cfg.Buddy, cfg.NATS.CredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
-			laneSvc := svc
-			if lane == subject.LaneFailover {
-				laneSvc = newLaneService(conn, laneJS, service.WithPageBudget(pageBudget))
-			}
-			r := natsrouter.New(conn, "user-service", routerOpts...)
-			r.Use(natsrouter.Recovery())
-			// RequestID must precede any handler that reads request_id from ctx —
-			// otherwise Classify's log line records an empty value.
-			r.Use(natsrouter.RequestID())
-			r.Use(natsrouter.Logging())
-			// After Logging so the timeout wraps the handler chain; bounds the Mongo
-			// aggregations from hanging past the configured deadline. user-service uses
-			// its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as the single per-request
-			// deadline.
+	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
+		func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
+			r := natsrouter.Default(conn, "user-service", routerOpts...)
+			// After Logging so the timeout wraps the handler chain; bounds the
+			// Mongo aggregations from hanging past the configured deadline.
+			// user-service uses its own HANDLER_TIMEOUT (not REQUEST_TIMEOUT) as
+			// the single per-request deadline.
 			r.Use(natsrouter.HandlerTimeout(cfg.HandlerTimeout))
-			laneSvc.RegisterHandlers(r)
+			newLaneService(conn, laneJS).RegisterHandlers(r)
 			return r, nil
 		})
 	if err != nil {

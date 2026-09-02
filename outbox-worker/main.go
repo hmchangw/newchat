@@ -18,6 +18,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/outbox"
@@ -135,23 +136,23 @@ func main() {
 	}
 
 	// Buddy lane: keeps this site federating OUTWARD while its own NATS is down.
-	// BindBuddy never fails startup — on any failure no failover lane is added
+	// The buddy dial never fails startup — on any failure no failover lane is added
 	// and the home lanes carry on. With no peers there is nothing to forward, so
 	// the lane is gated out entirely.
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(len(peers) > 0), cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			// Its own process, forwarding through the buddy connection: this
-			// lane runs because the home cluster is unreachable, so forwarding
-			// through the home JetStream would never deliver and never Ack.
-			fIters, fOrdered, fErr := startFailoverLanes(ctx, bjs, &cfg, peers, sem, &wg, newLaneProcess(bjs))
-			if fErr != nil {
-				return fErr
-			}
-			iters = append(iters, fIters...)
-			orderedCtxs = append(orderedCtxs, fOrdered...)
-			return nil
-		})
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy.OnlyIf(len(peers) > 0), CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	buddyConn := dialer.Bind(ctx, func(ctx context.Context, _ *o11ynats.Conn, bjs o11ynats.JetStream) error {
+		// Its own process, forwarding through the buddy connection.
+		fIters, fOrdered, fErr := startFailoverLanes(ctx, bjs, &cfg, peers, sem, &wg, newLaneProcess(bjs))
+		if fErr != nil {
+			return fErr
+		}
+		iters = append(iters, fIters...)
+		orderedCtxs = append(orderedCtxs, fOrdered...)
+		return nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -260,40 +261,19 @@ func buildLaneConsumerConfig(s stream.ConsumerSettings, siteID, destSiteID, lane
 	return cc
 }
 
-// startFailoverLanes readies the buddy-hosted OUTBOX-FAILOVER stream and binds
-// the same per-destination consumer pair the live stream gets: a concurrent lane
-// per peer plus a FIFO lane per peer. The partition must be mirrored exactly, or
-// an event type would land on the failover stream with no consumer.
-//
-// Failing partway is not partial-success: any error returns and the caller keeps
-// the home lanes running, because a half-bound failover lane would silently drop
-// whichever event types missed their consumer.
-// newLanePublisher binds one lane's forwarding to the connection that lane
-// consumes on. Every forward is JetStream-backed: it blocks on PubAck and the
-// server honors the msgID as Nats-Msg-Id for dedup. HandleEvent skips any target
-// without a DedupID, so msgID is always non-empty here.
-func newLanePublisher(js o11ynats.JetStream) PublishFunc {
-	return func(ctx context.Context, subj string, data []byte, msgID string) error {
-		msg := natsutil.NewMsg(ctx, subj, data)
-		if _, err := js.PublishMsg(ctx, msg, jetstream.WithMsgID(msgID)); err != nil {
-			return fmt.Errorf("publish to %q: %w", subj, err)
-		}
-		return nil
-	}
-}
-
 // newLaneProcess is the message disposition every consumer on one lane shares:
 // jobguard Acks on panic (poison drop) — the callbacks run outside natsrouter's
 // Recovery middleware, so an unrecovered panic would crash the worker and
 // crash-loop on JetStream redelivery — and jsretry Ack-drops permanent errors
 // and Naks transient ones with backoff.
 //
-// Each lane builds its own from its own connection: the failover lane exists
-// because this site's NATS is unreachable, so a lane consuming on the buddy but
-// forwarding through home would neither deliver nor Ack, redelivering the
-// buffered federation event forever while appearing to be in flight.
-func newLaneProcess(js o11ynats.JetStream) func(context.Context, jetstream.Msg) {
-	handler := NewHandler(newLanePublisher(js))
+// Each lane builds its own from the connection it consumes on (see
+// failoverlane.HandlerFor): forwarding through the dead home connection would
+// neither deliver nor Ack, redelivering the event forever while appearing to be
+// in flight. Every forward is JetStream-backed — it blocks on PubAck and the
+// server honors msgID as Nats-Msg-Id; HandleEvent skips any target without one.
+func newLaneProcess(js natsutil.JetStreamMsgPublisher) func(context.Context, jetstream.Msg) {
+	handler := NewHandler(natsutil.JetStreamPublishFunc(js, natsmetrics.Publisher{}))
 	return func(msgCtx context.Context, msg jetstream.Msg) {
 		jobguard.Run(msg, func() {
 			handlerCtx, _ := logctx.ConsumeContext(msgCtx, msg.Headers(), msg.Subject(), msg.Data())
@@ -302,6 +282,14 @@ func newLaneProcess(js o11ynats.JetStream) func(context.Context, jetstream.Msg) 
 	}
 }
 
+// startFailoverLanes readies the buddy-hosted OUTBOX-FAILOVER stream and binds
+// the same per-destination consumer pair the live stream gets: a concurrent lane
+// per peer plus a FIFO lane per peer. The partition must be mirrored exactly, or
+// an event type would land on the failover stream with no consumer.
+//
+// Failing partway is not partial-success: any error returns and the caller keeps
+// the home lanes running, because a half-bound failover lane would silently drop
+// whichever event types missed their consumer.
 func startFailoverLanes(ctx context.Context, bjs o11ynats.JetStream, cfg *config, peers []string,
 	sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg),
 ) ([]o11ynats.MessagesContext, []o11ynats.ConsumeContext, error) {

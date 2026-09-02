@@ -324,6 +324,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -402,19 +406,18 @@ func main() {
 
 	// Everything a handler needs that is the same on both lanes; only the NATS
 	// connection differs, and newLaneHandler binds that per lane.
+	// One handler per lane; see failoverlane.HandlerFor for why nothing that
+	// speaks NATS may be shared between them. The restore tracker drives the
+	// home lane's dual-publish window after recovery; the router ignores it on
+	// the failover lane, which always routes global.
 	shared := &broadcastDeps{
 		store: cachedStore, users: us, keys: keyProvider,
 		sealer: sealer, previews: previews,
 		domainMetrics: domainMetrics, publishMetrics: publishMetrics,
 		activityPeers: activityPeers, routeMode: roomRouteMode, cfg: &cfg,
+		restoredAt: natsutil.TrackRestores(ctx, nc).RestoredAt,
 	}
-
-	// One handler per lane. The home lane consults the restore tracker so it
-	// dual-publishes through the window in which clients are still finding their
-	// way back; the failover lane always routes global, because every client of a
-	// site whose NATS is down is on some other cluster.
-	homeRestores := natsutil.TrackRestores(ctx, nc)
-	handler := shared.newLaneHandler(nc, js, subject.LaneHome, homeRestores.RestoredAt)
+	handler := shared.newLaneHandler(nc, js, subject.LaneHome)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
@@ -447,43 +450,28 @@ func main() {
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		guardedProcessor(broadcastProcessor(handler)))
 
-	// Buddy lane. BindBuddy never fails startup — on any failure buddyLane stays
-	// nil and the service runs home-only. HasFailover gates the bot pipeline out
-	// without a mode check here.
+	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
+	// the service runs home-only. HasFailover gates the bot pipeline out.
 	binder := failoverlane.Binder{
-		SiteID: cfg.SiteID, Buddy: cfg.Buddy,
+		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
 		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
 		Sem: sem, WG: &wg, Metrics: sharedMetrics,
 	}
-	var buddyLane *natsutil.Lane
 	var buddyBroadcastSub *nats.Subscription
-	buddyConn := natsutil.BindBuddy(ctx, cfg.Buddy.OnlyIf(wiring.HasFailover()), cfg.NatsCredsFile,
-		sdk.TracerProvider(), sdk.Propagator, sdk.Toggles.Trace,
-		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
-			// Every NATS-facing dependency bound to the BUDDY connection: the
-			// home cluster is the one that is down, so a client fan-out, mention
-			// relay, thread-parent lookup or activity announce inherited from the
-			// home lane would publish into a dead connection. No restore tracker
-			// — this lane always routes global.
-			failoverHandler := shared.newLaneHandler(bconn, bjs, subject.LaneFailover, nil)
-
-			// message-worker's failover lane publishes the thread-tcount badge
-			// on the buddy for the same reason; without a subscriber there, the
-			// badge is lost for the whole outage.
-			var bsErr error
-			buddyBroadcastSub, bsErr = subscribeServerBroadcast(bconn, failoverHandler)
-			if bsErr != nil {
-				return fmt.Errorf("subscribe server-broadcast on buddy: %w", bsErr)
-			}
-
-			var bErr error
-			buddyLane, bErr = binder.Bind(ctx, bjs, &failoverlane.LaneSpec{
-				Stream: wiring.CanonicalFailoverStream,
-				Consumer: buildConsumerConfig(cfg.Consumer,
-					cfg.Mode.FailoverConsumerName("broadcast-worker"), wiring.CanonicalFailoverWildcard),
-			}, guardedHandler(broadcastProcessor(failoverHandler)))
-			return bErr
-		})
+	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
+		Stream: wiring.CanonicalFailoverStream,
+		Consumer: buildConsumerConfig(cfg.Consumer,
+			cfg.Mode.FailoverConsumerName("broadcast-worker"), wiring.CanonicalFailoverWildcard),
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		failoverHandler := shared.newLaneHandler(conn, laneJS, lane)
+		// message-worker's failover lane publishes the thread-tcount badge on
+		// the buddy; without a subscriber there it is lost for the whole outage.
+		var err error
+		if buddyBroadcastSub, err = subscribeServerBroadcast(conn, failoverHandler); err != nil {
+			return nil, fmt.Errorf("subscribe server-broadcast on buddy: %w", err)
+		}
+		return guardedHandler(broadcastProcessor(failoverHandler)), nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -561,21 +549,17 @@ type broadcastDeps struct {
 	publishMetrics natsmetrics.Publisher
 	activityPeers  []string
 	routeMode      subject.RoomRouteMode
+	restoredAt     func() time.Time
 	cfg            *config
 }
 
 // newLaneHandler builds the handler for one lane, binding every NATS-facing
 // dependency — the client fan-out, the OUTBOX mention relay, the thread-parent
-// request/reply and the cross-site activity announce — to nc/js, the connection
-// that lane consumes on. Sharing any of them across lanes would break the
-// failover lane, which runs precisely because the home connection is dead.
-//
-// restoredAt is the home lane's dual-publish window; the failover lane passes
-// nil, because every client of a site whose NATS is down is on another cluster.
-func (d *broadcastDeps) newLaneHandler(nc *o11ynats.Conn, js o11ynats.JetStream,
-	lane subject.Lane, restoredAt func() time.Time,
-) *Handler {
-	publisher := &natsPublisher{nc: nc, metrics: d.publishMetrics}
+// request/reply and the cross-site activity announce — to the connection that
+// lane consumes on; see failoverlane.HandlerFor.
+func (d *broadcastDeps) newLaneHandler(nc *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) *Handler {
+	publisher := corePublisher(natsutil.CorePublishFunc(nc, d.publishMetrics,
+		natsutil.WithPublishLabels(natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish)))
 	var activity *roomActivityRefresher
 	if len(d.activityPeers) > 0 {
 		activity = newRoomActivityRefresher(
@@ -583,41 +567,20 @@ func (d *broadcastDeps) newLaneHandler(nc *o11ynats.Conn, js o11ynats.JetStream,
 	}
 	return NewHandler(d.store, d.users, publisher, d.keys,
 		newHistoryParentFetcher(nc, d.publishMetrics), d.cfg.Encryption.Enabled,
-		subject.NewLaneRouter(d.routeMode, lane, restoredAt, d.cfg.FailoverRevertGrace),
+		subject.NewLaneRouter(d.routeMode, lane, d.restoredAt, d.cfg.FailoverRevertGrace),
 		withBroadcastMetrics(d.domainMetrics),
-		withOutboxFederation(d.cfg.SiteID, newLaneOutboxPublisher(js, d.publishMetrics), lane == subject.LaneFailover),
+		// The OUTBOX mention relay is JetStream; the client fan-out stays core.
+		withOutboxFederation(d.cfg.SiteID, natsutil.JetStreamPublishFunc(js, d.publishMetrics), lane),
 		withRoomActivityRefresh(activity),
 		withThreadViewSubject(d.cfg.ThreadViewSubjectEnabled),
 		withPreviewSealer(d.sealer, d.previews))
 }
 
-// newLaneOutboxPublisher binds the OUTBOX mention relay to one lane's
-// JetStream; the client fan-out stays on core NATS (natsPublisher).
-func newLaneOutboxPublisher(js o11ynats.JetStream, metrics natsmetrics.Publisher) PublishFunc {
-	return func(ctx context.Context, subj string, data []byte, msgID string) error {
-		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
-		if err != nil {
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			metrics.Failure(ctx, destination, operation, err)
-			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
-		}
-		return nil
-	}
-}
+// corePublisher adapts a core-NATS publish func to the Publisher interface.
+type corePublisher func(ctx context.Context, subject string, data []byte) error
 
-// natsPublisher adapts *o11ynats.Conn to the Publisher interface.
-type natsPublisher struct {
-	nc      *o11ynats.Conn
-	metrics natsmetrics.Publisher
-}
-
-func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
-	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
-	p.metrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
-	if err != nil {
-		return fmt.Errorf("publish to %q: %w", subject, err)
-	}
-	return nil
+func (p corePublisher) Publish(ctx context.Context, subject string, data []byte) error {
+	return p(ctx, subject, data)
 }
 
 // messageProcessor handles one consumed message, performing its own Ack/Nak.

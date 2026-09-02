@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	o11ynats "github.com/flywindy/o11y/nats"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -39,9 +37,6 @@ type Routers struct {
 	buddyConn *o11ynats.Conn
 }
 
-// HasBuddy reports whether the failover lane is serving.
-func (r *Routers) HasBuddy() bool { return r != nil && r.Buddy != nil }
-
 // BindRouters builds the home router and, when a buddy is configured, an
 // equivalent one on the buddy connection.
 //
@@ -55,15 +50,14 @@ func (r *Routers) HasBuddy() bool { return r != nil && r.Buddy != nil }
 // correct single-site behaviour and better than refusing to boot over a cluster
 // needed only during an outage.
 func BindRouters(ctx context.Context, home *o11ynats.Conn, homeJS o11ynats.JetStream,
-	buddy natsutil.BuddyConfig, credsFile string, tp trace.TracerProvider,
-	prop propagation.TextMapPropagator, tracingEnabled bool, build RouterFor,
+	buddy *natsutil.BuddyDialer, build RouterFor,
 ) (*Routers, error) {
 	homeRouter, err := build(ctx, home, homeJS, subject.LaneHome)
 	if err != nil {
 		return nil, fmt.Errorf("build home router: %w", err)
 	}
 	routers := &Routers{Home: homeRouter}
-	routers.buddyConn = natsutil.BindBuddy(ctx, buddy, credsFile, tp, prop, tracingEnabled,
+	routers.buddyConn = buddy.Bind(ctx,
 		func(ctx context.Context, bconn *o11ynats.Conn, bjs o11ynats.JetStream) error {
 			buddyRouter, bErr := build(ctx, bconn, bjs, subject.LaneFailover)
 			if bErr != nil {
