@@ -14,6 +14,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/cassrepo"
 	"github.com/hmchangw/chat/history-service/internal/models"
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/mention"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
@@ -89,7 +90,7 @@ func (s *HistoryService) LoadHistory(c *natsrouter.Context, req models.LoadHisto
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
-	s.resolveRemovedMemberNames(c, page.Data)
+	s.normalizeLegacySysMsgs(c, page.Data)
 	// Trim last: both passes above change encoded size. Rows are DESC, so
 	// dropping the tail leaves the client's next before = oldest kept createdAt.
 	kept, trimmed, err := s.fitPage(c, page.Data, pageEnvelope)
@@ -160,7 +161,7 @@ func (s *HistoryService) LoadNextMessages(c *natsrouter.Context, req models.Load
 
 	redactUnavailableQuotes(page.Data, accessSince)
 	setDecodedAttachments(c, page.Data)
-	s.resolveRemovedMemberNames(c, page.Data)
+	s.normalizeLegacySysMsgs(c, page.Data)
 	return &models.LoadNextMessagesResponse{
 		Messages:          page.Data,
 		NextCursor:        page.NextCursor,
@@ -227,7 +228,7 @@ func (s *HistoryService) loadSurroundingByMessageID(c *natsrouter.Context, accou
 		only := *centralMsg
 		redactUnavailableQuote(&only, accessSince)
 		decodeMessageAttachments(c, &only)
-		s.resolveRemovedMemberName(c, &only)
+		s.normalizeLegacySysMsg(c, &only)
 		// Serial best-effort read — this path issues no page reads to parallelise against.
 		return &models.LoadSurroundingMessagesResponse{
 			Messages:          []models.Message{only},
@@ -372,7 +373,7 @@ func (s *HistoryService) assembleSurrounding(
 
 	redactUnavailableQuotes(messages, accessSince)
 	setDecodedAttachments(c, messages)
-	s.resolveRemovedMemberNames(c, messages)
+	s.normalizeLegacySysMsgs(c, messages)
 	// Trim outward from the pivot so the caller keeps the row they centred on;
 	// each end that loses rows sets its own "more" flag.
 	lo, hi, narrowed, err := s.fitWindow(c, messages, len(beforePage.Data), pageEnvelope)
@@ -438,7 +439,7 @@ func (s *HistoryService) GetMessageByID(c *natsrouter.Context, req models.GetMes
 
 	redactUnavailableQuote(msg, accessSince)
 	decodeMessageAttachments(c, msg)
-	s.resolveRemovedMemberName(c, msg)
+	s.normalizeLegacySysMsg(c, msg)
 	return msg, nil
 }
 
@@ -483,7 +484,7 @@ func (s *HistoryService) GetMessagesByIDs(c *natsrouter.Context, req models.GetM
 
 	redactUnavailableQuotes(kept, accessSince)
 	setDecodedAttachments(c, kept)
-	s.resolveRemovedMemberNames(c, kept)
+	s.normalizeLegacySysMsgs(c, kept)
 	return &models.GetMessagesByIDsResponse{Messages: kept}, nil
 }
 
@@ -519,8 +520,17 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 		return nil, errcode.BadRequest("newMsg exceeds maximum size")
 	}
 
+	// Re-resolve @mentions from the edited content so the persisted row, the
+	// canonical event and search-sync all reflect the post-edit mentions. Fail
+	// closed on a lookup error: a partial/empty set would be written over (or
+	// clear) the stored mentions, permanently losing them. A retry resolves clean.
+	resolved, err := mention.Resolve(c, req.NewMsg, s.users.FindUsersByAccounts)
+	if err != nil {
+		return nil, fmt.Errorf("resolve edited mentions for %s: %w", req.MessageID, err)
+	}
+
 	editedAt := time.Now().UTC()
-	if err := s.msgWriter.UpdateMessageContent(c, msg, req.NewMsg, editedAt); err != nil {
+	if err := s.msgWriter.UpdateMessageContent(c, msg, req.NewMsg, resolved.Participants, editedAt); err != nil {
 		// A TOCTOU between findMessage and the CAS edit is a benign race, not a server
 		// fault — map it to 4xx so it doesn't pollute 5xx telemetry.
 		if errors.Is(err, cassrepo.ErrMessageNotFound) {
@@ -532,7 +542,8 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 	editedAtMs := editedAt.UnixMilli()
 
 	// search-sync-worker reindexes the FULL doc, so attachments/card must ride
-	// along or edits wipe them. Mentions omitted: broadcast-worker re-resolves.
+	// along or edits wipe them. Mentions carry the re-resolved set so the stored
+	// row, the event and search-sync agree on the post-edit mentions.
 	canonicalEvt := model.MessageEvent{
 		Event: model.EventUpdated,
 		Message: model.Message{
@@ -543,6 +554,7 @@ func (s *HistoryService) EditMessage(c *natsrouter.Context, siteID string, req m
 			Content:                      req.NewMsg,
 			Attachments:                  msg.Attachments,
 			Card:                         msg.Card,
+			Mentions:                     resolved.Participants,
 			CreatedAt:                    msg.CreatedAt,
 			EditedAt:                     &editedAt,
 			UpdatedAt:                    &editedAt,

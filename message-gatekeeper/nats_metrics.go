@@ -31,12 +31,15 @@ const (
 	reasonRoomRestricted   gatekeeperReasonCode = "room_restricted"
 	reasonCanonicalPublish gatekeeperReasonCode = "canonical_publish"
 	reasonDependency       gatekeeperReasonCode = "dependency"
-	reasonUnknown          gatekeeperReasonCode = "unknown"
+	// reasonInternal is a permanent server-side fault (a value that cannot be
+	// marshaled): undeliverable work, never a client rejection.
+	reasonInternal gatekeeperReasonCode = "internal"
+	reasonUnknown  gatekeeperReasonCode = "unknown"
 )
 
 var allGatekeeperReasons = []gatekeeperReasonCode{
 	reasonNone, reasonInvalidSubject, reasonInvalidPayload, reasonNotSubscribed,
-	reasonRoomRestricted, reasonCanonicalPublish, reasonDependency, reasonUnknown,
+	reasonRoomRestricted, reasonCanonicalPublish, reasonDependency, reasonInternal, reasonUnknown,
 }
 
 type gatekeeperMetrics struct {

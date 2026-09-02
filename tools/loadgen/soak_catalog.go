@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
 )
 
 const soakCatalogShardCount = 64
@@ -190,9 +192,9 @@ func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 	// the stored one — ever holds it.
 	c.reduceContentLocked(&tracked, tracked.Content)
 	if tracked.ThreadReplyLimit <= 0 {
-		tracked.ThreadReplyLimit = soakThreadReplyHardCap
+		tracked.ThreadReplyLimit = distribution.ThreadReplyHardCap
 	}
-	tracked.ThreadReplyLimit = min(tracked.ThreadReplyLimit, soakThreadReplyHardCap)
+	tracked.ThreadReplyLimit = min(tracked.ThreadReplyLimit, distribution.ThreadReplyHardCap)
 	key := soakCatalogKey(tracked.RoomID, tracked.ID)
 
 	c.globalMu.Lock()
@@ -532,7 +534,7 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 			ID: message.MessageID, RoomID: message.RoomID,
 			Author:    message.Sender.Account,
 			CreatedAt: message.CreatedAt, ThreadParentID: message.ThreadParentID,
-			ThreadReplyLimit: soakThreadReplyHardCap,
+			ThreadReplyLimit: distribution.ThreadReplyHardCap,
 		},
 		acceptedAt: c.clock.Now().Add(-c.persistGrace),
 		edited:     message.EditedAt != nil,

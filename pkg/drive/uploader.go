@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -21,6 +23,15 @@ import (
 // so it does not track the public client leg's server timeouts. Overrides
 // restyutil's 30s default, which large streamed bodies blow through.
 const driveTimeout = 5 * time.Minute
+
+// Drive's per-file upload modes, and the error substring marking a name
+// collision. Matched case-insensitively: Drive's wire casing is not contractual.
+const (
+	modeNormal   = "Normal"
+	modeKeepBoth = "KeepBoth"
+
+	conflictMarker = "file conflict"
+)
 
 // MultipartFile is an opened multipart file plus its name, ready to upload.
 type MultipartFile struct {
@@ -72,12 +83,62 @@ func (c *Client) GetBaseURLFromRoomOrigin(origin string) string {
 	return c.baseURL
 }
 
-// UploadGroupImages uploads files to a Drive group in one bulk multipart call.
+// UploadGroupImages uploads files to a Drive group in one bulk multipart call,
+// then re-sends any file Drive rejected as a name conflict under KeepBoth.
+//
+// Drive reports conflicts per file inside a 200, so only those entries go back —
+// re-sending the batch would store a second copy of everything that succeeded.
+// Once only: a KeepBoth upload has no name left to collide with. A retry that
+// never lands keeps the first attempt's results; its successes are real.
+func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
+	results, err := c.uploadBulk(userID, username, email, groupID, origin, files, modeNormal)
+	if err != nil {
+		return nil, err
+	}
+
+	var conflicts []int
+	var retryFiles []MultipartFile
+	// A result past the end of what was sent has no file to re-upload.
+	matched := results[:min(len(results), len(files))]
+	for i := range matched {
+		if isNameConflict(&matched[i]) {
+			conflicts = append(conflicts, i)
+			retryFiles = append(retryFiles, files[i])
+		}
+	}
+	if len(conflicts) == 0 {
+		return results, nil
+	}
+
+	retried, err := c.uploadBulk(userID, username, email, groupID, origin, retryFiles, modeKeepBoth)
+	if err != nil {
+		// Nothing downstream will log this: the batch returns no error, so its
+		// successes survive and the conflicts stay the failures Drive reported.
+		slog.Error("drive keepboth retry failed",
+			"error", err, "groupId", groupID, "files", len(retryFiles))
+		return results, nil
+	}
+	for n, i := range conflicts {
+		if n < len(retried) {
+			results[i] = retried[n]
+		}
+	}
+	return results, nil
+}
+
+// isNameConflict reports whether Drive rejected an entry for a name collision.
+func isNameConflict(r *UploadGroupImageResponse) bool {
+	return strings.EqualFold(r.Status, StatusFailure) &&
+		strings.Contains(strings.ToLower(r.Error), conflictMarker)
+}
+
+// uploadBulk performs one bulk multipart call with every file under mode.
 // userID/userName/email are sent as form fields; each file is attached with the
 // indexed naming convention files[i].file / files[i].fileName / files[i].mode.
 // The body is streamed (see buildStreamedBody), so memory does not scale with
-// upload size.
-func (c *Client) UploadGroupImages(userID, username, email, groupID, origin string, files []MultipartFile) ([]UploadGroupImageResponse, error) {
+// upload size, and a caller may run it twice over the same files — each build
+// rewinds them.
+func (c *Client) uploadBulk(userID, username, email, groupID, origin string, files []MultipartFile, mode string) ([]UploadGroupImageResponse, error) {
 	fields := []formField{
 		{"userId", userID},
 		{"userName", username},
@@ -86,7 +147,7 @@ func (c *Client) UploadGroupImages(userID, username, email, groupID, origin stri
 	for i, f := range files {
 		fields = append(fields,
 			formField{fmt.Sprintf("files[%d].fileName", i), f.Filename},
-			formField{fmt.Sprintf("files[%d].mode", i), "KeepBoth"})
+			formField{fmt.Sprintf("files[%d].mode", i), mode})
 	}
 	body, err := buildStreamedBody(fields, files)
 	if err != nil {
@@ -130,6 +191,12 @@ func (c *Client) fetchPresignedURL(host, groupID, fileID string) (string, error)
 	type presignedURL struct {
 		URL   string `json:"url"`
 		Error string `json:"error,omitempty"`
+	}
+	// The api-token below is attached to whatever host we are handed, and that
+	// host can originate in a client query string — so the allow-list check has
+	// to happen before the request is built, not at the caller.
+	if !c.hostAllowed(host) {
+		return "", ErrHostNotAllowed
 	}
 	var result presignedURL
 	resp, err := c.downloadClient.R().

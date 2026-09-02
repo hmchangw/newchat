@@ -1,4 +1,4 @@
-package main
+package topology
 
 import (
 	"fmt"
@@ -11,29 +11,40 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-type soakTopology struct {
+const MaxBorrowedUsers = 20000
+
+type Topology struct {
 	BorrowedUsers []model.User
 	ActiveUsers   []model.User
 	Rooms         []model.Room
 	Subscriptions []model.Subscription
 }
 
-// soakIDs isolates random project identity generation from deterministic
-// topology selection. Tests inject a repeatable sequence; production uses
-// pkg/idgen so persisted entities follow the repository identity contract.
-type soakIDs struct {
-	channelRoomID  func() string
-	subscriptionID func() string
+type BuildConfig struct {
+	RunID          string
+	MaxUsers       int
+	ActiveUsers    int
+	RoomCount      int
+	ChannelRatio   float64
+	ChannelMembers int
 }
 
-func newProductionSoakIDs() *soakIDs {
-	return &soakIDs{
-		channelRoomID:  idgen.GenerateID,
-		subscriptionID: idgen.GenerateUUIDv7,
+// IdentitySource isolates random project identity generation from deterministic
+// topology selection. Tests inject a repeatable sequence; production uses
+// pkg/idgen so persisted entities follow the repository identity contract.
+type IdentitySource struct {
+	NewChannelRoomID  func() string
+	NewSubscriptionID func() string
+}
+
+func NewProductionIdentitySource() *IdentitySource {
+	return &IdentitySource{
+		NewChannelRoomID:  idgen.GenerateID,
+		NewSubscriptionID: idgen.GenerateUUIDv7,
 	}
 }
 
-func eligibleSoakUsers(users []model.User, siteID string) []model.User {
+func eligibleUsers(users []model.User, siteID string) []model.User {
 	eligible := make([]model.User, 0, len(users))
 	for i := range users {
 		user := &users[i]
@@ -51,21 +62,21 @@ func eligibleSoakUsers(users []model.User, siteID string) []model.User {
 	return eligible
 }
 
-func selectSoakUsers(
+func selectUsers(
 	users []model.User,
 	siteID string,
 	maxUsers int,
 	activeUsers int,
 	seed int64,
 ) ([]model.User, []model.User, error) {
-	if maxUsers <= 0 || maxUsers > maxBorrowedSoakUsers {
-		return nil, nil, fmt.Errorf("max borrowed users must be between 1 and %d", maxBorrowedSoakUsers)
+	if maxUsers <= 0 || maxUsers > MaxBorrowedUsers {
+		return nil, nil, fmt.Errorf("max borrowed users must be between 1 and %d", MaxBorrowedUsers)
 	}
 	if activeUsers <= 0 || activeUsers > maxUsers {
 		return nil, nil, fmt.Errorf("active users must be between 1 and max borrowed users")
 	}
 
-	eligible := eligibleSoakUsers(users, siteID)
+	eligible := eligibleUsers(users, siteID)
 	if len(eligible) < activeUsers {
 		return nil, nil, fmt.Errorf("active users requested=%d eligible=%d", activeUsers, len(eligible))
 	}
@@ -83,19 +94,19 @@ func selectSoakUsers(
 	return borrowed, active, nil
 }
 
-func buildSoakTopology(
+func Build(
 	users []model.User,
-	cfg *soakConfig,
+	cfg *BuildConfig,
 	siteID string,
 	seed int64,
-	ids *soakIDs,
-) (soakTopology, error) {
-	if ids == nil || ids.channelRoomID == nil || ids.subscriptionID == nil {
-		return soakTopology{}, fmt.Errorf("soak identity generator is required")
+	ids *IdentitySource,
+) (Topology, error) {
+	if ids == nil || ids.NewChannelRoomID == nil || ids.NewSubscriptionID == nil {
+		return Topology{}, fmt.Errorf("soak identity generator is required")
 	}
-	borrowed, active, err := selectSoakUsers(users, siteID, cfg.MaxUsers, cfg.ActiveUsers, seed)
+	borrowed, active, err := selectUsers(users, siteID, cfg.MaxUsers, cfg.ActiveUsers, seed)
 	if err != nil {
-		return soakTopology{}, fmt.Errorf("select soak users: %w", err)
+		return Topology{}, fmt.Errorf("select soak users: %w", err)
 	}
 
 	channelCount := int(math.Round(float64(cfg.RoomCount) * cfg.ChannelRatio))
@@ -105,18 +116,18 @@ func buildSoakTopology(
 	maxDMPairs := len(active)*(len(active)-1)/2 +
 		len(active)*inactiveBorrowed
 	if dmCount > maxDMPairs {
-		return soakTopology{}, fmt.Errorf("requested %d DM rooms but only %d unique DM pairs are available", dmCount, maxDMPairs)
+		return Topology{}, fmt.Errorf("requested %d DM rooms but only %d unique DM pairs are available", dmCount, maxDMPairs)
 	}
 	channelMembers := min(cfg.ChannelMembers, len(borrowed))
 	if channelCount*channelMembers+dmCount*2 < len(active) {
-		return soakTopology{}, fmt.Errorf(
+		return Topology{}, fmt.Errorf(
 			"room membership capacity=%d cannot cover %d active users",
 			channelCount*channelMembers+dmCount*2,
 			len(active),
 		)
 	}
 
-	topology := soakTopology{
+	topology := Topology{
 		BorrowedUsers: borrowed,
 		ActiveUsers:   active,
 		Rooms:         make([]model.Room, 0, cfg.RoomCount),
@@ -155,7 +166,7 @@ func buildSoakTopology(
 		}
 
 		room := model.Room{
-			ID:        ids.channelRoomID(),
+			ID:        ids.NewChannelRoomID(),
 			Name:      fmt.Sprintf("soak-%s-channel-%06d", cfg.RunID, roomIndex),
 			Type:      model.RoomTypeChannel,
 			SiteID:    siteID,
@@ -166,7 +177,7 @@ func buildSoakTopology(
 		topology.Rooms = append(topology.Rooms, room)
 		topology.Subscriptions = append(
 			topology.Subscriptions,
-			buildSoakSubscriptions(&room, members, ids, createdAt)...,
+			buildSubscriptions(&room, members, ids, createdAt)...,
 		)
 	}
 
@@ -180,7 +191,7 @@ func buildSoakTopology(
 			dmIndex,
 		)
 		if !ok {
-			return soakTopology{}, fmt.Errorf("find unique DM pair")
+			return Topology{}, fmt.Errorf("find unique DM pair")
 		}
 		roomID := idgen.BuildDMRoomID(a.ID, b.ID)
 		uids, accounts := model.BuildDMParticipants(&a, &b)
@@ -197,7 +208,7 @@ func buildSoakTopology(
 		topology.Rooms = append(topology.Rooms, room)
 		topology.Subscriptions = append(
 			topology.Subscriptions,
-			buildSoakSubscriptions(&room, []model.User{a, b}, ids, createdAt)...,
+			buildSubscriptions(&room, []model.User{a, b}, ids, createdAt)...,
 		)
 		covered[a.ID] = true
 		covered[b.ID] = true
@@ -205,7 +216,7 @@ func buildSoakTopology(
 
 	for i := range active {
 		if !covered[active[i].ID] {
-			return soakTopology{}, fmt.Errorf("active user %q has no writable room", active[i].ID)
+			return Topology{}, fmt.Errorf("active user %q has no writable room", active[i].ID)
 		}
 	}
 	return topology, nil
@@ -269,7 +280,7 @@ func nextSoakDMPartner(
 	return model.User{}, false
 }
 
-func activeSoakUserIDs(topology *soakTopology) map[string]struct{} {
+func ActiveUserIDs(topology *Topology) map[string]struct{} {
 	if topology == nil {
 		return nil
 	}
@@ -282,11 +293,11 @@ func activeSoakUserIDs(topology *soakTopology) map[string]struct{} {
 	return active
 }
 
-func isActiveSoakSubscription(
+func IsActiveSubscription(
 	subscription *model.Subscription,
 	active map[string]struct{},
 ) bool {
-	if !isSoakRoomMember(subscription) {
+	if !IsRoomMember(subscription) {
 		return false
 	}
 	if len(active) == 0 {
@@ -296,11 +307,11 @@ func isActiveSoakSubscription(
 	return ok
 }
 
-// isSoakRoomMember follows the production subscription model: channel and DM
+// IsRoomMember follows the production subscription model: channel and DM
 // membership is represented by row existence because leave deletes the row.
 // Only an app room (a botDM facing a ".bot" counterpart) keeps the row and uses
 // IsSubscribed as a soft toggle.
-func isSoakRoomMember(subscription *model.Subscription) bool {
+func IsRoomMember(subscription *model.Subscription) bool {
 	if subscription == nil {
 		return false
 	}
@@ -322,10 +333,10 @@ func reserveSoakPair(a, b *model.User, used map[string]struct{}) bool {
 	return true
 }
 
-func buildSoakSubscriptions(
+func buildSubscriptions(
 	room *model.Room,
 	members []model.User,
-	ids *soakIDs,
+	ids *IdentitySource,
 	joinedAt time.Time,
 ) []model.Subscription {
 	subscriptions := make([]model.Subscription, len(members))
@@ -339,7 +350,7 @@ func buildSoakSubscriptions(
 			name = members[(i+1)%len(members)].Account
 		}
 		subscriptions[i] = model.Subscription{
-			ID: ids.subscriptionID(),
+			ID: ids.NewSubscriptionID(),
 			User: model.SubscriptionUser{
 				ID:      members[i].ID,
 				Account: members[i].Account,

@@ -4179,3 +4179,42 @@ type deliveryCountMsg struct {
 func (m *deliveryCountMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{NumDelivered: m.numDelivered}, nil
 }
+
+// A value the encoder rejects fails identically on every redelivery, so the
+// marshal failure must be permanent — jsretry Ack-drops it instead of spending
+// the consumer's whole MaxDeliver budget on a doomed retry.
+func TestHandler_PublishMutation_MarshalFailureIsPermanent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), &mockPublisher{},
+		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+	room := &model.Room{ID: "room-1", Type: model.RoomTypeChannel}
+
+	// A channel is unrepresentable in JSON: the encoder rejects it every time.
+	err := h.publishMutation(context.Background(), room, model.RoomEventMessageDeleted, "msg-1", make(chan int))
+
+	require.Error(t, err)
+	ec, perm := errcode.IsPermanent(err)
+	require.True(t, perm, "a marshal failure can never succeed on redelivery")
+	assert.Equal(t, errcode.CodeInternal, ec.Code, "a marshal fault is a server fault, not a client error")
+}
+
+// An oversized room event is rejected client-side before the wire, so every
+// target subject and every redelivery fails identically. Retrying only holds an
+// ack-pending slot until MaxDeliver drops it anyway.
+func TestHandler_PublishRoomEvent_OversizedPayloadIsPermanent(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	roomID := "room-1"
+	pub := &mockPublisher{failOn: map[string]error{}}
+	for _, subj := range subject.RoomEventTargets(roomID, nil, nil, subject.RouteGlobal, time.Now().UTC()) {
+		pub.failOn[subj] = nats.ErrMaxPayload
+	}
+	h := NewHandler(NewMockStore(ctrl), NewMockUserStore(ctrl), pub,
+		NewMockRoomKeyProvider(ctrl), defaultParentFetcher, true, subject.RouteGlobal)
+
+	err := h.publishRoomEvent(context.Background(), roomID, nil, nil, []byte(`{}`), "message_deleted event")
+
+	require.Error(t, err)
+	ec, perm := errcode.IsPermanent(err)
+	require.True(t, perm, "an oversized publish can never succeed on redelivery")
+	assert.Equal(t, errcode.CodeInternal, ec.Code)
+}

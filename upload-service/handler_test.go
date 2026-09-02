@@ -1388,3 +1388,37 @@ func TestHandleUploadFile_DriveNoResponses(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Equal(t, "unavailable", decodeErr(t, w).Code)
 }
+
+// TestDownload_HostNotAllowed_400 pins the boundary between "the client sent a
+// host we will not send our credential to" and "the Drive is broken". Before the
+// allow-list every drive.ErrHostNotAllowed would have surfaced as a 503, which
+// reads as our outage rather than their bad request — and, more to the point,
+// the request would have been made at all.
+func TestDownload_HostNotAllowed_400(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
+	fd := &fakeDrive{getErr: fmt.Errorf("fetch presigned url: %w", drive.ErrHostNotAllowed)}
+	h := newHandler(store, fd)
+	c, w := newDownloadCtx(t, "r1", "f1", "https://evil.example", okUser())
+	h.HandleDownloadFile(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "bad_request", decodeErr(t, w).Code)
+	assert.NotContains(t, decodeErr(t, w).Error, "evil.example",
+		"the rejected host must not be reflected back to the caller")
+}
+
+// The legacy v3 endpoint shares downloadFrom but carries its own Drive client,
+// so its host is checked against the legacy config's base URLs.
+func TestDownloadV3_HostNotAllowed_400(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	store := NewMockStore(ctrl)
+	store.EXPECT().MemberSiteID(gomock.Any(), "r1", "alice").Return("site-x", true, nil)
+	legacy := &fakeDrive{getErr: fmt.Errorf("fetch presigned url: %w", drive.ErrHostNotAllowed)}
+	h := newHandler(store, &fakeDrive{})
+	h.legacyDrive = legacy
+	c, w := newDownloadCtx(t, "r1", "f1", "https://evil.example", okUser())
+	h.HandleDownloadProtectedImageV3(c)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "bad_request", decodeErr(t, w).Code)
+}

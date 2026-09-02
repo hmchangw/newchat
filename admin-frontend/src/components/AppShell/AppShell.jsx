@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState } from 'react'
 import { useAuth } from '@/context/AuthContext'
-import { permissionsEnabled } from '@/lib/runtimeConfig'
+import { permissionsEnabled, updatesEnabled } from '@/lib/runtimeConfig'
 import LazyFallback from '@/components/shared/LazyFallback'
 import './style.css'
 
@@ -11,15 +11,17 @@ const SECTIONS = [
     key: 'permissions',
     label: 'Permissions',
     Component: lazy(() => import('@/components/PermissionsView')),
+    gate: permissionsEnabled,
   },
   {
     key: 'updates',
     label: 'Updates',
     Component: lazy(() => import('@/components/UpdatesConsole')),
+    gate: updatesEnabled,
   },
 ]
 
-// Top-level authed layout: nav to switch Users/Audit, header with signed-in account + logout.
+// Top-level authed layout: nav to switch sections, header with signed-in account + logout.
 export default function AppShell() {
   const { session, logout } = useAuth()
   const [section, setSection] = useState('users')
@@ -28,9 +30,9 @@ export default function AppShell() {
     logout()
   }
 
-  // Permissions is deploy-gated: the section exists only where the runtime
-  // config enables it (PERMISSIONS_ENABLED, rendered by nginx from env).
-  const sections = SECTIONS.filter((s) => s.key !== 'permissions' || permissionsEnabled())
+  // A section carrying a `gate` is deploy-gated: it exists only where the runtime
+  // config enables it (PERMISSIONS_ENABLED / UPDATES_ENABLED, rendered by nginx from env).
+  const sections = SECTIONS.filter((s) => !s.gate || s.gate())
   const { Component } = sections.find((s) => s.key === section) ?? sections[0]
 
   return (

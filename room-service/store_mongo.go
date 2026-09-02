@@ -234,7 +234,10 @@ func (s *MongoStore) GetRoom(ctx context.Context, id string) (*model.Room, error
 	var room model.Room
 	opts := options.FindOne().SetProjection(roomReadProjection)
 	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}, opts).Decode(&room); err != nil {
-		return nil, fmt.Errorf("room %q not found: %w", id, err)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("room %q: %w", id, ErrRoomNotFound)
+		}
+		return nil, fmt.Errorf("get room %q: %w", id, err)
 	}
 	return &room, nil
 }
@@ -243,7 +246,10 @@ func (s *MongoStore) GetRoomAppRead(ctx context.Context, id string) (*model.Room
 	var room model.Room
 	opts := options.FindOne().SetProjection(roomAppReadProjection)
 	if err := s.rooms.FindOne(ctx, bson.M{"_id": id}, opts).Decode(&room); err != nil {
-		return nil, fmt.Errorf("room %q not found: %w", id, err)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, fmt.Errorf("room %q: %w", id, ErrRoomNotFound)
+		}
+		return nil, fmt.Errorf("get room %q for app read: %w", id, err)
 	}
 	return &room, nil
 }

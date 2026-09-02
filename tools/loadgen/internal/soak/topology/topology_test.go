@@ -1,4 +1,4 @@
-package main
+package topology
 
 import (
 	"fmt"
@@ -27,7 +27,7 @@ func TestEligibleSoakUsers_ExcludesUnsafeAccounts(t *testing.T) {
 		{ID: "", Account: "missing-id", SiteID: "site-a"},
 	}
 
-	got := eligibleSoakUsers(users, "site-a")
+	got := eligibleUsers(users, "site-a")
 
 	require.Len(t, got, 1)
 	assert.Equal(t, "alice", got[0].Account)
@@ -36,11 +36,11 @@ func TestEligibleSoakUsers_ExcludesUnsafeAccounts(t *testing.T) {
 func TestSelectSoakUsers_CapsBorrowedPoolAndSelectsActiveDeterministically(t *testing.T) {
 	users := makeSoakUsers(20005, "site-a")
 
-	borrowedA, activeA, err := selectSoakUsers(users, "site-a", 20000, 2000, 42)
+	borrowedA, activeA, err := selectUsers(users, "site-a", 20000, 2000, 42)
 	require.NoError(t, err)
-	borrowedB, activeB, err := selectSoakUsers(users, "site-a", 20000, 2000, 42)
+	borrowedB, activeB, err := selectUsers(users, "site-a", 20000, 2000, 42)
 	require.NoError(t, err)
-	_, activeC, err := selectSoakUsers(users, "site-a", 20000, 2000, 43)
+	_, activeC, err := selectUsers(users, "site-a", 20000, 2000, 43)
 	require.NoError(t, err)
 
 	assert.Len(t, borrowedA, 20000)
@@ -51,23 +51,42 @@ func TestSelectSoakUsers_CapsBorrowedPoolAndSelectsActiveDeterministically(t *te
 }
 
 func TestSelectSoakUsers_RejectsInsufficientEligibleUsers(t *testing.T) {
-	_, _, err := selectSoakUsers(makeSoakUsers(3, "site-a"), "site-a", 10, 4, 1)
+	_, _, err := selectUsers(makeSoakUsers(3, "site-a"), "site-a", 10, 4, 1)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "active users")
+}
+
+func TestSelectSoakUsers_RejectsInvalidLimits(t *testing.T) {
+	users := makeSoakUsers(4, "site-a")
+	tests := []struct {
+		name        string
+		maxUsers    int
+		activeUsers int
+	}{
+		{name: "zero max", activeUsers: 1},
+		{name: "over max", maxUsers: MaxBorrowedUsers + 1, activeUsers: 1},
+		{name: "zero active", maxUsers: 4},
+		{name: "active over max", maxUsers: 2, activeUsers: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := selectUsers(users, "site-a", tt.maxUsers, tt.activeUsers, 1)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestBuildSoakTopology_ChannelDMSplitMembershipAndRoles(t *testing.T) {
 	users := makeSoakUsers(12, "site-a")
 	original := append([]model.User(nil), users...)
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 12
 	cfg.ActiveUsers = 8
 	cfg.RoomCount = 10
 	cfg.ChannelRatio = 0.3
 	cfg.ChannelMembers = 4
-	cfg.ReactionsPerHotMessage = 4
 
-	topology, err := buildSoakTopology(users, &cfg, "site-a", 17, newSequenceSoakIDs())
+	topology, err := Build(users, &cfg, "site-a", 17, newSequenceIdentitySource())
 	require.NoError(t, err)
 
 	var channels, dms int
@@ -113,15 +132,14 @@ func TestBuildSoakTopology_ChannelDMSplitMembershipAndRoles(t *testing.T) {
 }
 
 func TestBuildSoakTopology_EveryActiveUserHasWritableRoom(t *testing.T) {
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 10
 	cfg.ActiveUsers = 10
 	cfg.RoomCount = 5
 	cfg.ChannelRatio = 0.2
 	cfg.ChannelMembers = 2
-	cfg.ReactionsPerHotMessage = 2
 
-	topology, err := buildSoakTopology(makeSoakUsers(10, "site-a"), &cfg, "site-a", 5, newSequenceSoakIDs())
+	topology, err := Build(makeSoakUsers(10, "site-a"), &cfg, "site-a", 5, newSequenceIdentitySource())
 	require.NoError(t, err)
 
 	hasRoom := make(map[string]bool)
@@ -134,20 +152,19 @@ func TestBuildSoakTopology_EveryActiveUserHasWritableRoom(t *testing.T) {
 }
 
 func TestBuildSoakTopology_EveryRoomHasAnActiveMember(t *testing.T) {
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 20
 	cfg.ActiveUsers = 3
 	cfg.RoomCount = 12
 	cfg.ChannelRatio = 0.5
 	cfg.ChannelMembers = 4
-	cfg.ReactionsPerHotMessage = 3
 
-	topology, err := buildSoakTopology(
+	topology, err := Build(
 		makeSoakUsers(20, "site-a"),
 		&cfg,
 		"site-a",
 		42,
-		newSequenceSoakIDs(),
+		newSequenceIdentitySource(),
 	)
 	require.NoError(t, err)
 
@@ -168,18 +185,17 @@ func TestBuildSoakTopology_EveryRoomHasAnActiveMember(t *testing.T) {
 }
 
 func TestBuildSoakTopology_IsDeterministicWithSeededIdentitySource(t *testing.T) {
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 20
 	cfg.ActiveUsers = 10
 	cfg.RoomCount = 12
 	cfg.ChannelRatio = 0.25
 	cfg.ChannelMembers = 5
-	cfg.ReactionsPerHotMessage = 5
 	users := makeSoakUsers(20, "site-a")
 
-	a, err := buildSoakTopology(users, &cfg, "site-a", 99, newSequenceSoakIDs())
+	a, err := Build(users, &cfg, "site-a", 99, newSequenceIdentitySource())
 	require.NoError(t, err)
-	b, err := buildSoakTopology(users, &cfg, "site-a", 99, newSequenceSoakIDs())
+	b, err := Build(users, &cfg, "site-a", 99, newSequenceIdentitySource())
 	require.NoError(t, err)
 
 	assert.Equal(t, a, b)
@@ -190,10 +206,10 @@ func TestBuildSoakSubscriptions_LeavesBotDMOnlyFlagUnset(t *testing.T) {
 
 	for _, roomType := range []model.RoomType{model.RoomTypeChannel, model.RoomTypeDM} {
 		t.Run(string(roomType), func(t *testing.T) {
-			subscriptions := buildSoakSubscriptions(
+			subscriptions := buildSubscriptions(
 				&model.Room{ID: "room-1", SiteID: "site-a", Type: roomType, Name: "room"},
 				members,
-				newSequenceSoakIDs(),
+				newSequenceIdentitySource(),
 				time.Unix(1, 0),
 			)
 
@@ -273,43 +289,78 @@ func TestIsActiveSoakSubscription_UsesExistingRoomRowsAsMembership(t *testing.T)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isActiveSoakSubscription(tt.sub, active))
+			assert.Equal(t, tt.want, IsActiveSubscription(tt.sub, active))
 		})
 	}
 }
 
 func TestBuildSoakTopology_RejectsImpossibleRoomShape(t *testing.T) {
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 3
 	cfg.ActiveUsers = 3
 	cfg.RoomCount = 4
 	cfg.ChannelRatio = 0
 	cfg.ChannelMembers = 2
-	cfg.ReactionsPerHotMessage = 2
 
-	_, err := buildSoakTopology(makeSoakUsers(3, "site-a"), &cfg, "site-a", 1, newSequenceSoakIDs())
+	_, err := Build(makeSoakUsers(3, "site-a"), &cfg, "site-a", 1, newSequenceIdentitySource())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unique DM")
 }
 
+func TestBuildSoakTopology_RejectsMissingIdentitySource(t *testing.T) {
+	cfg := validBuildConfig()
+	users := makeSoakUsers(cfg.MaxUsers, "site-a")
+
+	_, err := Build(users, &cfg, "site-a", 1, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity generator")
+
+	_, err = Build(users, &cfg, "site-a", 1, &IdentitySource{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "identity generator")
+}
+
+func TestBuildSoakTopology_WrapsUserSelectionErrors(t *testing.T) {
+	cfg := validBuildConfig()
+	cfg.ActiveUsers = cfg.MaxUsers + 1
+
+	_, err := Build(makeSoakUsers(cfg.MaxUsers, "site-a"), &cfg, "site-a", 1, newSequenceIdentitySource())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "select soak users")
+}
+
+func TestBuildSoakTopology_RejectsInsufficientMembershipCapacity(t *testing.T) {
+	cfg := validBuildConfig()
+	cfg.MaxUsers = 6
+	cfg.ActiveUsers = 6
+	cfg.RoomCount = 1
+	cfg.ChannelRatio = 1
+	cfg.ChannelMembers = 2
+
+	_, err := Build(makeSoakUsers(6, "site-a"), &cfg, "site-a", 1, newSequenceIdentitySource())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "membership capacity")
+}
+
 func TestBuildSoakTopology_RejectsDMPairsWithoutActiveParticipantBeforeGeneration(t *testing.T) {
-	cfg := validSoakConfig(t)
+	cfg := validBuildConfig()
 	cfg.MaxUsers = 4
 	cfg.ActiveUsers = 1
 	cfg.RoomCount = 4
 	cfg.ChannelRatio = 0
 	cfg.ChannelMembers = 2
-	cfg.ReactionsPerHotMessage = 1
 	generatedSubscriptions := 0
-	ids := &soakIDs{
-		channelRoomID: func() string { return "unused-channel" },
-		subscriptionID: func() string {
+	ids := &IdentitySource{
+		NewChannelRoomID: func() string { return "unused-channel" },
+		NewSubscriptionID: func() string {
 			generatedSubscriptions++
 			return fmt.Sprintf("subscription-%d", generatedSubscriptions)
 		},
 	}
 
-	_, err := buildSoakTopology(
+	_, err := Build(
 		makeSoakUsers(4, "site-a"),
 		&cfg,
 		"site-a",
@@ -321,11 +372,35 @@ func TestBuildSoakTopology_RejectsDMPairsWithoutActiveParticipantBeforeGeneratio
 	assert.Zero(t, generatedSubscriptions, "impossible DM capacity must fail before generation")
 }
 
-func TestProductionSoakIDs_UseProjectIdentityFormats(t *testing.T) {
-	ids := newProductionSoakIDs()
+func TestReserveSoakPair_RejectsSelfAndDuplicatePairs(t *testing.T) {
+	users := makeSoakUsers(2, "site-a")
+	used := make(map[string]struct{})
 
-	assert.True(t, idgen.IsValidMessageID(ids.channelRoomID()))
-	assert.True(t, idgen.IsValidUUIDv7(ids.subscriptionID()))
+	assert.False(t, reserveSoakPair(&users[0], &users[0], used))
+	assert.True(t, reserveSoakPair(&users[0], &users[1], used))
+	assert.False(t, reserveSoakPair(&users[1], &users[0], used))
+}
+
+func TestActiveSoakUserIDs_HandlesNilAndSkipsEmptyIDs(t *testing.T) {
+	assert.Nil(t, ActiveUserIDs(nil))
+	assert.Equal(t, map[string]struct{}{"u-1": {}}, ActiveUserIDs(&Topology{
+		ActiveUsers: []model.User{{ID: ""}, {ID: "u-1"}},
+	}))
+}
+
+func TestIsActiveSoakSubscription_AllowsAnyMemberWhenActiveSetIsEmpty(t *testing.T) {
+	assert.False(t, IsActiveSubscription(nil, nil))
+	assert.True(t, IsActiveSubscription(&model.Subscription{
+		RoomType: model.RoomTypeChannel,
+		User:     model.SubscriptionUser{ID: "u-1"},
+	}, nil))
+}
+
+func TestProductionSoakIDs_UseProjectIdentityFormats(t *testing.T) {
+	ids := NewProductionIdentitySource()
+
+	assert.True(t, idgen.IsValidMessageID(ids.NewChannelRoomID()))
+	assert.True(t, idgen.IsValidUUIDv7(ids.NewSubscriptionID()))
 }
 
 func makeSoakUsers(count int, siteID string) []model.User {
@@ -341,16 +416,27 @@ func makeSoakUsers(count int, siteID string) []model.User {
 	return users
 }
 
-func newSequenceSoakIDs() *soakIDs {
+func newSequenceIdentitySource() *IdentitySource {
 	var room, subscription int
-	return &soakIDs{
-		channelRoomID: func() string {
+	return &IdentitySource{
+		NewChannelRoomID: func() string {
 			room++
 			return fmt.Sprintf("channel-%03d", room)
 		},
-		subscriptionID: func() string {
+		NewSubscriptionID: func() string {
 			subscription++
 			return fmt.Sprintf("subscription-%05d", subscription)
 		},
+	}
+}
+
+func validBuildConfig() BuildConfig {
+	return BuildConfig{
+		RunID:          "test-run",
+		MaxUsers:       20,
+		ActiveUsers:    10,
+		RoomCount:      10,
+		ChannelRatio:   0.5,
+		ChannelMembers: 5,
 	}
 }

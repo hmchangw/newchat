@@ -15,6 +15,7 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/cassutil"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -265,7 +266,7 @@ func main() {
 		func(ctx context.Context, users []model.IUserWithChange) error {
 			data, err := json.Marshal(users)
 			if err != nil {
-				return fmt.Errorf("marshal user identity fanout: %w", err)
+				return errcode.MarshalFailed("user identity fanout", err)
 			}
 			_, err = js.PublishMsg(ctx, natsutil.NewMsg(ctx, subject.OrgSyncUsersUpsert(cfg.SiteID), data))
 			publishMetrics.Failure(ctx, natsmetrics.DestinationUserSync, natsmetrics.OperationTeamsUserUpsert, err)

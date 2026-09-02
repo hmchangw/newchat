@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -155,4 +156,231 @@ func TestLoadAppName_ErrorLeavesNothingForTheRecheck(t *testing.T) {
 	got, err := loadAppName(context.Background(), cache, inner, "bot-1")
 	require.NoError(t, err)
 	assert.Equal(t, "Recovered Bot", got, "a failed load must not poison the recheck")
+}
+
+// The batch half exists so a page of many bots costs one read, not one per bot.
+func TestAppNameCache_NamesReadsOnceForRepeats(t *testing.T) {
+	var calls atomic.Int64
+	c := NewAppNameCache(nil, func(_ context.Context, accounts []string) (map[string]string, error) {
+		calls.Add(1)
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	for range 3 {
+		got, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+	}
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+// The point of caching a batch: a warm account is never re-queried, so only the
+// genuinely unknown accounts reach Mongo.
+func TestAppNameCache_NamesQueriesOnlyTheMisses(t *testing.T) {
+	var asked [][]string
+	c := NewAppNameCache(nil, func(_ context.Context, accounts []string) (map[string]string, error) {
+		asked = append(asked, append([]string(nil), accounts...))
+		out := map[string]string{}
+		for _, a := range accounts {
+			out[a] = strings.ToUpper(a)
+		}
+		return out, nil
+	})
+
+	_, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	got, err := c.Names(context.Background(), []string{"a.bot", "b.bot", "c.bot"})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{"a.bot": "A.BOT", "b.bot": "B.BOT", "c.bot": "C.BOT"}, got)
+	require.Len(t, asked, 2)
+	assert.ElementsMatch(t, []string{"a.bot", "b.bot"}, asked[0])
+	assert.Equal(t, []string{"c.bot"}, asked[1], "a warm account must not be re-queried")
+}
+
+// An account absent from the batch result has no app — a stable answer, cached as
+// the empty name it is, exactly as the single-account half does.
+func TestAppNameCache_NamesCachesTheAbsentApp(t *testing.T) {
+	var calls atomic.Int64
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		return map[string]string{}, nil
+	})
+
+	for range 3 {
+		got, err := c.Names(context.Background(), []string{"nomatch.bot"})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	}
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+// One cache serves both halves, so a name either one resolves is free to the other.
+func TestAppNameCache_BothHalvesShareOneCache(t *testing.T) {
+	var oneCalls, manyCalls atomic.Int64
+	var asked [][]string
+	c := NewAppNameCache(
+		func(context.Context, string) (string, error) {
+			oneCalls.Add(1)
+			return "Alpha", nil
+		},
+		func(_ context.Context, accounts []string) (map[string]string, error) {
+			manyCalls.Add(1)
+			asked = append(asked, append([]string(nil), accounts...))
+			return map[string]string{"b.bot": "Beta"}, nil
+		},
+	)
+
+	// Single warms a.bot; the batch must then ask only for b.bot.
+	name, err := c.Name(context.Background(), "a.bot")
+	require.NoError(t, err)
+	assert.Equal(t, "Alpha", name)
+
+	got, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+	require.Len(t, asked, 1)
+	assert.Equal(t, []string{"b.bot"}, asked[0])
+
+	// And the reverse: b.bot came from the batch, so the single half is free.
+	name, err = c.Name(context.Background(), "b.bot")
+	require.NoError(t, err)
+	assert.Equal(t, "Beta", name)
+	assert.Equal(t, int64(1), oneCalls.Load())
+	assert.Equal(t, int64(1), manyCalls.Load())
+}
+
+// A failed batch still hands back what the cache already knew, and caches nothing
+// from the failure — the next call retries the misses.
+func TestAppNameCache_NamesErrorKeepsCacheHitsAndRetries(t *testing.T) {
+	var calls atomic.Int64
+	failing := errors.New("mongo down")
+	c := NewAppNameCache(nil, func(_ context.Context, accounts []string) (map[string]string, error) {
+		if calls.Add(1) == 1 {
+			return map[string]string{"a.bot": "Alpha"}, nil
+		}
+		return nil, failing
+	})
+
+	_, err := c.Names(context.Background(), []string{"a.bot"})
+	require.NoError(t, err)
+
+	got, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+	require.ErrorIs(t, err, failing)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha"}, got, "cache hits survive a failed fetch")
+
+	// Nothing about b.bot was learned, so it must be asked again.
+	_, err = c.Names(context.Background(), []string{"b.bot"})
+	require.ErrorIs(t, err, failing)
+	assert.Equal(t, int64(3), calls.Load())
+}
+
+func TestAppNameCache_NamesEmptyInputReadsNothing(t *testing.T) {
+	var calls atomic.Int64
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		return nil, nil
+	})
+
+	got, err := c.Names(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Zero(t, calls.Load())
+}
+
+// A nil inner half is a store that was never wired: it resolves nothing rather
+// than panicking, so callers degrade to the composed name.
+func TestAppNameCache_NilInnersDegrade(t *testing.T) {
+	c := NewAppNameCache(nil, nil)
+
+	name, err := c.Name(context.Background(), "a.bot")
+	require.NoError(t, err)
+	assert.Empty(t, name)
+
+	got, err := c.Names(context.Background(), []string{"a.bot"})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// A cold bot under a burst of concurrent pages is exactly when the extra reads hurt
+// most: a TTL expiry lets every in-flight request miss at once. They must collapse
+// to one read, not one per request.
+func TestAppNameCache_NamesCollapsesConcurrentColdBatches(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		<-release
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := c.Names(context.Background(), []string{"a.bot", "b.bot"})
+			assert.NoError(t, err)
+			assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+		}()
+	}
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int64(1), calls.Load(), "concurrent misses on one account set must collapse to one read")
+}
+
+// The same accounts in a different order are the same miss set, so they must share a
+// leader rather than each opening their own.
+func TestAppNameCache_NamesCollapsesRegardlessOfAccountOrder(t *testing.T) {
+	var calls atomic.Int64
+	release := make(chan struct{})
+	c := NewAppNameCache(nil, func(context.Context, []string) (map[string]string, error) {
+		calls.Add(1)
+		<-release
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	orders := [][]string{{"a.bot", "b.bot"}, {"b.bot", "a.bot"}}
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := c.Names(context.Background(), orders[i%2])
+			assert.NoError(t, err)
+			assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+		}()
+	}
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int64(1), calls.Load(), "account order must not split one miss set into two reads")
+}
+
+// The cache check and sf.Do are separate steps, so a caller can miss the check while a
+// load is in flight and then reach Do after that load completed and released the key —
+// arriving as a NEW leader for an answer already cached. That interleaving cannot be
+// driven from outside, so this pins the property the leader itself must hold.
+func TestAppNameCache_LoadNamesRechecksTheCacheBeforeReading(t *testing.T) {
+	var asked [][]string
+	c := NewAppNameCache(nil, func(_ context.Context, accounts []string) (map[string]string, error) {
+		asked = append(asked, append([]string(nil), accounts...))
+		return map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, nil
+	})
+
+	// The first leader populates the cache, as the real one does.
+	got, err := c.loadNames(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+
+	// A post-completion leader for a set that is now warm must read nothing.
+	got, err = c.loadNames(context.Background(), []string{"a.bot", "b.bot"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"a.bot": "Alpha", "b.bot": "Beta"}, got)
+	require.Len(t, asked, 1, "a leader arriving after the load completed must serve the cached answer")
+
+	// A set that is only partly warm reads just the cold half.
+	_, err = c.loadNames(context.Background(), []string{"a.bot", "c.bot"})
+	require.NoError(t, err)
+	require.Len(t, asked, 2)
+	assert.Equal(t, []string{"c.bot"}, asked[1])
 }

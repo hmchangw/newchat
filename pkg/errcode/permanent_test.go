@@ -108,3 +108,45 @@ func TestTerminal(t *testing.T) {
 		})
 	}
 }
+
+func TestMarshalFailed_IsPermanentInternal(t *testing.T) {
+	cause := errors.New("json: unsupported value: NaN")
+	err := MarshalFailed("message event", cause)
+
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatal("a marshal failure must be permanent so the worker Ack-drops it")
+	}
+	ec, ok := IsPermanent(err)
+	if !ok {
+		t.Fatal("IsPermanent must unwrap MarshalFailed")
+	}
+	if ec.Code != CodeInternal {
+		t.Fatalf("Code = %v, want %v (a marshal fault is a server fault)", ec.Code, CodeInternal)
+	}
+}
+
+func TestMarshalFailed_MessageNamesTheValueOnly(t *testing.T) {
+	cause := errors.New("json: error calling MarshalJSON: secret-body-abc")
+	err := MarshalFailed("message event", cause)
+
+	const want = "marshal message event"
+	if got := err.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q — the cause must never reach the client message", got, want)
+	}
+}
+
+func TestMarshalFailed_CauseReachableForServerLogs(t *testing.T) {
+	cause := errors.New("json: unsupported value: NaN")
+	err := MarshalFailed("thread reply event", cause)
+
+	if !errors.Is(err, cause) {
+		t.Fatal("the encoder error must stay reachable as the cause for Classify's server-side log")
+	}
+}
+
+func TestMarshalFailed_NilCause(t *testing.T) {
+	err := MarshalFailed("room activity event", nil)
+	if !errors.Is(err, ErrPermanent) {
+		t.Fatal("a nil cause must still yield a permanent error, not a panic")
+	}
+}

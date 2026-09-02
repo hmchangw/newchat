@@ -1455,7 +1455,7 @@ func TestHistoryService_EditMessage_UpdateFails(t *testing.T) {
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-abc").Return(hydrated, nil)
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), hydrated, "new content", gomock.Any()).
+		UpdateMessageContent(gomock.Any(), hydrated, "new content", gomock.Any(), gomock.Any()).
 		Return(fmt.Errorf("cassandra timeout"))
 
 	// The publisher mock expects no calls — gomock fails the test if the failed UPDATE still publishes.
@@ -1480,7 +1480,7 @@ func TestHistoryService_EditMessage_RaceWithDelete_MapsToNotFound(t *testing.T) 
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "m-race").Return(hydrated, nil)
 	msgs.EXPECT().
-		UpdateMessageContent(gomock.Any(), hydrated, "new content", gomock.Any()).
+		UpdateMessageContent(gomock.Any(), hydrated, "new content", gomock.Any(), gomock.Any()).
 		Return(fmt.Errorf("edit message m-race: %w", cassrepo.ErrMessageNotFound))
 
 	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "m-race", NewMsg: "new content"})
@@ -1501,7 +1501,7 @@ func TestHistoryService_EditMessage_PublishesCanonicalUpdatedEvent(t *testing.T)
 		Msg:       "original content",
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any(), gomock.Any()).Return(nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -1529,6 +1529,88 @@ func TestHistoryService_EditMessage_PublishesCanonicalUpdatedEvent(t *testing.T)
 	require.NotNil(t, resp)
 }
 
+// An edit that changes @mentions must resolve them and persist the resolved set
+// (so history reads return post-edit mentions) AND carry them on the canonical event.
+func TestHistoryService_EditMessage_ResolvesAndPersistsMentions(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, users, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	// Permissive preview-walk stubs (empty room → ClearPreview).
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "original content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+		Return([]model.User{{ID: "bob-id", Account: "bob", SiteID: "site-test", EngName: "Bob", ChineseName: "鮑勃"}}, nil).
+		Times(1)
+
+	wantMentions := []model.Participant{{UserID: "bob-id", Account: "bob", SiteID: "site-test", ChineseName: "鮑勃", EngName: "Bob"}}
+	msgs.EXPECT().
+		UpdateMessageContent(gomock.Any(), hydrated, "hey @bob", wantMentions, gomock.Any()).
+		Return(nil)
+
+	pub.EXPECT().
+		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ string, data []byte, _ string) error {
+			var evt model.MessageEvent
+			require.NoError(t, json.Unmarshal(data, &evt))
+			assert.Equal(t, wantMentions, evt.Message.Mentions)
+			return nil
+		})
+
+	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "msg-1", NewMsg: "hey @bob"})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+}
+
+// A user-lookup failure degrades: the edit still succeeds, persisting no
+// individual mentions rather than failing the whole edit.
+// A mention-lookup failure must fail the edit closed — persisting a partial or
+// empty mention set would overwrite (or clear) the stored mentions and lose
+// them permanently. No write, no publish; a retry resolves cleanly.
+func TestHistoryService_EditMessage_MentionLookupError_FailsClosed(t *testing.T) {
+	svc, msgs, subs, rooms, pub, _, users, _ := newServiceWithRoomMock(t)
+	c := testContext()
+
+	rooms.EXPECT().ClearPreview(gomock.Any(), gomock.Any(), gomock.Any()).Return(true, nil).AnyTimes()
+	rooms.EXPECT().InvalidatePreviewKey(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	expectEmptyPreviewWalk(msgs)
+
+	subs.EXPECT().GetHistorySharedSince(gomock.Any(), "u1", "r1").Return(nil, true, nil)
+	hydrated := &models.Message{
+		MessageID: "msg-1",
+		RoomID:    "r1",
+		Sender:    models.Participant{Account: "u1", ID: "u1-id"},
+		CreatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Msg:       "original content",
+	}
+	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
+
+	users.EXPECT().
+		FindUsersByAccounts(gomock.Any(), []string{"bob"}).
+		Return(nil, errors.New("mongo down")).
+		Times(1)
+
+	// No persist, no publish — the edit fails before either.
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	pub.EXPECT().Publish(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
+	resp, err := svc.EditMessage(c, "site-test", models.EditMessageRequest{MessageID: "msg-1", NewMsg: "hey @bob"})
+	require.Error(t, err)
+	require.Nil(t, resp)
+}
+
 // .updated is a full-doc replace: it must carry attachments and card,
 // or the re-index wipes those fields from the search document.
 func TestHistoryService_EditMessage_CarriesAttachmentsAndCard(t *testing.T) {
@@ -1551,7 +1633,7 @@ func TestHistoryService_EditMessage_CarriesAttachmentsAndCard(t *testing.T) {
 		CardAction:  cardAction,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any(), gomock.Any()).Return(nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -1590,7 +1672,7 @@ func TestHistoryService_EditMessage_PublishFailureDoesNotFailRPC(t *testing.T) {
 		Msg:       "original content",
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any(), gomock.Any()).Return(nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -1621,7 +1703,7 @@ func TestHistoryService_EditMessage_PassesDedupMessageID(t *testing.T) {
 		Msg:       "original",
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated", gomock.Any(), gomock.Any()).Return(nil)
 
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -1952,7 +2034,7 @@ func TestHistoryService_EditMessage_EmbedsRefreshedPreview(t *testing.T) {
 		Msg:       "original content",
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "updated content", gomock.Any(), gomock.Any()).Return(nil)
 	// roomLastMessage walk: the refreshed preview is the edited message itself.
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
@@ -2204,7 +2286,7 @@ func TestHistoryService_EditMessage_PreviewWriteFails_WithdrawsTheFreshnessKey(t
 		Msg:       "before",
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "msg-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "after", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "after", gomock.Any(), gomock.Any()).Return(nil)
 	expectSurvivorWalk(msgs)
 	pub.EXPECT().
 		Publish(gomock.Any(), subject.MsgCanonicalUpdated("site-test"), gomock.Any(), gomock.Any()).
@@ -2270,7 +2352,7 @@ func TestHistoryService_EditMessage_HiddenThreadReply_SkipsPreviewWalk(t *testin
 		TShow:                 false,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any(), gomock.Any()).Return(nil)
 	// No GetMessagesBefore expectation: the walk must be skipped for hidden thread replies.
 
 	pub.EXPECT().
@@ -2305,7 +2387,7 @@ func TestHistoryService_EditMessage_TShowThreadReply_EmbedsPreview(t *testing.T)
 		TShow:                 true,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any(), gomock.Any()).Return(nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{
 			{MessageID: "m-latest", RoomID: "r1", Sender: models.Participant{Account: "u1", ID: "u1-id"}, Msg: "latest", CreatedAt: hydrated.CreatedAt},
@@ -2344,7 +2426,7 @@ func TestHistoryService_EditMessage_ThreadReply_CarriesThreadFields(t *testing.T
 		TShow:                 false,
 	}
 	msgs.EXPECT().GetMessageByID(gomock.Any(), "reply-1").Return(hydrated, nil)
-	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any()).Return(nil)
+	msgs.EXPECT().UpdateMessageContent(gomock.Any(), hydrated, "edited reply", gomock.Any(), gomock.Any()).Return(nil)
 	// No GetMessagesBefore expectation: thread replies skip the preview walk.
 
 	pub.EXPECT().
@@ -3063,6 +3145,8 @@ func TestHistoryService_LoadHistory_ResolvesRemovedMemberNames(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.Messages, 1)
 	assert.Equal(t, `"Bob 鮑勃" has been removed from the channel.`, resp.Messages[0].Msg)
+	// The legacy plural type must not reach the client.
+	assert.Equal(t, model.MessageTypeMemberRemoved, resp.Messages[0].Type)
 }
 
 // The ordinary page must not acquire a Mongo round trip: gomock fails the test

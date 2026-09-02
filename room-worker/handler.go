@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/orgdisplay"
 	"github.com/hmchangw/chat/pkg/outbox"
+	"github.com/hmchangw/chat/pkg/preview"
 	"github.com/hmchangw/chat/pkg/roomkeymetrics"
 	"github.com/hmchangw/chat/pkg/roomkeysender"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
@@ -79,10 +80,13 @@ type Handler struct {
 	publishUsers func(ctx context.Context, users []model.IUserWithChange) error
 	// routeMode (ROOM_SUBJECT_MODE) gates same-site room .event namespaces; cross-site always global.
 	routeMode subject.RoomRouteMode
+	// appName is the cached bot app-name lookup (wraps appNameLookup); nil-safe
+	// because BotAwareDisplayName skips a nil lookup.
+	appName preview.AppNameLookup
 }
 
 func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, keyStore RoomKeyStore, keySender *roomkeysender.Sender, routeMode subject.RoomRouteMode) *Handler {
-	return &Handler{
+	h := &Handler{
 		store:            store,
 		siteID:           siteID,
 		publish:          publish,
@@ -91,6 +95,8 @@ func NewHandler(store SubscriptionStore, siteID string, publish PublishFunc, key
 		keyFanoutWorkers: defaultKeyFanoutWorkers,
 		routeMode:        routeMode,
 	}
+	h.appName = preview.CachedAppNameLookup(h.appNameLookup)
+	return h
 }
 
 // bustRoomMeta best-effort invalidates a room's L2 (Valkey) metadata entry
@@ -369,6 +375,25 @@ func (h *Handler) cleanupThreadMembership(ctx context.Context, roomID string, ac
 	return nil
 }
 
+// appNameLookup adapts store.GetApp to preview.AppNameLookup: no match is ("", nil)
+// so BotAwareDisplayName degrades to the composed name.
+func (h *Handler) appNameLookup(ctx context.Context, botAccount string) (string, error) {
+	app, err := h.store.GetApp(ctx, botAccount)
+	if errors.Is(err, ErrAppNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return app.Name, nil
+}
+
+// botAwareName renders a sys-msg participant's name (member or requester),
+// substituting the registered app name for a bot account.
+func (h *Handler) botAwareName(ctx context.Context, u *model.User) string {
+	return preview.BotAwareDisplayName(ctx, h.appName, u.EngName, u.ChineseName, u.Account)
+}
+
 func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.RemoveMemberRequest, currentPair *roomkeystore.VersionedKeyPair) (err error) {
 	if req.Timestamp <= 0 {
 		req.Timestamp = time.Now().UTC().UnixMilli()
@@ -509,9 +534,9 @@ func (h *Handler) processRemoveIndividual(ctx context.Context, req *model.Remove
 		fmt.Sprintf("%s:%s:%d", req.RoomID, req.Account, req.Timestamp))
 	var content string
 	if isSelfLeave {
-		content = formatLeft(&user.User)
+		content = formatLeft(h.botAwareName(ctx, &user.User))
 	} else {
-		content = formatRemovedUser(requester, &user.User)
+		content = formatRemovedUser(h.botAwareName(ctx, requester), h.botAwareName(ctx, &user.User))
 	}
 	sysMsg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(seed, "rmindiv"),
@@ -718,7 +743,7 @@ func (h *Handler) processRemoveOrg(ctx context.Context, req *model.RemoveMemberR
 		UserID:      requester.ID,
 		UserAccount: requester.Account,
 		Type:        model.MessageTypeMemberRemoved,
-		Content:     formatRemovedOrg(requester, name, tcName, req.OrgID),
+		Content:     formatRemovedOrg(h.botAwareName(ctx, requester), name, tcName, req.OrgID),
 		SysMsgData:  sysMsgPayload,
 		CreatedAt:   now,
 	}
@@ -1234,11 +1259,11 @@ func (h *Handler) processAddMembers(ctx context.Context, data []byte) (err error
 			sysMsgData, _ := json.Marshal(membersAdded)
 			seed := messageDedupSeed(ctx, "processAddMembers", req.RoomID,
 				fmt.Sprintf("%s:%s:%d", req.RoomID, req.RequesterAccount, req.Timestamp))
-			content := addedContent(requester, sysIndividuals, req.Orgs, func(a string) *model.User {
+			content := addedContent(h.botAwareName(ctx, requester), sysIndividuals, req.Orgs, func(a string) string {
 				if u, ok := userMap[a]; ok {
-					return &u
+					return h.botAwareName(ctx, &u)
 				}
-				return nil
+				return ""
 			})
 			sysMsg := model.Message{
 				ID:          idgen.MessageIDFromRequestID(seed, "addmembers"),
@@ -1916,7 +1941,7 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal room_created sys data: %w", err)
+		return errcode.MarshalFailed("room_created sys data", err)
 	}
 	msg1 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_created"),
@@ -1946,10 +1971,13 @@ func (h *Handler) publishChannelSysMessages(ctx context.Context, req *model.Crea
 		AddedUsersCount: addedUsersCount,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal members_added sys data: %w", err)
+		return errcode.MarshalFailed("members_added sys data", err)
 	}
-	content := addedContent(requester, req.ResolvedUsers, req.ResolvedOrgs, func(a string) *model.User {
-		return userByAccount[a]
+	content := addedContent(h.botAwareName(ctx, requester), req.ResolvedUsers, req.ResolvedOrgs, func(a string) string {
+		if u, ok := userByAccount[a]; ok {
+			return h.botAwareName(ctx, u)
+		}
+		return ""
 	})
 	msg2 := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "members_added"),
@@ -1976,7 +2004,7 @@ func (h *Handler) publishCanonical(ctx context.Context, msg *model.Message, site
 	}
 	data, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("marshal MessageEvent: %w", err)
+		return errcode.MarshalFailed("MessageEvent", err)
 	}
 	return h.publish(ctx, subject.MsgCanonicalCreated(siteID), data, natsutil.CanonicalDedupID(&evt))
 }
@@ -2324,7 +2352,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 
 	sysData, err := json.Marshal(model.RoomRenamedSysData{NewName: req.NewName, ByAccount: req.Account})
 	if err != nil {
-		return fmt.Errorf("marshal sys data: %w", err)
+		return errcode.MarshalFailed("room_renamed sys data", err)
 	}
 	requester, err := h.store.GetUser(ctx, req.Account)
 	if err != nil && !errors.Is(err, ErrUserNotFound) {
@@ -2332,7 +2360,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	requesterLabel := req.Account
 	if requester != nil {
-		requesterLabel = displayName(requester)
+		requesterLabel = h.botAwareName(ctx, requester)
 	}
 	msg := model.Message{
 		ID:          idgen.MessageIDFromRequestID(requestID, "room_renamed"),
@@ -2367,7 +2395,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 		RoomID: req.RoomID, NewName: req.NewName, Timestamp: req.Timestamp,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal rename inbox payload: %w", err)
+		return errcode.MarshalFailed("rename inbox payload", err)
 	}
 	now := time.Now().UTC().UnixMilli()
 	// Same-site search feed: search-sync re-indexes the room name from this
@@ -2383,7 +2411,7 @@ func (h *Handler) processRoomRename(ctx context.Context, data []byte) (err error
 	}
 	internalRenameData, err := json.Marshal(internalRename)
 	if err != nil {
-		return fmt.Errorf("marshal internal rename event: %w", err)
+		return errcode.MarshalFailed("internal rename event", err)
 	}
 	// Best-effort: log, don't Nak. Returning here would redeliver the whole
 	// handler, and UpdateRoomName / UpdateSubscriptionNamesForRoom (already
@@ -2503,7 +2531,7 @@ func (h *Handler) publishSyncDMInbox(ctx context.Context, room *model.Room, requ
 	}
 	pData, err := json.Marshal(memberEvt)
 	if err != nil {
-		return fmt.Errorf("marshal member_added inbox payload: %w", err)
+		return errcode.MarshalFailed("member_added inbox payload", err)
 	}
 	// Dedup keys on intrinsic room identity (stable across retries and
 	// re-subscribes) plus the destination site, NOT the request ID — the router

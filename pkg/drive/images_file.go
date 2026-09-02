@@ -13,6 +13,12 @@ var AllowedImageFileTypes = map[string]bool{
 	".heic": true,
 }
 
+// Drive's per-file result statuses in a bulk-upload response.
+const (
+	StatusSuccess = "success"
+	StatusFailure = "failure"
+)
+
 // GroupImageObject is Drive's per-file descriptor in a bulk-upload response.
 type GroupImageObject struct {
 	FileID   string `json:"objectId"`
