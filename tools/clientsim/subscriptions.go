@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -11,13 +12,30 @@ import (
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
-// openSub is one open room subscription plus the namespace it was opened
-// on. Storing global here (instead of re-deriving it from the subject
-// string) keeps the resync snapshot trivially correct.
+// openSub is one subscribed room: the two lanes a real client opens on it,
+// plus the namespace they were opened on. Storing global here (instead of
+// re-deriving it from the subject string) keeps the resync snapshot
+// trivially correct.
 type openSub struct {
-	sub    simSub
+	msg    simSub // chat.room.{id}.event        — messages and mutations
+	member simSub // chat.room.{id}.event.member — roster add/remove
 	global bool
 }
+
+// roomLane names the delivery counter a room subject feeds. The two lanes
+// share one channel (and therefore one pump goroutine), so the subject is
+// the only thing that tells them apart.
+func roomLane(subj string) string {
+	if strings.HasSuffix(subj, memberSubjectSuffix) {
+		return "member"
+	}
+	return "channel"
+}
+
+// memberSubjectSuffix is what subject.RoomMemberEvent appends to the room
+// base; a literal subscription on the message subject does not match it,
+// which is why the member lane needs its own subscription.
+const memberSubjectSuffix = ".event.member"
 
 // subscribeLanes opens the user event lane and the live update lane on the
 // given connection — the update lane BEFORE the bootstrap walk so a
@@ -75,7 +93,9 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 		case subClose:
 			delete(s.missingRooms, ch.RoomID)
 			if open, ok := s.roomSubs[ch.RoomID]; ok {
-				_ = open.sub.Unsubscribe() // conn may already be closing; nothing to recover
+				// conn may already be closing; nothing to recover
+				_ = open.msg.Unsubscribe()
+				_ = open.member.Unsubscribe()
 				delete(s.roomSubs, ch.RoomID)
 			}
 		case subOpen:
@@ -83,7 +103,7 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 				delete(s.missingRooms, ch.RoomID)
 				continue
 			}
-			sub, err := conn.SubscribeChan(subject.RoomEvent(ch.RoomID, ch.Global), s.roomCh)
+			open, err := s.openRoomLanes(conn, ch.RoomID, ch.Global)
 			if err != nil {
 				// Not recorded in roomSubs, so the next add/resync retries.
 				// Until then this client is missing the room's traffic, which
@@ -94,9 +114,26 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 				continue
 			}
 			delete(s.missingRooms, ch.RoomID)
-			s.roomSubs[ch.RoomID] = openSub{sub: sub, global: ch.Global}
+			s.roomSubs[ch.RoomID] = open
 		}
 	}
+}
+
+// openRoomLanes subscribes both room lanes into the shared channel. A room
+// counts as subscribed only when both are open: a half-open room would miss
+// every event on the failed lane while looking complete, so the opened lane
+// is rolled back and the caller records the room as missing.
+func (s *simClient) openRoomLanes(conn simConn, roomID string, global bool) (openSub, error) {
+	msg, err := conn.SubscribeChan(subject.RoomEvent(roomID, global), s.roomCh)
+	if err != nil {
+		return openSub{}, fmt.Errorf("subscribe room message lane: %w", err)
+	}
+	member, err := conn.SubscribeChan(subject.RoomMemberEvent(roomID, global), s.roomCh)
+	if err != nil {
+		_ = msg.Unsubscribe() // roll back, so a retry is not a duplicate
+		return openSub{}, fmt.Errorf("subscribe room member lane: %w", err)
+	}
+	return openSub{msg: msg, member: member, global: global}, nil
 }
 
 // updateReadyLocked promotes only when a walk has verified the plan AND every
@@ -118,7 +155,7 @@ func (s *simClient) pump(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-s.roomCh:
-			handleDelivery(s.m, "channel", msg.Data, time.Now())
+			handleDelivery(s.m, roomLane(msg.Subject), msg.Data, time.Now())
 		}
 	}
 }

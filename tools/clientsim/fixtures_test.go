@@ -103,7 +103,8 @@ type fakeConn struct {
 	// than racing the scheduler to guess.
 	reqEntered chan struct{}
 
-	subChanErr      error // next SubscribeChan fails with this, then clears
+	subChanErr      error            // next SubscribeChan fails with this, then clears
+	subChanErrOn    map[string]error // persistent per-subject SubscribeChan failures
 	forceReconnects atomic.Int64
 	closes          atomic.Int64
 }
@@ -129,6 +130,9 @@ func (f *fakeConn) SubscribeCB(subj string, cb nats.MsgHandler) (simSub, error) 
 func (f *fakeConn) SubscribeChan(subj string, ch chan *nats.Msg) (simSub, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err, ok := f.subChanErrOn[subj]; ok {
+		return nil, err
+	}
 	if f.subChanErr != nil {
 		err := f.subChanErr
 		f.subChanErr = nil
@@ -181,6 +185,17 @@ func (f *fakeConn) failNextRequests(errs ...error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqErrors = append(f.reqErrors, errs...)
+}
+
+// failSubscribeChanOn makes every SubscribeChan on subj fail, so a test can
+// break one lane of a room without touching the other.
+func (f *fakeConn) failSubscribeChanOn(subj string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.subChanErrOn == nil {
+		f.subChanErrOn = map[string]error{}
+	}
+	f.subChanErrOn[subj] = err
 }
 
 func (f *fakeConn) ForceReconnect() error { f.forceReconnects.Add(1); return nil }

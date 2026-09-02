@@ -69,6 +69,7 @@ type metrics struct {
 	// so it must not pay the label-hash lookup on every copy.
 	deliveredUser    prometheus.Counter
 	deliveredChannel prometheus.Counter
+	deliveredMember  prometheus.Counter
 
 	// readyNow backs ConnsReady so the peak can be maintained without
 	// reading a gauge's value back out of the registry.
@@ -163,7 +164,7 @@ func newMetrics() *metrics {
 		JWTRefreshes:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_jwt_refreshes_total", Help: "JWT re-mints by lifecycle mode."}, []string{"mode"}),
 		Delivered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "clientsim_msgs_delivered_total",
-			Help: "Fan-out copies received, by lane. Per-connection copies — NOT comparable to loadgen's logical send counters.",
+			Help: "Fan-out copies received, by lane (user | channel | member). Per-connection copies — NOT comparable to loadgen's logical send counters.",
 		}, []string{"lane"}),
 		BroadcastLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "clientsim_broadcast_to_client_latency_seconds", Buckets: latencyBuckets,
@@ -182,6 +183,7 @@ func newMetrics() *metrics {
 	}
 	m.deliveredUser = m.Delivered.WithLabelValues("user")
 	m.deliveredChannel = m.Delivered.WithLabelValues("channel")
+	m.deliveredMember = m.Delivered.WithLabelValues("member")
 	r.MustRegister(
 		m.ConnsActive, m.ConnsConnecting, m.ConnsReady, m.ConnsReadyPeak, m.ConnsReadyMin,
 		m.AuthDuration, m.ConnectDuration,
@@ -197,10 +199,14 @@ func newMetrics() *metrics {
 
 // delivered returns the pre-resolved counter for a lane.
 func (m *metrics) delivered(lane string) prometheus.Counter {
-	if lane == "user" {
+	switch lane {
+	case "user":
 		return m.deliveredUser
+	case "member":
+		return m.deliveredMember
+	default:
+		return m.deliveredChannel
 	}
-	return m.deliveredChannel
 }
 
 // Handler serves this registry (mounted at the metrics server root, like loadgen).

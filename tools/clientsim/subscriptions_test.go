@@ -341,3 +341,78 @@ func TestSimClient_StaleWalkDoesNotReVerifyAfterDisconnect(t *testing.T) {
 	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
 		"a walk from the previous connection must not stand in for a post-reconnect one")
 }
+
+// --- room subscriptions cover BOTH lanes the real client opens ---
+
+func TestApplyChanges_OpensMessageAndMemberSubjects(t *testing.T) {
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+
+	s.mu.Lock()
+	s.applyChangesLocked([]subChange{{Op: subOpen, RoomID: "r1", Global: true}})
+	s.mu.Unlock()
+
+	fc.mu.Lock()
+	_, hasMsg := fc.chanSubs[subject.RoomEvent("r1", true)]
+	_, hasMember := fc.chanSubs[subject.RoomMemberEvent("r1", true)]
+	fc.mu.Unlock()
+	assert.True(t, hasMsg, "must open the room message subject")
+	assert.True(t, hasMember, "must open the room member subject")
+
+	s.mu.Lock()
+	_, missing := s.missingRooms["r1"]
+	s.mu.Unlock()
+	assert.False(t, missing, "both subscribes succeeded, so the room is not missing")
+}
+
+func TestApplyChanges_MemberSubscribeFailureRollsBackTheMessageSub(t *testing.T) {
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	// A room is subscribed only when BOTH lanes are open; a half-open room
+	// would silently miss every member event while counting as ready.
+	fc.failSubscribeChanOn(subject.RoomMemberEvent("r2", true), errors.New("permissions violation"))
+
+	s.mu.Lock()
+	s.applyChangesLocked([]subChange{{Op: subOpen, RoomID: "r2", Global: true}})
+	_, recorded := s.roomSubs["r2"]
+	_, missing := s.missingRooms["r2"]
+	s.mu.Unlock()
+
+	assert.False(t, recorded, "a half-open room must not be recorded as subscribed")
+	assert.True(t, missing, "a half-open room must be remembered as missing")
+
+	fc.mu.Lock()
+	msgSub := fc.subs[subject.RoomEvent("r2", true)]
+	fc.mu.Unlock()
+	require.NotNil(t, msgSub, "the message lane was opened before the member lane failed")
+	assert.Equal(t, int64(1), msgSub.unsubs.Load(), "the opened lane must be rolled back")
+}
+
+func TestApplyChanges_CloseUnsubscribesBothLanes(t *testing.T) {
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+
+	s.mu.Lock()
+	s.applyChangesLocked([]subChange{{Op: subOpen, RoomID: "r3", Global: true}})
+	s.applyChangesLocked([]subChange{{Op: subClose, RoomID: "r3"}})
+	s.mu.Unlock()
+
+	fc.mu.Lock()
+	msgSub := fc.subs[subject.RoomEvent("r3", true)]
+	memberSub := fc.subs[subject.RoomMemberEvent("r3", true)]
+	fc.mu.Unlock()
+	require.NotNil(t, msgSub)
+	require.NotNil(t, memberSub)
+	assert.Equal(t, int64(1), msgSub.unsubs.Load())
+	assert.Equal(t, int64(1), memberSub.unsubs.Load())
+}
+
+func TestRoomLane_SplitsMemberEventsOntoTheirOwnCounter(t *testing.T) {
+	assert.Equal(t, "member", roomLane(subject.RoomMemberEvent("r4", true)))
+	assert.Equal(t, "member", roomLane(subject.RoomMemberEvent("r4", false)))
+	assert.Equal(t, "channel", roomLane(subject.RoomEvent("r4", true)))
+	assert.Equal(t, "channel", roomLane(subject.RoomEvent("r4", false)))
+}

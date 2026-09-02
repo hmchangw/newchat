@@ -78,9 +78,9 @@ func TestNewMetrics_RegistersAllSeries(t *testing.T) {
 		"clientsim_errors_total",
 		"clientsim_run_info",
 	}
-	// Delivered pre-resolves both lane children, so its family carries two
-	// series; every other name carries one.
-	wantSeries := len(names) + 1
+	// Delivered pre-resolves all three lane children (user | channel |
+	// member), so its family carries three series; every other name carries one.
+	wantSeries := len(names) + 2
 	got, err := promtestutil.GatherAndCount(m.Registry, names...)
 	require.NoError(t, err)
 	assert.Equal(t, wantSeries, got)
@@ -89,6 +89,8 @@ func TestNewMetrics_RegistersAllSeries(t *testing.T) {
 	assert.InDelta(t, 2, promtestutil.ToFloat64(m.Delivered.WithLabelValues("channel")), 0.001)
 	assert.InDelta(t, 2, promtestutil.ToFloat64(m.delivered("channel")), 0.001,
 		"pre-resolved child must be the same series as the vec child")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(m.delivered("member")), 0.001,
+		"the member lane is registered up-front so it scrapes as 0, not absent")
 	assert.Equal(t, uint64(1), histogramCount(t, m.Registry, "clientsim_broadcast_to_client_latency_seconds"))
 }
 
