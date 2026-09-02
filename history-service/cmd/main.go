@@ -369,6 +369,10 @@ func main() {
 		opts = append(opts, service.WithRoomTimesCache(roomTimes))
 	}
 
+	if !cfg.PreviewWarmBackEnabled {
+		slog.Warn("preview warm-back DISABLED — rooms without a stored preview re-walk Cassandra on every rooms.get")
+	}
+
 	svc := service.New(cassRepo, subSource, roomSource, pub, threadRoomRepo, threadSubRepo, userSource, appRepo, &cfg, opts...)
 
 	// Default middleware chain (Recovery, RequestID, Logging) plus this service's

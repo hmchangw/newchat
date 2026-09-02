@@ -86,10 +86,17 @@ type previewWarmer struct {
 	closed bool
 }
 
-// newPreviewWarmer starts the writer's workers. Non-positive sizes take the defaults:
-// warm-back is what stops the lazy walk repeating forever, so "off" is not an option the
-// wiring offers.
-func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Duration) *previewWarmer {
+// newPreviewWarmer starts the writer's workers, or returns an inert one when the operator
+// has turned warm-back off. Non-positive sizes take the defaults.
+//
+// Disabled is expressed as already-closed rather than as worker-less: closed is exactly
+// "not accepting work", so Submit sheds instead of filling a queue nothing drains, Close
+// waits on no workers and never closes the nil channel, and neither gains a branch on the
+// hot path. A drop counter is not touched either — an operator's off is not a shed job.
+func newPreviewWarmer(rooms RoomRepository, enabled bool, workers, queue int, timeout time.Duration) *previewWarmer {
+	if !enabled {
+		return &previewWarmer{rooms: rooms, timeout: timeout, closed: true}
+	}
 	if workers <= 0 {
 		workers = defaultWarmBackWorkers
 	}
