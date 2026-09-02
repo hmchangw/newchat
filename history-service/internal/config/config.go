@@ -159,17 +159,8 @@ type Config struct {
 	// rooms can pin; overflow sheds the write, which the next read re-derives.
 	// Non-positive takes the built-in default for either.
 	//
-	// PreviewWarmBackEnabled is an operator kill switch, on by default: warm-back is
-	// what stops the lazy walk repeating forever, so turning it off leaves every room
-	// without a stored preview re-walking Cassandra once per preview-cache TTL — on
-	// every read where that cache is off, or where the walk resolves nothing (only
-	// positives are cached). It exists for
-	// the case where that read cost is preferable to the write cost — an ailing Mongo,
-	// or a site where the eager writer is being re-cut — not as a tuning knob. Off
-	// withholds only this optional write: the walk still runs and the client still
-	// gets its preview, and the mutation path's repair (persistMutatedPreview), which
-	// is correctness rather than optimization, is untouched. The sizes above are
-	// ignored when it is off.
+	// Enabled is a kill switch, not a tuning knob: off trades the write for a re-walk
+	// per preview-cache TTL. persistMutatedPreview's repair is correctness, so unaffected.
 	PreviewWarmBackEnabled bool `env:"PREVIEW_WARMBACK_ENABLED" envDefault:"true"`
 	PreviewWarmBackWorkers int  `env:"PREVIEW_WARMBACK_WORKERS" envDefault:"8"`
 	PreviewWarmBackQueue   int  `env:"PREVIEW_WARMBACK_QUEUE"   envDefault:"1024"`

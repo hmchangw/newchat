@@ -142,9 +142,7 @@ func TestValidate_RejectsNegativeWarmBackSizes(t *testing.T) {
 	}
 }
 
-// Zero is "take the default", not "disable" — disabling is PREVIEW_WARMBACK_ENABLED's job,
-// and validate says nothing about it: the sizes are genuinely ignored when it is off, so
-// rejecting the combination would invent a constraint.
+// Zero is "take the default"; disabling is PREVIEW_WARMBACK_ENABLED's job, which validate ignores.
 func TestValidate_AcceptsZeroWarmBackSizesAsDefaults(t *testing.T) {
 	cfg := baseValid()
 	cfg.PreviewWarmBackWorkers = 0
@@ -483,8 +481,7 @@ func TestLoad_KeyReadPreferenceWireName(t *testing.T) {
 		"the field must bind to MONGO_KEY_READ_PREFERENCE via the MONGO_ envPrefix")
 }
 
-// The warm-back writer is a kill switch, not a tuning knob: on unless an operator
-// turns it off, so a fresh deployment keeps repairing cold rooms without being told to.
+// On unless an operator turns it off, so a fresh deployment self-heals cold rooms.
 func TestLoad_PreviewWarmBackEnabled(t *testing.T) {
 	tests := []struct {
 		name string

@@ -180,9 +180,7 @@ type HistoryService struct {
 	maxPinnedPerRoom   int
 	pinEnabled         bool // from PIN_ENABLED env var; false disables pin/unpin globally
 	previewCache       PreviewCache
-	// warmer stores walk-resolved previews off the request path; Close drains it. Never
-	// nil — PREVIEW_WARMBACK_ENABLED=false installs the no-op, so the read path needs no
-	// guard and shutdown stays unconditional.
+	// warmer stores walk-resolved previews off the request path; never nil, so no guard needed.
 	warmer previewWriter
 	// pageBudget caps a paginated reply so it is trimmed to fit the broker
 	// rather than refused by it. Zero value disables trimming.

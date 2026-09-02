@@ -43,8 +43,7 @@ func newRoomsServiceWithWarmer(t *testing.T, warmWorkers, warmQueue int, opts ..
 // disableWarmBack turns the background preview writer off, the way an operator does.
 func disableWarmBack(c *config.Config) { c.PreviewWarmBackEnabled = false }
 
-// newRoomsServiceWithConfig builds a service whose config the caller adjusts first, for the
-// tests that flip a toggle rather than size a queue. A nil tweak takes the defaults below.
+// newRoomsServiceWithConfig lets a caller adjust the config first; nil takes the defaults.
 func newRoomsServiceWithConfig(t *testing.T, tweak func(*config.Config), opts ...service.Option) (*service.HistoryService, *mocks.MockMessageRepository, *mocks.MockRoomRepository) {
 	ctrl := gomock.NewController(t)
 	msgs := mocks.NewMockMessageRepository(ctrl)
@@ -652,9 +651,7 @@ func TestHistoryService_RoomsGet_CancellationDuringTheWalkIsAnErrorNotAPartialAn
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-// PREVIEW_WARMBACK_ENABLED=false withholds the optional write, not the read. Distinct from
-// the after-Close test above: that one sheds inside a live warmer, this one pins that the
-// no-op is what New installs.
+// The toggle withholds the write, not the read; unlike the after-Close test, this pins the no-op.
 func TestHistoryService_RoomsGet_WarmBackDisabledStillServesTheWalkedPreview(t *testing.T) {
 	svc, msgs, rooms := newRoomsServiceWithConfig(t, disableWarmBack)
 	walked := walkedMsg("r1", "m-walked", "resolved lazily")
@@ -663,21 +660,17 @@ func TestHistoryService_RoomsGet_WarmBackDisabledStillServesTheWalkedPreview(t *
 		Return(map[string]mongorepo.RoomTimes{"r1": storedRow(nil)}, nil)
 	msgs.EXPECT().GetMessagesBefore(gomock.Any(), "r1", gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(makePage([]models.Message{walked}, false), nil)
-	// No SetPreviewMessage expectation: gomock fails the test if the write is attempted,
-	// which is the whole point of the toggle.
+	// No SetPreviewMessage expectation: gomock fails if the write is attempted.
 
 	resp, err := svc.RoomsGet(roomsCtx(), models.RoomsGetRequest{RoomIDs: []string{"r1"}})
 	require.NoError(t, err)
 	assert.Equal(t, "m-walked", resp.Rooms["r1"].MessageID)
 }
 
-// The no-op holds no queue and no workers, so shutdown must not wait on any — and Close
-// must stay safe to call, twice, rather than becoming conditional at the call site.
+// The no-op has nothing to drain: Close must stay fast and safe to call twice.
 func TestHistoryService_Close_DisabledWarmBackDrainsImmediately(t *testing.T) {
 	svc, _, _ := newRoomsServiceWithConfig(t, disableWarmBack)
 
-	// No workers to wait on, so a tight budget is ample — a disabled writer must not be
-	// able to hold shutdown. Called twice: Close stays idempotent rather than conditional.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, svc.Close(ctx))

@@ -62,20 +62,14 @@ func newWarmBackMetrics(m metric.Meter) warmBackMetrics {
 	return warmBackMetrics{stored: stored, dropped: dropped, failed: failed}
 }
 
-// previewWriter stores walk-resolved previews. previewWarmer is the live implementation;
-// nopPreviewWarmer is what PREVIEW_WARMBACK_ENABLED=false installs. An interface rather
-// than a disabled-shaped previewWarmer because "off" and "shut down" must not share an
-// encoding: previewWarmer.Close is nil-channel-safe only because it guards on closed, so
-// a warmer born closed puts a close(nil) panic one idiomatic refactor away — and it would
-// leave shutdown indistinguishable from off at every future log, metric and fast path.
+// previewWriter is the warm-back writer; PREVIEW_WARMBACK_ENABLED=false installs the no-op.
+// An interface so "off" never encodes as closed: Close is nil-channel-safe only via that guard.
 type previewWriter interface {
 	Submit(ctx context.Context, job *warmBackJob)
 	Close(ctx context.Context) error
 }
 
-// nopPreviewWarmer is the disabled form: it stores nothing, so a walk-resolved room simply
-// stays on the lazy path. Holds no queue and no workers, which is why Close has nothing to
-// drain and cannot fail.
+// nopPreviewWarmer is the disabled form: no queue, no workers, nothing for Close to drain.
 type nopPreviewWarmer struct{}
 
 func (nopPreviewWarmer) Submit(context.Context, *warmBackJob) {}
@@ -105,9 +99,7 @@ type previewWarmer struct {
 	closed bool
 }
 
-// newPreviewWarmer starts the writer's workers. Non-positive sizes take the defaults.
-// PREVIEW_WARMBACK_ENABLED=false is not expressed here: it selects nopPreviewWarmer
-// instead, so this constructor never builds a warmer that cannot do its job.
+// newPreviewWarmer starts the writer's workers; non-positive sizes take the defaults.
 func newPreviewWarmer(rooms RoomRepository, workers, queue int, timeout time.Duration) *previewWarmer {
 	if workers <= 0 {
 		workers = defaultWarmBackWorkers
