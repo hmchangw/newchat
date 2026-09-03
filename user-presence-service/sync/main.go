@@ -38,8 +38,9 @@ type Config struct {
 
 	// GraphTLSInsecureSkipVerify disables Graph TLS verification (opt-in, default
 	// false) for dev/on-prem environments behind a TLS-intercepting proxy. The
-	// proxy itself is taken from the standard HTTPS_PROXY/HTTP_PROXY env vars
-	// (msgraph clones the default transport, which honors ProxyFromEnvironment).
+	// proxy itself comes from GraphProxyURL below, or — only when that is empty —
+	// from the standard HTTPS_PROXY/HTTP_PROXY env vars (msgraph clones the
+	// default transport, which honors ProxyFromEnvironment).
 	GraphTLSInsecureSkipVerify bool `env:"GRAPH_TLS_INSECURE_SKIP_VERIFY" envDefault:"false"`
 
 	// GraphProxyURL, when set, routes the presence Graph client through this
@@ -47,6 +48,15 @@ type Config struct {
 	// and host, e.g. "http://proxy.corp:8080". Empty falls back to the standard
 	// proxy env vars.
 	GraphProxyURL string `env:"GRAPH_PROXY_URL" envDefault:""`
+	// GraphProxyUsername and GraphProxyPassword authenticate to GRAPH_PROXY_URL:
+	// HTTP Basic for an http/https proxy, the RFC 1929 username/password
+	// sub-negotiation for socks5/socks5h. Kept separate from the URL so a
+	// password carrying URL metacharacters needs no percent-encoding; they
+	// override any userinfo embedded in the URL. GRAPH_PROXY_PASSWORD is a
+	// secret — never log it. Setting either without GRAPH_PROXY_URL fails at
+	// client construction.
+	GraphProxyUsername string `env:"GRAPH_PROXY_USERNAME" envDefault:""`
+	GraphProxyPassword string `env:"GRAPH_PROXY_PASSWORD" envDefault:""`
 
 	// GraphUserAgent overrides the User-Agent header on presence requests. Empty
 	// falls back to the msgraph package's default desktop-browser string. Set this
@@ -124,9 +134,14 @@ func run() error {
 		ClientSecret:          cfg.GraphClientSecret,
 		TLSInsecureSkipVerify: cfg.GraphTLSInsecureSkipVerify,
 		ProxyURL:              cfg.GraphProxyURL,
+		ProxyUsername:         cfg.GraphProxyUsername,
+		ProxyPassword:         cfg.GraphProxyPassword,
 		UserAgent:             cfg.GraphUserAgent,
 	}
-	users := msgraph.NewDirectoryClient(graphCfg)
+	users, err := msgraph.NewDirectoryClient(graphCfg)
+	if err != nil {
+		return fmt.Errorf("build directory client: %w", err)
+	}
 	pres, err := msgraph.NewPresenceClient(graphCfg, msgraph.ROPCCredentials{Username: cfg.GraphROPCUser, Password: cfg.GraphROPCPassword})
 	if err != nil {
 		return fmt.Errorf("build presence client: %w", err)

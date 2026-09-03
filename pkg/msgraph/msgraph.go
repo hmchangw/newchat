@@ -10,8 +10,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -45,11 +47,17 @@ type DirectoryReader interface {
 }
 
 // NewDirectoryClient returns an app-only directory reader (shares the graph
-// client used for meetings; New always returns a *graphClient).
+// client used for meetings; New always returns a *graphClient). Honors
+// cfg.ProxyURL and the proxy credentials, reporting an invalid value at
+// construction rather than surfacing an opaque per-request error.
 //
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
-func NewDirectoryClient(cfg Config, opts ...Option) DirectoryReader {
-	return New(cfg, opts...).(*graphClient)
+func NewDirectoryClient(cfg Config, opts ...Option) (DirectoryReader, error) {
+	g := New(cfg, opts...).(*graphClient)
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, fmt.Errorf("configure directory client proxy: %w", err)
+	}
+	return g, nil
 }
 
 // UserLister walks the tenant's user directory page by page. Kept separate
@@ -69,8 +77,8 @@ type UserLister interface {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewUserListerClient(cfg Config, opts ...Option) (UserLister, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
-		return nil, err
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, fmt.Errorf("configure user lister client proxy: %w", err)
 	}
 	return g, nil
 }
@@ -125,14 +133,26 @@ type Config struct {
 	// only (e.g. a self-signed cert fronting Graph). Never enable in production.
 	TLSInsecureSkipVerify bool
 	// ProxyURL, when non-empty, routes the client's HTTP requests through this
-	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by the presence, chats,
-	// chat-members, user-lister and meetings clients — each NewXxxClient
-	// (NewPresenceClient / NewChatsClient / NewChatMembersClient /
-	// NewUserListerClient / NewMeetingsClient) applies it and reports an invalid
-	// value at construction. The bare New and NewDirectoryClient constructors
-	// ignore it and rely on the standard proxy env vars. Must include a scheme
-	// and host (e.g. "http://proxy.corp:8080").
+	// proxy (overriding HTTPS_PROXY/HTTP_PROXY). Honored by every error-returning
+	// NewXxxClient constructor — presence, chats, chat-members, user-lister,
+	// meetings, directory and group-reader — each applies it and reports an
+	// invalid value at construction. Only the bare New ignores it and relies on
+	// the standard proxy env vars. Must include a scheme and host
+	// (e.g. "http://proxy.corp:8080").
 	ProxyURL string
+	// ProxyUsername and ProxyPassword authenticate to ProxyURL. For an http/https
+	// proxy they travel as HTTP Basic (Proxy-Authorization, emitted by net/http
+	// on both the plain-HTTP hop and the CONNECT tunnel); for socks5/socks5h they
+	// travel in the RFC 1929 sub-negotiation instead. They override any userinfo
+	// embedded in ProxyURL, so a password carrying URL metacharacters needs no
+	// percent-encoding — the reason they are separate settings. Rejected at
+	// construction: either without ProxyURL, a password without a username, and
+	// a username containing ':' for a Basic (http/https) proxy.
+	// ProxyPassword is a secret: never log it. It also reaches the proxy
+	// unencrypted on every scheme but https (CWE-319) — applyProxy warns once at
+	// startup; see docs/msgraph-client.md.
+	ProxyUsername string
+	ProxyPassword string
 	// UserAgent overrides the User-Agent header sent on every Graph request. When
 	// empty the client falls back to defaultUserAgent (a browser string). Honored
 	// by both the app-only client (New) and the presence client
@@ -287,16 +307,16 @@ func New(cfg Config, opts ...Option) Client {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
-		return nil, err
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, fmt.Errorf("configure meetings client proxy: %w", err)
 	}
 	return g, nil
 }
 
 // NewMeetingsDirectoryClient returns the meetings (Client) and directory
 // (DirectoryReader) surfaces backed by a single app-only graphClient — one
-// token cache serves both. Honors cfg.ProxyURL like NewMeetingsClient (the bare
-// NewDirectoryClient does not). Both return values are the same instance.
+// token cache serves both, so one proxy and one token round-trip cover both.
+// Both return values are the same instance.
 // room-service uses this so the meeting organizer/attendee object-ID lookup runs
 // on the same app-only User.Read.All Service Principal that creates the meeting,
 // with no resource-owner (ROPC) credentials.
@@ -304,8 +324,8 @@ func NewMeetingsClient(cfg Config, opts ...Option) (Client, error) {
 //nolint:gocritic // hugeParam: startup-only constructor; Config passed by value is intentional.
 func NewMeetingsDirectoryClient(cfg Config, opts ...Option) (Client, DirectoryReader, error) {
 	g := New(cfg, opts...).(*graphClient)
-	if err := applyProxyURL(g.httpClient, cfg.ProxyURL); err != nil {
-		return nil, nil, err
+	if err := applyProxy(g.httpClient, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("configure meetings directory client proxy: %w", err)
 	}
 	return g, g, nil
 }
@@ -331,22 +351,126 @@ func mutableTransport(hc *http.Client) *http.Transport {
 	return tr
 }
 
-// applyProxyURL points hc's transport at rawProxyURL (overriding
-// HTTPS_PROXY/HTTP_PROXY) when it is non-empty. The URL must include a scheme
-// and host; an invalid value is reported so the caller fails fast at
-// construction rather than surfacing an opaque per-request error. No-op when
-// rawProxyURL is empty.
-func applyProxyURL(hc *http.Client, rawProxyURL string) error {
-	if rawProxyURL == "" {
+// supportedProxySchemes are the schemes net/http.Transport can proxy through
+// (transport.go: "http", "https", "socks5", "socks5h"). Anything else is a
+// configuration error we catch at construction.
+var supportedProxySchemes = map[string]bool{
+	"http": true, "https": true, "socks5": true, "socks5h": true,
+}
+
+// basicAuthProxySchemes are the schemes whose credentials travel as HTTP Basic
+// in a Proxy-Authorization header. The SOCKS5 schemes authenticate through the
+// RFC 1929 sub-negotiation instead, so the Basic-specific rules below don't
+// apply to them.
+var basicAuthProxySchemes = map[string]bool{"http": true, "https": true}
+
+// socksProxySchemes are the schemes whose credentials travel as the RFC 1929
+// sub-negotiation, whose one-byte length prefixes cap each field.
+var socksProxySchemes = map[string]bool{"socks5": true, "socks5h": true}
+
+// socksCredentialMaxBytes is what a one-byte RFC 1929 length field can address.
+const socksCredentialMaxBytes = 255
+
+// applyProxy points hc's transport at cfg.ProxyURL (overriding
+// HTTPS_PROXY/HTTP_PROXY) when it is non-empty, authenticating with
+// cfg.ProxyUsername/ProxyPassword when they are set. The URL must include a
+// scheme and host; an invalid value — or credentials that cannot apply to any
+// proxy — is reported so the caller fails fast at construction rather than
+// surfacing an opaque per-request error. No-op when the proxy settings are all
+// empty — an ambient HTTPS_PROXY/HTTP_PROXY is then left to the transport
+// untouched and unexamined, so its own userinfo raises no warning here. No
+// error message carries the password.
+func applyProxy(hc *http.Client, cfg *Config) error {
+	if cfg.ProxyURL == "" {
+		// Credentials with nowhere to go: the ambient HTTPS_PROXY carries its own
+		// userinfo, so silently dropping these would egress unauthenticated.
+		if cfg.ProxyUsername != "" || cfg.ProxyPassword != "" {
+			return errors.New("graph proxy credentials set without a proxy url")
+		}
 		return nil
 	}
-	proxyURL, err := url.Parse(rawProxyURL)
-	if err != nil {
-		return fmt.Errorf("parse graph proxy url: %w", err)
+	if cfg.ProxyUsername == "" && cfg.ProxyPassword != "" {
+		return errors.New("graph proxy password set without a username")
 	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		// Redacted() masks any embedded proxy credentials before it reaches logs.
-		return fmt.Errorf("invalid graph proxy url %q: scheme and host are required", proxyURL.Redacted())
+	proxyURL, err := url.Parse(cfg.ProxyURL)
+	if err != nil {
+		// Nothing from a failed parse may reach the log: *url.Error quotes the
+		// whole input, and its underlying error quotes fragments of it too
+		// (`invalid URL escape "%zz"` would expose the start of a password).
+		// Redacted() can't help — it needs a URL that parsed.
+		return errors.New("parse graph proxy url: malformed value in GRAPH_PROXY_URL")
+	}
+	// Hostname(), not Host: "http://:8080" has a non-empty Host but nothing to
+	// dial. The message interpolates nothing — Redacted() only masks userinfo
+	// that url.Parse actually populated, and a scheme-less "user:pw@host" parses
+	// with User nil and the whole value in Opaque, so Redacted() would hand the
+	// password straight to the log.
+	if proxyURL.Scheme == "" || proxyURL.Hostname() == "" {
+		return errors.New("invalid graph proxy url: GRAPH_PROXY_URL needs a scheme and host")
+	}
+	// url.Parse only checks that a port is digits, so ":99999" would survive to
+	// become a dial failure on the first Graph call — the thing constructing
+	// eagerly is meant to prevent. The number is not a credential, but the
+	// message stays static anyway.
+	if port := proxyURL.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("invalid graph proxy url: GRAPH_PROXY_URL has a port outside 1-65535")
+		}
+	}
+	if !supportedProxySchemes[proxyURL.Scheme] {
+		// net/http would accept this here and fail on the first request instead.
+		return fmt.Errorf("unsupported graph proxy scheme %q: want http, https, socks5 or socks5h", proxyURL.Scheme)
+	}
+	if cfg.ProxyUsername != "" {
+		proxyURL.User = url.UserPassword(cfg.ProxyUsername, cfg.ProxyPassword)
+	}
+	// Validate the effective userinfo, whether it came from the explicit fields
+	// or from the URL — the checks above only saw the explicit ones.
+	if proxyURL.User != nil {
+		username := proxyURL.User.Username()
+		password, _ := proxyURL.User.Password()
+		if username == "" {
+			if password != "" {
+				// Basic would send ":password"; the proxy answers 407 on the first request.
+				return errors.New("graph proxy password set without a username")
+			}
+			// A bare "@" leaves User non-nil with both fields empty, and
+			// net/http's proxyAuth() keys off nothing but that non-nil: it
+			// sends "Basic Og==" (base64 of ":") and draws the same 407. Every
+			// scheme needs a username once userinfo is present at all.
+			return errors.New("empty graph proxy userinfo: GRAPH_PROXY_URL has an '@' but no username")
+		}
+		// RFC 1929 prefixes each field with a one-byte length, so Go's SOCKS
+		// dialer refuses to encode an over-long one — but only when it
+		// authenticates, on the first Graph request. Basic has no such limit,
+		// hence the scheme test. Neither message names the credential.
+		if socksProxySchemes[proxyURL.Scheme] {
+			if len(username) > socksCredentialMaxBytes {
+				return errors.New("invalid graph proxy username for a socks5 proxy: must be 1-255 bytes")
+			}
+			if len(password) > socksCredentialMaxBytes {
+				return errors.New("invalid graph proxy password for a socks5 proxy: must be at most 255 bytes")
+			}
+		}
+		// Basic sends "user:password", so an HTTP(S) proxy splits a colon-bearing
+		// username at the wrong place and answers 407 — RFC 7617 forbids the colon
+		// for that reason. SOCKS5 negotiates length-prefixed fields (RFC 1929),
+		// where a colon is ordinary data.
+		if basicAuthProxySchemes[proxyURL.Scheme] && strings.Contains(username, ":") {
+			return fmt.Errorf("invalid graph proxy username for a %s proxy: must not contain ':'", proxyURL.Scheme)
+		}
+		// CWE-319: Basic and the RFC 1929 sub-negotiation both travel before any
+		// TLS to the target, so every scheme but https hands these credentials to
+		// anyone on the path to the proxy. Warned rather than rejected — corporate
+		// proxies are overwhelmingly plain http, and refusing them here would break
+		// the deployments this setting exists for. Never name the credentials.
+		// Only the configured proxy is warned about: userinfo in an ambient
+		// HTTPS_PROXY reaches the transport without passing through here.
+		if proxyURL.Scheme != "https" {
+			slog.Warn("graph proxy credentials are sent unencrypted to the proxy; only an https proxy encrypts that hop",
+				"scheme", proxyURL.Scheme, "proxyHost", proxyURL.Hostname())
+		}
 	}
 	tr := mutableTransport(hc)
 	if tr == nil {

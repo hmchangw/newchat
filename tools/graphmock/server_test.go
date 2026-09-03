@@ -28,12 +28,15 @@ func newTestServer(t *testing.T) (*server, *httptest.Server) {
 
 // graphReader wires the real pkg/msgraph client at the mock, so the walk
 // exercises the client's actual token + paging paths.
-func graphReader(srv *httptest.Server) msgraph.GroupReader {
-	return msgraph.NewGroupReaderClient(
+func graphReader(t *testing.T, srv *httptest.Server) msgraph.GroupReader {
+	t.Helper()
+	c, err := msgraph.NewGroupReaderClient(
 		msgraph.Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		msgraph.WithBaseURL(srv.URL+"/v1.0"),
 		msgraph.WithTokenURL(srv.URL+"/t/oauth2/v2.0/token"),
 	)
+	require.NoError(t, err)
+	return c
 }
 
 func TestToken(t *testing.T) {
@@ -55,14 +58,14 @@ func TestToken(t *testing.T) {
 
 func TestGetGroup_ViaMsgraphClient(t *testing.T) {
 	_, srv := newTestServer(t)
-	got, err := graphReader(srv).GetGroup(context.Background(), "g-eng")
+	got, err := graphReader(t, srv).GetGroup(context.Background(), "g-eng")
 	require.NoError(t, err)
 	assert.Equal(t, &msgraph.GroupProfile{ID: "g-eng", DisplayName: "Engineering", Description: "Engineering department"}, got)
 }
 
 func TestGetGroup_Unknown404(t *testing.T) {
 	_, srv := newTestServer(t)
-	_, err := graphReader(srv).GetGroup(context.Background(), "nope")
+	_, err := graphReader(t, srv).GetGroup(context.Background(), "nope")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "status 404")
 }
@@ -71,7 +74,7 @@ func TestListMembers_PagedWalkViaMsgraphClient(t *testing.T) {
 	_, srv := newTestServer(t)
 	var got []msgraph.GraphUser
 	pages := 0
-	skipped, err := graphReader(srv).ListGroupMembers(context.Background(), "g-eng", 2,
+	skipped, err := graphReader(t, srv).ListGroupMembers(context.Background(), "g-eng", 2,
 		func(users []msgraph.GraphUser) error {
 			pages++
 			got = append(got, users...)
@@ -97,9 +100,9 @@ func TestFixtureSwap(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// old group gone, new one served
-	_, err = graphReader(srv).GetGroup(context.Background(), "g-eng")
+	_, err = graphReader(t, srv).GetGroup(context.Background(), "g-eng")
 	require.Error(t, err)
-	g, err := graphReader(srv).GetGroup(context.Background(), "g-new")
+	g, err := graphReader(t, srv).GetGroup(context.Background(), "g-new")
 	require.NoError(t, err)
 	assert.Equal(t, "New", g.DisplayName)
 

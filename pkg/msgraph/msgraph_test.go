@@ -1,14 +1,20 @@
 package msgraph
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,12 +36,15 @@ func newTestClient(tokenURL, baseURL string) Client {
 }
 
 // newTestDirectory wires a DirectoryReader at the given token + graph servers.
-func newTestDirectory(tokenURL, baseURL string) DirectoryReader {
-	return NewDirectoryClient(
+func newTestDirectory(t *testing.T, tokenURL, baseURL string) DirectoryReader {
+	t.Helper()
+	c, err := NewDirectoryClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s"},
 		WithTokenURL(tokenURL),
 		WithBaseURL(baseURL),
 	)
+	require.NoError(t, err)
+	return c
 }
 
 func TestCreateOnlineMeeting_Success(t *testing.T) {
@@ -276,7 +285,7 @@ func TestResolveAccountIDs_BatchesAndKeysByAccount(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	got, err := c.ResolveAccountIDs(context.Background(), []string{"alice", "bob"})
 	require.NoError(t, err)
 	// Keyed by account (lowercased UPN local-part), so mixed-case UPN still maps.
@@ -297,7 +306,7 @@ func TestResolveAccountIDs_SkipsUnrequestedAndDupes(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	got, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"alice": "ida1"}, got)
@@ -320,14 +329,15 @@ func TestResolveAccountIDs_ChunksLargeInput(t *testing.T) {
 	for i := range accounts {
 		accounts[i] = fmt.Sprintf("u%d", i)
 	}
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	_, err := c.ResolveAccountIDs(context.Background(), accounts)
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls, "accounts beyond one chunk trigger a second query")
 }
 
 func TestResolveAccountIDs_Empty(t *testing.T) {
-	c := NewDirectoryClient(Config{TenantID: "t"})
+	c, err := NewDirectoryClient(Config{TenantID: "t"})
+	require.NoError(t, err)
 	got, err := c.ResolveAccountIDs(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -624,7 +634,7 @@ func TestResolveAccountIDs_SendsUserAgent(t *testing.T) {
 	}))
 	defer graphSrv.Close()
 
-	c := newTestDirectory(tokenSrv.URL, graphSrv.URL)
+	c := newTestDirectory(t, tokenSrv.URL, graphSrv.URL)
 	_, err := c.ResolveAccountIDs(context.Background(), []string{"alice"})
 	require.NoError(t, err)
 }
@@ -686,7 +696,7 @@ func TestWithMaxIdleConns_NonPositiveNoop(t *testing.T) {
 
 func TestNewChatsClient_MaxIdleConnsSurvivesProxy(t *testing.T) {
 	// NewChatsClient applies the options (WithMaxIdleConns) inside New, then wires
-	// the proxy afterwards. applyProxyURL must reuse that transport so the idle
+	// the proxy afterwards. applyProxy must reuse that transport so the idle
 	// pool size is not lost when a proxy is configured.
 	c, err := NewChatsClient(
 		Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"},
@@ -841,4 +851,728 @@ func TestCreateOnlineMeeting_UsesObjectIDs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "m1", m.ID)
+}
+
+// proxyTargetOf resolves the proxy URL a constructed client's transport would
+// dial, so tests can assert on the credentials carried in its userinfo. c must
+// be one of the *graphClient-backed surfaces.
+//
+// The callback takes a nil request because applyProxy installs
+// http.ProxyURL, which returns its fixed URL without reading one. A
+// request-dependent proxy func (NO_PROXY handling, say) would panic here
+// rather than fail quietly, which is the right way to learn this changed.
+func proxyTargetOf(t *testing.T, c any) *url.URL {
+	t.Helper()
+	g, ok := c.(*graphClient)
+	require.True(t, ok, "client must be backed by *graphClient")
+	tr, ok := g.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "transport must be *http.Transport")
+	require.NotNil(t, tr.Proxy, "proxy must be configured on the transport")
+	u, err := tr.Proxy(nil)
+	require.NoError(t, err)
+	require.NotNil(t, u, "proxy must resolve")
+	return u
+}
+
+// TestProxyCredentials_SentAsBasicAuth is the end-to-end assertion behind
+// GRAPH_PROXY_USERNAME/GRAPH_PROXY_PASSWORD: an authenticating proxy must
+// receive a Proxy-Authorization: Basic header on every hop (token and Graph
+// alike). The proxy serves canned responses keyed by path, so neither the token
+// host nor the Graph host has to be reachable.
+func TestProxyCredentials_SentAsBasicAuth(t *testing.T) {
+	var mu sync.Mutex
+	proxyAuthByHost := map[string]string{}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxyAuthByHost[r.Host] = r.Header.Get("Proxy-Authorization")
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/users") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"value": []GraphUser{{ID: "u1", UserPrincipalName: "u1@corp.com"}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "ptok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer proxy.Close()
+
+	lister, err := NewUserListerClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL:      proxy.URL,
+			ProxyUsername: "proxyuser",
+			ProxyPassword: "proxypass",
+		},
+		WithTokenURL("http://login.example.test/token"),
+		WithBaseURL("http://graph.example.test"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, lister.ListUsers(context.Background(), 10, func([]GraphUser) error { return nil }))
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:proxypass"))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, want, proxyAuthByHost["login.example.test"], "token hop must authenticate to the proxy")
+	assert.Equal(t, want, proxyAuthByHost["graph.example.test"], "graph hop must authenticate to the proxy")
+}
+
+// TestProxyCredentials_SpecialCharactersNeedNoEncoding is the reason the
+// credentials are separate env vars rather than userinfo embedded in
+// GRAPH_PROXY_URL: a password containing URL metacharacters would corrupt the
+// parsed host if it were inlined, so it must survive verbatim here.
+func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
+	// #nosec G101 -- fixture password for a local httptest proxy, not a real credential
+	const password = "p@ss:w/rd?#%"
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyUsername: "corp\\svc",
+		ProxyPassword: password,
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	assert.Equal(t, "proxy.corp:8080", u.Host, "host must survive a password full of URL metacharacters")
+	require.NotNil(t, u.User)
+	assert.Equal(t, "corp\\svc", u.User.Username())
+	got, ok := u.User.Password()
+	require.True(t, ok)
+	assert.Equal(t, password, got)
+}
+
+// TestProxyCredentials_OverrideEmbeddedUserinfo pins precedence: the explicit
+// credentials win over anything already inlined in the URL, so rotating the
+// password means changing one secret rather than two settings that can drift.
+func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
+	// #nosec G101 -- fixture userinfo; the test exists to prove it is overridden
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://olduser:oldpass@proxy.corp:8080",
+		ProxyUsername: "newuser",
+		ProxyPassword: "newpass",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "newuser", u.User.Username())
+	got, _ := u.User.Password()
+	assert.Equal(t, "newpass", got)
+}
+
+// TestProxyCredentials_EmbeddedUserinfoPreserved is the backward-compatibility
+// guard: deployments already authenticating via userinfo in GRAPH_PROXY_URL
+// keep working when the new vars are unset.
+func TestProxyCredentials_EmbeddedUserinfoPreserved(t *testing.T) {
+	// #nosec G101 -- fixture userinfo; the test exists to prove it is preserved
+	c, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL: "http://embedded:secret@proxy.corp:8080",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "embedded", u.User.Username())
+	got, _ := u.User.Password()
+	assert.Equal(t, "secret", got)
+}
+
+// TestProxyCredentials_WithoutProxyURLFails fails fast on a half-configured
+// deployment: credentials with no GRAPH_PROXY_URL would otherwise be silently
+// dropped while traffic egressed through the ambient HTTPS_PROXY unauthenticated.
+func TestProxyCredentials_WithoutProxyURLFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "username only", username: "proxyuser"},
+		{name: "password only", password: "proxypass"},
+		{name: "both", username: "proxyuser", password: "proxypass"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyUsername: tc.username,
+				ProxyPassword: tc.password,
+			}
+			_, err := NewMeetingsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatsClient(cfg)
+			require.Error(t, err)
+			_, err = NewChatMembersClient(cfg)
+			require.Error(t, err)
+			_, err = NewUserListerClient(cfg)
+			require.Error(t, err)
+			_, _, err = NewMeetingsDirectoryClient(cfg)
+			require.Error(t, err)
+			_, err = NewDirectoryClient(cfg)
+			require.Error(t, err)
+			_, err = NewGroupReaderClient(cfg)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestProxyCredentials_PasswordWithoutUsernameFails rejects a password with no
+// username: Basic auth has no such form, so it is a misconfiguration rather
+// than an anonymous-proxy request.
+func TestProxyCredentials_PasswordWithoutUsernameFails(t *testing.T) {
+	_, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyPassword: "proxypass",
+	})
+	require.Error(t, err)
+}
+
+// TestProxyCredentials_ErrorNeverLeaksPassword guards the one path where the
+// proxy settings reach a log line. errcode.Classify writes construction errors
+// to the server log, and CLAUDE.md forbids logging passwords.
+func TestProxyCredentials_ErrorNeverLeaksPassword(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      proxy,
+				ProxyUsername: "proxyuser",
+				ProxyPassword: password,
+			})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "proxy password must never reach an error string")
+		})
+	}
+}
+
+// TestProxyCredentials_HonoredByPresenceClient covers the one constructor
+// outside msgraph.go that applies the proxy, so the presence lane authenticates
+// with the same credentials as the app-only lanes.
+func TestProxyCredentials_HonoredByPresenceClient(t *testing.T) {
+	pc, err := NewPresenceClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL:      "http://proxy.corp:8080",
+			ProxyUsername: "proxyuser",
+			ProxyPassword: "proxypass",
+		},
+		ROPCCredentials{Username: "svc@corp.com", Password: "pw"},
+	)
+	require.NoError(t, err)
+
+	p, ok := pc.(*presenceClient)
+	require.True(t, ok)
+	tr, ok := p.hc.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.Proxy)
+	req, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	require.NoError(t, err)
+	u, err := tr.Proxy(req)
+	require.NoError(t, err)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "proxyuser", u.User.Username())
+}
+
+// TestNewDirectoryClient_RoutesThroughAuthenticatedProxy closes the last
+// app-only gap: the standalone directory reader used to ignore every proxy
+// setting and fall back to the ambient HTTPS_PROXY, so a deployment moving to
+// an authenticating proxy would have had to configure the same credentials
+// twice — once here as URL userinfo, once as GRAPH_PROXY_*.
+func TestNewDirectoryClient_RoutesThroughAuthenticatedProxy(t *testing.T) {
+	c, err := NewDirectoryClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL:      "http://proxy.corp:8080",
+		ProxyUsername: "proxyuser",
+		ProxyPassword: "p@ss:w/rd",
+	})
+	require.NoError(t, err)
+
+	u := proxyTargetOf(t, c)
+	assert.Equal(t, "proxy.corp:8080", u.Host)
+	require.NotNil(t, u.User)
+	assert.Equal(t, "proxyuser", u.User.Username())
+	got, ok := u.User.Password()
+	require.True(t, ok)
+	assert.Equal(t, "p@ss:w/rd", got)
+}
+
+func TestNewDirectoryClient_EmptyProxyIsNoOp(t *testing.T) {
+	c, err := NewDirectoryClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s"})
+	require.NoError(t, err)
+	require.NotNil(t, c)
+}
+
+func TestNewDirectoryClient_InvalidProxyURL(t *testing.T) {
+	for _, proxy := range []string{"://nope", "proxy.corp:8080", "http://"} {
+		t.Run(proxy, func(t *testing.T) {
+			c, err := NewDirectoryClient(Config{TenantID: "t", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.Nil(t, c)
+		})
+	}
+}
+
+// TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword covers the path
+// the separate-credentials test misses: url.Parse's *url.Error carries the raw
+// input, so a malformed URL with embedded userinfo would put the proxy password
+// in the returned error — and from there into the server log via
+// errcode.Classify. Redacted() cannot help, since it needs a parsed URL.
+func TestProxyCredentials_MalformedURLNeverLeaksEmbeddedPassword(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	for _, proxy := range []string{
+		"://user:" + password + "@proxy.corp:8080",
+		"http://user:" + password + "@proxy.corp:80 80",
+		"ht tp://user:" + password + "@proxy.corp",
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "a malformed proxy url must not leak its embedded password")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsUnsupportedScheme keeps the fail-fast promise whole:
+// net/http only proxies through http, https, socks5 and socks5h, so any other
+// scheme is a startup-time configuration error rather than a surprise on the
+// first Graph call.
+func TestApplyProxy_RejectsUnsupportedScheme(t *testing.T) {
+	for _, proxy := range []string{"ftp://proxy.corp:21", "socks4://proxy.corp:1080", "ws://proxy.corp:80"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestApplyProxy_AcceptsEverySupportedScheme(t *testing.T) {
+	for _, proxy := range []string{
+		"http://proxy.corp:8080",
+		"https://proxy.corp:8443",
+		"socks5://proxy.corp:1080",
+		"socks5h://proxy.corp:1080",
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.NoError(t, err)
+			assert.Equal(t, proxy, proxyTargetOf(t, c).String())
+		})
+	}
+}
+
+// TestProxyCredentials_MalformedEscapeNeverLeaksPassword closes the hole left by
+// the first sanitising attempt: unwrapping to *url.Error.Err is not enough,
+// because some underlying parse errors quote the offending input themselves
+// (`invalid URL escape "%zz"`). A password beginning with a bad escape would
+// still reach the log, so no parse failure may carry any part of the value.
+func TestProxyCredentials_MalformedEscapeNeverLeaksPassword(t *testing.T) {
+	// #nosec G101 -- deliberately malformed fixture URLs; the test asserts none of
+	// them reaches an error message
+	tests := []struct {
+		name   string
+		proxy  string
+		secret string
+	}{
+		{name: "bad escape starts the password", proxy: "http://user:%zzsecret@proxy.corp", secret: "zz"},
+		{name: "bad escape inside the password", proxy: "http://user:pw%GGtail@proxy.corp", secret: "GG"},
+		{name: "bad escape in the username", proxy: "http://%QQuser:pw@proxy.corp", secret: "QQ"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), tc.secret, "no fragment of the proxy url may reach the error")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsColonInBasicUsername keeps a colon-bearing username from
+// failing only on the first request: Go builds the Basic credential as
+// "user:pass", so an HTTP(S) proxy splits at the first colon and reads a
+// different pair, answering 407. RFC 7617 forbids a colon in the user-id.
+func TestApplyProxy_RejectsColonInBasicUsername(t *testing.T) {
+	t.Run("explicit username", func(t *testing.T) {
+		for _, scheme := range []string{"http", "https"} {
+			t.Run(scheme, func(t *testing.T) {
+				_, err := NewMeetingsClient(Config{
+					TenantID: "t", ClientID: "c", ClientSecret: "s",
+					ProxyURL:      scheme + "://proxy.corp:8080",
+					ProxyUsername: "corp:svc",
+					ProxyPassword: "pw",
+				})
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), "pw", "the rejection must not carry the password")
+			})
+		}
+	})
+
+	// A percent-encoded colon survives url.Parse into Username(), so the
+	// embedded form reaches the same broken credential.
+	t.Run("embedded username", func(t *testing.T) {
+		_, err := NewMeetingsClient(Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			ProxyURL: "http://corp%3Asvc:pw@proxy.corp:8080",
+		})
+		require.Error(t, err)
+	})
+}
+
+// TestApplyProxy_AllowsColonInSocksUsername is the other half: SOCKS5 negotiates
+// credentials with length-prefixed fields (RFC 1929), so a colon is ordinary
+// data there and must not be rejected.
+func TestApplyProxy_AllowsColonInSocksUsername(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      scheme + "://proxy.corp:1080",
+				ProxyUsername: "corp:svc",
+				ProxyPassword: "pw",
+			})
+			require.NoError(t, err)
+			u := proxyTargetOf(t, c)
+			require.NotNil(t, u.User)
+			assert.Equal(t, "corp:svc", u.User.Username())
+		})
+	}
+}
+
+// TestProxyCredentials_SchemelessURLNeverLeaksPassword covers the third shape of
+// this leak. The first two were parse *failures*; this one parses fine. Without
+// a scheme, url.Parse reads "user" as the scheme and swallows the rest into
+// Opaque, leaving User nil — so Redacted(), which only masks a populated User,
+// returns the raw string password and all. No error may interpolate the value.
+func TestProxyCredentials_SchemelessURLNeverLeaksPassword(t *testing.T) {
+	const password = "supersecret"
+	for _, proxy := range []string{
+		"user:" + password + "@proxy.corp:8080",
+		"proxy.corp:8080/" + password,
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), password, "a parsed-but-invalid proxy url must not leak its value")
+		})
+	}
+}
+
+// TestApplyProxy_RejectsEmbeddedEmptyUsername mirrors the explicit
+// password-without-username check onto userinfo carried in the URL: Basic would
+// send ":secret", which an authenticating proxy answers with 407 — after
+// construction has already succeeded.
+func TestApplyProxy_RejectsEmbeddedEmptyUsername(t *testing.T) {
+	const password = "secret"
+	_, err := NewMeetingsClient(Config{
+		TenantID: "t", ClientID: "c", ClientSecret: "s",
+		ProxyURL: "http://:" + password + "@proxy.corp:8080",
+	})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), password, "the rejection must not carry the password")
+}
+
+// TestApplyProxy_RejectsPortWithoutHostname closes a hole in the host check:
+// "http://:8080" has a non-empty Host (":8080") but no hostname, so a Host==""
+// test passes it through and the dial fails later instead of at startup.
+func TestApplyProxy_RejectsPortWithoutHostname(t *testing.T) {
+	for _, proxy := range []string{"http://:8080", "https://:443", "socks5://:1080"} {
+		t.Run(proxy, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: proxy})
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestApplyProxy_WarnsOnUnencryptedCredentialHop covers CWE-319: Basic and the
+// RFC 1929 sub-negotiation both travel before any TLS to the target, so an
+// http/socks5 proxy hands the credentials to anyone on the path. Only an https
+// proxy encrypts the hop carrying them. Warned rather than rejected — corporate
+// proxies are overwhelmingly plain http, and refusing them would break the
+// deployment this setting exists for — so the warning is the whole mitigation
+// and must actually fire, without quoting the credentials.
+func TestApplyProxy_WarnsOnUnencryptedCredentialHop(t *testing.T) {
+	const password = "sup3rs3cr3t"
+	tests := []struct {
+		name     string
+		proxy    string
+		wantWarn bool
+	}{
+		{name: "http warns", proxy: "http://proxy.corp:8080", wantWarn: true},
+		{name: "socks5 warns", proxy: "socks5://proxy.corp:1080", wantWarn: true},
+		{name: "socks5h warns", proxy: "socks5h://proxy.corp:1080", wantWarn: true},
+		{name: "https is silent", proxy: "https://proxy.corp:8443", wantWarn: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL:      tc.proxy,
+				ProxyUsername: "proxyuser",
+				ProxyPassword: password,
+			})
+			require.NoError(t, err)
+
+			logged := buf.String()
+			assert.NotContains(t, logged, password, "the warning must never carry the password")
+			assert.NotContains(t, logged, "proxyuser", "the warning must never carry the username")
+			if tc.wantWarn {
+				assert.Contains(t, logged, "unencrypted", "an unencrypted credential hop must be warned about")
+			} else {
+				assert.Empty(t, logged, "an https proxy encrypts the credential hop, so nothing to warn about")
+			}
+		})
+	}
+}
+
+// TestApplyProxy_NoWarnWithoutCredentials keeps the warning tied to credentials:
+// an unauthenticated http proxy exposes nothing and must stay silent.
+func TestApplyProxy_NoWarnWithoutCredentials(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: "http://proxy.corp:8080"})
+	require.NoError(t, err)
+	assert.Empty(t, buf.String(), "no credentials means no exposure to warn about")
+}
+
+// newConnectProxy starts a proxy that serves only CONNECT, recording the
+// Proxy-Authorization header per tunnelled host before splicing the two
+// connections together. Production reaches both the token endpoint and Graph
+// over https, so the credentials ride CONNECT rather than an ordinary proxied
+// request — a different code path in net/http than the one an http:// target
+// exercises.
+func newConnectProxy(t *testing.T, targets ...string) (*httptest.Server, func(host string) string) {
+	t.Helper()
+	// The tunnel is only ever opened to the test servers, so the address dialed
+	// comes from this set rather than from the request.
+	allowed := map[string]string{}
+	for _, target := range targets {
+		allowed[target] = target
+	}
+	var mu sync.Mutex
+	authByHost := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "this proxy serves CONNECT only", http.StatusMethodNotAllowed)
+			return
+		}
+		mu.Lock()
+		authByHost[r.Host] = r.Header.Get("Proxy-Authorization")
+		mu.Unlock()
+
+		target, ok := allowed[r.Host]
+		if !ok {
+			http.Error(w, "host is not a declared test target", http.StatusForbidden)
+			return
+		}
+		upstream, err := net.Dial("tcp", target)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		hijacker, hijackable := w.(http.Hijacker)
+		if !hijackable {
+			_ = upstream.Close()
+			http.Error(w, "connection is not hijackable", http.StatusInternalServerError)
+			return
+		}
+		downstream, _, err := hijacker.Hijack()
+		if err != nil {
+			_ = upstream.Close()
+			return
+		}
+		if _, err := downstream.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+			_ = upstream.Close()
+			_ = downstream.Close()
+			return
+		}
+		// Both copies end when either side closes, so the handler returns
+		// rather than outliving the test.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(upstream, downstream)
+			_ = upstream.Close()
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(downstream, upstream)
+			_ = downstream.Close()
+		}()
+		wg.Wait()
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func(host string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return authByHost[host]
+	}
+}
+
+// TestProxyCredentials_SentOnConnectTunnel is the https counterpart of
+// TestProxyCredentials_SentAsBasicAuth: that one proxies plain http, where the
+// header rides the request itself. Real deployments talk to
+// login.microsoftonline.com and graph.microsoft.com over https, so the only
+// hop that carries the credentials is CONNECT.
+func TestProxyCredentials_SentOnConnectTunnel(t *testing.T) {
+	token := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: "ptok", ExpiresIn: 3600}) // #nosec G117 -- test mock OAuth token
+	}))
+	defer token.Close()
+	graph := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": []GraphUser{{ID: "u1", UserPrincipalName: "u1@corp.com"}},
+		})
+	}))
+	defer graph.Close()
+
+	proxy, authFor := newConnectProxy(t, hostOf(t, token.URL), hostOf(t, graph.URL))
+
+	lister, err := NewUserListerClient(
+		Config{
+			TenantID: "t", ClientID: "c", ClientSecret: "s",
+			// The httptest certs are self-signed; the hop under test is the
+			// CONNECT to the proxy, not the TLS inside the tunnel.
+			TLSInsecureSkipVerify: true,
+			ProxyURL:              proxy.URL,
+			ProxyUsername:         "proxyuser",
+			ProxyPassword:         "proxypass",
+		},
+		WithTokenURL(token.URL+"/token"),
+		WithBaseURL(graph.URL),
+	)
+	require.NoError(t, err)
+
+	// Idle tunnels keep the proxy handler running, so drop them before the
+	// server's own cleanup waits on it.
+	tr, ok := lister.(*graphClient).httpClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	t.Cleanup(tr.CloseIdleConnections)
+
+	require.NoError(t, lister.ListUsers(context.Background(), 10, func([]GraphUser) error { return nil }))
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("proxyuser:proxypass"))
+	assert.Equal(t, want, authFor(hostOf(t, token.URL)), "token CONNECT must authenticate to the proxy")
+	assert.Equal(t, want, authFor(hostOf(t, graph.URL)), "graph CONNECT must authenticate to the proxy")
+}
+
+func hostOf(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	return u.Host
+}
+
+// TestApplyProxy_RejectsOutOfRangePort keeps the fail-fast contract honest:
+// url.Parse only checks that a port is digits, so an out-of-range one would
+// otherwise surface as a dial failure on the first Graph call instead of at
+// construction.
+func TestApplyProxy_RejectsOutOfRangePort(t *testing.T) {
+	tests := []struct {
+		name    string
+		proxy   string
+		wantErr bool
+	}{
+		{name: "above the range", proxy: "http://proxy.corp:99999", wantErr: true},
+		{name: "just above the range", proxy: "http://proxy.corp:65536", wantErr: true},
+		{name: "port zero", proxy: "http://proxy.corp:0", wantErr: true},
+		{name: "socks5 out of range", proxy: "socks5://proxy.corp:70000", wantErr: true},
+		{name: "highest valid port", proxy: "http://proxy.corp:65535"},
+		{name: "lowest valid port", proxy: "http://proxy.corp:1"},
+		{name: "no port at all", proxy: "http://proxy.corp"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "port")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestApplyProxy_RejectsUnencodableSocksCredentials pins the RFC 1929 wire
+// limits. Go's SOCKS dialer refuses to encode an empty or over-long field, but
+// only when it authenticates — on the first Graph request, long after the
+// constructor said the config was fine. The equivalent Basic credential has no
+// such limit, so the check is scoped to the SOCKS schemes.
+func TestApplyProxy_RejectsUnencodableSocksCredentials(t *testing.T) {
+	long := strings.Repeat("a", 256)
+	max := strings.Repeat("a", 255)
+	tests := []struct {
+		name     string
+		proxy    string
+		username string
+		password string
+		wantErr  bool
+	}{
+		{name: "socks username over the limit", proxy: "socks5://proxy.corp:1080", username: long, password: "pw", wantErr: true},
+		{name: "socks password over the limit", proxy: "socks5://proxy.corp:1080", username: "user", password: long, wantErr: true},
+		{name: "socks5h username over the limit", proxy: "socks5h://proxy.corp:1080", username: long, password: "pw", wantErr: true},
+		{name: "embedded socks username over the limit", proxy: "socks5://" + long + ":pw@proxy.corp:1080", wantErr: true},
+		{name: "embedded socks password over the limit", proxy: "socks5://user:" + long + "@proxy.corp:1080", wantErr: true},
+		{name: "embedded empty socks username", proxy: "socks5://:@proxy.corp:1080", wantErr: true},
+		{name: "socks username at the limit", proxy: "socks5://proxy.corp:1080", username: max, password: max},
+		{name: "http username over the limit", proxy: "http://proxy.corp:8080", username: long, password: long},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewMeetingsClient(Config{
+				TenantID: "t", ClientID: "c", ClientSecret: "s",
+				ProxyURL: tc.proxy, ProxyUsername: tc.username, ProxyPassword: tc.password,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), long, "the rejection must not echo the credential")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestApplyProxy_RejectsEmptyUserinfo covers the URL shapes that carry a bare
+// "@": url.Parse leaves User non-nil with both fields empty, and net/http's
+// proxyAuth() keys off nothing but that non-nil — it sends
+// "Proxy-Authorization: Basic Og==" (base64 of ":"). An authenticating proxy
+// answers 407 on the first request, so the pod starts and every Graph call
+// fails. A username is required whenever userinfo is present at all.
+func TestApplyProxy_RejectsEmptyUserinfo(t *testing.T) {
+	tests := []struct {
+		name    string
+		proxy   string
+		wantErr bool
+	}{
+		{name: "http empty username and password", proxy: "http://:@proxy.corp:8080", wantErr: true},
+		{name: "http bare at sign", proxy: "http://@proxy.corp:8080", wantErr: true},
+		{name: "https empty username and password", proxy: "https://:@proxy.corp:8080", wantErr: true},
+		{name: "socks5 empty username and password", proxy: "socks5://:@proxy.corp:1080", wantErr: true},
+		{name: "username without password stays valid", proxy: "http://user@proxy.corp:8080"},
+		{name: "no userinfo at all", proxy: "http://proxy.corp:8080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := NewMeetingsClient(Config{TenantID: "t", ClientID: "c", ClientSecret: "s", ProxyURL: tc.proxy})
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			// The valid shapes must still reach the transport unchanged.
+			u := proxyTargetOf(t, c)
+			assert.Equal(t, "proxy.corp:8080", u.Host)
+		})
+	}
 }

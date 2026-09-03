@@ -59,8 +59,8 @@ type presenceClient struct {
 func NewPresenceClient(cfg Config, creds ROPCCredentials, opts ...Option) (PresenceReader, error) {
 	g := New(cfg, opts...).(*graphClient)
 	hc := g.httpClient
-	if err := applyProxyURL(hc, cfg.ProxyURL); err != nil {
-		return nil, err
+	if err := applyProxy(hc, &cfg); err != nil {
+		return nil, fmt.Errorf("configure presence client proxy: %w", err)
 	}
 	ua := cfg.UserAgent
 	if ua == "" {
