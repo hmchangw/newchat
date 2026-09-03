@@ -277,6 +277,39 @@ func TestValidSubscriptionListTypes_MatchesUserService(t *testing.T) {
 	assert.Equal(t, map[string]bool{"current": true, "rooms": true, "apps": true}, validSubscriptionListTypes)
 }
 
+// apps is a type user-service serves but these fixtures cannot: BuildFixtures
+// creates only channel and dm rooms, while apps matches subscribed botDM rows
+// alone. Accepting it would make every request return an empty page — recorded
+// as a failure, contributing no latency — so the ramp would report a total
+// failure rate against a perfectly healthy service.
+func TestWorkloadSupportedListTypes_ExcludesAppsWithoutBotDMFixtures(t *testing.T) {
+	assert.Equal(t, map[string]bool{"current": true, "rooms": true}, workloadSupportedListTypes)
+
+	for listType := range workloadSupportedListTypes {
+		assert.True(t, validSubscriptionListTypes[listType],
+			"%q must also be a type user-service accepts", listType)
+	}
+	assert.True(t, validSubscriptionListTypes["apps"],
+		"apps stays valid for the service; it is only this workload's fixtures that cannot serve it")
+	assert.False(t, workloadSupportedListTypes["apps"])
+}
+
+// The fixtures the workload seeds must contain no botDM rows, which is the
+// reason apps is unsupported. If that ever changes, apps can be supported and
+// this test says so.
+func TestBuildSubscriptionListFixtures_ContainNoBotDMRows(t *testing.T) {
+	for _, name := range []string{"small", "medium", "realistic"} {
+		t.Run(name, func(t *testing.T) {
+			p, ok := BuiltinPreset(name)
+			require.True(t, ok)
+			f := BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC())
+			for i := range f.Subscriptions {
+				assert.NotEqual(t, model.RoomTypeBotDM, f.Subscriptions[i].RoomType)
+			}
+		})
+	}
+}
+
 func TestSubscriptionListGenerator_RunDispatchesOnBothPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

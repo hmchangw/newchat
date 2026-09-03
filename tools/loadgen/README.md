@@ -598,7 +598,7 @@ every row resolve `hasUnread` the same way.
   consumer-pending signal). Defaults: `--slo-p95=100ms`, `--slo-p99=250ms`,
   `--slo-error-rate=0.001`.
 - **Empty pages count as failures.** Every seeded account owns subscriptions, so
-  a zero-row reply means the fixtures or `--list-type` are wrong. An empty page
+  a zero-row reply means the fixtures are wrong. An empty page
   is also the fastest possible reply, so scoring it as a success would let a
   misconfigured run report a record-breaking ramp. A service error envelope and
   a `{}` body are kept distinct from it — both decode to zero rows, and folding
@@ -875,7 +875,7 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=history PRESET=history-medium 
 | `--preset` | (required) | an existing preset for the chosen workload (`read-receipt` reuses the history presets; `login` and `search` reuse the message presets for their account set) |
 | `--steps` | messages `500,1k,2k,5k,10k` / history+read-receipt+subscription-list `200,500,1k,2k,5k` / login `50,100,200,500,1k` / search `100,200,500,1k,2k` | explicit ordered RPS list; `k` suffix = ×1000 |
 | `--request-timeout` | `5s` | **history / read-receipt / room-read / thread-read / subscription-list / login / search**: per-request reply timeout |
-| `--list-type` | `current` | **subscription-list only**: `current`, `rooms`, or `apps` |
+| `--list-type` | `current` | **subscription-list only**: `current` or `rooms`. `apps` is rejected — user-service serves it, but it matches subscribed `botDM` rows alone and these fixtures seed none, so every page would come back empty |
 | `--list-limit` | `200` | **subscription-list only**: page size; see the NATS payload-ceiling note above |
 | `--include-last-message` | `true` | **subscription-list only**: request the per-room `previewMessage` enrichment; `=false` isolates the query from the enrichment cost |
 | `--auth-url` | `$AUTH_URL` | **login only**: auth-service base URL |

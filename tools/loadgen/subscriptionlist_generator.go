@@ -20,6 +20,15 @@ import (
 // fail identically — worth catching at flag-parse time instead.
 var validSubscriptionListTypes = map[string]bool{"current": true, "rooms": true, "apps": true}
 
+// workloadSupportedListTypes is the subset these fixtures can actually serve.
+// `apps` is missing deliberately: BuildFixtures creates only channel and dm
+// rooms, while `apps` matches subscribed botDM rows alone, so every reply would
+// be an empty page — recorded as a failure and contributing no latency, which
+// reports a 100% failure rate against a healthy service. Seeding botDM rows
+// needs bot users and app records, a different fixture family; until then the
+// flag rejects the value instead of measuring nothing.
+var workloadSupportedListTypes = map[string]bool{"current": true, "rooms": true}
+
 // SubscriptionListRequester is the narrow request/reply transport seam. The
 // production implementation reuses newNATSHistoryRequester (from
 // history_main.go) — both interfaces share the same Request method signature;
