@@ -22,6 +22,15 @@ scrape_configs:
     static_configs:
       - targets: ["loadgen:9099"]
 
+  # clientsim is a separate compose project but joins the same chat-local
+  # network, so its service alias is stable and does not need Docker SD.
+  # Expect this target DOWN whenever no run is in flight: the container's
+  # entrypoint is `sleep infinity` and the binary is exec'd per run, so the
+  # endpoint only exists while a soak is actually running.
+  - job_name: clientsim
+    static_configs:
+      - targets: ["clientsim:2112"]
+
   - job_name: cadvisor
     static_configs:
       - targets: ["cadvisor:8080"]
