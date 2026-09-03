@@ -155,7 +155,7 @@ Correct: `jsretry.Settle` everywhere, no bare `Nak()`/`NakWithDelay(0)` (`main.g
 
 ### Recommendations
 - `high` — classify non-retryable Mongo errors as permanent: `mongo.IsDuplicateKeyError` / document-validation failures should return `errcode.Permanent(...)` from the store error path so the lane drains instead of wedging.
-- `high` — pair `MaxDeliver=-1` with a `NumDelivered` ceiling that escalates to permanent (plus a metric/log at the threshold), so an unresolvable batch cannot block the site forever.
+- `high` — pair `MaxDeliver=-1` with a `NumDelivered` threshold that **alerts and quarantines** the batch (dead-letter subject or a parked collection it can be replayed from), not one that escalates to `errcode.Permanent`. A blanket escalation Ack-drops on attempt N, so a Mongo outage merely longer than N attempts becomes silent HR data loss — trading a visible wedge for an invisible one. Permanent classification belongs on errors proven non-retryable (duplicate key, document validation), which is the recommendation above.
 - `medium` — reconcile the `hr_employee` key: upsert on `account` (matching the unique index and the README) or drop the unique index — today the write key and the enforced constraint disagree.
 - `medium` — chunk large batches (e.g. 1k `WriteModel`s per BulkWrite) so a retry is not all-or-nothing.
 - `low` — document (or assert) the index prerequisite for `account` on both collections.

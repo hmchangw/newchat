@@ -144,7 +144,7 @@ No goroutines, precise projections and bounded admission, but the mention path i
 
 ### Recommendations
 - `high` — Replace the member scan + per-mention lookup with two targeted queries: `FindMemberIDs(ctx, roomID, requestedIDs)` using `{"roomId": roomID, "u._id": {"$in": ids}}`, and a single `FindUsers(ctx, ids)` with `$in` — turning N+1 into 2 round trips independent of room size.
-- `high` — Until that lands, cap `ListMemberIDs` with `options.Find().SetLimit(...)` so a large room cannot dominate a request.
+- `high` — Do **not** cap `ListMemberIDs` with a bare `options.Find().SetLimit(...)` as a stopgap: the caller uses the result to decide membership and to resolve mentions, so a silent truncation answers those questions wrongly — a member past the cap stops being mentionable, with no error. The targeted query above is the fix; there is no safe interim limit on a call whose correctness depends on completeness.
 - `medium` — Mount `mongoutil.BreakerConfig` and wrap the subscription and user lookups so a Mongo stall fails fast instead of consuming the concurrency budget.
 - `low` — Consider a short-TTL L2 for the `(roomID, botID)` subscription check, the single most repeated read on this path; if the "no cache" stance at `main.go:29` is deliberate, restate the reason there so the next reader does not re-litigate it.
 
