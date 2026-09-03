@@ -83,3 +83,7 @@ tmp/
 
 # Captured pprof profiles from `make profile`.
 profiles/
+
+# Python bytecode from tools/dashboards
+__pycache__/
+*.pyc

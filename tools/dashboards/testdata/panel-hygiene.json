@@ -1,0 +1,53 @@
+{
+  "_expect": [
+    "panel-missing-description",
+    "panel-missing-unit",
+    "panel-missing-novalue",
+    "panel-datasource-not-variable",
+    "target-datasource-not-variable"
+  ],
+  "uid": "fixture",
+  "title": "fixture",
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "query": "prometheus"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "id": 1,
+      "title": "Bare",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "hardcoded-uid"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "hardcoded-uid"
+          },
+          "expr": "up",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

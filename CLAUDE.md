@@ -47,6 +47,8 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
 | Command | Description |
 |---------|-------------|
 | `make lint` | Run `golangci-lint` (includes `go vet`, `staticcheck`, `errcheck`, `goimports`, etc.) |
+| `make lint-dashboards` | Static checks for the Grafana dashboard JSON under `deploy/grafana/dashboards` — panel hygiene, PromQL shape, variable scope, grid layout, and a simulation of the Prometheus → `joinByField` → `organize` pipeline that reports the columns each table actually renders. Rules are listed in `tools/dashboards/README.md` |
+| `make test-dashboards` | Run the dashboard rules against their fixtures in `tools/dashboards/testdata`. Each fixture declares the rule ids it must raise in a top-level `_expect` list; a rule with no fixture fails the target |
 | `make fmt` | Run `goimports` via `golangci-lint fmt` to format all `.go` files |
 | `make test` | Run all unit tests with race detector |
 | `make test SERVICE=<name>` | Run unit tests for a single service |

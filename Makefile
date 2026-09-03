@@ -1,4 +1,4 @@
-.PHONY: lint fmt tidy test test-integration benchmark-natsmetrics test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
+.PHONY: lint lint-dashboards test-dashboards fmt tidy test test-integration benchmark-natsmetrics test-loadgen-failure test-loadgen-failure-integration coverage-loadgen-failure coverage-loadgen-soak generate build validate-loadgen-k8s deps-up deps-down \
         require-deps up up-detached down dev ui-up ui-down \
         o11y-up o11y-down obs-up obs-down profile tools tools-mockgen sast sast-gosec sast-vuln sast-semgrep sast-semgrep-test \
         fed-deps-up fed-deps-down fed-regen require-fed-deps fed-up fed-up-lean fed-down fed-ui-up fed-ui-down fed-logs \
@@ -97,6 +97,18 @@ lint:
 # Run goimports via golangci-lint to format all .go files
 fmt:
 	golangci-lint fmt ./...
+
+# Static checks for the Grafana dashboard JSON. A dashboard defect is not a
+# crash -- the JSON parses, Grafana raises nothing, and the board is wrong on
+# screen -- so these checks are the only feedback before someone opens it.
+# tools/dashboards/README.md lists the rules.
+lint-dashboards:
+	python3 tools/dashboards/lint.py
+
+# Run the dashboard rules against their fixtures. Every rule must have one:
+# an unverified rule can be disabled by an edit with nothing turning red.
+test-dashboards:
+	python3 tools/dashboards/lint_test.py
 
 # Synchronize module requirements and checksums after dependency changes.
 tidy:
