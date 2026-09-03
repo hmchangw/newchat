@@ -555,20 +555,22 @@ account's page, and the preset fixtures already carry it.
 
 ```
 make -C tools/loadgen/deploy up
-make -C tools/loadgen/deploy seed-sublist PRESET=medium
-make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=medium
+make -C tools/loadgen/deploy seed-sublist PRESET=realistic
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=realistic
 ```
+
+`realistic` is not incidental here — see the preset note below.
 
 Override the ramp with `STEPS` (default `200,500,1000,2000,5000`):
 
 ```
-make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=medium STEPS=500,1k,2k,5k
+make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=realistic STEPS=500,1k,2k,5k
 ```
 
 Tear down the fixtures:
 
 ```
-make -C tools/loadgen/deploy teardown-sublist PRESET=medium
+make -C tools/loadgen/deploy teardown-sublist PRESET=realistic
 ```
 
 ### Why this workload seeds its own fixtures
@@ -610,9 +612,15 @@ every row resolve `hasUnread` the same way.
 - The NATS page is additionally capped server-side by `MAX_SUBSCRIPTION_LIMIT`
   (default 1000), so `--list-limit` above that is silently clamped.
 - Single-site only: all seeded users are local.
-- Presets are the messages presets (`small`/`medium`/`large`/`realistic`).
-  `realistic` is the most representative — its mixed room sizes and DM rows
-  exercise the per-row app/HR enrichment branches that a uniform preset skips.
+- **Use `--preset=realistic`.** The uniform presets (`small`/`medium`/`large`)
+  put every account in exactly one room, so each reply carries a single row — a
+  ramp over them measures the latency of a one-row page, which is fast and says
+  nothing about the endpoint under real sidebars. Only `realistic` has the mixed
+  room sizes that give an account several rooms (mean ~3, max ~9), and its DM
+  rows are also what exercise the per-row HR-enrichment branch. The workload logs
+  a startup warning when the chosen preset averages under two subscriptions per
+  account, and logs the mean rows per page at every step, so a degenerate run is
+  visible in the output rather than silently fast.
 
 ## History workload (LoadHistory / GetThreadMessages benchmark)
 
@@ -847,8 +855,9 @@ loadgen max-rps --workload=login --preset=medium
 loadgen max-rps --workload=search --preset=medium
 
 # subscription-list: seed the list-shaped fixtures first, then ramp
-loadgen seed --workload=subscription-list --preset=medium
-loadgen max-rps --workload=subscription-list --preset=medium --steps=200,500,1k,2k
+# (realistic is the only preset whose accounts hold more than one room)
+loadgen seed --workload=subscription-list --preset=realistic
+loadgen max-rps --workload=subscription-list --preset=realistic --steps=200,500,1k,2k
 ```
 
 Via the deploy Makefile:

@@ -86,10 +86,19 @@ func newSubscriptionListWorkload(ctx context.Context, cfg *config, preset *Prese
 			slog.Warn("metrics server stopped", "error", err)
 		}
 	}()
+	fixtures := BuildSubscriptionListFixtures(preset, seed, cfg.SiteID, time.Now().UTC())
+	// Warned, not rejected: measuring a one-row page is a legitimate thing to
+	// want, as long as it is on purpose. Silently doing it is the failure mode —
+	// the ramp would report the latency of a reply that is not a sidebar.
+	if degeneratePageFixtures(&fixtures) {
+		slog.Warn("preset yields about one subscription per account; this ramp measures a one-row page, not a sidebar cold-open — use --preset=realistic for a representative page",
+			"preset", preset.Name,
+			"subs_per_account", subscriptionsPerAccount(&fixtures))
+	}
 	w := &subscriptionListWorkload{
 		cfg:                cfg,
 		preset:             preset,
-		fixtures:           BuildSubscriptionListFixtures(preset, seed, cfg.SiteID, time.Now().UTC()),
+		fixtures:           fixtures,
 		seed:               seed,
 		requestTimeout:     p.RequestTimeout,
 		metrics:            metrics,
@@ -154,5 +163,24 @@ func (w *subscriptionListWorkload) RunStep(ctx context.Context, targetRPS int, w
 	if err := runSubscriptionListFor(ctx, w.newGenerator(collector, targetRPS), hold); err != nil {
 		return rpsStepInputs{}, err
 	}
+	// rpsStepInputs carries no row counts, so without this the page size actually
+	// measured is invisible in the report — and a ramp over one-row pages looks
+	// identical to a ramp over sidebar-sized ones.
+	logStepPageShape(targetRPS, collector)
 	return buildSubscriptionListInputs(targetRPS, hold, collector), nil
+}
+
+// logStepPageShape reports the page size the step actually measured, so a run's
+// output answers "was this a real sidebar?" without re-deriving it from the preset.
+func logStepPageShape(targetRPS int, c *SubscriptionListCollector) {
+	samples := c.Samples()
+	if len(samples) == 0 {
+		return
+	}
+	slog.Info("subscription-list page shape",
+		"rps", targetRPS,
+		"pages", len(samples),
+		"mean_rows", c.MeanRows(),
+		"has_more_pages", c.HasMoreCount(),
+		"empty_pages", c.EmptyPageCount())
 }

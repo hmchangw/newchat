@@ -96,7 +96,9 @@ func TestSubscriptionListFixtures_HasMoreReflectsPaging(t *testing.T) {
 	defer cancel()
 
 	db := testutil.MongoDB(t, "sublistpaging")
-	p, ok := BuiltinPreset("small")
+	// realistic, not small: the uniform presets put every account in exactly one
+	// room, so no account there can have a second page to report.
+	p, ok := BuiltinPreset("realistic")
 	require.True(t, ok)
 	fixtures := BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC())
 	require.NoError(t, Seed(ctx, db, &fixtures))

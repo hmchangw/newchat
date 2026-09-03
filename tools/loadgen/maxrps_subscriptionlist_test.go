@@ -141,3 +141,21 @@ func TestSubscriptionListWorkload_NewGeneratorCarriesRequestShape(t *testing.T) 
 	require.NotNil(t, g.cfg.IncludeLastMessage)
 	assert.True(t, *g.cfg.IncludeLastMessage)
 }
+
+func TestLogStepPageShape_SkipsEmptyCollector(t *testing.T) {
+	// No samples means nothing was measured; logging a zero-row page shape would
+	// read as a degenerate ramp rather than an absent one.
+	assert.NotPanics(t, func() { logStepPageShape(500, NewSubscriptionListCollector()) })
+}
+
+func TestLogStepPageShape_ReportsMeasuredPages(t *testing.T) {
+	c := NewSubscriptionListCollector()
+	c.RecordSample(SubscriptionListSample{Latency: time.Millisecond, Rows: 4, HasMore: true})
+	c.RecordSample(SubscriptionListSample{Latency: time.Millisecond, Rows: 2})
+	c.RecordEmptyPage(time.Millisecond)
+
+	assert.NotPanics(t, func() { logStepPageShape(500, c) })
+	assert.InDelta(t, 3.0, c.MeanRows(), 0.001)
+	assert.Equal(t, 1, c.HasMoreCount())
+	assert.Equal(t, 1, c.EmptyPageCount())
+}

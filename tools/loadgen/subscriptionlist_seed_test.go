@@ -85,3 +85,42 @@ func TestBuildSubscriptionListFixtures_AccountsHaveSubscriptions(t *testing.T) {
 		assert.Positive(t, n, "account %s has no subscriptions", acct)
 	}
 }
+
+// The uniform presets give every account exactly one subscription, so a ramp on
+// them measures a one-row page rather than a sidebar cold-open — fast, and
+// meaningless. This pins the numbers the workload's startup warning keys on, so
+// a preset change that quietly degrades the workload fails here.
+func TestSubscriptionsPerAccount_SeparatesSidebarPresetsFromDegenerateOnes(t *testing.T) {
+	tests := []struct {
+		preset       string
+		wantSidebar  bool
+		atLeastCount float64
+	}{
+		{preset: "small", wantSidebar: false},
+		{preset: "medium", wantSidebar: false},
+		{preset: "realistic", wantSidebar: true, atLeastCount: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.preset, func(t *testing.T) {
+			p, ok := BuiltinPreset(tc.preset)
+			require.True(t, ok)
+			f := BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC())
+
+			mean := subscriptionsPerAccount(&f)
+			assert.Positive(t, mean)
+			if tc.wantSidebar {
+				assert.GreaterOrEqual(t, mean, tc.atLeastCount)
+				assert.False(t, degeneratePageFixtures(&f))
+			} else {
+				assert.Less(t, mean, minSidebarSubsPerAccount)
+				assert.True(t, degeneratePageFixtures(&f))
+			}
+		})
+	}
+}
+
+func TestSubscriptionsPerAccount_EmptyFixturesAreDegenerate(t *testing.T) {
+	empty := Fixtures{}
+	assert.InDelta(t, 0.0, subscriptionsPerAccount(&empty), 0.001)
+	assert.True(t, degeneratePageFixtures(&empty))
+}

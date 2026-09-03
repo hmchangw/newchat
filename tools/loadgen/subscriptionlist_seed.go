@@ -90,3 +90,31 @@ func subListRowName(room *model.Room, members []string, account string) string {
 	}
 	return room.Name
 }
+
+// minSidebarSubsPerAccount is the mean below which a preset stops modelling a
+// sidebar. The uniform presets (small/medium/large) put every account in exactly
+// one room, so their pages carry a single row: a ramp over them reports the
+// latency of a one-row reply, which is fast and says nothing about the endpoint
+// under real sidebars. Only `realistic` has the mixed room sizes that give an
+// account several rooms.
+const minSidebarSubsPerAccount = 2.0
+
+// subscriptionsPerAccount returns the mean subscriptions per distinct account,
+// or 0 when there are none.
+func subscriptionsPerAccount(f *Fixtures) float64 {
+	accounts := make(map[string]struct{}, len(f.Subscriptions))
+	for i := range f.Subscriptions {
+		accounts[f.Subscriptions[i].User.Account] = struct{}{}
+	}
+	if len(accounts) == 0 {
+		return 0
+	}
+	return float64(len(f.Subscriptions)) / float64(len(accounts))
+}
+
+// degeneratePageFixtures reports whether these fixtures would make the ramp
+// measure a page too small to mean anything. Warned about rather than rejected:
+// measuring the floor is a legitimate thing to want, as long as it is on purpose.
+func degeneratePageFixtures(f *Fixtures) bool {
+	return subscriptionsPerAccount(f) < minSidebarSubsPerAccount
+}
