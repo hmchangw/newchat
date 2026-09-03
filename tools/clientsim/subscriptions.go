@@ -263,6 +263,11 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		timeout: 5 * time.Second,
 	}
 	plan, err := fetchSubscriptionPlan(ctx, lister)
+	// Counted on success and on failure alike: the exposure is the boundary
+	// crossing itself, not what the walk went on to do with the rows.
+	if lister.calls > 1 {
+		s.m.PaginatedWalks.Inc()
+	}
 	if err != nil {
 		// Check the epoch BEFORE blaming the RPC. A connection that dies
 		// mid-walk usually makes the request fail rather than return a stale

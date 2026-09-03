@@ -184,6 +184,20 @@ reported as exited, so the fleet would silently shrink.
   `RoomEvent.Timestamp`) and `clientsim_canonical_to_client_latency_seconds`
   (receive − `EventTimestamp`) span hosts and carry inter-host clock skew:
   trend/regression evidence, not absolute truth.
+- `clientsim_walk_paginated_total` counts bootstrap walks that crossed a
+  `subscription.list` page boundary. The server orders that list by
+  `room.lastMsgAt` **descending** and pages it by **offset**, so under the
+  very load this tool generates a row can move across the boundary between
+  two requests and never be returned. The plan is then short a room, and
+  readiness cannot tell — readiness is measured against the plan. The
+  production client pages identically, so clientsim reproducing it is
+  fidelity, not a defect; the counter is there so the exposure is a number
+  rather than a surprise. A client whose sidebar fits in one page
+  (≤ 40 subscriptions) is not exposed at all, which is why this counts
+  paginated walks rather than all of them. It does **not** detect an actual
+  loss — treat a high count as "read the delivery totals with suspicion",
+  and prefer pool accounts with small sidebars when the run is about
+  fan-out completeness.
 - Any increment on `clientsim_decode_failures_total`,
   `clientsim_invalid_timestamp_total`, or
   `clientsim_slow_consumer_events_total` marks the window **degraded**
@@ -245,17 +259,43 @@ not in this repo. The load-bearing points:
   the downward API; replicas = `CLIENTSIM_SHARD_COUNT`. No coordination
   service needed.
 - **Side issuer**: a second auth-service Deployment with `DEV_MODE=true`,
-  the same `AUTH_SCOPED_SIGNING_KEY` secret, ClusterIP only, no ingress,
-  NetworkPolicy admitting only clientsim pods.
-  > ⚠️ **Not yet safe on a shared cluster.** The dev-mint account guard
-  > (spec §6.3: `DEV_MODE_ACCOUNT_ALLOWLIST_FILE`, generated from the run's
-  > pool artifact) ships in a **separate follow-up PR**. Until it lands the
-  > issuer's dev mode signs *any* account — so on staging, network
-  > isolation is the only barrier, and a shared cluster deployment must
-  > wait for that guard. Local throwaway stacks are fine.
+  reachable only in-cluster — **ClusterIP, no ingress and no VirtualService**
+  — with a NetworkPolicy admitting only the clientsim and loadgen pods.
+  clientsim reaches it by service DNS and nothing else changes in the code:
+  `CLIENTSIM_AUTH_URL=http://dev-auth-service.<ns>.svc.cluster.local:8080`.
+  > ⚠️ **Test and staging only.** Dev mode mints a NATS JWT for *any*
+  > account the caller names, so anything that can reach this Deployment can
+  > impersonate any user of that site. That is acceptable against synthetic
+  > data and unacceptable anywhere else: never run it in production, and
+  > never expose it outside the cluster. Note that a namespace is not a
+  > network boundary by default — the NetworkPolicy is what makes the
+  > isolation real, and `kubectl port-forward` bypasses it for anyone who
+  > holds that permission.
 - **OS limits**: raise `ulimit -n` well above conns × (2 + rooms); one
   (srcIP → dstIP:port) tuple caps at ~60k ephemeral ports — beyond that add
   replicas (each pod has its own IP) or NATS endpoint IPs.
+- **Room-queue memory**: the room lane is bounded in **messages, not
+  bytes** — `nats.go` writes straight into the channel, so there is no
+  enqueue hook to charge bytes against. Worst case retained per pod is
+  `CLIENTSIM_TARGET_CONNS × CLIENTSIM_SUB_PENDING_MSGS × event size`
+  (10k conns × 512 × ~2 KiB ≈ 10 GB if every pump stalled at once). The
+  pump only decodes and counts, so a full queue means the process is
+  already starved; size the pod against that product, or lower
+  `CLIENTSIM_SUB_PENDING_MSGS`, rather than assuming
+  `CLIENTSIM_SUB_PENDING_BYTES` covers it (it does not — it bounds the
+  callback subscriptions).
+- **Shutdown undercounts by design**: `close()` calls `nats.Conn.Close()`
+  rather than `Drain()`, so user-lane deliveries still sitting in nats.go's
+  callback backlog are dropped instead of counted. Draining tens of
+  thousands of connections would need a server round-trip per client and
+  could not be bounded inside the shutdown budget, and the loss is one
+  backlog per client at the very end of a run. Read the delivery totals as
+  a window, never as an exact ledger — that is loadgen's job.
+- **Never change `CLIENTSIM_SHARD_COUNT` on a running fleet**: ownership is
+  `index mod count` with no fencing, so during a rolling rescale the old and
+  new partitionings coexist and connect overlapping accounts twice —
+  fan-out and delivery counts double for those accounts while every pod's
+  readiness still passes. Scale to zero, then back up.
 - **LB checklist for M1**: idle-timeout on long-lived mostly-idle WSS
   conns, per-backend/per-IP connection ceilings, and whether the minted
   JWT's permissions cover the full subscription walk.

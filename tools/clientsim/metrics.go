@@ -80,6 +80,10 @@ type metrics struct {
 	// signal that says whether the pump is keeping up and roughly how much is
 	// sitting in memory. Depth x observed payload size is the byte picture.
 	RoomQueueDepth prometheus.Histogram
+	// PaginatedWalks counts bootstrap walks that needed more than one
+	// subscription.list page — the walks whose plan can be short a room
+	// without anything noticing. See the counter's Help for why.
+	PaginatedWalks prometheus.Counter
 	AuthFailures   prometheus.Counter
 	// Errors counts stage failures (stage: auth|connect|walk|resync|
 	// room_subscribe|async|conn_closed) so
@@ -240,6 +244,10 @@ func newMetrics() *metrics {
 			Name: "clientsim_room_queue_depth", Buckets: roomQueueDepthBuckets,
 			Help: "Deliveries still queued behind each one the pump took; the room lane is bounded in messages, not bytes.",
 		}),
+		PaginatedWalks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "clientsim_walk_paginated_total",
+			Help: "Bootstrap walks that crossed a subscription.list page boundary. The server orders that list by room.lastMsgAt descending and pages it by offset, so under load a row can move across the boundary between two requests and never be returned: the plan is then short a room, and readiness cannot tell, because it is measured against the plan. The production client pages identically — this counts the clients exposed to it, it does not detect an actual loss.",
+		}),
 		AuthFailures: prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_auth_failures_total", Help: "Auth exchange failures (transport errors and non-2xx rejections)."}),
 		Errors:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_errors_total", Help: "Stage failures."}, []string{"stage"}),
 		RunInfo:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clientsim_run_info", Help: "Static run metadata; value is always 1. Run ID stays in logs (unbounded label), matching loadgen."}, []string{"jwtMode", "shardIndex", "shardCount"}),
@@ -253,7 +261,7 @@ func newMetrics() *metrics {
 		m.Disconnects, m.Reconnects, m.ReconnectAttempt, m.JWTRefreshes, m.Delivered,
 		m.BroadcastLatency, m.CanonicalLatency,
 		m.DecodeFailures, m.InvalidTimestamp, m.SlowConsumer, m.RoomQueueDepth,
-		m.AuthFailures, m.Errors, m.RunInfo,
+		m.AuthFailures, m.Errors, m.RunInfo, m.PaginatedWalks,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

@@ -24,6 +24,31 @@ type Artifact struct {
 	Accounts      []string `json:"accounts"`
 }
 
+// validateAccounts is the entry-level half of the contract, shared by Write
+// and Load so a producer cannot report success on a file the consumer refuses.
+//
+// A duplicate is counted in the shard the readiness floor is measured against,
+// but a consumer starts each account once — so the target can never be reached
+// and MIN_READY_RATIO either fails the run for a reason unrelated to the system
+// under test or absorbs the gap in its slack. Split across shards it is worse:
+// two pods connect the same account, and every room they share double-counts
+// its deliveries.
+func validateAccounts(accounts []string) error {
+	seen := make(map[string]int, len(accounts))
+	for i, account := range accounts {
+		// An empty entry builds subjects like chat.user..event.room, which
+		// subscribe cleanly and receive nothing.
+		if account == "" {
+			return fmt.Errorf("pool artifact account %d is empty", i)
+		}
+		if first, dup := seen[account]; dup {
+			return fmt.Errorf("pool artifact has duplicate account %q at positions %d and %d", account, first, i)
+		}
+		seen[account] = i
+	}
+	return nil
+}
+
 // Write stamps the current SchemaVersion (mutating the caller's struct —
 // callers pass literals) and persists the artifact atomically (tmp +
 // rename), so a concurrent Load from another process never sees a
@@ -43,6 +68,9 @@ func Write(path string, a *Artifact) error {
 		return errors.New("write pool artifact: empty runID")
 	case a.ConfigDigest == "":
 		return errors.New("write pool artifact: empty configDigest — the artifact would be unmatchable to its run")
+	}
+	if err := validateAccounts(a.Accounts); err != nil {
+		return fmt.Errorf("write pool artifact: %w", err)
 	}
 	a.SchemaVersion = SchemaVersion
 	data, err := json.MarshalIndent(a, "", "  ")
@@ -122,23 +150,8 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	// array the moment it passes maxAccounts — it has to be checked there for
 	// the cap to bound memory rather than merely report on it, so a check
 	// here could never fire.
-	// A duplicate is counted in the shard the readiness floor is measured
-	// against, but a consumer starts each account once — so the target can
-	// never be reached and MIN_READY_RATIO either fails the run for a reason
-	// unrelated to the system under test or absorbs the gap in its slack.
-	// Split across shards it is worse: two pods connect the same account, and
-	// every room they share double-counts its deliveries.
-	seen := make(map[string]int, len(a.Accounts))
-	for i, account := range a.Accounts {
-		// An empty entry builds subjects like chat.user..event.room, which
-		// subscribe cleanly and receive nothing.
-		if account == "" {
-			return nil, fmt.Errorf("pool artifact account %d is empty", i)
-		}
-		if first, dup := seen[account]; dup {
-			return nil, fmt.Errorf("pool artifact has duplicate account %q at positions %d and %d", account, first, i)
-		}
-		seen[account] = i
+	if err := validateAccounts(a.Accounts); err != nil {
+		return nil, err
 	}
 	return a, nil
 }

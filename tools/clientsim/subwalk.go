@@ -116,9 +116,14 @@ type natsLister struct {
 	conn    simConn
 	subject string // subject.UserSubscriptionList(account, siteID)
 	timeout time.Duration
+	// calls counts the pages this walk requested. One lister serves exactly
+	// one walk, driven from that walk's own goroutine, so no synchronisation
+	// is needed and the count is the walk's page count.
+	calls int
 }
 
 func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage, error) {
+	l.calls++
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal subscription.list request: %w", err)

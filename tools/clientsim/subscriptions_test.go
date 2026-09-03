@@ -926,3 +926,38 @@ func TestLiveUpdate_ARemovalPromotesWithoutAFlush(t *testing.T) {
 	assert.Equal(t, flushes, fc.flushes.Load(), "a close-only change needs no acknowledgement")
 	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
 }
+
+// subscription.list pages by offset over a collection the server orders by
+// room.lastMsgAt descending (docs/client-api.md). Under the very load this
+// tool generates that order churns, so a row can move across a page boundary
+// between two requests and never be returned — the plan is then short a room,
+// and nothing downstream can tell, because readiness is measured against the
+// plan itself. The production client pages the same way, so this is fidelity,
+// not a defect to fix here; what it must not be is invisible. A client whose
+// sidebar fits on one page is not exposed at all, which is why the counter is
+// of PAGINATED walks rather than of all of them.
+func TestBootstrapWalk_CountsWalksExposedToOffsetPagination(t *testing.T) {
+	t.Run("single page is not exposed", func(t *testing.T) {
+		fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+		s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+		s.conn = fc
+		s.markConnUp()
+
+		require.NoError(t, s.bootstrapWalk(context.Background()))
+		assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.PaginatedWalks), 0.001)
+	})
+
+	t.Run("a second page is", func(t *testing.T) {
+		fc := newFakeConn(
+			subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}, HasMore: true},
+			subListPage{Subscriptions: []subRow{{RoomID: "r2", RoomType: "channel"}}},
+		)
+		s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+		s.conn = fc
+		s.markConnUp()
+
+		require.NoError(t, s.bootstrapWalk(context.Background()))
+		assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.PaginatedWalks), 0.001,
+			"a walk that crossed a page boundary is counted once, not once per page")
+	})
+}

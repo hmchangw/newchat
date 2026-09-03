@@ -243,14 +243,31 @@ load-test auth-service instance** with `DEV_MODE=true` and the same
 
 The main auth-service is untouched and never runs dev mode in staging.
 
-### 6.3 Dev-mint guard (small auth-service change) — DEFERRED to a follow-up PR
+### 6.3 Dev-mint guard (small auth-service change) — DROPPED
 
-> **Status:** NOT in the clientsim landing PR. This touches a production
-> service (auth-service), so it ships separately. Until it lands, the side
-> issuer's dev mode signs **any** account, so the overlay and any k8s
-> deployment are safe **only** on throwaway local stacks — a shared
-> test/staging cluster MUST NOT run the side issuer without this guard. The
-> allowlist references in §4 and §9 assume this PR has landed.
+> **Status: not being built.** Reviewed with the repo owner after the
+> landing PR: the allowlist would be generated from the run's pool
+> artifact, and that pool is drawn from the site's **real** accounts rather
+> than purpose-made fixtures. Restricting the issuer to "the accounts in
+> this run" therefore restricts it to real users — it narrows the blast
+> radius by a factor that depends only on how large the run is, and buys
+> nothing on the property that matters (whether a reachable issuer can
+> impersonate a real person). The barrier is network isolation, plus the
+> environments this may run in.
+>
+> The controls that replace it, and that the README documents as
+> load-bearing:
+>
+> - ClusterIP only — no ingress, no VirtualService.
+> - A NetworkPolicy admitting only the clientsim and loadgen pods (a
+>   namespace is not a network boundary on its own).
+> - Test and staging only, where the data is synthetic. Never production.
+>
+> `fileProvider` (§6.1) is dropped for the same class of reason: real SSO
+> tokens for tens of thousands of accounts are not obtainable, so the
+> interface point stays unimplemented.
+>
+> The design below is kept as the record of what was considered.
 
 Dev mode today mints a JWT for **any** account — a network-isolation
 failure would turn the side issuer into an impersonation oracle for real

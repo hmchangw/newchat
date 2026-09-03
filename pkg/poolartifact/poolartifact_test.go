@@ -162,11 +162,11 @@ func TestLoad_RejectsAnImplausibleAccountCount(t *testing.T) {
 // its slack. Across shards it is worse: two pods each connect the same account,
 // and every room they share double-counts its deliveries.
 func TestLoad_RejectsDuplicateAccounts(t *testing.T) {
+	// Written directly: Write now rejects the same input, so it can no longer
+	// be used to produce a file that only Load refuses.
 	path := filepath.Join(t.TempDir(), "pool.json")
-	require.NoError(t, Write(path, &Artifact{
-		RunID: "r", SiteID: "s", ConfigDigest: "d",
-		Accounts: []string{"user-0", "user-1", "user-0"},
-	}))
+	require.NoError(t, os.WriteFile(path,
+		[]byte(`{"schemaVersion":1,"runId":"r","siteId":"s","configDigest":"d","accounts":["user-0","user-1","user-0"]}`), 0o600))
 	_, err := Load(path, "s")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "duplicate")
@@ -244,4 +244,31 @@ func TestLoad_DecodeCostTracksTheCapNotTheFile(t *testing.T) {
 
 	assert.Less(t, farOver, justOver*2,
 		"rejecting a file three times over the cap must not cost three times as much")
+}
+
+// Write is the producer half of the same contract Load enforces. Anything
+// Write persists but Load refuses turns a bad seed into a failure hours later,
+// in the wrong tool and with the seeder already gone.
+func TestWrite_RejectsWhatLoadRejects(t *testing.T) {
+	tests := []struct {
+		name     string
+		accounts []string
+		want     string
+	}{
+		{name: "empty entry", accounts: []string{"u1", "", "u3"}, want: "account 1 is empty"},
+		{name: "duplicate", accounts: []string{"u1", "u2", "u1"}, want: "duplicate account"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "pool.json")
+			err := Write(path, &Artifact{
+				RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: tt.accounts,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+			// Nothing is left behind for a later run to pick up.
+			_, statErr := os.Stat(path)
+			assert.True(t, os.IsNotExist(statErr), "a rejected artifact must not be written")
+		})
+	}
 }
