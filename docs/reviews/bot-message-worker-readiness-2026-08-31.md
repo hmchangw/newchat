@@ -115,7 +115,9 @@ Subject, stream and consumer wiring are exactly right, but the Cassandra write-t
 
 ### Recommendations
 - `high` — pin the five plaintext create INSERTs with `USING TIMESTAMP writeTS(msg.CreatedAt)`, porting `message-worker/store_cassandra.go:82-119` verbatim, and leave the encrypted creates unpinned with the CLAUDE.md rationale as a comment.
-- `high` — make `countAndSetParentTcount` non-fatal for the commit (Ack the create and retry the tcount SET separately), or move it ahead of the commit, so a post-commit failure cannot replay the create.
+- `high` — close the post-commit replay, but **not by moving `countAndSetParentTcount` ahead of the commit** — an earlier draft of this report offered that, and it cannot work: the SET is driven by `threadcount.Count`, an authoritative scan of `thread_messages_by_thread` for the thread (`pkg/threadcount/count.go:33-45`), so running it before the reply is inserted counts every reply *except* the new one and writes a `tcount` short by one. Two options that do work:
+  - **Pin the create's write timestamp** (recommendation 2 above, which CLAUDE.md already mandates for this service). A replay of a pinned create replays the identical write, so a post-commit NAK stops being able to revert anything and the ordering question disappears. This is the fix.
+  - **If the tcount step is instead made non-fatal**, say why it is safe rather than just Acking: the SET is *blind*, from a fresh authoritative count, so the next reply in that thread recomputes and repairs it. Log it with a metric, and note the one case that does not self-heal — a thread whose failing reply is its last, which keeps a stale `tcount` indefinitely.
 - `high` — correct the CLAUDE.md bot-message-worker paragraph: the retry window is 12.6 min via `jsretry.DefaultBackoff`, and the thread path *does* have a post-commit failure point.
 - `medium` — convert the inline encrypted `null` bindings into separate unpinned `stripLegacyPlaintext*` UPDATE statements before pinning anything.
 
