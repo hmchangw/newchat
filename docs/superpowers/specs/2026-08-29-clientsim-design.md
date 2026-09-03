@@ -175,10 +175,11 @@ source-port tuples in §5.3 regardless of stability across restarts.)
 6. JWT lifecycle **defaults to the production frontend's behavior**
    (`useJwtRefresh.js`). Who mints, per mode (always exactly once per
    refresh — the connect callback of step 3 never does):
-   - `proactive` (default): a per-client timer at ~80% of the JWT's
+   - `proactive` (NOT the default; a stress knob — the real client does
+     not refresh on its own): a per-client timer at ~80% of the JWT's
      remaining life ±5% jitter mints once, updates the cached JWT, then
      forces a reconnect; the callback presents the already-fresh cache.
-   - `expiry` (resilience A/B mode): no timer. The server's expiry
+   - `expiry` (THE DEFAULT, and client parity): no timer. The server's expiry
      disconnect triggers reconnect, and the reconnect path re-mints into
      the cache before the callback presents it (the one case where
      reconnect handling mints).
@@ -300,7 +301,7 @@ explicitly accepted part of the staging blast radius.
 | `CLIENTSIM_SHARD_INDEX` / `CLIENTSIM_SHARD_COUNT` | `0` / `1` | replica slice |
 | `CLIENTSIM_RAMP_RATE` | `50` | connects/sec **per replica** during ramp |
 | `CLIENTSIM_CHURN_RATE` | `0` | reconnect cycles/sec across the shard |
-| `CLIENTSIM_JWT_MODE` | `proactive` | `proactive` (frontend-like 80% ±5%) or `expiry` (resilience A/B) |
+| `CLIENTSIM_JWT_MODE` | `expiry` | `expiry` = client parity (the real client never refreshes on its own; the server drops the conn at JWT expiry and it re-mints on the reconnect). `proactive` (76%-84% of remaining life) is a deliberate auth-service stress knob, NOT client parity |
 | `CLIENTSIM_SUB_PENDING_MSGS` / `_BYTES` | `512` / `128KiB` | lane pending limits; msgs also sizes the shared room-delivery channel |
 | `CLIENTSIM_RECONNECT_BUF_BYTES` | `64KiB` | nats.go reconnect buffer per conn |
 | `CLIENTSIM_PING_INTERVAL` | `2m` | client ping interval (idle-conn keepalive) |

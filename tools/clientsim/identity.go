@@ -48,14 +48,18 @@ func (c *jwtCache) get() (string, time.Time) {
 	return c.token, c.expiresAt
 }
 
-// jwtRefreshFraction / jwtRefreshJitter mirror useJwtRefresh.js's
-// REFRESH_FRACTION and REFRESH_JITTER. The jitter is MULTIPLICATIVE on the
-// fraction — 0.80 * (1 ± 0.05), i.e. 76%-84% of remaining life — not ±5
-// percentage points, which would be 75%-85% and is a different convention.
+// jwtRefreshFraction / jwtRefreshJitter shape the OPTIONAL proactive mode.
 //
-// UNVERIFIED against the production client: chat-frontend is a test frontend,
-// not the reference. If the real client's schedule differs, the fleet's
-// re-mint cadence against auth-service is off by that much.
+// The production client does NOT refresh proactively: it holds its JWT until
+// the server drops the connection at expiry and re-mints on the reconnect,
+// which is what jwtModeExpiry (the default) models. This schedule is copied
+// from chat-frontend's useJwtRefresh.js and exists to put re-mint load on
+// auth-service on purpose — a stress knob, not client parity, so its numbers
+// do not need to match anything.
+//
+// The jitter is MULTIPLICATIVE on the fraction — 0.80 * (1 ± 0.05), i.e.
+// 76%-84% of remaining life — not ±5 percentage points, which would be
+// 75%-85% and is a different convention.
 const (
 	jwtRefreshFraction = 0.80
 	jwtRefreshJitter   = 0.05

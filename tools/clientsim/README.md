@@ -9,11 +9,9 @@ lanes, kept live via `subscription.update`) — then holds the connection,
 counting deliveries and observing client-edge latency.
 
 **Fidelity caveats.** The reference is the production client, not this repo's
-`chat-frontend` (a test frontend). Two behaviours are copied from
-`chat-frontend` and are **unverified** against the real client: the JWT
-proactive-refresh schedule (`0.80 * (1 ± 0.05)` of remaining life, i.e.
-76%–84%, from `useJwtRefresh.js`) and the `crossSite` tri-state rule. Two more
-are deliberate gaps. The real client fetches its
+`chat-frontend` (a test frontend). The `crossSite` tri-state rule is confirmed
+to match the real client, and the default JWT mode (`expiry`) matches it too:
+the real client never refreshes on its own. Two deliberate gaps remain. The real client fetches its
 subscription list over `GET /api/v1/subscriptions` and falls back to the
 NATS RPC; that route requires an `ssoToken` (or a bot session), which the
 dev-mode auth exchange does not issue, so clientsim exercises the **fallback
@@ -82,7 +80,7 @@ the local YAML in this repo.
 | `CLIENTSIM_RAMP_RATE` | `50` | connects/sec **per replica** during ramp |
 | `CLIENTSIM_CHURN_RATE` | `0` | reconnect cycles/sec across the shard |
 | — | — | clients that exit early are restarted at the ramp rate, up to 5 attempts each |
-| `CLIENTSIM_JWT_MODE` | `proactive` | `proactive` (frontend-parity 80% ±5% refresh) or `expiry` (resilience A/B) |
+| `CLIENTSIM_JWT_MODE` | `expiry` | `expiry` = client parity: never refreshes; the server drops the conn at JWT expiry and the client re-mints on the reconnect. `proactive` re-mints at 76%–84% of remaining life — a deliberate stress knob for auth-service, **not** what the real client does |
 | `CLIENTSIM_ALLOW_INSECURE_WS` | `false` | opt into a cleartext `ws://` URL; without it a non-`wss://` URL is a startup error |
 | `CLIENTSIM_SUB_PENDING_MSGS` / `_BYTES` | `512` / `128KiB` | pending limits for the two per-user lanes; msgs also sizes the shared room-delivery channel |
 | `CLIENTSIM_RECONNECT_BUF_BYTES` | `64KiB` | nats.go reconnect buffer per conn |

@@ -38,7 +38,11 @@ type config struct {
 	ShardCount      int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
 	RampRate        float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
 	ChurnRate       float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
-	JWTMode         string  `env:"CLIENTSIM_JWT_MODE" envDefault:"proactive"`
+	// expiry is the DEFAULT because it is what the real client does: it never
+	// refreshes on its own, it holds the JWT until the server drops the
+	// connection at expiry and re-mints on the reconnect. proactive is a
+	// deliberate stress knob, not client parity — see the README.
+	JWTMode string `env:"CLIENTSIM_JWT_MODE" envDefault:"expiry"`
 	// MinReadyRatio is the fraction of the shard that must have reached
 	// full readiness at some point for the run to count. 0 disables it.
 	MinReadyRatio float64 `env:"CLIENTSIM_MIN_READY_RATIO" envDefault:"0.95"`
