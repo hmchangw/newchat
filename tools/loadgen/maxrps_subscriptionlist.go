@@ -49,11 +49,9 @@ func buildSubscriptionListInputs(targetRPS int, hold time.Duration, c *Subscript
 // captured by the cleanup closure, not stored on the struct.
 type subscriptionListWorkload struct {
 	cfg                *config
-	preset             *Preset
 	fixtures           Fixtures
 	seed               int64
 	requestTimeout     time.Duration
-	metrics            *Metrics
 	requester          SubscriptionListRequester
 	listType           string
 	limit              int
@@ -97,11 +95,9 @@ func newSubscriptionListWorkload(ctx context.Context, cfg *config, preset *Prese
 	}
 	w := &subscriptionListWorkload{
 		cfg:                cfg,
-		preset:             preset,
 		fixtures:           fixtures,
 		seed:               seed,
 		requestTimeout:     p.RequestTimeout,
-		metrics:            metrics,
 		requester:          newNATSHistoryRequester(nc.NatsConn()),
 		listType:           p.ListType,
 		limit:              p.Limit,
@@ -116,8 +112,9 @@ func newSubscriptionListWorkload(ctx context.Context, cfg *config, preset *Prese
 	return w, cleanup, nil
 }
 
-func (w *subscriptionListWorkload) newGenerator(collector *SubscriptionListCollector, targetRPS int) *subscriptionListGenerator {
+func (w *subscriptionListWorkload) newGenerator(runCtx context.Context, collector *SubscriptionListCollector, targetRPS int) *subscriptionListGenerator {
 	return newSubscriptionListGenerator(&subscriptionListGeneratorConfig{
+		RunCtx:             runCtx,
 		Fixtures:           &w.fixtures,
 		SiteID:             w.cfg.SiteID,
 		Rate:               targetRPS,
@@ -155,12 +152,12 @@ func runSubscriptionListFor(ctx context.Context, gen *subscriptionListGenerator,
 func (w *subscriptionListWorkload) RunStep(ctx context.Context, targetRPS int, warmup, hold time.Duration) (rpsStepInputs, error) {
 	if warmup > 0 {
 		warmCollector := NewSubscriptionListCollector()
-		if err := runSubscriptionListFor(ctx, w.newGenerator(warmCollector, targetRPS), warmup); err != nil {
+		if err := runSubscriptionListFor(ctx, w.newGenerator(ctx, warmCollector, targetRPS), warmup); err != nil {
 			return rpsStepInputs{}, err
 		}
 	}
 	collector := NewSubscriptionListCollector()
-	if err := runSubscriptionListFor(ctx, w.newGenerator(collector, targetRPS), hold); err != nil {
+	if err := runSubscriptionListFor(ctx, w.newGenerator(ctx, collector, targetRPS), hold); err != nil {
 		return rpsStepInputs{}, err
 	}
 	// rpsStepInputs carries no row counts, so without this the page size actually
@@ -170,17 +167,26 @@ func (w *subscriptionListWorkload) RunStep(ctx context.Context, targetRPS int, w
 	return buildSubscriptionListInputs(targetRPS, hold, collector), nil
 }
 
-// logStepPageShape reports the page size the step actually measured, so a run's
-// output answers "was this a real sidebar?" without re-deriving it from the preset.
+// logStepPageShape reports what the step actually measured: the page size, so a
+// run answers "was this a real sidebar?" without re-deriving it from the preset,
+// and the failure classes split out. rpsStepInputs carries only a summed
+// FailedOps, so without this a broker timeout, a protocol incompatibility and
+// bad fixtures all render as the same number — three problems needing three
+// different responses.
 func logStepPageShape(targetRPS int, c *SubscriptionListCollector) {
 	samples := c.Samples()
-	if len(samples) == 0 {
+	timeouts, replies := c.TimeoutErrors(), c.ReplyErrors()
+	bad, empty := c.BadReplyCount(), c.EmptyPageCount()
+	if len(samples) == 0 && timeouts+replies+bad+empty == 0 {
 		return
 	}
-	slog.Info("subscription-list page shape",
+	slog.Info("subscription-list step shape",
 		"rps", targetRPS,
 		"pages", len(samples),
 		"mean_rows", c.MeanRows(),
 		"has_more_pages", c.HasMoreCount(),
-		"empty_pages", c.EmptyPageCount())
+		"timeout_errors", timeouts,
+		"service_errors", replies,
+		"bad_replies", bad,
+		"empty_pages", empty)
 }

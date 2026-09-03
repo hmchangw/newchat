@@ -542,9 +542,11 @@ make -C tools/loadgen/deploy teardown-roomread PRESET=medium
 Finds the maximum sustainable RPS for `subscription.list`
 (`user-service.ListSubscriptions`, the
 `chat.user.{account}.request.user.{siteID}.subscription.list` request/reply
-RPC). Every request is the call a client makes on connect — `type=current`,
-`limit=200`, `includeLastMessage=true`, `offset=0` — because the reconnect
-burst, not steady browsing, is what this endpoint has to survive.
+RPC). By default every request is the call a client makes on connect —
+`type=current`, `limit=200`, `includeLastMessage=true`, `offset=0` — because the
+reconnect burst, not steady browsing, is what this endpoint has to survive.
+`--list-type`, `--list-limit` and `--include-last-message` change that shape;
+`offset` is always 0, since a cold open asks for the first page.
 
 Accounts are picked **uniformly**, unlike the room-read workload's Zipf skew: a
 client cold-opens its sidebar once per connect, so there is no hot-account
@@ -553,7 +555,7 @@ account's page, and the preset fixtures already carry it.
 
 ### Quick start
 
-```
+```sh
 make -C tools/loadgen/deploy up
 make -C tools/loadgen/deploy seed-sublist PRESET=realistic
 make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=realistic
@@ -563,13 +565,13 @@ make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=reali
 
 Override the ramp with `STEPS` (default `200,500,1000,2000,5000`):
 
-```
+```sh
 make -C tools/loadgen/deploy run-max-rps WORKLOAD=subscription-list PRESET=realistic STEPS=500,1k,2k,5k
 ```
 
 Tear down the fixtures:
 
-```
+```sh
 make -C tools/loadgen/deploy teardown-sublist PRESET=realistic
 ```
 

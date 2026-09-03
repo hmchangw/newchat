@@ -52,6 +52,11 @@ func okSubListReply(t *testing.T, rows int, hasMore bool) []byte {
 
 func newTestSubListGenerator(t *testing.T, req SubscriptionListRequester, c *SubscriptionListCollector) *subscriptionListGenerator {
 	t.Helper()
+	return newTestSubListGeneratorWithRunCtx(t, req, c, context.Background())
+}
+
+func newTestSubListGeneratorWithRunCtx(t *testing.T, req SubscriptionListRequester, c *SubscriptionListCollector, runCtx context.Context) *subscriptionListGenerator {
+	t.Helper()
 	p, ok := BuiltinPreset("small")
 	require.True(t, ok)
 	f := BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC())
@@ -67,6 +72,7 @@ func newTestSubListGenerator(t *testing.T, req SubscriptionListRequester, c *Sub
 		ListType:           "current",
 		Limit:              200,
 		IncludeLastMessage: &include,
+		RunCtx:             runCtx,
 	}, 42)
 }
 
@@ -169,22 +175,6 @@ func TestSubscriptionListGenerator_TransportErrorIsClassified(t *testing.T) {
 
 	assert.Equal(t, 1, c.TimeoutErrors())
 	assert.Empty(t, c.Samples())
-}
-
-// A cancelled run is draining, not failing: counting those would inflate the
-// error tally at every step boundary.
-func TestSubscriptionListGenerator_CancelledRunRecordsNothing(t *testing.T) {
-	req := &fakeSubListRequester{err: context.Canceled}
-	c := NewSubscriptionListCollector()
-	g := newTestSubListGenerator(t, req, c)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	g.requestOne(ctx)
-
-	assert.Empty(t, c.Samples())
-	assert.Equal(t, 0, c.TimeoutErrors())
-	assert.Equal(t, 0, c.ReplyErrors())
 }
 
 func TestSubscriptionListGenerator_RunRejectsNonPositiveRate(t *testing.T) {
@@ -419,4 +409,81 @@ func TestSubscriptionListGenerator_RunReportsBodyMarshalFailureOnce(t *testing.T
 	assert.Equal(t, 0, c.BadReplyCount())
 	subjects, _ := req.seen()
 	assert.Empty(t, subjects, "no request is dispatched when the body could not be built")
+}
+
+// A row a client cannot use is a contract failure, the same as the top-level
+// `{}` case — and it is also the fastest possible reply, so accepting it would
+// contribute a fast successful sample.
+func TestSubscriptionListGenerator_RejectsRowsMissingRoomID(t *testing.T) {
+	tests := []struct {
+		name        string
+		reply       string
+		wantSamples int
+		wantBad     int
+	}{
+		{"row without roomId", `{"subscriptions":[{}],"hasMore":false}`, 0, 1},
+		{"one good row, one malformed", `{"subscriptions":[{"roomId":"r1"},{}]}`, 0, 1},
+		{"all rows well formed", `{"subscriptions":[{"roomId":"r1"},{"roomId":"r2"}]}`, 1, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &fakeSubListRequester{reply: []byte(tc.reply)}
+			c := NewSubscriptionListCollector()
+			g := newTestSubListGenerator(t, req, c)
+
+			g.requestOne(context.Background())
+
+			assert.Len(t, c.Samples(), tc.wantSamples)
+			assert.Equal(t, tc.wantBad, c.BadReplyCount())
+		})
+	}
+}
+
+// The window context stops new dispatches; it must not abort and erase requests
+// already admitted into the measured window. Those are disproportionately the
+// slow ones, so dropping them biases latency and error rate downward.
+func TestSubscriptionListGenerator_AdmittedRequestSurvivesDispatchCancellation(t *testing.T) {
+	req := &fakeSubListRequester{reply: okSubListReply(t, 3, false)}
+	c := NewSubscriptionListCollector()
+	g := newTestSubListGenerator(t, req, c)
+
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	cancelDispatch()
+
+	g.requestOne(dispatchCtx)
+
+	assert.Len(t, c.Samples(), 1,
+		"a request admitted before the boundary must still be measured")
+}
+
+// Outer cancellation is the run genuinely ending, and must still discard.
+func TestSubscriptionListGenerator_OuterCancellationStillDiscards(t *testing.T) {
+	req := &fakeSubListRequester{err: context.Canceled}
+	c := NewSubscriptionListCollector()
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	g := newTestSubListGeneratorWithRunCtx(t, req, c, runCtx)
+	cancelRun()
+
+	g.requestOne(context.Background())
+
+	assert.Empty(t, c.Samples())
+	assert.Equal(t, 0, c.TimeoutErrors())
+}
+
+// An unset RunCtx falls back to the dispatch context, so a caller that does not
+// thread the run context keeps the previous behaviour rather than losing
+// cancellation entirely.
+func TestSubscriptionListGenerator_RequestCtxFallsBackToDispatchCtx(t *testing.T) {
+	req := &fakeSubListRequester{reply: okSubListReply(t, 1, false)}
+	g := newTestSubListGenerator(t, req, NewSubscriptionListCollector())
+
+	type ctxKey string
+	dispatchCtx := context.WithValue(context.Background(), ctxKey("k"), "v")
+
+	g.cfg.RunCtx = nil
+	assert.Equal(t, "v", g.requestCtx(dispatchCtx).Value(ctxKey("k")))
+
+	runCtx := context.WithValue(context.Background(), ctxKey("k"), "run")
+	g.cfg.RunCtx = runCtx
+	assert.Equal(t, "run", g.requestCtx(dispatchCtx).Value(ctxKey("k")))
 }
