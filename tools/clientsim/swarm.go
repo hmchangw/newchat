@@ -414,9 +414,11 @@ func histQuantile(h *dto.Histogram, q float64) float64 {
 		count := float64(b.GetCumulativeCount())
 		bound := b.GetUpperBound()
 		if count >= rank {
-			if count == prevCount {
-				return bound
-			}
+			// count == prevCount is unreachable: rank is positive (every
+			// caller passes a positive quantile over a non-empty histogram),
+			// so an equal pair at or above rank would have returned on the
+			// previous bucket, and on the first bucket prevCount is 0 while
+			// count must exceed a positive rank.
 			return prevBound + (bound-prevBound)*(rank-prevCount)/(count-prevCount)
 		}
 		prevCount, prevBound = count, bound

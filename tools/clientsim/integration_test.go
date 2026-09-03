@@ -81,7 +81,7 @@ func TestSimClient_EndToEnd_WSSubscribeWalkAndCount(t *testing.T) {
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			t.Log("simClient run did not exit within 10s")
+			t.Error("simClient run did not exit within 10s")
 		}
 		sc.close()
 	})

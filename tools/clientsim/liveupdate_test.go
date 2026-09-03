@@ -141,3 +141,16 @@ func TestApplySubscriptionUpdate_EmptyRoomIDIsMalformed(t *testing.T) {
 		assert.Empty(t, asserted)
 	})
 }
+
+// The same wildcard hazard on the live path: an update naming room "*" would
+// open chat.room.*.event. It is malformed, so it invalidates the plan and
+// forces a resync rather than being applied.
+func TestApplySubscriptionUpdate_RejectsRoomIDsThatAreNotSubjectTokens(t *testing.T) {
+	for _, bad := range []string{"*", ">", "a.b", "has space"} {
+		t.Run("roomId "+bad, func(t *testing.T) {
+			_, _, err := applySubscriptionUpdate(map[string]bool{}, updJSON("added", bad, "channel", nil))
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "roomId")
+		})
+	}
+}

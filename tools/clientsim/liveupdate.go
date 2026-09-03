@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 type subChangeOp int
@@ -50,8 +51,10 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, st
 		// membership change this client now cannot apply, so the caller has to
 		// record evidence rather than treat it as nothing happening. A DM or
 		// bot add IS nothing happening here — that traffic rides the user lane.
-		if roomID == "" {
-			return nil, "", errors.New("subscription.update added event has no roomId")
+		// Same wildcard hazard as the walk: a roomId of "*" would open
+		// chat.room.*.event, a valid subscription to every room there is.
+		if !subject.IsValidAccountToken(roomID) {
+			return nil, "", fmt.Errorf("subscription.update added event has a roomId that is not a subject token: %q", roomID)
 		}
 		if evt.Subscription.RoomType != "channel" {
 			return nil, "", nil
@@ -67,8 +70,8 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, st
 		plan[roomID] = global
 		return []subChange{{Op: subOpen, RoomID: roomID, Global: global}}, roomID, nil
 	case "removed":
-		if roomID == "" {
-			return nil, "", errors.New("subscription.update removed event has no roomId")
+		if !subject.IsValidAccountToken(roomID) {
+			return nil, "", fmt.Errorf("subscription.update removed event has a roomId that is not a subject token: %q", roomID)
 		}
 		// Close even for a room the plan does not know about. A room whose
 		// subscribe failed is in missingRooms but absent from the plan view

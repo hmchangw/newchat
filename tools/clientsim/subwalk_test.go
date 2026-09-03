@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -122,4 +124,50 @@ func TestNatsLister_RejectsRepliesWithoutASubscriptionsField(t *testing.T) {
 			assert.NotNil(t, page)
 		})
 	}
+}
+
+// A roomId is interpolated straight into a NATS subject. "*" or ">" there is
+// not a broken subscription — it is a VALID WILDCARD one: chat.room.*.event
+// receives every room in the namespace. The client would then count the whole
+// site's traffic as its own while looking perfectly ready, which corrupts the
+// one number this tool exists to produce.
+func TestFetchSubscriptionPlan_RejectsRoomIDsThatAreNotSubjectTokens(t *testing.T) {
+	for _, bad := range []string{"*", ">", "a.b", "has space", ""} {
+		t.Run("roomId "+bad, func(t *testing.T) {
+			l := &fakeLister{pages: []subListPage{{
+				Subscriptions: []subRow{{RoomID: bad, RoomType: "channel"}}, HasMore: false,
+			}}}
+			_, err := fetchSubscriptionPlan(context.Background(), l)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "roomId")
+			assert.True(t, errors.Is(err, errWalkProtocol),
+				"a reply that would open a wildcard subscription is a protocol violation, not something to retry")
+		})
+	}
+}
+
+func TestFetchSubscriptionPlan_AcceptsOrdinaryRoomIDs(t *testing.T) {
+	l := &fakeLister{pages: []subListPage{{
+		Subscriptions: []subRow{{RoomID: "GENERAL-abc123", RoomType: "channel"}}, HasMore: false,
+	}}}
+	plan, err := fetchSubscriptionPlan(context.Background(), l)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"GENERAL-abc123": true}, plan)
+}
+
+// A responder stuck on hasMore=true costs 250 requests per walk. Left
+// retryable, every client repeats that walk forever: a version skew becomes a
+// sustained request storm with the whole fleet unready.
+func TestFetchSubscriptionPlan_PageLimitIsATerminalProtocolError(t *testing.T) {
+	pages := make([]subListPage, maxSubListPages+1)
+	for i := range pages {
+		pages[i] = subListPage{
+			Subscriptions: []subRow{{RoomID: "r" + strconv.Itoa(i), RoomType: "channel"}}, HasMore: true,
+		}
+	}
+	l := &fakeLister{pages: pages}
+	_, err := fetchSubscriptionPlan(context.Background(), l)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errWalkProtocol),
+		"a responder that never ends its pagination will not end it on a retry either")
 }

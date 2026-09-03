@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // subListPageLimit is the server's default page size; we request it
@@ -72,6 +73,18 @@ func fetchSubscriptionPlan(ctx context.Context, l subscriptionLister) (map[strin
 			if row.RoomType != "channel" {
 				continue
 			}
+			// A roomId is interpolated straight into a NATS subject, so "*"
+			// or ">" is not a broken subscription but a VALID WILDCARD one:
+			// chat.room.*.event receives every room in the namespace, and the
+			// client would count the whole site's traffic as its own while
+			// looking ready. IsValidAccountToken is the repo's single-subject-
+			// token check (no '.', '*', '>', space or control char, non-empty)
+			// — its name says account, its rule is what any subject token
+			// must satisfy.
+			if !subject.IsValidAccountToken(row.RoomID) {
+				return nil, fmt.Errorf("subscription.list returned a roomId that is not a subject token (%q): %w",
+					row.RoomID, errWalkProtocol)
+			}
 			if _, seen := plan[row.RoomID]; seen {
 				continue
 			}
@@ -89,7 +102,12 @@ func fetchSubscriptionPlan(ctx context.Context, l subscriptionLister) (map[strin
 			return nil, fmt.Errorf("subscription.list page at offset %d claims hasMore with no rows: %w", offset, errWalkProtocol)
 		}
 	}
-	return nil, fmt.Errorf("subscription.list exceeded %d pages without hasMore=false", maxSubListPages)
+	// Tagged as a protocol violation, not left retryable: a responder that
+	// never ends its pagination will not end it on a retry either, and each
+	// walk costs maxSubListPages requests — across a fleet that is a sustained
+	// request storm with every client unready.
+	return nil, fmt.Errorf("subscription.list exceeded %d pages without hasMore=false: %w",
+		maxSubListPages, errWalkProtocol)
 }
 
 // natsLister issues the real client RPC over the simulated user's own
