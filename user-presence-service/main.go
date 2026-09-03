@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
@@ -50,9 +52,12 @@ type Config struct {
 	UserCacheSize int           `env:"USER_CACHE_SIZE" envDefault:"10000"`
 	UserCacheTTL  time.Duration `env:"USER_CACHE_TTL"  envDefault:"5m"`
 	NATS          NATSConfig    `envPrefix:"NATS_"`
-	Valkey        valkeyutil.Config
-	Mongo         MongoConfig    `envPrefix:"MONGO_"`
-	Presence      PresenceConfig `envPrefix:"PRESENCE_"`
+	// Buddy is the peer cluster hosting this site's standby lanes; the service
+	// also answers displaced clients' RPCs there while its own NATS is down.
+	Buddy    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	Valkey   valkeyutil.Config
+	Mongo    MongoConfig    `envPrefix:"MONGO_"`
+	Presence PresenceConfig `envPrefix:"PRESENCE_"`
 
 	// Pool caps the Mongo connection pool. RequestTimeout bounds each handler so
 	// a slow op frees its connection. No concurrency cap: the presence routes are
@@ -151,12 +156,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	publish := func(ctx context.Context, subj string, data []byte) error {
-		return nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+	// publishOn binds a presence broadcast to one connection.
+	publishOn := func(conn *o11ynats.Conn) func(context.Context, string, []byte) error {
+		return func(ctx context.Context, subj string, data []byte) error {
+			return conn.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data))
+		}
 	}
-
-	peer := NewNATSPeerPresenceClient(nc.NatsConn(), cfg.Presence.PeerTimeout)
-	handler := NewHandler(store, userDir, peer, publish, cfg.SiteID, cfg.Presence.BatchMax)
 
 	// No admission cap here: Hello/Ping/Activity/Bye are fire-and-forget
 	// (RegisterVoid), and under a saturated concurrency semaphore those are
@@ -164,20 +169,39 @@ func main() {
 	// presence updates and strand users online/offline. Only the per-request
 	// timeout is applied.
 	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
-	router := natsrouter.Default(nc, "user-presence-service",
-		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	if cfg.RequestTimeout > 0 {
-		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+	// One handler per lane over the same store and user cache: the presence
+	// broadcast and the peer-site query both speak NATS and must go out on the
+	// connection the lane's requests arrive on.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
 	}
-	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
-	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
-	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
-	natsrouter.RegisterVoid(router, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
-	natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), handler.SetManual)
-	natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), handler.QueryBatch)
-	natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), handler.QueryBatchPeer)
+	routers, err := failoverlane.BindRouters(ctx, nc, nil, &dialer,
+		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
+			peer := NewNATSPeerPresenceClient(conn.NatsConn(), cfg.Presence.PeerTimeout)
+			handler := NewHandler(store, userDir, peer, publishOn(conn), cfg.SiteID, cfg.Presence.BatchMax)
+			router := natsrouter.Default(conn, "user-presence-service",
+				natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
+			if cfg.RequestTimeout > 0 {
+				router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
+			}
+			natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
+			natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
+			natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
+			natsrouter.RegisterVoid(router, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
+			natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), handler.SetManual)
+			natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), handler.QueryBatch)
+			natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), handler.QueryBatchPeer)
+			return router, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
-	sweeper := NewSweeper(store, publish, cfg.SiteID, cfg.Presence.SweepInterval)
+	// The sweeper is not request-driven, so it has no lane: it expires stale
+	// sessions in this site's store and announces them on the home connection.
+	sweeper := NewSweeper(store, publishOn(nc), cfg.SiteID, cfg.Presence.SweepInterval)
 	sweepCtx, stopSweep := context.WithCancel(ctx)
 	sweepDone := make(chan struct{})
 	go func() {
@@ -187,7 +211,7 @@ func main() {
 
 	slog.Info("user-presence-service running", "site", cfg.SiteID, "valkey", cfg.Valkey.Addrs)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	hooks := []func(context.Context) error{
 		// Stop the sweeper and wait for Run to return BEFORE draining NATS or
 		// closing the store, so no in-flight Sweep/publish races teardown.
 		func(ctx context.Context) error {
@@ -199,10 +223,13 @@ func main() {
 				return fmt.Errorf("sweeper shutdown timed out: %w", ctx.Err())
 			}
 		},
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	}
+	hooks = append(hooks, routers.ShutdownHooks()...)
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { return store.Close() },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
