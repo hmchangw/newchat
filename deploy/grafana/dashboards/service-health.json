@@ -656,8 +656,8 @@
     {
       "type": "timeseries",
       "id": 9,
-      "title": "HTTP p99 by service",
-      "description": "One line per service so a slow service is identifiable without opening anything. Percentiles are interpolated inside a bucket and aggregated across pods: read shape and movement, not absolute truth. The top boundary is 10s, so a line pinned there means at least 10s.",
+      "title": "HTTP latency by service",
+      "description": "Solid is p95, dashed is p99, one pair per service. The gap between them is the diagnosis: p95 flat with p99 rising is a tail problem -- a retry, a GC pause, one bad pod, a cold path -- while both rising together is systemic.\n\np95 leads because it is the one that survives this fleet's traffic. A percentile needs samples above it to mean anything: p95 wants roughly 200 per window and p99 roughly 1000, so below about 3 requests per second p99 is a single slow call rather than a measurement. The req/s column in the table below says which you are looking at.\n\nBoth are interpolated inside a bucket, and every latency family in the repo shares one set of boundaries whose relative width is 100 to 150 percent. Read movement, not absolute values. The top boundary is 10s, so a line pinned there means at least 10s.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -675,10 +675,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{service_name}}"
+          "legendFormat": "{{service_name}} p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "{{service_name}} p99"
         }
       ],
       "fieldConfig": {
@@ -703,7 +714,30 @@
           "noValue": "NO DATA",
           "mappings": []
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*p99$"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -721,8 +755,8 @@
     {
       "type": "timeseries",
       "id": 10,
-      "title": "NATS RPC p99 by service",
-      "description": "Shares o11y's bucket boundaries with the HTTP histogram on purpose, so the two are directly comparable. The methods table below splits this further.\n\nA service sitting at 10s is not slow, it is timing out: the router's REQUEST_TIMEOUT defaults to 10s and the top histogram boundary is also 10s, so every timed-out call lands in the overflow bucket and histogram_quantile reports the last finite boundary. Confirm against the unavailable series in the errors panel above -- a timeout is recorded there.",
+      "title": "NATS RPC latency by service",
+      "description": "Solid p95, dashed p99, same reading as the HTTP panel beside it. Both share o11y's bucket boundaries on purpose, so the two panels are measured with the same ruler.\n\nA service sitting at exactly 10s is not slow, it is timing out: the router's REQUEST_TIMEOUT defaults to 10s and the top histogram boundary is also 10s, so a timed-out call lands in the overflow bucket and the quantile reports the last finite boundary. Which of the two it is shows in the errors panel -- a router timeout is recorded as unavailable, and pkg/oidc's own 10s HTTP timeout surfaces as unauthenticated instead.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -740,10 +774,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{service_name}}"
+          "legendFormat": "{{service_name}} p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "{{service_name}} p99"
         }
       ],
       "fieldConfig": {
@@ -768,7 +813,30 @@
           "noValue": "NO DATA",
           "mappings": []
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*p99$"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -787,7 +855,7 @@
       "type": "table",
       "id": 11,
       "title": "HTTP routes",
-      "description": "One row per route and service. Paths are templated by the gin middleware, so an id in the URL never becomes its own row. Sorted by error rate.\n\nIt opens sorted by traffic rather than by error rate, because error % is a division and is blank for a route with no calls in the window: sorting on a mostly empty column looks random. Click the error % header to rank by failure instead.",
+      "description": "One row per route and service. Paths are templated by the gin middleware, so an id in the URL never becomes its own row. Sorted by error rate.\n\nIt opens sorted by traffic rather than by error rate, because error % is a division and is blank for a route with no calls in the window: sorting on a mostly empty column looks random. Click the error % header to rank by failure instead.\n\nThe latency column is p95, not p99. Sliced per route the sample count is small, and p99 over a handful of calls is the slowest one of them rather than a measurement. Read it beside req/s: a p95 on a route doing 0.02 requests per second is still barely evidence.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -829,7 +897,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
+          "expr": "label_join(histogram_quantile(0.95, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -875,7 +943,7 @@
               "service_name": "service",
               "Value #A": "req/s",
               "Value #C": "error %",
-              "Value #D": "p99"
+              "Value #D": "p95"
             },
             "indexByName": {
               "service_name": 0,
@@ -945,8 +1013,8 @@
           },
           {
             "matcher": {
-              "id": "byRegexp",
-              "options": "p(95|99)"
+              "id": "byName",
+              "options": "p95"
             },
             "properties": [
               {
@@ -1038,7 +1106,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
+          "expr": "label_join(histogram_quantile(0.95, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1084,7 +1152,7 @@
               "service_name": "service",
               "Value #A": "req/s",
               "Value #C": "error %",
-              "Value #D": "p99"
+              "Value #D": "p95"
             },
             "indexByName": {
               "service_name": 0,
@@ -1154,8 +1222,8 @@
           },
           {
             "matcher": {
-              "id": "byRegexp",
-              "options": "p(95|99)"
+              "id": "byName",
+              "options": "p95"
             },
             "properties": [
               {
