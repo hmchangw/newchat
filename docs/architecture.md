@@ -275,7 +275,13 @@ raised in the gap are lost.
 cluster, carrying no traffic until that site's own NATS is unavailable. The
 site's own services consume them over a second NATS connection and keep writing
 to the site's own databases — which is the property that makes failover safe
-rather than merely available. See
+rather than merely available. The request/reply services (`room-service`,
+`history-service`, `user-service`, `search-service`, `user-presence-service`)
+register a second router on that connection too, so a displaced client's RPCs —
+and the failover-lane workers' own thread-parent, badge and presence RPCs — are
+answered by this site's instance against this site's stores. Every lane's
+publishes and outbound RPCs leave on the connection its work arrived on; nothing
+is shared with the home lane, whose connection is the one that is down. See
 [`nats-failover-scenarios.md`](./nats-failover-scenarios.md) for the operational
 picture and
 [the design spec](./superpowers/specs/2026-08-15-nats-site-failover-design.md)
