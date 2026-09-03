@@ -260,7 +260,7 @@ Every thread reply costs `message-worker` **~15 serial round trips**, including:
 - **Two Cassandra LWTs** (`IF EXISTS`, Paxos, ~4 extra round trips each) re-stamping `thread_room_id` on *every* subsequent reply, though the stamp is immutable after the first (`store_cassandra.go:464-484` — verified).
 - **A full-partition scan with no `LIMIT` and no `COUNT`** on every reply (`pkg/threadcount/count.go:41-44` — verified). Its own comment explains why (`deleted` tombstones must be walked past, not counted), which makes it deliberate — and O(N) per reply, O(N²) per thread. A 20k-reply thread decodes 20k rows to add one message.
 
-And **`SerialConsistency` is never set anywhere in the repo** (verified — zero occurrences), so those LWTs take the server default `SERIAL` rather than `LOCAL_SERIAL`: **cross-DC Paxos on every thread reply.**
+And **`SerialConsistency` is never set anywhere in the repo** (verified — zero occurrences), so those LWTs take the server default `SERIAL` rather than `LOCAL_SERIAL`. Nor is the client pinned to a DC: `cassutil` sets `Consistency = LocalQuorum` but its host policy is `TokenAwareHostPolicy(RoundRobinHostPolicy())`, not `DCAwareRoundRobinPolicy` (`pkg/cassutil/cass.go:73`, `:77`). So **the code takes no local-DC guarantee at all** — under any multi-DC Cassandra topology this is cross-DC Paxos on every thread reply. Whether a given site is multi-DC is a deployment fact this audit could not observe; what is verifiable is that nothing in the repo prevents it.
 
 ### 5.3 The `@all` cliff
 
