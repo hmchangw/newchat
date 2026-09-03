@@ -12,11 +12,15 @@ import (
 // work; an all-equal key would collapse every comparison onto the name tiebreak.
 const subListActivitySpread = 30 * 24 * time.Hour
 
-// subListLastSeenSpread bounds how far behind a room's activity a member's
-// LastSeenAt may sit. hasUnread is computed per row by comparing the two, so a
-// spread means a page carries a realistic mix of read and unread rows rather
-// than resolving the same way for every one.
+// subListLastSeenSpread bounds how far a member's LastSeenAt sits from the
+// room's activity, in either direction. hasUnread is computed per row by
+// comparing the two, so the sign is what decides the branch.
 const subListLastSeenSpread = 14 * 24 * time.Hour
+
+// subListCaughtUpShare is the fraction of subscriptions seeded at or after their
+// room's activity, i.e. read. Drawing LastSeenAt only from behind made every row
+// unread, so the caught-up branch never ran and every row resolved the same way.
+const subListCaughtUpShare = 0.4
 
 // BuildSubscriptionListFixtures reuses the messages preset fixtures and stamps
 // the three fields subscription.list's match filter reads and BuildFixtures
@@ -68,11 +72,22 @@ func BuildSubscriptionListFixtures(p *Preset, seed int64, siteID string, now tim
 		s.RoomType = room.Type
 		s.Name = subListRowName(room, membersByRoom[s.RoomID], s.User.Account)
 
-		behind := time.Duration(r.Int63n(int64(subListLastSeenSpread)))
-		lastSeenAt := room.LastMsgAt.Add(-behind).UTC()
-		s.LastSeenAt = &lastSeenAt
+		s.LastSeenAt = seededLastSeenAt(r, *room.LastMsgAt)
 	}
 	return f
+}
+
+// seededLastSeenAt places a member either at/after the room's activity (read) or
+// behind it (unread), so a page carries both. Ahead is capped well short of the
+// activity spread so a caught-up member cannot be dragged past `now`.
+func seededLastSeenAt(r *rand.Rand, lastMsgAt time.Time) *time.Time {
+	offset := time.Duration(r.Int63n(int64(subListLastSeenSpread)))
+	at := lastMsgAt.Add(-offset).UTC()
+	if r.Float64() < subListCaughtUpShare {
+		// Equal counts as read, so a zero offset is a legitimate draw here.
+		at = lastMsgAt.Add(offset % time.Hour).UTC()
+	}
+	return &at
 }
 
 // subListRowName mirrors how the service names a row: a channel carries the

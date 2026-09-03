@@ -51,6 +51,14 @@ type subscriptionListGeneratorConfig struct {
 	ListType           string
 	Limit              int
 	IncludeLastMessage *bool
+	// RunCtx is the run-level context requests execute under. It is deliberately
+	// NOT the per-window context the pacer dispatches with: cancelling a window
+	// must stop new dispatches, not abort requests already admitted into the
+	// measured window. Those are disproportionately the slow ones, so aborting
+	// them erases the tail from both AttemptedOps and FailedOps and biases the
+	// step's latency and error rate downward. Nil falls back to the dispatch
+	// context, preserving the old behaviour for callers that do not set it.
+	RunCtx context.Context
 }
 
 // subscriptionListGenerator drives the open-loop subscription.list
@@ -125,12 +133,23 @@ func (g *subscriptionListGenerator) Run(ctx context.Context) error {
 	return nil
 }
 
-func (g *subscriptionListGenerator) requestOne(ctx context.Context) {
+func (g *subscriptionListGenerator) requestOne(dispatchCtx context.Context) {
 	account := g.pickAccount()
 	if account == "" {
 		return
 	}
-	g.doList(ctx, account)
+	g.doList(g.requestCtx(dispatchCtx), account)
+}
+
+// requestCtx returns the context an admitted request runs under: the run-level
+// one when configured, so a window boundary stops dispatch without erasing
+// in-flight work. A genuine run cancellation still aborts and discards, which is
+// what the ctx.Err() check in doList is for.
+func (g *subscriptionListGenerator) requestCtx(dispatchCtx context.Context) context.Context {
+	if g.cfg.RunCtx != nil {
+		return g.cfg.RunCtx
+	}
+	return dispatchCtx
 }
 
 func (g *subscriptionListGenerator) doList(ctx context.Context, account string) {
@@ -158,22 +177,40 @@ func (g *subscriptionListGenerator) doList(ctx context.Context, account string) 
 // its keep is the last one: an errcode envelope and a `{}` both decode to zero
 // rows, and folding either into "empty page" would report a service outage or a
 // contract break as a fast, healthy, empty sidebar.
+//
+// The success payload is decoded first and errcode.Parse runs only when the
+// collection is absent. Parsing every reply twice would burn load-box CPU on the
+// hot path — a 200-row page approaches the 128 KB ceiling, and the parse happens
+// before the in-flight slot is released, so it shows up as saturation below the
+// service's real capacity.
 func (g *subscriptionListGenerator) classifyReply(reply []byte, latency time.Duration) {
-	if _, ok := errcode.Parse(reply); ok {
-		g.cfg.Collector.RecordError(errClassReply, latency)
+	var parsed soakSubscriptionListResponse
+	if err := json.Unmarshal(reply, &parsed); err != nil {
+		g.cfg.Collector.RecordBadReply(latency)
 		return
 	}
-	var parsed soakSubscriptionListResponse
 	// Presence of the collection, not its length: a genuinely empty sidebar
-	// replies with an empty array, while `{}` leaves it nil and is a contract
-	// violation.
-	if err := json.Unmarshal(reply, &parsed); err != nil || parsed.Subscriptions == nil {
+	// replies with an empty array, while `{}` and an errcode envelope both leave
+	// it nil.
+	if parsed.Subscriptions == nil {
+		if _, ok := errcode.Parse(reply); ok {
+			g.cfg.Collector.RecordError(errClassReply, latency)
+			return
+		}
 		g.cfg.Collector.RecordBadReply(latency)
 		return
 	}
 	if len(parsed.Subscriptions) == 0 {
 		g.cfg.Collector.RecordEmptyPage(latency)
 		return
+	}
+	// A row without a room is a row a client cannot render — the same contract
+	// break as the top-level `{}`, and just as fast to return.
+	for i := range parsed.Subscriptions {
+		if parsed.Subscriptions[i].RoomID == "" {
+			g.cfg.Collector.RecordBadReply(latency)
+			return
+		}
 	}
 	g.cfg.Collector.RecordSample(SubscriptionListSample{
 		Latency: latency,

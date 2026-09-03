@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,7 +80,6 @@ func newTestSubListWorkload(t *testing.T, req SubscriptionListRequester) *subscr
 	include := true
 	return &subscriptionListWorkload{
 		cfg:                &config{SiteID: "site-a", MaxInFlight: 4},
-		preset:             &p,
 		fixtures:           BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC()),
 		seed:               42,
 		requestTimeout:     time.Second,
@@ -131,7 +134,7 @@ func TestSubscriptionListWorkload_NewGeneratorCarriesRequestShape(t *testing.T) 
 	req := &fakeSubListRequester{reply: okSubListReply(t, 1, false)}
 	w := newTestSubListWorkload(t, req)
 
-	g := w.newGenerator(NewSubscriptionListCollector(), 750)
+	g := w.newGenerator(context.Background(), NewSubscriptionListCollector(), 750)
 
 	assert.Equal(t, 750, g.cfg.Rate)
 	assert.Equal(t, "current", g.cfg.ListType)
@@ -148,14 +151,66 @@ func TestLogStepPageShape_SkipsEmptyCollector(t *testing.T) {
 	assert.NotPanics(t, func() { logStepPageShape(500, NewSubscriptionListCollector()) })
 }
 
+// Asserts the emitted record, not the collector: the point of this function is
+// the log line, so reading the collector back would pass even if it emitted
+// nothing or emitted the wrong values.
 func TestLogStepPageShape_ReportsMeasuredPages(t *testing.T) {
 	c := NewSubscriptionListCollector()
 	c.RecordSample(SubscriptionListSample{Latency: time.Millisecond, Rows: 4, HasMore: true})
 	c.RecordSample(SubscriptionListSample{Latency: time.Millisecond, Rows: 2})
 	c.RecordEmptyPage(time.Millisecond)
+	c.RecordError(errClassTimeout, time.Millisecond)
+	c.RecordError(errClassReply, time.Millisecond)
+	c.RecordBadReply(time.Millisecond)
 
-	assert.NotPanics(t, func() { logStepPageShape(500, c) })
-	assert.InDelta(t, 3.0, c.MeanRows(), 0.001)
-	assert.Equal(t, 1, c.HasMoreCount())
-	assert.Equal(t, 1, c.EmptyPageCount())
+	attrs := captureLogAttrs(t, func() { logStepPageShape(500, c) })
+
+	assert.Equal(t, float64(500), attrs["rps"])
+	assert.Equal(t, float64(2), attrs["pages"])
+	assert.InDelta(t, 3.0, attrs["mean_rows"], 0.001)
+	assert.Equal(t, float64(1), attrs["has_more_pages"])
+	assert.Equal(t, float64(1), attrs["timeout_errors"])
+	assert.Equal(t, float64(1), attrs["service_errors"])
+	assert.Equal(t, float64(1), attrs["bad_replies"])
+	assert.Equal(t, float64(1), attrs["empty_pages"])
+}
+
+// A step that produced nothing at all must stay silent: a zero-row line would
+// read as a degenerate ramp rather than an absent one.
+func TestLogStepPageShape_EmitsNothingWhenNothingHappened(t *testing.T) {
+	attrs := captureLogAttrs(t, func() { logStepPageShape(500, NewSubscriptionListCollector()) })
+	assert.Empty(t, attrs)
+}
+
+// A step with only failures still reports, or a fully failing step would be as
+// quiet as one that never ran.
+func TestLogStepPageShape_ReportsFailureOnlySteps(t *testing.T) {
+	c := NewSubscriptionListCollector()
+	c.RecordEmptyPage(time.Millisecond)
+
+	attrs := captureLogAttrs(t, func() { logStepPageShape(500, c) })
+
+	require.NotEmpty(t, attrs)
+	assert.Equal(t, float64(0), attrs["pages"])
+	assert.Equal(t, float64(1), attrs["empty_pages"])
+}
+
+// captureLogAttrs swaps in a JSON slog handler for the duration of fn and
+// returns the attributes of the single record it emitted, or an empty map.
+func captureLogAttrs(t *testing.T, fn func()) map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	fn()
+
+	line := strings.TrimSpace(buf.String())
+	if line == "" {
+		return map[string]any{}
+	}
+	var attrs map[string]any
+	require.NoError(t, json.Unmarshal([]byte(line), &attrs))
+	return attrs
 }

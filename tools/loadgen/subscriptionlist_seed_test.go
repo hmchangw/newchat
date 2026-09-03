@@ -124,3 +124,36 @@ func TestSubscriptionsPerAccount_EmptyFixturesAreDegenerate(t *testing.T) {
 	assert.InDelta(t, 0.0, subscriptionsPerAccount(&empty), 0.001)
 	assert.True(t, degeneratePageFixtures(&empty))
 }
+
+// hasUnread is computed per row by comparing the room's activity to the
+// member's lastSeenAt. Drawing lastSeenAt only from [lastMsgAt-spread, lastMsgAt]
+// made every row unread, so the branch that resolves a caught-up room never ran.
+func TestBuildSubscriptionListFixtures_ProduceBothReadAndUnreadRows(t *testing.T) {
+	p, ok := BuiltinPreset("realistic")
+	require.True(t, ok)
+	f := BuildSubscriptionListFixtures(&p, 42, "site-a", time.Now().UTC())
+
+	activity := map[string]time.Time{}
+	for i := range f.Rooms {
+		require.NotNil(t, f.Rooms[i].LastMsgAt)
+		activity[f.Rooms[i].ID] = *f.Rooms[i].LastMsgAt
+	}
+
+	caughtUp, unread := 0, 0
+	for i := range f.Subscriptions {
+		s := &f.Subscriptions[i]
+		require.NotNil(t, s.LastSeenAt)
+		if s.LastSeenAt.Before(activity[s.RoomID]) {
+			unread++
+		} else {
+			caughtUp++
+		}
+	}
+
+	assert.Positive(t, unread, "no unread rows: the unread branch would never run")
+	assert.Positive(t, caughtUp, "no caught-up rows: hasUnread resolves the same way for every row")
+	// Neither state should be a rounding error, or the rarer branch is barely exercised.
+	total := caughtUp + unread
+	assert.Greater(t, float64(caughtUp)/float64(total), 0.2)
+	assert.Greater(t, float64(unread)/float64(total), 0.2)
+}

@@ -338,7 +338,7 @@ func runTeardown(ctx context.Context, cfg *config, args []string) int {
 	case "room-read":
 		return runTeardownRoomRead(ctx, cfg, *preset, *seed)
 	case "subscription-list":
-		return runTeardownSubscriptionList(ctx, cfg, *preset, *seed)
+		return runTeardownSubscriptionList(ctx, cfg, *preset)
 	case "thread-read":
 		return runTeardownHistory(ctx, cfg, *preset, *seed)
 	case "botroom":
@@ -534,7 +534,9 @@ func runSeedSubscriptionList(ctx context.Context, cfg *config, preset string, se
 	return 0
 }
 
-func runTeardownSubscriptionList(ctx context.Context, cfg *config, preset string, seed int64) int {
+// No seed parameter: teardown drops the seeded collections wholesale, so unlike
+// the seeding side it does not depend on which fixtures were generated.
+func runTeardownSubscriptionList(ctx context.Context, cfg *config, preset string) int {
 	if _, ok := BuiltinPreset(preset); !ok {
 		fmt.Fprintf(os.Stderr, "unknown preset: %s\n", preset)
 		return 2
