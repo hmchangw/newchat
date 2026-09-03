@@ -15,7 +15,7 @@ import (
 )
 
 func TestSimClient_ConnectAfterCloseDoesNotLeak(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	mint := &countingMinter{jwt: func() string { return mintTestJWT(t, time.Now().Add(2*time.Hour)) }}
 	s := newTestSimClient(t, "user-lc", jwtModeExpiry, mint)
 	dialed := make(chan struct{})
@@ -145,7 +145,7 @@ func TestReconnectBackoff_NonPositiveAttemptIsTheFirstBand(t *testing.T) {
 // --- stability timer: the attempt counter survives a short-lived reconnect ---
 
 func TestReconnectAttempts_AccumulateUntilFiveMinutesOfStability(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 
 	assert.Equal(t, 1, s.nextReconnectAttempt())
@@ -166,7 +166,7 @@ func TestReconnectAttempts_AccumulateUntilFiveMinutesOfStability(t *testing.T) {
 }
 
 func TestReconnectAttempts_LateStabilityTimerCannotResetANewerEpisode(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.stabilityWindow = 20 * time.Millisecond
 

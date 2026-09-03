@@ -69,7 +69,7 @@ func TestSimClient_HealthCheckExitsOnAPermanentlyClosedConnection(t *testing.T) 
 	// with MaxReconnects(-1). Without the health tick run() would sit in hold
 	// forever holding a dead socket: never ready, never reported as exited,
 	// so the swarm never restarts it and the fleet silently shrinks.
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.healthInterval = 5 * time.Millisecond
 
@@ -95,7 +95,7 @@ func TestSimClient_HealthCheckLeavesAReconnectingConnectionAlone(t *testing.T) {
 	// nats.ws reports isClosed()=false while it is still retrying, and the
 	// real client treats that as alive so the health check never shortcuts
 	// the backoff curve.
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.healthInterval = 5 * time.Millisecond
 
@@ -116,5 +116,43 @@ func TestSimClient_HealthCheckLeavesAReconnectingConnectionAlone(t *testing.T) {
 		assert.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not exit on cancel")
+	}
+}
+
+func TestSimClient_HealthTicksDoNotPostponeTheJWTRefresh(t *testing.T) {
+	// The refresh timer must be armed once and re-armed only after it fires.
+	// Rebuilding it on every loop iteration silently defeats the schedule:
+	// nextRefreshDelay is 80% of *remaining* life, so each health tick moves
+	// the deadline out and the fire time converges on T - healthInterval/4
+	// instead of 0.8*T. With production numbers (2h token, 3m tick) that is
+	// ~116 minutes rather than ~96 — the refresh lands minutes before expiry
+	// instead of comfortably inside the token's life.
+	fc := newFakeConn(emptySubListPage())
+	s, mint := newLifecycleClient(t, fc, jwtModeProactive)
+	s.refreshRand = func() float64 { return 0.5 } // exactly 80%, no jitter
+	s.healthInterval = 2 * time.Millisecond
+	s.minRefreshDelay = time.Millisecond // the floor is not what this test measures
+	s.conn = fc
+	// The expiry is set directly rather than through a minted token: JWT
+	// claims carry whole seconds, which is far too coarse to pin a deadline.
+	// One second of life means the schedule fires at 800ms; postponed, it
+	// would not fire until ~999ms.
+	s.cache.mu.Lock()
+	s.cache.token, s.cache.expiresAt = "primed", time.Now().Add(time.Second)
+	s.cache.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.hold(ctx) }()
+
+	require.Eventually(t, func() bool { return mint.calls.Load() >= 1 }, 900*time.Millisecond, 5*time.Millisecond,
+		"the proactive refresh must fire on its own schedule, not be pushed out by health ticks")
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("hold did not exit on cancel")
 	}
 }

@@ -102,11 +102,13 @@ func TestJWTCache_TracksExpiryFromClaims(t *testing.T) {
 }
 
 func TestSimClient_ProactiveRefreshLoop_MintsAndForcesReconnect(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	mint := &countingMinter{jwt: func() string { return mintTestJWT(t, time.Now().Add(1200*time.Millisecond)) }}
 	s := newTestSimClient(t, "user-lc", jwtModeProactive, mint)
 	s.dial = func(context.Context) (simConn, error) { return fc, nil }
 	s.resyncJitter = func() time.Duration { return 0 }
+	// The production floor is 30s; this test is about the loop, not the floor.
+	s.minRefreshDelay = time.Millisecond
 	startClient(t, s)
 
 	// ~80% of 1.2s ≈ 0.9-1.0s to the first refresh.
@@ -114,4 +116,35 @@ func TestSimClient_ProactiveRefreshLoop_MintsAndForcesReconnect(t *testing.T) {
 		"proactive loop must re-mint")
 	require.Eventually(t, func() bool { return fc.forceReconnects.Load() >= 1 }, 5*time.Second, 20*time.Millisecond,
 		"refresh must force a reconnect to present the fresh JWT")
+}
+
+func TestNextRefreshDelay_FloorsTheRetryOnAnExpiredToken(t *testing.T) {
+	// A failed mint leaves the cached expiry alone, so the next delay is
+	// computed from a token that is already dead. Returning ~0 there turns
+	// every client in the fleet into a 1 Hz retry loop against auth-service;
+	// tens of thousands of them is a self-inflicted outage.
+	mint := &countingMinter{jwt: func() string { return mintTestJWT(t, time.Now().Add(2*time.Hour)) }}
+	s := newTestSimClient(t, "user-1", jwtModeProactive, mint)
+	require.NoError(t, s.primeJWT(context.Background()))
+
+	t.Run("expired cache retries at the floor", func(t *testing.T) {
+		s.cache.forceExpireForTest()
+		assert.Equal(t, defaultMinRefreshDelay, s.nextRefreshDelay())
+	})
+	t.Run("a near-dead token also retries at the floor", func(t *testing.T) {
+		require.NoError(t, s.cache.set(mintTestJWT(t, time.Now().Add(2*time.Second))))
+		assert.Equal(t, defaultMinRefreshDelay, s.nextRefreshDelay())
+	})
+	t.Run("a healthy token keeps the proportional schedule", func(t *testing.T) {
+		require.NoError(t, s.cache.set(mintTestJWT(t, time.Now().Add(2*time.Hour))))
+		d := s.nextRefreshDelay()
+		assert.Greater(t, d, 90*time.Minute)
+		assert.Less(t, d, 102*time.Minute)
+	})
+	t.Run("a token with no expiry claim idles", func(t *testing.T) {
+		s.cache.mu.Lock()
+		s.cache.expiresAt = time.Time{}
+		s.cache.mu.Unlock()
+		assert.Equal(t, time.Hour, s.nextRefreshDelay())
+	})
 }

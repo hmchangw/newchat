@@ -61,6 +61,16 @@ const (
 	jwtRefreshJitter   = 0.05
 )
 
+// defaultMinRefreshDelay floors the proactive schedule. A failed mint leaves the
+// cached expiry untouched, so the next delay is computed from a token with
+// almost no life left — and once it is past expiry the proportional formula
+// yields zero. Without a floor every client in a 30k fleet would retry
+// against auth-service roughly once a second, turning one auth blip into a
+// self-inflicted outage. The cost is that a token with under ~37s of life is
+// refreshed after it expires rather than before; auth-service mints 2h
+// tokens, so that trade only ever bites a test fixture.
+const defaultMinRefreshDelay = 30 * time.Second
+
 // refreshDelay is the proactive schedule: a share of the JWT's remaining life,
 // jittered so a fleet does not re-mint in lockstep.
 func refreshDelay(expiresAt, now time.Time, randFloat func() float64) time.Duration {
@@ -125,10 +135,10 @@ func (s *simClient) nextRefreshDelay() time.Duration {
 	if expiresAt.IsZero() {
 		return time.Hour
 	}
-	if delay := refreshDelay(expiresAt, time.Now(), secureFloat64); delay > 0 {
+	if delay := refreshDelay(expiresAt, time.Now(), s.refreshRand); delay > s.minRefreshDelay {
 		return delay
 	}
-	return time.Second
+	return s.minRefreshDelay
 }
 
 // refreshAndReconnect re-mints and then forces a reconnect so the fresh JWT

@@ -16,7 +16,7 @@ import (
 )
 
 func TestSimClient_LiveUpdate_AddRemoveFlipAgainstConn(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	startClient(t, s)
 
@@ -57,7 +57,7 @@ func TestSimClient_LiveUpdate_AddRemoveFlipAgainstConn(t *testing.T) {
 }
 
 func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	startClient(t, s)
 
@@ -93,7 +93,7 @@ func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
 }
 
 func TestSimClient_LiveRepairWaitsForEveryMissingRoom(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	startClient(t, s)
 
@@ -345,7 +345,7 @@ func TestSimClient_StaleWalkDoesNotReVerifyAfterDisconnect(t *testing.T) {
 // --- room subscriptions cover BOTH lanes the real client opens ---
 
 func TestApplyChanges_OpensMessageAndMemberSubjects(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 
@@ -367,7 +367,7 @@ func TestApplyChanges_OpensMessageAndMemberSubjects(t *testing.T) {
 }
 
 func TestApplyChanges_MemberSubscribeFailureRollsBackTheMessageSub(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 	// A room is subscribed only when BOTH lanes are open; a half-open room
@@ -391,7 +391,7 @@ func TestApplyChanges_MemberSubscribeFailureRollsBackTheMessageSub(t *testing.T)
 }
 
 func TestApplyChanges_CloseUnsubscribesBothLanes(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 
@@ -510,7 +510,7 @@ func TestBootstrapWalk_StaleEpochIsNotFatal(t *testing.T) {
 	// A disconnect during the initial walk is an expected race: the reconnect
 	// handler already scheduled a resync. Tearing the client down instead
 	// burns its restart budget for something that would have self-healed.
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 	s.invalidatePlan() // the walk below will observe a changed epoch
@@ -544,7 +544,7 @@ func TestBootstrapWalk_StaleEpochIsNotFatalWhenTheRPCAlsoFails(t *testing.T) {
 	// request usually FAILS rather than returning a stale plan. Guarding only
 	// the success path left run() closing the client for exactly the case the
 	// reconnect's resync already owns.
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 	fc.reqGate = make(chan struct{})
@@ -566,7 +566,7 @@ func TestBootstrapWalk_StaleEpochIsNotFatalWhenTheRPCAlsoFails(t *testing.T) {
 }
 
 func TestBootstrapWalk_RPCFailureWithoutAnEpochChangeStaysFatal(t *testing.T) {
-	fc := newFakeConn(subListPage{HasMore: false})
+	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 	fc.failNextRequests(errors.New("nats: no responders available for request"))
@@ -576,4 +576,132 @@ func TestBootstrapWalk_RPCFailureWithoutAnEpochChangeStaysFatal(t *testing.T) {
 	assert.False(t, errors.Is(err, errPlanEpochChanged),
 		"a genuine walk failure must still end the client")
 	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("walk")), 0.001)
+}
+
+// An update that confirms a room the client already holds produces no change,
+// but it is still newer information than the snapshot an in-flight walk is
+// carrying. If it does not bump the room's generation, the walk's older plan
+// wins and closes a room the server just told us we are subscribed to — the
+// client then silently misses that room's traffic while reporting ready.
+func TestBootstrapWalk_IdempotentAddOutranksAStaleSnapshot(t *testing.T) {
+	fc := newFakeConn(emptySubListPage()) // the walk's snapshot lost r-keep
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	require.NoError(t, s.subscribeLanes(fc))
+	open, err := s.openRoomLanes(fc, "r-keep", true)
+	require.NoError(t, err)
+	s.roomSubs["r-keep"] = open
+
+	done := make(chan error, 1)
+	go func() { done <- s.bootstrapWalk(context.Background()) }()
+	<-fc.reqEntered
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r-keep", "channel", nil))
+	close(fc.reqGate)
+	require.NoError(t, <-done)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, still := s.roomSubs["r-keep"]
+	assert.True(t, still, "a confirming update must outrank the older walk snapshot that lost the room")
+}
+
+// A rejection the server will repeat forever must not be retried forever:
+// 30k clients re-asking a permanently-rejecting responder every few seconds
+// is a self-inflicted load test of the wrong thing. Giving up leaves the plan
+// unverified, so the readiness gate reports the run as failed — loudly.
+func TestResync_GivesUpOnATerminalRejection(t *testing.T) {
+	fc := newFakeConn()
+	fc.rawReply = []byte(`{"code":"bad_request","error":"unknown subscription type"}`)
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	done := make(chan struct{})
+	go func() { s.resync(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("resync retried a permanently rejected walk instead of giving up")
+	}
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("resync_terminal")), 0.001)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001, "an abandoned resync must not be ready")
+}
+
+// A retryable rejection is still retried — the give-up above must not swallow
+// a broker that is merely down.
+func TestResync_KeepsRetryingATransientRejection(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	fc.rawReply = []byte(`{"code":"unavailable","error":"responder down"}`)
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.resync(ctx); close(done) }()
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.Errors.WithLabelValues("resync")) >= 3
+	}, 3*time.Second, 10*time.Millisecond, "a transient rejection must keep retrying")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("resync_terminal")), 0.001)
+	cancel()
+	<-done
+}
+
+// A failed subscribe leaves the room in missingRooms, which is not derived
+// from roomSubs and so is invisible to diffPlans. If the server later drops
+// that room, nothing ever clears the entry and the client stays out of the
+// ready set for the rest of the soak over a room that no longer exists.
+func TestBootstrapWalk_ClearsMissingRoomsTheServerNoLongerLists(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	s.missingRooms["r-gone"] = struct{}{}
+
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	assert.Empty(t, s.missingRooms, "a room absent from the plan cannot keep the client unready forever")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// A room still in the plan keeps its missing entry: the walk clears stale
+// bookkeeping, it does not paper over a subscribe that is still broken.
+func TestBootstrapWalk_KeepsMissingRoomsStillInThePlan(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r-broken", RoomType: "channel"}}})
+	fc.subChanErrOn = map[string]error{subject.RoomEvent("r-broken", true): assert.AnError}
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	assert.Contains(t, s.missingRooms, "r-broken")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// touched is keyed by room and written on every live update. Over an 8h soak
+// with churn it would otherwise retain every room the account ever saw, in
+// every one of tens of thousands of clients.
+func TestBootstrapWalk_PrunesSettledTouchedEntries(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r-open", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	s.gen = 5
+	s.touched["long-gone"] = 3 // removed rooms accumulate here forever
+	s.touched["r-open"] = 4
+
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	assert.NotContains(t, s.touched, "long-gone", "a settled, closed room must not be retained")
+	assert.Contains(t, s.touched, "r-open", "a room still open keeps its generation")
 }

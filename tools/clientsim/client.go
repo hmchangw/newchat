@@ -89,6 +89,11 @@ type simClient struct {
 	stabilityGen    uint64
 	stabilityWindow time.Duration
 	healthInterval  time.Duration
+	// refreshRand is the jitter source for the proactive JWT schedule, and
+	// minRefreshDelay its floor — both injectable so a test can pin the
+	// deadline instead of racing it.
+	refreshRand     func() float64
+	minRefreshDelay time.Duration
 
 	stateMu sync.Mutex
 	connUp  bool
@@ -175,6 +180,8 @@ func newSimClient(account, runID string, cfg *config, mint minter, m *metrics) (
 
 		stabilityWindow: defaultStabilityWindow,
 		healthInterval:  defaultHealthInterval,
+		refreshRand:     secureFloat64,
+		minRefreshDelay: defaultMinRefreshDelay,
 	}
 	s.dial = s.realDial
 	s.resyncJitter = func() time.Duration {
@@ -244,19 +251,24 @@ func (s *simClient) run(ctx context.Context) error {
 func (s *simClient) hold(ctx context.Context) error {
 	health := time.NewTicker(s.healthInterval)
 	defer health.Stop()
+
+	// The refresh timer is armed ONCE and re-armed only after it fires.
+	// Rebuilding it per loop iteration would let the health tick postpone the
+	// deadline indefinitely: nextRefreshDelay is a share of *remaining* life,
+	// so every tick recomputes a later fire time and the schedule converges
+	// on expiry instead of 80% of the token's life.
+	var timer *time.Timer
+	var refresh <-chan time.Time
+	if s.cfg.JWTMode == jwtModeProactive {
+		timer = time.NewTimer(s.nextRefreshDelay())
+		defer timer.Stop()
+		refresh = timer.C
+	}
 	for {
-		var refresh <-chan time.Time
-		var timer *time.Timer
-		if s.cfg.JWTMode == jwtModeProactive {
-			timer = time.NewTimer(s.nextRefreshDelay())
-			refresh = timer.C
-		}
 		select {
 		case <-ctx.Done():
-			stopTimer(timer)
 			return nil
 		case <-health.C:
-			stopTimer(timer)
 			if conn := s.connSnapshot(); conn != nil && conn.IsClosed() {
 				s.m.Errors.WithLabelValues("conn_closed").Inc()
 				// Returning hands the account back to the swarm, which
@@ -266,12 +278,8 @@ func (s *simClient) hold(ctx context.Context) error {
 			}
 		case <-refresh:
 			s.refreshAndReconnect(ctx)
+			// Drained by the receive above, so Reset is safe here.
+			timer.Reset(s.nextRefreshDelay())
 		}
-	}
-}
-
-func stopTimer(t *time.Timer) {
-	if t != nil {
-		t.Stop()
 	}
 }

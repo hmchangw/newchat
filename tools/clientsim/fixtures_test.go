@@ -105,6 +105,7 @@ type fakeConn struct {
 	subs     map[string]*fakeSub
 
 	pages     []subListPage
+	rawReply  []byte // when set, every Request returns this body verbatim
 	reqCount  atomic.Int64
 	reqGate   chan struct{} // when non-nil, Request blocks until it closes
 	reqErrors []error       // returned before pages, one error per Request
@@ -171,6 +172,11 @@ func (f *fakeConn) Request(ctx context.Context, _ string, _ []byte) (*nats.Msg, 
 	}
 	i := int(f.reqCount.Add(1)) - 1
 	f.mu.Lock()
+	if f.rawReply != nil {
+		reply := f.rawReply
+		f.mu.Unlock()
+		return &nats.Msg{Data: reply}, nil
+	}
 	if len(f.reqErrors) > 0 {
 		err := f.reqErrors[0]
 		f.reqErrors = f.reqErrors[1:]
@@ -249,4 +255,12 @@ func startClient(t *testing.T, s *simClient) (context.CancelFunc, chan error) {
 		}
 	})
 	return cancel, done
+}
+
+// emptySubListPage is a walk reply for a user with no channel subscriptions.
+// The explicit empty slice matters: natsLister rejects a reply whose
+// `subscriptions` field is absent or null, so a nil here would not round-trip
+// through the fake's JSON encoding the way a real server's reply does.
+func emptySubListPage() subListPage {
+	return subListPage{Subscriptions: []subRow{}, HasMore: false}
 }

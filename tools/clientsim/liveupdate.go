@@ -31,30 +31,36 @@ type subUpdateEnvelope struct {
 // applySubscriptionUpdate mutates plan per one subscription.update event and
 // returns the changes to apply (0, 1, or 2 — a namespace flip closes the old
 // sub then opens the new one, mirroring the frontend's openChannelSub).
-func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, error) {
+//
+// The second return is the room whose membership this event ASSERTS, which is
+// not the same as the rooms it changes. An "added" for a room already open on
+// the right namespace yields no changes, yet it is still fresher than any walk
+// snapshot in flight; reporting only the changes would let that older snapshot
+// close a room the server just confirmed.
+func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, string, error) {
 	var evt subUpdateEnvelope
 	if err := json.Unmarshal(data, &evt); err != nil {
-		return nil, fmt.Errorf("decode subscription.update event: %w", err)
+		return nil, "", fmt.Errorf("decode subscription.update event: %w", err)
 	}
 	roomID := evt.Subscription.RoomID
 	switch evt.Action {
 	case "added":
 		if evt.Subscription.RoomType != "channel" || roomID == "" {
-			return nil, nil
+			return nil, "", nil
 		}
 		global := roomGlobal(evt.Subscription.Room)
 		if have, open := plan[roomID]; open {
 			if have == global {
-				return nil, nil // already subscribed on the right namespace
+				return nil, roomID, nil // already subscribed on the right namespace
 			}
 			plan[roomID] = global
-			return []subChange{{Op: subClose, RoomID: roomID}, {Op: subOpen, RoomID: roomID, Global: global}}, nil
+			return []subChange{{Op: subClose, RoomID: roomID}, {Op: subOpen, RoomID: roomID, Global: global}}, roomID, nil
 		}
 		plan[roomID] = global
-		return []subChange{{Op: subOpen, RoomID: roomID, Global: global}}, nil
+		return []subChange{{Op: subOpen, RoomID: roomID, Global: global}}, roomID, nil
 	case "removed":
 		if roomID == "" {
-			return nil, nil
+			return nil, "", nil
 		}
 		// Close even for a room the plan does not know about. A room whose
 		// subscribe failed is in missingRooms but absent from the plan view
@@ -63,11 +69,11 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, er
 		// exists. applyChangesLocked's close path clears missingRooms first
 		// and tolerates having nothing to unsubscribe.
 		delete(plan, roomID)
-		return []subChange{{Op: subClose, RoomID: roomID}}, nil
+		return []subChange{{Op: subClose, RoomID: roomID}}, roomID, nil
 	default:
 		// role_updated, mute_toggled, favorite_toggled, read, ... — state
 		// the real client tracks, none of it changes what we subscribe to.
-		return nil, nil
+		return nil, "", nil
 	}
 }
 

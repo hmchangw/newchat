@@ -10,6 +10,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -58,14 +59,18 @@ func (s *simClient) subscribeLanes(conn simConn) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		view := s.planViewLocked()
-		changes, err := applySubscriptionUpdate(view, msg.Data)
+		changes, asserted, err := applySubscriptionUpdate(view, msg.Data)
 		if err != nil {
 			s.m.DecodeFailures.Inc()
 			return
 		}
-		for _, ch := range changes {
+		// Stamped on the asserted room even when the event produced no change:
+		// the generation is what makes a live update outrank an in-flight
+		// walk's older snapshot, and an idempotent confirmation is still
+		// newer than that snapshot.
+		if asserted != "" {
 			s.gen++
-			s.touched[ch.RoomID] = s.gen
+			s.touched[asserted] = s.gen
 		}
 		if len(changes) > 0 {
 			s.applyChangesLocked(changes)
@@ -219,8 +224,45 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	}
 	s.planVerified = true
 	s.applyChangesLocked(kept)
+	s.reconcileBookkeepingLocked(plan, startGen)
 	s.updateReadyLocked()
 	return nil
+}
+
+// reconcileBookkeepingLocked settles the two maps diffPlans cannot see.
+// Caller holds s.mu.
+//
+// missingRooms is not derived from roomSubs, so a room whose subscribe failed
+// is invisible to the diff: once the server stops listing it, nothing clears
+// the entry and the client stays out of the ready set for the rest of the
+// soak over a room that no longer exists. touched is keyed by room and written
+// on every live update, so without pruning it retains every room the account
+// ever saw — in every one of tens of thousands of clients, for hours.
+//
+// Both skip anything a live update stamped after this walk's snapshot: that
+// update is the fresher fact, exactly as in the kept-filter above.
+func (s *simClient) reconcileBookkeepingLocked(plan map[string]bool, startGen uint64) {
+	for roomID := range s.missingRooms {
+		if _, want := plan[roomID]; want {
+			continue // still desired and still broken; the repair path owns it
+		}
+		if s.touched[roomID] > startGen {
+			continue
+		}
+		delete(s.missingRooms, roomID)
+	}
+	for roomID, g := range s.touched {
+		if g > startGen {
+			continue
+		}
+		if _, open := s.roomSubs[roomID]; open {
+			continue
+		}
+		if _, missing := s.missingRooms[roomID]; missing {
+			continue
+		}
+		delete(s.touched, roomID)
+	}
 }
 
 // planEpochChanged reports whether the connection was replaced since the
@@ -262,6 +304,22 @@ func (s *simClient) resync(ctx context.Context) {
 		case <-jitter.C:
 		}
 		if err := s.bootstrapWalk(ctx); err != nil {
+			// A rejection the server will repeat identically is not worth
+			// retrying: tens of thousands of clients re-asking a
+			// permanently-rejecting responder every few seconds is a load
+			// test of the wrong thing, and it never converges. Giving up
+			// leaves planVerified false, so the client stays out of the ready
+			// set and the exit gate fails the run — which is the loud
+			// outcome. Infra failures (timeouts, no responders, a broker
+			// bounce) are NOT terminal and keep retrying forever, because a
+			// soak whose broker recovers must recover with it.
+			if terminal, why := terminalWalkError(err); terminal {
+				s.m.Errors.WithLabelValues("resync_terminal").Inc()
+				slog.Error("post-reconnect resync abandoned", "account", s.account,
+					"reason", why, "error", err)
+				s.finishResync()
+				return
+			}
 			s.m.Errors.WithLabelValues("resync").Inc()
 			attempt++
 			slog.Warn("post-reconnect resync; retrying", "account", s.account, "attempt", attempt, "error", err)
@@ -280,6 +338,20 @@ func (s *simClient) resync(ctx context.Context) {
 		s.resyncMu.Unlock()
 		return
 	}
+}
+
+// terminalWalkError reports whether a failed walk will fail identically on
+// every retry: a client-fault errcode from the responder (bad_request,
+// forbidden, not_found — errcode.Terminal's own definition), or a reply whose
+// shape the walk cannot use. Everything else, errcode or not, is infra.
+func terminalWalkError(err error) (bool, string) {
+	if ee, terminal := errcode.Terminal(err); terminal {
+		return true, string(ee.Code)
+	}
+	if errors.Is(err, errWalkProtocol) {
+		return true, "protocol"
+	}
+	return false, ""
 }
 
 func (s *simClient) finishResync() {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -17,6 +18,11 @@ const subListPageLimit = 40
 // precedent): a server stuck on hasMore=true must not spin the walk
 // forever. 250 pages × 40 rows covers a 10k-room sidebar.
 const maxSubListPages = 250
+
+// errWalkProtocol tags a reply the walk cannot use — the wrong shape, or a
+// page that contradicts itself. Unlike a timeout or a downed responder, a
+// retry produces the same reply, so the resync abandons rather than spins.
+var errWalkProtocol = errors.New("subscription.list protocol violation")
 
 type subListRequest struct {
 	Type   string `json:"type"`
@@ -71,9 +77,16 @@ func fetchSubscriptionPlan(ctx context.Context, l subscriptionLister) (map[strin
 			}
 			plan[row.RoomID] = roomGlobal(row.Room)
 		}
-		// An empty page claiming more is a server bug; stop rather than spin.
-		if !reply.HasMore || len(reply.Subscriptions) == 0 {
+		if !reply.HasMore {
 			return plan, nil
+		}
+		// hasMore with no rows leaves the plan truncated. Returning it as a
+		// success would be the worst outcome available: the client subscribes
+		// to a subset, marks the plan verified and reports ready, so a soak
+		// silently measures a fraction of the sidebar behind green gauges.
+		// Failing sends the walk back through the resync instead.
+		if len(reply.Subscriptions) == 0 {
+			return nil, fmt.Errorf("subscription.list page at offset %d claims hasMore with no rows: %w", offset, errWalkProtocol)
 		}
 	}
 	return nil, fmt.Errorf("subscription.list exceeded %d pages without hasMore=false", maxSubListPages)
@@ -101,9 +114,21 @@ func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage
 	if ec, isErr := errcode.Parse(msg.Data); isErr {
 		return nil, fmt.Errorf("subscription.list rejected: %w", ec)
 	}
-	var page subListPage
-	if err := json.Unmarshal(msg.Data, &page); err != nil {
-		return nil, fmt.Errorf("decode subscription.list reply: %w", err)
+	// Decoded through a pointer-valued shadow of subListPage so an absent or
+	// null `subscriptions` is distinguishable from an explicit empty array.
+	// Straight into subListPage, a reply of `null`, `{}` or one missing the
+	// field decodes into a zero value that reads exactly like "this user has
+	// no channels" — a broken responder would then leave the whole fleet
+	// ready with nothing subscribed.
+	var reply struct {
+		Subscriptions *[]subRow `json:"subscriptions"`
+		HasMore       bool      `json:"hasMore"`
 	}
-	return &page, nil
+	if err := json.Unmarshal(msg.Data, &reply); err != nil {
+		return nil, fmt.Errorf("decode subscription.list reply: %w: %w", errWalkProtocol, err)
+	}
+	if reply.Subscriptions == nil {
+		return nil, fmt.Errorf("subscription.list reply has no subscriptions field: %w", errWalkProtocol)
+	}
+	return &subListPage{Subscriptions: *reply.Subscriptions, HasMore: reply.HasMore}, nil
 }

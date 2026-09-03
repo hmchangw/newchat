@@ -26,52 +26,59 @@ func TestApplySubscriptionUpdate(t *testing.T) {
 		payload  []byte
 		wantPlan map[string]bool
 		want     []subChange
+		// wantAsserted is the room the event vouches for — set even when the
+		// event changes nothing, because it is what stops a stale walk from
+		// reverting it.
+		wantAsserted string
 	}{
 		{"added channel opens global", map[string]bool{},
 			updJSON("added", "r1", "channel", &tr),
 			map[string]bool{"r1": true},
-			[]subChange{{Op: subOpen, RoomID: "r1", Global: true}}},
+			[]subChange{{Op: subOpen, RoomID: "r1", Global: true}}, "r1"},
 		{"added channel missing crossSite fails safe to global", map[string]bool{},
 			updJSON("added", "r1", "channel", nil),
 			map[string]bool{"r1": true},
-			[]subChange{{Op: subOpen, RoomID: "r1", Global: true}}},
+			[]subChange{{Op: subOpen, RoomID: "r1", Global: true}}, "r1"},
 		{"added dm is user-lane only, no change", map[string]bool{},
 			updJSON("added", "d1", "dm", nil),
-			map[string]bool{}, nil},
+			map[string]bool{}, nil, ""},
 		{"removed closes and forgets", map[string]bool{"r1": true},
 			updJSON("removed", "r1", "channel", nil),
 			map[string]bool{},
-			[]subChange{{Op: subClose, RoomID: "r1"}}},
+			[]subChange{{Op: subClose, RoomID: "r1"}}, "r1"},
 		// Deliberately NOT a no-op: a room whose subscribe failed is absent
 		// from the plan view but present in missingRooms, and only a close
 		// clears it. See TestSimClient_RemovalClearsAFailedRoomAndRestoresReady.
 		{"removed room absent from the plan still closes", map[string]bool{},
 			updJSON("removed", "rX", "channel", nil),
 			map[string]bool{},
-			[]subChange{{Op: subClose, RoomID: "rX"}}},
+			[]subChange{{Op: subClose, RoomID: "rX"}}, "rX"},
 		{"crossSite flip closes old namespace, opens new", map[string]bool{"r1": true},
 			updJSON("added", "r1", "channel", &fa),
 			map[string]bool{"r1": false},
-			[]subChange{{Op: subClose, RoomID: "r1"}, {Op: subOpen, RoomID: "r1", Global: false}}},
+			[]subChange{{Op: subClose, RoomID: "r1"}, {Op: subOpen, RoomID: "r1", Global: false}}, "r1"},
+		// No change, but still an assertion about r1: the walk snapshot that
+		// disagrees with it is the older fact.
 		{"same namespace re-add is a no-op (never double-subscribed)", map[string]bool{"r1": true},
 			updJSON("added", "r1", "channel", &tr),
-			map[string]bool{"r1": true}, nil},
+			map[string]bool{"r1": true}, nil, "r1"},
 		{"role_updated carrying a subscription does not touch subs", map[string]bool{"r1": true},
 			updJSON("role_updated", "r1", "channel", &tr),
-			map[string]bool{"r1": true}, nil},
+			map[string]bool{"r1": true}, nil, ""},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			changes, err := applySubscriptionUpdate(tt.plan, tt.payload)
+			changes, asserted, err := applySubscriptionUpdate(tt.plan, tt.payload)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, changes)
 			assert.Equal(t, tt.wantPlan, tt.plan)
+			assert.Equal(t, tt.wantAsserted, asserted)
 		})
 	}
 }
 
 func TestApplySubscriptionUpdate_Malformed(t *testing.T) {
-	_, err := applySubscriptionUpdate(map[string]bool{}, []byte("{oops"))
+	_, _, err := applySubscriptionUpdate(map[string]bool{}, []byte("{oops"))
 	assert.Error(t, err)
 }
 
@@ -98,7 +105,7 @@ func TestApplySubscriptionUpdate_RemovalClearsARoomThatNeverOpened(t *testing.T)
 	// deleted the missingRooms entry and the client stayed not-ready for the
 	// rest of the run — for a room that no longer exists.
 	plan := map[string]bool{}
-	changes, err := applySubscriptionUpdate(plan, updJSON("removed", "gone", "channel", nil))
+	changes, _, err := applySubscriptionUpdate(plan, updJSON("removed", "gone", "channel", nil))
 	require.NoError(t, err)
 	require.Len(t, changes, 1, "a removal must still close, so missingRooms is cleared")
 	assert.Equal(t, subClose, changes[0].Op)
@@ -107,7 +114,7 @@ func TestApplySubscriptionUpdate_RemovalClearsARoomThatNeverOpened(t *testing.T)
 
 func TestApplySubscriptionUpdate_RemovalWithoutARoomIDIsIgnored(t *testing.T) {
 	plan := map[string]bool{}
-	changes, err := applySubscriptionUpdate(plan, updJSON("removed", "", "channel", nil))
+	changes, _, err := applySubscriptionUpdate(plan, updJSON("removed", "", "channel", nil))
 	require.NoError(t, err)
 	assert.Empty(t, changes)
 }

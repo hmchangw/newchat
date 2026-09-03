@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,4 +72,54 @@ func TestRoomGlobal_TriState(t *testing.T) {
 	assert.True(t, roomGlobal(&subRoom{}), "nil crossSite -> global")
 	assert.True(t, roomGlobal(&subRoom{CrossSite: bptr(true)}))
 	assert.False(t, roomGlobal(&subRoom{CrossSite: bptr(false)}), "only explicit false is local")
+}
+
+func TestFetchSubscriptionPlan_TruncatedWalkIsAnError(t *testing.T) {
+	// A page that claims hasMore but carries no rows leaves the plan
+	// truncated. Returning it as a success is the worst outcome available:
+	// the client subscribes to a subset, marks the plan verified, and reports
+	// ready — a soak that measures a fraction of the fleet's rooms while
+	// every dashboard stays green. Failing sends it back through the resync.
+	rows := make([]subRow, subListPageLimit)
+	for i := range rows {
+		rows[i] = subRow{RoomID: string(rune('a' + i%26)), RoomType: "channel"}
+	}
+	l := &fakeLister{pages: []subListPage{
+		{Subscriptions: rows, HasMore: true},
+		{Subscriptions: nil, HasMore: true}, // server says more, sends none
+	}}
+	_, err := fetchSubscriptionPlan(context.Background(), l)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no rows")
+}
+
+func TestNatsLister_RejectsRepliesWithoutASubscriptionsField(t *testing.T) {
+	// `null`, `{}` and a reply missing the field all decode into a zero
+	// subListPage, which is indistinguishable from "this user has no
+	// channels" — so a broken responder would put the whole fleet in the
+	// ready state with nothing subscribed. Only an explicit array counts.
+	tests := []struct {
+		name    string
+		reply   string
+		wantErr string
+	}{
+		{"null body", `null`, "no subscriptions"},
+		{"empty object", `{}`, "no subscriptions"},
+		{"hasMore but no field", `{"hasMore":true}`, "no subscriptions"},
+		{"explicit empty array is legitimate", `{"subscriptions":[],"hasMore":false}`, ""},
+		{"populated array", `{"subscriptions":[{"roomId":"r1","roomType":"channel"}],"hasMore":false}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := &natsLister{conn: &requestConn{reply: []byte(tt.reply)}, subject: "s", timeout: time.Second}
+			page, err := l.List(context.Background(), subListRequest{Type: "rooms"})
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotNil(t, page)
+		})
+	}
 }
