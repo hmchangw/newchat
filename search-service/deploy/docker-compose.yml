@@ -11,6 +11,11 @@ services:
       - NATS_URL=${NATS_URL:-nats://nats:4222}
       - NATS_CREDS_FILE=${NATS_CREDS_FILE:-/etc/nats/backend.creds}
       - SITE_ID=${SITE_ID:-site-local}
+      # Dev points the buddy at the same NATS: one server, but the full failover
+      # code path (second router on the buddy connection) still runs. Placement
+      # is not asserted here — a single-server NATS reports no cluster.
+      - BUDDY_SITE_ID=${BUDDY_SITE_ID:-site-local}
+      - BUDDY_NATS_URL=${BUDDY_NATS_URL:-nats://nats:4222}
       - SEARCH_URL=${SEARCH_URL:-http://elasticsearch:9200}
       - SEARCH_BACKEND=${SEARCH_BACKEND:-elasticsearch}
       - VALKEY_ADDRS=${VALKEY_ADDRS:-valkey:6379}
