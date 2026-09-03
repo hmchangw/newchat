@@ -11,10 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -196,13 +196,29 @@ func validateConfig(cfg *config) error {
 	// The NATS user JWT crosses the wire on connect, so cleartext has to be a
 	// deliberate act rather than a typo in a URL. Opting in still warns: on a
 	// throwaway local stack that is fine, against anything shared it is not.
-	if !strings.HasPrefix(cfg.NATSWSURL, "wss://") {
+	// Scheme-parsed, not prefix-matched: the opt-in below exists to allow
+	// CLEARTEXT WEBSOCKET on a throwaway stack, never a different protocol. A
+	// nats:// URL would connect over plain TCP and quietly measure a transport
+	// the real client does not ship.
+	u, err := url.Parse(cfg.NATSWSURL)
+	if err != nil {
+		// Same message as a wrong scheme: an operator who set a bare host:port
+		// needs to be told what the knob wants, not shown a parser's internals.
+		return fmt.Errorf("CLIENTSIM_NATS_WS_URL must be a WebSocket URL (wss:// or ws://), got %q: %w",
+			cfg.NATSWSURL, err)
+	}
+	switch u.Scheme {
+	case "wss":
+	case "ws":
 		if !cfg.AllowInsecureWS {
 			return fmt.Errorf("CLIENTSIM_NATS_WS_URL must use wss://, got %q — set CLIENTSIM_ALLOW_INSECURE_WS=true only for a throwaway local stack",
 				cfg.NATSWSURL)
 		}
 		slog.Warn("connecting over cleartext WebSocket; the NATS user JWT is sent unencrypted — never do this against a shared cluster",
 			"url", cfg.NATSWSURL)
+	default:
+		return fmt.Errorf("CLIENTSIM_NATS_WS_URL must be a WebSocket URL (wss:// or ws://), got %q — this tool connects the way the real client does, over nats.ws",
+			cfg.NATSWSURL)
 	}
 	if cfg.JWTMode != jwtModeProactive && cfg.JWTMode != jwtModeExpiry {
 		return fmt.Errorf("CLIENTSIM_JWT_MODE must be proactive or expiry, got %q", cfg.JWTMode)

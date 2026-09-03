@@ -114,7 +114,11 @@ func (s *simClient) userCB() (string, error) {
 	if token == "" {
 		return "", errors.New("jwt cache empty: primeJWT must run before connect")
 	}
-	if s.cfg.JWTMode == jwtModeExpiry && !expiresAt.IsZero() && time.Now().After(expiresAt) {
+	// forceRefresh is the broker's verdict and outranks the local clock in
+	// either mode: waiting for a timer or a local expiry that will not arrive
+	// hands the same rejected credential back on every reconnect.
+	forced := s.forceRefresh.CompareAndSwap(true, false)
+	if forced || (s.cfg.JWTMode == jwtModeExpiry && !expiresAt.IsZero() && time.Now().After(expiresAt)) {
 		if err := s.refreshJWT(context.Background()); err != nil {
 			return "", err
 		}
@@ -151,7 +155,11 @@ func (s *simClient) refreshAndReconnect(ctx context.Context) {
 		return
 	}
 	if conn := s.connSnapshot(); conn != nil {
+		s.markIntentionalReconnect()
 		if err := conn.ForceReconnect(); err != nil {
+			// No disconnect will follow, so the latch would mislabel the next
+			// one that does.
+			s.intentionalReconnect.Store(false)
 			slog.Warn("force reconnect after refresh", "account", s.account, "error", err)
 		}
 	}

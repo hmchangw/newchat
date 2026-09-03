@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -176,4 +177,62 @@ func TestReconnectAttempts_LateStabilityTimerCannotResetANewerEpisode(t *testing
 	time.Sleep(60 * time.Millisecond)
 	assert.Equal(t, 1, s.reconnectAttemptsForTest(),
 		"a disarmed timer must not reset a counter that has moved on")
+}
+
+// ForceReconnect passes a nil error to DisconnectedErrCB (nats.go v1.50.0
+// doReconnect(nil, true)), so a deliberate JWT-refresh reconnect was recorded
+// under the same "closed" label as a real teardown. An operator reading the
+// disconnect series during a soak could not tell the fleet's own refresh
+// churn from connections actually going away.
+func TestDisconnectReason_SeparatesADeliberateRefreshFromAClose(t *testing.T) {
+	m := newMetrics()
+	s := newTestSimClient(t, "user-1", jwtModeProactive, &countingMinter{})
+	s.m = m
+
+	s.recordDisconnect(nil) // an ordinary close
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Disconnects.WithLabelValues("closed")), 0.001)
+
+	s.markIntentionalReconnect()
+	s.recordDisconnect(nil) // the forced reconnect that follows a refresh
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Disconnects.WithLabelValues("jwt_refresh")), 0.001)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Disconnects.WithLabelValues("closed")), 0.001,
+		"the latch is consumed once, not sticky")
+
+	s.recordDisconnect(nil)
+	assert.InDelta(t, 2, promtestutil.ToFloat64(m.Disconnects.WithLabelValues("closed")), 0.001)
+}
+
+// A real error still classifies as itself even if a refresh latch is pending:
+// the latch describes an intentional close, not an error that happened to
+// arrive during one.
+func TestDisconnectReason_ARealErrorOutranksThePendingLatch(t *testing.T) {
+	s := newTestSimClient(t, "user-1", jwtModeProactive, &countingMinter{})
+	s.markIntentionalReconnect()
+	s.recordDisconnect(io.EOF)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Disconnects.WithLabelValues("eof")), 0.001)
+}
+
+// In expiry mode userCB only re-mints once the LOCAL clock says the JWT is
+// dead. A broker that rejects a still-locally-valid token would be handed the
+// same dead credential on every reconnect, forever. The disconnect path
+// latches the broker's verdict so the next callback mints once.
+func TestUserCB_ABrokerAuthExpiryForcesOneRefresh(t *testing.T) {
+	mint := &countingMinter{jwt: func() string { return mintTestJWT(t, time.Now().Add(2*time.Hour)) }}
+	s := newTestSimClient(t, "user-1", jwtModeExpiry, mint)
+	require.NoError(t, s.primeJWT(context.Background()))
+	require.Equal(t, int64(1), mint.calls.Load())
+
+	// Locally valid: no mint.
+	_, err := s.userCB()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), mint.calls.Load())
+
+	s.recordDisconnect(nats.ErrAuthExpired)
+	_, err = s.userCB()
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), mint.calls.Load(), "the broker's verdict must force one mint")
+
+	_, err = s.userCB()
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), mint.calls.Load(), "and exactly one — the latch is consumed")
 }

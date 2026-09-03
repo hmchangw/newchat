@@ -145,14 +145,7 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 			go s.resync(ctx)
 		}),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			// nats.go passes a nil error when the client itself closed the
-			// connection; labelling that "eof" makes a deliberate teardown
-			// read like a network drop on the dashboard.
-			reason := "closed"
-			if err != nil {
-				reason = disconnectReason(err)
-			}
-			s.m.Disconnects.WithLabelValues(reason).Inc()
+			s.recordDisconnect(err)
 			// Separate calls, not one nested helper: invalidatePlan takes
 			// s.mu and markConnDown holds stateMu, and the lock order forbids
 			// stateMu -> s.mu.
@@ -227,6 +220,35 @@ func (s *simClient) controlPlaneFault(ctx context.Context) {
 	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
 	s.mu.Unlock()
 	go s.resync(ctx)
+}
+
+// markIntentionalReconnect latches the fact that the NEXT disconnect is one
+// the client asked for. nats.go's ForceReconnect calls doReconnect(nil, true),
+// which hands DisconnectedErrCB a nil error (nats.go@v1.50.0), so without the
+// latch the fleet's own JWT-refresh churn is indistinguishable from
+// connections actually going away.
+func (s *simClient) markIntentionalReconnect() { s.intentionalReconnect.Store(true) }
+
+// recordDisconnect classifies one disconnect and, when the broker says the
+// credential is dead, latches a forced re-mint for the next JWT callback.
+func (s *simClient) recordDisconnect(err error) {
+	// A real error classifies as itself: the latch describes an intentional
+	// close, not an error that happened to arrive during one.
+	reason := "closed"
+	switch {
+	case err != nil:
+		reason = disconnectReason(err)
+		if errors.Is(err, nats.ErrAuthExpired) {
+			// Expiry mode only re-mints once the LOCAL clock says the token is
+			// dead. A broker rejecting a still-locally-valid JWT (clock skew,
+			// or a stricter server-side check) would otherwise be handed the
+			// same dead credential on every reconnect, forever.
+			s.forceRefresh.Store(true)
+		}
+	case s.intentionalReconnect.CompareAndSwap(true, false):
+		reason = "jwt_refresh"
+	}
+	s.m.Disconnects.WithLabelValues(reason).Inc()
 }
 
 // disconnectReason maps common close errors to a bounded label set so the

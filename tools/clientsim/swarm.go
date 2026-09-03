@@ -83,6 +83,57 @@ func rampPacing(rampRate float64) (time.Duration, *rampBudget) {
 	return time.Millisecond, &rampBudget{perTick: rampRate / 1000}
 }
 
+// orderIndex is the churn-pick population: a slice for O(1) random selection
+// plus the account->position map that makes removal O(1) too. The map is the
+// point — scanning the slice per removal made a full-fleet shutdown quadratic,
+// and at 30k clients that is ~4.5e8 string comparisons against a 20s drain
+// budget. Not internally synchronized; the swarm's mu guards it.
+type orderIndex struct {
+	accts []string
+	at    map[string]int
+}
+
+func newOrderIndex() *orderIndex { return &orderIndex{at: map[string]int{}} }
+
+func (o *orderIndex) add(account string) {
+	if _, ok := o.at[account]; ok {
+		return
+	}
+	o.at[account] = len(o.accts)
+	o.accts = append(o.accts, account)
+}
+
+// remove swaps the last element into the hole and repairs ITS index — getting
+// that wrong silently drops a different account on some later removal.
+func (o *orderIndex) remove(account string) {
+	i, ok := o.at[account]
+	if !ok {
+		return
+	}
+	last := len(o.accts) - 1
+	o.accts[i] = o.accts[last]
+	o.at[o.accts[i]] = i
+	o.accts = o.accts[:last]
+	delete(o.at, account)
+}
+
+func (o *orderIndex) len() int { return len(o.accts) }
+
+// accounts returns a copy, so a caller iterating it cannot be invalidated by
+// a concurrent removal.
+func (o *orderIndex) accounts() []string {
+	out := make([]string, len(o.accts))
+	copy(out, o.accts)
+	return out
+}
+
+func (o *orderIndex) pick(randN func(int) int) string {
+	if len(o.accts) == 0 {
+		return ""
+	}
+	return o.accts[randN(len(o.accts))]
+}
+
 // runSwarm ramps clients at rampRate connects/sec (per replica — cluster
 // rate is rampRate × replicas), optionally churns clients at churnRate
 // cycles/sec, and drains everything when ctx ends. Rates above 1000/s are
@@ -98,8 +149,8 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		mu       sync.Mutex
 		running  = map[string]runnable{}
 		cancels  = map[string]context.CancelFunc{}
-		order    []string // parallel index for O(1) random churn picks
-		pending  []string // accounts awaiting a restart (failed start, or early exit)
+		order    = newOrderIndex() // O(1) random churn picks AND O(1) removal
+		pending  []string          // accounts awaiting a restart (failed start, or early exit)
 		attempts = map[string]int{}
 		epochs   = map[string]uint64{} // epoch of the instance currently registered
 		epoch    uint64
@@ -135,7 +186,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		running[account] = client
 		cancels[account] = cancel
 		epochs[account] = ep
-		order = append(order, account)
+		order.add(account)
 		mu.Unlock()
 		wg.Add(1)
 		go func() {
@@ -160,13 +211,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		delete(running, account)
 		delete(cancels, account)
 		delete(epochs, account)
-		for i, a := range order {
-			if a == account {
-				order[i] = order[len(order)-1]
-				order = order[:len(order)-1]
-				break
-			}
-		}
+		order.remove(account)
 		mu.Unlock()
 		if cancel != nil {
 			cancel()
@@ -195,12 +240,13 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 		pending = append(pending, account)
 	}
 
+	// Same pacing as the ramp: clamping to one cycle per 1ms tick silently ran
+	// a configured 5000/s at 1000/s.
 	var churnCh <-chan time.Time
+	churnBudget := &rampBudget{}
 	if churnRate > 0 {
-		churnInterval := time.Duration(float64(time.Second) / churnRate)
-		if churnInterval < time.Millisecond {
-			churnInterval = time.Millisecond
-		}
+		var churnInterval time.Duration
+		churnInterval, churnBudget = rampPacing(churnRate)
 		churnTicker := time.NewTicker(churnInterval)
 		defer churnTicker.Stop()
 		churnCh = churnTicker.C
@@ -238,15 +284,15 @@ loop:
 			stopOne(inst.account)
 			requeue(inst.account)
 		case <-churnCh:
-			// Cycle one random running client through a full disconnect +
+			// Cycle random running clients through a full disconnect +
 			// re-auth + rejoin, modeling mobile clients dropping.
-			mu.Lock()
-			var pick string
-			if len(order) > 0 {
-				pick = order[secureIntN(len(order))]
-			}
-			mu.Unlock()
-			if pick != "" {
+			for n := churnBudget.take(); n > 0; n-- {
+				mu.Lock()
+				pick := order.pick(secureIntN)
+				mu.Unlock()
+				if pick == "" {
+					break
+				}
 				// A churn restart is a deliberate cycle, not a failure: reset
 				// the attempt budget so long soaks do not exhaust it.
 				stopOne(pick)
@@ -259,8 +305,7 @@ loop:
 	}
 
 	mu.Lock()
-	accountsToStop := make([]string, len(order))
-	copy(accountsToStop, order)
+	accountsToStop := order.accounts()
 	mu.Unlock()
 	for _, account := range accountsToStop {
 		stopOne(account)

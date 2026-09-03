@@ -211,7 +211,10 @@ func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
 		{"wss is always fine", "wss://nats.example:443", false, ""},
 		{"ws without the opt-in is rejected", "ws://127.0.0.1:8080", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
 		{"ws with the opt-in is allowed", "ws://127.0.0.1:8080", true, ""},
-		{"a non-websocket scheme is rejected too", "nats://127.0.0.1:4222", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+		// Rejected for BEING the wrong protocol, not merely for lacking the
+		// opt-in — TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn
+		// owns the case where the opt-in is present.
+		{"a non-websocket scheme is rejected too", "nats://127.0.0.1:4222", false, "must be a WebSocket URL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -263,5 +266,45 @@ func TestServeMetrics_ShutdownIsNotAFailure(t *testing.T) {
 		assert.False(t, ok, "a clean shutdown must not report an error, got %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("serveMetrics never finished after Shutdown")
+	}
+}
+
+// The tool's premise is that it connects the way the real client does — over
+// nats.ws. A nats:// URL would connect over plain TCP instead, quietly
+// measuring a transport nobody ships. The insecure opt-in exists to allow
+// cleartext WebSocket on a throwaway stack, not to allow a different protocol.
+func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T) {
+	base := func() *config {
+		return &config{
+			JWTMode: jwtModeProactive, MinReadyRatio: 0.95,
+			SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
+			RampRate: 50, ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		url     string
+		allow   bool
+		wantErr string
+	}{
+		{"wss is always fine", "wss://nats.example:443", false, ""},
+		{"ws needs the opt-in", "ws://127.0.0.1:8080", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+		{"ws with the opt-in", "ws://127.0.0.1:8080", true, ""},
+		{"nats:// is not a WebSocket URL, opt-in or not", "nats://127.0.0.1:4222", true, "WebSocket"},
+		{"tls:// is not either", "tls://127.0.0.1:4222", true, "WebSocket"},
+		{"a bare host is not a URL at all", "127.0.0.1:4222", true, "WebSocket"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			cfg.NATSWSURL, cfg.AllowInsecureWS = tt.url, tt.allow
+			err := validateConfig(cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
 	}
 }

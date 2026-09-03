@@ -156,3 +156,54 @@ func TestSimClient_HealthTicksDoNotPostponeTheJWTRefresh(t *testing.T) {
 		t.Fatal("hold did not exit on cancel")
 	}
 }
+
+// The pump is the only consumer of roomCh, and run cancelled it without
+// waiting. Messages already queued at shutdown were discarded uncounted, so
+// the run's delivery total was biased low by however deep the queue was —
+// silently, in a tool whose entire product is that count.
+func TestSimClient_ShutdownDrainsQueuedDeliveries(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	const queued = 32
+	for i := 0; i < queued; i++ {
+		s.roomCh <- &nats.Msg{Subject: subject.RoomEvent("r1", true), Data: []byte(`{"type":"other"}`)}
+	}
+	require.Len(t, s.roomCh, queued, "precondition: the pump has not started")
+
+	pumpCtx, stopPump := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.pump(pumpCtx) }()
+	s.drainPump(stopPump, done)
+
+	assert.InDelta(t, queued, promtestutil.ToFloat64(s.m.Delivered.WithLabelValues("channel")), 0.001,
+		"every queued delivery must be counted before the client goes away")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("drainPump returned without joining the pump goroutine")
+	}
+}
+
+// The drain is bounded: a pump that cannot keep up must not hold the whole
+// fleet's shutdown past its budget.
+func TestSimClient_ShutdownDrainIsBounded(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.pumpDrainTimeout = 20 * time.Millisecond
+	s.roomCh <- &nats.Msg{Subject: subject.RoomEvent("r1", true), Data: []byte(`{"type":"other"}`)}
+
+	// No pump is running, so the queue never empties.
+	stopPump := func() {}
+	done := make(chan struct{})
+	close(done)
+	start := time.Now()
+	s.drainPump(stopPump, done)
+
+	assert.Less(t, time.Since(start), time.Second, "the drain must give up on its own deadline")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("drain_timeout")), 0.001,
+		"a drain that gave up with messages queued is evidence, not silence")
+}

@@ -409,3 +409,37 @@ func TestSummarize_OmitsTheOverflowAttrWhenNothingOverflowed(t *testing.T) {
 		assert.NotEqual(t, "clientsim_broadcast_to_client_latency_seconds_over_top_bucket", s.Attrs[i])
 	}
 }
+
+// Churn had the same rounding bug the ramp did: above 1000 cycles/s it was
+// clamped to one per 1ms tick, so a configured 5000/s silently ran at 1000/s.
+// Both paths now share rampPacing.
+func TestChurnPacing_HonoursRatesAboveTheBatchThreshold(t *testing.T) {
+	interval, b := rampPacing(5000)
+	assert.Equal(t, time.Millisecond, interval)
+	total := 0
+	for i := 0; i < 1000; i++ {
+		total += b.take()
+	}
+	assert.Equal(t, 5000, total, "a churn rate above 1000/s must not be clamped to 1000/s")
+}
+
+// Removing a client scanned the whole order slice, so a full-fleet shutdown
+// was quadratic: at 30k clients that is ~4.5e8 string comparisons against a
+// 20s drain budget.
+func TestOrderIndex_RemovalIsConstantTime(t *testing.T) {
+	idx := newOrderIndex()
+	for i := 0; i < 5; i++ {
+		idx.add(fmt.Sprintf("u%d", i))
+	}
+	idx.remove("u2")
+	assert.Equal(t, 4, idx.len())
+	assert.NotContains(t, idx.accounts(), "u2")
+	// Swap-with-last must keep the index of the moved element correct, or a
+	// later removal silently drops the wrong account.
+	idx.remove("u4")
+	assert.Equal(t, 3, idx.len())
+	assert.ElementsMatch(t, []string{"u0", "u1", "u3"}, idx.accounts())
+	idx.remove("absent") // no-op, never a panic
+	assert.Equal(t, 3, idx.len())
+	assert.NotEmpty(t, idx.pick(secureIntN))
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -94,6 +95,14 @@ type simClient struct {
 	// deadline instead of racing it.
 	refreshRand     func() float64
 	minRefreshDelay time.Duration
+	// intentionalReconnect labels the disconnect a proactive refresh causes;
+	// forceRefresh carries the broker's "this credential is dead" verdict to
+	// the next JWT callback. Both are consumed once.
+	intentionalReconnect atomic.Bool
+	forceRefresh         atomic.Bool
+	// pumpDrainTimeout bounds the shutdown drain; a field so tests need not
+	// wait out the production budget.
+	pumpDrainTimeout time.Duration
 
 	stateMu sync.Mutex
 	connUp  bool
@@ -178,10 +187,11 @@ func newSimClient(account, runID string, cfg *config, mint minter, m *metrics) (
 		touched:      map[string]uint64{},
 		roomCh:       make(chan *nats.Msg, cfg.SubPendingMsgs),
 
-		stabilityWindow: defaultStabilityWindow,
-		healthInterval:  defaultHealthInterval,
-		refreshRand:     secureFloat64,
-		minRefreshDelay: defaultMinRefreshDelay,
+		stabilityWindow:  defaultStabilityWindow,
+		healthInterval:   defaultHealthInterval,
+		refreshRand:      secureFloat64,
+		minRefreshDelay:  defaultMinRefreshDelay,
+		pumpDrainTimeout: defaultPumpDrainTimeout,
 	}
 	s.dial = s.realDial
 	s.resyncJitter = func() time.Duration {
@@ -216,12 +226,20 @@ func (s *simClient) run(ctx context.Context) error {
 	if err := s.connect(ctx); err != nil {
 		return err
 	}
+	// The pump's context is deliberately NOT derived from ctx: on the normal
+	// SIGTERM path ctx is already done by the time teardown runs, so a derived
+	// pump would exit before draining anything.
+	pumpCtx, stopPump := context.WithCancel(context.WithoutCancel(ctx))
+	pumpDone := make(chan struct{})
+	go func() { defer close(pumpDone); s.pump(pumpCtx) }()
 	// Every exit from here owns its teardown, rather than trusting the swarm
 	// to call close(). Idempotent, so the swarm's own close() is still safe.
-	defer s.close()
-	pumpCtx, stopPump := context.WithCancel(ctx)
-	defer stopPump()
-	go s.pump(pumpCtx)
+	// Order matters: close the connection FIRST so nothing new lands in
+	// roomCh, then count what is already queued.
+	defer func() {
+		s.close()
+		s.drainPump(stopPump, pumpDone)
+	}()
 
 	conn := s.connSnapshot()
 	if conn == nil {
@@ -248,6 +266,40 @@ func (s *simClient) run(ctx context.Context) error {
 // MaxReconnects(-1); before this, run() would sit here forever with a dead
 // connection, never reporting an exit, so the swarm never restarted it and
 // the fleet silently shrank.
+// defaultPumpDrainTimeout bounds the shutdown drain. Well inside the swarm's
+// 20s budget: clients drain concurrently, so this is a per-client ceiling, not
+// a fleet-wide one.
+const (
+	defaultPumpDrainTimeout = 2 * time.Second
+	pumpDrainPoll           = 5 * time.Millisecond
+)
+
+// drainPump counts the deliveries already queued before the client goes away.
+// The caller closes the connection first, so nothing new arrives. Without this
+// the run's delivery total is biased low by whatever roomCh held at shutdown —
+// silently, which for a tool whose product IS that count is the one outcome
+// worth spending a bounded wait to avoid.
+func (s *simClient) drainPump(stop context.CancelFunc, done <-chan struct{}) {
+	defer func() {
+		stop()
+		<-done
+	}()
+	deadline := time.NewTimer(s.pumpDrainTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(pumpDrainPoll)
+	defer tick.Stop()
+	for len(s.roomCh) > 0 {
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			s.m.Errors.WithLabelValues("drain_timeout").Inc()
+			slog.Warn("pump drain timed out with deliveries queued",
+				"account", s.account, "queued", len(s.roomCh))
+			return
+		}
+	}
+}
+
 func (s *simClient) hold(ctx context.Context) error {
 	health := time.NewTicker(s.healthInterval)
 	defer health.Stop()
