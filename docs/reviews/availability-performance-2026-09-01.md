@@ -64,7 +64,7 @@ It is made worse by a two-hop correlated failure that the intended escape hatch 
 |---|---|
 | **Availability** | **Serious.** The synchronous fabric is built to **queue, not shed**: the admission cap sits *above* the resource it protects in every guarded service but one. Four `critical` and one site-wide silent-drop path. |
 | **Journey performance** | **Bounded but uneven.** The warm steady-state path is genuinely fast (~10 ms p50 send, one publish per room regardless of size). Every serious finding is a *cliff* — thread replies, cold rooms, one slow peer, a cold cache — not steady-state slowness. |
-| **Capacity** | **A hard per-site ceiling of ~3,300–4,000 msg/s** that **adding pods does not raise**, and every hot-path worker stops gaining from replicas at about **5 pods**. |
+| **Capacity** | **A hard per-site ceiling of ~3,300–4,000 msg/s** that **adding pods does not raise** — replicas divide one server-side in-flight budget rather than adding to it. Prefetch pressure appears from ~5 pods and the gain is gone by ~10 (derived from config, not measured — see §9.2). |
 
 ## What was verified by hand
 
@@ -402,15 +402,16 @@ Today's handlers are `$max`/`$setOnInsert`/`$lt`-guarded, so duplicates are beni
 
 This leads the next hot-path constraint by roughly two orders of magnitude: `message-gatekeeper` holds a message for one PubAck (~1 ms), giving it a comparable-budget ceiling near 10⁶/s.
 
-### 9.2 Horizontal scaling stops at ~5 pods
+### 9.2 Replicas stop helping — but not at a fixed pod count
 
-All six `MAX_WORKERS` workers use `PullMaxMessages(2 × MaxWorkers)` = **200** at the default. Buffered-but-unprocessed messages are *delivered*, so they consume `MaxAckPending`:
+All six `MAX_WORKERS` workers request `PullMaxMessages(2 × MaxWorkers)` = **200** per pull, re-requesting once the outstanding count falls below `ceil(200/2)` = 100 (nats.go's default `ThresholdMessages`, `jetstream/pull.go:1184-1186`). **That is a per-pull maximum, not a reservation.** An outstanding pull request costs nothing against `MaxAckPending`; only *delivered, un-acked* messages do, and that budget is server-side per durable and shared by every pod bound to it. An earlier draft of this report divided `1000 / 200`, called 5 pods a hard scaling wall and said the 6th pod's workers would idle. That is not the mechanism: the shared budget is **redistributed** across pods, not exhausted by them, and a 6th pod gets its share of deliveries like any other.
 
-```
-1000 / 200  =  5 pods before prefetch alone exhausts the budget
-```
+What survives, and is the load-bearing part:
 
-The 6th pod's workers idle while its buffer starves. Worker-side the same arithmetic gives 10 pods. **No service couples `MAX_WORKERS` to `CONSUMER_MAX_ACK_PENDING`, and no validation warns** — except `search-sync-worker`, which checks exactly this shape and only **warns**, and whose shipped code defaults **fail their own check** (`(2+1) × 500 = 1500 > 1000`; the local compose repairs it by pinning 1500).
+- **Throughput is capped by `MaxAckPending ÷ mean in-flight time`, independent of pod count** — the §9.1 ceiling. Replicas cannot raise it, which is the conclusion that mattered.
+- Replicas stop *helping* once a pod's share of the shared budget drops below what keeps its own workers busy: on even distribution, `1000 / MAX_WORKERS` = **~10 pods**. Prefetch pressure shows earlier — from about 5 pods a pod can no longer fill a 200-message pull, so pulls round-trip more often and delivery gets burstier and less even. Five is a pressure point, not a limit.
+
+Both numbers are derived from configuration, not measured. The useful replica count depends on handler concurrency, per-message latency, ack timing and pull scheduling, and has to be settled with consumer metrics (`num_ack_pending`, `num_waiting`, delivery and ack rates) under load. **No service couples `MAX_WORKERS` to `CONSUMER_MAX_ACK_PENDING`, and no validation warns** — except `search-sync-worker`, which checks exactly this shape and only **warns**, and whose shipped code defaults **fail their own check** (`(2+1) × 500 = 1500 > 1000`; the local compose repairs it by pinning 1500).
 
 ### 9.3 The per-pod ceiling nobody set
 
@@ -451,7 +452,7 @@ Ordered by blast radius ÷ effort. Items 1–4 are the availability chain that a
 | 8 | `high` | **Bound `rooms.get`'s lazy work per request; stop discarding the preview batch on a failed flush; back-pressure warm-back instead of dropping it** | `history-service/internal/service/rooms.go:81-117`; `broadcast-worker/preview_writer.go:148-161`; `warmback.go:118` | 5,000 partition reads behind a 5 s deadline is an outage amplifier, not a degradation mode — and the two mechanisms that create and sustain the cold rooms are both silent. |
 | 9 | `high` | **Extract `roomlist-worker`'s `consumeState` into `pkg/` and wire it into every worker's health check** | `roomlist-worker/main.go:262-303` | Every other worker reports Ready while consuming nothing. The correct implementation, including the self-SIGTERM so the final flush drains, is already written — it just was not propagated. |
 | 10 | `high` | **Set `PoolSize` explicitly in `valkeyutil`, sized from the caller's `MAX_WORKERS`; add an L1 in front of `roomsubcache`** | `pkg/valkeyutil/valkey.go:111`; `pkg/roomsubcache/lookup.go:123` | ~10 Valkey connections against 100 workers is the real per-pod ceiling on the normal warm path, and it is a library default nobody chose. The `roomsubcache` single-slot hot key rides on the same connections. |
-| 11 | `high` | **Derive the ack budget from the target rate, and add a startup check coupling `PullMaxMessages × replicas` to `MaxAckPending`** — in `pkg/stream`, so all six workers inherit it. Make `search-sync-worker`'s existing check **fail**, not warn | `roomlist-worker/main.go:50`; `pkg/stream/consumer.go` | The ~3,300 msg/s site ceiling and the ~5-pod scaling wall are both invisible from any single service, and the second one means **adding pods silently stops helping**. `search-sync-worker`'s shipped defaults already fail their own check. |
+| 11 | `high` | **Derive the ack budget from the target rate** (`MaxAckPending ≥ target rate × mean in-flight time`), and validate it in `pkg/stream` so all six workers inherit the check. Fix `search-sync-worker`'s shipped defaults, which fail its own check | `roomlist-worker/main.go:50`; `pkg/stream/consumer.go` | The ~3,300 msg/s site ceiling is invisible from any single service, and **adding pods silently stops helping** because they divide one server-side budget. Couple the budget to the *rate*, not to `PullMaxMessages × replicas` — a pull batch is not a per-pod reservation (§9.2). Settle the replica count with consumer metrics under load. |
 | 12 | `medium` | **Fix the LWT re-stamp and the per-reply partition scan; set `LOCAL_SERIAL`** | `message-worker/store_cassandra.go:464-484`; `pkg/threadcount/count.go:41`; `pkg/cassutil/cass.go:73` | O(N²) per thread, two Paxos rounds per reply, and — because `SerialConsistency` is unset repo-wide — **cross-DC Paxos on every thread reply.** |
 
 ### Sequencing
