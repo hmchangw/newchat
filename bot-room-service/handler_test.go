@@ -25,7 +25,7 @@ type fakeStore struct {
 	InsertRoomFn             func(ctx context.Context, r *Room) error
 	FindRoomFn               func(ctx context.Context, id string) (*Room, error)
 	UpsertSubscriptionFn     func(ctx context.Context, s *Subscription) (bool, error)
-	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (account string, deleted bool, err error)
+	DeleteSubscriptionFn     func(ctx context.Context, r, u string) (subID, account string, deleted bool, err error)
 	FindUserFn               func(ctx context.Context, id string) (*model.User, error)
 	ListRoomMemberAccountsFn func(ctx context.Context, roomID string) ([]string, error)
 }
@@ -40,7 +40,7 @@ func (f *fakeStore) FindRoom(ctx context.Context, id string) (*Room, error) {
 func (f *fakeStore) UpsertSubscription(ctx context.Context, s *Subscription) (bool, error) {
 	return f.UpsertSubscriptionFn(ctx, s)
 }
-func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (string, bool, error) {
+func (f *fakeStore) DeleteSubscription(ctx context.Context, r, u string) (string, string, bool, error) {
 	return f.DeleteSubscriptionFn(ctx, r, u)
 }
 func (f *fakeStore) FindUser(ctx context.Context, id string) (*model.User, error) {
@@ -477,7 +477,7 @@ func TestHandleRemove_EmitsSysmsgWhenSomethingChanged(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) { return "bob", true, nil },
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) { return "sub-1", "bob", true, nil },
 		FindUserFn: func(_ context.Context, id string) (*model.User, error) {
 			return &model.User{ID: id, Account: "bob", SiteID: "site-a"}, nil
 		},
@@ -886,9 +886,9 @@ func TestHandleRemove_TransientFindUserFailureLeavesTheSubscriptionIntact(t *tes
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
 			deletes++
-			return "bob", true, nil
+			return "sub-1", "bob", true, nil
 		},
 		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
 			return nil, errors.New("mongo down")
@@ -911,9 +911,9 @@ func TestHandleRemove_MissingUserDocStillRemovesLocally(t *testing.T) {
 		FindRoomFn: func(_ context.Context, _ string) (*Room, error) {
 			return &Room{ID: "r1", Type: "c", CreatedByBot: "bot-1"}, nil
 		},
-		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, bool, error) {
+		DeleteSubscriptionFn: func(_ context.Context, _, _ string) (string, string, bool, error) {
 			deletes++
-			return "bob", true, nil
+			return "sub-1", "bob", true, nil
 		},
 		FindUserFn: func(_ context.Context, _ string) (*model.User, error) {
 			return nil, ErrNotFound
