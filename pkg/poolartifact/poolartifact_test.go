@@ -1,8 +1,11 @@
 package poolartifact
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -144,14 +147,9 @@ func TestLoad_RejectsArtifactsMissingRunCorrelation(t *testing.T) {
 // the tool tries to hold — an accidental pool file would take the site down
 // rather than test it.
 func TestLoad_RejectsAnImplausibleAccountCount(t *testing.T) {
-	accounts := make([]string, maxAccounts+1)
-	for i := range accounts {
-		accounts[i] = "u"
-	}
-	path := filepath.Join(t.TempDir(), "pool.json")
-	require.NoError(t, Write(path, &Artifact{
-		RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: accounts,
-	}))
+	// Written directly rather than through Write, which now rejects the same
+	// oversized artifact — this fixture exists to exercise the READ path.
+	path := writeOversizedFixture(t)
 	_, err := Load(path, "s")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "accounts")
@@ -184,4 +182,66 @@ func TestLoad_AcceptsDistinctAccounts(t *testing.T) {
 	a, err := Load(path, "s")
 	require.NoError(t, err)
 	assert.Len(t, a.Accounts, 3)
+}
+
+// writeAccountFixture emits an artifact with n accounts, as raw JSON text so
+// building the fixture does not itself cost a slice of n strings.
+func writeAccountFixture(t *testing.T, n int) string {
+	t.Helper()
+	var b bytes.Buffer
+	b.WriteString(`{"schemaVersion":1,"runId":"r","siteId":"s","configDigest":"d","accounts":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`"u"`)
+	}
+	b.WriteString(`]}`)
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, os.WriteFile(path, b.Bytes(), 0o600))
+	return path
+}
+
+func writeOversizedFixture(t *testing.T) string {
+	t.Helper()
+	return writeAccountFixture(t, maxAccounts+1)
+}
+
+// Write and Load must agree on what a valid artifact is. A seeder that can
+// emit an artifact the consumer refuses at startup turns a bad --users value
+// into a failure hours later, in the wrong tool.
+func TestWrite_RejectsAnImplausibleAccountCount(t *testing.T) {
+	accounts := make([]string, maxAccounts+1)
+	for i := range accounts {
+		accounts[i] = "u" + strconv.Itoa(i)
+	}
+	err := Write(filepath.Join(t.TempDir(), "pool.json"), &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: accounts,
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "accounts")
+}
+
+// The byte cap bounds the FILE, not the decode. Unmarshalling into []string
+// materialises every account in the file before any count check can run, so
+// the cost tracked the file's CONTENTS: a file three times over the cap cost
+// three times as much to reject. Decoding the array incrementally and
+// abandoning it at the cap makes the cost track the CAP instead — which is
+// the only thing the cap can honestly promise, since a legitimate pool of
+// maxAccounts costs that much either way.
+func TestLoad_DecodeCostTracksTheCapNotTheFile(t *testing.T) {
+	measure := func(path string) uint64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		_, err := Load(path, "s")
+		require.Error(t, err)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	justOver := measure(writeAccountFixture(t, maxAccounts+1))
+	farOver := measure(writeAccountFixture(t, maxAccounts*3))
+
+	assert.Less(t, farOver, justOver*2,
+		"rejecting a file three times over the cap must not cost three times as much")
 }

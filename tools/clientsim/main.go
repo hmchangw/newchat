@@ -207,6 +207,12 @@ func validateConfig(cfg *config) error {
 		return fmt.Errorf("CLIENTSIM_NATS_WS_URL must be a WebSocket URL (wss:// or ws://), got %q: %w",
 			cfg.NATSWSURL, err)
 	}
+	// A scheme with no authority ("wss:", "wss:///path") parses cleanly and
+	// would only fail inside nats.Connect's handshake, where the error reads
+	// like a broker problem rather than the config typo it is.
+	if u.Host == "" {
+		return fmt.Errorf("CLIENTSIM_NATS_WS_URL has no host: %q", cfg.NATSWSURL)
+	}
 	switch u.Scheme {
 	case "wss":
 	case "ws":

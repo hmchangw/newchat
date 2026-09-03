@@ -216,8 +216,7 @@ func (s *simClient) handleAsyncError(ctx context.Context, sub *nats.Subscription
 // the whole gap rather than for one event.
 func (s *simClient) controlPlaneFault(ctx context.Context) {
 	s.mu.Lock()
-	s.planVerified = false
-	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
+	s.invalidateForControlFaultLocked()
 	s.mu.Unlock()
 	go s.resync(ctx)
 }
@@ -238,6 +237,10 @@ func (s *simClient) recordDisconnect(err error) {
 	switch {
 	case err != nil:
 		reason = disconnectReason(err)
+		// Spend the latch: a real disconnect means the forced reconnect it
+		// described never happened, and carrying it forward would mislabel the
+		// next ordinary close as a JWT refresh.
+		s.intentionalReconnect.Store(false)
 		if errors.Is(err, nats.ErrAuthExpired) {
 			// Expiry mode only re-mints once the LOCAL clock says the token is
 			// dead. A broker rejecting a still-locally-valid JWT (clock skew,

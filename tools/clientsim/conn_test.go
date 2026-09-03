@@ -210,6 +210,13 @@ func TestDisconnectReason_ARealErrorOutranksThePendingLatch(t *testing.T) {
 	s.markIntentionalReconnect()
 	s.recordDisconnect(io.EOF)
 	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Disconnects.WithLabelValues("eof")), 0.001)
+
+	// ...and the latch is spent, not left armed: a real disconnect means the
+	// forced reconnect this latch described never happened, so carrying it
+	// forward would mislabel the NEXT ordinary close as a JWT refresh.
+	s.recordDisconnect(nil)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Disconnects.WithLabelValues("closed")), 0.001)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.Disconnects.WithLabelValues("jwt_refresh")), 0.001)
 }
 
 // In expiry mode userCB only re-mints once the LOCAL clock says the JWT is

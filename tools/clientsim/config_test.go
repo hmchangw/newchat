@@ -293,6 +293,11 @@ func TestValidateConfig_RejectsNonWebSocketSchemesEvenWithTheOptIn(t *testing.T)
 		{"nats:// is not a WebSocket URL, opt-in or not", "nats://127.0.0.1:4222", true, "WebSocket"},
 		{"tls:// is not either", "tls://127.0.0.1:4222", true, "WebSocket"},
 		{"a bare host is not a URL at all", "127.0.0.1:4222", true, "WebSocket"},
+		// A scheme with no authority parses cleanly and only fails later,
+		// inside nats.Connect's own handshake, where the message is far less
+		// obviously a config mistake.
+		{"scheme with no authority", "wss:", true, "host"},
+		{"empty authority with a path", "wss:///path", true, "host"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

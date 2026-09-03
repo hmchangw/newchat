@@ -824,3 +824,49 @@ func TestUpdateLane_UndecodableEventDemotesAndResyncs(t *testing.T) {
 		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
 	}, 3*time.Second, 5*time.Millisecond, "the resync must restore readiness")
 }
+
+// A walk fetches its plan, applies it, then flushes before promoting. If a
+// control message is lost DURING that flush, the plan the walk is about to
+// vouch for predates the update that went missing — but planEpoch only moves
+// on a disconnect, so the walk sailed past its own check and set
+// planVerified=true, erasing the fault. The fence is a separate generation
+// that only control-plane invalidation moves.
+func TestBootstrapWalk_DoesNotPromotePastAControlPlaneFault(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fc.onFlush = func() {
+		// Block the repair walk the fault schedules, so the assertion below
+		// observes this walk's decision rather than the resync's.
+		fc.reqGate = make(chan struct{})
+		s.controlPlaneFault(ctx)
+	}
+
+	err := s.bootstrapWalk(ctx)
+	require.Error(t, err, "a walk whose plan was invalidated mid-flight must not report success")
+	assert.True(t, errors.Is(err, errPlanEpochChanged),
+		"the resync is already scheduled, so this is the expected race, not a fatal failure")
+
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"the walk must not vouch for a plan older than the control message that was lost")
+	s.mu.Lock()
+	verified := s.planVerified
+	s.mu.Unlock()
+	assert.False(t, verified)
+}
+
+// The fence must not fire when nothing invalidated the plan, or no walk would
+// ever promote.
+func TestBootstrapWalk_PromotesWhenNoControlFaultIntervenes(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}

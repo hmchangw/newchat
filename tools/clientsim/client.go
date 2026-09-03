@@ -55,6 +55,11 @@ type simClient struct {
 	// client cannot prove a SUB is authorized (a successful walk says nothing
 	// about it), so readiness fails closed until the connection is replaced.
 	asyncFault bool
+	// controlGen advances on every control-plane invalidation (a lost or
+	// unusable subscription.update). Separate from planEpoch, which tracks the
+	// CONNECTION: a walk in flight has to lose to both, and conflating them
+	// would make a lost control message read as a disconnect race.
+	controlGen uint64
 	// planEpoch advances on every disconnect. A walk reads it before its RPC
 	// and again before applying: the RPC happens with no lock held, so without
 	// this a walk whose reply arrived over a now-dead connection could set

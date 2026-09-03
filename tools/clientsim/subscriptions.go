@@ -66,8 +66,7 @@ func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 			// plan this client holds is no longer proven. Counting it and
 			// returning left the client vouching for a plan it could not.
 			s.m.DecodeFailures.Inc()
-			s.planVerified = false
-			s.updateReadyLocked()
+			s.invalidateForControlFaultLocked()
 			go s.resync(ctx)
 			return
 		}
@@ -87,6 +86,15 @@ func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 		return fmt.Errorf("subscribe update lane for %s: %w", s.account, err)
 	}
 	return nil
+}
+
+// invalidateForControlFaultLocked marks the plan unproven because a
+// subscription.update was lost or unusable, and advances the fence a walk in
+// flight checks before it promotes. Caller holds s.mu.
+func (s *simClient) invalidateForControlFaultLocked() {
+	s.planVerified = false
+	s.controlGen++
+	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
 }
 
 // planViewLocked derives the roomID -> global dedupe view from the open
@@ -195,6 +203,7 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	s.mu.Lock()
 	startGen := s.gen
 	startEpoch := s.planEpoch
+	startControl := s.controlGen
 	s.mu.Unlock()
 
 	lister := &natsLister{
@@ -235,6 +244,14 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.planEpoch != startEpoch {
+		return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
+	}
+	if s.controlGen != startControl {
+		// A control message was lost while this walk was in flight, so the
+		// plan it holds predates the change that message carried. Promoting
+		// would erase the fault with a snapshot that is older than it. The
+		// fault already scheduled the resync that re-derives the plan, so this
+		// is the expected race rather than a failure.
 		return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
 	}
 	// Verified only here, after the broker has acknowledged the flush: this is

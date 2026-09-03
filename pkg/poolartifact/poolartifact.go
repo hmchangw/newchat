@@ -5,6 +5,7 @@
 package poolartifact
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,11 @@ func Write(path string, a *Artifact) error {
 	switch {
 	case len(a.Accounts) == 0:
 		return errors.New("write pool artifact: empty accounts")
+	// Symmetric with Load: a seeder that can emit an artifact the consumer
+	// refuses at startup turns a bad --users value into a failure hours later,
+	// in the wrong tool.
+	case len(a.Accounts) > maxAccounts:
+		return fmt.Errorf("write pool artifact: %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
 	case a.SiteID == "":
 		return errors.New("write pool artifact: empty siteID")
 	case a.RunID == "":
@@ -90,9 +96,9 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	if int64(len(data)) > maxArtifactBytes {
 		return nil, fmt.Errorf("pool artifact exceeds the %d-byte cap", maxArtifactBytes)
 	}
-	var a Artifact
-	if err := json.Unmarshal(data, &a); err != nil {
-		return nil, fmt.Errorf("parse pool artifact: %w", err)
+	a, err := decodeArtifact(data)
+	if err != nil {
+		return nil, err
 	}
 	if a.SchemaVersion != SchemaVersion {
 		return nil, fmt.Errorf("pool artifact schema version %d, want %d", a.SchemaVersion, SchemaVersion)
@@ -133,5 +139,55 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 		}
 		seen[account] = i
 	}
-	return &a, nil
+	return a, nil
+}
+
+// decodeArtifact decodes the envelope, then the accounts array INCREMENTALLY,
+// abandoning it the moment it passes the cap.
+//
+// maxArtifactBytes bounds the file, not the decode. json.Unmarshal into
+// []string materialises every account as its own heap string plus the slice's
+// doubling growth, so a file well inside the byte cap costs several times its
+// own size in live heap before any count check can run — measured at ~148 MB
+// to reject a single oversized fixture. Streaming the array makes the cap
+// mean what it says.
+func decodeArtifact(data []byte) (*Artifact, error) {
+	var env struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		RunID         string          `json:"runId"`
+		SiteID        string          `json:"siteId"`
+		ConfigDigest  string          `json:"configDigest"`
+		Accounts      json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, fmt.Errorf("parse pool artifact: %w", err)
+	}
+	a := &Artifact{
+		SchemaVersion: env.SchemaVersion,
+		RunID:         env.RunID,
+		SiteID:        env.SiteID,
+		ConfigDigest:  env.ConfigDigest,
+	}
+	if len(env.Accounts) == 0 {
+		return a, nil // absent or null: the emptiness check below reports it
+	}
+	dec := json.NewDecoder(bytes.NewReader(env.Accounts))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("parse pool artifact accounts: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != json.Delim(0x5B) {
+		return nil, errors.New("pool artifact accounts is not an array")
+	}
+	for dec.More() {
+		if len(a.Accounts) == maxAccounts {
+			return nil, fmt.Errorf("pool artifact has more accounts than the %d cap", maxAccounts)
+		}
+		var account string
+		if err := dec.Decode(&account); err != nil {
+			return nil, fmt.Errorf("parse pool artifact accounts: %w", err)
+		}
+		a.Accounts = append(a.Accounts, account)
+	}
+	return a, nil
 }
