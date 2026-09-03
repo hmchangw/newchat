@@ -117,6 +117,9 @@ type fakeConn struct {
 	subChanErr      error            // next SubscribeChan fails with this, then clears
 	subChanErrOn    map[string]error // persistent per-subject SubscribeChan failures
 	forceReconnects atomic.Int64
+	flushes         atomic.Int64
+	flushErr        error
+	onFlush         func() // observed at flush time, to assert ordering
 	closes          atomic.Int64
 	closed          atomic.Bool // what IsClosed reports, set by tests
 }
@@ -196,6 +199,14 @@ func (f *fakeConn) Request(ctx context.Context, _ string, _ []byte) (*nats.Msg, 
 		return nil, err
 	}
 	return &nats.Msg{Data: data}, nil
+}
+
+func (f *fakeConn) FlushWithContext(context.Context) error {
+	f.flushes.Add(1)
+	if f.onFlush != nil {
+		f.onFlush()
+	}
+	return f.flushErr
 }
 
 func (f *fakeConn) failNextRequests(errs ...error) {

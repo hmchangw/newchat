@@ -205,6 +205,43 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		return fmt.Errorf("bootstrap walk for %s: %w", s.account, err)
 	}
 
+	if err := s.applyPlan(plan, startGen, startEpoch); err != nil {
+		return err
+	}
+
+	// The SUBs just opened are still in nats.go's write buffer. Promoting now
+	// would count this client as ready over subscriptions the broker does not
+	// hold yet, and at ramp time thousands of clients sit in that window at
+	// once — the readiness gauge would lead reality by exactly the interval an
+	// operator uses to decide the fleet is up. Flushing outside s.mu keeps the
+	// round-trip off the live-update lane.
+	flushCtx, cancel := context.WithTimeout(ctx, subFlushTimeout)
+	defer cancel()
+	if err := conn.FlushWithContext(flushCtx); err != nil {
+		s.m.Errors.WithLabelValues("flush").Inc()
+		return fmt.Errorf("bootstrap walk for %s: flush subscriptions: %w", s.account, err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.planEpoch != startEpoch {
+		return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
+	}
+	// Verified only here, after the broker has acknowledged the flush: this is
+	// the single point that can promote a client on a walk.
+	s.planVerified = true
+	s.updateReadyLocked()
+	return nil
+}
+
+// subFlushTimeout bounds the pre-promotion round-trip. Long enough that a
+// loaded broker is not mistaken for a dead one, short enough that a client
+// cannot sit unpromoted behind it for a whole ramp.
+const subFlushTimeout = 5 * time.Second
+
+// applyPlan reconciles the open subscriptions with a fetched plan under s.mu.
+// It deliberately does NOT promote: readiness waits for the flush.
+func (s *simClient) applyPlan(plan map[string]bool, startGen, startEpoch uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.planEpoch != startEpoch {
@@ -222,10 +259,8 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		}
 		kept = append(kept, ch)
 	}
-	s.planVerified = true
 	s.applyChangesLocked(kept)
 	s.reconcileBookkeepingLocked(plan, startGen)
-	s.updateReadyLocked()
 	return nil
 }
 

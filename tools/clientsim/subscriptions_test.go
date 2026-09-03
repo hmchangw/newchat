@@ -695,3 +695,40 @@ func TestBootstrapWalk_PrunesSettledTouchedEntries(t *testing.T) {
 	assert.NotContains(t, s.touched, "long-gone", "a settled, closed room must not be retained")
 	assert.Contains(t, s.touched, "r-open", "a room still open keeps its generation")
 }
+
+// The SUB lines for the rooms a walk just opened sit in nats.go's write
+// buffer. Promoting before the broker has processed them counts a client as
+// ready over subscriptions the server does not hold yet — and at ramp time
+// thousands of clients occupy that window at once, so the readiness gauge
+// leads reality by exactly the interval an operator would use to decide the
+// fleet is up.
+func TestBootstrapWalk_PromotesOnlyAfterTheBrokerHasTheSubs(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	var readyAtFlush float64
+	fc.onFlush = func() { readyAtFlush = promtestutil.ToFloat64(s.m.ConnsReady) }
+
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+
+	assert.Equal(t, int64(1), fc.flushes.Load(), "the walk must flush its subscriptions")
+	assert.Zero(t, readyAtFlush, "readiness was published before the broker had the SUBs")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// A flush that fails means the SUBs never reached the broker. Promoting on
+// that would be the same lie, so the walk fails and the resync retries.
+func TestBootstrapWalk_AFailedFlushIsNotReady(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	fc.flushErr = assert.AnError
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	err := s.bootstrapWalk(context.Background())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "flush")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}

@@ -29,6 +29,10 @@ type simConn interface {
 	// budget lives or dies on this).
 	SubscribeChan(subj string, ch chan *nats.Msg) (simSub, error)
 	Request(ctx context.Context, subj string, data []byte) (*nats.Msg, error)
+	// FlushWithContext round-trips the buffered protocol to the broker. The
+	// walk needs it before it promotes: a SUB that is still in nats.go's
+	// write buffer is a subscription the server does not have yet.
+	FlushWithContext(ctx context.Context) error
 	ForceReconnect() error
 	// IsClosed reports a permanently closed connection. With
 	// MaxReconnects(-1) nats.go never gives up on its own, so this is only
@@ -67,6 +71,10 @@ func (r *realConn) SubscribeChan(subj string, ch chan *nats.Msg) (simSub, error)
 
 func (r *realConn) Request(ctx context.Context, subj string, data []byte) (*nats.Msg, error) {
 	return r.nc.RequestWithContext(ctx, subj, data)
+}
+
+func (r *realConn) FlushWithContext(ctx context.Context) error {
+	return r.nc.FlushWithContext(ctx)
 }
 
 func (r *realConn) ForceReconnect() error { return r.nc.ForceReconnect() }

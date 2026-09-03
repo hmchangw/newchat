@@ -46,9 +46,13 @@ type config struct {
 	// default: in a failure test that loss is the measurement, not a fault.
 	FailOnDegraded bool `env:"CLIENTSIM_FAIL_ON_DEGRADED" envDefault:"false"`
 	SubPendingMsgs int  `env:"CLIENTSIM_SUB_PENDING_MSGS" envDefault:"512"`
-	// 128 KiB: payloads are counted and dropped, so the byte limit exists
-	// only as a memory backstop — at 10k conns a 1 MiB default would budget
-	// hundreds of GiB (review: performance §3).
+	// 128 KiB. Applies to the TWO CALLBACK LANES ONLY: nats.go rejects
+	// SetPendingLimits on a channel subscription and does no byte accounting
+	// there, so the room lane is bounded by SUB_PENDING_MSGS slots alone.
+	// Giving the room lane a real byte limit would mean callback
+	// subscriptions, and nats.go starts a dispatcher goroutine per callback
+	// sub — one per room per client, which is the budget this design exists
+	// to protect. See the README's memory section for the arithmetic.
 	SubPendingBytes   int           `env:"CLIENTSIM_SUB_PENDING_BYTES" envDefault:"131072"`
 	ReconnectBufBytes int           `env:"CLIENTSIM_RECONNECT_BUF_BYTES" envDefault:"65536"`
 	PingInterval      time.Duration `env:"CLIENTSIM_PING_INTERVAL" envDefault:"2m"`
