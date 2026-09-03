@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -24,6 +26,7 @@ import (
 	"github.com/hmchangw/chat/pkg/searchengine"
 	"github.com/hmchangw/chat/pkg/searchindex"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
 
@@ -108,14 +111,17 @@ func (c *SearchConfig) Validate() error {
 // against the other or moved to a distinct prefix to avoid silent env
 // shadowing.
 type Config struct {
-	SiteID   string   `env:"SITE_ID,required"`
-	ES       ESConfig `envPrefix:"SEARCH_"`
-	Valkey   valkeyutil.Config
-	NATS     NATSConfig     `envPrefix:"NATS_"`
-	Search   SearchConfig   `envPrefix:"SEARCH_"`
-	Mongo    MongoConfig    `envPrefix:"MONGO_"`
-	UsersAPI UsersAPIConfig `envPrefix:"USERS_API_"`
-	DebugLog logctx.Config  `envPrefix:"DEBUG_LOG_"`
+	SiteID string   `env:"SITE_ID,required"`
+	ES     ESConfig `envPrefix:"SEARCH_"`
+	Valkey valkeyutil.Config
+	NATS   NATSConfig `envPrefix:"NATS_"`
+	// Buddy is the peer cluster hosting this site's standby lanes; the service
+	// also answers displaced clients' RPCs there while its own NATS is down.
+	Buddy    natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	Search   SearchConfig         `envPrefix:"SEARCH_"`
+	Mongo    MongoConfig          `envPrefix:"MONGO_"`
+	UsersAPI UsersAPIConfig       `envPrefix:"USERS_API_"`
+	DebugLog logctx.Config        `envPrefix:"DEBUG_LOG_"`
 	// UNPREFIXED on purpose — must match search-sync-worker / es-index-migrator
 	// exactly. On SearchConfig they would pick up envPrefix:"SEARCH_" and drift
 	// from the writer silently (wildcard read + allow_no_indices ⇒ empty hits).
@@ -272,7 +278,7 @@ func main() {
 		"hr_size", cfg.Search.HRCacheSize, "hr_ttl", cfg.Search.HRCacheTTL,
 		"app_size", cfg.Search.AppCacheSize, "app_ttl", cfg.Search.AppCacheTTL)
 
-	handler := newHandler(store, cachedMongo, usersClient, cache, &handlerConfig{
+	handlerCfg := &handlerConfig{
 		SiteID:                  cfg.SiteID,
 		DocCounts:               cfg.Search.DocCounts,
 		MaxDocCounts:            cfg.Search.MaxDocCounts,
@@ -284,17 +290,33 @@ func main() {
 		SpotlightOrgReadPattern: spotlightOrgReadPattern,
 		ShowTeamsRoom:           cfg.ShowTeamsRoom,
 		ShowTeamsAccounts:       teamsAccountSet(cfg.ShowTeamsAccounts),
-	})
-	handler.room = newRoomClient(nc)
+	}
 
 	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
-	router := natsrouter.New(nc, "search-service",
-		append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
-	router.Use(natsrouter.RequestID())
-	router.Use(natsrouter.Recovery())
-	router.Use(natsrouter.Logging())
-	router.Use(cfg.Guard.TimeoutMiddleware()...)
-	handler.Register(router)
+	// One handler per lane over the same stores and caches; only the room
+	// client speaks NATS, and it must go out on the connection the lane's
+	// requests arrive on. No home JetStream: this service publishes nothing.
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NATS.CredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
+	routers, err := failoverlane.BindRouters(ctx, nc, nil, &dialer,
+		func(_ context.Context, conn *o11ynats.Conn, _ o11ynats.JetStream, _ subject.Lane) (*natsrouter.Router, error) {
+			handler := newHandler(store, cachedMongo, usersClient, cache, handlerCfg)
+			handler.room = newRoomClient(conn)
+			router := natsrouter.New(conn, "search-service",
+				append(cfg.Guard.Options(), natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))...)
+			router.Use(natsrouter.RequestID())
+			router.Use(natsrouter.Recovery())
+			router.Use(natsrouter.Logging())
+			router.Use(cfg.Guard.TimeoutMiddleware()...)
+			handler.Register(router)
+			return router, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Health-only listener. All four timeouts guard against hung probes tying
 	// up a goroutine indefinitely on an operator-exposed port. App metrics moved
@@ -334,9 +356,8 @@ func main() {
 		"valkey", cfg.Valkey.Addrs,
 	)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		// Wait for in-flight handlers BEFORE nc.Drain so they can't touch torn-down deps.
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	// Wait for in-flight handlers BEFORE nc.Drain so they can't touch torn-down deps.
+	hooks := append(routers.ShutdownHooks(),
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(_ context.Context) error { valkeyutil.Disconnect(valkey); return nil },
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
@@ -345,4 +366,5 @@ func main() {
 		// drain-window observations (incl. app metrics) before it closes.
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
