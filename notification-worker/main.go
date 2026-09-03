@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -334,6 +335,8 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	wg.Add(1)
 	go func() {
 		// The loop itself is counted so shutdown, which stops the iterator and
@@ -344,6 +347,7 @@ func main() {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
 				consumerMetrics.LoopFailed(context.Background(), err)
+				loop.Stopped(err)
 				return
 			}
 			sem <- struct{}{}
@@ -380,6 +384,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -396,7 +401,8 @@ func main() {
 		"user_settings_enabled", cfg.UserSettingsEnabled,
 	)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(_ context.Context) error {
 			consumerMetrics.LoopStopped(context.Background())
 			iter.Stop()

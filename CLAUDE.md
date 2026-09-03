@@ -343,6 +343,7 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
   - **Sequential** (`cons.Consume()`): Callback-based sequential processing for lower-volume streams where concurrency is unnecessary
 - Match the pattern already used by the service being modified — don't mix patterns within a single consumer
 - Follow existing worker services (`message-worker`, `broadcast-worker`, etc.) as reference implementations
+- **Every consume loop is guarded by `pkg/loopguard`.** A loop that exits on a terminal iterator error (durable deleted, bad request) would otherwise leave a pod that reports ready and consumes nothing: liveness always answers 200 and readiness probes only the NATS connection, which stays healthy in exactly that failure. Wire it as roomlist-worker does: arm `sig := shutdown.Signals()` BEFORE starting the loop, build `loopguard.New(name, loopguard.SelfShutdown)`, report the loop's exit via `Stopped(err)` (pull iterators; `natsmetrics.Start` takes it as its `stopped` hook) or `WatchClosed(cc.Closed())` (callback `Consume` lanes), add `Check()` to the health server, and make `BeginShutdown()` the first hook of `shutdown.WaitOn(ctx, sig, …)` so the deliberate `iter.Stop()` is not read as a death. An unexpected stop fails readiness with the cause and raises SIGTERM on the process so the supervisor replaces it — the only actor able to rebuild the iterator
 
 ### JetStream Redelivery Backoff
 

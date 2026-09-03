@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/hmchangw/chat/pkg/health"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/shutdown"
@@ -71,12 +72,15 @@ func run() error {
 		return fmt.Errorf("messages iter: %w", err)
 	}
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 	go func() {
 		for {
 			mCtx, msg, err := iter.Next()
 			if err != nil {
+				loop.Stopped(err)
 				return
 			}
 			sem <- struct{}{}
@@ -90,13 +94,15 @@ func run() error {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		return fmt.Errorf("health server: %w", err)
 	}
 
 	slog.Info("push-notification-service running", "site", cfg.SiteID)
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(_ context.Context) error { iter.Stop(); return nil },
 		func(dctx context.Context) error {
 			done := make(chan struct{})

@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -72,7 +73,12 @@ func main() {
 
 	handler := NewHandler(newMongoStore(mongoClient.Database(cfg.MongoWriteDB)))
 
+	// Armed before any consumer starts: a dying consume loop raises SIGTERM on
+	// this process, and a signal raised before the handler exists is fatal.
+	sig := shutdown.Signals()
 	consumeCtxs := make([]o11ynats.ConsumeContext, 0, len(cfg.SiteIDs))
+	guards := make([]*loopguard.Guard, 0, len(cfg.SiteIDs))
+	checks := []health.Check{natsutil.HealthCheck(nc)}
 	for _, siteID := range cfg.SiteIDs {
 		cc, err := startSiteConsumer(ctx, otelJS, handler, siteID, cfg.Consumer)
 		if err != nil {
@@ -80,11 +86,14 @@ func main() {
 			os.Exit(1)
 		}
 		consumeCtxs = append(consumeCtxs, cc)
+		// A callback consumer reports its death only by closing Closed().
+		g := loopguard.New("consume-loop-"+siteID, loopguard.SelfShutdown)
+		g.WatchClosed(cc.Closed())
+		guards = append(guards, g)
+		checks = append(checks, g.Check())
 	}
 
-	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, false,
-		natsutil.HealthCheck(nc),
-	)
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, false, checks...)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -92,8 +101,13 @@ func main() {
 
 	slog.Info("hr-sync-worker started", "sites", cfg.SiteIDs)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		func(_ context.Context) error {
+			// Mark the stop intended BEFORE Stop() closes the watched channels, or
+			// the guards read a clean shutdown as a death and re-signal the process.
+			for _, g := range guards {
+				g.BeginShutdown()
+			}
 			for _, cc := range consumeCtxs {
 				cc.Stop()
 			}

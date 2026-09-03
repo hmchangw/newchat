@@ -17,6 +17,7 @@ import (
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
@@ -307,6 +308,8 @@ func main() {
 	}
 	consumerMetrics.LoopStarted(ctx)
 
+	sig := shutdown.Signals()
+	loop := loopguard.New("consume-loop", loopguard.SelfShutdown)
 	wg.Add(1)
 	go func() {
 		// The loop itself is counted so shutdown, which stops the iterator and
@@ -317,6 +320,7 @@ func main() {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
 				consumerMetrics.LoopFailed(context.Background(), err)
+				loop.Stopped(err)
 				return
 			}
 			sem <- struct{}{}
@@ -339,6 +343,7 @@ func main() {
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
+		loop.Check(),
 	)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
@@ -351,6 +356,7 @@ func main() {
 	// THEN flush observability exporters. Reverse order drops traces/metrics
 	// emitted during NATS drain, mongo disconnect, and keyStore close.
 	hooks := []func(ctx context.Context) error{
+		func(_ context.Context) error { loop.BeginShutdown(); return nil },
 		func(ctx context.Context) error {
 			// Mark the loop down before stopping the iterator: the Next error that
 			// Stop provokes is a clean shutdown, and LoopFailed only reports a
@@ -388,7 +394,7 @@ func main() {
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
 
-	shutdown.Wait(ctx, 25*time.Second, hooks...)
+	shutdown.WaitOn(ctx, sig, 25*time.Second, hooks...)
 }
 
 // jobProcessor is the slice of the handler that the consumer goroutine drives;

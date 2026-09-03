@@ -17,9 +17,17 @@ import (
 // shutdown is only ever triggered from outside. A service that can raise its
 // own shutdown signal must use WaitOn instead — see the note there.
 func Wait(ctx context.Context, timeout time.Duration, shutdownFuncs ...func(context.Context) error) {
+	WaitOn(ctx, Signals(), timeout, shutdownFuncs...)
+}
+
+// Signals returns a buffered channel already armed for SIGINT and SIGTERM. A
+// service that can raise its own shutdown signal calls this BEFORE starting
+// anything able to raise it, then hands the channel to WaitOn — see the note
+// there for why the ordering matters.
+func Signals() chan os.Signal {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	WaitOn(ctx, sig, timeout, shutdownFuncs...)
+	return sig
 }
 
 // WaitOn is Wait with the signal channel supplied by the caller, already armed

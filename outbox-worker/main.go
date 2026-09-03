@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
@@ -114,6 +114,12 @@ func main() {
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
 
+	// Armed before any lane starts: a dying lane raises SIGTERM on this process,
+	// and a signal raised before the handler exists is fatal.
+	sig := shutdown.Signals()
+	guards := make([]*loopguard.Guard, 0, 2*len(cfg.AllSiteIDs))
+	checks := []health.Check{natsutil.HealthCheck(nc)}
+
 	// Both lanes are per remote peer (from ALL_SITE_IDS). Per destination, not a
 	// single shared consumer, so a down peer's parked forwards (MaxDeliver=-1,
 	// never Ack) fill only their own consumer's ack-pending budget instead of
@@ -139,7 +145,10 @@ func main() {
 			os.Exit(1)
 		}
 		iters = append(iters, iter)
-		drainPool(ctx, iter, sem, &wg, process)
+		cg := loopguard.New("outbox-concurrent-"+dest, loopguard.SelfShutdown)
+		guards = append(guards, cg)
+		checks = append(checks, cg.Check())
+		drainPool(ctx, iter, sem, &wg, process, cg.Stopped)
 
 		ocons, err := js.CreateOrUpdateConsumer(ctx, outboxCfg.Name, buildOrderedConsumerConfig(cfg.Consumer, cfg.SiteID, dest))
 		if err != nil {
@@ -152,11 +161,14 @@ func main() {
 			os.Exit(1)
 		}
 		orderedCtxs = append(orderedCtxs, cc)
+		// A callback consumer reports its death only by closing Closed().
+		og := loopguard.New("outbox-ordered-"+dest, loopguard.SelfShutdown)
+		og.WatchClosed(cc.Closed())
+		guards = append(guards, og)
+		checks = append(checks, og.Check())
 	}
 
-	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
-		natsutil.HealthCheck(nc),
-	)
+	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled, checks...)
 	if err != nil {
 		slog.Error("health server failed to start", "error", err)
 		os.Exit(1)
@@ -164,8 +176,13 @@ func main() {
 
 	slog.Info("outbox-worker running", "site", cfg.SiteID, "federation_peers", peers)
 
-	shutdown.Wait(ctx, 25*time.Second,
+	shutdown.WaitOn(ctx, sig, 25*time.Second,
 		func(ctx context.Context) error {
+			// Mark the stop intended BEFORE Stop() ends the lanes, or the guards
+			// read a clean shutdown as a death and re-signal the process.
+			for _, g := range guards {
+				g.BeginShutdown()
+			}
 			for _, it := range iters {
 				it.Stop()
 			}
@@ -199,19 +216,17 @@ func main() {
 // iter.Stop() returns without waiting for it, so shutdown's wg.Wait() must
 // also cover the pump, or a message received between Next() and the
 // per-message Add(1) could slip past the wait and race nc.Drain(). The pump
-// exits when the iterator is Stop()'d on shutdown.
-func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg)) {
+// exits when the iterator is Stop()'d on shutdown, or on a terminal iterator
+// error; either way the cause goes to stopped, which is what turns a dead lane
+// into a readiness failure and a restart (pkg/loopguard).
+func drainPool(ctx context.Context, iter o11ynats.MessagesContext, sem chan struct{}, wg *sync.WaitGroup, process func(context.Context, jetstream.Msg), stopped func(error)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
 			msgCtx, msg, err := iter.Next()
 			if err != nil {
-				// ErrMsgIteratorClosed is the normal stop (iter.Stop() on shutdown);
-				// any other error means consumption died unexpectedly — surface it.
-				if !errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-					slog.ErrorContext(ctx, "outbox concurrent iterator stopped", "error", err)
-				}
+				stopped(err)
 				return
 			}
 			sem <- struct{}{}

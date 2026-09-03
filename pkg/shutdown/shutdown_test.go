@@ -157,3 +157,20 @@ func signalSelf(t *testing.T) {
 		t.Errorf("signal self: %v", err)
 	}
 }
+
+// Signals must return a channel that is already armed and buffered, so a
+// worker can arm it BEFORE starting a loop able to raise SIGTERM on itself: an
+// early signal is latched in the buffer instead of killing the process.
+func TestSignals_LatchesASignalRaisedBeforeWaitOn(t *testing.T) {
+	sig := shutdown.Signals()
+	defer signal.Stop(sig)
+
+	assert.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+
+	select {
+	case got := <-sig:
+		assert.Equal(t, syscall.SIGTERM, got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Signals must deliver a SIGTERM raised after it was armed")
+	}
+}

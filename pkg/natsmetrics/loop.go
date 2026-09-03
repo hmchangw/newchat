@@ -21,22 +21,29 @@ type ProcessMessage func(context.Context, *Message)
 // iterator and then waits on wg, so a loop counted only once it dispatches a
 // message lets that wait pass through while a message Next already returned is
 // still on its way to a worker.
-func Start(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
+//
+// stopped receives the terminal Next error once the loop has exited. Nothing
+// else observes that exit, so this is where a caller fails readiness and asks
+// for a restart (pkg/loopguard); nil ignores it.
+func Start(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage, stopped func(error)) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		Consume(ctx, iter, consumer, maxWorkers, maxDeliver, wg, classify, process)
+		err := Consume(ctx, iter, consumer, maxWorkers, maxDeliver, wg, classify, process)
+		if stopped != nil {
+			stopped(err)
+		}
 	}()
 }
 
 // Consume runs the existing bounded concurrent pull pattern. Callers mark the
 // loop started only after iterator creation succeeds; Consume marks it stopped
-// before returning from a terminal Next failure.
+// before returning the terminal Next failure.
 //
 // classify runs inside the worker goroutine, not on the dispatch path: a
 // classifier that parses the payload would otherwise serialize the whole
 // consumer behind one message at a time.
-func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) {
+func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers, maxDeliver int, wg *sync.WaitGroup, classify ClassifyEvent, process ProcessMessage) error {
 	// A zero maxWorkers would make sem unbuffered and park the dispatch send
 	// forever — the loop stops consuming with no error and no terminal metric,
 	// while the loop-up gauge still reads 1. A negative one panics in make.
@@ -48,7 +55,7 @@ func Consume(ctx context.Context, iter Iterator, consumer *Consumer, maxWorkers,
 		msgCtx, msg, err := iter.Next()
 		if err != nil {
 			consumer.LoopFailed(ctx, err)
-			return
+			return err
 		}
 		sem <- struct{}{}
 		wg.Add(1)

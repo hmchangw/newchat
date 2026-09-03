@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/hmchangw/chat/pkg/loopguard"
 	"github.com/hmchangw/chat/pkg/model"
 )
 
@@ -97,7 +98,7 @@ func TestConsumeLoop_MalformedPayloadSettledImmediatelyNeverJoinsBatch(t *testin
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg, &consumeState{})
+	consumeLoop(iter, f, &wg, loopguard.New("consume-loop", nil))
 
 	assert.True(t, bad.acked, "a malformed payload must be settled (Acked as permanent) immediately")
 	assert.False(t, bad.naked)
@@ -116,7 +117,7 @@ func TestConsumeLoop_WellFormedPayloadReachesFlusherHeldUntilFlush(t *testing.T)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg, &consumeState{})
+	consumeLoop(iter, f, &wg, loopguard.New("consume-loop", nil))
 
 	assert.False(t, good.acked, "a well-formed message must stay un-settled until its batch is flushed")
 	assert.False(t, good.naked)
@@ -157,7 +158,7 @@ func TestConsumeLoop_PanicInGuardedPathDoesNotKillLoopOrCrashMessage(t *testing.
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	require.NotPanics(t, func() { consumeLoop(iter, f, &wg, &consumeState{}) },
+	require.NotPanics(t, func() { consumeLoop(iter, f, &wg, loopguard.New("consume-loop", nil)) },
 		"a panic in one message's handling must not escape the consume loop")
 
 	assert.False(t, bad.acked, "a message whose handling panicked must stay un-acked so JetStream redelivers it")
@@ -176,7 +177,7 @@ func TestConsumeLoop_ReturnsWhenIteratorErrors(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(iter, f, &wg, &consumeState{})
+	consumeLoop(iter, f, &wg, loopguard.New("consume-loop", nil))
 
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
@@ -194,7 +195,7 @@ func TestConsumeLoop_ReturnsWhenIteratorErrors(t *testing.T) {
 // no signal at all. /readyz previously probed only the NATS connection, which
 // stays healthy in exactly this failure.
 func TestConsumeLoop_ExitFailsReadiness(t *testing.T) {
-	var state consumeState
+	state := loopguard.New("consume-loop", nil)
 	probe := state.Check().Probe
 
 	require.NoError(t, probe(context.Background()),
@@ -202,7 +203,7 @@ func TestConsumeLoop_ExitFailsReadiness(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, state)
 	wg.Wait()
 
 	err := probe(context.Background())
@@ -214,7 +215,7 @@ func TestConsumeLoop_ExitFailsReadiness(t *testing.T) {
 // A loop still draining messages is healthy — the probe must not fail merely
 // because work is in flight.
 func TestConsumeLoop_ReadyWhileConsuming(t *testing.T) {
-	var state consumeState
+	state := loopguard.New("consume-loop", nil)
 	assert.NoError(t, state.Check().Probe(context.Background()))
 }
 
@@ -226,11 +227,11 @@ func TestConsumeLoop_ReadyWhileConsuming(t *testing.T) {
 // iterator.
 func TestConsumeLoop_UnexpectedExitRequestsProcessRestart(t *testing.T) {
 	restarted := make(chan struct{}, 1)
-	state := consumeState{onUnexpectedStop: func() { restarted <- struct{}{} }}
+	state := loopguard.New("consume-loop", func() { restarted <- struct{}{} })
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, state)
 	wg.Wait()
 
 	select {
@@ -245,12 +246,12 @@ func TestConsumeLoop_UnexpectedExitRequestsProcessRestart(t *testing.T) {
 // spurious error on every clean stop.
 func TestConsumeLoop_ShutdownExitDoesNotRequestRestart(t *testing.T) {
 	restarted := make(chan struct{}, 1)
-	state := consumeState{onUnexpectedStop: func() { restarted <- struct{}{} }}
-	state.beginShutdown()
+	state := loopguard.New("consume-loop", func() { restarted <- struct{}{} })
+	state.BeginShutdown()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, &state)
+	consumeLoop(&fakeIterator{}, newFlusher(&stubStore{}, 0, 0), &wg, state)
 	wg.Wait()
 
 	select {
@@ -318,13 +319,13 @@ func captureLogs(t *testing.T) *capturingHandler {
 // reads the same flag two lines earlier to decide not to re-signal the process.
 func TestConsumeLoop_GracefulStopIsNotLoggedAsAnError(t *testing.T) {
 	logs := captureLogs(t)
-	state := consumeState{}
-	state.beginShutdown()
+	state := loopguard.New("consume-loop", nil)
+	state.BeginShutdown()
 	iter := &fakeIterator{} // exhausted immediately: Next returns errFakeIterDone
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, &state)
+	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, state)
 	wg.Wait()
 
 	lvl, found := logs.levelFor("consume loop stopped")
@@ -336,12 +337,12 @@ func TestConsumeLoop_GracefulStopIsNotLoggedAsAnError(t *testing.T) {
 // this is the line that says room-list state has silently stopped being written.
 func TestConsumeLoop_UnexpectedStopStaysAnError(t *testing.T) {
 	logs := captureLogs(t)
-	state := consumeState{onUnexpectedStop: func() {}}
+	state := loopguard.New("consume-loop", func() {})
 	iter := &fakeIterator{} // exhausted immediately: Next returns errFakeIterDone
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, &state)
+	consumeLoop(iter, newFlusher(&stubStore{}, 0, 0), &wg, state)
 	wg.Wait()
 
 	lvl, found := logs.levelFor("consume loop stopped")
@@ -384,11 +385,11 @@ func TestConsumeLoop_DrainsEarlyWhenMentionsCrossTheBudget(t *testing.T) {
 			headers: nats.Header{},
 		},
 	}}
-	state := consumeState{onUnexpectedStop: func() {}}
+	state := loopguard.New("consume-loop", func() {})
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	consumeLoop(iter, f, &wg, &state)
+	consumeLoop(iter, f, &wg, state)
 	wg.Wait()
 
 	assert.NotEmpty(t, store.mentions,
