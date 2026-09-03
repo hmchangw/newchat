@@ -78,11 +78,15 @@ type broadcastMetrics struct {
 	threadViewFailures metric.Int64Counter
 
 	// channelEnqueue is SLO-1b's numerator: one logical outcome per created
-	// channel message across every room subject required by locality routing. Its denominator
-	// (messages_canonical_published_total{broadcast_path="room_subject"}) is
-	// emitted upstream by message-gatekeeper, so the ratio can exceed 1 under
-	// redelivery — this side is consumer-side and counts again, that side does
-	// not move. See the contract §13.3.
+	// channel message across every room subject required by locality routing.
+	//
+	// Its denominator (messages_canonical_published_total{broadcast_path="room_subject"})
+	// is emitted upstream by message-gatekeeper, and the two do not cover the
+	// same messages: this side counts every created channel message on the
+	// canonical stream, including the system messages room-worker and
+	// room-service publish there directly. It is also consumer-side, so a
+	// redelivery counts again while the denominator does not move. Both push the
+	// ratio above 1. See the contract §13.3 caveat 3.
 	channelEnqueue     metric.Int64Counter
 	channelEnqueueOpts map[enqueueOutcome]metric.MeasurementOption
 }

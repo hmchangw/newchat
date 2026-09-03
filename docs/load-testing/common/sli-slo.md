@@ -228,11 +228,32 @@ a protocol-receive prober (loadgen) and a render prober (browser) — neither is
     counted by `messages_canonical_publish_duplicate_total`, so the size of the
     exclusion is visible), while a first publish whose ack is lost is retried,
     flagged duplicate, and counted by neither. Consistent with §0.1.
-  - **SLO-1b's ratio can exceed 1, and the dashboard must not clamp it.** The
-    numerator is consumer-side, so a JetStream redelivery increments it again
-    while the upstream denominator does not move. That is the correct trade — an
-    outage-safe denominator is worth an over-countable numerator — but a panel
-    that silently clamps at 1 hides the redelivery it is evidence of.
+  - **The numerators cover more messages than this denominator, so SLO-1a and
+    SLO-1b are not yet ratios.** Two independent reasons.
+
+    *Redelivery.* Both numerators are consumer-side, so a JetStream redelivery
+    increments them again while the upstream denominator does not move. That is
+    the accepted trade — an outage-safe denominator is worth an over-countable
+    numerator.
+
+    *Different producers.* **message-gatekeeper is not the only publisher on
+    `chat.msg.canonical.{site}.created`.** `room-worker` publishes membership and
+    rename system messages there, `room-service` publishes `teams_meet_started`,
+    the oplog migration tool replays historical messages, and loadgen's
+    `--inject=canonical` mode injects synthetic ones — the last one during a
+    campaign, which is exactly when these are read. broadcast-worker's
+    `handleCreated` and message-worker both consume the whole created subject
+    with no provenance filter, so every one of those raises a numerator while the
+    denominator never sees it. **SLO-1b can exceed 1 in steady state with no
+    redelivery at all, and SLO-1a's two halves are not the same message
+    universe.**
+
+    Until this is closed, treat both as unscored diagnostics. Closing it is a
+    scope decision, not a metric fix: either v1 is defined as frontdoor
+    (gatekeeper) messages and both numerators filter to that provenance, or every
+    canonical producer grows its own denominator with a `broadcast_path`
+    classification. A panel must not clamp the ratio at 1 either way — a clamp
+    hides exactly this.
 - **Numerators**, one outcome per logical message (approximate — see §0.1):
   - `message_worker_persistence_total{message_kind,result="success"|"error"}`
     (message-worker) → SLO-1a.
@@ -627,7 +648,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P | Work | Unlocks |
 |---|---|---|
 | P1 | ✅ `natsrouter` metrics middleware (`rpc_server_call_duration_seconds{rpc_method, error_type}`, OTel RPC semconv) | SLO-4/5 + dashboards for all non-named RPCs |
-| P2 | J1 counters. **Landed (P2a):** gatekeeper `messages_canonical_published_total{broadcast_path}` (upstream denominator) and `messages_canonical_publish_duplicate_total`; broadcast-worker `broadcast_channel_enqueue_total{outcome}`. Message-worker persistence already ships, but as `message_worker_persistence_total{message_kind,result}` rather than the `messages_persisted_total{outcome}` this document writes — real drift, unresolved, and renaming it would break existing dashboards. **Outstanding (P2b):** `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
+| P2 | J1 counters. **Landed (P2a):** gatekeeper `messages_canonical_published_total{broadcast_path}` (upstream denominator) and `messages_canonical_publish_duplicate_total`; broadcast-worker `broadcast_channel_enqueue_total{outcome}`. Message-worker persistence already ships as `message_worker_persistence_total{message_kind,result}`, and keeps that name — renaming it to match an earlier draft of this document would break existing dashboards for no gain. **Outstanding (P2b):** `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
 | P5 | Collector `spanmetrics` on frontend spans | observational last-mile & J2 client view |

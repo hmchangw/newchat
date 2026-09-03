@@ -234,15 +234,21 @@ func TestHandler_ChannelEnqueue_MatchesTheGatekeeperDenominator(t *testing.T) {
 	}
 }
 
-// TestPublishChannelEvent_MutationsDoNotCount checks the current dispatch
-// match. broadcast_channel_enqueue_total counts created channel messages on the
-// room-subject path, which is what
-// messages_canonical_published_total{broadcast_path="room_subject"} counts
-// upstream — and that equality holds only while publishChannelEvent is reached
-// from handleCreated alone. A mutation (edit, pin, react) reaches the room
-// subject through publishMutation → publishRoomEvent, bypassing it; a second
-// caller would silently add messages to the numerator that the denominator
-// never saw, pushing SLO-1b above 1 for a reason that is not redelivery.
+// TestPublishChannelEvent_MutationsDoNotCount pins one half of the numerator's
+// scope: broadcast_channel_enqueue_total counts *created* channel messages on
+// the room-subject path and no mutation. An edit, pin or react reaches the same
+// room subject through publishMutation → publishRoomEvent, bypassing
+// publishChannelEvent; a second caller would silently add messages to the
+// numerator.
+//
+// It does NOT establish that the numerator and
+// messages_canonical_published_total{broadcast_path="room_subject"} cover the
+// same messages, and an earlier version of this comment claimed it did. They do
+// not: room-worker and room-service publish system messages straight to the
+// canonical created subject, handleCreated has no provenance filter, and the
+// gatekeeper denominator never sees them. See the contract §13.3 caveat 3 —
+// the numerator is a superset today, and the ratio can exceed 1 for that reason
+// rather than for redelivery.
 func TestPublishChannelEvent_MutationsDoNotCount(t *testing.T) {
 	pub := &mockPublisher{}
 	h, store, us, keyStore, reader := enqueueHandler(t, false, pub)

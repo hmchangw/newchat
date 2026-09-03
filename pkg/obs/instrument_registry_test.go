@@ -746,3 +746,148 @@ func TestBoundedSubjectArg_IgnoresTheBuilderName(t *testing.T) {
 	// Multiple arguments: any one of them naming an entity is enough.
 	assert.False(t, boundedSubjectArg("subject.RoomEvents(siteID, roomID)"))
 }
+
+// canonicalCreatedProducers is every package that publishes on
+// chat.msg.canonical.{site}.created, with why it is or is not inside SLO-1a/1b's
+// denominator.
+//
+// message-gatekeeper is the only one that emits
+// messages_canonical_published_total. broadcast-worker's handleCreated and
+// message-worker both consume the whole created subject with no provenance
+// filter, so every other entry here raises an SLO numerator that the denominator
+// never sees — which is why the contract calls those two unscored diagnostics
+// rather than ratios (§13.3 caveat 3).
+var canonicalCreatedProducers = map[string]string{
+	"message-gatekeeper":               "the frontdoor. Emits the denominator",
+	"room-worker":                      "membership and rename system messages",
+	"room-service":                     "teams_meet_started system message",
+	"data-migration/oplog-transformer": "one-shot historical replay, bounded release window",
+	"tools/loadgen":                    "--inject=canonical, deliberately bypasses the frontdoor",
+}
+
+// TestCanonicalCreatedProducersAreKnown is a tripwire, not a gate: the set above
+// is wrong today on purpose, because the numerators cover it and the denominator
+// does not.
+//
+// It exists because that gap was found by a human reading the repo, not by
+// anything in CI, after two rounds of review had passed over a comment asserting
+// the two sides counted the same messages. A new producer would inflate SLO-1b's
+// numerator silently and identically. Failing here forces the next one to be a
+// decision — extend the denominator, filter the numerator, or add a row with a
+// reason — instead of a discovery.
+func TestCanonicalCreatedProducersAreKnown(t *testing.T) {
+	repo := repoFS(t)
+
+	found := map[string]struct{}{}
+	var unparsed []string
+	require.NoError(t, walkGoSources(repo, func(path string, src []byte) {
+		if strings.HasSuffix(path, "_test.go") || !bytes.Contains(src, []byte("MsgCanonicalCreated")) {
+			return
+		}
+		// pkg/stream builds the subject into a pipeline descriptor and pkg/subject
+		// defines it; neither publishes.
+		if strings.HasPrefix(path, "pkg/") {
+			return
+		}
+		producer, err := publishesCanonicalCreated(path, src)
+		if err != nil {
+			unparsed = append(unparsed, err.Error())
+			return
+		}
+		if producer {
+			found[producerKey(path)] = struct{}{}
+		}
+	}))
+	require.Empty(t, unparsed, "a file naming the canonical created subject went unchecked:\n  %s",
+		strings.Join(unparsed, "\n  "))
+
+	var unexpected []string
+	for pkg := range found {
+		if _, ok := canonicalCreatedProducers[pkg]; !ok {
+			unexpected = append(unexpected, pkg)
+		}
+	}
+	sort.Strings(unexpected)
+
+	assert.Empty(t, unexpected, "a new publisher on chat.msg.canonical.{site}.created raises "+
+		"broadcast_channel_enqueue_total and message_worker_persistence_total, but not "+
+		"messages_canonical_published_total. Either give it a denominator, filter it out of the "+
+		"numerators, or add it to canonicalCreatedProducers with the reason — and update "+
+		"docs/specs/o11y/nats-metrics-contract.md §13.3 caveat 3 either way.\n"+
+		"Unaccounted:\n  %s", strings.Join(unexpected, "\n  "))
+
+	for pkg := range canonicalCreatedProducers {
+		_, ok := found[pkg]
+		assert.True(t, ok, "canonicalCreatedProducers lists %q, which no longer publishes on the "+
+			"canonical created subject — drop the row so the list stays evidence rather than folklore", pkg)
+	}
+}
+
+// producerKey reduces a file path to the directory that owns the publish, keeping
+// two path segments for the nested tools and migration trees.
+func producerKey(path string) string {
+	dir := filepath.ToSlash(filepath.Dir(path))
+	parts := strings.Split(dir, "/")
+	if len(parts) > 1 && (parts[0] == "tools" || parts[0] == "data-migration") {
+		return parts[0] + "/" + parts[1]
+	}
+	return parts[0]
+}
+
+// publishesCanonicalCreated reports whether src *publishes* on the canonical
+// created subject, as opposed to merely naming it.
+//
+// The distinction is the whole value of this guard. message-worker names the
+// subject too — `cc.FilterSubjects = []string{subject.MsgCanonicalCreated(id)}`
+// — and a substring scan called it a producer, which would have put the SLO's
+// own consumer on the producer list. Matching the publish call instead does not
+// work either: message-gatekeeper hoists the subject into a local before
+// building the message, so there is no enclosing publish call to match. What
+// separates them reliably is the consumer side: a filter-subject assignment.
+func publishesCanonicalCreated(path string, src []byte) (bool, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+	if err != nil {
+		return false, fmt.Errorf("%s: could not parse: %w", path, err)
+	}
+
+	// Every call position that sits inside a FilterSubjects assignment.
+	consumerSide := map[token.Pos]struct{}{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, lhs := range assign.Lhs {
+			sel, ok := lhs.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "FilterSubjects" {
+				continue
+			}
+			for _, rhs := range assign.Rhs {
+				ast.Inspect(rhs, func(inner ast.Node) bool {
+					if call, ok := inner.(*ast.CallExpr); ok {
+						consumerSide[call.Pos()] = struct{}{}
+					}
+					return true
+				})
+			}
+		}
+		return true
+	})
+
+	producer := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "MsgCanonicalCreated" {
+			return true
+		}
+		if _, isConsumer := consumerSide[call.Pos()]; !isConsumer {
+			producer = true
+		}
+		return true
+	})
+	return producer, nil
+}

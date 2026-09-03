@@ -1048,10 +1048,16 @@ func (h *Handler) encryptRoomEvent(ctx context.Context, roomID string, clientMsg
 
 // publishChannelEvent enqueues one created channel message onto every room
 // subject required by the active locality route.
+//
 // It is SLO-1b's numerator, and it is reached from handleCreated alone —
-// mutations take publishMutation → publishRoomEvent — which is what makes the
-// count comparable to messages_canonical_published_total{broadcast_path="room_subject"}
-// upstream. TestPublishChannelEvent_HasOneCaller is the guard on that.
+// mutations take publishMutation → publishRoomEvent — so the count is scoped to
+// creates. TestPublishChannelEvent_HasOneCaller is the guard on that.
+//
+// That scoping does NOT make it comparable to
+// messages_canonical_published_total{broadcast_path="room_subject"}: room-worker
+// and room-service publish system messages straight to the canonical created
+// subject and handleCreated has no provenance filter, so this counter is a
+// superset of the gatekeeper's denominator. Contract §13.3 caveat 3.
 //
 // The outcome is recorded from a defer on a named return rather than around the
 // final publish. Encryption and marshalling return early, and locality routing

@@ -814,7 +814,7 @@ to this contract.
 | `messages_canonical_published_total` | counter | message-gatekeeper | on first published message | none | **SLO-1a denominator** (all-`broadcast_path` total) and **SLO-1b/2 denominator** (`broadcast_path="room_subject"` slice). Emitted upstream of both workers on purpose: a consumer-side denominator is only incremented by a worker that is running, so a stalled broadcast-worker would remove a message from *both* halves of SLO-1b and hold the ratio at 100% through the outage. Three caveats below |
 | `messages_canonical_publish_duplicate_total` | counter | message-gatekeeper | **never on a happy path** — only on a JetStream redelivery inside the stream's dedup window | none — the stream deduplicates silently | the size of the exclusion the row above makes. Unlabelled: the message it describes was already classified on its first publish |
 | `message_worker_persistence_total` | counter | message-worker | on first persist | none | campaign; SLO-1a |
-| `broadcast_channel_enqueue_total` | counter | broadcast-worker | on first channel message | none — a Core NATS publish leaves no broker-side record of acceptance | **SLO-1b numerator**. One logical `outcome` (`ok`/`failed`) per `publishChannelEvent` call, recorded from a `defer` on a named return so encryption, marshal, and every locality-routing publish are covered. `ok` requires every required room-subject target; any target failure yields the single `failed` outcome, with no `partial` label and no per-target increments. Reached from `handleCreated` alone; mutations take `publishMutation` → `publishRoomEvent`, which is what makes it comparable to the `room_subject` denominator. **Enqueue acceptance, not delivery**: a nil return from each Core NATS publish means accepted into the client's send buffer (§7.1) |
+| `broadcast_channel_enqueue_total` | counter | broadcast-worker | on first channel message | none — a Core NATS publish leaves no broker-side record of acceptance | **SLO-1b numerator**. One logical `outcome` (`ok`/`failed`) per `publishChannelEvent` call, recorded from a `defer` on a named return so encryption, marshal, and every locality-routing publish are covered. `ok` requires every required room-subject target; any target failure yields the single `failed` outcome, with no `partial` label and no per-target increments. Scoped to *creates*: mutations take `publishMutation` → `publishRoomEvent`. **It is a superset of the `room_subject` denominator** — caveat 3 below. **Enqueue acceptance, not delivery**: a nil return from each Core NATS publish means accepted into the client's send buffer (§7.1) |
 | `broadcast_worker_fanout_recipients` | histogram | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_recipient_deliveries_total` | counter | broadcast-worker | on first fan-out | none | campaign; SLO-1b |
 | `broadcast_worker_thread_view_publish_failures_total` | counter | broadcast-worker | on first failed thread-view mirror | none — the mirror is a Core NATS publish the broker keeps no record of | thread-panel delivery health. Failures only, by the author's design (#349): an open panel refetches on open, so the rate is what is worth alerting on, not the absolute count |
@@ -888,11 +888,32 @@ sum(increase(broadcast_channel_enqueue_total{outcome="ok"}[$w]))
 Any SLO-1b/2 recording rule must carry that worst-case denominator, not the bare
 `room_subject` slice.
 
-**3. SLO-1b's ratio can exceed 1, and the dashboard must not clamp it.** The
-numerator (`broadcast_channel_enqueue_total`) is consumer-side, so a JetStream
-redelivery increments it again while this denominator does not move. That is the
-correct trade — an outage-safe denominator is worth an over-countable numerator —
-but a panel that silently clamps at 1 hides the redelivery it is evidence of.
+**3. The numerator covers more messages than this denominator, so SLO-1b is not
+yet a ratio.** Two independent reasons, and the second is the larger.
+
+*Redelivery.* The numerator (`broadcast_channel_enqueue_total`) is
+consumer-side, so a JetStream redelivery increments it again while this
+denominator does not move. That is the accepted trade — an outage-safe
+denominator is worth an over-countable numerator.
+
+*Different producers.* `message-gatekeeper` is **not** the only publisher on
+`chat.msg.canonical.{site}.created`. `room-worker` publishes membership and
+rename system messages there (`processRemoveIndividual`, `processRemoveOrg`,
+`processAddMembers`, `publishCanonical`), `room-service` publishes
+`teams_meet_started`, the oplog migration tool replays historical messages, and
+loadgen's `--inject=canonical` mode injects synthetic ones. `handleCreated` has
+no provenance filter, so every one of those increments the numerator — and
+`message_worker_persistence_total`, SLO-1a's numerator — while this denominator
+never sees them. SLO-1b can therefore exceed 1 in steady state with no
+redelivery at all, and SLO-1a's two halves are not the same message universe.
+
+**Until that is closed, both are unscored diagnostics rather than SLOs.**
+Closing it is a scope decision, not a metric fix: either v1 is defined as
+frontdoor (gatekeeper) messages and both numerators filter to that provenance,
+or every canonical producer grows its own denominator with a `broadcast_path`
+classification. The first is much smaller; the second is the only one that makes
+"a message a user can see" the unit. A panel must not clamp the ratio at 1
+either way — a clamp hides exactly this.
 
 ### 13.4 Adding an instrument
 

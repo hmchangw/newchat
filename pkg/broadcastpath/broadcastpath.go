@@ -6,9 +6,15 @@
 // different services, one upstream of the other, and a ratio whose halves
 // disagree about which messages belong in it is worse than no ratio at all — it
 // reads green while the disagreement, not the system, moves it. Keeping the rule
-// here rather than as a copy in each service is what stops that drifting, for the
-// same reason model.IsHiddenThreadReply lives in pkg/model rather than in the
-// three services that branch on it.
+// here rather than as a copy in each service is what stops the *classification*
+// drifting, for the same reason model.IsHiddenThreadReply lives in pkg/model
+// rather than in the three services that branch on it.
+//
+// One definition of the route is not one definition of the message set, and the
+// two halves do not currently agree on the latter: room-worker and room-service
+// publish system messages straight to the canonical created subject, so the
+// consumer-side numerator counts messages the gatekeeper denominator never saw.
+// This package cannot fix that — see the contract §13.3 caveat 3.
 //
 // The label is the fan-out route, not the room type. A channel thread reply is a
 // channel room that routes to per-account thread fan-out and never reaches
