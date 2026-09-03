@@ -435,7 +435,7 @@ func TestAsyncFault_SurvivesAnUnrelatedLiveUpdate(t *testing.T) {
 		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
 	}, 2*time.Second, 10*time.Millisecond, "client never became ready")
 
-	s.handleAsyncError(nil, errors.New("nats: Permissions Violation for Subscription to \"chat.room.r1.event.member\""))
+	s.handleAsyncError(context.Background(), nil, errors.New("nats: Permissions Violation for Subscription to \"chat.room.r1.event.member\""))
 	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
 		"an async fault must demote the client")
 
@@ -462,7 +462,7 @@ func TestAsyncFault_ClearsWithTheConnectionItBelongedTo(t *testing.T) {
 		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
 	}, 2*time.Second, 10*time.Millisecond)
 
-	s.handleAsyncError(nil, errors.New("nats: Permissions Violation for Subscription"))
+	s.handleAsyncError(context.Background(), nil, errors.New("nats: Permissions Violation for Subscription"))
 	require.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
 
 	s.invalidatePlan() // what the disconnect handler does
@@ -580,7 +580,7 @@ func TestBootstrapWalk_IdempotentAddOutranksAStaleSnapshot(t *testing.T) {
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
 	s.markConnUp()
-	require.NoError(t, s.subscribeLanes(fc))
+	require.NoError(t, s.subscribeLanes(context.Background(), fc))
 	open, err := s.openRoomLanes(fc, "r-keep", true)
 	require.NoError(t, err)
 	s.roomSubs["r-keep"] = open
@@ -731,4 +731,96 @@ func TestBootstrapWalk_AFailedFlushIsNotReady(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "flush")
 	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// The subscription.update lane is the control plane: everything the client
+// knows about its room set between walks arrives on it. A slow consumer there
+// means a membership change was DROPPED, so the plan the client holds may no
+// longer be the server's — yet the old handler counted the event and returned,
+// leaving planVerified true and the client in the ready set. Readiness has to
+// fail closed and a resync has to re-derive the plan.
+func TestAsyncError_SlowConsumerOnTheUpdateLaneDemotesAndResyncs(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+	require.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001, "precondition: ready")
+
+	// The repair walk is gated so the demotion is observable; ungated, the
+	// resync re-promotes before the assertion and the test passes whether or
+	// not the demotion ever happened.
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	s.handleAsyncError(context.Background(),
+		&nats.Subscription{Subject: subject.SubscriptionUpdate("user-lc")}, nats.ErrSlowConsumer)
+
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.SlowConsumer), 0.001, "still counted as a slow consumer")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"a dropped control message means the plan is no longer proven")
+	s.mu.Lock()
+	verified := s.planVerified
+	s.mu.Unlock()
+	assert.False(t, verified, "only a fresh walk may vouch for the plan again")
+
+	select {
+	case <-fc.reqEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no resync was scheduled for the dropped control message")
+	}
+	close(fc.reqGate)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond, "the resync must restore readiness")
+}
+
+// A slow consumer on a room or user delivery lane is loss to be measured, not
+// a reason to doubt the plan. Demoting there would make every burst look like
+// a fleet collapse.
+func TestAsyncError_SlowConsumerOnADeliveryLaneKeepsReadiness(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+
+	s.handleAsyncError(context.Background(), &nats.Subscription{Subject: subject.RoomEvent("r1", true)}, nats.ErrSlowConsumer)
+
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.SlowConsumer), 0.001)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"delivery loss is the measurement, not a plan fault")
+}
+
+// A control message we cannot parse is the same hazard as one we never got:
+// it may have carried a membership change, so the plan is no longer proven.
+func TestUpdateLane_UndecodableEventDemotesAndResyncs(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	require.NoError(t, s.subscribeLanes(context.Background(), fc))
+	require.NoError(t, s.bootstrapWalk(context.Background()))
+	require.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001, "precondition: ready")
+
+	// The repair walk is gated so the demotion is observable; without the gate
+	// the resync would re-promote before the assertion and the test would pass
+	// whether or not the demotion ever happened.
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), []byte("{not json"))
+
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.DecodeFailures), 0.001)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"an unparseable control message must not leave the client vouching for its plan")
+
+	// ...and the scheduled resync is what earns readiness back.
+	select {
+	case <-fc.reqEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no resync was scheduled for the lost control message")
+	}
+	close(fc.reqGate)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond, "the resync must restore readiness")
 }

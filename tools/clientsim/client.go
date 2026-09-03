@@ -227,7 +227,7 @@ func (s *simClient) run(ctx context.Context) error {
 	if conn == nil {
 		return fmt.Errorf("client %s closed during startup", s.account)
 	}
-	if err := s.subscribeLanes(conn); err != nil {
+	if err := s.subscribeLanes(ctx, conn); err != nil {
 		return err
 	}
 	// A walk whose connection died mid-RPC is a race the resync already owns;

@@ -48,7 +48,7 @@ const memberSubjectSuffix = ".event.member"
 // subscribeLanes opens the user event lane and the live update lane on the
 // given connection — the update lane BEFORE the bootstrap walk so a
 // membership change landing mid-bootstrap is not lost (spec §5.2).
-func (s *simClient) subscribeLanes(conn simConn) error {
+func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 	if _, err := conn.SubscribeCB(subject.UserRoomEvent(s.account), func(msg *nats.Msg) {
 		handleDelivery(s.m, "user", msg.Data, time.Now())
 	}); err != nil {
@@ -61,7 +61,14 @@ func (s *simClient) subscribeLanes(conn simConn) error {
 		view := s.planViewLocked()
 		changes, asserted, err := applySubscriptionUpdate(view, msg.Data)
 		if err != nil {
+			// A control message we cannot parse is the same hazard as one we
+			// never received: it may have carried a membership change, so the
+			// plan this client holds is no longer proven. Counting it and
+			// returning left the client vouching for a plan it could not.
 			s.m.DecodeFailures.Inc()
+			s.planVerified = false
+			s.updateReadyLocked()
+			go s.resync(ctx)
 			return
 		}
 		// Stamped on the asserted room even when the event produced no change:

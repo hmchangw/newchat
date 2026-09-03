@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -45,7 +46,14 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, st
 	roomID := evt.Subscription.RoomID
 	switch evt.Action {
 	case "added":
-		if evt.Subscription.RoomType != "channel" || roomID == "" {
+		// An event naming no room is malformed: it may have carried a real
+		// membership change this client now cannot apply, so the caller has to
+		// record evidence rather than treat it as nothing happening. A DM or
+		// bot add IS nothing happening here — that traffic rides the user lane.
+		if roomID == "" {
+			return nil, "", errors.New("subscription.update added event has no roomId")
+		}
+		if evt.Subscription.RoomType != "channel" {
 			return nil, "", nil
 		}
 		global := roomGlobal(evt.Subscription.Room)
@@ -60,7 +68,7 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, st
 		return []subChange{{Op: subOpen, RoomID: roomID, Global: global}}, roomID, nil
 	case "removed":
 		if roomID == "" {
-			return nil, "", nil
+			return nil, "", errors.New("subscription.update removed event has no roomId")
 		}
 		// Close even for a room the plan does not know about. A room whose
 		// subscribe failed is in missingRooms but absent from the plan view

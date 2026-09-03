@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/hmchangw/chat/pkg/subject"
 )
 
 // simSub is the slice of *nats.Subscription the client uses, so unit tests
@@ -163,7 +165,7 @@ func (s *simClient) realDial(ctx context.Context) (simConn, error) {
 			s.markConnDown()
 		}),
 		nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
-			s.handleAsyncError(sub, err)
+			s.handleAsyncError(ctx, sub, err)
 		}),
 	)
 	if err != nil {
@@ -184,12 +186,19 @@ func (s *simClient) nextReconnectDelay(int) time.Duration {
 // that fails readiness closed until the next reconnect is unusable to an
 // operator without the subject that caused it. It is nil for connection-level
 // faults.
-func (s *simClient) handleAsyncError(sub *nats.Subscription, err error) {
+func (s *simClient) handleAsyncError(ctx context.Context, sub *nats.Subscription, err error) {
 	// Episode semantics only: one increment per Active->SlowConsumer
 	// transition; never add Subscription.Dropped() here (see the metric's
 	// doc comment and pkg/natsutil/slowconsumer.go).
 	if errors.Is(err, nats.ErrSlowConsumer) {
 		s.m.SlowConsumer.Inc()
+		// On a delivery lane that is loss to be measured. On the
+		// subscription.update lane it is a DROPPED MEMBERSHIP CHANGE: the plan
+		// this client holds may no longer be the server's, so it can no longer
+		// be counted as carrying its subscriptions.
+		if sub != nil && sub.Subject == subject.SubscriptionUpdate(s.account) {
+			s.controlPlaneFault(ctx)
+		}
 		return
 	}
 	// Subscription permission violations and other asynchronous faults can
@@ -206,6 +215,18 @@ func (s *simClient) handleAsyncError(sub *nats.Subscription, err error) {
 		subj = sub.Subject
 	}
 	slog.Warn("nats async error", "account", s.account, "subject", subj, "error", err)
+}
+
+// controlPlaneFault marks the plan unproven because a subscription.update was
+// lost or unusable, then schedules the walk that re-derives it. Only a
+// completed walk may promote the client again, so readiness fails closed for
+// the whole gap rather than for one event.
+func (s *simClient) controlPlaneFault(ctx context.Context) {
+	s.mu.Lock()
+	s.planVerified = false
+	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
+	s.mu.Unlock()
+	go s.resync(ctx)
 }
 
 // disconnectReason maps common close errors to a bounded label set so the

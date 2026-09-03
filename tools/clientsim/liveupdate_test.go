@@ -112,9 +112,32 @@ func TestApplySubscriptionUpdate_RemovalClearsARoomThatNeverOpened(t *testing.T)
 	assert.Equal(t, "gone", changes[0].RoomID)
 }
 
-func TestApplySubscriptionUpdate_RemovalWithoutARoomIDIsIgnored(t *testing.T) {
+func TestApplySubscriptionUpdate_RemovalWithoutARoomIDIsMalformed(t *testing.T) {
+	// Previously swallowed as a no-op. A removal that names no room may have
+	// carried a real membership change, so it is evidence the caller records
+	// (and a reason to re-derive the plan), not nothing happening.
 	plan := map[string]bool{}
 	changes, _, err := applySubscriptionUpdate(plan, updJSON("removed", "", "channel", nil))
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.Empty(t, changes)
+}
+
+// A membership event naming no room is malformed, not a no-op: it may have
+// carried a real change the client now cannot apply. Swallowing it left the
+// run with no evidence and the plan silently possibly-stale. A DM `added`,
+// by contrast, is a legitimate event this tool correctly ignores.
+func TestApplySubscriptionUpdate_EmptyRoomIDIsMalformed(t *testing.T) {
+	for _, action := range []string{"added", "removed"} {
+		t.Run(action+" without a roomId", func(t *testing.T) {
+			_, _, err := applySubscriptionUpdate(map[string]bool{}, updJSON(action, "", "channel", nil))
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "roomId")
+		})
+	}
+	t.Run("a DM add is a legitimate skip, not malformed", func(t *testing.T) {
+		changes, asserted, err := applySubscriptionUpdate(map[string]bool{}, updJSON("added", "d1", "dm", nil))
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+		assert.Empty(t, asserted)
+	})
 }
