@@ -992,3 +992,86 @@ func TestApplyChanges_StopsOpeningRoomsAtTheCap(t *testing.T) {
 	assert.Empty(t, fc.chanSubs[subject.RoomEvent("one-too-many", true)],
 		"no lane is opened for a room past the cap")
 }
+
+// The cap refuses the subscription, so nothing is queued for the broker to
+// acknowledge — and a flush that confirms nothing is pure cost. Without this,
+// a publisher stuck emitting unique room IDs past the cap spawns one goroutine
+// and one PING round-trip per event, in every client at once: the very
+// unbounded growth the cap exists to stop, moved from subscriptions to
+// goroutines.
+//
+// liveGen is the assertion rather than the flush counter: it is advanced
+// synchronously under s.mu in the same critical section that spawns the flush,
+// so an unchanged liveGen proves no flush was scheduled. Counting flushes
+// would race the goroutine and pass even when one was.
+func TestLiveUpdate_CapRejectedOpenDoesNotFlush(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	s.mu.Lock()
+	for i := 0; i < maxRoomsPerClient; i++ {
+		s.roomSubs["filler-"+strconv.Itoa(i)] = openSub{}
+	}
+	beforeGen := s.liveGen
+	s.mu.Unlock()
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "past-the-cap", "channel", nil))
+
+	s.mu.Lock()
+	afterGen := s.liveGen
+	s.mu.Unlock()
+	assert.Equal(t, beforeGen, afterGen,
+		"a rejected open queues no SUB, so there is nothing to flush for")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("room_cap")), 0.001)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
+		"the refused room still keeps the client out of the ready set")
+}
+
+// The same rule for the other way an open can queue nothing: openRoomLanes
+// failed, so no lane is pending and the room is already recorded missing.
+func TestLiveUpdate_FailedOpenDoesNotFlush(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	fc.subChanErrOn = map[string]error{subject.RoomEvent("r-broken", true): assert.AnError}
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+
+	s.mu.Lock()
+	beforeGen := s.liveGen
+	s.mu.Unlock()
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r-broken", "channel", nil))
+
+	s.mu.Lock()
+	afterGen := s.liveGen
+	s.mu.Unlock()
+	assert.Equal(t, beforeGen, afterGen)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// The positive control for both: an open that DOES queue a lane must still
+// demote, flush and come back — otherwise the two tests above would pass on a
+// build that simply never flushes.
+func TestLiveUpdate_SuccessfulOpenStillFlushes(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	startClient(t, s)
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond)
+	before := fc.flushes.Load()
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r-new", "channel", nil))
+
+	require.Eventually(t, func() bool { return fc.flushes.Load() > before },
+		3*time.Second, 5*time.Millisecond, "a real open must be acknowledged by the broker")
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond, "and readiness comes back once it is")
+}

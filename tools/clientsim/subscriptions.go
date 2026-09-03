@@ -79,8 +79,13 @@ func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 			s.touched[asserted] = s.gen
 		}
 		if len(changes) > 0 {
-			s.applyChangesLocked(changes)
-			if opensARoom(changes) {
+			// The RESULT, not the intent: an open the cap refused or whose
+			// lanes failed queues nothing, so there is nothing for the broker
+			// to acknowledge. Flushing for it would spawn a goroutine and a
+			// PING per event — at the cap, once for every further room a
+			// faulty publisher names, which is the unbounded growth the cap
+			// exists to stop wearing a different hat.
+			if s.applyChangesLocked(changes) {
 				// A new SUB is only queued locally. Core NATS does not replay,
 				// so a client that keeps vouching here misses anything
 				// published before the broker installs it — permanently, with
@@ -108,17 +113,6 @@ func (s *simClient) invalidateForControlFaultLocked() {
 	s.planVerified = false
 	s.controlGen++
 	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
-}
-
-// opensARoom reports whether a batch adds a subscription, which is the only
-// case that has to wait for the broker before the client may vouch again.
-func opensARoom(changes []subChange) bool {
-	for _, ch := range changes {
-		if ch.Op == subOpen {
-			return true
-		}
-	}
-	return false
 }
 
 // flushThenPromote waits for the broker to acknowledge the SUBs a live update
@@ -161,11 +155,12 @@ func (s *simClient) planViewLocked() map[string]bool {
 // applyChangesLocked opens/closes room subscriptions. Caller holds s.mu;
 // holding the lock across the whole batch is what makes decide+apply atomic
 // with respect to the resync walk (the review's lost-update race).
-func (s *simClient) applyChangesLocked(changes []subChange) {
+func (s *simClient) applyChangesLocked(changes []subChange) bool {
 	conn := s.conn
 	if conn == nil {
-		return
+		return false
 	}
+	queued := false
 	for _, ch := range changes {
 		switch ch.Op {
 		case subClose:
@@ -203,8 +198,10 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 			}
 			delete(s.missingRooms, ch.RoomID)
 			s.roomSubs[ch.RoomID] = open
+			queued = true
 		}
 	}
+	return queued
 }
 
 // maxRoomsPerClient bounds the room subscriptions one simulated client will
@@ -373,7 +370,9 @@ func (s *simClient) applyPlan(plan map[string]bool, startGen, startEpoch, startC
 		}
 		kept = append(kept, ch)
 	}
-	s.applyChangesLocked(kept)
+	// The walk flushes unconditionally before it promotes, so whether this
+	// batch queued anything does not change what happens next.
+	_ = s.applyChangesLocked(kept)
 	s.reconcileBookkeepingLocked(plan, startGen)
 	return nil
 }
