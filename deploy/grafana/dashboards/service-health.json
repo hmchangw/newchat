@@ -1,7 +1,7 @@
 {
   "uid": "chat-service-health",
   "title": "Chat \u2014 Service Health",
-  "description": "Triage surface for the chat platform: an alert fires, you open this, and you read down until you know which layer is broken. Row 1 is what users experience, row 2 is whether the processes are healthy, and the collapsed rows are the drill-down.\n\nCore path (the Core path unhealthy tile): message-gatekeeper, broadcast-worker, message-worker, roomlist-worker, notification-worker.\n\nServer-side NATS, MongoDB and Cassandra health belongs to the teams that run them; everything here is the client side.",
+  "description": "Triage surface: an alert fires, you open this, you read down until you know which layer broke. Row 1 is what users experience and names the service and the endpoint; row 2 is whether the processes are healthy; row 3 is the dependency client view.\n\nCore path: message-gatekeeper, broadcast-worker, message-worker, roomlist-worker, notification-worker.\n\nServer-side NATS, MongoDB and Cassandra health belongs to the teams that run them. Everything here is the client side.",
   "tags": [
     "chat",
     "service-health",
@@ -37,7 +37,7 @@
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
-        "description": "Each site runs its own Prometheus, so selecting the datasource selects the site. There is deliberately no site variable."
+        "description": "Each site runs its own Prometheus, so choosing the datasource chooses the site. There is deliberately no site variable."
       },
       {
         "type": "query",
@@ -71,6 +71,26 @@
         "skipUrlSync": false
       },
       {
+        "type": "textbox",
+        "name": "name",
+        "label": "Name filter",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "options": [
+          {
+            "text": "",
+            "value": "",
+            "selected": true
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false,
+        "description": "Substring matched against the container name, for the resource table and the two container charts in row 2. Those come from cAdvisor, which sees every container in the namespace including datastores, exporters and web UIs. Type nextgen to keep only nextgen-* containers; leave empty for all."
+      },
+      {
         "type": "query",
         "name": "service",
         "label": "Service",
@@ -100,7 +120,7 @@
         "multi": true,
         "sort": 1,
         "skipUrlSync": false,
-        "description": "Filters the application metrics only. The resource table and the ranked CPU/memory panels come from cAdvisor, which labels by container rather than service_name, and always show every container so a service cannot be hidden by a filter that does not know its name."
+        "description": "Filters the application metrics. Its values come from a metric only our Go services emit, so it can never list a datastore or an exporter. The container panels in row 2 use the Name filter instead, because cAdvisor does not know a container's service_name."
       }
     ]
   },
@@ -140,7 +160,7 @@
       "type": "stat",
       "id": 1,
       "title": "Core path unhealthy",
-      "description": "Replicas that should be running and are not, restricted to the five services on the send path: message-gatekeeper, broadcast-worker, message-worker, roomlist-worker, notification-worker. A message that misses any of them is not accepted, delivered, persisted or notified. Non-zero here means act now.",
+      "description": "Unavailable replicas on the five services a message must pass through: message-gatekeeper, broadcast-worker, message-worker, roomlist-worker, notification-worker. Matched as a substring, so a deployment-name prefix does not hide them.\n\nNO DATA means kube-state-metrics is not being scraped here, not that everything is up -- the tile beside it will be empty for the same reason.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -158,7 +178,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"$namespace\",deployment=~\"message-gatekeeper|broadcast-worker|message-worker|roomlist-worker|notification-worker\"})",
+          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"$namespace\",deployment=~\".*(message-gatekeeper|broadcast-worker|message-worker|roomlist-worker|notification-worker).*\"})",
           "refId": "A",
           "range": true
         }
@@ -206,7 +226,7 @@
       "type": "stat",
       "id": 2,
       "title": "All deployments unhealthy",
-      "description": "Unavailable replicas across every deployment in the namespace, with no allowlist, so a newly added service is counted here even before anyone classifies it. Read it together with the tile on the left: the same number means the problem is on the send path.",
+      "description": "Unavailable replicas across every deployment, with no allowlist, so a service nobody has classified is still counted. The same number as the tile on the left means the problem is on the send path.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -272,7 +292,7 @@
       "type": "stat",
       "id": 3,
       "title": "API error rate",
-      "description": "Failed calls as a percentage of all calls, HTTP and NATS request/reply together. HTTP counts 5xx only -- a 4xx is the client being told no, not the service failing. NATS counts any call that carried an error.type, which the semantic convention omits on success.\n\nA family with no series contributes nothing rather than voiding the whole tile, so a site that serves only NATS traffic still gets a number. When neither family is present the tile reads NO DATA, not 0% -- nothing scraped is not the same as nothing failing.",
+      "description": "Failed calls over all calls, HTTP and NATS request/reply together. HTTP counts 5xx only: a 4xx is the service correctly refusing. NATS counts any call carrying error.type, which the convention omits on success.\n\nThis tile says how much, never who -- the two tables in row 1 name the route and the method.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -342,7 +362,7 @@
       "type": "stat",
       "id": 4,
       "title": "Circuit breakers open",
-      "description": "Breakers currently open or half-open across the six services that use pkg/circuitbreaker. This is the fastest answer to \"which dependency is fenced\" -- no datastore exporter can see it, because a breaker is application state.\n\nA breaker publishes its state only on the first transition, so a service whose breakers have never tripped has no series at all. NO DATA here means nothing has ever tripped, which is the healthy case.",
+      "description": "Breakers currently open or half-open. Four exist today: subscription and roommeta in message-gatekeeper, roommeta in broadcast-worker, atrestdek in message-worker and history-service. Each opens after MONGO_BREAKER_FAILS (default 5) consecutive qualifying failures and retries after MONGO_BREAKER_COOLDOWN (default 10s). A missing document is not a failure; a timeout is.\n\nThe gauge is written only on a transition, so a breaker that has never tripped since the process started has no series at all. An empty tile is the healthy state.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -368,7 +388,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "noValue": "0",
+          "noValue": "none open",
           "mappings": [],
           "color": {
             "mode": "thresholds"
@@ -420,8 +440,8 @@
     {
       "type": "timeseries",
       "id": 6,
-      "title": "Request rate",
-      "description": "Traffic, the golden signal that is missing from every error-only dashboard. A sudden drop is an outage upstream of these services -- and while it lasts the error rate falls too, because no requests are arriving to fail.",
+      "title": "Request rate by service",
+      "description": "Traffic, the golden signal an error-only dashboard leaves out. A drop is an outage upstream of these services, and while it lasts the error rate falls with it because nothing is arriving to fail.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -466,7 +486,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -497,8 +516,8 @@
     {
       "type": "timeseries",
       "id": 7,
-      "title": "HTTP errors by status class",
-      "description": "Status codes folded to their class. 5xx is the service failing; 4xx is the service correctly refusing, and during an auth incident 4xx rising is the symptom rather than the fault. Stacked so a rise in total volume is distinguishable from a change in mix.",
+      "title": "HTTP errors by service",
+      "description": "Broken out per service and status class, because the class alone cannot be acted on. 5xx is the service failing; 4xx is it refusing, and a 4xx spike during an auth incident is the symptom rather than the fault. The routes table below names the endpoint.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -516,10 +535,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (status_class) (label_replace(rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"[45]..\"}[$__rate_interval]), \"status_class\", \"$1xx\", \"http_response_status_code\", \"(\\\\d)\\\\d\\\\d\"))",
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{status_class}}"
+          "legendFormat": "{{service_name}} 5xx"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"4..\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": true,
+          "legendFormat": "{{service_name}} 4xx"
         }
       ],
       "fieldConfig": {
@@ -532,7 +562,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -563,8 +592,8 @@
     {
       "type": "timeseries",
       "id": 8,
-      "title": "NATS RPC errors by type",
-      "description": "error.type is absent on a successful call, so every series here is a failure. unavailable and internal are the service breaking; not_found, forbidden, conflict and bad_request are it working correctly and saying no.",
+      "title": "NATS RPC errors by service and type",
+      "description": "error.type is absent on success, so every series here is a failure. unavailable and internal are the service breaking; unauthenticated, forbidden, not_found, conflict and bad_request are it working and saying no -- a rise in those is usually a client or a token, not an outage.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -582,10 +611,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
+          "expr": "sum by (service_name, error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{error_type}}"
+          "legendFormat": "{{service_name}} {{error_type}}"
         }
       ],
       "fieldConfig": {
@@ -598,7 +627,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -629,8 +657,8 @@
     {
       "type": "timeseries",
       "id": 9,
-      "title": "HTTP latency",
-      "description": "p95 and p99 across all routes. Percentiles are interpolated inside a bucket and aggregated across pods, so read them for shape and movement. The top boundary is 10s: a p99 pinned there means \"at least 10s\", not 10s.",
+      "title": "HTTP p99 by service",
+      "description": "One line per service so a slow service is identifiable without opening anything. Percentiles are interpolated inside a bucket and aggregated across pods: read shape and movement, not absolute truth. The top boundary is 10s, so a line pinned there means at least 10s.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -648,21 +676,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
-          "legendFormat": "p95"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) by (le))",
-          "refId": "B",
-          "range": true,
-          "legendFormat": "p99"
+          "legendFormat": "{{service_name}}"
         }
       ],
       "fieldConfig": {
@@ -675,7 +692,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -706,8 +722,8 @@
     {
       "type": "timeseries",
       "id": 10,
-      "title": "NATS RPC latency",
-      "description": "p95 and p99 across all request/reply methods. Shares o11y's bucket boundaries with the HTTP histogram on purpose, so the two percentiles are directly comparable.",
+      "title": "NATS RPC p99 by service",
+      "description": "Shares o11y's bucket boundaries with the HTTP histogram on purpose, so the two are directly comparable. The methods table below splits this further.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -725,21 +741,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
-          "legendFormat": "p95"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) by (le))",
-          "refId": "B",
-          "range": true,
-          "legendFormat": "p99"
+          "legendFormat": "{{service_name}}"
         }
       ],
       "fieldConfig": {
@@ -752,7 +757,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -781,32 +785,19 @@
       }
     },
     {
-      "type": "row",
-      "id": 11,
-      "title": "2. Services \u2014 utilization, saturation, errors",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 21
-      },
-      "panels": []
-    },
-    {
       "type": "table",
-      "id": 12,
-      "title": "Service resources",
-      "description": "One row per container, from cAdvisor and kube-state. Sorted by restarts because that is the only column where any non-zero value is always a finding -- 80% CPU can be normal, three restarts never is. The graded columns have their own ranked views below.\n\nRows are containers, not services: the pod-level rollup (container=\"\") and the pause container are excluded, so a pod with sidecars contributes one row per sidecar.\n\nRestarts are counted inside the selected time range. A pod that was replaced takes its counter with it, so a service that crashed and was then rescheduled is undercounted here; the deploy markers and the availability tiles at the top cover that case.",
+      "id": 11,
+      "title": "HTTP routes",
+      "description": "One row per route and service. Paths are templated by the gin middleware, so an id in the URL never becomes its own row. Sorted by error rate.\n\nerr/s is shown beside error %: the percentage is a division and goes blank when a route has no traffic in the window, while the rate still shows what happened.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "h": 13,
-        "w": 24,
+        "h": 11,
+        "w": 12,
         "x": 0,
-        "y": 22
+        "y": 21
       },
       "targets": [
         {
@@ -815,7 +806,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__range]))",
+          "expr": "sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -827,7 +818,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container!=\"\", container!=\"POD\",resource=\"cpu\"})",
+          "expr": "sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval]))",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -839,7 +830,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
+          "expr": "100 * sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -851,7 +842,444 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container!=\"\", container!=\"POD\",resource=\"memory\"})",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "http_route",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true,
+              "Time 11": true,
+              "Time 12": true,
+              "Time 13": true,
+              "service_name 1": true,
+              "service_name 2": true,
+              "service_name 3": true
+            },
+            "renameByName": {
+              "http_route": "route",
+              "service_name": "service",
+              "Value #A": "req/s",
+              "Value #B": "err/s",
+              "Value #C": "error %",
+              "Value #D": "p99"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "-",
+          "mappings": [],
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.5
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "p(95|99)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "(req|err)/s"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "error %",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "id": 12,
+      "title": "NATS RPC methods",
+      "description": "One row per service and rpc.method, sorted by error rate.\n\nrpc.method is a curated enum mapped from the subject and it only covers room-service, history-service and the teams routes. Every call to user-service, search-service and media-service records unknown, so those rows are a whole service's request surface collapsed into one -- which is why the table groups by service too, otherwise three services would share a single row.\n\nThe router already computes a per-route wildcard pattern when the handler registers. Exporting it as a second label would make this one row per API; that is a change in pkg/natsmetrics.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "rpc_method",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true,
+              "Time 11": true,
+              "Time 12": true,
+              "Time 13": true,
+              "service_name 1": true,
+              "service_name 2": true,
+              "service_name 3": true
+            },
+            "renameByName": {
+              "rpc_method": "method",
+              "service_name": "service",
+              "Value #A": "req/s",
+              "Value #B": "err/s",
+              "Value #C": "error %",
+              "Value #D": "p99"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "-",
+          "mappings": [],
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.5
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "p(95|99)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "(req|err)/s"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "error %",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "id": 13,
+      "title": "2. Services \u2014 utilization, saturation, errors",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 14,
+      "title": "Service resources",
+      "description": "One row per container, from cAdvisor and kube-state. This is the ranked view: every column sorts, so click the one you are chasing. It opens sorted by restarts because that is the only column where any non-zero value is always a finding -- 80% CPU can be normal, three restarts never is.\n\nUse the Name filter variable to cut it down; typing nextgen selects every nextgen-* container and drops the datastores, exporters and web UIs that share the namespace.\n\nA blank in a % of limit column reads \"no limit\": either the container declares none, or kube-state-metrics is not scraped here. The absolute CPU and memory columns come from cAdvisor alone and are populated either way.\n\nRestarts are counted inside the selected range. A pod that was replaced took its counter with it, so a crash followed by a reschedule is undercounted; the deploy markers cover that case.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (container) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__range]))",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"cpu\"})",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum by (container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -863,7 +1291,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"})",
+          "expr": "sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"})",
           "refId": "E",
           "range": false,
           "instant": true,
@@ -875,20 +1303,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container!=\"\", container!=\"POD\",resource=\"cpu\"})",
+          "expr": "100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"memory\"})",
           "refId": "F",
-          "range": false,
-          "instant": true,
-          "format": "table"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "count by (container) (kube_pod_container_status_ready{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"} == 1)",
-          "refId": "G",
           "range": false,
           "instant": true,
           "format": "table"
@@ -922,14 +1338,13 @@
               "Time 13": true
             },
             "renameByName": {
-              "container": "service",
+              "container": "container",
               "Value #A": "restarts",
-              "Value #B": "CPU % of limit",
-              "Value #C": "throttled %",
-              "Value #D": "memory % of limit",
+              "Value #B": "CPU (cores)",
+              "Value #C": "CPU % of limit",
+              "Value #D": "throttled %",
               "Value #E": "memory",
-              "Value #F": "CPU limit (cores)",
-              "Value #G": "ready containers"
+              "Value #F": "memory % of limit"
             },
             "indexByName": {}
           }
@@ -938,7 +1353,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "noValue": "NO DATA",
+          "noValue": "-",
           "mappings": [],
           "custom": {
             "align": "auto",
@@ -949,36 +1364,6 @@
           }
         },
         "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "restarts"
-            },
-            "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background"
-                }
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": null
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              }
-            ]
-          },
           {
             "matcher": {
               "id": "byRegexp",
@@ -1018,6 +1403,44 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "noValue",
+                "value": "no limit"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "restarts"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "noValue",
+                "value": "0"
               }
             ]
           },
@@ -1060,6 +1483,10 @@
                     }
                   ]
                 }
+              },
+              {
+                "id": "noValue",
+                "value": "no quota"
               }
             ]
           },
@@ -1078,12 +1505,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "CPU limit (cores)"
+              "options": "CPU (cores)"
             },
             "properties": [
               {
                 "id": "decimals",
-                "value": 2
+                "value": 3
               }
             ]
           }
@@ -1109,166 +1536,19 @@
       }
     },
     {
-      "type": "bargauge",
-      "id": 13,
-      "title": "CPU: top 10 by % of limit",
-      "description": "Cores used against the container's CPU limit. High is not by itself a problem -- a service allowed two cores and using them is working. Read it next to the throttle panel: high CPU without throttling is healthy use of the budget.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 35
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "topk(10, 100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container!=\"\", container!=\"POD\",resource=\"cpu\"}))",
-          "refId": "A",
-          "range": true,
-          "legendFormat": "{{container}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "noValue": "NO DATA",
-          "mappings": [],
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 70
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "minVizWidth": 8,
-        "minVizHeight": 16,
-        "valueMode": "color"
-      }
-    },
-    {
-      "type": "bargauge",
-      "id": 14,
-      "title": "CPU throttling: top 10",
-      "description": "Share of CFS periods in which the container was stopped after spending its quota. This is the panel CPU usage cannot replace: a bursty service can average 30% and still be frozen for most of every 100ms period, so latency moves while the CPU chart looks calm.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 35
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "topk(10, 100 * sum by (container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[$__rate_interval])))",
-          "refId": "A",
-          "range": true,
-          "legendFormat": "{{container}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "noValue": "NO DATA",
-          "mappings": [],
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 10
-              }
-            ]
-          },
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "minVizWidth": 8,
-        "minVizHeight": 16,
-        "valueMode": "color"
-      }
-    },
-    {
-      "type": "bargauge",
+      "type": "timeseries",
       "id": 15,
-      "title": "Memory: top 10 by % of limit",
-      "description": "Working set against the container's memory limit. Working set is the number the kubelet uses for OOM kills and eviction, which is why it is here rather than usage (inflated by reclaimable page cache) or RSS (excludes it entirely).",
+      "title": "CPU: busiest 10 containers",
+      "description": "Cores used over time for the ten heaviest containers. The table above ranks; this shows whether a number that looks high has been high all along or started at a deploy marker.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 35
+        "w": 12,
+        "x": 0,
+        "y": 47
       },
       "targets": [
         {
@@ -1277,7 +1557,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, 100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container!=\"\", container!=\"POD\",resource=\"memory\"}))",
+          "expr": "topk(10, sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{container}}"
@@ -1285,54 +1565,111 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "noValue": "NO DATA",
-          "mappings": [],
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 70
-              },
-              {
-                "color": "red",
-                "value": 90
-              }
-            ]
-          },
-          "min": 0
+          "unit": "none",
+          "noValue": "NO DATA",
+          "mappings": []
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
         },
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "showUnfilled": true,
-        "minVizWidth": 8,
-        "minVizHeight": 16,
-        "valueMode": "color"
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Memory: largest 10 containers",
+      "description": "Working set over time for the ten largest containers. Working set is what the kubelet uses for OOM kills and eviction, which is why it is here rather than usage (inflated by reclaimable page cache) or RSS (excludes it). A line that only ever climbs is the shape that ends in an OOM kill.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}))",
+          "refId": "A",
+          "range": true,
+          "legendFormat": "{{container}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "bytes",
+          "noValue": "NO DATA",
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "type": "table",
-      "id": 16,
+      "id": 17,
       "title": "Go runtime configuration",
-      "description": "Keyed by service_name from the OTel resource, so these rows come from a different label space than the resource table above and the two cannot be joined automatically -- the bot- and teams- deployments run the same binary under a different service_name than their container name. Compare against that table by eye.\n\nTwo rows are worth reading every time. GOMAXPROCS well above the container's CPU limit makes the Go scheduler open that many Ps against a fraction of a core, which is the most common cause of the throttling above. An empty GOMEMLIMIT means the runtime never feels the container's memory ceiling and will keep growing until the kernel intervenes -- the metric is only published when the limit is actually set, so blank is the finding.",
+      "description": "Keyed by service_name from the OTel resource, a different label space from the container table above -- the bot- and teams- deployments run the same binary under a different service_name than their container name, so the two cannot be joined automatically. Compare by eye.\n\nGOMAXPROCS well above the container's CPU limit is the most common cause of throttling: the scheduler opens that many Ps against a fraction of a core. GOMEMLIMIT is only published when it is actually set, so a blank means the runtime never feels the container's memory ceiling and will grow until the kernel intervenes -- blank is the finding, not missing data.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1341,7 +1678,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 55
       },
       "targets": [
         {
@@ -1434,7 +1771,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "noValue": "NO DATA",
+          "noValue": "-",
           "mappings": [],
           "custom": {
             "align": "auto",
@@ -1492,9 +1829,9 @@
     },
     {
       "type": "timeseries",
-      "id": 17,
-      "title": "Goroutines",
-      "description": "The signal is the slope, not the value. A count that climbs across deploy markers and never returns is a leak in a handler or consumer; a count that tracks traffic is normal. The table above gives the current number, this gives the direction.",
+      "id": 18,
+      "title": "Goroutines: highest 10 services",
+      "description": "Read the slope, not the value. Twenty thousand goroutines on a fan-out worker under load is normal; two hundred that become two thousand and never come back down after a deploy marker is a leak in a handler that stopped returning. A count that rises and falls with the request rate is working correctly.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1503,7 +1840,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 55
       },
       "targets": [
         {
@@ -1512,7 +1849,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (service_name) (go_goroutine_count{namespace=~\"$namespace\", service_name=~\"$service\"})",
+          "expr": "topk(10, max by (service_name) (go_goroutine_count{namespace=~\"$namespace\", service_name=~\"$service\"}))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}}"
@@ -1528,7 +1865,6 @@
             "showPoints": "auto",
             "pointSize": 5,
             "spanNulls": false,
-            "axisPlacement": "auto",
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1558,455 +1894,21 @@
     },
     {
       "type": "row",
-      "id": 18,
-      "title": "3. API detail",
+      "id": 19,
+      "title": "3. Dependencies \u2014 client view",
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 52
-      },
-      "panels": [
-        {
-          "type": "table",
-          "id": 19,
-          "title": "HTTP routes",
-          "description": "One row per registered route. Routes are templated by the gin middleware, so path parameters never become separate rows.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 0,
-            "y": 53
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
-              "refId": "A",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "100 * sum by (http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
-              "refId": "B",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
-              "refId": "C",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
-              "refId": "D",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "joinByField",
-              "options": {
-                "byField": "http_route",
-                "mode": "outer"
-              }
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "Time 1": true,
-                  "Time 2": true,
-                  "Time 3": true,
-                  "Time 4": true,
-                  "Time 5": true,
-                  "Time 6": true,
-                  "Time 7": true,
-                  "Time 8": true,
-                  "Time 9": true,
-                  "Time 10": true,
-                  "Time 11": true,
-                  "Time 12": true,
-                  "Time 13": true
-                },
-                "renameByName": {
-                  "http_route": "route",
-                  "Value #A": "req/s",
-                  "Value #B": "error %",
-                  "Value #C": "p95",
-                  "Value #D": "p99"
-                },
-                "indexByName": {}
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "none",
-              "noValue": "NO DATA",
-              "mappings": [],
-              "custom": {
-                "align": "auto",
-                "cellOptions": {
-                  "type": "auto"
-                },
-                "filterable": true
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "error %"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "percent"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 2
-                  },
-                  {
-                    "id": "custom.cellOptions",
-                    "value": {
-                      "type": "color-text"
-                    }
-                  },
-                  {
-                    "id": "thresholds",
-                    "value": {
-                      "mode": "absolute",
-                      "steps": [
-                        {
-                          "color": "green",
-                          "value": null
-                        },
-                        {
-                          "color": "yellow",
-                          "value": 0.5
-                        },
-                        {
-                          "color": "red",
-                          "value": 2
-                        }
-                      ]
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "p(95|99)"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "s"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 3
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "req/s"
-                },
-                "properties": [
-                  {
-                    "id": "decimals",
-                    "value": 2
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "footer": {
-              "show": false,
-              "reducer": [
-                "sum"
-              ],
-              "countRows": false,
-              "fields": ""
-            },
-            "sortBy": [
-              {
-                "displayName": "error %",
-                "desc": true
-              }
-            ]
-          }
-        },
-        {
-          "type": "table",
-          "id": 20,
-          "title": "NATS RPC methods",
-          "description": "One row per service and rpc.method. The vocabulary is a curated enum mapped from the subject, and it only covers room-service, history-service and the teams routes: every call to user-service, search-service and media-service records rpc_method=\"unknown\". Those rows are that service's whole request surface collapsed into one, which is why the table groups by service as well -- without it three services would share a single unknown row.\n\nThe router already computes a per-route wildcard pattern at registration; exporting it as a second label would give this table one row per API. That is a change in pkg/natsmetrics, not here.",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 12,
-            "x": 12,
-            "y": 53
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
-              "refId": "A",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
-              "refId": "B",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
-              "refId": "C",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${datasource}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
-              "refId": "D",
-              "range": false,
-              "instant": true,
-              "format": "table"
-            }
-          ],
-          "transformations": [
-            {
-              "id": "joinByField",
-              "options": {
-                "byField": "rpc_method",
-                "mode": "outer"
-              }
-            },
-            {
-              "id": "organize",
-              "options": {
-                "excludeByName": {
-                  "Time": true,
-                  "Time 1": true,
-                  "Time 2": true,
-                  "Time 3": true,
-                  "Time 4": true,
-                  "Time 5": true,
-                  "Time 6": true,
-                  "Time 7": true,
-                  "Time 8": true,
-                  "Time 9": true,
-                  "Time 10": true,
-                  "Time 11": true,
-                  "Time 12": true,
-                  "Time 13": true,
-                  "service_name 1": true,
-                  "service_name 2": true,
-                  "service_name 3": true
-                },
-                "renameByName": {
-                  "rpc_method": "method",
-                  "service_name": "service",
-                  "Value #A": "req/s",
-                  "Value #B": "error %",
-                  "Value #C": "p95",
-                  "Value #D": "p99"
-                },
-                "indexByName": {}
-              }
-            }
-          ],
-          "fieldConfig": {
-            "defaults": {
-              "unit": "none",
-              "noValue": "NO DATA",
-              "mappings": [],
-              "custom": {
-                "align": "auto",
-                "cellOptions": {
-                  "type": "auto"
-                },
-                "filterable": true
-              }
-            },
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "error %"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "percent"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 2
-                  },
-                  {
-                    "id": "custom.cellOptions",
-                    "value": {
-                      "type": "color-text"
-                    }
-                  },
-                  {
-                    "id": "thresholds",
-                    "value": {
-                      "mode": "absolute",
-                      "steps": [
-                        {
-                          "color": "green",
-                          "value": null
-                        },
-                        {
-                          "color": "yellow",
-                          "value": 0.5
-                        },
-                        {
-                          "color": "red",
-                          "value": 2
-                        }
-                      ]
-                    }
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byRegexp",
-                  "options": "p(95|99)"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "s"
-                  },
-                  {
-                    "id": "decimals",
-                    "value": 3
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "req/s"
-                },
-                "properties": [
-                  {
-                    "id": "decimals",
-                    "value": 2
-                  }
-                ]
-              }
-            ]
-          },
-          "options": {
-            "showHeader": true,
-            "cellHeight": "sm",
-            "footer": {
-              "show": false,
-              "reducer": [
-                "sum"
-              ],
-              "countRows": false,
-              "fields": ""
-            },
-            "sortBy": [
-              {
-                "displayName": "error %",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "type": "row",
-      "id": 21,
-      "title": "4. Dependencies \u2014 client view",
-      "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 63
+        "y": 64
       },
       "panels": [
         {
           "type": "timeseries",
-          "id": 22,
+          "id": 20,
           "title": "Datastore operations",
-          "description": "Client-side operation rate by datastore. This is what our processes asked for, not what the servers did -- the MongoDB, Cassandra and Valkey teams own the server view. Operation names carry no database or collection label; traces are the only way down to that level.",
+          "description": "Client-side operation rate. This is what our processes asked for, not what the servers did -- the MongoDB, Cassandra and Valkey teams own the server view. Operation names carry no database or collection label, so traces are the only way further down.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2015,7 +1917,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 64
+            "y": 65
           },
           "targets": [
             {
@@ -2024,10 +1926,10 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (db_system_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+              "expr": "sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
-              "legendFormat": "{{db_system_name}}"
+              "legendFormat": "{{db_system_name}} {{service_name}}"
             }
           ],
           "fieldConfig": {
@@ -2040,7 +1942,6 @@
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
-                "axisPlacement": "auto",
                 "stacking": {
                   "mode": "none",
                   "group": "A"
@@ -2070,9 +1971,9 @@
         },
         {
           "type": "timeseries",
-          "id": 23,
+          "id": 21,
           "title": "Datastore error ratio",
-          "description": "Share of client operations that returned an error. error_type exists only on failures, so the numerator selects it and the denominator does not.",
+          "description": "Share of client operations that returned an error, per datastore and service. error_type exists only on failures, so the numerator selects it and the denominator does not.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2081,7 +1982,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 64
+            "y": 65
           },
           "targets": [
             {
@@ -2090,10 +1991,10 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "100 * sum by (db_system_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+              "expr": "100 * sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
-              "legendFormat": "{{db_system_name}}"
+              "legendFormat": "{{db_system_name}} {{service_name}}"
             }
           ],
           "fieldConfig": {
@@ -2106,7 +2007,6 @@
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
-                "axisPlacement": "auto",
                 "stacking": {
                   "mode": "none",
                   "group": "A"
@@ -2136,9 +2036,9 @@
         },
         {
           "type": "timeseries",
-          "id": 24,
+          "id": 22,
           "title": "Datastore p99 latency",
-          "description": "Client-observed p99 per datastore, which includes the network and any driver retry. A gap between this and the server team's own latency panel is the round trip plus the retry, and that gap is the part we own.",
+          "description": "Client-observed p99, which includes the network and any driver retry. The gap between this and the server team's own latency panel is the round trip plus the retry, and that gap is the part we own.\n\nDeliberately coarse: this family carries a bucket per service, operation and server address, and a full-resolution query over a long range trips Prometheus's sample limit. The step is pinned to one minute and the panel to 100 points. If it still fails, shorten the range -- the durable fix is a recording rule.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2147,7 +2047,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 64
+            "y": 65
           },
           "targets": [
             {
@@ -2172,7 +2072,6 @@
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
-                "axisPlacement": "auto",
                 "stacking": {
                   "mode": "none",
                   "group": "A"
@@ -2198,13 +2097,15 @@
               "mode": "multi",
               "sort": "desc"
             }
-          }
+          },
+          "maxDataPoints": 100,
+          "interval": "1m"
         },
         {
           "type": "timeseries",
-          "id": 25,
+          "id": 23,
           "title": "Connection pool queue depth",
-          "description": "Requests waiting for a pooled connection. The datastore can be perfectly healthy while this climbs -- it measures our side running out of connections, which no server-side dashboard can see. It is a count, so it is plotted apart from the timeout rate beside it.",
+          "description": "Requests waiting for a pooled connection. A flat zero is the healthy state and the expected reading -- the panel earns its place on the day it is not zero, because the datastore can be perfectly healthy while our side runs out of connections, and no server-side dashboard shows that.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2213,7 +2114,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 72
+            "y": 73
           },
           "targets": [
             {
@@ -2238,7 +2139,6 @@
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
-                "axisPlacement": "auto",
                 "stacking": {
                   "mode": "none",
                   "group": "A"
@@ -2268,9 +2168,9 @@
         },
         {
           "type": "timeseries",
-          "id": 26,
+          "id": 24,
           "title": "Connection pool checkout timeouts",
-          "description": "Checkouts that gave up waiting. Any sustained rate means requests are failing for lack of a connection rather than anything the datastore did, and it is the signal that pool sizing, not the database, is the constraint.",
+          "description": "Checkouts that gave up waiting. Flat zero is healthy. Any sustained rate means requests are failing for want of a connection rather than anything the datastore did, and that pool sizing is the constraint.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2279,7 +2179,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 72
+            "y": 73
           },
           "targets": [
             {
@@ -2304,7 +2204,6 @@
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
-                "axisPlacement": "auto",
                 "stacking": {
                   "mode": "none",
                   "group": "A"
@@ -2334,18 +2233,18 @@
         },
         {
           "type": "state-timeline",
-          "id": 27,
+          "id": 25,
           "title": "JetStream consumer loops",
-          "description": "Whether each service's consumer loop can still receive. It does not restart itself: the loop returns on a terminal error and stays gone until the process does, so a lane that drops to DOWN stays there. This is the alive-but-not-consuming failure, and it is invisible to a liveness probe.",
+          "description": "One lane per service and durable. The loop does not restart itself: it returns on a terminal error and stays gone until the process does, so a lane that turns red stays red. This is the alive-but-not-consuming failure, and a liveness probe cannot see it.\n\nValues are not printed inside the segments; the colour is the state and the lane label on the left is the identity.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "gridPos": {
-            "h": 8,
-            "w": 8,
+            "h": 7,
+            "w": 24,
             "x": 0,
-            "y": 80
+            "y": 81
           },
           "targets": [
             {
@@ -2357,7 +2256,7 @@
               "expr": "chat_nats_consumer_loop_up{namespace=~\"$namespace\", service_name=~\"$service\"}",
               "refId": "A",
               "range": true,
-              "legendFormat": "{{service_name}} {{consumer}}"
+              "legendFormat": "{{service_name}} / {{consumer}}"
             }
           ],
           "fieldConfig": {
@@ -2395,21 +2294,21 @@
               },
               "custom": {
                 "lineWidth": 0,
-                "fillOpacity": 80,
+                "fillOpacity": 90,
                 "spanNulls": false
               }
             },
             "overrides": []
           },
           "options": {
-            "showValue": "auto",
+            "showValue": "never",
             "mergeValues": true,
-            "rowHeight": 0.9,
-            "alignValue": "center",
+            "rowHeight": 0.85,
+            "alignValue": "left",
             "legend": {
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": true
+              "showLegend": false
             },
             "tooltip": {
               "mode": "single",
@@ -2419,18 +2318,18 @@
         },
         {
           "type": "state-timeline",
-          "id": 28,
+          "id": 26,
           "title": "NATS client connections",
-          "description": "Whether each service still holds a broker connection. The underlying metric counts live connections rather than reporting a boolean, so it is clamped to 1 here: the question this answers is connected or not, and the count itself is not meaningful on a dashboard.",
+          "description": "Whether each service still holds a broker connection. The underlying metric counts live connections rather than reporting a boolean, so it is clamped to one: the question is connected or not, and the count is not meaningful here.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 8,
-            "y": 80
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 88
           },
           "targets": [
             {
@@ -2480,21 +2379,21 @@
               },
               "custom": {
                 "lineWidth": 0,
-                "fillOpacity": 80,
+                "fillOpacity": 90,
                 "spanNulls": false
               }
             },
             "overrides": []
           },
           "options": {
-            "showValue": "auto",
+            "showValue": "never",
             "mergeValues": true,
-            "rowHeight": 0.9,
-            "alignValue": "center",
+            "rowHeight": 0.85,
+            "alignValue": "left",
             "legend": {
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": true
+              "showLegend": false
             },
             "tooltip": {
               "mode": "single",
@@ -2504,18 +2403,18 @@
         },
         {
           "type": "state-timeline",
-          "id": 29,
+          "id": 27,
           "title": "Circuit breakers",
-          "description": "Per service and breaker name. A breaker publishes only on transition, so a breaker that has never tripped has no lane here at all -- an empty panel is the healthy state, not missing instrumentation.",
+          "description": "One lane per service and breaker. Four breakers exist: subscription and roommeta in message-gatekeeper, roommeta in broadcast-worker, atrestdek in message-worker and history-service.\n\nA breaker publishes its state only when it transitions, so one that has never tripped since its process started has no lane at all. An empty panel is the healthy state, not missing instrumentation.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
           "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 16,
-            "y": 80
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 88
           },
           "targets": [
             {
@@ -2570,21 +2469,21 @@
               },
               "custom": {
                 "lineWidth": 0,
-                "fillOpacity": 80,
+                "fillOpacity": 90,
                 "spanNulls": false
               }
             },
             "overrides": []
           },
           "options": {
-            "showValue": "auto",
+            "showValue": "never",
             "mergeValues": true,
-            "rowHeight": 0.9,
-            "alignValue": "center",
+            "rowHeight": 0.85,
+            "alignValue": "left",
             "legend": {
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": true
+              "showLegend": false
             },
             "tooltip": {
               "mode": "single",
