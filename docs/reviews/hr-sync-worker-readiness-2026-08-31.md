@@ -5,7 +5,7 @@
 
 ## Overall score: 2.8 / 5
 
-A small consumer with correct `errcode.Permanent`-vs-transient tiering, clean `jsretry` discipline, `jobguard` panic containment and good WHY-comments — but three structural problems, each of which is a single-point failure for the HR feed.
+A small consumer with clean `jsretry` discipline, `jobguard` panic containment and good WHY-comments. Its `errcode.Permanent`-vs-transient tiering is correct on the decode/poison side but **not on the store side** — every store failure is classified transient (see below), so a non-retryable Mongo error retries forever — but three structural problems, each of which is a single-point failure for the HR feed.
 
 **A permanent store error wedges the site's lane forever.** Every store failure is classified transient, `MaxDeliver` is forced to `-1` and `MaxAckPending=1`, so a non-retryable Mongo error retries indefinitely while blocking every subsequent batch. It is reachable today: `portal-service` enforces a **unique `account` index** on `hr_employee` while this worker upserts keyed on `_id = employeeId`, so a rehire yields a permanent E11000 that never becomes permanent to the worker — and the only health check is NATS liveness, which stays green throughout. **A quit deletes across sites**: the batch carries `SiteID`, the handler discards it, and the delete filters on `account` alone. And **stream ownership is inverted** — this consumer creates the producer's stream, while a sibling consumer's code states the opposite ownership model outright.
 
