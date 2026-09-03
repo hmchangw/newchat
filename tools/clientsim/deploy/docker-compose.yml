@@ -49,6 +49,9 @@ services:
     environment:
       CLIENTSIM_NATS_WS_URL: "ws://chat-local-nats:9222"
       CLIENTSIM_AUTH_URL: "http://auth-sideissuer:8080"
+      # The local stack's NATS speaks plain ws://. Cleartext is an explicit
+      # opt-in because the user JWT crosses the wire on connect.
+      CLIENTSIM_ALLOW_INSECURE_WS: "true"
       CLIENTSIM_POOL_FILE: "/var/lib/clientsim/pool.json"
       CLIENTSIM_SITE_ID: "site-local"
       CLIENTSIM_METRICS_ADDR: ":2112"

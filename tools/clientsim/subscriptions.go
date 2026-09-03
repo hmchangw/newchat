@@ -189,6 +189,13 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	}
 	plan, err := fetchSubscriptionPlan(ctx, lister)
 	if err != nil {
+		// Check the epoch BEFORE blaming the RPC. A connection that dies
+		// mid-walk usually makes the request fail rather than return a stale
+		// plan, so this is the likelier half of the race — and counting it as
+		// a walk failure would swamp the error rate during a broker bounce.
+		if s.planEpochChanged(startEpoch) {
+			return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
+		}
 		s.m.Errors.WithLabelValues("walk").Inc()
 		return fmt.Errorf("bootstrap walk for %s: %w", s.account, err)
 	}
@@ -214,6 +221,14 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 	s.applyChangesLocked(kept)
 	s.updateReadyLocked()
 	return nil
+}
+
+// planEpochChanged reports whether the connection was replaced since the
+// caller sampled startEpoch.
+func (s *simClient) planEpochChanged(startEpoch uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.planEpoch != startEpoch
 }
 
 // resync re-runs the bootstrap walk after a reconnect. Coalescing, not

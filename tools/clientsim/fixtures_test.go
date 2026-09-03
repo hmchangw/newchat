@@ -72,7 +72,8 @@ func mintTestJWT(t *testing.T, expires time.Time) string {
 func newTestSimClient(t *testing.T, account, mode string, mint minter) *simClient {
 	t.Helper()
 	cfg := &config{
-		NATSWSURL: "ws://127.0.0.1:1", SiteID: "site-a", JWTMode: mode,
+		NATSWSURL: "ws://127.0.0.1:1", AllowInsecureWS: true,
+		SiteID: "site-a", JWTMode: mode,
 		SubPendingMsgs: 512, SubPendingBytes: 1 << 20,
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
 	}

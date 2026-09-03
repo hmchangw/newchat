@@ -24,16 +24,21 @@ import (
 )
 
 type config struct {
-	NATSWSURL   string  `env:"CLIENTSIM_NATS_WS_URL,required"`
-	AuthURL     string  `env:"CLIENTSIM_AUTH_URL,required"`
-	PoolFile    string  `env:"CLIENTSIM_POOL_FILE,required"`
-	SiteID      string  `env:"CLIENTSIM_SITE_ID,required"`
-	TargetConns int     `env:"CLIENTSIM_TARGET_CONNS" envDefault:"0"`
-	ShardIndex  int     `env:"CLIENTSIM_SHARD_INDEX" envDefault:"0"`
-	ShardCount  int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
-	RampRate    float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
-	ChurnRate   float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
-	JWTMode     string  `env:"CLIENTSIM_JWT_MODE" envDefault:"proactive"`
+	NATSWSURL string `env:"CLIENTSIM_NATS_WS_URL,required"`
+	// AllowInsecureWS opts into a cleartext ws:// URL. Off by default because
+	// the NATS user JWT crosses the wire on connect: against anything shared
+	// that is a credential in the clear, and a warning is too easy to miss in
+	// a soak's log stream. The local throwaway stack sets it explicitly.
+	AllowInsecureWS bool    `env:"CLIENTSIM_ALLOW_INSECURE_WS" envDefault:"false"`
+	AuthURL         string  `env:"CLIENTSIM_AUTH_URL,required"`
+	PoolFile        string  `env:"CLIENTSIM_POOL_FILE,required"`
+	SiteID          string  `env:"CLIENTSIM_SITE_ID,required"`
+	TargetConns     int     `env:"CLIENTSIM_TARGET_CONNS" envDefault:"0"`
+	ShardIndex      int     `env:"CLIENTSIM_SHARD_INDEX" envDefault:"0"`
+	ShardCount      int     `env:"CLIENTSIM_SHARD_COUNT" envDefault:"1"`
+	RampRate        float64 `env:"CLIENTSIM_RAMP_RATE" envDefault:"50"`
+	ChurnRate       float64 `env:"CLIENTSIM_CHURN_RATE" envDefault:"0"`
+	JWTMode         string  `env:"CLIENTSIM_JWT_MODE" envDefault:"proactive"`
 	// MinReadyRatio is the fraction of the shard that must have reached
 	// full readiness at some point for the run to count. 0 disables it.
 	MinReadyRatio float64 `env:"CLIENTSIM_MIN_READY_RATIO" envDefault:"0.95"`
@@ -73,14 +78,6 @@ func run(ctx context.Context) error {
 	}
 	if err := validateConfig(&cfg); err != nil {
 		return err
-	}
-
-	// Not rejected: the local throwaway stack legitimately runs plain ws://.
-	// But a JWT on the wire in cleartext against anything shared is a real
-	// exposure, so it must never be silent.
-	if strings.HasPrefix(cfg.NATSWSURL, "ws://") {
-		slog.Warn("connecting over cleartext WebSocket; the NATS user JWT is sent unencrypted — use wss:// against any shared cluster",
-			"url", cfg.NATSWSURL)
 	}
 
 	pool, err := poolartifact.Load(cfg.PoolFile, cfg.SiteID)
@@ -165,6 +162,17 @@ func run(ctx context.Context) error {
 // validateConfig rejects value combinations that would silently void a
 // spec-required control instead of limping with surprising semantics.
 func validateConfig(cfg *config) error {
+	// The NATS user JWT crosses the wire on connect, so cleartext has to be a
+	// deliberate act rather than a typo in a URL. Opting in still warns: on a
+	// throwaway local stack that is fine, against anything shared it is not.
+	if !strings.HasPrefix(cfg.NATSWSURL, "wss://") {
+		if !cfg.AllowInsecureWS {
+			return fmt.Errorf("CLIENTSIM_NATS_WS_URL must use wss://, got %q — set CLIENTSIM_ALLOW_INSECURE_WS=true only for a throwaway local stack",
+				cfg.NATSWSURL)
+		}
+		slog.Warn("connecting over cleartext WebSocket; the NATS user JWT is sent unencrypted — never do this against a shared cluster",
+			"url", cfg.NATSWSURL)
+	}
 	if cfg.JWTMode != jwtModeProactive && cfg.JWTMode != jwtModeExpiry {
 		return fmt.Errorf("CLIENTSIM_JWT_MODE must be proactive or expiry, got %q", cfg.JWTMode)
 	}

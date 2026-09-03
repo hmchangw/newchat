@@ -538,3 +538,42 @@ func TestBootstrapWalk_StaleEpochIsNotFatal(t *testing.T) {
 	assert.True(t, errors.Is(got, errPlanEpochChanged),
 		"the stale-epoch case must be distinguishable so run() does not tear the client down")
 }
+
+func TestBootstrapWalk_StaleEpochIsNotFatalWhenTheRPCAlsoFails(t *testing.T) {
+	// The likelier half of the same race: when the connection dies mid-RPC the
+	// request usually FAILS rather than returning a stale plan. Guarding only
+	// the success path left run() closing the client for exactly the case the
+	// reconnect's resync already owns.
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	fc.reqGate = make(chan struct{})
+	fc.reqEntered = make(chan struct{}, 1)
+	fc.failNextRequests(errors.New("nats: no responders available for request"))
+
+	walkErr := make(chan error, 1)
+	go func() { walkErr <- s.bootstrapWalk(context.Background()) }()
+	<-fc.reqEntered
+	s.invalidatePlan() // the disconnect handler, while the RPC is in flight
+	close(fc.reqGate)
+
+	got := <-walkErr
+	require.Error(t, got)
+	assert.True(t, errors.Is(got, errPlanEpochChanged),
+		"a walk whose connection went away must not be fatal, even when its RPC failed")
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("walk")), 0.001,
+		"a reconnect race is not a walk failure; counting it would swamp the error rate during a broker bounce")
+}
+
+func TestBootstrapWalk_RPCFailureWithoutAnEpochChangeStaysFatal(t *testing.T) {
+	fc := newFakeConn(subListPage{HasMore: false})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	fc.failNextRequests(errors.New("nats: no responders available for request"))
+
+	err := s.bootstrapWalk(context.Background())
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, errPlanEpochChanged),
+		"a genuine walk failure must still end the client")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("walk")), 0.001)
+}

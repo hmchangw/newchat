@@ -16,7 +16,11 @@ import (
 
 func validTestConfig() config {
 	return config{
-		NATSWSURL: "ws://x", AuthURL: "http://x", PoolFile: "p", SiteID: "s",
+		// Cleartext with the explicit opt-in: these cases are about the other
+		// knobs, and TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn
+		// owns the transport rule.
+		NATSWSURL: "ws://x", AllowInsecureWS: true,
+		AuthURL: "http://x", PoolFile: "p", SiteID: "s",
 		RampRate: 50, JWTMode: jwtModeProactive,
 		SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
@@ -110,6 +114,7 @@ func setupUnreachableRun(t *testing.T) {
 		Accounts: []string{"user-a", "user-b"},
 	}))
 	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
 	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
 	t.Setenv("CLIENTSIM_POOL_FILE", pool)
 	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
@@ -139,6 +144,7 @@ func TestRun_EndToEnd_StartsAndShutsDown(t *testing.T) {
 
 func TestRun_FailsFastOnBadPoolFile(t *testing.T) {
 	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
 	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
 	t.Setenv("CLIENTSIM_POOL_FILE", filepath.Join(t.TempDir(), "missing.json"))
 	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
@@ -148,6 +154,7 @@ func TestRun_FailsFastOnBadPoolFile(t *testing.T) {
 
 func TestRun_FailsFastOnInvalidMode(t *testing.T) {
 	t.Setenv("CLIENTSIM_NATS_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("CLIENTSIM_ALLOW_INSECURE_WS", "true")
 	t.Setenv("CLIENTSIM_AUTH_URL", "http://127.0.0.1:1")
 	t.Setenv("CLIENTSIM_POOL_FILE", "x")
 	t.Setenv("CLIENTSIM_SITE_ID", "site-t")
@@ -170,7 +177,8 @@ func TestValidateConfig_ReadyRatioBounds(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config{JWTMode: jwtModeProactive, MinReadyRatio: tt.ratio,
+			cfg := &config{NATSWSURL: "wss://x", JWTMode: jwtModeProactive,
+				MinReadyRatio:  tt.ratio,
 				SubPendingMsgs: 1, SubPendingBytes: 1, ShardCount: 1,
 				RampRate: 1, ReconnectBufBytes: 1, PingInterval: time.Minute}
 			err := validateConfig(cfg)
@@ -179,6 +187,42 @@ func TestValidateConfig_ReadyRatioBounds(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
+	base := func() *config {
+		return &config{
+			NATSWSURL: "wss://nats.example:443", JWTMode: jwtModeProactive,
+			MinReadyRatio: 0.95, SubPendingMsgs: 512, SubPendingBytes: 1 << 17,
+			RampRate: 50, ChurnRate: 0, ReconnectBufBytes: 1 << 16,
+			PingInterval: 2 * time.Minute,
+		}
+	}
+	tests := []struct {
+		name    string
+		url     string
+		allow   bool
+		wantErr string
+	}{
+		{"wss is always fine", "wss://nats.example:443", false, ""},
+		{"ws without the opt-in is rejected", "ws://127.0.0.1:8080", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+		{"ws with the opt-in is allowed", "ws://127.0.0.1:8080", true, ""},
+		{"a non-websocket scheme is rejected too", "nats://127.0.0.1:4222", false, "CLIENTSIM_ALLOW_INSECURE_WS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			cfg.NATSWSURL = tt.url
+			cfg.AllowInsecureWS = tt.allow
+			err := validateConfig(cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }

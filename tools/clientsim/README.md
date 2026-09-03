@@ -83,6 +83,7 @@ the local YAML in this repo.
 | `CLIENTSIM_CHURN_RATE` | `0` | reconnect cycles/sec across the shard |
 | — | — | clients that exit early are restarted at the ramp rate, up to 5 attempts each |
 | `CLIENTSIM_JWT_MODE` | `proactive` | `proactive` (frontend-parity 80% ±5% refresh) or `expiry` (resilience A/B) |
+| `CLIENTSIM_ALLOW_INSECURE_WS` | `false` | opt into a cleartext `ws://` URL; without it a non-`wss://` URL is a startup error |
 | `CLIENTSIM_SUB_PENDING_MSGS` / `_BYTES` | `512` / `128KiB` | pending limits for the two per-user lanes; msgs also sizes the shared room-delivery channel |
 | `CLIENTSIM_RECONNECT_BUF_BYTES` | `64KiB` | nats.go reconnect buffer per conn |
 | `CLIENTSIM_PING_INTERVAL` | `2m` | client ping interval (idle-conn keepalive) |

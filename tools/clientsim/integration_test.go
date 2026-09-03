@@ -63,7 +63,8 @@ func TestSimClient_EndToEnd_WSSubscribeWalkAndCount(t *testing.T) {
 	require.NoError(t, backend.Flush())
 
 	cfg := config{
-		NATSWSURL: info.WSURL, AuthURL: "http://unused", PoolFile: "unused",
+		NATSWSURL: info.WSURL, AllowInsecureWS: true,
+		AuthURL: "http://unused", PoolFile: "unused",
 		SiteID: site, JWTMode: jwtModeProactive,
 		SubPendingMsgs: 512, SubPendingBytes: 1 << 20,
 		ReconnectBufBytes: 1 << 16, PingInterval: 2 * time.Minute,
