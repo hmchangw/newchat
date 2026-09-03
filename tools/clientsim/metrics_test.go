@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+
+	"github.com/hmchangw/chat/pkg/subject"
 
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -102,4 +108,32 @@ func TestMetrics_HandlerServesRegistry(t *testing.T) {
 	assert.True(t, strings.Contains(body, "clientsim_decode_failures_total 1"),
 		"scrape body must carry the counter, got:\n%.500s", body)
 	assert.Contains(t, body, "go_goroutines", "Go collector must be registered")
+}
+
+// The room lane is bounded in MESSAGES, not bytes — nats.go rejects
+// SetPendingLimits on a channel subscription, and giving it a real byte limit
+// would mean a dispatcher goroutine per room per client. What was missing was
+// not the bound but the visibility: how deep the queue actually runs is what
+// tells an operator whether the pump is keeping up and how much is sitting in
+// memory. The pump samples it on every dequeue.
+func TestPump_RecordsRoomQueueDepth(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+
+	const queued = 4
+	for i := 0; i < queued; i++ {
+		s.roomCh <- &nats.Msg{Subject: subject.RoomEvent("r1", true), Data: []byte(`{"type":"other"}`)}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); s.pump(ctx) }()
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.Delivered.WithLabelValues("channel")) == queued
+	}, 3*time.Second, 5*time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, uint64(queued), histogramCount(t, s.m.Registry, "clientsim_room_queue_depth"),
+		"every dequeue samples the depth behind it")
 }

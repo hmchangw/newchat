@@ -175,6 +175,9 @@ func (s *simClient) pump(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case msg := <-s.roomCh:
+			// Sampled before handling, so it reports the backlog this message
+			// was taken from rather than the one left after it.
+			s.m.RoomQueueDepth.Observe(float64(len(s.roomCh)))
 			handleDelivery(s.m, roomLane(msg.Subject), msg.Data, time.Now())
 		}
 	}

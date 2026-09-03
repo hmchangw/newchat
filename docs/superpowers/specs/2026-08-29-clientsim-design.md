@@ -327,14 +327,27 @@ overlay Prometheus and the k8s stack):
   time), the longest span measurable from the envelope alone.
 - Loss visibility (mandatory, so received-only histograms can't
   silently survive a drop storm with a *better* p99):
-  - slow-consumer **episodes** via the existing
-    `pkg/natsutil` helper (`clientsim_slow_consumer_events_total`) — the
-    nats.go async error callback fires once per Active→SlowConsumer
-    transition, not per dropped message, and `Subscription.Dropped()` is
-    a lifetime cumulative (the helper's comment documents the
-    double-count trap); exact dropped-message counts, if ever needed, are
-    a separate cumulative-delta sampling of `Dropped()`, never
-    callback-additions.
+  - slow-consumer **episodes** as a clientsim-local counter
+    (`clientsim_slow_consumer_events_total`) that reuses the EPISODE
+    SEMANTICS `pkg/natsutil/slowconsumer.go` documents, not that helper
+    itself: `logSlowConsumer` is unexported and reachable only from inside
+    `natsutil.Connect`, which this tool cannot use (it needs `UserJWT`,
+    `CustomReconnectDelay` and per-client handlers on every simulated
+    user's own connection), and it records to an OpenTelemetry counter
+    named `nats_slow_consumer_events_total` rather than to clientsim's
+    private Prometheus registry — labelled by subject, which at 30k
+    clients × per-room subjects is a cardinality explosion. The semantics
+    that DO carry over: the nats.go async error callback fires once per
+    Active→SlowConsumer transition, not per dropped message, and
+    `Subscription.Dropped()` is a lifetime cumulative (the helper's
+    comment documents the double-count trap); exact dropped-message
+    counts, if ever needed, are a separate cumulative-delta sampling of
+    `Dropped()`, never callback-additions.
+  - room-lane queue depth (`clientsim_room_queue_depth`), sampled by the
+    pump on every dequeue. The room lane is bounded in MESSAGES, not
+    bytes — nats.go rejects `SetPendingLimits` on a channel subscription
+    and a real byte limit would cost a dispatcher goroutine per room per
+    client — so depth is what makes the unbounded dimension observable.
   - `clientsim_decode_failures_total`,
     `clientsim_invalid_timestamp_total` (zero/negative observed age).
   - Any increment on these during a measurement window marks that

@@ -24,6 +24,11 @@ var handshakeBuckets = []float64{
 // the fleet is sitting in.
 var reconnectAttemptBuckets = []float64{1, 2, 3, 5, 8, 10, 14, 17, 25, 50, 100}
 
+// roomQueueDepthBuckets span an empty queue up to the default
+// CLIENTSIM_SUB_PENDING_MSGS (512), which is where the channel blocks and
+// nats.go starts dropping.
+var roomQueueDepthBuckets = []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512}
+
 // latencyBuckets are loadgen's shared histogram buckets verbatim (its
 // metrics.go hand-picked 1-2-5 series), so histogram_quantile lines up
 // across the two tools' Grafana panels.
@@ -68,7 +73,14 @@ type metrics struct {
 	// is lifetime-cumulative and callback-adding it double-counts; see
 	// pkg/natsutil/slowconsumer.go for the full trap description.
 	SlowConsumer prometheus.Counter
-	AuthFailures prometheus.Counter
+	// RoomQueueDepth samples how many deliveries were waiting behind each one
+	// the pump took. The room lane is bounded in MESSAGES, not bytes — nats.go
+	// rejects SetPendingLimits on a channel subscription and a real byte limit
+	// would cost a dispatcher goroutine per room per client — so this is the
+	// signal that says whether the pump is keeping up and roughly how much is
+	// sitting in memory. Depth x observed payload size is the byte picture.
+	RoomQueueDepth prometheus.Histogram
+	AuthFailures   prometheus.Counter
 	// Errors counts stage failures (stage: auth|connect|walk|resync|
 	// room_subscribe|async|conn_closed) so
 	// error RATE is queryable, not just grep-able from logs.
@@ -194,9 +206,13 @@ func newMetrics() *metrics {
 		DecodeFailures:   prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_decode_failures_total", Help: "Envelope decode failures; any increment marks the window degraded."}),
 		InvalidTimestamp: prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_invalid_timestamp_total", Help: "Zero or negative observed event age (beyond the skew tolerance); any increment marks the window degraded."}),
 		SlowConsumer:     prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_slow_consumer_events_total", Help: "Slow-consumer episodes (per transition, not per dropped message); any increment marks the window degraded."}),
-		AuthFailures:     prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_auth_failures_total", Help: "Auth exchange failures (transport errors and non-2xx rejections)."}),
-		Errors:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_errors_total", Help: "Stage failures."}, []string{"stage"}),
-		RunInfo:          prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clientsim_run_info", Help: "Static run metadata; value is always 1. Run ID stays in logs (unbounded label), matching loadgen."}, []string{"jwtMode", "shardIndex", "shardCount"}),
+		RoomQueueDepth: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "clientsim_room_queue_depth", Buckets: roomQueueDepthBuckets,
+			Help: "Deliveries still queued behind each one the pump took; the room lane is bounded in messages, not bytes.",
+		}),
+		AuthFailures: prometheus.NewCounter(prometheus.CounterOpts{Name: "clientsim_auth_failures_total", Help: "Auth exchange failures (transport errors and non-2xx rejections)."}),
+		Errors:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "clientsim_errors_total", Help: "Stage failures."}, []string{"stage"}),
+		RunInfo:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "clientsim_run_info", Help: "Static run metadata; value is always 1. Run ID stays in logs (unbounded label), matching loadgen."}, []string{"jwtMode", "shardIndex", "shardCount"}),
 	}
 	m.deliveredUser = m.Delivered.WithLabelValues("user")
 	m.deliveredChannel = m.Delivered.WithLabelValues("channel")
@@ -206,7 +222,7 @@ func newMetrics() *metrics {
 		m.AuthDuration, m.ConnectDuration,
 		m.Disconnects, m.Reconnects, m.ReconnectAttempt, m.JWTRefreshes, m.Delivered,
 		m.BroadcastLatency, m.CanonicalLatency,
-		m.DecodeFailures, m.InvalidTimestamp, m.SlowConsumer,
+		m.DecodeFailures, m.InvalidTimestamp, m.SlowConsumer, m.RoomQueueDepth,
 		m.AuthFailures, m.Errors, m.RunInfo,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
