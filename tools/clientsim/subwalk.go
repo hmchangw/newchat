@@ -125,7 +125,12 @@ func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage
 		HasMore       bool      `json:"hasMore"`
 	}
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return nil, fmt.Errorf("decode subscription.list reply: %w: %w", errWalkProtocol, err)
+		// Single %w, on the sentinel: two %w verbs can put two errcode errors
+		// in one chain and Classify would pick the first (the repo's
+		// errcode-no-multi-wrap-errcode rule). terminalWalkError needs the
+		// sentinel to match, and nothing branches on the decoder's own error,
+		// so that one rides as text.
+		return nil, fmt.Errorf("decode subscription.list reply (%v): %w", err, errWalkProtocol)
 	}
 	if reply.Subscriptions == nil {
 		return nil, fmt.Errorf("subscription.list reply has no subscriptions field: %w", errWalkProtocol)
