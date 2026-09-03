@@ -171,7 +171,7 @@ Genuinely well-engineered hot path — pipelined ES bulk with slot-based backpre
 
 ### Recommendations
 - `high` — Raise the `CONSUMER_MAX_ACK_PENDING` default (or lower `BULK_BATCH_SIZE` to ~300) so the **shipped defaults satisfy `(depth+1)×bulk`**, and make `checkBatchAckCoupling` a fatal `os.Exit(1)` like the other config validations rather than a warning.
-- `high` — Derive a per-flush context with a bulk timeout (e.g. `BULK_TIMEOUT`, default 30 s aligned to `AckWait`) in `flushPipeline.run`, and pass a cancellable root ctx from `main` that `shutdown.Wait` cancels.
+- `high` — Derive a per-flush context with a bulk timeout in `flushPipeline.run`, and pass a cancellable root ctx from `main` that `shutdown.Wait` cancels. Size it **below** `AckWait`, not aligned to it: a message waits up to `BULK_FLUSH_INTERVAL` (default 5 s) in the batch before the request starts, so a 30 s timeout against the 30 s default `AckWait` lets the ack deadline expire while the bulk is still in flight — JetStream redelivers into a second bulk, duplicating the write during exactly the ES slowdown the timeout exists to contain. The whole queue-plus-flush budget must fit inside `AckWait` with settlement margin (e.g. 20 s), or `AckWait` must be raised to match.
 - `medium` — Add a small TTL/LRU cache (positive **and** negative) in front of `esParentResolver`, and narrow the lookup from `prefix-*` to the reply's own month ± one index.
 - `medium` — Set `MaxIdleConnsPerHost`/`MaxConnsPerHost` on the ES transport in `pkg/searchengine.New`, sized to `PIPELINE_DEPTH × collections`.
 - `low` — Hoist the remove-room body out of the per-account loop; chunk the Teams `$in` at ~1000 ids.
