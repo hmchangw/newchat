@@ -68,7 +68,7 @@ Boundaries are unusually disciplined — every interface is consumer-defined, co
 
 ### Recommendations
 - `high` — Replace `HTTPConfig`'s three pool fields and `validateMongoPool` with `Pool mongoutil.PoolConfig \`envPrefix:"HTTP_"\``; env names are unchanged, `Validate()` replaces the local copy, and the HTTP client picks up the 2 s `ServerSelectionTimeout` it currently lacks.
-- `medium` — Route the settings and chatlist inbox events through the local OUTBOX (`outbox.Publish`), adding each type to exactly one `pkg/outbox` partition set; keep status direct if the LWW argument is judged sufficient. At minimum, fan out concurrently under the existing `MaxSiteFanout` semaphore instead of serially.
+- `medium` — Route the settings and chatlist inbox events through the local OUTBOX (`outbox.Publish`), adding each type to exactly one `pkg/outbox` partition set (both are order-insensitive at the destination, so `ConcurrentEventTypes`); keep status direct if the LWW argument is judged sufficient. **Deploy `outbox-worker` first.** Its per-destination lane consumers derive `FilterSubjects` from those two lists at startup (`outbox-worker/main.go:242-254`), so a type user-service publishes before the worker carries the same `pkg/outbox` build lands in OUTBOX with no consumer selecting it — durable, but undelivered until the worker rolls out. Fanning out concurrently under the existing `MaxSiteFanout` semaphore is worth doing either way, but it is a latency fix only: it does not make a failed publish recoverable, which is the point of this item.
 - `medium` — Export `service.BadgeCache` and delete the structural copy; collapse `service.New`'s dependency list into a named `service.Deps` struct and build the two instances by overriding one `Deps`.
 - `medium` — Validate in `config.Load` that `SiteID` appears in `AllSiteIDs` when non-empty, and log the resolved peer list at startup so a federation-disabled deploy is visible.
 - `low` — Extract `service/subscriptions.go`'s enrichment engine into `service/enrich.go`; add a comment at `main.go:126` recording why no `bootstrapStreams` exists.
@@ -149,7 +149,7 @@ All 28 client subjects and `BadgeCountBatch` built via `pkg/subject` — no raw 
 - `medium` — Route `SettingsUpdate` and `ChatlistUpdate` through `EncodeAccount`, matching `SubscriptionUpdate`; add a `pkg/subject` table case for a `.bot` account across all three builders so they cannot diverge again.
 - `medium` — Add chatlist fanout test expectations asserting both subjects, the self-site skip and a non-zero shared timestamp, mirroring `status_test.go:74-160`.
 - `medium` — Move the `ALL_SITE_IDS` fanout off the reply path: fan out concurrently under the existing `MAX_SITE_FANOUT` semaphore and reply as soon as the local write commits.
-- `medium` — For settings and chatlist specifically, publish through the local OUTBOX instead of direct-to-remote-INBOX, so a gateway failure is durably retried rather than logged and dropped.
+- `medium` — For settings and chatlist specifically, publish through the local OUTBOX instead of direct-to-remote-INBOX, so a gateway failure is durably retried rather than logged and dropped — with the `outbox-worker`-first deploy order noted in Chapter 3's recommendation, since its lane consumers filter on the `pkg/outbox` type lists.
 - `low` — Add `bson` tags to the two event structs; update `docs/client-api.md` §Chatlist Sections to the mandated field-table + JSON-example style in the same PR.
 
 ---
