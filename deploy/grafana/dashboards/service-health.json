@@ -65,10 +65,10 @@
         "hide": 0,
         "refresh": 2,
         "includeAll": true,
-        "allValue": ".*",
         "multi": false,
         "sort": 1,
-        "skipUrlSync": false
+        "skipUrlSync": false,
+        "description": "All means every namespace this variable lists, not every namespace in the cluster: no allValue is set, so Grafana builds the union of the options. With a literal .* the availability tiles counted unavailable replicas in kube-system and every other team's namespace."
       },
       {
         "type": "textbox",
@@ -98,10 +98,10 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(go_goroutine_count{namespace=~\"$namespace\"}, service_name)",
+        "definition": "label_values(go_goroutine_count{namespace=~\"${namespace:regex}\"}, service_name)",
         "query": {
           "qryType": 1,
-          "query": "label_values(go_goroutine_count{namespace=~\"$namespace\"}, service_name)",
+          "query": "label_values(go_goroutine_count{namespace=~\"${namespace:regex}\"}, service_name)",
           "refId": "service"
         },
         "current": {
@@ -116,7 +116,6 @@
         "hide": 0,
         "refresh": 2,
         "includeAll": true,
-        "allValue": ".*",
         "multi": true,
         "sort": 1,
         "skipUrlSync": false,
@@ -147,7 +146,7 @@
         "hide": false,
         "iconColor": "purple",
         "name": "Deploys",
-        "expr": "changes(kube_deployment_status_observed_generation{namespace=~\"$namespace\"}[$__rate_interval]) > 0",
+        "expr": "changes(kube_deployment_status_observed_generation{namespace=~\"${namespace:regex}\"}[$__rate_interval]) > 0",
         "titleFormat": "deploy",
         "textFormat": "{{deployment}}",
         "step": "60s",
@@ -178,7 +177,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"$namespace\",deployment=~\".*(message-gatekeeper|broadcast-worker|message-worker|roomlist-worker|notification-worker).*\"})",
+          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"${namespace:regex}\",deployment=~\".*(message-gatekeeper|broadcast-worker|message-worker|roomlist-worker|notification-worker).*\"})",
           "refId": "A",
           "range": true
         }
@@ -244,7 +243,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"$namespace\"})",
+          "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"${namespace:regex}\"})",
           "refId": "A",
           "range": true
         }
@@ -310,7 +309,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * ((sum(rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval])) or vector(0)) + (sum(rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) or vector(0))) / ((sum(rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) or vector(0)) + (sum(rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])) or vector(0)))",
+          "expr": "100 * ((sum(rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])) or vector(0)) + (sum(rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) or vector(0))) / ((sum(rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])) or vector(0)) + (sum(rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])) or vector(0)))",
           "refId": "A",
           "range": true
         }
@@ -380,7 +379,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(circuit_breaker_state{namespace=~\"$namespace\", service_name=~\"$service\"} > 0)",
+          "expr": "count(circuit_breaker_state{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"} > 0)",
           "refId": "A",
           "range": true
         }
@@ -459,7 +458,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "legendFormat": "HTTP {{service_name}}"
@@ -470,7 +469,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by (service_name) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
           "refId": "B",
           "range": true,
           "legendFormat": "NATS {{service_name}}"
@@ -535,7 +534,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval]))",
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} 5xx"
@@ -546,7 +545,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"4..\"}[$__rate_interval]))",
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",http_response_status_code=~\"4..\"}[$__rate_interval]))",
           "refId": "B",
           "range": true,
           "legendFormat": "{{service_name}} 4xx"
@@ -611,7 +610,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name, error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval]))",
+          "expr": "sum by (service_name, error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} {{error_type}}"
@@ -676,7 +675,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}}"
@@ -741,7 +740,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}}"
@@ -806,7 +805,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
+          "expr": "label_join(sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -818,7 +817,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(100 * sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
+          "expr": "label_join(100 * sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -830,7 +829,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
+          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1015,7 +1014,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
+          "expr": "label_join(sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1027,7 +1026,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
+          "expr": "label_join(100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1039,7 +1038,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
+          "expr": "label_join(histogram_quantile(0.99, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1237,7 +1236,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__range]))",
+          "expr": "sum by (container) (increase(kube_pod_container_status_restarts_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__range]))",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1249,7 +1248,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
+          "expr": "sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1261,7 +1260,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"cpu\"})",
+          "expr": "100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"cpu\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1273,7 +1272,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
+          "expr": "100 * sum by (container) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (rate(container_cpu_cfs_periods_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1285,7 +1284,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"})",
+          "expr": "sum by (container) (container_memory_working_set_bytes{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"})",
           "refId": "E",
           "range": false,
           "instant": true,
@@ -1297,7 +1296,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"memory\"})",
+          "expr": "100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"memory\"})",
           "refId": "F",
           "range": false,
           "instant": true,
@@ -1559,7 +1558,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, 100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"cpu\"}))",
+          "expr": "topk(10, 100 * sum by (container) (rate(container_cpu_usage_seconds_total{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}[$__rate_interval])) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"cpu\"}))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{container}}"
@@ -1624,7 +1623,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, 100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"$namespace\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"memory\"}))",
+          "expr": "topk(10, 100 * sum by (container) (container_memory_working_set_bytes{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\"}) / sum by (container) (kube_pod_container_resource_limits{namespace=~\"${namespace:regex}\", container=~\".*$name.*\", container!=\"\", container!=\"POD\",resource=\"memory\"}))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{container}}"
@@ -1689,7 +1688,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (service_name) (go_goroutine_count{namespace=~\"$namespace\", service_name=~\"$service\"})",
+          "expr": "max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1701,7 +1700,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (service_name) (go_processor_limit{namespace=~\"$namespace\", service_name=~\"$service\"})",
+          "expr": "max by (service_name) (go_processor_limit{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1713,7 +1712,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (service_name) (go_memory_limit_bytes{namespace=~\"$namespace\", service_name=~\"$service\"})",
+          "expr": "max by (service_name) (go_memory_limit_bytes{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1725,7 +1724,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (service_name) (go_memory_used_bytes{namespace=~\"$namespace\", service_name=~\"$service\"})",
+          "expr": "sum by (service_name) (go_memory_used_bytes{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1851,7 +1850,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(10, max by (service_name) (go_goroutine_count{namespace=~\"$namespace\", service_name=~\"$service\"}))",
+          "expr": "topk(10, max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}))",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}}"
@@ -1928,7 +1927,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+              "expr": "sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
               "legendFormat": "{{db_system_name}} {{service_name}}"
@@ -1993,7 +1992,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "100 * sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+              "expr": "100 * sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
               "legendFormat": "{{db_system_name}} {{service_name}}"
@@ -2058,7 +2057,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (le, db_system_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.99, sum by (le, db_system_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
               "refId": "A",
               "range": true,
               "legendFormat": "{{db_system_name}}"
@@ -2125,7 +2124,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service_name, db_system_name) (db_client_connection_pending_requests{namespace=~\"$namespace\", service_name=~\"$service\"})",
+              "expr": "sum by (service_name, db_system_name) (db_client_connection_pending_requests{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
               "refId": "A",
               "range": true,
               "legendFormat": "{{service_name}} {{db_system_name}}"
@@ -2190,7 +2189,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (service_name, db_system_name) (rate(db_client_connection_timeouts_total{namespace=~\"$namespace\", service_name=~\"$service\"}[$__rate_interval]))",
+              "expr": "sum by (service_name, db_system_name) (rate(db_client_connection_timeouts_total{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
               "legendFormat": "{{service_name}} {{db_system_name}}"
@@ -2255,7 +2254,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "min by (service_name, consumer) (chat_nats_consumer_loop_up{namespace=~\"$namespace\", service_name=~\"$service\"})",
+              "expr": "min by (service_name, consumer) (chat_nats_consumer_loop_up{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -2393,7 +2392,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "clamp_max(min by (service_name) (chat_nats_client_connected{namespace=~\"$namespace\", service_name=~\"$service\"}), 1)",
+              "expr": "clamp_max(min by (service_name) (chat_nats_client_connected{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}), 1)",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -2529,7 +2528,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "max by (service_name, breaker) (circuit_breaker_state{namespace=~\"$namespace\", service_name=~\"$service\"})",
+              "expr": "max by (service_name, breaker) (circuit_breaker_state{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"})",
               "refId": "A",
               "range": false,
               "instant": true,
