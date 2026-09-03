@@ -2028,8 +2028,8 @@
         {
           "type": "timeseries",
           "id": 20,
-          "title": "Datastore operations",
-          "description": "Client-side operation rate. This is what our processes asked for, not what the servers did -- the MongoDB, Cassandra and Valkey teams own the server view. Operation names carry no database or collection label, so traces are the only way further down.",
+          "title": "Datastore operations by service",
+          "description": "Client-side operation rate per datastore and service. This is what our processes asked for, not what the servers did -- the MongoDB, Cassandra and Valkey teams own the server view.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2093,8 +2093,8 @@
         {
           "type": "timeseries",
           "id": 21,
-          "title": "Datastore error ratio",
-          "description": "Share of client operations that returned an error, per datastore and service. error_type exists only on failures, so the numerator selects it and the denominator does not.",
+          "title": "Datastore errors by service and type",
+          "description": "Only failures: error_type exists on the metric solely when an operation returned one, so every series here is an error and its name is the class. A ratio tells you how bad; this tells you what kind, which is the first thing that narrows a search.\n\nThe error % column in the table below carries the ratio, per service and per operation.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2112,10 +2112,10 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "100 * sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))",
+              "expr": "sum by (db_system_name, service_name, error_type) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval]))",
               "refId": "A",
               "range": true,
-              "legendFormat": "{{db_system_name}} {{service_name}}"
+              "legendFormat": "{{db_system_name}} {{service_name}} {{error_type}}"
             }
           ],
           "fieldConfig": {
@@ -2124,19 +2124,19 @@
                 "drawStyle": "line",
                 "lineInterpolation": "linear",
                 "lineWidth": 2,
-                "fillOpacity": 0,
+                "fillOpacity": 45,
                 "showPoints": "auto",
                 "pointSize": 5,
                 "spanNulls": false,
                 "stacking": {
-                  "mode": "none",
+                  "mode": "normal",
                   "group": "A"
                 }
               },
               "color": {
                 "mode": "palette-classic"
               },
-              "unit": "percent",
+              "unit": "reqps",
               "noValue": "NO DATA",
               "mappings": []
             },
@@ -2158,8 +2158,8 @@
         {
           "type": "timeseries",
           "id": 22,
-          "title": "Datastore p99 latency",
-          "description": "Client-observed p99, which includes the network and any driver retry. The gap between this and the server team's own latency panel is the round trip plus the retry, and that gap is the part we own.\n\nDeliberately coarse: this family carries a bucket per service, operation and server address, and a full-resolution query over a long range trips Prometheus's sample limit. The step is pinned to one minute and the panel to 100 points. If it still fails, shorten the range -- the durable fix is a recording rule.",
+          "title": "Datastore latency",
+          "description": "Solid p95, dashed p99, per datastore. Client-observed, so it includes the network and any driver retry: the gap between this and the server team's own latency panel is the round trip plus the retry, and that gap is the part we own.\n\nDeliberately coarse -- this family carries a bucket per service, operation and server address, and a full-resolution query over a long range trips Prometheus's sample limit. The step is pinned to a minute and the panel to 100 points. The table below breaks the same number down by service and operation.",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2177,10 +2177,21 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum by (le, db_system_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+              "expr": "histogram_quantile(0.95, sum by (le, db_system_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
               "refId": "A",
               "range": true,
-              "legendFormat": "{{db_system_name}}"
+              "legendFormat": "{{db_system_name}} p95"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le, db_system_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])))",
+              "refId": "B",
+              "range": true,
+              "legendFormat": "{{db_system_name}} p99"
             }
           ],
           "fieldConfig": {
@@ -2205,7 +2216,30 @@
               "noValue": "NO DATA",
               "mappings": []
             },
-            "overrides": []
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".*p99$"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
           },
           "options": {
             "legend": {
@@ -2223,8 +2257,228 @@
           "interval": "1m"
         },
         {
-          "type": "timeseries",
+          "type": "table",
           "id": 23,
+          "title": "Datastore operations",
+          "description": "One row per datastore, service and operation, so \"MongoDB is at two seconds\" becomes \"history-service is spending two seconds on find\". Sort by p95 for the slow one, by error % for the broken one.\n\nThis is as far as the metric goes, and how far differs by store. MongoDB's view keeps db.operation.name and the peer address but deliberately drops the collection, so the next question -- which collection, which query shape -- is a trace. Cassandra's view keeps db.namespace and db.collection.name as well, so its table is already on the metric.\n\nOne more slice is available and is not here because the two stores name it differently: MongoDB tags the peer as network_peer_address, Cassandra and Valkey as server_address. Grouping by that answers whether one replica-set member is the slow one.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 73
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "label_join(sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\")",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (endpoint) (label_join(100 * sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\"))",
+              "refId": "C",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\"))",
+              "refId": "D",
+              "range": false,
+              "instant": true,
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "joinByField",
+              "options": {
+                "byField": "endpoint",
+                "mode": "outer"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Time 1": true,
+                  "Time 2": true,
+                  "Time 3": true,
+                  "Time 4": true,
+                  "Time 5": true,
+                  "Time 6": true,
+                  "Time 7": true,
+                  "Time 8": true,
+                  "Time 9": true,
+                  "Time 10": true,
+                  "Time 11": true,
+                  "Time 12": true,
+                  "Time 13": true,
+                  "endpoint": true
+                },
+                "renameByName": {
+                  "db_system_name": "store",
+                  "service_name": "service",
+                  "db_operation_name": "operation",
+                  "Value #A": "ops/s",
+                  "Value #C": "error %",
+                  "Value #D": "p95"
+                },
+                "indexByName": {
+                  "db_system_name": 0,
+                  "service_name": 1,
+                  "db_operation_name": 2,
+                  "Value #A": 3,
+                  "Value #C": 4,
+                  "Value #D": 5,
+                  "Time": 6,
+                  "Time 1": 7,
+                  "Time 2": 8,
+                  "Time 3": 9,
+                  "Time 4": 10,
+                  "Time 5": 11,
+                  "Time 6": 12,
+                  "Time 7": 13,
+                  "Time 8": 14,
+                  "Time 9": 15,
+                  "Time 10": 16,
+                  "Time 11": 17,
+                  "Time 12": 18,
+                  "Time 13": 19,
+                  "endpoint": 20
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "-",
+              "mappings": [],
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "error %"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "percent"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "yellow",
+                          "value": 0.5
+                        },
+                        {
+                          "color": "red",
+                          "value": 2
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p95"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": "req/s"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false,
+              "reducer": [
+                "sum"
+              ],
+              "countRows": false,
+              "fields": ""
+            },
+            "sortBy": [
+              {
+                "displayName": "p95",
+                "desc": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "timeseries",
+          "id": 24,
           "title": "Connection pool queue depth",
           "description": "Requests waiting for a pooled connection. A flat zero is the healthy state and the expected reading -- the panel earns its place on the day it is not zero, because the datastore can be perfectly healthy while our side runs out of connections, and no server-side dashboard shows that.",
           "datasource": {
@@ -2235,7 +2489,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 73
+            "y": 83
           },
           "targets": [
             {
@@ -2289,7 +2543,7 @@
         },
         {
           "type": "timeseries",
-          "id": 24,
+          "id": 25,
           "title": "Connection pool checkout timeouts",
           "description": "Checkouts that gave up waiting. Flat zero is healthy. Any sustained rate means requests are failing for want of a connection rather than anything the datastore did, and that pool sizing is the constraint.",
           "datasource": {
@@ -2300,7 +2554,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 73
+            "y": 83
           },
           "targets": [
             {
@@ -2354,7 +2608,7 @@
         },
         {
           "type": "table",
-          "id": 25,
+          "id": 26,
           "title": "JetStream consumer loops",
           "description": "One row per service and durable, sorted so anything DOWN is at the top. A timeline of twenty green lanes is noise; what an operator needs is whether any lane is down and which.\n\nThe loop does not restart itself: it returns on a terminal error and stays gone until the process does, so DOWN here is permanent until someone restarts the pod. A liveness probe cannot see it -- the process is healthy, it is simply no longer consuming.",
           "datasource": {
@@ -2365,7 +2619,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 81
+            "y": 91
           },
           "targets": [
             {
@@ -2499,7 +2753,7 @@
         },
         {
           "type": "table",
-          "id": 26,
+          "id": 27,
           "title": "NATS client connections",
           "description": "One row per service, sorted so a disconnected service is at the top. The underlying metric counts live connections rather than reporting a boolean, so it is clamped to one: the question here is connected or not.\n\nA service that has lost its broker connection still answers its health probe and still serves HTTP. Its NATS publishes are the part that silently stops working.",
           "datasource": {
@@ -2510,7 +2764,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 81
+            "y": 91
           },
           "targets": [
             {
@@ -2642,7 +2896,7 @@
         },
         {
           "type": "table",
-          "id": 27,
+          "id": 28,
           "title": "Circuit breakers",
           "description": "One row per service and breaker, sorted so open breakers are at the top. Four breakers exist: subscription and roommeta in message-gatekeeper, roommeta in broadcast-worker, atrestdek in message-worker and history-service.\n\nA breaker publishes its state only when it transitions, so one that has never tripped since its process started has no row at all. An empty table is the healthy state, not missing instrumentation.",
           "datasource": {
@@ -2653,7 +2907,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 81
+            "y": 91
           },
           "targets": [
             {
