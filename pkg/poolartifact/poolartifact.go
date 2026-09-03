@@ -115,12 +115,23 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	if len(a.Accounts) > maxAccounts {
 		return nil, fmt.Errorf("pool artifact has %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
 	}
+	// A duplicate is counted in the shard the readiness floor is measured
+	// against, but a consumer starts each account once — so the target can
+	// never be reached and MIN_READY_RATIO either fails the run for a reason
+	// unrelated to the system under test or absorbs the gap in its slack.
+	// Split across shards it is worse: two pods connect the same account, and
+	// every room they share double-counts its deliveries.
+	seen := make(map[string]int, len(a.Accounts))
 	for i, account := range a.Accounts {
 		// An empty entry builds subjects like chat.user..event.room, which
 		// subscribe cleanly and receive nothing.
 		if account == "" {
 			return nil, fmt.Errorf("pool artifact account %d is empty", i)
 		}
+		if first, dup := seen[account]; dup {
+			return nil, fmt.Errorf("pool artifact has duplicate account %q at positions %d and %d", account, first, i)
+		}
+		seen[account] = i
 	}
 	return &a, nil
 }

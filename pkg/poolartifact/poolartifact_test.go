@@ -156,3 +156,32 @@ func TestLoad_RejectsAnImplausibleAccountCount(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "accounts")
 }
+
+// A duplicated account is counted in the shard the readiness floor is measured
+// against, but the swarm deliberately starts it only once — so the target can
+// never be reached, and MIN_READY_RATIO either fails the run for a reason that
+// has nothing to do with the system under test or silently absorbs the gap in
+// its slack. Across shards it is worse: two pods each connect the same account,
+// and every room they share double-counts its deliveries.
+func TestLoad_RejectsDuplicateAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, Write(path, &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d",
+		Accounts: []string{"user-0", "user-1", "user-0"},
+	}))
+	_, err := Load(path, "s")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "duplicate")
+	assert.ErrorContains(t, err, "user-0")
+}
+
+func TestLoad_AcceptsDistinctAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, Write(path, &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d",
+		Accounts: []string{"user-0", "user-1", "user-2"},
+	}))
+	a, err := Load(path, "s")
+	require.NoError(t, err)
+	assert.Len(t, a.Accounts, 3)
+}
