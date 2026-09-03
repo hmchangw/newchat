@@ -144,8 +144,7 @@
         "expr": "changes(kube_deployment_status_observed_generation{namespace=~\"${namespace:regex}\"}[$__rate_interval]) > 0",
         "titleFormat": "deploy",
         "textFormat": "{{deployment}}",
-        "step": "60s",
-        "tagKeys": "deployment"
+        "step": "60s"
       }
     ]
   },
@@ -453,7 +452,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "HTTP {{service_name}}"
@@ -464,7 +463,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "B",
           "range": true,
           "legendFormat": "NATS {{service_name}}"
@@ -529,7 +528,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} 5xx"
@@ -540,7 +539,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"4..\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"4..\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "B",
           "range": true,
           "legendFormat": "{{service_name}} 4xx"
@@ -605,7 +604,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name, error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name, error_type) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} {{error_type}}"
@@ -670,7 +669,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(histogram_quantile(0.95, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(histogram_quantile(0.95, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} p95"
@@ -681,7 +680,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(histogram_quantile(0.99, sum by (le, service_name) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "B",
           "range": true,
           "legendFormat": "{{service_name}} p99"
@@ -769,7 +768,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(histogram_quantile(0.95, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(histogram_quantile(0.95, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}} p95"
@@ -780,7 +779,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(histogram_quantile(0.99, sum by (le, service_name) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "B",
           "range": true,
           "legendFormat": "{{service_name}} p99"
@@ -868,7 +867,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(label_join(sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\"), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(label_join(sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\"), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -880,7 +879,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",http_response_status_code=~\"5..\"}[$__rate_interval])) / sum by (service_name, http_route) (rate(http_server_request_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"http_route\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -892,7 +891,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, service_name, http_route) (rate(http_server_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"http_route\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1086,7 +1085,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(label_join(sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\"), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(label_join(sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\"), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1098,7 +1097,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (service_name, rpc_method) (rate(rpc_server_call_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1110,7 +1109,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, service_name, rpc_method) (rate(rpc_server_call_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"service_name\", \"rpc_method\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1783,7 +1782,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1795,7 +1794,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(max by (service_name) (go_processor_limit{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(max by (service_name) (go_processor_limit{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1807,7 +1806,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(max by (service_name) (go_memory_limit_bytes{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(max by (service_name) (go_memory_limit_bytes{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1819,7 +1818,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(sum by (service_name) (go_memory_used_bytes{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(sum by (service_name) (go_memory_used_bytes{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1965,7 +1964,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "label_replace(topk(10, max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"})), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+          "expr": "label_replace(topk(10, max by (service_name) (go_goroutine_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"})), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
           "refId": "A",
           "range": true,
           "legendFormat": "{{service_name}}"
@@ -2042,7 +2041,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (db_system_name, service_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": true,
               "legendFormat": "{{db_system_name}} {{service_name}}"
@@ -2107,7 +2106,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (db_system_name, service_name, error_type) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (db_system_name, service_name, error_type) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": true,
               "legendFormat": "{{db_system_name}} {{service_name}} {{error_type}}"
@@ -2273,7 +2272,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(label_join(sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\"), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(label_join(sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\"), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -2285,7 +2284,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (endpoint) (label_join(100 * sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\",error_type!=\"\"}[$__rate_interval])) / sum by (db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_count{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "C",
               "range": false,
               "instant": true,
@@ -2297,7 +2296,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\")), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (endpoint) (label_join(histogram_quantile(0.95, sum by (le, db_system_name, service_name, db_operation_name) (rate(db_client_operation_duration_seconds_bucket{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval]))), \"endpoint\", \" | \", \"db_system_name\", \"service_name\", \"db_operation_name\")), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "D",
               "range": false,
               "instant": true,
@@ -2493,7 +2492,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (service_name, db_system_name) (db_client_connection_pending_requests{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (service_name, db_system_name) (db_client_connection_pending_requests{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": true,
               "legendFormat": "{{service_name}} {{db_system_name}}"
@@ -2558,7 +2557,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(sum by (service_name, db_system_name) (rate(db_client_connection_timeouts_total{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(sum by (service_name, db_system_name) (rate(db_client_connection_timeouts_total{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}[$__rate_interval])), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": true,
               "legendFormat": "{{service_name}} {{db_system_name}}"
@@ -2623,7 +2622,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(min by (service_name, consumer) (chat_nats_consumer_loop_up{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(min by (service_name, consumer) (chat_nats_consumer_loop_up{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -2768,7 +2767,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(clamp_max(min by (service_name) (chat_nats_client_connected{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), 1), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(clamp_max(min by (service_name) (chat_nats_client_connected{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), 1), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": false,
               "instant": true,
@@ -2911,7 +2910,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "label_replace(max by (service_name, breaker) (circuit_breaker_state{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1\", \"service_name\", \".*nextgen-(.*)\")",
+              "expr": "label_replace(max by (service_name, breaker) (circuit_breaker_state{namespace=~\"${namespace:regex}\", service_name=~\".*$name.*\", service_name=~\"${service:regex}\"}), \"service_name\", \"$1$2\", \"service_name\", \"(.*)nextgen-(.*)\")",
               "refId": "A",
               "range": false,
               "instant": true,
