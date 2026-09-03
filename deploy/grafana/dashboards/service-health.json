@@ -945,13 +945,7 @@
               "Value #C": "error %",
               "Value #D": "p95"
             },
-            "indexByName": {
-              "service_name": 0,
-              "http_route": 1,
-              "Value #A": 2,
-              "Value #C": 3,
-              "Value #D": 4
-            }
+            "indexByName": {}
           }
         }
       ],
@@ -1154,13 +1148,7 @@
               "Value #C": "error %",
               "Value #D": "p95"
             },
-            "indexByName": {
-              "service_name": 0,
-              "rpc_method": 1,
-              "Value #A": 2,
-              "Value #C": 3,
-              "Value #D": 4
-            }
+            "indexByName": {}
           }
         }
       ],
@@ -1407,15 +1395,7 @@
               "Value #E": "memory",
               "Value #F": "memory % of limit"
             },
-            "indexByName": {
-              "container": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "Value #D": 4,
-              "Value #E": 5,
-              "Value #F": 6
-            }
+            "indexByName": {}
           }
         }
       ],
@@ -2331,13 +2311,6 @@
           ],
           "transformations": [
             {
-              "id": "joinByField",
-              "options": {
-                "byField": "consumer",
-                "mode": "outer"
-              }
-            },
-            {
               "id": "organize",
               "options": {
                 "excludeByName": {
@@ -2361,11 +2334,7 @@
                   "consumer": "durable",
                   "Value": "state"
                 },
-                "indexByName": {
-                  "service_name": 0,
-                  "consumer": 1,
-                  "Value": 2
-                }
+                "indexByName": {}
               }
             }
           ],
@@ -2469,13 +2438,6 @@
           ],
           "transformations": [
             {
-              "id": "joinByField",
-              "options": {
-                "byField": "service_name",
-                "mode": "outer"
-              }
-            },
-            {
               "id": "organize",
               "options": {
                 "excludeByName": {
@@ -2498,10 +2460,7 @@
                   "service_name": "service",
                   "Value": "state"
                 },
-                "indexByName": {
-                  "service_name": 0,
-                  "Value": 1
-                }
+                "indexByName": {}
               }
             }
           ],
@@ -2605,13 +2564,6 @@
           ],
           "transformations": [
             {
-              "id": "joinByField",
-              "options": {
-                "byField": "breaker",
-                "mode": "outer"
-              }
-            },
-            {
               "id": "organize",
               "options": {
                 "excludeByName": {
@@ -2635,11 +2587,7 @@
                   "breaker": "breaker",
                   "Value": "state"
                 },
-                "indexByName": {
-                  "service_name": 0,
-                  "breaker": 1,
-                  "Value": 2
-                }
+                "indexByName": {}
               }
             }
           ],
