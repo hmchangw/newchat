@@ -16,6 +16,10 @@ import (
 // SchemaVersion is the artifact schema this package reads and writes.
 const SchemaVersion = 1
 
+// Artifact is the account pool one load-test run connects as: the ordered
+// list, plus the metadata that ties it back to the run that produced it.
+// RunID and ConfigDigest are what let a clientsim fleet's connections be
+// matched to the seed behind them, so both are required at either end.
 type Artifact struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	RunID         string   `json:"runId"`
