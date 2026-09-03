@@ -100,7 +100,14 @@ type metrics struct {
 	// publishes. Two lock-free transitions could otherwise interleave their
 	// read-modify-publish and leave a gauge holding the older value until the
 	// next transition happened to correct it.
-	readyMu       sync.Mutex
+	readyMu sync.Mutex
+	// troughFloor is the readiness the fleet must first REACH before the
+	// low-water mark starts tracking. Seeding it on the first decrement made a
+	// churn cycle during the ramp — when the fleet has not come up yet —
+	// permanently pin the trough near zero however healthy the rest of the run
+	// was, which is not what the series claims to describe.
+	troughFloor   int64
+	troughArmed   atomic.Bool
 	readyNow      atomic.Int64
 	readyPeak     atomic.Int64
 	readyMin      atomic.Int64
@@ -110,12 +117,23 @@ type metrics struct {
 	readyCaptured atomic.Bool
 }
 
+// armTroughAt sets the readiness the fleet must reach before the trough starts
+// tracking. A floor of 0 (the gate disabled) arms on the first ready client.
+func (m *metrics) armTroughAt(floor int) {
+	m.readyMu.Lock()
+	defer m.readyMu.Unlock()
+	m.troughFloor = int64(floor)
+}
+
 // readyInc/readyDec move the readiness gauge and keep the high-water mark.
 func (m *metrics) readyInc() {
 	m.readyMu.Lock()
 	defer m.readyMu.Unlock()
 	n := m.readyNow.Add(1)
 	m.ConnsReady.Set(float64(n))
+	if n >= m.troughFloor {
+		m.troughArmed.Store(true)
+	}
 	if n > m.readyPeak.Load() {
 		m.readyPeak.Store(n)
 		m.ConnsReadyPeak.Set(float64(n))
@@ -138,6 +156,11 @@ func (m *metrics) recordTroughLocked(n int64) {
 	// guard the trough of any completed run is 0, which describes the shutdown
 	// rather than the measurement window.
 	if m.readyFrozen.Load() {
+		return
+	}
+	// Before the fleet first reached its floor, a dip is the ramp, not the
+	// window's trough.
+	if !m.troughArmed.Load() {
 		return
 	}
 	if m.readyMinSet.CompareAndSwap(false, true) {

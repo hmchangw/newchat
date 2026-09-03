@@ -140,7 +140,7 @@ func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage
 	// ready with nothing subscribed.
 	var reply struct {
 		Subscriptions *[]subRow `json:"subscriptions"`
-		HasMore       bool      `json:"hasMore"`
+		HasMore       *bool     `json:"hasMore"`
 	}
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
 		// Single %w, on the sentinel: two %w verbs can put two errcode errors
@@ -153,5 +153,11 @@ func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage
 	if reply.Subscriptions == nil {
 		return nil, fmt.Errorf("subscription.list reply has no subscriptions field: %w", errWalkProtocol)
 	}
-	return &subListPage{Subscriptions: *reply.Subscriptions, HasMore: reply.HasMore}, nil
+	// hasMore carries the same hazard: absent decodes as false, i.e. "this was
+	// the last page", so a responder that omits it truncates the walk while the
+	// client still reports ready.
+	if reply.HasMore == nil {
+		return nil, fmt.Errorf("subscription.list reply has no hasMore field: %w", errWalkProtocol)
+	}
+	return &subListPage{Subscriptions: *reply.Subscriptions, HasMore: *reply.HasMore}, nil
 }

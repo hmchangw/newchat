@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,8 +89,11 @@ func TestSimClient_SubscribeFailureIsRetriedOnNextAdd(t *testing.T) {
 	_, open = s.roomSubs["rX"]
 	s.mu.Unlock()
 	assert.True(t, open, "repeat added must retry after a failed open")
-	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
-		"repairing the last missing room must restore readiness")
+	// Asynchronous now: a live open demotes immediately and only promotes once
+	// the broker has acknowledged the SUB.
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond, "repairing the last missing room must restore readiness")
 }
 
 func TestSimClient_LiveRepairWaitsForEveryMissingRoom(t *testing.T) {
@@ -115,8 +119,10 @@ func TestSimClient_LiveRepairWaitsForEveryMissingRoom(t *testing.T) {
 		"one repaired room must not hide another missing room")
 
 	fc.deliverCB(t, updSubj, updJSON("added", "r2", "channel", nil))
-	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001,
-		"readiness returns only after every missing room is repaired")
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond,
+		"readiness returns only after every missing room is repaired — and after the broker acknowledges it")
 }
 
 func TestSimClient_BootstrapWalk_DoesNotRevertMidWalkUpdates(t *testing.T) {
@@ -868,5 +874,55 @@ func TestBootstrapWalk_PromotesWhenNoControlFaultIntervenes(t *testing.T) {
 	s.markConnUp()
 
 	require.NoError(t, s.bootstrapWalk(context.Background()))
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+}
+
+// The walk flushes before it promotes; the live path did not. A live `added`
+// opened the room and promoted in the same locked section, so an already-ready
+// client stayed ready while the SUB was still in nats.go's write buffer — and
+// core NATS does not replay, so anything published in that window is gone for
+// good with the gauge never dipping.
+func TestLiveUpdate_DoesNotStayReadyUntilTheBrokerHasTheNewSub(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, s.subscribeLanes(ctx, fc))
+	require.NoError(t, s.bootstrapWalk(ctx))
+	require.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001, "precondition: ready")
+
+	flushes := fc.flushes.Load()
+	// The flush now runs on its own goroutine, so the observation crosses one.
+	var readyAtFlush atomic.Int64
+	fc.onFlush = func() { readyAtFlush.Store(int64(promtestutil.ToFloat64(s.m.ConnsReady))) }
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("added", "r-new", "channel", nil))
+
+	require.Eventually(t, func() bool { return fc.flushes.Load() > flushes }, 3*time.Second, 5*time.Millisecond,
+		"a live add must flush before it vouches for the new room")
+	assert.Zero(t, readyAtFlush.Load(), "readiness must drop until the broker has the SUB")
+	require.Eventually(t, func() bool {
+		return promtestutil.ToFloat64(s.m.ConnsReady) == 1
+	}, 3*time.Second, 5*time.Millisecond, "and come back once it does")
+}
+
+// A live removal only closes; it cannot make the client miss traffic, so it
+// must not pay a flush round-trip or dip the gauge.
+func TestLiveUpdate_ARemovalPromotesWithoutAFlush(t *testing.T) {
+	fc := newFakeConn(subListPage{Subscriptions: []subRow{{RoomID: "r1", RoomType: "channel"}}})
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, s.subscribeLanes(ctx, fc))
+	require.NoError(t, s.bootstrapWalk(ctx))
+	flushes := fc.flushes.Load()
+
+	fc.deliverCB(t, subject.SubscriptionUpdate("user-lc"), updJSON("removed", "r1", "channel", nil))
+
+	assert.Equal(t, flushes, fc.flushes.Load(), "a close-only change needs no acknowledgement")
 	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
 }

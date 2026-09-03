@@ -137,3 +137,36 @@ func TestPump_RecordsRoomQueueDepth(t *testing.T) {
 	assert.Equal(t, uint64(queued), histogramCount(t, s.m.Registry, "clientsim_room_queue_depth"),
 		"every dequeue samples the depth behind it")
 }
+
+// The trough is meant to describe the measurement window. Seeding it on the
+// first decrement means a churn cycle during the ramp — when the fleet has not
+// come up yet — permanently pins clientsim_conns_ready_min near zero, however
+// healthy the rest of the run is. Tracking starts once the floor is reached.
+func TestMetrics_TroughIgnoresChurnBeforeTheFleetIsUp(t *testing.T) {
+	m := newMetrics()
+	m.armTroughAt(10)
+
+	for i := 0; i < 4; i++ { // ramping
+		m.readyInc()
+	}
+	m.readyDec() // a churn cycle at 4/10 — not the window's trough
+	assert.InDelta(t, 0, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001,
+		"no trough is recorded before the fleet reaches its floor")
+
+	for i := 0; i < 7; i++ {
+		m.readyInc() // reaches 10
+	}
+	m.readyDec() // now at 9, inside the window
+	assert.InDelta(t, 9, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001)
+}
+
+// With the gate disabled (floor 0) the trough tracks from the first client, so
+// a run without a floor still reports one.
+func TestMetrics_TroughWithNoFloorTracksImmediately(t *testing.T) {
+	m := newMetrics()
+	m.armTroughAt(0)
+	m.readyInc()
+	m.readyInc()
+	m.readyDec()
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001)
+}

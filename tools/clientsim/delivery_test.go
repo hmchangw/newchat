@@ -101,3 +101,26 @@ func TestHandleDelivery_OtherEventTypesStillSkipSilently(t *testing.T) {
 	handleDelivery(m, "channel", []byte(`{"type":"thread_metadata_updated"}`), time.UnixMilli(2))
 	assert.InDelta(t, 0, promtestutil.ToFloat64(m.InvalidTimestamp), 0.001)
 }
+
+// json.Unmarshal accepts `null` and `{}` into a zero envelope: the delivery is
+// counted, the empty type makes both timestamps non-strict, and every loss
+// counter stays at zero — so a responder emitting garbage reads as a clean,
+// non-degraded window. The event type is mandatory.
+func TestHandleDelivery_SchemaInvalidPayloadIsNotACleanDelivery(t *testing.T) {
+	for _, payload := range []string{`null`, `{}`, `{"roomId":"r1"}`} {
+		t.Run(payload, func(t *testing.T) {
+			m := newMetrics()
+			handleDelivery(m, "channel", []byte(payload), time.Now())
+			assert.InDelta(t, 1, promtestutil.ToFloat64(m.DecodeFailures), 0.001,
+				"an envelope with no event type is evidence, not a clean delivery")
+		})
+	}
+}
+
+// A typed event that simply is not new_message stays clean.
+func TestHandleDelivery_ATypedNonMessageEventStaysClean(t *testing.T) {
+	m := newMetrics()
+	handleDelivery(m, "channel", []byte(`{"type":"thread_metadata_updated"}`), time.Now())
+	assert.InDelta(t, 0, promtestutil.ToFloat64(m.DecodeFailures), 0.001)
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Delivered.WithLabelValues("channel")), 0.001)
+}

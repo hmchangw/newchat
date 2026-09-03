@@ -80,6 +80,18 @@ func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 		}
 		if len(changes) > 0 {
 			s.applyChangesLocked(changes)
+			if opensARoom(changes) {
+				// A new SUB is only queued locally. Core NATS does not replay,
+				// so a client that keeps vouching here misses anything
+				// published before the broker installs it — permanently, with
+				// the gauge never dipping. The walk already flushes before it
+				// promotes; this is the same rule on the live path.
+				s.markNotReady()
+				go s.flushThenPromote(ctx)
+				return
+			}
+			// A close-only change cannot make the client miss traffic, so it
+			// needs no acknowledgement round-trip.
 			s.updateReadyLocked()
 		}
 	}); err != nil {
@@ -95,6 +107,38 @@ func (s *simClient) invalidateForControlFaultLocked() {
 	s.planVerified = false
 	s.controlGen++
 	s.updateReadyLocked() // one place decides readiness; lock order s.mu -> stateMu
+}
+
+// opensARoom reports whether a batch adds a subscription, which is the only
+// case that has to wait for the broker before the client may vouch again.
+func opensARoom(changes []subChange) bool {
+	for _, ch := range changes {
+		if ch.Op == subOpen {
+			return true
+		}
+	}
+	return false
+}
+
+// flushThenPromote waits for the broker to acknowledge the SUBs a live update
+// just queued, then re-evaluates readiness. A failed flush leaves the client
+// not-ready and schedules the resync that re-derives and re-flushes the plan —
+// the client cannot prove the broker has its subscriptions until one succeeds.
+func (s *simClient) flushThenPromote(ctx context.Context) {
+	conn := s.connSnapshot()
+	if conn == nil {
+		return
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, subFlushTimeout)
+	defer cancel()
+	if err := conn.FlushWithContext(flushCtx); err != nil {
+		s.m.Errors.WithLabelValues("flush").Inc()
+		go s.resync(ctx)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateReadyLocked()
 }
 
 // planViewLocked derives the roomID -> global dedupe view from the open
@@ -224,7 +268,7 @@ func (s *simClient) bootstrapWalk(ctx context.Context) error {
 		return fmt.Errorf("bootstrap walk for %s: %w", s.account, err)
 	}
 
-	if err := s.applyPlan(plan, startGen, startEpoch); err != nil {
+	if err := s.applyPlan(plan, startGen, startEpoch, startControl); err != nil {
 		return err
 	}
 
@@ -268,9 +312,17 @@ const subFlushTimeout = 5 * time.Second
 
 // applyPlan reconciles the open subscriptions with a fetched plan under s.mu.
 // It deliberately does NOT promote: readiness waits for the flush.
-func (s *simClient) applyPlan(plan map[string]bool, startGen, startEpoch uint64) error {
+func (s *simClient) applyPlan(plan map[string]bool, startGen, startEpoch, startControl uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.controlGen != startControl {
+		// Checked BEFORE applying, not only before promoting. A control-plane
+		// fault schedules its own repair walk; if that walk finishes first and
+		// opens a room, this older walk would still CLOSE it on the way to
+		// failing its promotion check — leaving the client ready (from the
+		// repair) but missing the room, with nothing left to notice.
+		return fmt.Errorf("bootstrap walk for %s: %w", s.account, errPlanEpochChanged)
+	}
 	if s.planEpoch != startEpoch {
 		// The connection this plan was fetched over is gone. Applying it would
 		// reconcile against a dead snapshot, and marking it verified would

@@ -34,6 +34,15 @@ func handleDelivery(m *metrics, lane string, data []byte, now time.Time) {
 		m.DecodeFailures.Inc()
 		return
 	}
+	// `null` and `{}` unmarshal cleanly into a zero envelope. Without this the
+	// delivery is counted, the empty type makes both timestamps non-strict, and
+	// every loss counter stays at zero — so a responder emitting garbage reads
+	// as a clean, non-degraded window. Every event on these subjects carries a
+	// type.
+	if evt.Type == "" {
+		m.DecodeFailures.Inc()
+		return
+	}
 	// A new_message RoomEvent must carry BOTH stamps: broadcast-worker builds
 	// every one of them from the canonical event's own Timestamp, which
 	// CLAUDE.md requires each NATS event to set at its publish site. A zero in

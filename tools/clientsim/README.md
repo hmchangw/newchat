@@ -89,6 +89,14 @@ the local YAML in this repo.
 | `CLIENTSIM_MIN_READY_RATIO` | `0.95` | fleet-readiness exit gate; `0` disables it |
 | `CLIENTSIM_FAIL_ON_DEGRADED` | `false` | also exit non-zero when loss counters fired |
 
+**Readiness dips on a live room add.** A new `SUB` is only queued locally, and
+core NATS does not replay, so a client that kept vouching would miss anything
+published before the broker installs it. A live `added` therefore demotes,
+flushes, and promotes again — the same rule the bootstrap walk follows. Expect
+`clientsim_conns_ready` to move during membership churn; that is the gauge
+being honest, not the fleet degrading. A removal needs no round-trip and does
+not dip.
+
 Room subscriptions use `ChanSubscribe` into one shared channel drained by a
 single pump goroutine, so room count multiplies neither goroutines nor
 buffers. Steady state is ~7 goroutines per client regardless of room count.

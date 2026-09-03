@@ -171,3 +171,29 @@ func TestFetchSubscriptionPlan_PageLimitIsATerminalProtocolError(t *testing.T) {
 	assert.True(t, errors.Is(err, errWalkProtocol),
 		"a responder that never ends its pagination will not end it on a retry either")
 }
+
+// hasMore has the same absence-vs-false hazard the subscriptions field had:
+// a reply that omits it decodes as "this was the last page", so a
+// version-skewed responder truncates the walk and the client still goes ready.
+func TestNatsLister_RejectsRepliesWithoutHasMore(t *testing.T) {
+	tests := []struct {
+		name, reply, wantErr string
+	}{
+		{"missing hasMore", `{"subscriptions":[]}`, "hasMore"},
+		{"explicit false is fine", `{"subscriptions":[],"hasMore":false}`, ""},
+		{"explicit true is fine", `{"subscriptions":[{"roomId":"r1","roomType":"channel"}],"hasMore":true}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := &natsLister{conn: &requestConn{reply: []byte(tt.reply)}, subject: "s", timeout: time.Second}
+			_, err := l.List(context.Background(), subListRequest{Type: "rooms"})
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantErr)
+			assert.True(t, errors.Is(err, errWalkProtocol))
+		})
+	}
+}
