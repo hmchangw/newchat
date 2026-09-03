@@ -79,9 +79,9 @@ func TestSubscriptionListFixtures_ListTypesBehaveAsTheWorkloadAssumes(t *testing
 		assert.NotEmpty(t, res.Data)
 	})
 
-	// The seeder writes no botDM rows, so apps is legitimately empty. Pinned so a
-	// future --list-type=apps ramp is understood as measuring an empty page
-	// rather than a fast endpoint.
+	// The seeder writes no botDM rows, so apps is legitimately empty — which is
+	// why the workload rejects --list-type=apps rather than measuring it. Pinned
+	// here so that guard can be lifted the day botDM fixtures exist.
 	t.Run("apps is empty because the seeder writes no botDM rows", func(t *testing.T) {
 		res, err := repo.AggregateSubscriptions(ctx, account, "apps", false, nil, page)
 		require.NoError(t, err)

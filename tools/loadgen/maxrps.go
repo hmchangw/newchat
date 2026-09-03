@@ -114,7 +114,7 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 	// search-only tunable:
 	searchMixFlag := fs.String("search-mix", "messages:60,rooms:30,users:10", "search only: endpoint mix")
 	// subscription-list-only tunables:
-	listType := fs.String("list-type", "current", "subscription-list only: current|rooms|apps")
+	listType := fs.String("list-type", "current", "subscription-list only: current|rooms (apps needs botDM fixtures this workload does not seed)")
 	listLimit := fs.Int("list-limit", 200, "subscription-list only: page size (docs/client-api.md recommends 200)")
 	includeLastMessage := fs.Bool("include-last-message", true, "subscription-list only: request the per-room previewMessage enrichment")
 	csvPath := fs.String("csv", "", "optional CSV output path")
@@ -305,8 +305,12 @@ func runMaxRPS(ctx context.Context, cfg *config, args []string) int {
 			fmt.Fprintf(os.Stderr, "unknown preset: %s\n", *preset)
 			return 2
 		}
-		if !validSubscriptionListTypes[*listType] {
-			fmt.Fprintln(os.Stderr, "--list-type must be one of current|rooms|apps")
+		if !workloadSupportedListTypes[*listType] {
+			if validSubscriptionListTypes[*listType] {
+				fmt.Fprintf(os.Stderr, "--list-type=%s is not supported by this workload: its fixtures seed no botDM rows, so every page would come back empty\n", *listType)
+				return 2
+			}
+			fmt.Fprintln(os.Stderr, "--list-type must be one of current|rooms")
 			return 2
 		}
 		if *listLimit <= 0 {
