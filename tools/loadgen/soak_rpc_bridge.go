@@ -72,7 +72,7 @@ func validSoakErrorClass(class soakErrorClass) bool {
 type soakErrorReason = soakrpc.ErrorReason
 
 const (
-	soakErrorReasonUnknown     = soakrpc.ErrorReasonUnknown
+	soakErrorReasonUnknown     = soakrpc.ReasonUnknown
 	soakReasonResponseTooLarge = soakrpc.ReasonResponseTooLarge
 )
 

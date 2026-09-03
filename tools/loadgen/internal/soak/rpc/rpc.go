@@ -14,146 +14,146 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 )
 
-type soakRPCAction string
+type Action string
 
 const (
-	soakRPCSend        soakRPCAction = "send"
-	soakRPCThreadReply soakRPCAction = "thread_reply"
-	soakRPCLoadHistory soakRPCAction = "load_history"
-	soakRPCLoadNext    soakRPCAction = "load_next"
-	soakRPCGetThread   soakRPCAction = "get_thread_messages"
-	soakRPCGetMessage  soakRPCAction = "get_message_by_id"
-	soakRPCReact       soakRPCAction = "reaction"
-	soakRPCEdit        soakRPCAction = "edit"
-	soakRPCDelete      soakRPCAction = "delete"
-	soakRPCPin         soakRPCAction = "pin"
-	soakRPCUnpin       soakRPCAction = "unpin"
-	soakRPCPinnedList  soakRPCAction = "pinned_list"
-	soakRPCReadBack    soakRPCAction = "read_back"
-	soakRPCMarkRead    soakRPCAction = "mark_read"
-	soakRPCScroll      soakRPCAction = "scroll_history"
+	ActionSend        Action = "send"
+	ActionThreadReply Action = "thread_reply"
+	ActionLoadHistory Action = "load_history"
+	ActionLoadNext    Action = "load_next"
+	ActionGetThread   Action = "get_thread_messages"
+	ActionGetMessage  Action = "get_message_by_id"
+	ActionReact       Action = "reaction"
+	ActionEdit        Action = "edit"
+	ActionDelete      Action = "delete"
+	ActionPin         Action = "pin"
+	ActionUnpin       Action = "unpin"
+	ActionPinnedList  Action = "pinned_list"
+	ActionReadBack    Action = "read_back"
+	ActionMarkRead    Action = "mark_read"
+	ActionScroll      Action = "scroll_history"
 
-	soakRPCMemberAdd        soakRPCAction = "member_add"
-	soakRPCMemberRemove     soakRPCAction = "member_remove"
-	soakRPCRoomRename       soakRPCAction = "room_rename"
-	soakRPCMuteToggle       soakRPCAction = "mute_toggle"
-	soakRPCRoomCreate       soakRPCAction = "room_create"
-	soakRPCMemberList       soakRPCAction = "member_list"
-	soakRPCRoomsInfo        soakRPCAction = "rooms_info"
-	soakRPCSubscriptionList soakRPCAction = "subscription_list"
-	soakRPCRoomStateRead    soakRPCAction = "room_state_read"
-	soakRPCMessageRead      soakRPCAction = "message_read"
-	soakRPCReadReceiptList  soakRPCAction = "read_receipt_list"
-	soakRPCPresenceQuery    soakRPCAction = "presence_query"
+	ActionMemberAdd        Action = "member_add"
+	ActionMemberRemove     Action = "member_remove"
+	ActionRoomRename       Action = "room_rename"
+	ActionMuteToggle       Action = "mute_toggle"
+	ActionRoomCreate       Action = "room_create"
+	ActionMemberList       Action = "member_list"
+	ActionRoomsInfo        Action = "rooms_info"
+	ActionSubscriptionList Action = "subscription_list"
+	ActionRoomStateRead    Action = "room_state_read"
+	ActionMessageRead      Action = "message_read"
+	ActionReadReceiptList  Action = "read_receipt_list"
+	ActionPresenceQuery    Action = "presence_query"
 
-	soakRPCSearchMessages soakRPCAction = "search_messages"
-	soakRPCSearchRooms    soakRPCAction = "search_rooms"
-	// soakRPCSearchIndexProbe is the evidence query, kept on its own label so
+	ActionSearchMessages Action = "search_messages"
+	ActionSearchRooms    Action = "search_rooms"
+	// ActionSearchIndexProbe is the evidence query, kept on its own label so
 	// its latency and error rate never blend into the read lane's.
-	soakRPCSearchIndexProbe soakRPCAction = "search_index_probe"
+	ActionSearchIndexProbe Action = "search_index_probe"
 
 	// The user-service read lane. Every one of these is read-only, so they
 	// carry latency and outcome only and never enter the evidence ledger.
-	soakRPCUserMe                  soakRPCAction = "user_me"
-	soakRPCUserProfileGet          soakRPCAction = "user_profile_get"
-	soakRPCUserStatusGet           soakRPCAction = "user_status_get"
-	soakRPCUserSettingsGet         soakRPCAction = "user_settings_get"
-	soakRPCUserChatlistGet         soakRPCAction = "user_chatlist_get"
-	soakRPCUserPriorityContacts    soakRPCAction = "user_priority_contacts"
-	soakRPCUserAppsList            soakRPCAction = "user_apps_list"
-	soakRPCUserAppsCategories      soakRPCAction = "user_apps_categories"
-	soakRPCUserSubscriptionCount   soakRPCAction = "user_subscription_count"
-	soakRPCUserSubscriptionByRoom  soakRPCAction = "user_subscription_by_room"
-	soakRPCUserSubscriptionChannel soakRPCAction = "user_subscription_channels"
-	soakRPCUserSubscriptionDM      soakRPCAction = "user_subscription_dm"
-	soakRPCUserThreadList          soakRPCAction = "user_thread_list"
-	soakRPCUserThreadUnread        soakRPCAction = "user_thread_unread"
+	ActionUserMe                  Action = "user_me"
+	ActionUserProfileGet          Action = "user_profile_get"
+	ActionUserStatusGet           Action = "user_status_get"
+	ActionUserSettingsGet         Action = "user_settings_get"
+	ActionUserChatlistGet         Action = "user_chatlist_get"
+	ActionUserPriorityContacts    Action = "user_priority_contacts"
+	ActionUserAppsList            Action = "user_apps_list"
+	ActionUserAppsCategories      Action = "user_apps_categories"
+	ActionUserSubscriptionCount   Action = "user_subscription_count"
+	ActionUserSubscriptionByRoom  Action = "user_subscription_by_room"
+	ActionUserSubscriptionChannel Action = "user_subscription_channels"
+	ActionUserSubscriptionDM      Action = "user_subscription_dm"
+	ActionUserThreadList          Action = "user_thread_list"
+	ActionUserThreadUnread        Action = "user_thread_unread"
 )
 
-// soakUserReadActions is every action the user-service read lane dispatches. It
+// userReadActions is every action the user-service read lane dispatches. It
 // is the single source for both the allowlist and the lane's own dispatch
 // table, so an action can never be allowlisted without being sent.
-var soakUserReadActions = []soakRPCAction{
-	soakRPCUserMe, soakRPCUserProfileGet, soakRPCUserStatusGet,
-	soakRPCUserSettingsGet, soakRPCUserChatlistGet, soakRPCUserPriorityContacts,
-	soakRPCUserAppsList, soakRPCUserAppsCategories,
-	soakRPCUserSubscriptionCount, soakRPCUserSubscriptionByRoom,
-	soakRPCUserSubscriptionChannel, soakRPCUserSubscriptionDM,
-	soakRPCUserThreadList, soakRPCUserThreadUnread,
+var userReadActions = []Action{
+	ActionUserMe, ActionUserProfileGet, ActionUserStatusGet,
+	ActionUserSettingsGet, ActionUserChatlistGet, ActionUserPriorityContacts,
+	ActionUserAppsList, ActionUserAppsCategories,
+	ActionUserSubscriptionCount, ActionUserSubscriptionByRoom,
+	ActionUserSubscriptionChannel, ActionUserSubscriptionDM,
+	ActionUserThreadList, ActionUserThreadUnread,
 }
 
-func validSoakRPCAction(action soakRPCAction) bool {
+func ValidAction(action Action) bool {
 	switch action {
-	case soakRPCSend, soakRPCThreadReply, soakRPCLoadHistory, soakRPCLoadNext,
-		soakRPCGetThread, soakRPCGetMessage, soakRPCReact, soakRPCEdit,
-		soakRPCDelete, soakRPCPin, soakRPCUnpin, soakRPCPinnedList,
-		soakRPCReadBack, soakRPCMarkRead, soakRPCScroll,
-		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename,
-		soakRPCMuteToggle, soakRPCRoomCreate, soakRPCMemberList,
-		soakRPCRoomsInfo, soakRPCSubscriptionList, soakRPCRoomStateRead,
-		soakRPCMessageRead, soakRPCReadReceiptList, soakRPCPresenceQuery,
-		soakRPCSearchMessages, soakRPCSearchRooms, soakRPCSearchIndexProbe:
+	case ActionSend, ActionThreadReply, ActionLoadHistory, ActionLoadNext,
+		ActionGetThread, ActionGetMessage, ActionReact, ActionEdit,
+		ActionDelete, ActionPin, ActionUnpin, ActionPinnedList,
+		ActionReadBack, ActionMarkRead, ActionScroll,
+		ActionMemberAdd, ActionMemberRemove, ActionRoomRename,
+		ActionMuteToggle, ActionRoomCreate, ActionMemberList,
+		ActionRoomsInfo, ActionSubscriptionList, ActionRoomStateRead,
+		ActionMessageRead, ActionReadReceiptList, ActionPresenceQuery,
+		ActionSearchMessages, ActionSearchRooms, ActionSearchIndexProbe:
 		return true
 	default:
-		return slices.Contains(soakUserReadActions, action)
+		return slices.Contains(userReadActions, action)
 	}
 }
 
-type soakErrorClass string
+type ErrorClass string
 
 const (
-	soakErrorTimeout      soakErrorClass = "timeout"
-	soakErrorNoResponder  soakErrorClass = "no_responder"
-	soakErrorDisconnected soakErrorClass = "disconnected"
-	soakErrorUnavailable  soakErrorClass = "unavailable"
-	soakErrorInternal     soakErrorClass = "internal"
-	soakErrorNotFound     soakErrorClass = "not_found"
-	soakErrorForbidden    soakErrorClass = "forbidden"
-	soakErrorBadRequest   soakErrorClass = "bad_request"
-	soakErrorConflict     soakErrorClass = "conflict"
-	// soakErrorRequestEncode is a body that never reached the wire; it is the
+	ErrorTimeout      ErrorClass = "timeout"
+	ErrorNoResponder  ErrorClass = "no_responder"
+	ErrorDisconnected ErrorClass = "disconnected"
+	ErrorUnavailable  ErrorClass = "unavailable"
+	ErrorInternal     ErrorClass = "internal"
+	ErrorNotFound     ErrorClass = "not_found"
+	ErrorForbidden    ErrorClass = "forbidden"
+	ErrorBadRequest   ErrorClass = "bad_request"
+	ErrorConflict     ErrorClass = "conflict"
+	// ErrorRequestEncode is a body that never reached the wire; it is the
 	// only decode-shaped failure a mutation may treat as proven not-sent.
-	soakErrorRequestEncode soakErrorClass = "request_encode"
-	// soakErrorResponseDecode means the server replied and the reply could not
+	ErrorRequestEncode ErrorClass = "request_encode"
+	// ErrorResponseDecode means the server replied and the reply could not
 	// be parsed. The request was delivered, so any effect it had is real.
-	soakErrorResponseDecode        soakErrorClass = "response_decode"
-	soakErrorAssertion             soakErrorClass = "assertion"
-	soakErrorAmbiguous             soakErrorClass = "ambiguous"
-	soakErrorMutationTargetMissing soakErrorClass = "mutation_target_missing"
-	soakErrorResponseTooLarge      soakErrorClass = "response_too_large"
-	// soakErrorCanceled is the run itself going away, not the site failing.
+	ErrorResponseDecode        ErrorClass = "response_decode"
+	ErrorAssertion             ErrorClass = "assertion"
+	ErrorAmbiguous             ErrorClass = "ambiguous"
+	ErrorMutationTargetMissing ErrorClass = "mutation_target_missing"
+	ErrorResponseTooLarge      ErrorClass = "response_too_large"
+	// ErrorCanceled is the run itself going away, not the site failing.
 	// Folding it into internal would spike a server-fault class at every
 	// shutdown; leaving it empty made the recorder count the operation as a
 	// success, because the outcome is derived from the class alone.
-	soakErrorCanceled soakErrorClass = "canceled"
+	ErrorCanceled ErrorClass = "canceled"
 )
 
-func validSoakErrorClass(class soakErrorClass) bool {
+func ValidErrorClass(class ErrorClass) bool {
 	switch class {
-	case soakErrorTimeout, soakErrorNoResponder, soakErrorDisconnected,
-		soakErrorUnavailable, soakErrorInternal, soakErrorNotFound,
-		soakErrorForbidden, soakErrorBadRequest, soakErrorConflict,
-		soakErrorRequestEncode, soakErrorResponseDecode,
-		soakErrorAssertion, soakErrorAmbiguous,
-		soakErrorMutationTargetMissing, soakErrorResponseTooLarge,
-		soakErrorCanceled:
+	case ErrorTimeout, ErrorNoResponder, ErrorDisconnected,
+		ErrorUnavailable, ErrorInternal, ErrorNotFound,
+		ErrorForbidden, ErrorBadRequest, ErrorConflict,
+		ErrorRequestEncode, ErrorResponseDecode,
+		ErrorAssertion, ErrorAmbiguous,
+		ErrorMutationTargetMissing, ErrorResponseTooLarge,
+		ErrorCanceled:
 		return true
 	default:
 		return false
 	}
 }
 
-type soakAssertionError struct {
+type assertionError struct {
 	message string
 }
 
-func (e *soakAssertionError) Error() string { return e.message }
+func (e *assertionError) Error() string { return e.message }
 
-func newSoakAssertionError(message string) error {
-	return &soakAssertionError{message: message}
+func NewAssertionError(message string) error {
+	return &assertionError{message: message}
 }
 
-func parseSoakErrorEnvelope(data []byte) error {
+func ParseErrorEnvelope(data []byte) error {
 	parsed, ok := errcode.Parse(data)
 	if !ok {
 		return nil
@@ -161,49 +161,49 @@ func parseSoakErrorEnvelope(data []byte) error {
 	return parsed
 }
 
-// soakReasonResponseTooLarge aliases the platform reason carried by the
+// ReasonResponseTooLarge aliases the platform reason carried by the
 // oversize reply envelope, so the harness cannot drift from the wire contract.
-const soakReasonResponseTooLarge = errcode.ResponseTooLarge
+const ReasonResponseTooLarge = errcode.ResponseTooLarge
 
-// soakErrorReason is the service-supplied errcode reason, kept beside the
+// ErrorReason is the service-supplied errcode reason, kept beside the
 // collapsed class because the two forbidden answers a soak read can get need
 // opposite responses: "not_subscribed" means the harness verified with an
 // account the membership lane had already removed, "outside_access_window"
 // means that account rejoined and its own older message now predates its
 // history window.
-type soakErrorReason string
+type ErrorReason string
 
-// soakErrorReasonUnknown absorbs any reason not listed below. errcode's own
+// ReasonUnknown absorbs any reason not listed below. errcode's own
 // registry lives in a _test.go file and cannot be imported, so this list is
 // maintained here; the unknown bucket counting up is the signal to extend it.
-const soakErrorReasonUnknown soakErrorReason = "unknown"
+const ReasonUnknown ErrorReason = "unknown"
 
-var soakKnownErrorReasons = map[errcode.Reason]soakErrorReason{
-	errcode.MessageNotSubscribed:           soakErrorReason(errcode.MessageNotSubscribed),
-	errcode.MessageOutsideAccessWindow:     soakErrorReason(errcode.MessageOutsideAccessWindow),
-	errcode.MessageLargeRoomPostRestricted: soakErrorReason(errcode.MessageLargeRoomPostRestricted),
-	errcode.PinDisabled:                    soakErrorReason(errcode.PinDisabled),
-	errcode.PinLimitReached:                soakErrorReason(errcode.PinLimitReached),
-	errcode.PinRoomTooLarge:                soakErrorReason(errcode.PinRoomTooLarge),
-	errcode.RoomMaxSizeReached:             soakErrorReason(errcode.RoomMaxSizeReached),
-	errcode.RoomNotMember:                  soakErrorReason(errcode.RoomNotMember),
-	errcode.RoomNotOwner:                   soakErrorReason(errcode.RoomNotOwner),
-	errcode.RoomLastOwnerCannotLeave:       soakErrorReason(errcode.RoomLastOwnerCannotLeave),
-	errcode.RoomLastMemberCannotRemove:     soakErrorReason(errcode.RoomLastMemberCannotRemove),
-	errcode.RoomTargetNotMember:            soakErrorReason(errcode.RoomTargetNotMember),
-	errcode.RoomNonChannelOperation:        soakErrorReason(errcode.RoomNonChannelOperation),
-	errcode.RoomReadReceiptsUnavailable:    soakErrorReason(errcode.RoomReadReceiptsUnavailable),
-	errcode.RoomUserNotFound:               soakErrorReason(errcode.RoomUserNotFound),
-	errcode.RoomSelfDM:                     soakErrorReason(errcode.RoomSelfDM),
-	errcode.UserSubscriptionNotFound:       soakErrorReason(errcode.UserSubscriptionNotFound),
-	soakReasonResponseTooLarge:             soakErrorReason(soakReasonResponseTooLarge),
+var knownErrorReasons = map[errcode.Reason]ErrorReason{
+	errcode.MessageNotSubscribed:           ErrorReason(errcode.MessageNotSubscribed),
+	errcode.MessageOutsideAccessWindow:     ErrorReason(errcode.MessageOutsideAccessWindow),
+	errcode.MessageLargeRoomPostRestricted: ErrorReason(errcode.MessageLargeRoomPostRestricted),
+	errcode.PinDisabled:                    ErrorReason(errcode.PinDisabled),
+	errcode.PinLimitReached:                ErrorReason(errcode.PinLimitReached),
+	errcode.PinRoomTooLarge:                ErrorReason(errcode.PinRoomTooLarge),
+	errcode.RoomMaxSizeReached:             ErrorReason(errcode.RoomMaxSizeReached),
+	errcode.RoomNotMember:                  ErrorReason(errcode.RoomNotMember),
+	errcode.RoomNotOwner:                   ErrorReason(errcode.RoomNotOwner),
+	errcode.RoomLastOwnerCannotLeave:       ErrorReason(errcode.RoomLastOwnerCannotLeave),
+	errcode.RoomLastMemberCannotRemove:     ErrorReason(errcode.RoomLastMemberCannotRemove),
+	errcode.RoomTargetNotMember:            ErrorReason(errcode.RoomTargetNotMember),
+	errcode.RoomNonChannelOperation:        ErrorReason(errcode.RoomNonChannelOperation),
+	errcode.RoomReadReceiptsUnavailable:    ErrorReason(errcode.RoomReadReceiptsUnavailable),
+	errcode.RoomUserNotFound:               ErrorReason(errcode.RoomUserNotFound),
+	errcode.RoomSelfDM:                     ErrorReason(errcode.RoomSelfDM),
+	errcode.UserSubscriptionNotFound:       ErrorReason(errcode.UserSubscriptionNotFound),
+	ReasonResponseTooLarge:                 ErrorReason(ReasonResponseTooLarge),
 }
 
-func validSoakErrorReason(reason soakErrorReason) bool {
-	if reason == "" || reason == soakErrorReasonUnknown {
+func ValidErrorReason(reason ErrorReason) bool {
+	if reason == "" || reason == ReasonUnknown {
 		return true
 	}
-	for _, known := range soakKnownErrorReasons {
+	for _, known := range knownErrorReasons {
 		if reason == known {
 			return true
 		}
@@ -211,10 +211,10 @@ func validSoakErrorReason(reason soakErrorReason) bool {
 	return false
 }
 
-// classifySoakRPCReason returns the reason the service tagged the failure with,
+// ClassifyReason returns the reason the service tagged the failure with,
 // or "" when the error carries no errcode envelope (a transport timeout has no
 // reason to report).
-func classifySoakRPCReason(err error) soakErrorReason {
+func ClassifyReason(err error) ErrorReason {
 	if err == nil {
 		return ""
 	}
@@ -222,79 +222,79 @@ func classifySoakRPCReason(err error) soakErrorReason {
 	if !errors.As(err, &envelope) || envelope.Reason == "" {
 		return ""
 	}
-	if known, ok := soakKnownErrorReasons[envelope.Reason]; ok {
+	if known, ok := knownErrorReasons[envelope.Reason]; ok {
 		return known
 	}
-	return soakErrorReasonUnknown
+	return ReasonUnknown
 }
 
-func classifySoakRPCError(err error) soakErrorClass {
+func ClassifyError(err error) ErrorClass {
 	if err == nil {
 		return ""
 	}
-	var assertion *soakAssertionError
+	var assertion *assertionError
 	if errors.As(err, &assertion) {
-		return soakErrorAssertion
+		return ErrorAssertion
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
-		return soakErrorTimeout
+		return ErrorTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return soakErrorCanceled
+		return ErrorCanceled
 	}
 	if errors.Is(err, nats.ErrNoResponders) {
-		return soakErrorNoResponder
+		return ErrorNoResponder
 	}
 	if errors.Is(err, nats.ErrDisconnected) || errors.Is(err, nats.ErrConnectionClosed) {
-		return soakErrorDisconnected
+		return ErrorDisconnected
 	}
 
 	var envelope *errcode.Error
 	if errors.As(err, &envelope) {
 		switch envelope.Code {
 		case errcode.CodeBadRequest:
-			return soakErrorBadRequest
+			return ErrorBadRequest
 		case errcode.CodeUnauthenticated, errcode.CodeForbidden:
-			return soakErrorForbidden
+			return ErrorForbidden
 		case errcode.CodeNotFound:
-			return soakErrorNotFound
+			return ErrorNotFound
 		case errcode.CodeConflict:
-			return soakErrorConflict
+			return ErrorConflict
 		case errcode.CodeTooManyRequests, errcode.CodeUnavailable:
-			return soakErrorUnavailable
+			return ErrorUnavailable
 		case errcode.CodeInternal:
 			// pkg/natsutil replies with a compact oversize envelope when a
 			// response would exceed the broker's max_payload. It is code
 			// `internal`, so without this branch an over-large page reads as a
 			// server fault and the operator cannot tell "lower --page-limit"
 			// from "the service is broken".
-			if envelope.Reason == soakReasonResponseTooLarge {
-				return soakErrorResponseTooLarge
+			if envelope.Reason == ReasonResponseTooLarge {
+				return ErrorResponseTooLarge
 			}
-			return soakErrorInternal
+			return ErrorInternal
 		default:
-			return soakErrorInternal
+			return ErrorInternal
 		}
 	}
-	return soakErrorInternal
+	return ErrorInternal
 }
 
-type soakRetryMode uint8
+type RetryMode uint8
 
 const (
-	soakRetryNever soakRetryMode = iota
-	soakRetrySafe
-	soakRetryAmbiguous
+	RetryNever RetryMode = iota
+	RetrySafe
+	RetryAmbiguous
 )
 
-type soakRetryConfig struct {
+type RetryConfig struct {
 	MaxAttempts int
 	MinBackoff  time.Duration
 	MaxBackoff  time.Duration
 	Jitter      float64
 }
 
-type soakRPCTransport interface {
+type Transport interface {
 	Request(
 		ctx context.Context,
 		subject string,
@@ -303,13 +303,13 @@ type soakRPCTransport interface {
 	) ([]byte, error)
 }
 
-type soakSleeper interface {
+type Sleeper interface {
 	Sleep(context.Context, time.Duration) error
 }
 
-type soakTimerSleeper struct{}
+type TimerSleeper struct{}
 
-func (soakTimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
+func (TimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
@@ -320,8 +320,8 @@ func (soakTimerSleeper) Sleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-type soakRPCRequest struct {
-	Action  soakRPCAction
+type Request struct {
+	Action  Action
 	Subject string
 	// Account and RoomID identify the request in the failure log. A metric
 	// label cannot hold them (unbounded), so this is the only place a reader
@@ -330,37 +330,37 @@ type soakRPCRequest struct {
 	RoomID           string
 	Body             any
 	Timeout          time.Duration
-	RetryMode        soakRetryMode
+	RetryMode        RetryMode
 	ResolveAmbiguity func(context.Context) (retryNeeded bool, err error)
 }
 
-type soakRPCResult struct {
+type Result struct {
 	Attempts int
 	Retries  int
 	// ReplyBytes is the wire size of a SUCCESSFUL reply. A transport failure
 	// has nothing to size and an oversize failure carries only the compact
 	// envelope, so both leave it zero rather than reporting a tiny page.
 	ReplyBytes        int
-	ErrorClass        soakErrorClass
-	ErrorReason       soakErrorReason
+	ErrorClass        ErrorClass
+	ErrorReason       ErrorReason
 	AmbiguityResolved bool
 }
 
-type soakRPCClient struct {
-	transport soakRPCTransport
-	retry     soakRetryConfig
-	sleeper   soakSleeper
+type Client struct {
+	transport Transport
+	retry     RetryConfig
+	sleeper   Sleeper
 	random    func() float64
 }
 
-var errSoakRetryExhausted = errors.New("soak RPC retry attempts exhausted")
+var ErrRetryExhausted = errors.New("soak RPC retry attempts exhausted")
 
-func newSoakRPCClient(
-	transport soakRPCTransport,
-	retry soakRetryConfig,
-	sleeper soakSleeper,
+func NewClient(
+	transport Transport,
+	retry RetryConfig,
+	sleeper Sleeper,
 	random func() float64,
-) *soakRPCClient {
+) *Client {
 	if retry.MaxAttempts <= 0 {
 		retry.MaxAttempts = 1
 	}
@@ -372,12 +372,12 @@ func newSoakRPCClient(
 	}
 	retry.Jitter = min(max(retry.Jitter, 0), 1)
 	if sleeper == nil {
-		sleeper = soakTimerSleeper{}
+		sleeper = TimerSleeper{}
 	}
 	if random == nil {
 		random = func() float64 { return 0.5 }
 	}
-	return &soakRPCClient{
+	return &Client{
 		transport: transport,
 		retry:     retry,
 		sleeper:   sleeper,
@@ -386,12 +386,12 @@ func newSoakRPCClient(
 }
 
 //nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
-func (c *soakRPCClient) Call(
+func (c *Client) Call(
 	ctx context.Context,
-	request soakRPCRequest,
+	request Request,
 	response any,
-) (soakRPCResult, error) {
-	var result soakRPCResult
+) (Result, error) {
+	var result Result
 	// carry stamps the request identity onto every failure leaving this
 	// function, so the lane logger above does not have to thread it through.
 	// Declared before the first guard: a context that died before the wire is
@@ -400,7 +400,7 @@ func (c *soakRPCClient) Call(
 		if err == nil {
 			return nil
 		}
-		return &soakRequestError{
+		return &RequestError{
 			Action: request.Action, Subject: request.Subject,
 			Account: request.Account, RoomID: request.RoomID,
 			Class: result.ErrorClass, Reason: result.ErrorReason,
@@ -409,16 +409,16 @@ func (c *soakRPCClient) Call(
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		result.ErrorClass = classifySoakRPCError(err)
-		return result, carry(soakInterruptedError(request.Action, err, nil))
+		result.ErrorClass = ClassifyError(err)
+		return result, carry(interruptedError(request.Action, err, nil))
 	}
-	if !validSoakRPCAction(request.Action) {
-		result.ErrorClass = soakErrorInternal
+	if !ValidAction(request.Action) {
+		result.ErrorClass = ErrorInternal
 		return result, carry(fmt.Errorf("invalid soak RPC action %q", request.Action))
 	}
 	body, err := json.Marshal(request.Body)
 	if err != nil {
-		result.ErrorClass = soakErrorRequestEncode
+		result.ErrorClass = ErrorRequestEncode
 		return result, carry(fmt.Errorf("marshal %s request: %w", request.Action, err))
 	}
 
@@ -433,10 +433,10 @@ func (c *soakRPCClient) Call(
 			// ended the retrying — overwriting it would erase a timeout whose
 			// effect on the server is unknown.
 			if result.ErrorClass == "" {
-				result.ErrorClass = classifySoakRPCError(err)
+				result.ErrorClass = ClassifyError(err)
 			}
 			return result, carry(
-				soakInterruptedError(request.Action, err, lastRequestErr),
+				interruptedError(request.Action, err, lastRequestErr),
 			)
 		}
 		if attempt > 1 {
@@ -453,12 +453,12 @@ func (c *soakRPCClient) Call(
 			request.Timeout,
 		)
 		if requestErr == nil {
-			requestErr = parseSoakErrorEnvelope(reply)
+			requestErr = ParseErrorEnvelope(reply)
 		}
 		if requestErr == nil {
 			if response != nil {
 				if err := json.Unmarshal(reply, response); err != nil {
-					result.ErrorClass = soakErrorResponseDecode
+					result.ErrorClass = ErrorResponseDecode
 					return result, carry(fmt.Errorf("decode %s response: %w", request.Action, err))
 				}
 			}
@@ -468,13 +468,13 @@ func (c *soakRPCClient) Call(
 			return result, nil
 		}
 
-		class := classifySoakRPCError(requestErr)
+		class := ClassifyError(requestErr)
 		result.ErrorClass = class
-		result.ErrorReason = classifySoakRPCReason(requestErr)
+		result.ErrorReason = ClassifyReason(requestErr)
 		retry, resolved, resolveErr := c.shouldRetryAmbiguous(ctx, request, class)
 		if resolveErr != nil {
-			result.ErrorClass = classifySoakRPCError(resolveErr)
-			result.ErrorReason = classifySoakRPCReason(resolveErr)
+			result.ErrorClass = ClassifyError(resolveErr)
+			result.ErrorReason = ClassifyReason(resolveErr)
 			return result, carry(fmt.Errorf("resolve %s ambiguity: %w", request.Action, resolveErr))
 		}
 		if resolved {
@@ -483,12 +483,12 @@ func (c *soakRPCClient) Call(
 			result.ErrorReason = ""
 			return result, nil
 		}
-		if request.RetryMode != soakRetryAmbiguous {
-			retry = request.RetryMode == soakRetrySafe && transientSoakError(class)
+		if request.RetryMode != RetryAmbiguous {
+			retry = request.RetryMode == RetrySafe && IsTransientError(class)
 		}
 		if !retry {
-			if request.RetryMode == soakRetryAmbiguous && transientSoakError(class) {
-				result.ErrorClass = soakErrorAmbiguous
+			if request.RetryMode == RetryAmbiguous && IsTransientError(class) {
+				result.ErrorClass = ErrorAmbiguous
 				return result, carry(fmt.Errorf("%s result is ambiguous: %w", request.Action, requestErr))
 			}
 			return result, carry(fmt.Errorf("%s request failed: %w", request.Action, requestErr))
@@ -498,7 +498,7 @@ func (c *soakRPCClient) Call(
 			// nosemgrep: errcode-no-multi-wrap-errcode
 			return result, carry(fmt.Errorf(
 				"%w: %s: %w",
-				errSoakRetryExhausted,
+				ErrRetryExhausted,
 				request.Action,
 				requestErr,
 			))
@@ -508,24 +508,24 @@ func (c *soakRPCClient) Call(
 		delay := c.backoff(result.Retries)
 		if err := c.sleeper.Sleep(ctx, delay); err != nil {
 			return result, carry(
-				soakInterruptedError(request.Action, err, lastRequestErr),
+				interruptedError(request.Action, err, lastRequestErr),
 			)
 		}
 	}
 
 	return result, carry(fmt.Errorf(
 		"RPC retry loop exited unexpectedly: %w",
-		errSoakRetryExhausted,
+		ErrRetryExhausted,
 	))
 }
 
 //nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
-func (c *soakRPCClient) shouldRetryAmbiguous(
+func (c *Client) shouldRetryAmbiguous(
 	ctx context.Context,
-	request soakRPCRequest,
-	class soakErrorClass,
+	request Request,
+	class ErrorClass,
 ) (retry bool, resolved bool, err error) {
-	if request.RetryMode != soakRetryAmbiguous || !transientSoakError(class) {
+	if request.RetryMode != RetryAmbiguous || !IsTransientError(class) {
 		return false, false, nil
 	}
 	if request.ResolveAmbiguity == nil {
@@ -538,11 +538,11 @@ func (c *soakRPCClient) shouldRetryAmbiguous(
 	return retryNeeded, !retryNeeded, nil
 }
 
-// soakInterruptedError names both halves of an interrupted request: why the
+// interruptedError names both halves of an interrupted request: why the
 // operation failed, and why it stopped being retried. Reporting only the
 // cancellation would leave the message disagreeing with the error class, which
 // is kept from the attempt that actually reached the wire.
-func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error {
+func interruptedError(action Action, cancelErr, lastErr error) error {
 	if lastErr == nil {
 		return fmt.Errorf("%s interrupted: %w", action, cancelErr)
 	}
@@ -552,159 +552,23 @@ func soakInterruptedError(action soakRPCAction, cancelErr, lastErr error) error 
 		action, cancelErr, lastErr)
 }
 
-func transientSoakError(class soakErrorClass) bool {
+func IsTransientError(class ErrorClass) bool {
 	switch class {
-	case soakErrorTimeout, soakErrorNoResponder, soakErrorDisconnected,
-		soakErrorUnavailable, soakErrorInternal:
+	case ErrorTimeout, ErrorNoResponder, ErrorDisconnected,
+		ErrorUnavailable, ErrorInternal:
 		return true
 	default:
 		return false
 	}
 }
 
-func (c *soakRPCClient) backoff(retry int) time.Duration {
+func (c *Client) backoff(retry int) time.Duration {
 	base := float64(c.retry.MinBackoff) * math.Pow(2, float64(retry))
 	base = min(base, float64(c.retry.MaxBackoff))
 	factor := 1 + c.retry.Jitter*(2*min(max(c.random(), 0), 1)-1)
 	return time.Duration(base * factor)
 }
 
-type Action = soakRPCAction
-
-const (
-	ActionSend                    = soakRPCSend
-	ActionThreadReply             = soakRPCThreadReply
-	ActionLoadHistory             = soakRPCLoadHistory
-	ActionLoadNext                = soakRPCLoadNext
-	ActionGetThread               = soakRPCGetThread
-	ActionGetMessage              = soakRPCGetMessage
-	ActionReact                   = soakRPCReact
-	ActionEdit                    = soakRPCEdit
-	ActionDelete                  = soakRPCDelete
-	ActionPin                     = soakRPCPin
-	ActionUnpin                   = soakRPCUnpin
-	ActionPinnedList              = soakRPCPinnedList
-	ActionReadBack                = soakRPCReadBack
-	ActionMarkRead                = soakRPCMarkRead
-	ActionScroll                  = soakRPCScroll
-	ActionMemberAdd               = soakRPCMemberAdd
-	ActionMemberRemove            = soakRPCMemberRemove
-	ActionRoomRename              = soakRPCRoomRename
-	ActionMuteToggle              = soakRPCMuteToggle
-	ActionRoomCreate              = soakRPCRoomCreate
-	ActionMemberList              = soakRPCMemberList
-	ActionRoomsInfo               = soakRPCRoomsInfo
-	ActionSubscriptionList        = soakRPCSubscriptionList
-	ActionRoomStateRead           = soakRPCRoomStateRead
-	ActionMessageRead             = soakRPCMessageRead
-	ActionReadReceiptList         = soakRPCReadReceiptList
-	ActionPresenceQuery           = soakRPCPresenceQuery
-	ActionSearchMessages          = soakRPCSearchMessages
-	ActionSearchRooms             = soakRPCSearchRooms
-	ActionSearchIndexProbe        = soakRPCSearchIndexProbe
-	ActionUserMe                  = soakRPCUserMe
-	ActionUserProfileGet          = soakRPCUserProfileGet
-	ActionUserStatusGet           = soakRPCUserStatusGet
-	ActionUserSettingsGet         = soakRPCUserSettingsGet
-	ActionUserChatlistGet         = soakRPCUserChatlistGet
-	ActionUserPriorityContacts    = soakRPCUserPriorityContacts
-	ActionUserAppsList            = soakRPCUserAppsList
-	ActionUserAppsCategories      = soakRPCUserAppsCategories
-	ActionUserSubscriptionCount   = soakRPCUserSubscriptionCount
-	ActionUserSubscriptionByRoom  = soakRPCUserSubscriptionByRoom
-	ActionUserSubscriptionChannel = soakRPCUserSubscriptionChannel
-	ActionUserSubscriptionDM      = soakRPCUserSubscriptionDM
-	ActionUserThreadList          = soakRPCUserThreadList
-	ActionUserThreadUnread        = soakRPCUserThreadUnread
-)
-
-type ErrorClass = soakErrorClass
-
-const (
-	ErrorTimeout               = soakErrorTimeout
-	ErrorNoResponder           = soakErrorNoResponder
-	ErrorDisconnected          = soakErrorDisconnected
-	ErrorUnavailable           = soakErrorUnavailable
-	ErrorInternal              = soakErrorInternal
-	ErrorNotFound              = soakErrorNotFound
-	ErrorForbidden             = soakErrorForbidden
-	ErrorBadRequest            = soakErrorBadRequest
-	ErrorConflict              = soakErrorConflict
-	ErrorRequestEncode         = soakErrorRequestEncode
-	ErrorResponseDecode        = soakErrorResponseDecode
-	ErrorAssertion             = soakErrorAssertion
-	ErrorAmbiguous             = soakErrorAmbiguous
-	ErrorMutationTargetMissing = soakErrorMutationTargetMissing
-	ErrorResponseTooLarge      = soakErrorResponseTooLarge
-	ErrorCanceled              = soakErrorCanceled
-)
-
-type ErrorReason = soakErrorReason
-
-const (
-	ErrorReasonUnknown     = soakErrorReasonUnknown
-	ReasonResponseTooLarge = soakReasonResponseTooLarge
-)
-
-type RetryMode = soakRetryMode
-
-const (
-	RetryNever     = soakRetryNever
-	RetrySafe      = soakRetrySafe
-	RetryAmbiguous = soakRetryAmbiguous
-)
-
-type RetryConfig = soakRetryConfig
-type Transport = soakRPCTransport
-type Sleeper = soakSleeper
-type TimerSleeper = soakTimerSleeper
-type Request = soakRPCRequest
-type Result = soakRPCResult
-type Client = soakRPCClient
-
-var ErrRetryExhausted = errSoakRetryExhausted
-
-func NewClient(
-	transport Transport,
-	retry RetryConfig,
-	sleeper Sleeper,
-	random func() float64,
-) *Client {
-	return newSoakRPCClient(transport, retry, sleeper, random)
-}
-
 func UserReadActions() []Action {
-	return slices.Clone(soakUserReadActions)
-}
-
-func ValidAction(action Action) bool {
-	return validSoakRPCAction(action)
-}
-
-func ValidErrorClass(class ErrorClass) bool {
-	return validSoakErrorClass(class)
-}
-
-func ValidErrorReason(reason ErrorReason) bool {
-	return validSoakErrorReason(reason)
-}
-
-func NewAssertionError(message string) error {
-	return newSoakAssertionError(message)
-}
-
-func ParseErrorEnvelope(data []byte) error {
-	return parseSoakErrorEnvelope(data)
-}
-
-func ClassifyError(err error) ErrorClass {
-	return classifySoakRPCError(err)
-}
-
-func ClassifyReason(err error) ErrorReason {
-	return classifySoakRPCReason(err)
-}
-
-func IsTransientError(class ErrorClass) bool {
-	return transientSoakError(class)
+	return slices.Clone(userReadActions)
 }

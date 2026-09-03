@@ -12,8 +12,8 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
-	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
-	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
 type recordingTransport struct {
@@ -42,8 +42,8 @@ func (r *recordingRecorder) Record(sample *Sample) {
 	r.samples = append(r.samples, *sample)
 }
 
-func testTopology() *soaktopology.Topology {
-	return &soaktopology.Topology{
+func testTopology() *topology.Topology {
+	return &topology.Topology{
 		ActiveUsers: []model.User{
 			{ID: "u1", Account: "user-a"},
 			{ID: "u2", Account: "user-b"},
@@ -75,7 +75,7 @@ func newFixture(
 	reader, err := New(
 		Config{SiteID: "site-a", PageLimit: 5, RequestTimeout: time.Second},
 		testTopology(),
-		soakrpc.NewClient(transport, soakrpc.RetryConfig{MaxAttempts: 1}, nil, nil),
+		rpc.NewClient(transport, rpc.RetryConfig{MaxAttempts: 1}, nil, nil),
 		recorder,
 		rand.New(rand.NewSource(seed)),
 		nil,
@@ -89,7 +89,7 @@ func TestSoakNew_RequiresTopologyWithAnActiveAccount(t *testing.T) {
 	require.Error(t, err)
 
 	_, err = New(
-		Config{SiteID: "site-a"}, &soaktopology.Topology{}, nil, nil, nil, nil,
+		Config{SiteID: "site-a"}, &topology.Topology{}, nil, nil, nil, nil,
 	)
 	require.Error(t, err)
 }
@@ -98,59 +98,59 @@ func TestSoakReader_EachReadTargetsItsOwnSubject(t *testing.T) {
 	tests := []struct {
 		name    string
 		call    func(*Reader, context.Context) error
-		action  soakrpc.Action
+		action  rpc.Action
 		subject func(string) string
 		reply   string
 		rows    int
 		counted bool
 	}{
-		{name: "me", call: (*Reader).Me, action: soakrpc.ActionUserMe,
+		{name: "me", call: (*Reader).Me, action: rpc.ActionUserMe,
 			subject: func(a string) string { return subject.UserMe(a, "site-a") },
 			reply:   `{"account":"user-a"}`},
-		{name: "profile", call: (*Reader).ProfileByName, action: soakrpc.ActionUserProfileGet,
+		{name: "profile", call: (*Reader).ProfileByName, action: rpc.ActionUserProfileGet,
 			subject: func(a string) string { return subject.UserProfileGetByName(a, "site-a") },
 			reply:   `{"account":"user-b"}`},
-		{name: "status", call: (*Reader).StatusByName, action: soakrpc.ActionUserStatusGet,
+		{name: "status", call: (*Reader).StatusByName, action: rpc.ActionUserStatusGet,
 			subject: func(a string) string { return subject.UserStatusGetByName(a, "site-a") },
 			reply:   `{"account":"user-b"}`},
-		{name: "settings", call: (*Reader).Settings, action: soakrpc.ActionUserSettingsGet,
+		{name: "settings", call: (*Reader).Settings, action: rpc.ActionUserSettingsGet,
 			subject: func(a string) string { return subject.UserSettingsGet(a, "site-a") },
 			reply:   `{"permissions":{"canPost":true}}`},
-		{name: "chatlist", call: (*Reader).Chatlist, action: soakrpc.ActionUserChatlistGet,
+		{name: "chatlist", call: (*Reader).Chatlist, action: rpc.ActionUserChatlistGet,
 			subject: func(a string) string { return subject.UserChatlistGet(a, "site-a") },
 			reply:   `{"sections":[{"id":"s1"}]}`, rows: 1, counted: true},
 		{name: "priority contacts", call: (*Reader).PriorityContacts,
-			action:  soakrpc.ActionUserPriorityContacts,
+			action:  rpc.ActionUserPriorityContacts,
 			subject: func(a string) string { return subject.UserPriorityContactsGet(a, "site-a") },
 			reply:   `{"contacts":[{"account":"user-b"}]}`, rows: 1, counted: true},
-		{name: "apps list", call: (*Reader).AppsList, action: soakrpc.ActionUserAppsList,
+		{name: "apps list", call: (*Reader).AppsList, action: rpc.ActionUserAppsList,
 			subject: func(a string) string { return subject.UserAppsList(a, "site-a") },
 			reply:   `{"apps":[{"id":"app-1"}]}`, rows: 1, counted: true},
 		{name: "apps categories", call: (*Reader).AppsCategories,
-			action:  soakrpc.ActionUserAppsCategories,
+			action:  rpc.ActionUserAppsCategories,
 			subject: func(a string) string { return subject.UserAppsCategories(a, "site-a") },
 			reply:   `{"categories":[{"id":"chat"}]}`, rows: 1, counted: true},
 		{name: "subscription count", call: (*Reader).SubscriptionCount,
-			action:  soakrpc.ActionUserSubscriptionCount,
+			action:  rpc.ActionUserSubscriptionCount,
 			subject: func(a string) string { return subject.UserSubscriptionCount(a, "site-a") },
 			reply:   `{"count":7}`, rows: 7},
 		{name: "subscription by room", call: (*Reader).SubscriptionByRoom,
-			action:  soakrpc.ActionUserSubscriptionByRoom,
+			action:  rpc.ActionUserSubscriptionByRoom,
 			subject: func(a string) string { return subject.UserSubscriptionGetByRoomID(a, "site-a") },
 			reply:   `{"subscriptions":[{"roomId":"room-1"}]}`, rows: 1},
 		{name: "subscription channels", call: (*Reader).SubscriptionChannels,
-			action:  soakrpc.ActionUserSubscriptionChannel,
+			action:  rpc.ActionUserSubscriptionChannel,
 			subject: func(a string) string { return subject.UserSubscriptionGetChannels(a, "site-a") },
 			reply:   `{"subscriptions":[{"roomId":"room-1"}]}`, rows: 1, counted: true},
 		{name: "subscription dm", call: (*Reader).SubscriptionDM,
-			action:  soakrpc.ActionUserSubscriptionDM,
+			action:  rpc.ActionUserSubscriptionDM,
 			subject: func(a string) string { return subject.UserSubscriptionGetDM(a, "site-a") },
 			reply:   `{"subscription":{"roomId":"dm-1"}}`},
-		{name: "thread list", call: (*Reader).ThreadList, action: soakrpc.ActionUserThreadList,
+		{name: "thread list", call: (*Reader).ThreadList, action: rpc.ActionUserThreadList,
 			subject: func(a string) string { return subject.UserThreadList(a, "site-a") },
 			reply:   `{"items":[{"threadRoomId":"t1"}]}`, rows: 1, counted: true},
 		{name: "thread unread", call: (*Reader).ThreadUnread,
-			action:  soakrpc.ActionUserThreadUnread,
+			action:  rpc.ActionUserThreadUnread,
 			subject: func(a string) string { return subject.UserThreadUnreadSummary(a, "site-a") },
 			reply:   `{"unread":true}`},
 	}
@@ -181,8 +181,8 @@ func TestSoakReader_SkipsReadsWithoutAnEligibleTarget(t *testing.T) {
 	recorder := &recordingRecorder{}
 	reader, err := New(
 		Config{SiteID: "site-a"},
-		&soaktopology.Topology{ActiveUsers: []model.User{{Account: "user-a"}}},
-		soakrpc.NewClient(transport, soakrpc.RetryConfig{MaxAttempts: 1}, nil, nil),
+		&topology.Topology{ActiveUsers: []model.User{{Account: "user-a"}}},
+		rpc.NewClient(transport, rpc.RetryConfig{MaxAttempts: 1}, nil, nil),
 		recorder, rand.New(rand.NewSource(5)), nil,
 	)
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestSoakReader_SkipsReadsWithoutAnEligibleTarget(t *testing.T) {
 func TestSoakReader_AccountPairCollapsesWithASingleAccount(t *testing.T) {
 	reader, err := New(
 		Config{SiteID: "site-a"},
-		&soaktopology.Topology{ActiveUsers: []model.User{{Account: "user-a"}}},
+		&topology.Topology{ActiveUsers: []model.User{{Account: "user-a"}}},
 		nil, nil, rand.New(rand.NewSource(6)), nil,
 	)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestSoakReader_AccountPairCollapsesWithASingleAccount(t *testing.T) {
 }
 
 func TestSoakReader_UsesOnlyRealRoomPairsFromTheActiveSide(t *testing.T) {
-	topology := &soaktopology.Topology{
+	topology := &topology.Topology{
 		ActiveUsers: []model.User{{ID: "active", Account: "active"}},
 		Rooms: []model.Room{
 			{ID: "dm", Type: model.RoomTypeDM},
@@ -235,7 +235,7 @@ func TestSoakReader_UsesOnlyRealRoomPairsFromTheActiveSide(t *testing.T) {
 	transport := &recordingTransport{reply: []byte(`{}`)}
 	reader, err := New(
 		Config{SiteID: "site-a"}, topology,
-		soakrpc.NewClient(transport, soakrpc.RetryConfig{MaxAttempts: 1}, nil, nil),
+		rpc.NewClient(transport, rpc.RetryConfig{MaxAttempts: 1}, nil, nil),
 		nil, rand.New(rand.NewSource(7)), nil,
 	)
 	require.NoError(t, err)
@@ -262,7 +262,7 @@ func TestSoakReader_RecordsRPCFailuresAndPreservesTheCause(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Len(t, recorder.samples, 1)
-	assert.Equal(t, soakrpc.ErrorTimeout, recorder.samples[0].ErrorClass)
+	assert.Equal(t, rpc.ErrorTimeout, recorder.samples[0].ErrorClass)
 }
 
 func TestSoakReader_RequiresAnRPCClientAtCallTime(t *testing.T) {
@@ -275,13 +275,13 @@ func TestSoakReader_RequiresAnRPCClientAtCallTime(t *testing.T) {
 }
 
 func TestSoakReads_MatchTheRPCAllowlist(t *testing.T) {
-	dispatched := make([]soakrpc.Action, 0, len(soakUserReads()))
-	for _, read := range soakUserReads() {
+	dispatched := make([]rpc.Action, 0, len(reads()))
+	for _, read := range reads() {
 		dispatched = append(dispatched, read.Action)
 		assert.NotNil(t, read.Call)
-		assert.True(t, soakrpc.ValidAction(read.Action), "action=%s", read.Action)
+		assert.True(t, rpc.ValidAction(read.Action), "action=%s", read.Action)
 	}
-	assert.ElementsMatch(t, soakrpc.UserReadActions(), dispatched)
+	assert.ElementsMatch(t, rpc.UserReadActions(), dispatched)
 }
 
 func TestSoakReader_ReadMixedEventuallyDispatchesEveryAction(t *testing.T) {
@@ -292,11 +292,11 @@ func TestSoakReader_ReadMixedEventuallyDispatchesEveryAction(t *testing.T) {
 		require.NoError(t, reader.ReadMixed(context.Background()))
 	}
 
-	seen := make(map[soakrpc.Action]bool)
+	seen := make(map[rpc.Action]bool)
 	for i := range recorder.samples {
 		seen[recorder.samples[i].Action] = true
 	}
-	for _, action := range soakrpc.UserReadActions() {
+	for _, action := range rpc.UserReadActions() {
 		assert.True(t, seen[action], "action=%s", action)
 	}
 }

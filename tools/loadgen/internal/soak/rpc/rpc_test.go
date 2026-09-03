@@ -92,7 +92,7 @@ func TestSoakRPCPublicSurface_DelegatesWithoutChangingSemantics(t *testing.T) {
 	assert.True(t, ValidErrorClass(ErrorTimeout))
 	assert.False(t, ValidErrorClass(ErrorClass("unknown")))
 	assert.True(t, ValidErrorReason(""))
-	assert.True(t, ValidErrorReason(ErrorReasonUnknown))
+	assert.True(t, ValidErrorReason(ReasonUnknown))
 	assert.True(t, ValidErrorReason(ErrorReason(ReasonResponseTooLarge)))
 	assert.False(t, ValidErrorReason(ErrorReason("unknown_reason")))
 

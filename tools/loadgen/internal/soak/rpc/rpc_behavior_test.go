@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
-	soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
 type soakRPCFakeReply struct {
@@ -67,26 +67,26 @@ func TestClassifySoakRPCError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
-		want soakErrorClass
+		want ErrorClass
 	}{
-		{"timeout context", context.DeadlineExceeded, soakErrorTimeout},
-		{"timeout NATS", nats.ErrTimeout, soakErrorTimeout},
-		{"no responders", nats.ErrNoResponders, soakErrorNoResponder},
-		{"disconnected", nats.ErrDisconnected, soakErrorDisconnected},
-		{"connection closed", nats.ErrConnectionClosed, soakErrorDisconnected},
-		{"unavailable envelope", soakErrorEnvelope(`{"error":"later","code":"unavailable"}`), soakErrorUnavailable},
-		{"internal envelope", soakErrorEnvelope(`{"error":"failed","code":"internal"}`), soakErrorInternal},
-		{"not found envelope", soakErrorEnvelope(`{"error":"missing","code":"not_found"}`), soakErrorNotFound},
-		{"forbidden envelope", soakErrorEnvelope(`{"error":"no","code":"forbidden"}`), soakErrorForbidden},
-		{"bad request envelope", soakErrorEnvelope(`{"error":"bad","code":"bad_request"}`), soakErrorBadRequest},
-		{"conflict envelope", soakErrorEnvelope(`{"error":"exists","code":"conflict"}`), soakErrorConflict},
-		{"too many requests envelope", soakErrorEnvelope(`{"error":"slow down","code":"too_many_requests"}`), soakErrorUnavailable},
-		{"unknown", errors.New("boom"), soakErrorInternal},
+		{"timeout context", context.DeadlineExceeded, ErrorTimeout},
+		{"timeout NATS", nats.ErrTimeout, ErrorTimeout},
+		{"no responders", nats.ErrNoResponders, ErrorNoResponder},
+		{"disconnected", nats.ErrDisconnected, ErrorDisconnected},
+		{"connection closed", nats.ErrConnectionClosed, ErrorDisconnected},
+		{"unavailable envelope", soakErrorEnvelope(`{"error":"later","code":"unavailable"}`), ErrorUnavailable},
+		{"internal envelope", soakErrorEnvelope(`{"error":"failed","code":"internal"}`), ErrorInternal},
+		{"not found envelope", soakErrorEnvelope(`{"error":"missing","code":"not_found"}`), ErrorNotFound},
+		{"forbidden envelope", soakErrorEnvelope(`{"error":"no","code":"forbidden"}`), ErrorForbidden},
+		{"bad request envelope", soakErrorEnvelope(`{"error":"bad","code":"bad_request"}`), ErrorBadRequest},
+		{"conflict envelope", soakErrorEnvelope(`{"error":"exists","code":"conflict"}`), ErrorConflict},
+		{"too many requests envelope", soakErrorEnvelope(`{"error":"slow down","code":"too_many_requests"}`), ErrorUnavailable},
+		{"unknown", errors.New("boom"), ErrorInternal},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, classifySoakRPCError(tt.err))
+			assert.Equal(t, tt.want, ClassifyError(tt.err))
 		})
 	}
 }
@@ -98,20 +98,20 @@ func TestSoakRPCClient_RetriesSafeTransientErrorsWithBoundedBackoff(t *testing.T
 		{data: []byte(`{"messageId":"m1"}`)},
 	}}
 	sleeper := &soakRecordingSleeper{}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 4,
 		MinBackoff:  100 * time.Millisecond,
 		MaxBackoff:  150 * time.Millisecond,
 		Jitter:      0,
 	}, sleeper, func() float64 { return 0.5 })
 
-	var response soakwire.UnpinMessageResponse
-	result, err := client.Call(context.Background(), soakRPCRequest{
-		Action:    soakRPCGetMessage,
+	var response wire.UnpinMessageResponse
+	result, err := client.Call(context.Background(), Request{
+		Action:    ActionGetMessage,
 		Subject:   "chat.test",
-		Body:      soakwire.GetMessageByIDRequest{MessageID: "m1"},
+		Body:      wire.GetMessageByIDRequest{MessageID: "m1"},
 		Timeout:   time.Second,
-		RetryMode: soakRetrySafe,
+		RetryMode: RetrySafe,
 	}, &response)
 
 	require.NoError(t, err)
@@ -127,20 +127,20 @@ func TestSoakRPCClient_JitterStaysWithinConfiguredRange(t *testing.T) {
 		{data: []byte(`{"messageId":"m1"}`)},
 	}}
 	sleeper := &soakRecordingSleeper{}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 2,
 		MinBackoff:  100 * time.Millisecond,
 		MaxBackoff:  time.Second,
 		Jitter:      0.20,
 	}, sleeper, func() float64 { return 1 })
 
-	_, err := client.Call(context.Background(), soakRPCRequest{
-		Action:    soakRPCGetMessage,
+	_, err := client.Call(context.Background(), Request{
+		Action:    ActionGetMessage,
 		Subject:   "chat.test",
-		Body:      soakwire.GetMessageByIDRequest{MessageID: "m1"},
+		Body:      wire.GetMessageByIDRequest{MessageID: "m1"},
 		Timeout:   time.Second,
-		RetryMode: soakRetrySafe,
-	}, &soakwire.UnpinMessageResponse{})
+		RetryMode: RetrySafe,
+	}, &wire.UnpinMessageResponse{})
 
 	require.NoError(t, err)
 	require.Len(t, sleeper.delays, 1)
@@ -153,19 +153,19 @@ func TestSoakRPCClient_DoesNotRetryTerminalEnvelope(t *testing.T) {
 			transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{{
 				data: []byte(`{"error":"terminal","code":"` + code + `"}`),
 			}}}
-			client := newSoakRPCClient(transport, soakRetryConfig{
+			client := NewClient(transport, RetryConfig{
 				MaxAttempts: 3,
 				MinBackoff:  time.Millisecond,
 				MaxBackoff:  time.Second,
 			}, &soakRecordingSleeper{}, nil)
 
-			result, err := client.Call(context.Background(), soakRPCRequest{
-				Action:    soakRPCEdit,
+			result, err := client.Call(context.Background(), Request{
+				Action:    ActionEdit,
 				Subject:   "chat.test",
-				Body:      soakwire.EditMessageRequest{MessageID: "m1", NewMsg: "new"},
+				Body:      wire.EditMessageRequest{MessageID: "m1", NewMsg: "new"},
 				Timeout:   time.Second,
-				RetryMode: soakRetrySafe,
-			}, &soakwire.EditMessageResponse{})
+				RetryMode: RetrySafe,
+			}, &wire.EditMessageResponse{})
 
 			require.Error(t, err)
 			assert.Equal(t, 1, result.Attempts)
@@ -181,24 +181,24 @@ func TestSoakRPCClient_ReportsRetryExhaustion(t *testing.T) {
 		{err: nats.ErrTimeout},
 		{err: nats.ErrTimeout},
 	}}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 3,
 		MinBackoff:  time.Millisecond,
 		MaxBackoff:  time.Second,
 	}, &soakRecordingSleeper{}, nil)
 
-	result, err := client.Call(context.Background(), soakRPCRequest{
-		Action:    soakRPCLoadHistory,
+	result, err := client.Call(context.Background(), Request{
+		Action:    ActionLoadHistory,
 		Subject:   "chat.test",
-		Body:      soakwire.LoadHistoryRequest{Limit: 50},
+		Body:      wire.LoadHistoryRequest{Limit: 50},
 		Timeout:   time.Second,
-		RetryMode: soakRetrySafe,
-	}, &soakwire.LoadHistoryResponse{})
+		RetryMode: RetrySafe,
+	}, &wire.LoadHistoryResponse{})
 
 	require.Error(t, err)
-	assert.ErrorIs(t, err, errSoakRetryExhausted)
+	assert.ErrorIs(t, err, ErrRetryExhausted)
 	assert.ErrorIs(t, err, nats.ErrTimeout)
-	assert.Equal(t, soakErrorTimeout, result.ErrorClass)
+	assert.Equal(t, ErrorTimeout, result.ErrorClass)
 	assert.Equal(t, 3, result.Attempts)
 	assert.Equal(t, 2, result.Retries)
 }
@@ -208,19 +208,19 @@ func TestSoakRPCClient_ContextCancellationStopsImmediately(t *testing.T) {
 	cancel()
 	transport := &soakRPCFakeTransport{}
 	sleeper := &soakRecordingSleeper{}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 3,
 		MinBackoff:  time.Millisecond,
 		MaxBackoff:  time.Second,
 	}, sleeper, nil)
 
-	result, err := client.Call(ctx, soakRPCRequest{
-		Action:    soakRPCLoadHistory,
+	result, err := client.Call(ctx, Request{
+		Action:    ActionLoadHistory,
 		Subject:   "chat.test",
-		Body:      soakwire.LoadHistoryRequest{Limit: 50},
+		Body:      wire.LoadHistoryRequest{Limit: 50},
 		Timeout:   time.Second,
-		RetryMode: soakRetrySafe,
-	}, &soakwire.LoadHistoryResponse{})
+		RetryMode: RetrySafe,
+	}, &wire.LoadHistoryResponse{})
 
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, result.Attempts)
@@ -233,22 +233,22 @@ func TestSoakRPCClient_ReactionTimeoutIsNotBlindlyRetried(t *testing.T) {
 		{err: nats.ErrTimeout},
 		{data: []byte(`{"messageId":"m1","shortcode":":wave:","action":"added","reactedAt":1}`)},
 	}}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 3,
 		MinBackoff:  time.Millisecond,
 		MaxBackoff:  time.Second,
 	}, &soakRecordingSleeper{}, nil)
 
-	result, err := client.Call(context.Background(), soakRPCRequest{
-		Action:    soakRPCReact,
+	result, err := client.Call(context.Background(), Request{
+		Action:    ActionReact,
 		Subject:   "chat.test",
-		Body:      soakwire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
+		Body:      wire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
 		Timeout:   time.Second,
-		RetryMode: soakRetryAmbiguous,
-	}, &soakwire.ReactMessageResponse{})
+		RetryMode: RetryAmbiguous,
+	}, &wire.ReactMessageResponse{})
 
 	require.Error(t, err)
-	assert.Equal(t, soakErrorAmbiguous, result.ErrorClass)
+	assert.Equal(t, ErrorAmbiguous, result.ErrorClass)
 	assert.Equal(t, 1, result.Attempts)
 	assert.Equal(t, 1, transport.callCount())
 }
@@ -283,22 +283,22 @@ func TestSoakRPCClient_ReactionResolverControlsRetry(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			replies := append([]soakRPCFakeReply{{err: nats.ErrTimeout}}, tt.secondReplies...)
 			transport := &soakRPCFakeTransport{replies: replies}
-			client := newSoakRPCClient(transport, soakRetryConfig{
+			client := NewClient(transport, RetryConfig{
 				MaxAttempts: 3,
 				MinBackoff:  time.Millisecond,
 				MaxBackoff:  time.Second,
 			}, &soakRecordingSleeper{}, nil)
 
-			result, err := client.Call(context.Background(), soakRPCRequest{
-				Action:    soakRPCReact,
+			result, err := client.Call(context.Background(), Request{
+				Action:    ActionReact,
 				Subject:   "chat.test",
-				Body:      soakwire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
+				Body:      wire.ReactMessageRequest{MessageID: "m1", Shortcode: ":wave:"},
 				Timeout:   time.Second,
-				RetryMode: soakRetryAmbiguous,
+				RetryMode: RetryAmbiguous,
 				ResolveAmbiguity: func(context.Context) (bool, error) {
 					return tt.retryNeeded, nil
 				},
-			}, &soakwire.ReactMessageResponse{})
+			}, &wire.ReactMessageResponse{})
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -314,26 +314,26 @@ func TestSoakRPCClient_ReactionResolverControlsRetry(t *testing.T) {
 func TestSoakRPCClient_ClassifiesDecodeAndAssertionErrors(t *testing.T) {
 	t.Run("decode", func(t *testing.T) {
 		transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{{data: []byte(`{`)}}}
-		client := newSoakRPCClient(transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil)
-		result, err := client.Call(context.Background(), soakRPCRequest{
-			Action: soakRPCGetMessage, Subject: "chat.test",
-			Body: soakwire.GetMessageByIDRequest{MessageID: "m1"}, Timeout: time.Second,
+		client := NewClient(transport, RetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil)
+		result, err := client.Call(context.Background(), Request{
+			Action: ActionGetMessage, Subject: "chat.test",
+			Body: wire.GetMessageByIDRequest{MessageID: "m1"}, Timeout: time.Second,
 		}, &cannedSoakResponse{})
 		require.Error(t, err)
-		assert.Equal(t, soakErrorResponseDecode, result.ErrorClass)
+		assert.Equal(t, ErrorResponseDecode, result.ErrorClass)
 	})
 
 	t.Run("assertion", func(t *testing.T) {
-		err := newSoakAssertionError("message content differs")
-		assert.Equal(t, soakErrorAssertion, classifySoakRPCError(err))
+		err := NewAssertionError("message content differs")
+		assert.Equal(t, ErrorAssertion, ClassifyError(err))
 	})
 }
 
 func TestSoakRPCActionAndErrorLabelsAreBounded(t *testing.T) {
-	assert.True(t, validSoakRPCAction(soakRPCPinnedList))
-	assert.False(t, validSoakRPCAction(soakRPCAction("room-123")))
-	assert.True(t, validSoakErrorClass(soakErrorMutationTargetMissing))
-	assert.False(t, validSoakErrorClass(soakErrorClass("arbitrary-error-text")))
+	assert.True(t, ValidAction(ActionPinnedList))
+	assert.False(t, ValidAction(Action("room-123")))
+	assert.True(t, ValidErrorClass(ErrorMutationTargetMissing))
+	assert.False(t, ValidErrorClass(ErrorClass("arbitrary-error-text")))
 }
 
 type cannedSoakResponse struct {
@@ -345,7 +345,7 @@ func soakErrorEnvelope(payload string) error {
 	if err := json.Unmarshal([]byte(payload), &wire); err != nil {
 		panic(err)
 	}
-	return parseSoakErrorEnvelope([]byte(payload))
+	return ParseErrorEnvelope([]byte(payload))
 }
 
 // history-service replies with a compact oversize envelope when a page would
@@ -358,24 +358,24 @@ func TestClassifySoakRPCError_ResponseTooLargeIsItsOwnClass(t *testing.T) {
 	parsed, ok := errcode.Parse(oversize)
 	require.True(t, ok, "the oversize envelope must be a parseable errcode envelope")
 
-	assert.Equal(t, soakErrorResponseTooLarge, classifySoakRPCError(parsed))
+	assert.Equal(t, ErrorResponseTooLarge, ClassifyError(parsed))
 }
 
 // An ordinary internal error must keep its own class.
 func TestClassifySoakRPCError_PlainInternalStaysInternal(t *testing.T) {
 	plain, ok := errcode.Parse([]byte(`{"code":"internal","error":"boom"}`))
 	require.True(t, ok)
-	assert.Equal(t, soakErrorInternal, classifySoakRPCError(plain))
+	assert.Equal(t, ErrorInternal, ClassifyError(plain))
 }
 
 func TestValidSoakRPCAction_AcceptsRoomAndMemberActions(t *testing.T) {
-	for _, action := range []soakRPCAction{
-		soakRPCMemberAdd, soakRPCMemberRemove, soakRPCRoomRename, soakRPCMuteToggle,
-		soakRPCRoomCreate, soakRPCMemberList, soakRPCRoomsInfo,
-		soakRPCSubscriptionList, soakRPCRoomStateRead,
+	for _, action := range []Action{
+		ActionMemberAdd, ActionMemberRemove, ActionRoomRename, ActionMuteToggle,
+		ActionRoomCreate, ActionMemberList, ActionRoomsInfo,
+		ActionSubscriptionList, ActionRoomStateRead,
 	} {
 		t.Run(string(action), func(t *testing.T) {
-			assert.True(t, validSoakRPCAction(action))
+			assert.True(t, ValidAction(action))
 		})
 	}
 }
@@ -383,24 +383,24 @@ func TestValidSoakRPCAction_AcceptsRoomAndMemberActions(t *testing.T) {
 // The two failures sit on opposite sides of the wire, so they must not share a
 // class: one proves the request never left, the other proves the server replied.
 func TestSoakRPCClient_ClassifiesEncodeAndDecodeSeparately(t *testing.T) {
-	client := newSoakRPCClient(
-		&soakRPCFakeTransport{}, soakRetryConfig{MaxAttempts: 1}, nil, nil,
+	client := NewClient(
+		&soakRPCFakeTransport{}, RetryConfig{MaxAttempts: 1}, nil, nil,
 	)
 
-	result, err := client.Call(context.Background(), soakRPCRequest{
-		Action: soakRPCGetMessage, Body: make(chan int),
+	result, err := client.Call(context.Background(), Request{
+		Action: ActionGetMessage, Body: make(chan int),
 	}, nil)
 	require.Error(t, err)
-	assert.Equal(t, soakErrorRequestEncode, result.ErrorClass)
+	assert.Equal(t, ErrorRequestEncode, result.ErrorClass)
 
-	decoding := newSoakRPCClient(
+	decoding := NewClient(
 		&soakRPCFakeTransport{replies: []soakRPCFakeReply{{data: []byte(`{"messageId":`)}}},
-		soakRetryConfig{MaxAttempts: 1}, nil, nil,
+		RetryConfig{MaxAttempts: 1}, nil, nil,
 	)
-	var response soakwire.GetMessageByIDRequest
-	result, err = decoding.Call(context.Background(), soakRPCRequest{
-		Action: soakRPCGetMessage,
+	var response wire.GetMessageByIDRequest
+	result, err = decoding.Call(context.Background(), Request{
+		Action: ActionGetMessage,
 	}, &response)
 	require.Error(t, err)
-	assert.Equal(t, soakErrorResponseDecode, result.ErrorClass)
+	assert.Equal(t, ErrorResponseDecode, result.ErrorClass)
 }
