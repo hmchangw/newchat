@@ -401,18 +401,17 @@ func defaultResyncRetryDelay(attempt int) time.Duration {
 		minDelay = 250 * time.Millisecond
 		maxDelay = 5 * time.Second
 	)
+	// The loop stops the first time delay reaches maxDelay/2, so it can never
+	// leave delay above maxDelay — only the jitter below can, and only the
+	// clamp after it is reachable.
 	delay := minDelay
 	for i := 1; i < attempt && delay < maxDelay/2; i++ {
 		delay *= 2
 	}
-	if delay > maxDelay {
-		delay = maxDelay
-	}
 	// Add up to 50% jitter so a recovered broker is not hit by every client
-	// on the same backoff boundary.
-	if extraMax := int(delay / 2); extraMax > 0 {
-		delay += time.Duration(secureIntN(extraMax))
-	}
+	// on the same backoff boundary. delay is always >= minDelay, and
+	// secureIntN treats a non-positive bound as zero regardless.
+	delay += time.Duration(secureIntN(int(delay / 2)))
 	if delay > maxDelay {
 		return maxDelay
 	}
