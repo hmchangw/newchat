@@ -41,7 +41,7 @@ Disciplined error tiering, typed `errcode` usage and zero string-matching on err
 ### Recommendations
 - `medium` — Delete the two `slog` calls that precede a returned error; move any field worth keeping into `errcode.WithLogValues(ctx, …)` so `Classify` emits them on its single line.
 - `medium` — Convert `handler.go:298` and `:472` to the `*Context` variants so the enriched `request_id`/`room_id`/trace ride the line.
-- `low` — Wrap the tail marshal as a typed `errcode.Internal(…, WithCause(err))` so a permanently unmarshalable message **Acks instead of burning `MaxDeliver` NAKs**; wrap `metacache.go:21`.
+- `low` — Wrap the tail marshal as `errcode.Permanent` preserving the marshal cause, so a permanently unmarshalable message **Acks instead of burning `MaxDeliver` NAKs** — `errcode.Internal` would not, since only `IsPermanent` drives the Ack-drop; wrap `metacache.go:21`.
 - `nitpick` — Make the singleflight assertion comma-ok with a defensive fallback; switch `interface{}` → `any`.
 
 ---

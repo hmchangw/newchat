@@ -52,7 +52,7 @@ Scores are the mean of the six dimensions. Coverage is statement-weighted from t
 
 ### What the scores say
 
-No service scored below 2.8 and none above 3.7 — **the fleet is uniformly mid-band**, which is itself the finding. The code *inside* functions is consistently good: D1 (code quality) averages ~3.9 and never drops below 3. What drags every service down is the same three things — **untested wiring, shared state configured per-service instead of once, and cross-service contracts asserted by comment rather than by compiler or test.**
+Scores range from 2.5 to 3.7 — **the fleet is uniformly mid-band**, which is itself the finding. The code *inside* functions is consistently good: D1 (code quality) averages ~3.9 and never drops below 3. What drags every service down is the same three things — **untested wiring, shared state configured per-service instead of once, and cross-service contracts asserted by comment rather than by compiler or test.**
 
 ---
 
