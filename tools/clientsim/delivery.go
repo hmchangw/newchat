@@ -34,12 +34,15 @@ func handleDelivery(m *metrics, lane string, data []byte, now time.Time) {
 		m.DecodeFailures.Inc()
 		return
 	}
-	// A new_message RoomEvent must carry the broadcast Timestamp; a zero
-	// there is a contract violation. Other event types on the same subjects
-	// legitimately omit these stamps and just skip observation.
+	// A new_message RoomEvent must carry BOTH stamps: broadcast-worker builds
+	// every one of them from the canonical event's own Timestamp, which
+	// CLAUDE.md requires each NATS event to set at its publish site. A zero in
+	// either is corruption — and skipping the canonical one silently would
+	// compute that histogram's quantiles over an unknown subset of the
+	// traffic. Other event types on the same subjects legitimately omit both.
 	strict := evt.Type == model.RoomEventNewMessage
 	observeAge(m, m.BroadcastLatency, evt.Timestamp, now, strict)
-	observeAge(m, m.CanonicalLatency, evt.EventTimestamp, now, false)
+	observeAge(m, m.CanonicalLatency, evt.EventTimestamp, now, strict)
 }
 
 // observeAge records now - tsMillis. A timestamp within skewTolerance of

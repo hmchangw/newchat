@@ -61,6 +61,14 @@ func Write(path string, a *Artifact) error {
 // 64 MB is generous headroom, not a real limit.
 const maxArtifactBytes = 64 << 20
 
+// maxAccounts bounds the DECODED pool, which the byte cap does not: 64 MB of
+// short account names is millions of entries, and every entry becomes a
+// connection the consumer tries to hold. A pool file pointed at the wrong
+// thing would then take a site down instead of testing it. One million is
+// ten times the largest pool the tooling is designed for, so it can only ever
+// catch a mistake.
+const maxAccounts = 1_000_000
+
 // Load reads and validates an artifact. Unknown schema, wrong site, or an
 // empty pool are startup errors for the consumer — fail fast, never limp.
 func Load(path, wantSiteID string) (*Artifact, error) {
@@ -103,6 +111,9 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	}
 	if len(a.Accounts) == 0 {
 		return nil, errors.New("pool artifact has no accounts")
+	}
+	if len(a.Accounts) > maxAccounts {
+		return nil, fmt.Errorf("pool artifact has %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
 	}
 	for i, account := range a.Accounts {
 		// An empty entry builds subjects like chat.user..event.room, which

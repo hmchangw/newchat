@@ -513,16 +513,6 @@ func TestBootstrapWalk_StaleEpochIsNotFatal(t *testing.T) {
 	fc := newFakeConn(emptySubListPage())
 	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
 	s.conn = fc
-	s.invalidatePlan() // the walk below will observe a changed epoch
-
-	err := func() error {
-		s.mu.Lock()
-		startEpoch := s.planEpoch
-		s.mu.Unlock()
-		s.planEpoch = startEpoch // no-op, keeps the intent readable
-		return nil
-	}()
-	require.NoError(t, err)
 
 	// Force the race: bump the epoch while the walk's RPC is in flight.
 	fc.reqGate = make(chan struct{})

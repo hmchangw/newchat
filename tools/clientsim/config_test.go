@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -224,5 +226,42 @@ func TestValidateConfig_RequiresEncryptedTransportUnlessOptedIn(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+// The tool's entire output is its metrics endpoint. A Serve failure mid-run
+// means hours of fleet time nobody can read, so it has to reach run() rather
+// than being logged past.
+func TestServeMetrics_ReportsAServeFailure(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &http.Server{Handler: http.NewServeMux(), ReadHeaderTimeout: time.Second}
+	errCh := serveMetrics(srv, lis)
+
+	require.NoError(t, lis.Close()) // pulled out from under Serve
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "metrics server")
+	case <-time.After(3 * time.Second):
+		t.Fatal("a dead metrics server never reported")
+	}
+}
+
+// A deliberate shutdown is not a failure: the channel closes with no error.
+func TestServeMetrics_ShutdownIsNotAFailure(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := &http.Server{Handler: http.NewServeMux(), ReadHeaderTimeout: time.Second}
+	errCh := serveMetrics(srv, lis)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(ctx))
+	select {
+	case err, ok := <-errCh:
+		assert.False(t, ok, "a clean shutdown must not report an error, got %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("serveMetrics never finished after Shutdown")
 	}
 }

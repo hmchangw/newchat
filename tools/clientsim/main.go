@@ -111,11 +111,7 @@ func run(ctx context.Context) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	go func() {
-		if err := metricsSrv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("metrics server stopped mid-run", "error", err)
-		}
-	}()
+	metricsErr := serveMetrics(metricsSrv, lis)
 
 	mintClient := newAuthClient(cfg.AuthURL, devProvider{}, m)
 	factory := func(account string) (runnable, error) {
@@ -128,8 +124,17 @@ func run(ctx context.Context) error {
 	// that remained collapsed after a fault.
 	swarmCtx, cancelSwarm := context.WithCancel(context.WithoutCancel(ctx))
 	captured := make(chan struct{})
+	// metricsFailure is written here and read only after <-captured, which the
+	// close below happens-before.
+	var metricsFailure error
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case err, ok := <-metricsErr:
+			if ok {
+				metricsFailure = err
+			}
+		}
 		m.captureReadyAtDrain()
 		cancelSwarm()
 		close(captured)
@@ -142,6 +147,11 @@ func run(ctx context.Context) error {
 	_ = metricsSrv.Shutdown(shutdownCtx) // best-effort; the process is exiting either way
 	summary, summaryErr := printSummary(m, pool.RunID, pool.ConfigDigest, len(shard))
 
+	// Reported ahead of everything else: whatever the swarm did, a run whose
+	// endpoint died produced numbers nobody can read.
+	if metricsFailure != nil {
+		return metricsFailure
+	}
 	if swarmErr != nil {
 		return swarmErr
 	}
@@ -157,6 +167,23 @@ func run(ctx context.Context) error {
 		return errors.New("run marked degraded and CLIENTSIM_FAIL_ON_DEGRADED is set")
 	}
 	return nil
+}
+
+// serveMetrics runs the Prometheus endpoint and reports a Serve failure other
+// than the shutdown sentinel. The tool's entire output is its metrics, so a
+// dead endpoint is not something to log past: it invalidates the run, and the
+// caller ends it rather than holding a fleet nobody can measure. A clean
+// Shutdown closes the channel without sending.
+func serveMetrics(srv *http.Server, lis net.Listener) <-chan error {
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("metrics server stopped mid-run: %w", err)
+			return
+		}
+		close(errCh)
+	}()
+	return errCh
 }
 
 // validateConfig rejects value combinations that would silently void a

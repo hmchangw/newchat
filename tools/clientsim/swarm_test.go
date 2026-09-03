@@ -339,3 +339,73 @@ func (c *countingClient) run(ctx context.Context) error {
 	return nil
 }
 func (c *countingClient) close() {}
+
+// Above 1000/s the ramp starts a batch per 1ms tick. Rounding the batch up
+// overshoots by up to a full extra connection per tick — at 1001/s that is
+// two per millisecond, i.e. 2000/s, double what the operator configured.
+// A soak that ramps twice as fast as its own knob says is not the test the
+// operator asked for.
+func TestRampBudget_HonoursTheConfiguredRate(t *testing.T) {
+	cases := []struct {
+		name  string
+		rate  float64
+		ticks int
+		want  int
+	}{
+		{"just above the batch threshold", 1001, 1000, 1001},
+		{"well above", 5500, 1000, 5500},
+		{"exactly on a multiple", 2000, 1000, 2000},
+		{"at or below the threshold starts one per tick", 750, 100, 100},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, b := rampPacing(tt.rate)
+			total := 0
+			for i := 0; i < tt.ticks; i++ {
+				total += b.take()
+			}
+			assert.Equal(t, tt.want, total)
+		})
+	}
+}
+
+func TestRampPacing_KeepsSubThousandRatesOnTheirOwnInterval(t *testing.T) {
+	interval, b := rampPacing(50)
+	assert.Equal(t, 20*time.Millisecond, interval)
+	assert.Equal(t, 1, b.take(), "below the batch threshold every tick starts exactly one")
+}
+
+// Samples above the highest finite bucket are invisible to histQuantile: it
+// returns the top bound, exactly as Prometheus's histogram_quantile does. That
+// is the right value but a misleading one to print alone — a p99 pinned to the
+// bucket ceiling reads like a measured latency. The summary says how many
+// samples overflowed so a clamped quantile cannot be mistaken for a real one.
+func TestSummarize_ReportsSamplesAboveTheTopBucket(t *testing.T) {
+	m := newMetrics()
+	for i := 0; i < 5; i++ {
+		m.BroadcastLatency.Observe(1e6) // far above any bucket
+	}
+	m.BroadcastLatency.Observe(0.001)
+	s, err := summarize(m, "run-1", "digest", 1)
+	require.NoError(t, err)
+
+	attrs := map[string]any{}
+	for i := 0; i+1 < len(s.Attrs); i += 2 {
+		if k, ok := s.Attrs[i].(string); ok {
+			attrs[k] = s.Attrs[i+1]
+		}
+	}
+	assert.Equal(t, uint64(5), attrs["clientsim_broadcast_to_client_latency_seconds_over_top_bucket"],
+		"a quantile clamped to the bucket ceiling must not be reported without its overflow count")
+}
+
+// A histogram entirely inside its buckets reports no overflow attribute at all.
+func TestSummarize_OmitsTheOverflowAttrWhenNothingOverflowed(t *testing.T) {
+	m := newMetrics()
+	m.BroadcastLatency.Observe(0.001)
+	s, err := summarize(m, "run-1", "digest", 1)
+	require.NoError(t, err)
+	for i := 0; i+1 < len(s.Attrs); i += 2 {
+		assert.NotEqual(t, "clientsim_broadcast_to_client_latency_seconds_over_top_bucket", s.Attrs[i])
+	}
+}

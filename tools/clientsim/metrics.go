@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -80,8 +81,14 @@ type metrics struct {
 	deliveredChannel prometheus.Counter
 	deliveredMember  prometheus.Counter
 
-	// readyNow backs ConnsReady so the peak can be maintained without
-	// reading a gauge's value back out of the registry.
+	// readyNow backs ConnsReady so the water marks can be maintained without
+	// reading a gauge's value back out of the registry. They stay atomic
+	// because readyGate and summarize read them without the lock; readyMu
+	// exists only to ORDER a transition's counter update against the gauge it
+	// publishes. Two lock-free transitions could otherwise interleave their
+	// read-modify-publish and leave a gauge holding the older value until the
+	// next transition happened to correct it.
+	readyMu       sync.Mutex
 	readyNow      atomic.Int64
 	readyPeak     atomic.Int64
 	readyMin      atomic.Int64
@@ -93,29 +100,28 @@ type metrics struct {
 
 // readyInc/readyDec move the readiness gauge and keep the high-water mark.
 func (m *metrics) readyInc() {
+	m.readyMu.Lock()
+	defer m.readyMu.Unlock()
 	n := m.readyNow.Add(1)
 	m.ConnsReady.Set(float64(n))
-	for {
-		peak := m.readyPeak.Load()
-		if n <= peak {
-			return
-		}
-		if m.readyPeak.CompareAndSwap(peak, n) {
-			m.ConnsReadyPeak.Set(float64(n))
-			return
-		}
+	if n > m.readyPeak.Load() {
+		m.readyPeak.Store(n)
+		m.ConnsReadyPeak.Set(float64(n))
 	}
 }
 
 func (m *metrics) readyDec() {
+	m.readyMu.Lock()
+	defer m.readyMu.Unlock()
 	n := m.readyNow.Add(-1)
 	m.ConnsReady.Set(float64(n))
-	m.recordTrough(n)
+	m.recordTroughLocked(n)
 }
 
-// recordTrough keeps the low-water mark. Seeded on the first decrement rather
-// than at zero, so the ramp up from an empty fleet is not itself the trough.
-func (m *metrics) recordTrough(n int64) {
+// recordTroughLocked keeps the low-water mark. Seeded on the first decrement
+// rather than at zero, so the ramp up from an empty fleet is not itself the
+// trough. Caller holds readyMu.
+func (m *metrics) recordTroughLocked(n int64) {
 	// The drain that ends every run walks readiness down to zero. Without this
 	// guard the trough of any completed run is 0, which describes the shutdown
 	// rather than the measurement window.
@@ -127,15 +133,9 @@ func (m *metrics) recordTrough(n int64) {
 		m.ConnsReadyMin.Set(float64(n))
 		return
 	}
-	for {
-		low := m.readyMin.Load()
-		if n >= low {
-			return
-		}
-		if m.readyMin.CompareAndSwap(low, n) {
-			m.ConnsReadyMin.Set(float64(n))
-			return
-		}
+	if n < m.readyMin.Load() {
+		m.readyMin.Store(n)
+		m.ConnsReadyMin.Set(float64(n))
 	}
 }
 
@@ -143,6 +143,10 @@ func (m *metrics) recordTrough(n int64) {
 // connection and drives readyNow to zero. Store the value before publishing
 // the captured flag so readyGate never observes an uninitialized snapshot.
 func (m *metrics) captureReadyAtDrain() {
+	// Under readyMu so the snapshot cannot land between a transition's counter
+	// update and the gauge it publishes.
+	m.readyMu.Lock()
+	defer m.readyMu.Unlock()
 	n := m.readyNow.Load()
 	m.readyAtDrain.Store(n)
 	// A run that never dipped has no recorded trough; its minimum is the fleet

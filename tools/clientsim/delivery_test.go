@@ -47,7 +47,10 @@ func TestHandleDelivery_InvalidTimestamps(t *testing.T) {
 	}{
 		{"zero broadcast ts on new_message is a contract violation", 0, now.Add(-1 * time.Millisecond).UnixMilli(), 1, 0},
 		{"future broadcast ts (negative age)", now.Add(time.Minute).UnixMilli(), now.Add(-1 * time.Millisecond).UnixMilli(), 1, 0},
-		{"zero canonical ts still observes broadcast", now.Add(-5 * time.Millisecond).UnixMilli(), 0, 0, 1},
+		// Both stamps are mandatory on a new_message: the broadcast sample is
+		// still observed, and the missing canonical stamp is still evidence.
+		{"zero canonical ts is evidence and does not block the broadcast sample",
+			now.Add(-5 * time.Millisecond).UnixMilli(), 0, 1, 1},
 		{"small future ts within skew tolerance observes zero, not invalid",
 			now.Add(500 * time.Millisecond).UnixMilli(), now.Add(-1 * time.Millisecond).UnixMilli(), 0, 1},
 	}
@@ -77,5 +80,24 @@ func TestHandleDelivery_NonRoomEventJSONStillCounts(t *testing.T) {
 	handleDelivery(m, "channel", []byte(`{"type":"message_read","roomId":"r1"}`), time.Now())
 	assert.InDelta(t, 1, promtestutil.ToFloat64(m.Delivered.WithLabelValues("channel")), 0.001)
 	assert.Equal(t, uint64(0), histogramCount(t, m.Registry, "clientsim_broadcast_to_client_latency_seconds"))
+	assert.InDelta(t, 0, promtestutil.ToFloat64(m.InvalidTimestamp), 0.001)
+}
+
+// broadcast-worker builds every new_message RoomEvent from the canonical
+// event's own Timestamp, which CLAUDE.md requires every NATS event to carry.
+// A zero eventTimestamp on a new_message is therefore corruption, not an
+// optional field — and skipping it silently computes the canonical-latency
+// p99 over an unknown subset of the traffic.
+func TestHandleDelivery_NewMessageWithoutAnEventTimestampIsEvidence(t *testing.T) {
+	m := newMetrics()
+	handleDelivery(m, "channel", []byte(`{"type":"new_message","timestamp":1}`), time.UnixMilli(2))
+	assert.InDelta(t, 1, promtestutil.ToFloat64(m.InvalidTimestamp), 0.001,
+		"a new_message missing eventTimestamp must count as evidence")
+}
+
+// Other event types on the same subjects legitimately omit both stamps.
+func TestHandleDelivery_OtherEventTypesStillSkipSilently(t *testing.T) {
+	m := newMetrics()
+	handleDelivery(m, "channel", []byte(`{"type":"thread_metadata_updated"}`), time.UnixMilli(2))
 	assert.InDelta(t, 0, promtestutil.ToFloat64(m.InvalidTimestamp), 0.001)
 }

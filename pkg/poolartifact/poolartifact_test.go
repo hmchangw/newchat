@@ -138,3 +138,21 @@ func TestLoad_RejectsArtifactsMissingRunCorrelation(t *testing.T) {
 		})
 	}
 }
+
+// The byte cap bounds the read, not the decode. A 64 MB file of short account
+// names is millions of entries, and every one of them becomes a connection
+// the tool tries to hold — an accidental pool file would take the site down
+// rather than test it.
+func TestLoad_RejectsAnImplausibleAccountCount(t *testing.T) {
+	accounts := make([]string, maxAccounts+1)
+	for i := range accounts {
+		accounts[i] = "u"
+	}
+	path := filepath.Join(t.TempDir(), "pool.json")
+	require.NoError(t, Write(path, &Artifact{
+		RunID: "r", SiteID: "s", ConfigDigest: "d", Accounts: accounts,
+	}))
+	_, err := Load(path, "s")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "accounts")
+}

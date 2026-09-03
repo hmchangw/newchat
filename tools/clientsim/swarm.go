@@ -45,6 +45,44 @@ type instance struct {
 	epoch   uint64
 }
 
+// rampBudget paces starts across ticks. Above the batch threshold a tick
+// starts more than one client, and the fractional remainder is CARRIED rather
+// than rounded: rounding each tick up to a whole client overshoots by up to a
+// full extra start per millisecond, so 1001/s would ramp at 2000/s — twice the
+// rate the operator configured, which is a different test than the one they
+// asked for.
+type rampBudget struct {
+	perTick float64
+	ticks   int64
+	issued  int64
+}
+
+// take reports how many clients this tick may start. The count comes from the
+// CUMULATIVE target rather than a running fractional credit: repeatedly adding
+// a fraction that binary floating point cannot represent (1.001, say) drifts,
+// and at 1001/s that drift loses a whole connection over a one-second ramp.
+func (r *rampBudget) take() int {
+	r.ticks++
+	want := int64(math.Round(float64(r.ticks) * r.perTick))
+	n := want - r.issued
+	r.issued = want
+	if n < 0 {
+		return 0
+	}
+	return int(n)
+}
+
+// rampPacing splits a connects/sec rate into a ticker interval and a per-tick
+// budget. Below 1000/s each tick starts exactly one client; above it the tick
+// is pinned to 1ms and the budget carries the remainder.
+func rampPacing(rampRate float64) (time.Duration, *rampBudget) {
+	interval := time.Duration(float64(time.Second) / rampRate)
+	if interval >= time.Millisecond {
+		return interval, &rampBudget{perTick: 1}
+	}
+	return time.Millisecond, &rampBudget{perTick: rampRate / 1000}
+}
+
 // runSwarm ramps clients at rampRate connects/sec (per replica — cluster
 // rate is rampRate × replicas), optionally churns clients at churnRate
 // cycles/sec, and drains everything when ctx ends. Rates above 1000/s are
@@ -53,12 +91,7 @@ func runSwarm(ctx context.Context, accounts []string, rampRate, churnRate float6
 	if rampRate <= 0 {
 		rampRate = 1
 	}
-	interval := time.Duration(float64(time.Second) / rampRate)
-	batch := 1
-	if interval < time.Millisecond {
-		batch = int(math.Ceil(rampRate / 1000))
-		interval = time.Millisecond
-	}
+	interval, budget := rampPacing(rampRate)
 
 	var (
 		wg       sync.WaitGroup
@@ -181,7 +214,7 @@ loop:
 			break loop
 		case <-rampTicker.C:
 			// Refills first: restore what the fleet lost before growing it.
-			slots := batch
+			slots := budget.take()
 			for ; slots > 0 && len(pending) > 0; slots-- {
 				account := pending[0]
 				pending = pending[1:]
@@ -304,6 +337,14 @@ func summarize(m *metrics, runID, configDigest string, target int) (runSummary, 
 				fam.GetName()+"_p50", histQuantile(h, 0.50),
 				fam.GetName()+"_p95", histQuantile(h, 0.95),
 				fam.GetName()+"_p99", histQuantile(h, 0.99))
+			// A quantile that lands in the +Inf bucket is reported as the top
+			// finite bound — correct, and the same thing histogram_quantile
+			// does, but it reads like a measured latency. Printing the
+			// overflow count beside it is what stops a clamped p99 from being
+			// mistaken for the real tail.
+			if over := overTopBucket(h); over > 0 {
+				s.Attrs = append(s.Attrs, fam.GetName()+"_over_top_bucket", over)
+			}
 		case "clientsim_decode_failures_total", "clientsim_invalid_timestamp_total", "clientsim_slow_consumer_events_total":
 			v := fam.GetMetric()[0].GetCounter().GetValue()
 			degradedEvidence += v
@@ -336,6 +377,17 @@ func histQuantile(h *dto.Histogram, q float64) float64 {
 		prevCount, prevBound = count, bound
 	}
 	return prevBound
+}
+
+// overTopBucket counts samples above the highest finite bucket: the dto
+// carries only the explicit buckets, so this is the total minus the last
+// cumulative count.
+func overTopBucket(h *dto.Histogram) uint64 {
+	buckets := h.GetBucket()
+	if len(buckets) == 0 {
+		return h.GetSampleCount()
+	}
+	return h.GetSampleCount() - buckets[len(buckets)-1].GetCumulativeCount()
 }
 
 // printSummary logs the end-of-run summary and returns it. Any loss-counter
