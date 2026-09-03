@@ -284,6 +284,12 @@ not in this repo. The load-bearing points:
   `CLIENTSIM_SUB_PENDING_MSGS`, rather than assuming
   `CLIENTSIM_SUB_PENDING_BYTES` covers it (it does not — it bounds the
   callback subscriptions).
+- **Room cap**: a client refuses to open more than 5000 rooms
+  (`clientsim_errors_total{stage="room_cap"}`), records the excess as
+  missing and therefore leaves the ready set. Real sidebars run to hundreds,
+  so a trip is a finding about the control plane rather than a limit to
+  raise — but the run fails loudly instead of the pod dying with the
+  measurement in it.
 - **Shutdown undercounts by design**: `close()` calls `nats.Conn.Close()`
   rather than `Drain()`, so user-lane deliveries still sitting in nats.go's
   callback backlog are dropped instead of counted. Draining tens of

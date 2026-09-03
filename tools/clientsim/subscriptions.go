@@ -181,6 +181,16 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 				delete(s.missingRooms, ch.RoomID)
 				continue
 			}
+			if len(s.roomSubs) >= maxRoomsPerClient {
+				s.m.Errors.WithLabelValues("room_cap").Inc()
+				// Bounded by the same number: at the cap the client is
+				// already unready, so recording every further room would
+				// just move the unbounded growth into this map.
+				if len(s.missingRooms) < maxRoomsPerClient {
+					s.missingRooms[ch.RoomID] = struct{}{}
+				}
+				continue
+			}
 			open, err := s.openRoomLanes(conn, ch.RoomID, ch.Global)
 			if err != nil {
 				// Not recorded in roomSubs, so the next add/resync retries.
@@ -196,6 +206,19 @@ func (s *simClient) applyChangesLocked(changes []subChange) {
 		}
 	}
 }
+
+// maxRoomsPerClient bounds the room subscriptions one simulated client will
+// hold. Each open room costs two NATS subscriptions retained until a matching
+// removal or teardown, so a membership publisher stuck emitting unique room
+// IDs during a soak grows that without bound in every client at once — and
+// the process it kills is the one holding the run's measurement.
+//
+// Past the cap the room is recorded missing instead of opened, which drops
+// the client out of the ready set and fails the exit gate: loud, and with the
+// numbers still readable. 5000 is far above any real sidebar (a heavy account
+// runs to hundreds), so tripping it is a finding about the control plane, not
+// a limit to raise — clientsim_errors_total{stage="room_cap"} names it.
+const maxRoomsPerClient = 5000
 
 // openRoomLanes subscribes both room lanes into the shared channel. A room
 // counts as subscribed only when both are open: a half-open room would miss

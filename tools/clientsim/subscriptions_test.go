@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -960,4 +961,34 @@ func TestBootstrapWalk_CountsWalksExposedToOffsetPagination(t *testing.T) {
 		assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.PaginatedWalks), 0.001,
 			"a walk that crossed a page boundary is counted once, not once per page")
 	})
+}
+
+// Every opened room costs two NATS subscriptions, retained until a matching
+// removal or teardown. A membership publisher stuck emitting unique room IDs
+// during a soak would grow that without bound in every client at once, and
+// the process that dies is the one holding the measurement. The cap keeps the
+// failure loud instead of fatal: the room is recorded missing, so the client
+// leaves the ready set and the exit gate fails the run.
+func TestApplyChanges_StopsOpeningRoomsAtTheCap(t *testing.T) {
+	fc := newFakeConn(emptySubListPage())
+	s, _ := newLifecycleClient(t, fc, jwtModeExpiry)
+	s.conn = fc
+	s.markConnUp()
+
+	s.mu.Lock()
+	for i := 0; i < maxRoomsPerClient; i++ {
+		s.roomSubs["filler-"+strconv.Itoa(i)] = openSub{}
+	}
+	s.applyChangesLocked([]subChange{{RoomID: "one-too-many", Op: subOpen, Global: true}})
+	_, opened := s.roomSubs["one-too-many"]
+	_, missing := s.missingRooms["one-too-many"]
+	s.updateReadyLocked()
+	s.mu.Unlock()
+
+	assert.False(t, opened, "the cap must refuse the subscription, not merely report it")
+	assert.True(t, missing, "a refused room keeps the client out of the ready set")
+	assert.InDelta(t, 1, promtestutil.ToFloat64(s.m.Errors.WithLabelValues("room_cap")), 0.001)
+	assert.InDelta(t, 0, promtestutil.ToFloat64(s.m.ConnsReady), 0.001)
+	assert.Empty(t, fc.chanSubs[subject.RoomEvent("one-too-many", true)],
+		"no lane is opened for a room past the cap")
 }
