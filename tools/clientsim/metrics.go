@@ -131,8 +131,15 @@ func (m *metrics) readyInc() {
 	defer m.readyMu.Unlock()
 	n := m.readyNow.Add(1)
 	m.ConnsReady.Set(float64(n))
-	if n >= m.troughFloor {
-		m.troughArmed.Store(true)
+	if n >= m.troughFloor && m.troughArmed.CompareAndSwap(false, true) && m.troughFloor > 0 {
+		// Seed the low-water mark as the window opens. Waiting for the first
+		// decrement leaves the gauge at 0 for a fleet that has never dipped —
+		// scraped mid-run that is indistinguishable from a collapse.
+		//
+		// Only with a real floor: at floor 0 the window opens on the first
+		// ready client, so seeding there would make the ramp itself the
+		// trough — the very thing the arming exists to keep out.
+		m.recordTroughLocked(n)
 	}
 	if n > m.readyPeak.Load() {
 		m.readyPeak.Store(n)

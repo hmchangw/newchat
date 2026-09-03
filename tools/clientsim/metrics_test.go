@@ -170,3 +170,26 @@ func TestMetrics_TroughWithNoFloorTracksImmediately(t *testing.T) {
 	m.readyDec()
 	assert.InDelta(t, 1, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001)
 }
+
+// The trough gauge is scraped throughout the run, not only at the end. Seeding
+// it on the first DECREMENT means a healthy fleet that has never dipped
+// reports clientsim_conns_ready_min = 0 — indistinguishable from a fleet that
+// collapsed. The window opens when the floor is reached, so that is where the
+// low-water mark starts.
+func TestMetrics_TroughIsPublishedWhenTheWindowArms(t *testing.T) {
+	m := newMetrics()
+	m.armTroughAt(3)
+	for i := 0; i < 3; i++ {
+		m.readyInc()
+	}
+	assert.InDelta(t, 3, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001,
+		"the trough reads the fleet's size the moment the window opens")
+
+	// Climbing past the floor does not raise the mark: it is a low-water mark
+	// of the window, not a running gauge.
+	m.readyInc()
+	assert.InDelta(t, 3, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001)
+	m.readyDec()
+	m.readyDec()
+	assert.InDelta(t, 2, promtestutil.ToFloat64(m.ConnsReadyMin), 0.001)
+}

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -79,7 +80,13 @@ func TestSimClient_EndToEnd_WSSubscribeWalkAndCount(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			// The run's own error is the only report of a client that died
+			// mid-test; discarding it here would let the assertions above
+			// pass on deliveries that arrived before an unnoticed collapse.
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("simClient run: %v", err)
+			}
 		case <-time.After(10 * time.Second):
 			t.Error("simClient run did not exit within 10s")
 		}

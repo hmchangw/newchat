@@ -56,6 +56,14 @@ func applySubscriptionUpdate(plan map[string]bool, data []byte) ([]subChange, st
 		if !subject.IsValidAccountToken(roomID) {
 			return nil, "", fmt.Errorf("subscription.update added event has a roomId that is not a subject token: %q", roomID)
 		}
+		// Absent is not the same as "this is a DM": a named non-channel type is
+		// a legitimate skip (that traffic rides the user lane, and an unknown
+		// new type must not fail the run), but an event naming NO type may be
+		// a channel add being dropped — a room the client then never
+		// subscribes to while reporting ready.
+		if evt.Subscription.RoomType == "" {
+			return nil, "", fmt.Errorf("subscription.update added event has no roomType for room %q", roomID)
+		}
 		if evt.Subscription.RoomType != "channel" {
 			return nil, "", nil
 		}

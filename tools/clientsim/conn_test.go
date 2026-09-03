@@ -243,3 +243,35 @@ func TestUserCB_ABrokerAuthExpiryForcesOneRefresh(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), mint.calls.Load(), "and exactly one — the latch is consumed")
 }
+
+// The broker's expiry verdict is consumed by CompareAndSwap before the mint is
+// attempted, so a mint that FAILS threw the verdict away: the next reconnect
+// presented the same dead credential with nothing left to force a re-mint, and
+// the client could never recover.
+func TestUserCB_AFailedForcedRefreshKeepsTheBrokerVerdict(t *testing.T) {
+	mint := &countingMinter{err: assert.AnError}
+	s := newTestSimClient(t, "user-1", jwtModeExpiry, mint)
+	// Prime by hand: the minter is set to fail from the start.
+	require.NoError(t, s.cache.set(mintTestJWT(t, time.Now().Add(2*time.Hour))))
+
+	s.recordDisconnect(nats.ErrAuthExpired)
+	_, err := s.userCB()
+	require.Error(t, err, "the forced mint fails")
+	assert.Equal(t, int64(1), mint.calls.Load())
+
+	// The verdict must survive, or the next reconnect hands back the same
+	// credential the broker already rejected.
+	_, err = s.userCB()
+	require.Error(t, err)
+	assert.Equal(t, int64(2), mint.calls.Load(), "the broker verdict must outlive a failed mint")
+
+	// Once the mint succeeds the latch is finally spent.
+	mint.err = nil
+	mint.jwt = func() string { return mintTestJWT(t, time.Now().Add(2*time.Hour)) }
+	_, err = s.userCB()
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), mint.calls.Load())
+	_, err = s.userCB()
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), mint.calls.Load(), "and not re-armed afterwards")
+}

@@ -55,6 +55,11 @@ type simClient struct {
 	// client cannot prove a SUB is authorized (a successful walk says nothing
 	// about it), so readiness fails closed until the connection is replaced.
 	asyncFault bool
+	// liveGen advances on every live batch that OPENS a subscription. Two
+	// rapid adds each spawn a flush; without the fence the earlier one can
+	// promote after the later one demoted, vouching for a SUB that is still
+	// buffered.
+	liveGen uint64
 	// controlGen advances on every control-plane invalidation (a lost or
 	// unusable subscription.update). Separate from planEpoch, which tracks the
 	// CONNECTION: a walk in flight has to lose to both, and conflating them

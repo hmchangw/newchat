@@ -457,6 +457,18 @@ func printSummary(m *metrics, runID, configDigest string, target int) (runSummar
 // Deliberately separate from the degraded flag. Loss counters describe the
 // system under test — in a failure test they are the result, not a fault —
 // whereas a fleet that never came up means the numbers describe nothing.
+// readyFloor is the smallest ready count that satisfies readyGate. The gate
+// compares in floats (peak >= minRatio*target), so this rounds UP: truncating
+// 0.9*7 = 6.3 to 6 would call the fleet "up" one client below the bar the run
+// is actually held to, and the trough would then include the tail of the ramp
+// it exists to exclude.
+func readyFloor(minRatio float64, target int) int {
+	if minRatio <= 0 || target <= 0 {
+		return 0
+	}
+	return int(math.Ceil(minRatio * float64(target)))
+}
+
 func readyGate(m *metrics, target int, minRatio float64) error {
 	if minRatio <= 0 || target == 0 {
 		return nil

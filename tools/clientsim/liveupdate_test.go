@@ -154,3 +154,27 @@ func TestApplySubscriptionUpdate_RejectsRoomIDsThatAreNotSubjectTokens(t *testin
 		})
 	}
 }
+
+// A missing roomType is not the same as "this is a DM". A DM or bot add is a
+// legitimate skip — that traffic rides the user lane — but an event that names
+// no type at all may be a channel add being dropped on the floor, which is a
+// room the client then never subscribes to while reporting ready.
+func TestApplySubscriptionUpdate_MissingRoomTypeIsMalformed(t *testing.T) {
+	_, _, err := applySubscriptionUpdate(map[string]bool{},
+		[]byte(`{"action":"added","subscription":{"roomId":"r1"},"timestamp":1}`))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "roomType")
+}
+
+// A named non-channel type stays a silent skip, including one this tool does
+// not know — a new room type must not fail the run.
+func TestApplySubscriptionUpdate_NamedNonChannelTypesAreSkipped(t *testing.T) {
+	for _, rt := range []string{"dm", "botDM", "somethingNew"} {
+		t.Run(rt, func(t *testing.T) {
+			changes, asserted, err := applySubscriptionUpdate(map[string]bool{}, updJSON("added", "d1", rt, nil))
+			require.NoError(t, err)
+			assert.Empty(t, changes)
+			assert.Empty(t, asserted)
+		})
+	}
+}

@@ -124,6 +124,13 @@ func (s *simClient) userCB() (string, error) {
 	forced := s.forceRefresh.CompareAndSwap(true, false)
 	if forced || (s.cfg.JWTMode == jwtModeExpiry && !expiresAt.IsZero() && time.Now().After(expiresAt)) {
 		if err := s.refreshJWT(context.Background()); err != nil {
+			if forced {
+				// The verdict is spent only by a mint that SUCCEEDED. Dropping
+				// it here would hand the next reconnect the same credential
+				// the broker already rejected, with nothing left to force a
+				// re-mint — the client could never recover.
+				s.forceRefresh.Store(true)
+			}
 			return "", err
 		}
 		token, _ = s.cache.get()

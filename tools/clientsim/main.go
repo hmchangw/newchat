@@ -104,7 +104,7 @@ func run(ctx context.Context) error {
 	m := newMetrics()
 	// Same floor the exit gate uses, so the trough describes the measurement
 	// window rather than the ramp that preceded it.
-	m.armTroughAt(int(cfg.MinReadyRatio * float64(len(shard))))
+	m.armTroughAt(readyFloor(cfg.MinReadyRatio, len(shard)))
 	m.RunInfo.WithLabelValues(cfg.JWTMode,
 		strconv.Itoa(cfg.ShardIndex), strconv.Itoa(cfg.ShardCount)).Set(1)
 	// Bind before the swarm starts: a soak whose metrics endpoint never

@@ -443,3 +443,46 @@ func TestOrderIndex_RemovalIsConstantTime(t *testing.T) {
 	assert.Equal(t, 3, idx.len())
 	assert.NotEmpty(t, idx.pick(secureIntN))
 }
+
+// The trough arms at the readiness floor so it describes the measurement
+// window. That floor has to be the same bar readyGate holds the run to, and
+// the gate compares in floats: at 7 accounts and a 0.9 ratio it demands 7
+// ready clients, so truncating 6.3 to 6 would open the window while the fleet
+// is still one client short of the floor — exactly the ramp the arming exists
+// to exclude.
+func TestReadyFloor_MatchesTheGatesBar(t *testing.T) {
+	tests := []struct {
+		name   string
+		ratio  float64
+		target int
+		want   int
+	}{
+		{name: "exact multiple", ratio: 0.95, target: 100, want: 95},
+		{name: "fractional rounds up", ratio: 0.9, target: 7, want: 7},
+		{name: "just over an integer", ratio: 0.5, target: 5, want: 3},
+		{name: "gate disabled", ratio: 0, target: 100, want: 0},
+		{name: "whole fleet", ratio: 1, target: 3, want: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := readyFloor(tt.ratio, tt.target)
+			assert.Equal(t, tt.want, got)
+			if tt.ratio <= 0 || tt.target == 0 {
+				return
+			}
+			// The floor is the SMALLEST ready count the gate accepts: one
+			// below it must fail, so the two can never disagree by a client.
+			pass := newMetrics()
+			pass.readyPeak.Store(int64(got))
+			pass.readyAtDrain.Store(int64(got))
+			pass.readyCaptured.Store(true)
+			assert.NoError(t, readyGate(pass, tt.target, tt.ratio))
+
+			fail := newMetrics()
+			fail.readyPeak.Store(int64(got - 1))
+			fail.readyAtDrain.Store(int64(got - 1))
+			fail.readyCaptured.Store(true)
+			assert.Error(t, readyGate(fail, tt.target, tt.ratio))
+		})
+	}
+}

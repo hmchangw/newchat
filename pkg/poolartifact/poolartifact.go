@@ -118,9 +118,10 @@ func Load(path, wantSiteID string) (*Artifact, error) {
 	if len(a.Accounts) == 0 {
 		return nil, errors.New("pool artifact has no accounts")
 	}
-	if len(a.Accounts) > maxAccounts {
-		return nil, fmt.Errorf("pool artifact has %d accounts, above the %d cap", len(a.Accounts), maxAccounts)
-	}
+	// The account cap is enforced inside decodeArtifact, which abandons the
+	// array the moment it passes maxAccounts — it has to be checked there for
+	// the cap to bound memory rather than merely report on it, so a check
+	// here could never fire.
 	// A duplicate is counted in the shard the readiness floor is measured
 	// against, but a consumer starts each account once — so the target can
 	// never be reached and MIN_READY_RATIO either fails the run for a reason

@@ -87,7 +87,8 @@ func (s *simClient) subscribeLanes(ctx context.Context, conn simConn) error {
 				// the gauge never dipping. The walk already flushes before it
 				// promotes; this is the same rule on the live path.
 				s.markNotReady()
-				go s.flushThenPromote(ctx)
+				s.liveGen++
+				go s.flushThenPromote(ctx, s.liveGen)
 				return
 			}
 			// A close-only change cannot make the client miss traffic, so it
@@ -124,7 +125,7 @@ func opensARoom(changes []subChange) bool {
 // just queued, then re-evaluates readiness. A failed flush leaves the client
 // not-ready and schedules the resync that re-derives and re-flushes the plan —
 // the client cannot prove the broker has its subscriptions until one succeeds.
-func (s *simClient) flushThenPromote(ctx context.Context) {
+func (s *simClient) flushThenPromote(ctx context.Context, gen uint64) {
 	conn := s.connSnapshot()
 	if conn == nil {
 		return
@@ -138,6 +139,12 @@ func (s *simClient) flushThenPromote(ctx context.Context) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.liveGen != gen {
+		// A later add already demoted and is waiting on its own flush. This
+		// one's acknowledgement says nothing about that newer SUB, so leave
+		// the promotion to the flush that covers it.
+		return
+	}
 	s.updateReadyLocked()
 }
 
