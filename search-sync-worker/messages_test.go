@@ -792,3 +792,30 @@ func TestMessageCollection_BuildAction_RejectsWrongShapePerMode(t *testing.T) {
 		})
 	}
 }
+
+// A fourth consumer over messageCollection, bound to the buddy-hosted
+// MESSAGES-CANONICAL-FAILOVER. Indexing is unchanged — Elasticsearch is up
+// during a NATS outage — only the source stream is new.
+func TestFailoverMessageCollection(t *testing.T) {
+	coll := newFailoverMessageCollection("msgs-v1", "site-a", false)
+
+	assert.Equal(t, "MESSAGES-CANONICAL-FAILOVER-site-a", coll.StreamConfig("site-a").Name)
+	assert.Equal(t, "message-sync-failover", coll.ConsumerName())
+	assert.Equal(t, []string{"chat.failover.msg.canonical.site-a.*"}, coll.FilterSubjects("site-a"))
+
+	// The user collection already owns the template and mapping for this index
+	// prefix; a second pusher for the same index would be redundant.
+	assert.Empty(t, coll.TemplateName())
+	assert.Nil(t, coll.TemplateBody())
+}
+
+// The failover consumer must not collide with the live one — same index, but a
+// shared durable would have the two lanes clobber each other's cursor.
+func TestFailoverMessageCollection_DistinctFromLive(t *testing.T) {
+	live := newMessageCollection("msgs-v1", "site-a", time.Time{}, false)
+	failover := newFailoverMessageCollection("msgs-v1", "site-a", false)
+
+	assert.NotEqual(t, live.ConsumerName(), failover.ConsumerName())
+	assert.NotEqual(t, live.StreamConfig("site-a").Name, failover.StreamConfig("site-a").Name)
+	assert.NotEqual(t, live.FilterSubjects("site-a"), failover.FilterSubjects("site-a"))
+}

@@ -111,7 +111,7 @@ func (s *HistoryService) ReactMessage(c *natsrouter.Context, siteID string, req 
 			},
 		},
 	}
-	s.publishCanonicalBestEffort(c, subject.MsgCanonicalReacted(siteID), &canonicalEvt)
+	s.publishCanonicalBestEffort(c, siteID, subject.CanonicalReacted, &canonicalEvt)
 
 	return &models.ReactMessageResponse{
 		MessageID: req.MessageID,

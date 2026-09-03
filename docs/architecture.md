@@ -173,15 +173,13 @@ sequenceDiagram
 
     NATS->>MW: canonical.created
     MW->>Cass: persist message
-    MW->>NATS: pub fanout.{site}.{room}
-    Note over NATS: FANOUT stream
 
-    NATS->>BW: fanout.{site}.{room}
+    NATS->>BW: canonical.created
     BW->>Members: pub chat.room.{room}.stream.msg
     BW->>Members: pub chat.room.{room}.event.metadata.update
-    BW-->>NATS: pub outbox.{site}.to.{dest}.* (remote members)
+    Note over BW,Members: core NATS, gateway-routed —<br/>remote members are reached directly,<br/>no OUTBOX hop
 
-    NATS->>NW: fanout / canonical.created
+    NATS->>NW: canonical.created
     NW->>NATS: pub chat.server.notification.push.{site}.send
     Note over NATS: PUSH-NOTIFICATION stream → push service
 
@@ -202,11 +200,18 @@ flowchart LR
 
     MESSAGES[["MESSAGES-{site}<br/>chat.user.*.room.*.{site}.msg.&gt;"]]
     CANON[["MESSAGES-CANONICAL-{site}<br/>chat.msg.canonical.{site}.&gt;"]]
-    FANOUT[["FANOUT-{site}<br/>fanout.{site}.&gt;"]]
     ROOMS[["ROOMS-{site}<br/>member invites"]]
     PUSH[["PUSH-NOTIFICATION-{site}<br/>push.{site}.&gt;"]]
     OUTBOX[["OUTBOX-{site}<br/>outbox.{site}.&gt;"]]
     INBOX[["INBOX-{site}<br/>chat.inbox.{site}.*"]]
+    INBOXFO[["INBOX-FAILOVER-{site}<br/>chat.failover.inbox.{site}.external.&gt;"]]
+
+    subgraph Standby["Standby lanes — hosted on the BUDDY cluster, idle until an outage"]
+        MSGFO[["MESSAGES-FAILOVER-{site}"]]
+        CANONFO[["MESSAGES-CANONICAL-FAILOVER-{site}"]]
+        PUSHFO[["PUSH-NOTIFICATION-FAILOVER-{site}"]]
+        OUTBOXFO[["OUTBOX-FAILOVER-{site}"]]
+    end
 
     Client -->|msg.send| MESSAGES
     MESSAGES --> GK[message-gatekeeper]
@@ -218,22 +223,43 @@ flowchart LR
     CANON --> NW[notification-worker]
     CANON --> SS[search-sync-worker]
 
-    MW -->|fanout| FANOUT
-    FANOUT --> BW
-    FANOUT --> NW
-
     Client -->|member.invite| ROOMS
     ROOMS --> RW[room-worker]
 
     NW -->|push.send| PUSH
 
-    BW -->|cross-site| OUTBOX
     RW -->|cross-site| OUTBOX
-    OUTBOX -. "JetStream source<br/>(remote site)" .-> INBOX
+    OUTBOX -. "direct JS publish<br/>(remote site)" .-> INBOX
+    OUTBOX -. "on no-responders:<br/>redirect to the buddy" .-> INBOXFO
     INBOX --> IW[inbox-worker]
+    INBOXFO -. "buddy connection" .-> IW
 
     HS[history-service] -->|edited/deleted/reacted| CANON
+
+    %% Failover path: same services, standby streams on the buddy cluster.
+    Client -.->|"failover.msg.send<br/>(displaced client)"| MSGFO
+    MSGFO -.-> GK
+    GK -.->|failover canonical| CANONFO
+    CANONFO -.-> MW
+    CANONFO -.-> BW
+    CANONFO -.-> NW
+    CANONFO -.-> SS
+    NW -.->|failover push| PUSHFO
+    RS[room-service] -.->|"on no-responders"| OUTBOXFO
+    OUTBOXFO -.-> OW[outbox-worker]
+    OUTBOX --> OW
+    HS -.->|edited/deleted/pinned/reacted| CANONFO
+    Client -.->|"request/reply<br/>(displaced client)"| BuddyRouters["buddy routers:<br/>room-service, history-service, user-service"]
 ```
+
+The three request/reply services each bind a **second router** on the buddy
+connection (`pkg/failoverlane.BindRouters`), subscribed to the same site-scoped
+subjects as their home router. A displaced client's RPC can therefore still be
+answered by this site's instance against this site's databases — the buddy
+site's own copy of those services is not subscribed to another site's subjects.
+Each lane gets its own service instance so its outbound RPCs, publishes and
+OUTBOX writes leave on the connection the request arrived on; the stores and
+caches are shared, being site-local and unaffected by a NATS outage.
 
 `roomlist-worker` consumes `MESSAGES-CANONICAL` on its own durable consumer
 and owns every room-level MongoDB write derived from a canonical message event
@@ -244,6 +270,22 @@ outage retries rather than drops. `broadcast-worker` no longer performs these
 writes — deploy order matters: `roomlist-worker` must be live *before*
 `broadcast-worker` rolls to the release that removes them, or mention badges
 raised in the gap are lost.
+
+**Standby lanes.** Each site has five standby streams hosted on its *buddy*
+cluster, carrying no traffic until that site's own NATS is unavailable. The
+site's own services consume them over a second NATS connection and keep writing
+to the site's own databases — which is the property that makes failover safe
+rather than merely available. The request/reply services (`room-service`,
+`history-service`, `user-service`, `search-service`, `user-presence-service`)
+register a second router on that connection too, so a displaced client's RPCs —
+and the failover-lane workers' own thread-parent, badge and presence RPCs — are
+answered by this site's instance against this site's stores. Every lane's
+publishes and outbound RPCs leave on the connection its work arrived on; nothing
+is shared with the home lane, whose connection is the one that is down. See
+[`nats-failover-scenarios.md`](./nats-failover-scenarios.md) for the operational
+picture and
+[the design spec](./superpowers/specs/2026-08-15-nats-site-failover-design.md)
+for the mechanism.
 
 ---
 

@@ -9,15 +9,15 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	o11ynats "github.com/flywindy/o11y/nats"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
-	o11ynats "github.com/flywindy/o11y/nats"
-
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/jobguard"
 	"github.com/hmchangw/chat/pkg/jsretry"
@@ -92,11 +92,16 @@ type config struct {
 	// RoomLocalityGrace: post-flip dual-publish window. Must match across all publisher services.
 	RoomLocalityGrace time.Duration `env:"ROOM_LOCALITY_GRACE"      envDefault:"168h"`
 	// ThreadViewSubjectEnabled: kill switch for the thread-scoped view lane.
-	ThreadViewSubjectEnabled bool                    `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
-	Consumer                 stream.ConsumerSettings `envPrefix:"CONSUMER_"`
-	Bootstrap                bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
-	Encryption               encryptionConfig        `envPrefix:"ENCRYPTION_"`
-	DebugLog                 logctx.Config           `envPrefix:"DEBUG_LOG_"`
+	ThreadViewSubjectEnabled bool `env:"THREAD_VIEW_SUBJECT_ENABLED" envDefault:"true"`
+	// FailoverRevertGrace: post-restoration dual-publish window. Must outlast the
+	// client revert backoff (capped at 5m) — raising the client cap without
+	// raising this reopens the silent recovery gap dual-publishing exists to close.
+	FailoverRevertGrace time.Duration           `env:"FAILOVER_REVERT_GRACE" envDefault:"30m"`
+	Consumer            stream.ConsumerSettings `envPrefix:"CONSUMER_"`
+	Buddy               natsutil.BuddyConfig    `envPrefix:"BUDDY_"`
+	Bootstrap           bootstrapConfig         `envPrefix:"BOOTSTRAP_"`
+	Encryption          encryptionConfig        `envPrefix:"ENCRYPTION_"`
+	DebugLog            logctx.Config           `envPrefix:"DEBUG_LOG_"`
 	// AdminAcctPrefix overrides the platform-admin account prefix (ADMIN_ACCT_PREFIX); keep it identical across services.
 	AdminAcctPrefix string `env:"ADMIN_ACCT_PREFIX" envDefault:"p_admin"`
 
@@ -319,6 +324,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -344,17 +353,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	publisher := &natsPublisher{nc: nc, metrics: publishMetrics}
 	// The cross-site room-position announce. It used to ride the rooms.lastMsgAt
 	// flush; that write is roomlist-worker's now, so it fires from the fan-out path
 	// instead — same one-per-created-message coverage, and the room meta the
 	// cross-site test needs is already in the handler's hand.
-	var activity *roomActivityRefresher
-	if peers := remotePeers(cfg.SiteID, cfg.AllSiteIDs); len(peers) > 0 {
-		activity = newRoomActivityRefresher(
-			roomActivityPublisher(publisher, cfg.SiteID, peers), cfg.RoomActivityRefreshInterval)
+	activityPeers := remotePeers(cfg.SiteID, cfg.AllSiteIDs)
+	if len(activityPeers) > 0 {
 		slog.Info("cross-site room-activity refresh enabled",
-			"peers", peers, "refresh_interval", cfg.RoomActivityRefreshInterval)
+			"peers", activityPeers, "refresh_interval", cfg.RoomActivityRefreshInterval)
 	} else {
 		// Correct for a single-site deployment, but in a federated one it means
 		// remote chat lists cannot order this site's rooms — say so rather than
@@ -398,31 +404,31 @@ func main() {
 		slog.Info("room-key cache enabled", "size", cfg.RoomKeyCacheSize, "ttl", cfg.RoomKeyCacheTTL)
 	}
 
-	// JetStream publish for the OUTBOX mention relay; the client fan-out stays on
-	// core NATS (publisher above).
-	outboxPublish := func(ctx context.Context, subj string, data []byte, msgID string) error {
-		_, err := js.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data), jetstream.WithMsgID(msgID))
-		if err != nil {
-			destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-			publishMetrics.Failure(ctx, destination, operation, err)
-			return fmt.Errorf("publish jetstream message to %s with msgID %s: %w", subj, msgID, err)
-		}
-		return nil
+	// Everything a handler needs that is the same on both lanes; only the NATS
+	// connection differs, and newLaneHandler binds that per lane.
+	// One handler per lane; see failoverlane.HandlerFor for why nothing that
+	// speaks NATS may be shared between them. The restore tracker drives the
+	// home lane's dual-publish window after recovery; the router ignores it on
+	// the failover lane, which always routes global.
+	shared := &broadcastDeps{
+		store: cachedStore, users: us, keys: keyProvider,
+		sealer: sealer, previews: previews,
+		domainMetrics: domainMetrics, publishMetrics: publishMetrics,
+		activityPeers: activityPeers, routeMode: roomRouteMode, cfg: &cfg,
+		restoredAt: natsutil.TrackRestores(ctx, nc).RestoredAt,
 	}
-
-	parentFetcher := newHistoryParentFetcher(nc, publishMetrics)
-	handler := NewHandler(cachedStore, us, publisher, keyProvider, parentFetcher, cfg.Encryption.Enabled, roomRouteMode,
-		withBroadcastMetrics(domainMetrics), withOutboxFederation(cfg.SiteID, outboxPublish),
-		withRoomActivityRefresh(activity), withThreadViewSubject(cfg.ThreadViewSubjectEnabled),
-		withPreviewSealer(sealer, previews))
+	handler := shared.newLaneHandler(nc, js, subject.LaneHome)
 
 	// Core-NATS queue subscriber for server-broadcast events (e.g. thread tcount badge).
 	// Fire-and-forget: errors are logged inside HandleServerBroadcast; no retry path.
-	broadcastSub, err := nc.QueueSubscribe(ctx, subject.ServerBroadcastWildcard(cfg.SiteID), "broadcast-worker",
-		func(msgCtx context.Context, msg *nats.Msg) {
-			broadcastCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
-			handler.HandleServerBroadcast(broadcastCtx, msg.Data)
-		})
+	subscribeServerBroadcast := func(conn *o11ynats.Conn, h *Handler) (*nats.Subscription, error) {
+		return conn.QueueSubscribe(ctx, subject.ServerBroadcastWildcard(cfg.SiteID), "broadcast-worker",
+			func(msgCtx context.Context, msg *nats.Msg) {
+				broadcastCtx, _ := logctx.ConsumeContext(msgCtx, msg.Header, msg.Subject, msg.Data)
+				h.HandleServerBroadcast(broadcastCtx, msg.Data)
+			})
+	}
+	broadcastSub, err := subscribeServerBroadcast(nc, handler)
 	if err != nil {
 		slog.Error("subscribe server-broadcast failed", "error", err)
 		os.Exit(1)
@@ -436,9 +442,36 @@ func main() {
 	consumerMetrics.LoopStarted(ctx)
 
 	var wg sync.WaitGroup
-	natsmetrics.Start(ctx, iter, consumerMetrics, cfg.MaxWorkers, consumerCfg.MaxDeliver, &wg,
+	// One pool shared by both lanes: a buddy lane with its own semaphore would
+	// take this service to 2xMAX_WORKERS in-flight handlers against the same
+	// MongoDB and Valkey, even though the two lanes carry the same site's work.
+	sem := make(chan struct{}, cfg.MaxWorkers)
+	natsmetrics.StartInPool(ctx, iter, consumerMetrics, sem, consumerCfg.MaxDeliver, &wg,
 		func(msg jetstream.Msg) natsmetrics.EventType { return natsmetrics.EventTypeFromSubject(msg.Subject()) },
 		guardedProcessor(broadcastProcessor(handler)))
+
+	// Buddy lane. Never fails startup — on any failure buddyLane stays nil and
+	// the service runs home-only. HasFailover gates the bot pipeline out.
+	binder := failoverlane.Binder{
+		SiteID: cfg.SiteID, Dialer: dialer.OnlyIf(wiring.HasFailover()),
+		Bootstrap: cfg.Bootstrap.Enabled, MaxWorkers: cfg.MaxWorkers,
+		Sem: sem, WG: &wg, Metrics: sharedMetrics,
+	}
+	var buddyBroadcastSub *nats.Subscription
+	buddyLane, buddyConn := binder.BindLane(ctx, &failoverlane.LaneSpec{
+		Stream: wiring.CanonicalFailoverStream,
+		Consumer: buildConsumerConfig(cfg.Consumer,
+			cfg.Mode.FailoverConsumerName("broadcast-worker"), wiring.CanonicalFailoverWildcard),
+	}, func(_ context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (func(context.Context, jetstream.Msg), error) {
+		failoverHandler := shared.newLaneHandler(conn, laneJS, lane)
+		// message-worker's failover lane publishes the thread-tcount badge on
+		// the buddy; without a subscriber there it is lost for the whole outage.
+		var err error
+		if buddyBroadcastSub, err = subscribeServerBroadcast(conn, failoverHandler); err != nil {
+			return nil, fmt.Errorf("subscribe server-broadcast on buddy: %w", err)
+		}
+		return guardedHandler(broadcastProcessor(failoverHandler)), nil
+	})
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -452,22 +485,24 @@ func main() {
 
 	hooks := []func(context.Context) error{
 		func(_ context.Context) error {
+			if buddyBroadcastSub != nil {
+				// Best-effort: the buddy may be the connection that is gone.
+				if err := buddyBroadcastSub.Unsubscribe(); err != nil {
+					slog.Warn("unsubscribe buddy server-broadcast failed", "error", err)
+				}
+			}
 			return broadcastSub.Unsubscribe()
 		},
+		// Stop both iterators before draining, so neither lane pulls new work
+		// while the other is still finishing. Both feed one WaitGroup.
 		func(ctx context.Context) error {
 			consumerMetrics.LoopStopped(ctx)
 			iter.Stop()
+			buddyLane.Stop()
 			return nil
 		},
 		func(ctx context.Context) error {
-			done := make(chan struct{})
-			go func() { wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("worker drain timed out: %w", ctx.Err())
-			}
+			return natsutil.WaitPool(ctx, &wg)
 		},
 		// Stop the preview writer AFTER in-flight handlers drain, so anything they
 		// buffered on the way out lands in its final flush — and WAIT for that
@@ -482,6 +517,7 @@ func main() {
 			}
 		},
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
+		natsutil.DrainBuddy(buddyConn),
 	}
 	if keyStore != nil {
 		hooks = append(hooks, func(ctx context.Context) error { return keyStore.Close() })
@@ -500,19 +536,51 @@ func main() {
 	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }
 
-// natsPublisher adapts *o11ynats.Conn to the Publisher interface.
-type natsPublisher struct {
-	nc      *o11ynats.Conn
-	metrics natsmetrics.Publisher
+// broadcastDeps are the dependencies every broadcast handler shares, whichever
+// lane it serves: stores, caches and config. Only the NATS connection differs
+// per lane, and newLaneHandler binds it.
+type broadcastDeps struct {
+	store          Store
+	users          userstore.UserStore
+	keys           RoomKeyProvider
+	sealer         *previewSealer
+	previews       *previewWriter
+	domainMetrics  *broadcastMetrics
+	publishMetrics natsmetrics.Publisher
+	activityPeers  []string
+	routeMode      subject.RoomRouteMode
+	restoredAt     func() time.Time
+	cfg            *config
 }
 
-func (p *natsPublisher) Publish(ctx context.Context, subject string, data []byte) error {
-	err := p.nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subject, data))
-	p.metrics.Failure(ctx, natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish, err)
-	if err != nil {
-		return fmt.Errorf("publish to %q: %w", subject, err)
+// newLaneHandler builds the handler for one lane, binding every NATS-facing
+// dependency — the client fan-out, the OUTBOX mention relay, the thread-parent
+// request/reply and the cross-site activity announce — to the connection that
+// lane consumes on; see failoverlane.HandlerFor.
+func (d *broadcastDeps) newLaneHandler(nc *o11ynats.Conn, js o11ynats.JetStream, lane subject.Lane) *Handler {
+	publisher := corePublisher(natsutil.CorePublishFunc(nc, d.publishMetrics,
+		natsutil.WithPublishLabels(natsmetrics.DestinationRecipientEvent, natsmetrics.OperationRecipientPublish)))
+	var activity *roomActivityRefresher
+	if len(d.activityPeers) > 0 {
+		activity = newRoomActivityRefresher(
+			roomActivityPublisher(publisher, d.cfg.SiteID, d.activityPeers), d.cfg.RoomActivityRefreshInterval)
 	}
-	return nil
+	return NewHandler(d.store, d.users, publisher, d.keys,
+		newHistoryParentFetcher(nc, d.publishMetrics), d.cfg.Encryption.Enabled,
+		subject.NewLaneRouter(d.routeMode, lane, d.restoredAt, d.cfg.FailoverRevertGrace),
+		withBroadcastMetrics(d.domainMetrics),
+		// The OUTBOX mention relay is JetStream; the client fan-out stays core.
+		withOutboxFederation(d.cfg.SiteID, natsutil.JetStreamPublishFunc(js, d.publishMetrics), lane),
+		withRoomActivityRefresh(activity),
+		withThreadViewSubject(d.cfg.ThreadViewSubjectEnabled),
+		withPreviewSealer(d.sealer, d.previews))
+}
+
+// corePublisher adapts a core-NATS publish func to the Publisher interface.
+type corePublisher func(ctx context.Context, subject string, data []byte) error
+
+func (p corePublisher) Publish(ctx context.Context, subject string, data []byte) error {
+	return p(ctx, subject, data)
 }
 
 // messageProcessor handles one consumed message, performing its own Ack/Nak.
@@ -544,6 +612,14 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 // jobguard's panic recovery in the composition so a handler panic Acks instead
 // of crash-looping on JetStream redelivery. The integration test drives this
 // exact composition rather than a parallel copy of the loop.
+// guardedHandler is guardedProcessor for callers that hand back a plain
+// jetstream.Msg — the failover binder's handler shape.
+func guardedHandler(process messageProcessor) func(context.Context, jetstream.Msg) {
+	return func(msgCtx context.Context, msg jetstream.Msg) {
+		jobguard.Run(msg, func() { process(msgCtx, msg) })
+	}
+}
+
 func guardedProcessor(process messageProcessor) natsmetrics.ProcessMessage {
 	return func(msgCtx context.Context, msg *natsmetrics.Message) {
 		jobguard.Run(msg, func() { process(msgCtx, msg) })

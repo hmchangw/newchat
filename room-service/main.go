@@ -10,10 +10,11 @@ import (
 
 	"github.com/caarlos0/env/v11"
 
-	"github.com/nats-io/nats.go/jetstream"
+	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/badgecache"
+	"github.com/hmchangw/chat/pkg/failoverlane"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
@@ -21,10 +22,12 @@ import (
 	"github.com/hmchangw/chat/pkg/msgraph"
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
+
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/shutdown"
+	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 )
@@ -64,11 +67,16 @@ type config struct {
 	MemberListTimeout  time.Duration `env:"MEMBER_LIST_TIMEOUT"       envDefault:"5s"`
 	RoomKeyGracePeriod time.Duration `env:"ROOM_KEY_GRACE_PERIOD"     envDefault:"24h"`
 	// RoomKeyRetiredTTL: retention for rotated-out keys; see roomkeystore.WithRetiredKeys for the 2x-cache-TTL rule.
-	RoomKeyRetiredTTL        time.Duration   `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
-	HealthAddr               string          `env:"HEALTH_ADDR" envDefault:":8081"`
-	PProfEnabled             bool            `env:"PPROF_ENABLED" envDefault:"false"`
-	Bootstrap                bootstrapConfig `envPrefix:"BOOTSTRAP_"`
-	RestrictedRoomMinMembers int             `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
+	RoomKeyRetiredTTL time.Duration        `env:"ROOM_KEY_RETIRED_TTL"      envDefault:"30m"`
+	HealthAddr        string               `env:"HEALTH_ADDR" envDefault:":8081"`
+	PProfEnabled      bool                 `env:"PPROF_ENABLED" envDefault:"false"`
+	Bootstrap         bootstrapConfig      `envPrefix:"BOOTSTRAP_"`
+	Buddy             natsutil.BuddyConfig `envPrefix:"BUDDY_"`
+	// FailoverRevertGrace: post-restoration dual-publish window. Must outlast the
+	// client revert backoff (capped at 5m) — raising the client cap without
+	// raising this reopens the silent recovery gap dual-publishing exists to close.
+	FailoverRevertGrace      time.Duration `env:"FAILOVER_REVERT_GRACE" envDefault:"30m"`
+	RestrictedRoomMinMembers int           `env:"RESTRICTED_ROOM_MIN_MEMBERS" envDefault:"5"`
 	// Microsoft Teams integration. Teams* credentials are required only for the
 	// meetings RPC (Graph onlineMeeting create); the deep-link RPCs use only
 	// EmailDomain. When TenantID/ClientID/ClientSecret are unset the meetings RPC
@@ -226,6 +234,10 @@ func main() {
 		slog.Error("nats connect failed", "error", err)
 		os.Exit(1)
 	}
+	dialer := natsutil.BuddyDialer{
+		Config: cfg.Buddy, CredsFile: cfg.NatsCredsFile,
+		TracerProvider: sdk.TracerProvider(), Propagator: sdk.Propagator, TracingEnabled: sdk.Toggles.Trace,
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("jetstream init failed", "error", err)
@@ -285,8 +297,6 @@ func main() {
 	// dependency. A history-service outage degrades only read receipts
 	// (errcode.Unavailable); core room/membership/subscription operations are
 	// all MongoDB-backed and unaffected.
-	msgReader := newHistoryMessageReader(nc, cfg.SiteID, withHistoryMetrics(publishMetrics))
-
 	// Graph clients back the meetings RPC. Constructed only when the Azure app
 	// credentials are present; otherwise the meetings RPC reports not-configured
 	// while the deep-link RPCs keep working. One app-only client serves both the
@@ -354,48 +364,77 @@ func main() {
 		slog.Warn("badge cache and subauth L2 invalidation DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
-	memberListClient := NewNATSMemberListClient(nc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics))
-	handler := NewHandler(store, keyStore, memberListClient, msgReader, cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
-		func(ctx context.Context, subj string, data []byte, msgID string) error {
-			msg := natsutil.NewMsg(ctx, subj, data)
-			var opts []jetstream.PublishOpt
-			if msgID != "" {
-				opts = append(opts, jetstream.WithMsgID(msgID))
-			}
-			if _, err := js.PublishMsg(ctx, msg, opts...); err != nil {
-				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-				publishMetrics.Failure(ctx, destination, operation, err)
-				return fmt.Errorf("publish to %q: %w", subj, err)
-			}
-			return nil
-		},
-		func(ctx context.Context, subj string, data []byte) error {
-			if err := nc.PublishMsg(ctx, natsutil.NewMsg(ctx, subj, data)); err != nil {
-				destination, operation := natsmetrics.PublishLabelsFromSubject(subj)
-				publishMetrics.Failure(ctx, destination, operation, err)
-				return fmt.Errorf("publish core to %q: %w", subj, err)
-			}
-			return nil
-		},
-		cfg.LegacyRoomOrigins.byID,
-		nc.NatsConn().MaxPayload(),
-		roomRouteMode,
-	)
-	handler.dekProvisioner = dekProvisioner
-	handler.badge = badge
-	handler.valkey = subValkey
-	handler.graphClient = graphClient
-	handler.directoryClient = directoryClient
-	handler.teamsMeetingStore = store
-	handler.teamsEmailDomain = cfg.TeamsEmailDomain
-	handler.roomMembersLimit = cfg.RoomMembersLimit
-	handler.roomMembersCallLimit = cfg.RoomMembersCallLimit
-	handler.mentionableDefaultLimit = cfg.MentionableDefaultLimit
-	handler.mentionableMaxLimit = cfg.MentionableMaxLimit
+	// jsPublisher / corePublisher bind the two publish paths to ONE connection,
+	// so the buddy-side handler publishes on the buddy: a request that reached
+	// this service over the buddy did so because the home cluster is down, and
+	// its reply events have to go back out the way they came. Both lanes report
+	// to the same publish metrics — a failover publish is still a publish.
+	// buildHandler assembles a handler bound to one connection and one route
+	// resolver. Two are built — home and buddy — sharing every store and client,
+	// because the only thing that differs between the lanes is where events go.
+	buildHandler := func(pjs o11ynats.JetStream, pnc *o11ynats.Conn, routes subject.RouteResolver) *Handler {
+		// The request/reply clients bind to the same connection as the
+		// publishers: a member list or history read issued while serving a
+		// buddy-lane request must not go out over the connection whose cluster
+		// is the reason the request came in on the buddy.
+		h := NewHandler(store, keyStore,
+			NewNATSMemberListClient(pnc.NatsConn(), cfg.MemberListTimeout, withMemberListMetrics(publishMetrics)),
+			newHistoryMessageReader(pnc, cfg.SiteID, withHistoryMetrics(publishMetrics)),
+			cfg.SiteID, cfg.MaxRoomSize, cfg.MaxBatchSize, cfg.MemberListTimeout, cfg.RestrictedRoomMinMembers,
+			natsutil.JetStreamPublishFunc(pjs, publishMetrics),
+			natsutil.CorePublishFunc(pnc, publishMetrics),
+			cfg.LegacyRoomOrigins.byID,
+			nc.NatsConn().MaxPayload(),
+			routes,
+		)
+		h.dekProvisioner = dekProvisioner
+		h.badge = badge
+		h.valkey = subValkey
+		h.graphClient = graphClient
+		h.directoryClient = directoryClient
+		h.teamsMeetingStore = store
+		h.teamsEmailDomain = cfg.TeamsEmailDomain
+		h.roomMembersLimit = cfg.RoomMembersLimit
+		h.roomMembersCallLimit = cfg.RoomMembersCallLimit
+		h.mentionableDefaultLimit = cfg.MentionableDefaultLimit
+		h.mentionableMaxLimit = cfg.MentionableMaxLimit
+		return h
+	}
 
-	router := natsrouter.DefaultGuarded(nc, "room-service", cfg.Guard,
-		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	handler.Register(router)
+	// One handler per lane; see failoverlane.RouterFor for why nothing that
+	// speaks NATS may be shared between them. The restore tracker drives the
+	// home lane's dual-publish window after recovery; the router ignores it on
+	// the failover lane, which always routes global.
+	homeRestores := natsutil.TrackRestores(ctx, nc)
+	var handler *Handler
+	routers, err := failoverlane.BindRouters(ctx, nc, js, &dialer,
+		func(ctx context.Context, conn *o11ynats.Conn, laneJS o11ynats.JetStream, lane subject.Lane) (*natsrouter.Router, error) {
+			laneHandler := buildHandler(laneJS, conn,
+				subject.NewLaneRouter(roomRouteMode, lane, homeRestores.RestoredAt, cfg.FailoverRevertGrace))
+			if lane == subject.LaneHome {
+				handler = laneHandler
+			} else {
+				// The standby OUTBOX has to exist before the first federated
+				// event is buffered onto it. Both lanes get its publisher: the
+				// failover lane buffers there by definition, and the home lane
+				// needs it to fall back when a publish finds its own OUTBOX gone.
+				if err := stream.EnsureFailoverStream(ctx, stream.FailoverJS(laneJS),
+					stream.OutboxFailover(cfg.SiteID), cfg.Bootstrap.Enabled, cfg.Buddy.SiteID); err != nil {
+					return nil, err
+				}
+				failoverPublish := natsutil.JetStreamPublishFunc(laneJS, publishMetrics)
+				handler.SetFailoverPublisher(failoverPublish)
+				laneHandler.SetFailoverPublisher(failoverPublish)
+			}
+			r := natsrouter.DefaultGuarded(conn, "room-service", cfg.Guard,
+				natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
+			laneHandler.Register(r)
+			return r, nil
+		})
+	if err != nil {
+		slog.Error("bind routers failed", "error", err)
+		os.Exit(1)
+	}
 
 	healthStop, err := health.ServeWithPprof(cfg.HealthAddr, 5*time.Second, cfg.PProfEnabled,
 		natsutil.HealthCheck(nc),
@@ -407,8 +446,10 @@ func main() {
 
 	slog.Info("room-service running", "site", cfg.SiteID)
 
-	shutdown.Wait(ctx, 25*time.Second,
-		func(ctx context.Context) error { return router.Shutdown(ctx) },
+	// The lane routers stop and the buddy drains first, so neither lane accepts
+	// new work while the other is still finishing.
+	hooks := routers.ShutdownHooks()
+	hooks = append(hooks,
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error {
 			if closer, ok := keyStore.(interface{ Close() error }); ok {
@@ -433,4 +474,5 @@ func main() {
 		func(ctx context.Context) error { return healthStop(ctx) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+	shutdown.Wait(ctx, 25*time.Second, hooks...)
 }

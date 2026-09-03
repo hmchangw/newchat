@@ -152,7 +152,7 @@ func (s *HistoryService) resolvePreview(ctx context.Context, roomID string, rt m
 // Queued rather than written here: the write is optional and the reply is not, and sharing
 // the request's budget skipped it exactly where it mattered — a cold batch is what leaves
 // no budget, and a room that never warms back is what makes the next batch cold. See
-// previewWarmer.
+// PreviewWarmer.
 func (s *HistoryService) warmBackPreview(ctx context.Context, roomID string, w *previewWalk, now time.Time) {
 	// No observed id means no key to invalidate against later.
 	if w.NewestObservedID == "" {
