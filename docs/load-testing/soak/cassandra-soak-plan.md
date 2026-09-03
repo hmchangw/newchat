@@ -143,12 +143,19 @@ is non-destructive. It therefore does **not** cover:
 
 ## D. Config Facts (verified in repo)
 
-- **`compaction_window_size = 72 HOURS`** — pinned in
-  `docker-local/cassandra/init/10-table-messages_by_room.cql:41`,
-  `docker-local/cassandra/migrations/2026-05-twcs-message-tables.cql:40`,
-  `docs/cassandra_message_model.md:160`. Coupled to `MESSAGE_BUCKET_HOURS`
-  (`message-worker/main.go:39`, `history-service/internal/config/config.go:46`,
-  envDefault `72`) — the two must change together.
+- **`compaction_window_size` — the repo disagrees with itself, CONFIRM BEFORE ANY RUN.**
+  The init DDL sets **360**
+  (`docker-local/cassandra/init/10-table-messages_by_room.cql:41`); the TWCS
+  migration still sets **72**
+  (`docker-local/cassandra/migrations/2026-05-twcs-message-tables.cql:40`).
+  `MESSAGE_BUCKET_HOURS` defaults to **360** in every service
+  (`message-worker/main.go:46`, `history-service/internal/config/config.go:53`,
+  `bot-message-worker/main.go:37`). The two must match: a cluster built from the
+  migration and never re-`ALTER`ed spreads one 360 h bucket across five 72 h
+  compaction windows, so a single-bucket read touches five SSTable groups.
+  Query the deployed value and record it — compaction and SSTables-per-read
+  evidence is uninterpretable without it. See
+  [`../extreme-scenarios.md`](../extreme-scenarios.md) X6.
 - **`gc_grace_seconds`** — not set in the repo DDL → Cassandra default
   **864000s (10 days)**. In-repo references: `docs/specs/message-reactions.md:113`,
   `docs/research/dependency-instability-impact.md:214`.
@@ -244,9 +251,17 @@ NATS RPC to history-service):
 
 - **Write fan-out**: channel message = `UnloggedBatch` over 2 tables; thread reply
   = batch over 2–3 tables + bounded reply-count scan + parent UPDATE in 2 tables.
-- **Reply count is a bounded client-side scan, not `COUNT(*)`**: `pkg/threadcount`
-  tallies live rows to `Cap`(99); cost is ~99 live rows **plus soft-deleted rows
-  ahead of them** — heavy soft-delete inflates the scan.
+- **Reply count is an UNBOUNDED client-side scan, not `COUNT(*)`**: `pkg/threadcount`
+  issues a `LIMIT`-less `SELECT` over the whole `thread_messages_by_thread`
+  partition, pages at 5000 rows, and tallies live rows under a 15 s timeout its
+  own comment calls a *"backstop for an unbounded partition"*
+  (`pkg/threadcount/count.go:33-45`). Cost is the **entire thread length**, plus
+  soft-deleted rows (a live `deleted` cell, walked past). It runs on every reply
+  add (`message-worker/store_cassandra.go:346`), every reply delete
+  (`history-service/internal/cassrepo/write.go:379`) and the bot path — so a
+  thread of N replies costs ~N²/2 rows read over its life. No service enforces a
+  maximum thread length, so I7's 500 is an assumption, not a bound. See
+  [`../extreme-scenarios.md`](../extreme-scenarios.md) X1.
 - **LWT (Paxos)**: only soft-delete (`IF deleted != true`) and thread-parent stamp
   (`IF EXISTS`). **pin/unpin is a plain batch, not LWT.**
 - **Tombstone sources** (`deleted = true` is a live cell, not a tombstone):
