@@ -949,35 +949,63 @@ func TestRouter_RegisterVoidRecordsNoRPCSample(t *testing.T) {
 	assert.Empty(t, serverCallMethods(t, reader))
 }
 
-// An undeclared method compiles — RPCMethod is a string type — so registration
-// is where it has to be caught. Left unchecked it would record as "unknown",
-// which is precisely the bucket this work removes.
-func TestRegisterPanicsOnUndeclaredMethod(t *testing.T) {
-	for _, method := range []natsmetrics.RPCMethod{"", "not_registered", natsmetrics.MethodUnknown} {
-		t.Run(string(method), func(t *testing.T) {
-			r := New(startTestNATS(t), "test")
-			assert.Panics(t, func() {
-				Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open", method,
-					func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
-			})
-		})
-	}
+// An undeclared method must not kill the process. Registration is gated
+// earlier — by .semgrep/rpcmethod.yml and by each service's registration test
+// — so a value arriving here means both were bypassed. Degrade to _OTHER,
+// which is alertable, and keep serving: a chat service is worth more than a
+// clean dashboard.
+func TestRegisterDegradesUndeclaredMethodToOther(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "test", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+
+	require.NotPanics(t, func() {
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+			natsmetrics.RPCMethod("not_registered"),
+			func(_ *Context, req testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+	})
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"_OTHER"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
 }
 
-// Two routes sharing a method merge into one series, and nothing downstream can
-// separate them again. The vocabulary test cannot see this — only a router knows
-// which methods one service registered.
-func TestRegisterPanicsOnDuplicateMethodInOneRouter(t *testing.T) {
+// A duplicate method merges two routes into one series — a blunt signal, but
+// refusing the registration would drop the API entirely, which is an outage.
+// Register both and let the per-service golden test be the gate.
+func TestRegisterKeepsBothRoutesOnDuplicateMethod(t *testing.T) {
 	r := New(startTestNATS(t), "room-service")
+	handler := func(_ *Context, req testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil }
+
+	require.NotPanics(t, func() {
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+			natsmetrics.MethodOpenRoom, handler)
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.app.tabs",
+			natsmetrics.MethodOpenRoom, handler)
+	})
+
+	// Both subscriptions live; the map keeps the last claimant.
+	assert.Len(t, r.Routes(), 1)
+}
+
+// Routes is what each service's registration test compares to its golden file,
+// so it must be a copy — a caller holding the router's own map could mutate
+// the dispatch table.
+func TestRoutesReturnsACopy(t *testing.T) {
+	r := New(startTestNATS(t), "test")
 	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
 		natsmetrics.MethodOpenRoom,
 		func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
 
-	assert.Panics(t, func() {
-		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.app.tabs",
-			natsmetrics.MethodOpenRoom,
-			func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
-	})
+	got := r.Routes()
+	require.Len(t, got, 1)
+	delete(got, natsmetrics.MethodOpenRoom)
+	assert.Len(t, r.Routes(), 1, "Routes must not hand out the router's own map")
 }
 
 // Admission rejection replies before the handler runs, so it has no result to

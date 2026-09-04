@@ -204,26 +204,43 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-// addRPCRoute registers a reply-bearing route under a declared, router-unique
-// method. Both checks panic: a route is registered once at startup, and a
-// service whose telemetry is mislabelled should fail to start rather than run
-// blind.
+// addRPCRoute registers a reply-bearing route. Both checks log and degrade
+// rather than panic: every production call site passes a compile-time
+// constant, so a bad method is a code defect caught by .semgrep/rpcmethod.yml
+// and by the service's registration test — both cheaper than a crash loop.
+// Metrics are opt-in (NewFromProviderIfEnabled), so a panic here would kill a
+// process over a value it may not even record.
 func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handlers []HandlerFunc) {
 	if !method.Valid() {
-		panic(fmt.Sprintf("natsrouter: route %s declares rpc method %q, which is not in the natsmetrics vocabulary", pattern, method))
+		slog.Error("natsrouter: route declares an rpc method outside the vocabulary; its samples record as _OTHER",
+			"pattern", pattern, "method", method)
+		method = natsmetrics.MethodOther
 	}
 	r.mu.Lock()
 	if claimed, dup := r.methods[method]; dup {
-		r.mu.Unlock()
-		panic(fmt.Sprintf("natsrouter: rpc method %q is already registered by %s; two routes sharing a method merge into one series", method, claimed))
-	}
-	if r.methods == nil {
-		r.methods = map[natsmetrics.RPCMethod]string{}
+		// Registering anyway: refusing would drop the route, and a merged
+		// series is a blunt signal where a missing API is an outage.
+		slog.Error("natsrouter: rpc method already claimed; these routes' samples merge into one series",
+			"method", method, "claimed_by", claimed, "pattern", pattern)
 	}
 	r.methods[method] = pattern
 	r.mu.Unlock()
 
 	r.addRoute(pattern, method, true, handlers)
+}
+
+// Routes returns the method-to-pattern table this router registered, copied so
+// a caller cannot reach the dispatch state. Each service's registration test
+// compares it to a golden file, which is what pins a route to its correct
+// method — the duplicate check above only catches collisions.
+func (r *Router) Routes() map[natsmetrics.RPCMethod]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[natsmetrics.RPCMethod]string, len(r.methods))
+	for m, p := range r.methods {
+		out[m] = p
+	}
+	return out
 }
 
 // addVoidRoute registers a fire-and-forget route. It has no reply subject, so
