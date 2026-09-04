@@ -87,7 +87,7 @@ func TestNormalizersAcceptEveryDeclaredValue(t *testing.T) {
 // only the labels PublishLabelsFromSubject and the fixed publish call sites can
 // actually produce, and the request families are keyed by RPCMethod. The
 // publish figure is a real upper bound again, and the request ones count the
-// vocabulary plus its "unknown" record-time fallback, which is a reachable
+// vocabulary plus its "_OTHER" record-time fallback, which is a reachable
 // label value but not a registerable method.
 func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 	assert.Equal(t, 75, len(allEventTypes)*len(allOutcomes),
@@ -96,9 +96,9 @@ func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 		"chat.nats.terminal.failures: event_type x reason")
 	assert.Equal(t, 924, len(allDestinations)*len(allPublishOperations)*len(allPublishOutcomes),
 		"chat.nats.publish.failures: destination_kind x operation x outcome")
-	assert.Equal(t, 744, (len(allRPCMethods)+1)*len(allRequestOutcomes),
+	assert.Equal(t, 744, (len(rpcMethods)+1)*len(allRequestOutcomes),
 		"rpc.client.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
-	assert.Equal(t, 837, (len(allRPCMethods)+1)*len(allRequestResults),
+	assert.Equal(t, 837, (len(rpcMethods)+1)*len(allRequestResults),
 		"rpc.server.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 }
 

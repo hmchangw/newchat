@@ -262,7 +262,7 @@ func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	assert.Equal(t, string(OperationUnknown), attrs(publishPoints[0])["operation"])
 	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, string(MethodUnknown), attrsOf(requestPoints[0])["rpc.method"])
+	assert.Equal(t, string(MethodOther), attrsOf(requestPoints[0])["rpc.method"])
 }
 
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {

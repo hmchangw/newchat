@@ -8,58 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allRPCMethods is every method the fleet registers, plus the client-only one.
-// A new RPC route adds its constant here; the guards below then hold it to the
-// naming rule, and Valid() rejects anything absent from it at registration.
-//
-// 92 entries for 92 routes plus one client-only method, because room-service
-// and user-service share MethodMarkAllThreadsRead — two halves of one logical
-// operation across a hop. Uniqueness that matters is per router, not per fleet;
-// natsrouter enforces that.
-var allRPCMethods = []RPCMethod{
-	// room-service
-	MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,
-	MethodGetRoomAppTabs, MethodGetRoomAppCommandMenu, MethodListOrgMembers,
-	MethodListMembers, MethodListMemberStatuses, MethodListMentionableSubscriptions,
-	MethodGetRoomKey, MethodMarkMessageRead, MethodListMessageReaders,
-	MethodMarkThreadRead, MethodUpdateMemberRole, MethodRemoveMember, MethodAddMembers,
-	MethodRenameRoom, MethodSetRoomRestricted, MethodBatchGetRoomsInfo,
-	MethodBatchGetThreadRoomsInfo, MethodMarkAllThreadsRead, MethodEnsureRoomKey,
-	MethodCreateRoom, MethodStartTeamsRoomCall, MethodStartTeamsUserCall,
-	MethodCreateTeamsMeeting,
-	// history-service
-	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
-	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-	MethodBatchGetRooms, MethodListPinnedMessages, MethodGetThreadParentMessages,
-	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
-	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
-	MethodMigrateEditMessage, MethodMigrateDeleteMessage,
-	// user-service (MethodMarkAllThreadsRead is shared with room-service)
-	MethodGetCurrentUser, MethodGetUserStatus, MethodGetUserProfile, MethodSetUserStatus,
-	MethodGetSettings, MethodSetSettings, MethodListPriorityContacts,
-	MethodAddPriorityContact, MethodRemovePriorityContact, MethodGetChatlist,
-	MethodCreateChatlistSection, MethodDeleteChatlistSection, MethodRenameChatlistSection,
-	MethodReorderChatlistSections, MethodSetChatlistSectionSortMode,
-	MethodListSubscriptions, MethodListUserThreads, MethodGetThreadUnreadSummary,
-	MethodListChannelSubscriptions, MethodGetDMSubscription,
-	MethodGetSubscriptionByRoom, MethodCountSubscriptions, MethodSetAppSubscription,
-	MethodListApps, MethodListAppCategories, MethodSetSSOToken, MethodRefreshSSOToken,
-	MethodBatchGetBadgeCounts,
-	// search-service
-	MethodSearchMessages, MethodSearchRooms, MethodSearchApps, MethodSearchUsers,
-	MethodSearchOrgs,
-	// media-service / translation-service / room-worker
-	MethodListEmojis, MethodDeleteEmoji, MethodTranslateText, MethodCreateDMRoom,
-	// user-presence-service
-	MethodSetManualPresence, MethodBatchGetPresence, MethodBatchGetPeerPresence,
-	// bot lane
-	MethodCreateBotRoom, MethodAddBotRoomMembers, MethodRemoveBotRoomMembers,
-	MethodGetBotRoom, MethodEnsureBotDMRoom, MethodSendRoomMessage, MethodSendDM,
-	// client-only: chat.presence.{site}.request.snapshot has no subscriber in
-	// this repo and is gated off by PRESENCE_RPC_ENABLED=false.
-	MethodGetPresenceSnapshot,
-}
-
 var methodFormat = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
 
 // verbs is the closed set a method name may start with. It exists so a name
@@ -76,7 +24,7 @@ var verbs = map[string]bool{
 }
 
 func TestRPCMethodNamesFollowTheVocabularyRule(t *testing.T) {
-	for _, m := range allRPCMethods {
+	for _, m := range rpcMethods {
 		t.Run(string(m), func(t *testing.T) {
 			name := string(m)
 			assert.Regexp(t, methodFormat, name, "must be lower snake_case")
@@ -86,6 +34,44 @@ func TestRPCMethodNamesFollowTheVocabularyRule(t *testing.T) {
 			assert.True(t, verbs[verb], "%q is not in the allowed verb set; verb comes first", verb)
 		})
 	}
+}
+
+// The naming rule is only a rule if it runs over the same list the lookup
+// reads. It did not: the guards iterated a test-file copy while Valid() read a
+// switch, so a method added to the switch but not the copy was registerable
+// while violating snake_case, the verb set and the length cap.
+func TestVocabularyGuardsRunOverTheProductionList(t *testing.T) {
+	require.NotEmpty(t, rpcMethods)
+	for _, m := range rpcMethods {
+		t.Run(string(m), func(t *testing.T) {
+			name := string(m)
+			assert.Regexp(t, methodFormat, name, "must be lower snake_case")
+			assert.LessOrEqual(t, len(name), 40)
+			verb, _, ok := cutFirstToken(name)
+			require.True(t, ok, "must be <verb>_<object>")
+			assert.True(t, verbs[verb], "%q is not an allowed verb", verb)
+		})
+	}
+}
+
+// _OTHER is the semconv-mandated value for an unrecognized method
+// (semconv/v1.40.0/attribute_group.go:13902 — "the attribute MUST be set to
+// `_OTHER`"). It is the fallback, never a method a route may claim, so it is
+// absent from rpcMethods and exempt from the naming rule above.
+func TestOtherIsTheFallbackAndNotRegisterable(t *testing.T) {
+	assert.Equal(t, RPCMethod("_OTHER"), MethodOther)
+	assert.NotContains(t, rpcMethods, MethodOther)
+	assert.False(t, MethodOther.Valid())
+	assert.Equal(t, MethodOther, normalizeRPCMethod(RPCMethod("not_registered")))
+	assert.Equal(t, MethodOther, normalizeRPCMethod(RPCMethod("")))
+}
+
+func TestEveryDeclaredMethodIsValidAndNormalizesToItself(t *testing.T) {
+	for _, m := range rpcMethods {
+		assert.True(t, m.Valid(), "%q must be registerable", m)
+		assert.Equal(t, m, normalizeRPCMethod(m))
+	}
+	assert.Len(t, rpcMethods, 92)
 }
 
 func cutFirstToken(name string) (head, tail string, ok bool) {
@@ -103,23 +89,23 @@ func cutFirstToken(name string) (head, tail string, ok bool) {
 // single service registered.
 func TestRPCMethodListHasNoDuplicateEntries(t *testing.T) {
 	seen := map[RPCMethod]bool{}
-	for _, m := range allRPCMethods {
+	for _, m := range rpcMethods {
 		assert.False(t, seen[m], "duplicate rpc method %q", m)
 		seen[m] = true
 	}
-	assert.Len(t, allRPCMethods, 92)
+	assert.Len(t, rpcMethods, 92)
 }
 
 // Valid is what natsrouter calls at registration, so a gap here is a route that
 // panics at startup despite naming a real constant.
 func TestValidAcceptsEveryDeclaredMethodAndNothingElse(t *testing.T) {
-	for _, m := range allRPCMethods {
+	for _, m := range rpcMethods {
 		assert.True(t, m.Valid(), "%q must be registerable", m)
 		assert.Equal(t, m, normalizeRPCMethod(m))
 	}
 	assert.False(t, RPCMethod("").Valid(), "empty is not a method")
 	assert.False(t, RPCMethod("not_registered").Valid())
-	assert.False(t, MethodUnknown.Valid(), "the fallback is not registerable")
-	assert.Equal(t, MethodUnknown, normalizeRPCMethod(RPCMethod("not_registered")))
-	assert.Equal(t, MethodUnknown, normalizeRPCMethod(RPCMethod("")))
+	assert.False(t, MethodOther.Valid(), "the fallback is not registerable")
+	assert.Equal(t, MethodOther, normalizeRPCMethod(RPCMethod("not_registered")))
+	assert.Equal(t, MethodOther, normalizeRPCMethod(RPCMethod("")))
 }

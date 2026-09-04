@@ -117,57 +117,87 @@ const (
 	// this repo and is gated off by PRESENCE_RPC_ENABLED=false.
 	MethodGetPresenceSnapshot RPCMethod = "get_presence_snapshot"
 
-	// MethodUnknown is the record-time fallback for a value that should never
-	// occur. It is deliberately not part of the registerable vocabulary above.
-	MethodUnknown RPCMethod = "unknown"
+	// MethodOther is the value recorded for a method outside the vocabulary.
+	// semconv makes this normative for rpc.method: "When the method is not
+	// recognized … the attribute MUST be set to `_OTHER`"
+	// (semconv/v1.40.0/attribute_group.go:13902).
+	//
+	// In steady state it must not appear at all. Registration is gated by a
+	// semgrep rule and a per-service registration test, so a value reaching here
+	// means both were bypassed — alert on it rather than treating it as a bucket.
+	MethodOther RPCMethod = "_OTHER"
 )
+
+// rpcMethods is the vocabulary. It is the ONLY list: Valid and
+// normalizeRPCMethod read it, and the naming guards in rpcmethod_test.go
+// iterate it. A method declared above but missing here is not registerable,
+// which is a loud failure; the previous shape — a switch here and a separate
+// copy in the test file — made the opposite mistake silent.
+var rpcMethods = []RPCMethod{
+	// room-service
+	MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,
+	MethodGetRoomAppTabs, MethodGetRoomAppCommandMenu, MethodListOrgMembers,
+	MethodListMembers, MethodListMemberStatuses, MethodListMentionableSubscriptions,
+	MethodGetRoomKey, MethodMarkMessageRead, MethodListMessageReaders,
+	MethodMarkThreadRead, MethodUpdateMemberRole, MethodRemoveMember, MethodAddMembers,
+	MethodRenameRoom, MethodSetRoomRestricted, MethodBatchGetRoomsInfo,
+	MethodBatchGetThreadRoomsInfo, MethodMarkAllThreadsRead, MethodEnsureRoomKey,
+	MethodCreateRoom, MethodStartTeamsRoomCall, MethodStartTeamsUserCall,
+	MethodCreateTeamsMeeting,
+
+	// history-service
+	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
+	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
+	MethodBatchGetRooms, MethodListPinnedMessages, MethodGetThreadParentMessages,
+	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
+	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
+	MethodMigrateEditMessage, MethodMigrateDeleteMessage,
+
+	// user-service (MethodMarkAllThreadsRead is shared with room-service)
+	MethodGetCurrentUser, MethodGetUserStatus, MethodGetUserProfile, MethodSetUserStatus,
+	MethodGetSettings, MethodSetSettings, MethodListPriorityContacts,
+	MethodAddPriorityContact, MethodRemovePriorityContact, MethodGetChatlist,
+	MethodCreateChatlistSection, MethodDeleteChatlistSection, MethodRenameChatlistSection,
+	MethodReorderChatlistSections, MethodSetChatlistSectionSortMode,
+	MethodListSubscriptions, MethodListUserThreads, MethodGetThreadUnreadSummary,
+	MethodListChannelSubscriptions, MethodGetDMSubscription,
+	MethodGetSubscriptionByRoom, MethodCountSubscriptions, MethodSetAppSubscription,
+	MethodListApps, MethodListAppCategories, MethodSetSSOToken, MethodRefreshSSOToken,
+	MethodBatchGetBadgeCounts,
+
+	// search-service
+	MethodSearchMessages, MethodSearchRooms, MethodSearchApps, MethodSearchUsers,
+	MethodSearchOrgs,
+
+	// media-service / translation-service / room-worker
+	MethodListEmojis, MethodDeleteEmoji, MethodTranslateText, MethodCreateDMRoom,
+
+	// user-presence-service
+	MethodSetManualPresence, MethodBatchGetPresence, MethodBatchGetPeerPresence,
+
+	// bot lane
+	MethodCreateBotRoom, MethodAddBotRoomMembers, MethodRemoveBotRoomMembers,
+	MethodGetBotRoom, MethodEnsureBotDMRoom, MethodSendRoomMessage, MethodSendDM,
+
+	// client-only: chat.presence.{site}.request.snapshot has no subscriber in
+	// this repo and is gated off by PRESENCE_RPC_ENABLED=false.
+	MethodGetPresenceSnapshot,
+}
+
+var rpcMethodSet = func() map[RPCMethod]struct{} {
+	set := make(map[RPCMethod]struct{}, len(rpcMethods))
+	for _, m := range rpcMethods {
+		set[m] = struct{}{}
+	}
+	return set
+}()
 
 // normalizeRPCMethod bounds the label at record time.
 func normalizeRPCMethod(m RPCMethod) RPCMethod {
-	switch m {
-	// room-service
-	case MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,
-		MethodGetRoomAppTabs, MethodGetRoomAppCommandMenu, MethodListOrgMembers,
-		MethodListMembers, MethodListMemberStatuses, MethodListMentionableSubscriptions,
-		MethodGetRoomKey, MethodMarkMessageRead, MethodListMessageReaders,
-		MethodMarkThreadRead, MethodUpdateMemberRole, MethodRemoveMember, MethodAddMembers,
-		MethodRenameRoom, MethodSetRoomRestricted, MethodBatchGetRoomsInfo,
-		MethodBatchGetThreadRoomsInfo, MethodMarkAllThreadsRead, MethodEnsureRoomKey,
-		MethodCreateRoom, MethodStartTeamsRoomCall, MethodStartTeamsUserCall,
-		MethodCreateTeamsMeeting,
-		// history-service
-		MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
-		MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-		MethodBatchGetRooms, MethodListPinnedMessages, MethodGetThreadParentMessages,
-		MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
-		MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
-		MethodMigrateEditMessage, MethodMigrateDeleteMessage,
-		// user-service
-		MethodGetCurrentUser, MethodGetUserStatus, MethodGetUserProfile, MethodSetUserStatus,
-		MethodGetSettings, MethodSetSettings, MethodListPriorityContacts,
-		MethodAddPriorityContact, MethodRemovePriorityContact, MethodGetChatlist,
-		MethodCreateChatlistSection, MethodDeleteChatlistSection, MethodRenameChatlistSection,
-		MethodReorderChatlistSections, MethodSetChatlistSectionSortMode,
-		MethodListSubscriptions, MethodListUserThreads, MethodGetThreadUnreadSummary,
-		MethodListChannelSubscriptions, MethodGetDMSubscription,
-		MethodGetSubscriptionByRoom, MethodCountSubscriptions, MethodSetAppSubscription,
-		MethodListApps, MethodListAppCategories, MethodSetSSOToken, MethodRefreshSSOToken,
-		MethodBatchGetBadgeCounts,
-		// search-service
-		MethodSearchMessages, MethodSearchRooms, MethodSearchApps, MethodSearchUsers,
-		MethodSearchOrgs,
-		// media-service / translation-service / room-worker
-		MethodListEmojis, MethodDeleteEmoji, MethodTranslateText, MethodCreateDMRoom,
-		// user-presence-service
-		MethodSetManualPresence, MethodBatchGetPresence, MethodBatchGetPeerPresence,
-		// bot lane
-		MethodCreateBotRoom, MethodAddBotRoomMembers, MethodRemoveBotRoomMembers,
-		MethodGetBotRoom, MethodEnsureBotDMRoom,
-		MethodSendRoomMessage, MethodSendDM, MethodGetPresenceSnapshot:
+	if m.Valid() {
 		return m
-	default:
-		return MethodUnknown
 	}
+	return MethodOther
 }
 
 // Valid reports whether m is a declared method, and is what natsrouter checks
@@ -176,8 +206,9 @@ func normalizeRPCMethod(m RPCMethod) RPCMethod {
 // hole registration is meant to close, and the metric label must stay bounded
 // whichever way the value arrives.
 //
-// MethodUnknown is deliberately not valid. It is the record-time fallback for a
+// MethodOther is deliberately not valid. It is the record-time fallback for a
 // value that should never occur, not a method a route may claim.
 func (m RPCMethod) Valid() bool {
-	return m != MethodUnknown && normalizeRPCMethod(m) == m
+	_, ok := rpcMethodSet[m]
+	return ok
 }
