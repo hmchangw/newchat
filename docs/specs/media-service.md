@@ -446,6 +446,8 @@ Write endpoints require a botplatform session token (`x-user-id` +
 `sessions` collection (`pkg/session`) directly — the same lookup
 botplatform-service's `POST /api/v1/auth/validate` performs, without the HTTP
 hop. media-service has no `pkg/oidc` dependency: SSO users never write here.
+The validator is wired unconditionally over the service's own `MONGO_URI`
+(required), so no configuration serves these endpoints anonymously.
 
 | Endpoint | Rule | Failure |
 |---|---|---|

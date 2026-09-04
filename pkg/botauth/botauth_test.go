@@ -306,9 +306,8 @@ func TestAuthenticate_NoUpstreamCallWhenCredentialsMissing(t *testing.T) {
 	assert.Empty(t, stub.gotToken, "an empty credential must be rejected before the upstream call")
 }
 
-// TestValidator_Validate_CoalescesConcurrentCalls pins the stampede guard: N
-// simultaneous requests for one token must cost botplatform a single validation.
-
+// TestErrInvalidToken_NotShared guards against handing every caller the same
+// *errcode.Error: its fields are exported, so a shared pointer is one mutation
 // (or one concurrent write) away from corrupting unrelated requests.
 func TestErrInvalidToken_NotShared(t *testing.T) {
 	stub := &stubValidator{principal: principal.Principal{UserID: "u1"}}

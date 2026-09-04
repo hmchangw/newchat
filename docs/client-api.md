@@ -8908,11 +8908,11 @@ Every `/api/v1` endpoint takes exactly one credential:
 | Header(s) | Credential | Notes |
 |---|---|---|
 | `ssoToken` | OIDC access token | **Recommended.** Verified locally against cached JWKS — no network hop. |
-| `x-user-id` + `x-auth-token` | Botplatform session | Costs a botplatform round trip, and `pkg/botauth` caps concurrent validations at 64. |
+| `x-user-id` + `x-auth-token` | Botplatform session | One MongoDB point read of the `sessions` collection per request (`pkg/botauth`); no cache, so a revoked session is rejected on its next request. |
 
 Supplying both is a `400`. The account is taken from the verified credential, never from the request, so a caller can only ever read its own data — the same guarantee NATS subject scoping provides.
 
-> **Use `ssoToken` for sidebar initialization.** The session-token path depends on botplatform being reachable and shares a 64-validation ceiling, which binds well before the server's own concurrency cap during a mass reconnect.
+> **Use `ssoToken` for sidebar initialization.** The session-token path costs a MongoDB read per request, so a mass reconnect of session-token clients lands on the database rather than on the local JWKS cache.
 
 ### 13.2 HTTP — GET /api/v1/subscriptions
 
