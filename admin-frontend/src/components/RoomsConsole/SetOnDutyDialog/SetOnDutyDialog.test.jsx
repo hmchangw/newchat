@@ -60,6 +60,43 @@ describe('SetOnDutyDialog', () => {
     expect(await screen.findByRole('radio', { name: /helperbot.*bot/i })).toBeInTheDocument()
   })
 
+  it('disables a bot member so it cannot be made owner', async () => {
+    renderDialog()
+    expect(await ownerRadio('helperbot')).toBeDisabled()
+    expect(await ownerRadio('alice')).toBeEnabled()
+    expect(await ownerRadio('bob')).toBeEnabled()
+  })
+
+  it('a click on a bot never reaches the owner state', async () => {
+    renderDialog()
+    fireEvent.click(await ownerRadio('helperbot'))
+
+    // Asserting on the DOM's checked flag would test jsdom, not the dialog:
+    // fireEvent dispatches to a disabled input where a browser sends nothing,
+    // and the default action ticks the box. What matters is that onChange never
+    // ran, so no owner was committed and there is nothing to submit.
+    expect(screen.getByRole('button', { name: /set onduty/i })).toBeDisabled()
+
+    fireEvent.click(await ownerRadio('alice'))
+    fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
+    await waitFor(() =>
+      expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
+        onDuty: true,
+        ownerAccount: 'alice',
+      }),
+    )
+  })
+
+  it('says so when every member is a bot, and keeps confirm disabled', async () => {
+    listRoomMembers.mockResolvedValue([
+      { account: 'helperbot', isBot: true },
+      { account: 'alertbot', isBot: true },
+    ])
+    renderDialog()
+    expect(await screen.findByText(/only bot members/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /set onduty/i })).toBeDisabled()
+  })
+
   it('starts with no owner selected', async () => {
     renderDialog()
     const group = await screen.findByRole('radiogroup', { name: /owner/i })
