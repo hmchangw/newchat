@@ -87,7 +87,14 @@ Publisher / request-reply (label `site`):
 | `rpc_server_call_duration_seconds` | histogram | `rpc_method`, `error_type` | Inbound handler latency at the `natsrouter` boundary, same shape. SLO-4/5 read this; see [`docs/load-testing/common/sli-slo.md`](../../docs/load-testing/common/sli-slo.md) §3 for the good/valid expressions — the denominator is **not** the bare `_count`, because the 4xx classes are excluded from valid events. |
 
 Both RPC families carry `rpc_system_name="nats"`. `rpc_method` is a bounded operation, never the
-subject: services whose subjects have no operation mapping yet record `rpc_method="unknown"`.
+subject: it is declared at route registration (`natsrouter.Register`/`RegisterNoBody`/
+`RegisterOptionalBody` require a `natsmetrics.RPCMethod` constant to compile), and `RegisterVoid`
+routes (fire-and-forget, no reply) carry no method and record no `rpc_server_call_duration_seconds`
+sample at all — they are absent from this family, not present with an empty label.
+`rpc_method="_OTHER"` is **not** a fallback bucket for an unmapped subject; it only appears when
+registration itself was wrong (an undeclared method reaching `addRPCRoute`, which the semgrep rule
+and each service's `routes_test.go` golden test are meant to catch first). It should be zero in
+steady state — alert on any non-zero rate.
 
 **`pkg/cachemetrics`** — `cache_hits_total` / `cache_misses_total` / `cache_errors_total`, labels
 `cache`, `tier`. A collapsing hit ratio or rising `cache_errors_total` = a cache tier degraded → backing-store load rises.

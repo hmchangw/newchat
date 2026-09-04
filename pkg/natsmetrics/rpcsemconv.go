@@ -43,8 +43,8 @@ const (
 	rpcSystemNATS = "nats"
 )
 
-// rpcDurationBuckets is the one place these families deliberately depart from
-// the convention.
+// rpcDurationBuckets is one of two places these families deliberately depart
+// from the convention (rpc.method's naming is the other, below).
 //
 // The RPC convention prescribes 14 boundaries — o11y's 11 plus 0.075, 0.75 and
 // 7.5 — and asks for the identical set for http.server.request.duration. o11y
@@ -55,11 +55,24 @@ const (
 // bucket layouts, so their percentiles could not be compared and no single
 // recording rule would fit both.
 //
-// The deviation is confined to boundaries. Instrument names, the `s` unit,
-// rpc.system.name, rpc.method and the conditional error.type all still conform,
-// which is where the interoperability actually lives: a generic RPC dashboard
-// still finds and groups these series, and only histogram_quantile's
-// interpolation points differ.
+// The deviation is not confined to boundaries: rpc.method departs too, and is
+// recorded here for the same reason — a claimed conformance is worse than a
+// stated deviation.
+//
+// The convention asks for a fully-qualified method name — its own example is
+// `EchoService/Echo` — but RPCMethod values are short (`rename_room`), chosen
+// for Grafana readability over one more dotted segment nobody reads at a
+// glance. `service_name`, already a constant label on every series via
+// `WithResourceAsConstantLabels`, carries the qualifier a fully-qualified name
+// would: `service_name="room-service"` plus `rpc_method="rename_room"` is the
+// same join key as `RoomService/RenameRoom` would be, just two labels instead
+// of one string.
+//
+// Instrument names, the `s` unit, rpc.system.name, the `_OTHER` fallback for
+// an unrecognized method, and the conditional error.type do conform, which is
+// where the interoperability actually lives: a generic RPC dashboard still
+// finds and groups these series, and only histogram_quantile's interpolation
+// points and the method label's shape differ.
 //
 // A latency SLO's bound therefore has to be chosen from this set. SLO-5 was
 // drafted at 300 ms, which no set in play has a boundary for; it now reads

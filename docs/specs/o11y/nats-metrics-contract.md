@@ -731,22 +731,53 @@ each take a required `natsmetrics.RPCMethod`, so a route registered without one
 does not compile. `RegisterVoid` takes no method and records no
 `rpc.server.call.duration` sample at all — which is why user-presence-service's
 `hello`/`ping`/`activity`/`bye` heartbeat lane no longer appears in this family:
-the `rpc_method="unknown"` series has disappeared, not shrunk. Registration
-panics on a method that fails `Valid()` (an empty string, an unregistered
-string, or `MethodUnknown` itself) and panics on a method already claimed by
-another route in the same router. Neither check catches a route registered
-with a valid, unclaimed method that is simply the wrong one for that route —
-nothing pins a route to its correct method, so a copy-paste of the wrong
-constant compiles, passes the duplicate check, and silently mislabels that
-route's samples.
+the `rpc_method="unknown"` series has disappeared, not shrunk.
+
+Three gates keep the vocabulary closed, from cheapest to last-resort:
+
+1. **`.semgrep/rpcmethod.yml`**, a SAST rule, catches an untyped string literal
+   in the method argument at review time — the type system alone doesn't: a
+   string literal is assignable to `RPCMethod`, so `Register(r, pattern,
+   "rename_room", fn)` compiles.
+2. **Each service's `routes_test.go`**, comparing `Router.Routes()` to
+   `testdata/routes.golden` via `testutil.AssertRoutesGolden`, catches a
+   *valid* but wrong constant — one that compiles, passes every runtime check,
+   and simply names the wrong route. This is what actually pins a route to its
+   correct method: a copy-pasted wrong constant shows up as a one-line diff in
+   review. Ten goldens, 92 routes.
+3. **Runtime, in `addRPCRoute`**, is the backstop for whatever reaches it
+   anyway: an undeclared method logs `slog.Error` and degrades that route to
+   `MethodOther` (`_OTHER`) rather than panicking; a method already claimed by
+   another route in the same router logs and registers both routes anyway,
+   merging their samples into one series rather than dropping either route.
+   Registration no longer panics, deliberately: every service builds its
+   publisher through `NewFromProviderIfEnabled`, so with metrics off a bad
+   label records nothing at all — panicking would kill the process over a
+   value it might not even record. Eight of the ten services had no test that
+   ran their real registration table before gate 2 above existed, so the
+   panic's first firing could as easily be a production pod as a review
+   comment.
+
+Gate 2 has two blind spots, both by construction rather than oversight:
+
+- `Routes()` is keyed by method, so a duplicate registration within one
+  service collapses two routes into a single golden line — the file
+  *shrinks*, it does not grow a visibly-wrong entry. The router's
+  `slog.Error` on the duplicate is the louder signal for that case, not the
+  golden diff.
+- `RegisterVoid` routes carry no method and never enter `Routes()`, so they
+  are invisible to this gate by construction. user-presence-service's four
+  fire-and-forget routes (`hello`/`ping`/`activity`/`bye`) are pinned by
+  nothing.
 
 Names follow `<verb>_<object>[_qualifier]` in lower `snake_case`, guarded by
-`pkg/natsmetrics/rpcmethod_test.go` (92 constants for 91 routes plus one
-client-only method). Uniqueness
-is per router, not per fleet: `service_name` + `rpc_method` is the identity
-key natsrouter's duplicate check enforces, which is what lets room-service and
-user-service each register their own `mark_all_threads_read` without
-colliding.
+`pkg/natsmetrics/rpcmethod_test.go`: 91 method names cover 92 routes
+(`mark_all_threads_read` is registered by both room-service and user-service —
+two halves of one operation across a hop), plus one client-only method
+(`get_presence_snapshot`), giving 92 constants. Uniqueness is per router, not
+per fleet: `service_name` + `rpc_method` is the identity key natsrouter's
+duplicate check enforces, which is what lets room-service and user-service
+each register their own `mark_all_threads_read` without colliding.
 
 Three methods carry no live traffic today, found while auditing the
 vocabulary:
