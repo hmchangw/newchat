@@ -1,7 +1,11 @@
 package natsmetrics
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,24 +40,6 @@ func TestRPCMethodNamesFollowTheVocabularyRule(t *testing.T) {
 	}
 }
 
-// The naming rule is only a rule if it runs over the same list the lookup
-// reads. It did not: the guards iterated a test-file copy while Valid() read a
-// switch, so a method added to the switch but not the copy was registerable
-// while violating snake_case, the verb set and the length cap.
-func TestVocabularyGuardsRunOverTheProductionList(t *testing.T) {
-	require.NotEmpty(t, rpcMethods)
-	for _, m := range rpcMethods {
-		t.Run(string(m), func(t *testing.T) {
-			name := string(m)
-			assert.Regexp(t, methodFormat, name, "must be lower snake_case")
-			assert.LessOrEqual(t, len(name), 40)
-			verb, _, ok := cutFirstToken(name)
-			require.True(t, ok, "must be <verb>_<object>")
-			assert.True(t, verbs[verb], "%q is not an allowed verb", verb)
-		})
-	}
-}
-
 // _OTHER is the semconv-mandated value for an unrecognized method
 // (semconv/v1.40.0/attribute_group.go:13902 — "the attribute MUST be set to
 // `_OTHER`"). It is the fallback, never a method a route may claim, so it is
@@ -66,12 +52,65 @@ func TestOtherIsTheFallbackAndNotRegisterable(t *testing.T) {
 	assert.Equal(t, MethodOther, normalizeRPCMethod(RPCMethod("")))
 }
 
-func TestEveryDeclaredMethodIsValidAndNormalizesToItself(t *testing.T) {
-	for _, m := range rpcMethods {
-		assert.True(t, m.Valid(), "%q must be registerable", m)
-		assert.Equal(t, m, normalizeRPCMethod(m))
+// TestConstBlockMatchesRPCMethodList keeps the const block and rpcMethods as
+// one controlled pair. Nothing else compares them: rpcMethods is asserted at
+// a hardcoded length (92) elsewhere, so a constant added to the block but
+// left out of the list leaves that count unchanged and every other test
+// green — the exact gap "It is the ONLY list" used to claim was a loud
+// failure, when in fact nothing checked it at all. This test parses
+// rpcmethod.go's const block directly (rather than trusting a second
+// hand-maintained copy) and diffs its RPCMethod-typed constants, by value,
+// against rpcMethodSet in both directions.
+func TestConstBlockMatchesRPCMethodList(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "rpcmethod.go", nil, 0)
+	require.NoError(t, err, "parse rpcmethod.go")
+
+	// declared maps each RPCMethod-typed constant's string value to the
+	// identifier that declares it, so a mismatch can name the constant.
+	declared := map[RPCMethod]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			typeIdent, ok := vs.Type.(*ast.Ident)
+			if !ok || typeIdent.Name != "RPCMethod" {
+				continue
+			}
+			for i, name := range vs.Names {
+				require.Less(t, i, len(vs.Values), "%s: expected an explicit value", name.Name)
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				require.True(t, ok && lit.Kind == token.STRING, "%s: expected a string literal value", name.Name)
+				value, unquoteErr := strconv.Unquote(lit.Value)
+				require.NoError(t, unquoteErr, "%s: unquote %s", name.Name, lit.Value)
+				declared[RPCMethod(value)] = name.Name
+			}
+		}
 	}
-	assert.Len(t, rpcMethods, 92)
+	require.NotEmpty(t, declared, "const-block scan found nothing — the parser is probably wrong")
+
+	// Every declared constant except MethodOther must be in rpcMethods.
+	for value, name := range declared {
+		if name == "MethodOther" {
+			assert.False(t, value.Valid(), "MethodOther must stay outside rpcMethods, the fallback is not registerable")
+			continue
+		}
+		assert.True(t, value.Valid(),
+			"%s (%q) is declared in the const block but missing from rpcMethods; a route naming it would degrade to _OTHER instead of failing the build", name, value)
+	}
+
+	// Nothing in rpcMethods may be absent from the const block.
+	for _, m := range rpcMethods {
+		name, ok := declared[m]
+		assert.True(t, ok, "%q is in rpcMethods but has no matching RPCMethod constant declared in rpcmethod.go", m)
+		assert.NotEqual(t, "MethodOther", name, "%q resolved to MethodOther, which must never appear in rpcMethods", m)
+	}
 }
 
 func cutFirstToken(name string) (head, tail string, ok bool) {

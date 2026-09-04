@@ -128,11 +128,12 @@ const (
 	MethodOther RPCMethod = "_OTHER"
 )
 
-// rpcMethods is the vocabulary. It is the ONLY list: Valid and
-// normalizeRPCMethod read it, and the naming guards in rpcmethod_test.go
-// iterate it. A method declared above but missing here is not registerable,
-// which is a loud failure; the previous shape — a switch here and a separate
-// copy in the test file — made the opposite mistake silent.
+// rpcMethods is the vocabulary. Valid, normalizeRPCMethod and the naming
+// guards in rpcmethod_test.go all read this list, not the const block above.
+// TestConstBlockMatchesRPCMethodList keeps the two in step by parsing the
+// const block with go/parser and diffing it against rpcMethodSet, so a
+// constant added to one but not the other fails that test instead of passing
+// silently at 92/92 by coincidence.
 var rpcMethods = []RPCMethod{
 	// room-service
 	MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,

@@ -45,9 +45,9 @@ type Router struct {
 
 	mu   sync.Mutex
 	subs []*nats.Subscription
-	// methods maps each claimed rpc.method to the pattern that claimed it, so a
-	// second route naming the same method is rejected at registration instead of
-	// silently merging two routes into one series.
+	// methods maps each claimed rpc.method to the pattern that claimed it. A
+	// second route naming the same method is logged and both routes are
+	// registered, merging into one metric series rather than being rejected.
 	methods map[natsmetrics.RPCMethod]string
 }
 

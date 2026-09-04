@@ -31,7 +31,7 @@ const routesGoldenPath = "testdata/routes.golden"
 // already does, which is the gate quietly switching itself off. Regenerate it
 // instead, by deleting it and re-running the service's tests:
 //
-//	rm <service>/testdata/routes.golden && make test SERVICE=<service>
+//	rm <package dir>/testdata/routes.golden && make test SERVICE=<service>
 //
 // That writes the file from the live registration table and fails once, so the
 // new table lands in the diff for review rather than being absorbed silently.
@@ -54,5 +54,5 @@ func AssertRoutesGolden(t *testing.T, routes map[natsmetrics.RPCMethod]string) {
 	}
 	require.NoError(t, err)
 	require.Equal(t, string(want), got,
-		"route-to-method table changed; if the change is intended, regenerate: rm %s && make test SERVICE=<service>", routesGoldenPath)
+		"route-to-method table changed; if the change is intended, regenerate: rm <package dir>/%s && make test SERVICE=<service>", routesGoldenPath)
 }
