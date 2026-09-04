@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsutil"
 )
 
 // handler consumes bot canonical messages and writes them to Cassandra.
@@ -24,6 +25,10 @@ func newHandler(store Store, siteID string) *handler {
 
 // HandleJetStreamMsg processes one canonical message. Ack on success, Nak on transient error, Ack-drop on permanent/unmarshal error.
 func (h *handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
+	// Mark retries so the thread-reply writer can tell a redelivery from a first
+	// delivery: its tcount increment is not idempotent.
+	ctx = natsutil.StampRedelivery(ctx, msg)
+
 	var evt model.MessageEvent
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {
 		slog.ErrorContext(ctx, "bot-message-worker unmarshal failed — ack-drop",
