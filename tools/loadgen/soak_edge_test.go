@@ -495,20 +495,11 @@ func TestSoakReaderAndVerifier_ApplyDefaultsAndSkipEmptyCatalog(t *testing.T) {
 		nil,
 		nil,
 	)
-	assert.Equal(t, 50, reader.cfg.PageLimit)
-	assert.Equal(t, 100, reader.cfg.MaxPages)
-	assert.Equal(t, 5*time.Second, reader.cfg.RequestTimeout)
-	assert.NotNil(t, reader.rng)
-	assert.NotNil(t, reader.now)
 	outcome, err := reader.LoadHistory(context.Background(), "room-1")
 	require.NoError(t, err)
 	assert.True(t, outcome.Skipped)
 
 	verifier := newSoakVerifier(nil, catalog, nil, nil, nil)
-	assert.Equal(t, 50, verifier.cfg.PageLimit)
-	assert.Equal(t, 20, verifier.cfg.MaxPages)
-	assert.Equal(t, 5*time.Second, verifier.cfg.RequestTimeout)
-	assert.NotNil(t, verifier.now)
 	result := verifier.Sample(context.Background(), "room-1")
 	assert.Equal(t, soakVerifySkipped, result.Class)
 	result = verifier.VerifyHistory(context.Background(), "room-1", "missing")

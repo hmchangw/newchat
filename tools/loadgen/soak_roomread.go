@@ -180,7 +180,7 @@ func (r *soakRoomReader) ReadReceipts(ctx context.Context) error {
 		Body:    soakReadReceiptRequest{MessageID: message.ID},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Readers))
+		sample.CountRows(len(response.Readers))
 	})
 }
 
@@ -198,7 +198,7 @@ func (r *soakRoomReader) ListMembers(
 		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Members))
+		sample.CountRows(len(response.Members))
 	})
 	return response, err
 }
@@ -216,7 +216,7 @@ func (r *soakRoomReader) RoomsInfo(ctx context.Context) error {
 		Body:    soakRoomsInfoRequest{RoomIDs: roomIDs},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Rooms))
+		sample.CountRows(len(response.Rooms))
 	})
 }
 
@@ -238,7 +238,7 @@ func (r *soakRoomReader) SubscriptionList(ctx context.Context) error {
 		},
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Subscriptions))
+		sample.CountRows(len(response.Subscriptions))
 	})
 }
 
@@ -259,7 +259,7 @@ func (r *soakRoomReader) RoomState(
 		Account: account, RoomID: roomID,
 		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
 	}, &response, func(sample *soakReadSample) {
-		sample.countRows(len(response.Members))
+		sample.CountRows(len(response.Members))
 	})
 	return response, err
 }

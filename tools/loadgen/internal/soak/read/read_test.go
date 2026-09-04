@@ -1,4 +1,4 @@
-package main
+package read
 
 import (
 	"context"
@@ -14,19 +14,103 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakcatalog "github.com/hmchangw/chat/tools/loadgen/internal/soak/catalog"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
 func TestSoakReadPicker_UsesSeventyFiveFifteenTenMix(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
-	counts := map[soakReadKind]int{}
+	counts := map[Kind]int{}
 	const samples = 100000
 	for range samples {
-		counts[pickSoakReadKind(rng)]++
+		counts[PickKind(rng)]++
 	}
 
-	assert.InDelta(t, 0.75, float64(counts[soakReadHistory])/samples, 0.005)
-	assert.InDelta(t, 0.15, float64(counts[soakReadThread])/samples, 0.005)
-	assert.InDelta(t, 0.10, float64(counts[soakReadMessage])/samples, 0.005)
+	assert.InDelta(t, 0.75, float64(counts[KindHistory])/samples, 0.005)
+	assert.InDelta(t, 0.15, float64(counts[KindThread])/samples, 0.005)
+	assert.InDelta(t, 0.10, float64(counts[KindMessage])/samples, 0.005)
+}
+
+func TestSoakReaderAndVerifier_ApplyDefaults(t *testing.T) {
+	messageCatalog := soakcatalog.New(8, 100, 0, nil)
+	reader := NewReader(Config{}, nil, messageCatalog, nil, nil, nil, nil)
+	assert.Equal(t, 50, reader.cfg.PageLimit)
+	assert.Equal(t, 100, reader.cfg.MaxPages)
+	assert.Equal(t, 5*time.Second, reader.cfg.RequestTimeout)
+	assert.NotNil(t, reader.rng)
+	assert.NotNil(t, reader.now)
+
+	verifier := NewVerifier(nil, messageCatalog, nil, nil, nil)
+	assert.Equal(t, 50, verifier.cfg.PageLimit)
+	assert.Equal(t, 20, verifier.cfg.MaxPages)
+	assert.Equal(t, 5*time.Second, verifier.cfg.RequestTimeout)
+	assert.NotNil(t, verifier.now)
+}
+
+func TestSoakSample_CountRowsMarksARealRowCount(t *testing.T) {
+	sample := Sample{}
+	sample.CountRows(7)
+	assert.Equal(t, 7, sample.Messages)
+	assert.True(t, sample.RowsCounted)
+}
+
+func TestSoakReader_RecordsRPCFailuresByEndpoint(t *testing.T) {
+	tests := []struct {
+		name   string
+		invoke func(*Reader) (Outcome, error)
+	}{
+		{
+			name: "load history",
+			invoke: func(reader *Reader) (Outcome, error) {
+				return reader.LoadHistory(context.Background(), "room-1")
+			},
+		},
+		{
+			name: "get thread",
+			invoke: func(reader *Reader) (Outcome, error) {
+				return reader.GetThreadMessages(context.Background(), "room-1")
+			},
+		},
+		{
+			name: "get message",
+			invoke: func(reader *Reader) (Outcome, error) {
+				return reader.GetMessageByID(context.Background(), "room-1")
+			},
+		},
+		{
+			name: "pinned list",
+			invoke: func(reader *Reader) (Outcome, error) {
+				return reader.ListPinnedMessages(context.Background(), "room-1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := newFakeSoakClock(time.Unix(100, 0))
+			messageCatalog := acceptedSoakReadThread(
+				t,
+				clock,
+				"room-1",
+				"AAAAAAAAAAAAAAAAAAAA",
+			)
+			recorder := &soakReadRecorder{}
+			reader := newTestSoakReader(
+				&soakReadTransport{replies: []soakRPCFakeReply{{
+					data: []byte(`{"error":"denied","code":"forbidden"}`),
+				}}},
+				recorder,
+				messageCatalog,
+			)
+
+			_, err := tt.invoke(reader)
+			require.Error(t, err)
+			require.Len(t, recorder.snapshot(), 1)
+			assert.Equal(t, rpc.ErrorForbidden, recorder.snapshot()[0].ErrorClass)
+		})
+	}
 }
 
 func TestSoakReader_LoadHistoryPaginatesWithStrictOldestBoundary(t *testing.T) {
@@ -47,9 +131,9 @@ func TestSoakReader_LoadHistoryPaginatesWithStrictOldestBoundary(t *testing.T) {
 	calls := transport.snapshot()
 	require.Len(t, calls, 3)
 	assert.Equal(t, subject.MsgHistory("alice", "room-1", "site-1"), calls[0].subject)
-	var requests []soakLoadHistoryRequest
+	var requests []wire.LoadHistoryRequest
 	for _, call := range calls {
-		var request soakLoadHistoryRequest
+		var request wire.LoadHistoryRequest
 		require.NoError(t, json.Unmarshal(call.data, &request))
 		requests = append(requests, request)
 	}
@@ -66,7 +150,7 @@ func TestSoakReader_LoadHistoryPaginatesWithStrictOldestBoundary(t *testing.T) {
 	samples := recorder.snapshot()
 	require.Len(t, samples, 3)
 	for _, sample := range samples {
-		assert.Equal(t, soakRPCLoadHistory, sample.Action)
+		assert.Equal(t, rpc.ActionLoadHistory, sample.Action)
 		assert.Empty(t, sample.ErrorClass)
 		assert.Equal(t, 10*time.Millisecond, sample.Latency)
 	}
@@ -86,7 +170,7 @@ func TestSoakReader_LoadHistoryStopsOnNonProgressingPage(t *testing.T) {
 	assert.Len(t, transport.snapshot(), 2)
 	samples := recorder.snapshot()
 	require.Len(t, samples, 2)
-	assert.Equal(t, soakErrorAssertion, samples[1].ErrorClass)
+	assert.Equal(t, rpc.ErrorAssertion, samples[1].ErrorClass)
 }
 
 func TestSoakReader_ThreadCursorPagination(t *testing.T) {
@@ -107,7 +191,7 @@ func TestSoakReader_ThreadCursorPagination(t *testing.T) {
 	calls := transport.snapshot()
 	require.Len(t, calls, 2)
 	assert.Equal(t, subject.MsgThread("alice", "room-1", "site-1"), calls[0].subject)
-	var first, second soakGetThreadMessagesRequest
+	var first, second wire.GetThreadMessagesRequest
 	require.NoError(t, json.Unmarshal(calls[0].data, &first))
 	require.NoError(t, json.Unmarshal(calls[1].data, &second))
 	assert.Equal(t, "parent", first.ThreadMessageID)
@@ -162,11 +246,11 @@ func TestSoakReader_PinnedListCursorPaginationAndRepeatGuard(t *testing.T) {
 			} else {
 				require.ErrorContains(t, err, tt.wantErr)
 				samples := recorder.snapshot()
-				assert.Equal(t, soakErrorAssertion, samples[len(samples)-1].ErrorClass)
+				assert.Equal(t, rpc.ErrorAssertion, samples[len(samples)-1].ErrorClass)
 			}
 			assert.Equal(t, tt.wantPages, outcome.Pages)
 			for _, sample := range recorder.snapshot() {
-				assert.Equal(t, soakRPCPinnedList, sample.Action)
+				assert.Equal(t, rpc.ActionPinnedList, sample.Action)
 			}
 		})
 	}
@@ -174,14 +258,14 @@ func TestSoakReader_PinnedListCursorPaginationAndRepeatGuard(t *testing.T) {
 
 func TestSoakReader_PinnedListRehydratesCatalog(t *testing.T) {
 	pinnedAt := time.Unix(101, 0)
-	message := soakWireMessage{
+	message := wire.Message{
 		RoomID: "room-1", MessageID: "pinned-1",
 		Sender: cassandra.Participant{Account: "alice"},
 		Msg:    "owned by the soak room", CreatedAt: time.Unix(100, 0),
 		PinnedAt: &pinnedAt,
 	}
-	data, err := json.Marshal(soakListPinnedMessagesResponse{
-		Messages: []soakWireMessage{message},
+	data, err := json.Marshal(wire.ListPinnedMessagesResponse{
+		Messages: []wire.Message{message},
 	})
 	require.NoError(t, err)
 	transport := &soakReadTransport{
@@ -222,7 +306,7 @@ func TestSoakReader_EmptyCatalogIsWarmupSkip(t *testing.T) {
 func TestSoakReader_GetMessageDecodesPayloadAndRecordsEndpointLatency(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	catalog := acceptedSoakReadMessage(t, clock, "room-1", "message-1", "")
-	response, err := json.Marshal(soakWireMessage{
+	response, err := json.Marshal(wire.Message{
 		RoomID: "room-1", MessageID: "message-1", Msg: "hello",
 		CreatedAt: time.UnixMilli(100),
 	})
@@ -239,13 +323,13 @@ func TestSoakReader_GetMessageDecodesPayloadAndRecordsEndpointLatency(t *testing
 	calls := transport.snapshot()
 	require.Len(t, calls, 1)
 	assert.Equal(t, subject.MsgGet("alice", "room-1", "site-1"), calls[0].subject)
-	var request soakGetMessageByIDRequest
+	var request wire.GetMessageByIDRequest
 	require.NoError(t, json.Unmarshal(calls[0].data, &request))
 	assert.Equal(t, "message-1", request.MessageID)
 
 	samples := recorder.snapshot()
 	require.Len(t, samples, 1)
-	assert.Equal(t, soakRPCGetMessage, samples[0].Action)
+	assert.Equal(t, rpc.ActionGetMessage, samples[0].Action)
 	assert.Equal(t, 10*time.Millisecond, samples[0].Latency)
 	assert.Equal(t, 1, samples[0].Messages)
 }
@@ -266,7 +350,7 @@ func TestSoakReader_NormalEmptyResponseIsNotAnError(t *testing.T) {
 }
 
 func TestSoakReader_SelectsOnlyActiveAccountForRoom(t *testing.T) {
-	topology := soakTopology{
+	topology := topology.Topology{
 		ActiveUsers: []model.User{{ID: "u-alice", Account: "alice"}},
 		Subscriptions: []model.Subscription{
 			{RoomID: "room-1", User: model.SubscriptionUser{ID: "u-inactive", Account: "inactive"}},
@@ -277,11 +361,11 @@ func TestSoakReader_SelectsOnlyActiveAccountForRoom(t *testing.T) {
 	transport := &soakReadTransport{replies: []soakRPCFakeReply{{
 		data: soakHistoryReply(t),
 	}}}
-	reader := newSoakReader(soakReadConfig{
+	reader := NewReader(Config{
 		SiteID: "site-1", PageLimit: 2, MaxPages: 10, RequestTimeout: time.Second,
-	}, &topology, emptySoakReadCatalog(), newSoakRPCClient(
+	}, &topology, emptySoakReadCatalog(), rpc.NewClient(
 		transport,
-		soakRetryConfig{MaxAttempts: 1},
+		rpc.RetryConfig{MaxAttempts: 1},
 		&soakRecordingSleeper{},
 		nil,
 	), &soakReadRecorder{}, rand.New(rand.NewSource(1)), steppedSoakNow())
@@ -332,35 +416,35 @@ func (t *soakReadTransport) snapshot() []soakReadCall {
 
 type soakReadRecorder struct {
 	mu      sync.Mutex
-	samples []soakReadSample
+	samples []Sample
 }
 
-func (r *soakReadRecorder) Record(sample *soakReadSample) {
+func (r *soakReadRecorder) Record(sample *Sample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.samples = append(r.samples, *sample)
 }
 
-func (r *soakReadRecorder) snapshot() []soakReadSample {
+func (r *soakReadRecorder) snapshot() []Sample {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]soakReadSample(nil), r.samples...)
+	return append([]Sample(nil), r.samples...)
 }
 
 func newTestSoakReader(
-	transport soakRPCTransport,
-	recorder soakReadSampleRecorder,
-	catalog *soakCatalog,
-) *soakReader {
-	topology := soakTopology{Subscriptions: []model.Subscription{{
+	transport rpc.Transport,
+	recorder SampleRecorder,
+	catalog *soakcatalog.Catalog,
+) *Reader {
+	topology := topology.Topology{Subscriptions: []model.Subscription{{
 		RoomID: "room-1", IsSubscribed: true,
 		User: model.SubscriptionUser{ID: "u-1", Account: "alice"},
 	}}}
-	return newSoakReader(soakReadConfig{
+	return NewReader(Config{
 		SiteID: "site-1", PageLimit: 2, MaxPages: 10, RequestTimeout: time.Second,
-	}, &topology, catalog, newSoakRPCClient(
+	}, &topology, catalog, rpc.NewClient(
 		transport,
-		soakRetryConfig{MaxAttempts: 1},
+		rpc.RetryConfig{MaxAttempts: 1},
 		&soakRecordingSleeper{},
 		nil,
 	), recorder, rand.New(rand.NewSource(1)), steppedSoakNow())
@@ -375,8 +459,8 @@ func steppedSoakNow() func() time.Time {
 	}
 }
 
-func emptySoakReadCatalog() *soakCatalog {
-	return newSoakCatalog(8, 100, 0, newFakeSoakClock(time.Unix(100, 0)))
+func emptySoakReadCatalog() *soakcatalog.Catalog {
+	return soakcatalog.New(8, 100, 0, newFakeSoakClock(time.Unix(100, 0)))
 }
 
 func acceptedSoakReadMessage(
@@ -385,10 +469,10 @@ func acceptedSoakReadMessage(
 	roomID string,
 	messageID string,
 	threadParentID string,
-) *soakCatalog {
+) *soakcatalog.Catalog {
 	t.Helper()
-	catalog := newSoakCatalog(8, 100, 0, clock)
-	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+	catalog := soakcatalog.New(8, 100, 0, clock)
+	require.NoError(t, catalog.TrackPublished(&soakcatalog.Candidate{
 		ID: messageID, RoomID: roomID, Author: "alice", Content: "hello",
 		CreatedAt: clock.Now(), ThreadParentID: threadParentID,
 		ThreadReplyLimit: 10,
@@ -405,7 +489,7 @@ func acceptedSoakReadThread(
 	clock *fakeSoakClock,
 	roomID string,
 	messageID string,
-) *soakCatalog {
+) *soakcatalog.Catalog {
 	t.Helper()
 	catalog := acceptedSoakReadMessage(t, clock, roomID, messageID, "")
 	require.True(t, catalog.ReserveThreadReply(roomID, messageID))
@@ -415,14 +499,14 @@ func acceptedSoakReadThread(
 
 func soakHistoryReply(t *testing.T, timestamps ...int64) []byte {
 	t.Helper()
-	messages := make([]soakWireMessage, 0, len(timestamps))
+	messages := make([]wire.Message, 0, len(timestamps))
 	for index, timestamp := range timestamps {
-		messages = append(messages, soakWireMessage{
+		messages = append(messages, wire.Message{
 			RoomID: "room-1", MessageID: soakReadMessageID(index),
 			CreatedAt: time.UnixMilli(timestamp),
 		})
 	}
-	data, err := json.Marshal(soakLoadHistoryResponse{Messages: messages})
+	data, err := json.Marshal(wire.LoadHistoryResponse{Messages: messages})
 	require.NoError(t, err)
 	return data
 }
@@ -435,7 +519,7 @@ func soakThreadReply(
 ) []byte {
 	t.Helper()
 	messages := soakCassandraMessages(messageIDs)
-	data, err := json.Marshal(soakGetThreadMessagesResponse{
+	data, err := json.Marshal(wire.GetThreadMessagesResponse{
 		Messages: messages, NextCursor: nextCursor, HasNext: hasNext,
 	})
 	require.NoError(t, err)
@@ -449,7 +533,7 @@ func soakPinnedReply(
 	hasNext bool,
 ) []byte {
 	t.Helper()
-	data, err := json.Marshal(soakListPinnedMessagesResponse{
+	data, err := json.Marshal(wire.ListPinnedMessagesResponse{
 		Messages:   soakCassandraMessages(messageIDs),
 		NextCursor: nextCursor, HasNext: hasNext,
 	})
@@ -457,10 +541,10 @@ func soakPinnedReply(
 	return data
 }
 
-func soakCassandraMessages(messageIDs []string) []soakWireMessage {
-	messages := make([]soakWireMessage, len(messageIDs))
+func soakCassandraMessages(messageIDs []string) []wire.Message {
+	messages := make([]wire.Message, len(messageIDs))
 	for index, messageID := range messageIDs {
-		messages[index] = soakWireMessage{
+		messages[index] = wire.Message{
 			RoomID: "room-1", MessageID: messageID,
 			CreatedAt: time.UnixMilli(int64(index + 1)),
 		}
