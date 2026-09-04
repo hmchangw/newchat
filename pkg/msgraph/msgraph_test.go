@@ -922,6 +922,7 @@ func TestProxyCredentials_SentAsBasicAuth(t *testing.T) {
 // parsed host if it were inlined, so it must survive verbatim here.
 func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
 	// #nosec G101 -- fixture password for a local httptest proxy, not a real credential
+	// nosemgrep: gosec.G101-1
 	const password = "p@ss:w/rd?#%"
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
@@ -945,6 +946,7 @@ func TestProxyCredentials_SpecialCharactersNeedNoEncoding(t *testing.T) {
 // password means changing one secret rather than two settings that can drift.
 func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
 	// #nosec G101 -- fixture userinfo; the test exists to prove it is overridden
+	// nosemgrep: gosec.G101-1
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
 		ProxyURL:      "http://olduser:oldpass@proxy.corp:8080",
@@ -965,6 +967,7 @@ func TestProxyCredentials_OverrideEmbeddedUserinfo(t *testing.T) {
 // keep working when the new vars are unset.
 func TestProxyCredentials_EmbeddedUserinfoPreserved(t *testing.T) {
 	// #nosec G101 -- fixture userinfo; the test exists to prove it is preserved
+	// nosemgrep: gosec.G101-1
 	c, err := NewMeetingsClient(Config{
 		TenantID: "t", ClientID: "c", ClientSecret: "s",
 		ProxyURL: "http://embedded:secret@proxy.corp:8080",
@@ -1168,15 +1171,19 @@ func TestApplyProxy_AcceptsEverySupportedScheme(t *testing.T) {
 // (`invalid URL escape "%zz"`). A password beginning with a bad escape would
 // still reach the log, so no parse failure may carry any part of the value.
 func TestProxyCredentials_MalformedEscapeNeverLeaksPassword(t *testing.T) {
-	// #nosec G101 -- deliberately malformed fixture URLs; the test asserts none of
-	// them reaches an error message
 	tests := []struct {
 		name   string
 		proxy  string
 		secret string
 	}{
+		// #nosec G101 -- deliberately malformed fixture URL; the test asserts none of it reaches an error message
+		// nosemgrep: gosec.G101-1
 		{name: "bad escape starts the password", proxy: "http://user:%zzsecret@proxy.corp", secret: "zz"},
+		// #nosec G101 -- deliberately malformed fixture URL; the test asserts none of it reaches an error message
+		// nosemgrep: gosec.G101-1
 		{name: "bad escape inside the password", proxy: "http://user:pw%GGtail@proxy.corp", secret: "GG"},
+		// #nosec G101 -- deliberately malformed fixture URL; the test asserts none of it reaches an error message
+		// nosemgrep: gosec.G101-1
 		{name: "bad escape in the username", proxy: "http://%QQuser:pw@proxy.corp", secret: "QQ"},
 	}
 	for _, tc := range tests {
