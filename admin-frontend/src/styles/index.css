@@ -230,7 +230,8 @@ a:focus-visible,
   margin: 0;
 }
 
-.dialog label {
+.dialog label,
+.dialog legend {
   display: block;
   margin-bottom: var(--space-xs);
   font-weight: var(--font-medium);

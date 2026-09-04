@@ -6,8 +6,7 @@ import './style.css'
 
 // Turns duty on for one channel. The owner is picked from the room's own members
 // because room-service validates the designated owner against exactly that roster
-// — offering any other account would only earn a 400. A radio group is what makes
-// "exactly one owner" structural: the browser enforces it, not our state handling.
+// — offering any other account would only earn a 400.
 export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
   const [members, setMembers] = useState([])
   const [loaded, setLoaded] = useState(false)
@@ -39,14 +38,7 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
   // Filtering is local: the roster is already loaded and bounded by room-service's
   // MAX_ROOM_SIZE, so a query per keystroke would buy nothing.
   const needle = filter.trim().toLowerCase()
-  const matches = needle
-    ? members.filter((m) => m.account.toLowerCase().includes(needle))
-    : members
-  // A chosen owner stays on screen even once the filter stops matching them —
-  // otherwise confirm would submit an account the admin can no longer see, and
-  // this action demotes every other member of the room.
-  const pinned = owner && !matches.some((m) => m.account === owner)
-  const visible = pinned ? [...members.filter((m) => m.account === owner), ...matches] : matches
+  const matches = members.filter((m) => m.account.toLowerCase().includes(needle))
 
   const handleConfirm = async () => {
     setSubmitting(true)
@@ -88,15 +80,20 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
             onChange={(e) => setFilter(e.target.value)}
             disabled={submitting}
           />
+          {owner && (
+            // Stated separately from the list: a filter that hides the chosen row
+            // must not leave confirm pointing at an account nobody can see, and
+            // this action resets every other member to plain member.
+            <p className="onduty-owner-chosen">
+              Owner: <strong>{owner}</strong>
+            </p>
+          )}
           {matches.length === 0 && (
             <p className="onduty-owner-empty">No member matches “{filter.trim()}”.</p>
           )}
           <div className="onduty-owner-list" role="radiogroup" aria-label="Owner account">
-            {visible.map((member, i) => (
-              <label
-                key={member.account}
-                className={`onduty-owner-option ${pinned && i === 0 ? 'is-pinned' : ''}`}
-              >
+            {matches.map((member) => (
+              <label key={member.account} className="onduty-owner-option">
                 <input
                   type="radio"
                   name="onduty-owner"
@@ -106,7 +103,7 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
                   disabled={submitting}
                 />
                 <span>{member.account}</span>
-                {member.isBot && <span className="onduty-owner-bot">bot</span>}
+                {member.isBot && <span className="status-badge onduty-owner-bot">bot</span>}
               </label>
             ))}
           </div>

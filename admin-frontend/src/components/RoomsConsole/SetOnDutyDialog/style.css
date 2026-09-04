@@ -9,46 +9,43 @@
 
 .onduty-owner legend {
   padding: 0 var(--space-xs);
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
 }
 
-/* The .dialog input rule already styles this; only the spacing below it is ours. */
+/* Spacing only — the filter box takes its chrome from the shared .dialog input rule. */
 .onduty-owner-filter {
   margin-bottom: var(--space-sm);
+}
+
+.onduty-owner-chosen {
+  margin-bottom: var(--space-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 .onduty-owner-list {
   display: flex;
   flex-direction: column;
-  max-height: 208px;
+  max-height: 40vh;
   overflow-y: auto;
 }
 
-.onduty-owner-option {
+/* Scoped through .dialog to outrank `.dialog label`, which is (0,1,1) and would
+   otherwise keep these rows display:block — the same fix .permissions-date-field
+   label uses for this clash. */
+.dialog .onduty-owner-option {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  /* Cancels .dialog label's block/margin so the row reads as one control. */
   margin-bottom: 0;
   padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: var(--text-sm);
   font-weight: var(--font-regular);
   cursor: pointer;
 }
 
-.onduty-owner-option:hover {
+.dialog .onduty-owner-option:hover {
   background: var(--bg-hover);
-}
-
-/* The chosen owner is pinned to the top when the filter stops matching them;
-   the rule keeps that row from reading as part of the match list. */
-.onduty-owner-option.is-pinned {
-  border-bottom: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 
 .onduty-owner-option input {
@@ -60,14 +57,12 @@
   overflow-wrap: anywhere;
 }
 
-/* A bot can legally own a room, so the tag informs rather than blocks. */
+/* A bot can legally own a room, so the tag informs rather than blocks.
+   Geometry comes from the shared .status-badge base. */
 .onduty-owner-bot {
   margin-left: auto;
-  padding: 0 var(--space-sm);
-  border-radius: var(--radius-pill);
   background: var(--bg-input);
   color: var(--text-muted);
-  font-size: var(--text-xs);
 }
 
 .onduty-owner-empty {

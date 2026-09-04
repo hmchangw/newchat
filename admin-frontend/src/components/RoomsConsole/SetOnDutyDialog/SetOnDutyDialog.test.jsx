@@ -36,7 +36,6 @@ function renderDialog({ onClose = vi.fn(), onDone = vi.fn() } = {}) {
   render(<SetOnDutyDialog authToken="tok" room={ROOM} onClose={onClose} onDone={onDone} />)
 }
 
-/** Waits for the roster to land, then returns the owner radio for `account`. */
 async function ownerRadio(account) {
   return screen.findByRole('radio', { name: new RegExp(account) })
 }
@@ -70,8 +69,7 @@ describe('SetOnDutyDialog', () => {
 
   it('keeps confirm disabled until an owner is chosen', async () => {
     renderDialog()
-    await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    expect(screen.getByRole('button', { name: /set onduty/i })).toBeDisabled()
+    expect(await screen.findByRole('button', { name: /set onduty/i })).toBeDisabled()
 
     fireEvent.click(await ownerRadio('alice'))
     expect(screen.getByRole('button', { name: /set onduty/i })).toBeEnabled()
@@ -84,15 +82,6 @@ describe('SetOnDutyDialog', () => {
 
     expect(await ownerRadio('alice')).not.toBeChecked()
     expect(await ownerRadio('bob')).toBeChecked()
-
-    fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
-    // ownerAccount is a single string on the wire — there is no shape carrying two.
-    await waitFor(() =>
-      expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
-        onDuty: true,
-        ownerAccount: 'bob',
-      }),
-    )
   })
 
   it('sets duty on with the chosen owner, then reports done', async () => {
@@ -162,15 +151,14 @@ describe('SetOnDutyDialog', () => {
 
   it('says so when nothing matches the filter', async () => {
     renderDialog()
-    await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    fireEvent.change(screen.getByRole('textbox', { name: /filter/i }), {
+    fireEvent.change(await screen.findByRole('textbox', { name: /filter/i }), {
       target: { value: 'zzz' },
     })
     expect(screen.getByText(/no member matches/i)).toBeInTheDocument()
     expect(screen.queryByRole('radio')).not.toBeInTheDocument()
   })
 
-  it('keeps the chosen owner on screen when the filter would hide them', async () => {
+  it('still states the chosen owner when the filter hides their row', async () => {
     renderDialog()
     fireEvent.click(await ownerRadio('alice'))
     fireEvent.change(screen.getByRole('textbox', { name: /filter/i }), {
@@ -178,9 +166,8 @@ describe('SetOnDutyDialog', () => {
     })
 
     // Submitting an owner the admin cannot see would demote every other member blind.
-    const alice = await ownerRadio('alice')
-    expect(alice).toBeInTheDocument()
-    expect(alice).toBeChecked()
+    expect(screen.queryByRole('radio', { name: /alice/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/owner:/i)).toHaveTextContent('alice')
 
     fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
     await waitFor(() =>
@@ -194,8 +181,7 @@ describe('SetOnDutyDialog', () => {
   it('closes without calling the API when cancelled', async () => {
     const onClose = vi.fn()
     renderDialog({ onClose })
-    await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
-    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /cancel/i }))
     expect(onClose).toHaveBeenCalled()
     expect(setRoomOnDuty).not.toHaveBeenCalled()
   })
