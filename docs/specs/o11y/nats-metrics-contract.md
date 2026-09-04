@@ -834,6 +834,26 @@ to this contract.
 | `preview_warmback_stored_total` | counter | history-service | on first successful warm-back write | none | warm-back repair health, and the denominator that makes the two failure counters a rate rather than an absolute count |
 | `preview_warmback_dropped_total` | counter | history-service | on first shed job | none — the job is shed before any store call, so no driver metric sees it | warm-back saturation. The writer queue is bounded and a full queue drops the job, so a rising share means rooms stay on the lazy bucket walk — which is SLO-4's cost model, making this a leading indicator for the walk-depth tail `sli-slo.md` §3 Caveats names |
 | `preview_warmback_failed_total` | counter | history-service | on first failed warm-back write | partial: Mongo driver metrics cover write I/O broadly, not this operation | the same outcome as `dropped` reached the other way — the write was attempted and lost. Separate because saturation and a broken store need different responses |
+| `valkey_cache_keys` | gauge | cache-metrics-worker | on first scan tick | none — Valkey reports `used_memory` per node, with nothing decomposing it by application cache | per-cache share of the keyspace, paired with `cache_hits_total` on the same `cache` label so hit rate and footprint read together |
+| `valkey_cache_bytes` | gauge | cache-metrics-worker | on first scan tick | none — same reason; `MEMORY USAGE` is per key and nothing aggregates it by owner | the decision metric: "60% of memory, 20% hit rate" is actionable, either half alone is not. **Attributed bytes, not `used_memory`** — see §13.3 note below |
+| `valkey_cache_keys_total` | gauge | cache-metrics-worker | on first scan tick | `keyspace` from a Valkey exporter counts keys per node, not per cache | the denominator the per-cache series are a share of, and the scan's own coverage check |
+| `valkey_cache_bytes_total` | gauge | cache-metrics-worker | on first scan tick | `used_memory` answers a different question (what the node holds, including overhead these gauges exclude) | the attributed-bytes denominator. Deliberately does **not** reconcile with `used_memory` |
+
+**The four `valkey_cache_*` rows have no dashboard consuming them yet.** They
+arrive with the PR that adds `cache-metrics-worker`, so the honest Read-by is
+the intent above, not a panel that exists today. The `cache` label is chosen to
+match `cache_hits_total` precisely so the pairing is a query away rather than a
+migration, and the `unclassified` series is the one an alert should watch — an
+unregistered cache is visible but unnamed. If the reviewer's answer is that
+nothing will read these, §13.4 step 1 applies and the finding is the worker, not
+the rows.
+
+**Reported bytes are attributed bytes.** They deliberately do not sum to a
+node's `used_memory`: `MEMORY USAGE` excludes each key's share of the dict
+bucket array and the cluster slot index (~82% of the true per-key cost measured
+on Valkey 7.2), and a node carries a fixed baseline belonging to no cache. Read
+the gauges for per-cache share and trend; read `used_memory` for what the node
+holds.
 
 **The three `preview_warmback_*` rows are provisional in their Read-by column.**
 They arrived with #406, which merged before this registry existed, so nobody was

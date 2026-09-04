@@ -24,6 +24,8 @@ import (
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // SubAuth is the shared L2 projection of a subscription. Its presence in L2
@@ -53,18 +55,8 @@ type Loader func(ctx context.Context, roomID, account string) (SubAuth, bool, er
 // SubKey is the L2 key for a (roomID, account) subscription. The {roomID}
 // hash-tag colocates it in the room's cluster slot, matching house convention.
 func SubKey(roomID, account string) string {
-	return "sub:{" + roomID + "}:" + account + ":" + cacheKeySchemaVersion
+	return cachekeys.SubAuth(roomID, account)
 }
-
-// cacheKeySchemaVersion namespaces keys by stored shape, as roomsubcache and
-// roommetacache do, so a future change to the stored value misses these entries
-// rather than decoding them into an all-zero SubAuth with no JSON error. No
-// earlier generation exists to clear: this package is new, and the shapes
-// numbered below it never ran outside this branch.
-//
-// The version trails the key so the {roomID} hash tag still groups a room's
-// subscribers into one cluster slot.
-const cacheKeySchemaVersion = "v2"
 
 // FetchFromMongo reads the subscription projection both services need. Returns
 // (zero, false, nil) when the user is not subscribed (Mongo ErrNoDocuments).

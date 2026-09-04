@@ -10,6 +10,8 @@ import (
 
 	"github.com/hmchangw/chat/pkg/circuitbreaker"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // Recorder records the outcome of an L2 cache lookup. An alias of
@@ -33,7 +35,7 @@ const cacheKeySchemaVersion = "v3"
 // key (pkg/roomkeystore), matching house convention for room-scoped keys.
 // The version segment trails the key so the hash tag keeps that colocation.
 func MetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta:" + cacheKeySchemaVersion
+	return cachekeys.RoomMeta(roomID)
 }
 
 // legacyMetaKey is the deployed generation: unversioned, written and read by
@@ -42,7 +44,7 @@ func MetaKey(roomID string) string {
 // that has not been replaced yet keeps serving a room a new pod just renamed.
 // Drop it once no such binary can run.
 func legacyMetaKey(roomID string) string {
-	return "room:{" + roomID + "}:meta"
+	return cachekeys.RoomMetaLegacy(roomID)
 }
 
 // tierOption configures a tier at construction. Unexported: every production

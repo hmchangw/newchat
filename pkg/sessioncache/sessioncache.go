@@ -34,6 +34,8 @@ import (
 	"github.com/hmchangw/chat/pkg/cachemetrics"
 	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
+
+	"github.com/hmchangw/chat/pkg/cachekeys"
 )
 
 // Recorder records the outcome of an L2 cache lookup. An alias of
@@ -47,13 +49,7 @@ type Loader func(ctx context.Context, hash string) (*session.Session, error)
 // Key is the Valkey key for a hashed token. The hash — never the token — is the
 // key material: it arrives already hashed, and a reader of Valkey therefore
 // learns no credential they could authenticate with.
-func Key(hash string) string { return "session:" + hash + ":" + cacheKeySchemaVersion }
-
-// cacheKeySchemaVersion namespaces keys by stored shape, so a future change to
-// the stored value misses these entries instead of decoding them as the wrong
-// shape. No earlier generation exists to clear: this package is new, and the
-// shapes numbered below it never ran outside this branch.
-const cacheKeySchemaVersion = "v2"
+func Key(hash string) string { return cachekeys.Session(hash) }
 
 // usableSession rejects an entry with no session ID: it would authenticate
 // nobody in particular for a full TTL.

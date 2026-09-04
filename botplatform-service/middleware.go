@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/hmchangw/chat/pkg/cachekeys"
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/errcode/errhttp"
 	"github.com/hmchangw/chat/pkg/model"
@@ -131,7 +132,7 @@ func botRateLimit(client incrExClient, perCaller, perGlobal int) gin.HandlerFunc
 		}
 
 		if perCaller > 0 {
-			n, err := client.IncrEx(ctx, "botrl:caller:"+pr.UserID, window)
+			n, err := client.IncrEx(ctx, cachekeys.BotRateLimitCaller(pr.UserID), window)
 			if err != nil {
 				errhttp.Write(ctx, c, errcode.Internal("bot rate limit caller", errcode.WithCause(err)))
 				c.Abort()
