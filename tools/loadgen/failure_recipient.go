@@ -327,22 +327,6 @@ const (
 	recipientDeliveryRouteUser       recipientDeliveryRoute = "user"
 )
 
-type recipientExpectedRoute string
-
-const (
-	recipientExpectedRouteAny  recipientExpectedRoute = "any"
-	recipientExpectedRouteRoom recipientExpectedRoute = "room"
-	recipientExpectedRouteUser recipientExpectedRoute = "user"
-)
-
-type recipientSetSource string
-
-const (
-	recipientSetSourceLegacy          recipientSetSource = "legacy"
-	recipientSetSourceTopology        recipientSetSource = "topology_subscriptions"
-	recipientSetSourceThreadFollowers recipientSetSource = "catalog_thread_followers"
-)
-
 type recipientExpectationConfig struct {
 	OperationID string
 	Recipients  []string
