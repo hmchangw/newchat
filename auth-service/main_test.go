@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 	"github.com/stretchr/testify/assert"
@@ -33,4 +34,8 @@ func TestConfig_MongoDBDefault(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "chat", cfg.MongoDB)
+	// The shared pool knob must be mounted, or the driver's 30s server-selection
+	// default turns a Mongo outage into a 30s hang per session-token request.
+	assert.Equal(t, 2*time.Second, cfg.Pool.ServerSelectionTimeout)
+	require.NoError(t, cfg.Pool.Validate())
 }

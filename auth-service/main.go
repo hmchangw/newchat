@@ -44,6 +44,9 @@ type config struct {
 	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
 	MongoUsername string `env:"MONGO_USERNAME"`
 	MongoPassword string `env:"MONGO_PASSWORD"`
+	// Pool bounds the Mongo client's connection pool and server-selection wait
+	// (MONGO_MAX_POOL_SIZE / MONGO_MIN_POOL_SIZE / MONGO_SERVER_SELECTION_TIMEOUT).
+	Pool mongoutil.PoolConfig
 }
 
 func main() {
@@ -57,6 +60,9 @@ func run() error {
 	cfg, err := env.ParseAs[config]()
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	if err := cfg.Pool.Validate(); err != nil {
+		return fmt.Errorf("validate pool config: %w", err)
 	}
 
 	signingKP, err := nkeys.FromSeed([]byte(cfg.AuthScopedSigningKey))
@@ -78,7 +84,7 @@ func run() error {
 	}
 
 	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
-		mongoutil.WithObservability(sdk))
+		mongoutil.WithPool(cfg.Pool), mongoutil.WithObservability(sdk))
 	if err != nil {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
