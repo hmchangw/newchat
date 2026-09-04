@@ -283,7 +283,7 @@ func main() {
 
 	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
 		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), natsmetrics.MethodCreateDMRoom, handler.serverCreateDM)
+	registerRoutes(router, handler, cfg.SiteID)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup
@@ -396,6 +396,13 @@ func main() {
 // panicking stub (no NATS connection required).
 type jobProcessor interface {
 	HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg)
+}
+
+// registerRoutes wires room-worker's request/reply routes onto the router. It
+// is a function rather than inline in main so the registration table has
+// exactly one definition, which routes_test.go runs against a golden file.
+func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
+	natsrouter.Register(router, subject.RoomCreateDMSync(siteID), natsmetrics.MethodCreateDMRoom, handler.serverCreateDM)
 }
 
 // runJobWithRecovery processes one async job and contains any panic so the

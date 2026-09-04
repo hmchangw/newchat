@@ -1,0 +1,3 @@
+batch_get_peer_presence chat.server.request.presence.site-a.query.batch
+batch_get_presence chat.user.presence.site-a.query.batch
+set_manual_presence chat.user.{account}.request.presence.site-a.manual.set

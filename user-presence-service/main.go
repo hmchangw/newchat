@@ -169,13 +169,7 @@ func main() {
 	if cfg.RequestTimeout > 0 {
 		router.Use(natsrouter.HandlerTimeout(cfg.RequestTimeout))
 	}
-	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(cfg.SiteID), handler.Hello)
-	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
-	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
-	natsrouter.RegisterVoid(router, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
-	natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), natsmetrics.MethodSetManualPresence, handler.SetManual)
-	natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), natsmetrics.MethodBatchGetPresence, handler.QueryBatch)
-	natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), natsmetrics.MethodBatchGetPeerPresence, handler.QueryBatchPeer)
+	registerRoutes(router, handler, cfg.SiteID)
 
 	sweeper := NewSweeper(store, publish, cfg.SiteID, cfg.Presence.SweepInterval)
 	sweepCtx, stopSweep := context.WithCancel(ctx)
@@ -205,4 +199,19 @@ func main() {
 		func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// registerRoutes wires user-presence-service's routes onto the router. It is a
+// function rather than inline in main so the registration table has exactly one
+// definition, which routes_test.go runs against a golden file. The four
+// RegisterVoid routes are fire-and-forget: they name no rpc.method and record no
+// server-side sample, so only the three Register routes reach the golden file.
+func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
+	natsrouter.RegisterVoid(router, subject.PresenceHelloPattern(siteID), handler.Hello)
+	natsrouter.RegisterVoid(router, subject.PresencePingPattern(siteID), handler.Ping)
+	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(siteID), handler.Activity)
+	natsrouter.RegisterVoid(router, subject.PresenceByePattern(siteID), handler.Bye)
+	natsrouter.Register(router, subject.PresenceManualSetPattern(siteID), natsmetrics.MethodSetManualPresence, handler.SetManual)
+	natsrouter.Register(router, subject.PresenceQueryBatch(siteID), natsmetrics.MethodBatchGetPresence, handler.QueryBatch)
+	natsrouter.Register(router, subject.PresenceQueryBatchPeer(siteID), natsmetrics.MethodBatchGetPeerPresence, handler.QueryBatchPeer)
 }

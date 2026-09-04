@@ -114,7 +114,7 @@ func main() {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
 	router := natsrouter.Default(nc, "translation-service", routerOpts...)
-	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), natsmetrics.MethodTranslateText, handler.Translate)
+	registerRoutes(router, handler, cfg.SiteID)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
 
@@ -123,4 +123,11 @@ func main() {
 		func(ctx context.Context) error { return natsutil.Drain(ctx, nc) },
 		func(ctx context.Context) error { return obsShutdown(ctx) },
 	)
+}
+
+// registerRoutes wires translation-service's routes onto the router. It is a
+// function rather than inline in main so the registration table has exactly one
+// definition, which routes_test.go runs against a golden file.
+func registerRoutes(router *natsrouter.Router, handler *Handler, siteID string) {
+	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), natsmetrics.MethodTranslateText, handler.Translate)
 }
