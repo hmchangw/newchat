@@ -1,0 +1,17 @@
+batch_get_messages chat.user.{account}.request.room.{roomID}.site-a.msg.get.ids
+batch_get_rooms chat.server.request.history.site-a.rooms.get
+delete_message chat.user.{account}.request.room.{roomID}.site-a.msg.delete
+edit_message chat.user.{account}.request.room.{roomID}.site-a.msg.edit
+get_channel_history chat.user.{account}.request.room.{roomID}.site-a.msg.history
+get_message chat.user.{account}.request.room.{roomID}.site-a.msg.get
+get_next_messages chat.user.{account}.request.room.{roomID}.site-a.msg.next
+get_surrounding_messages chat.user.{account}.request.room.{roomID}.site-a.msg.surrounding
+get_thread_messages chat.user.{account}.request.room.{roomID}.site-a.msg.thread
+get_thread_parent_messages chat.user.{account}.request.room.{roomID}.site-a.msg.thread.parent
+list_pinned_messages chat.user.{account}.request.room.{roomID}.site-a.msg.pinned.list
+list_thread_subscriptions chat.server.request.thread.site-a.subscription.list
+migrate_delete_message chat.migration.internal.site-a.msg.delete
+migrate_edit_message chat.migration.internal.site-a.msg.edit
+pin_message chat.user.{account}.request.room.{roomID}.site-a.msg.pin
+toggle_message_reaction chat.user.{account}.request.room.{roomID}.site-a.msg.react
+unpin_message chat.user.{account}.request.room.{roomID}.site-a.msg.unpin

@@ -1,0 +1,2 @@
+send_dm chat.server.bot.request.dm.site-a.{userID}.msg.send
+send_room_message chat.server.bot.request.room.site-a.{roomID}.msg.send
