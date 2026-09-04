@@ -42,6 +42,10 @@ type lifecycleRig struct {
 	durable string
 	subject string
 	proxy   *freezeProxy
+	// reconnects fires once per completed reconnect. Polling nc.Status() is
+	// not enough: a severed socket is detected asynchronously, so the status
+	// still reads CONNECTED for a moment after the link is gone.
+	reconnects chan struct{}
 }
 
 // startLifecycleRig brings up an embedded JetStream server holding
@@ -65,9 +69,20 @@ func startLifecycleRig(t *testing.T, siteID string, withProxy bool) *lifecycleRi
 		url = rig.proxy.URL()
 	}
 
-	nc, err := nats.Connect(url, nats.ReconnectWait(50*time.Millisecond), nats.MaxReconnects(-1))
+	reconnects := make(chan struct{}, 8)
+	nc, err := nats.Connect(url,
+		nats.ReconnectWait(50*time.Millisecond),
+		nats.MaxReconnects(-1),
+		nats.ReconnectHandler(func(*nats.Conn) {
+			select {
+			case reconnects <- struct{}{}:
+			default:
+			}
+		}),
+	)
 	require.NoError(t, err)
 	t.Cleanup(nc.Close)
+	rig.reconnects = reconnects
 
 	js, err := jetstream.New(nc)
 	require.NoError(t, err)
@@ -99,11 +114,31 @@ func (r *lifecycleRig) consumer(t *testing.T, ackWait time.Duration) jetstream.C
 	return cons
 }
 
+// publish is fixture setup, not the behaviour under test, so it tolerates the
+// brief window after a reconnect in which the JetStream API has not answered
+// yet.
 func (r *lifecycleRig) publish(t *testing.T, n int) {
 	t.Helper()
 	for i := range n {
-		_, err := r.js.Publish(context.Background(), r.subject, fmt.Appendf(nil, `{"seq":%d}`, i))
+		var err error
+		for attempt := range 3 {
+			_, err = r.js.Publish(context.Background(), r.subject, fmt.Appendf(nil, `{"seq":%d}`, i))
+			if err == nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+		}
 		require.NoError(t, err, "publish %d", i)
+	}
+}
+
+// awaitReconnect blocks until the client has re-established its connection.
+func (r *lifecycleRig) awaitReconnect(t *testing.T, within time.Duration) {
+	t.Helper()
+	select {
+	case <-r.reconnects:
+	case <-time.After(within):
+		t.Fatalf("client did not reconnect within %s (status %s)", within, r.nc.Status())
 	}
 }
 
@@ -530,10 +565,7 @@ func TestReconnect_LoopSurvivesADroppedConnection(t *testing.T) {
 	waitCount(t, &processed, 1, 5*time.Second)
 
 	rig.proxy.Break()
-	deadline := time.Now().Add(10 * time.Second)
-	for rig.nc.Status() != nats.CONNECTED && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
+	rig.awaitReconnect(t, 20*time.Second)
 	require.Equal(t, nats.CONNECTED, rig.nc.Status(), "client should have reconnected through the proxy")
 
 	select {
@@ -548,6 +580,60 @@ func TestReconnect_LoopSurvivesADroppedConnection(t *testing.T) {
 	iter.Stop()
 	require.ErrorIs(t, waitStopped(t, stopped, 5*time.Second), jetstream.ErrMsgIteratorClosed)
 	waitWG(t, &wg, 5*time.Second)
+}
+
+// TestConsumeAPI_SelfHealsFromTheSameStall shows what the nats.go maintainers
+// consider correct handling of a missed heartbeat. The callback-based
+// Consume() API hits the identical error internally (pull.go:390-413) and, for
+// ErrNoHeartbeat specifically, re-issues the pull request, resets the
+// heartbeat monitor and carries on — the error is only *reported* to
+// ConsumeErrHandler, never acted on as terminal. Messages()/Next() runs the
+// same machinery but delegates that decision to the caller, which is the
+// decision main.go currently gets wrong.
+func TestConsumeAPI_SelfHealsFromTheSameStall(t *testing.T) {
+	rig := startLifecycleRig(t, "site7", true)
+	cons := rig.consumer(t, 30*time.Second)
+
+	var processed atomic.Int64
+	var mu sync.Mutex
+	var seenErrs []error
+
+	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		processed.Add(1)
+		require.NoError(t, msg.Ack())
+	},
+		jetstream.PullMaxMessages(10),
+		jetstream.PullExpiry(2*time.Second),
+		jetstream.PullHeartbeat(500*time.Millisecond),
+		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, cerr error) {
+			mu.Lock()
+			seenErrs = append(seenErrs, cerr)
+			mu.Unlock()
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(cc.Stop)
+
+	rig.publish(t, 1)
+	waitCount(t, &processed, 1, 5*time.Second)
+
+	rig.proxy.Freeze()
+	time.Sleep(1500 * time.Millisecond)
+	rig.proxy.Thaw()
+
+	rig.publish(t, 3)
+	waitCount(t, &processed, 4, 20*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	sawHeartbeatErr := false
+	for _, e := range seenErrs {
+		if errors.Is(e, jetstream.ErrNoHeartbeat) {
+			sawHeartbeatErr = true
+		}
+	}
+	assert.True(t, sawHeartbeatErr,
+		"Consume must have hit ErrNoHeartbeat and reported it while continuing to consume")
 }
 
 // ---------------------------------------------------------------------------
