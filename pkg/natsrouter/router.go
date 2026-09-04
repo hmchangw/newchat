@@ -45,6 +45,10 @@ type Router struct {
 
 	mu   sync.Mutex
 	subs []*nats.Subscription
+	// methods maps each claimed rpc.method to the pattern that claimed it, so a
+	// second route naming the same method is rejected at registration instead of
+	// silently merging two routes into one series.
+	methods map[natsmetrics.RPCMethod]string
 }
 
 // Option configures a Router on construction.
@@ -98,8 +102,9 @@ func WithMetrics(metrics natsmetrics.Publisher) Option {
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
 func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := &Router{
-		nc:    nc,
-		queue: queue,
+		nc:      nc,
+		queue:   queue,
+		methods: map[natsmetrics.RPCMethod]string{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -199,8 +204,49 @@ func (r *Router) Use(mw ...HandlerFunc) {
 	r.middleware = append(r.middleware, mw...)
 }
 
-func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
+// addRPCRoute registers a reply-bearing route under a declared, router-unique
+// method. Both checks panic: a route is registered once at startup, and a
+// service whose telemetry is mislabelled should fail to start rather than run
+// blind.
+func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handlers []HandlerFunc) {
+	if !method.Valid() {
+		panic(fmt.Sprintf("natsrouter: route %s declares rpc method %q, which is not in the natsmetrics vocabulary", pattern, method))
+	}
+	r.mu.Lock()
+	if claimed, dup := r.methods[method]; dup {
+		r.mu.Unlock()
+		panic(fmt.Sprintf("natsrouter: rpc method %q is already registered by %s; two routes sharing a method merge into one series", method, claimed))
+	}
+	if r.methods == nil {
+		r.methods = map[natsmetrics.RPCMethod]string{}
+	}
+	r.methods[method] = pattern
+	r.mu.Unlock()
+
+	r.addRoute(pattern, method, true, handlers)
+}
+
+// addVoidRoute registers a fire-and-forget route. It has no reply subject, so
+// there is no call to time and no method to name.
+func (r *Router) addVoidRoute(pattern string, handlers []HandlerFunc) {
+	r.addRoute(pattern, "", false, handlers)
+}
+
+// recordHandled reports one handler result, or nothing at all for a
+// fire-and-forget route. Routed through one helper so the three record sites
+// (stopping gate, admission rejection, handler completion) cannot disagree
+// about whether a void route is recorded.
+func (r *Router) recordHandled(ctx context.Context, rt route, started time.Time, result natsmetrics.RequestResult) {
+	if !rt.recordRPC {
+		return
+	}
+	r.metrics.HandledRequest(ctx, rt.method, time.Since(started), result)
+}
+
+func (r *Router) addRoute(pattern string, method natsmetrics.RPCMethod, recordRPC bool, handlers []HandlerFunc) {
 	rt := parsePattern(pattern)
+	rt.method = method
+	rt.recordRPC = recordRPC
 	all := make([]HandlerFunc, 0, len(r.middleware)+1+len(handlers))
 	all = append(all, r.middleware...)
 	// Identity enrichment is router plumbing, not an opt-in middleware. Keep it
@@ -211,18 +257,17 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 
 	natsHandler := func(msgCtx context.Context, m *nats.Msg) {
 		started := time.Now()
-		operation := natsmetrics.RequestOperationFromSubject(m.Subject)
 		// Stopping gate: reject before admit so Shutdown's contract holds
 		// even if a callback fires mid-drain or after Shutdown's ctx expired.
 		if r.stopping.Load() {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.recordHandled(msgCtx, rt, started, natsmetrics.RequestUnavailable)
 			return
 		}
 		admitted, release := r.admit()
 		if !admitted {
 			r.replyBusy(msgCtx, m)
-			r.metrics.HandledRequest(msgCtx, operation, time.Since(started), natsmetrics.RequestUnavailable)
+			r.recordHandled(msgCtx, rt, started, natsmetrics.RequestUnavailable)
 			return
 		}
 		r.wg.Add(1)
@@ -239,7 +284,7 @@ func (r *Router) addRoute(pattern string, handlers []HandlerFunc) {
 			c := acquireContext(msgCtx, m, rt.extractParams(m.Subject), all, r.reply)
 			defer releaseContext(c)
 			defer func() {
-				r.metrics.HandledRequest(msgCtx, operation, time.Since(started), c.requestResult)
+				r.recordHandled(msgCtx, rt, started, c.requestResult)
 			}()
 			defer func() {
 				if rec := recover(); rec != nil {

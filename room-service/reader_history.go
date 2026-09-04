@@ -67,7 +67,7 @@ func (r *historyMessageReader) GetMessageReadMeta(
 	started := time.Now()
 	defer func() {
 		if r.metrics != nil {
-			r.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), resultErr)
+			r.metrics.Request(ctx, natsmetrics.MethodGetMessage, time.Since(started), resultErr)
 		}
 	}()
 	msg, err := r.nc.Request(ctx, subject.MsgGet(account, roomID, r.siteID), reqBytes, historyRequestTimeout)

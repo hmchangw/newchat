@@ -35,19 +35,19 @@ func TestRequestInstrumentsFollowRPCSemanticConventions(t *testing.T) {
 	ctx := context.Background()
 	p := m.Publisher("s1")
 
-	p.Request(ctx, OperationHistoryRead, 12*time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, 8*time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetChannelHistory, 12*time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, 8*time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
 	client := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, client, 1)
 	assert.Equal(t, "nats", attrsOf(client[0])["rpc.system.name"])
-	assert.Equal(t, "history_read", attrsOf(client[0])["rpc.method"])
+	assert.Equal(t, "get_channel_history", attrsOf(client[0])["rpc.method"])
 
 	server := histogramPoints(t, rm, "rpc.server.call.duration")
 	require.Len(t, server, 1)
 	assert.Equal(t, "nats", attrsOf(server[0])["rpc.system.name"])
-	assert.Equal(t, "room_read", attrsOf(server[0])["rpc.method"])
+	assert.Equal(t, "open_room", attrsOf(server[0])["rpc.method"])
 }
 
 // A successful call must not carry error.type. The convention makes the label
@@ -58,8 +58,8 @@ func TestRequestInstruments_SuccessCarriesNoErrorType(t *testing.T) {
 	ctx := context.Background()
 	p := m.Publisher("s1")
 
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
 	for _, name := range []string{"rpc.client.call.duration", "rpc.server.call.duration"} {
@@ -77,8 +77,8 @@ func TestRequestInstruments_FailureCarriesBoundedErrorType(t *testing.T) {
 	ctx := context.Background()
 	p := m.Publisher("s1")
 
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nats.ErrTimeout)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestNotFound)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nats.ErrTimeout)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestNotFound)
 	rm := collect(t, reader)
 
 	client := histogramPoints(t, rm, "rpc.client.call.duration")
@@ -98,9 +98,9 @@ func TestRequestCountersAreReplacedByTheHistogramCount(t *testing.T) {
 	ctx := context.Background()
 	p := m.Publisher("s1")
 
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
 	for _, gone := range []string{"chat.nats.requests", "chat.nats.request.duration",
@@ -139,8 +139,8 @@ func TestRequestInstruments_UseSharedLatencyBoundaries(t *testing.T) {
 	ctx := context.Background()
 	p := m.Publisher("s1")
 
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
 	want := o11y.DefaultLatencyBuckets()
@@ -160,8 +160,8 @@ func TestAllLatencyHistogramsShareOneBoundarySet(t *testing.T) {
 	c := m.Consumer(ConsumerConfig{Site: "s1", Stream: "ST", Consumer: "dur"})
 	require.NoError(t, c.Track(ctx, &fakeMsg{}, EventCreated, 5).Ack())
 	p := m.Publisher("s1")
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestSuccess)
 	rm := collect(t, reader)
 
 	for _, name := range []string{
@@ -181,8 +181,8 @@ func TestRequestInstruments_ExportUnderSemconvPrometheusNames(t *testing.T) {
 	m, reg := newPrometheusExportSetup(t)
 	ctx := context.Background()
 	p := m.Publisher("s1")
-	p.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestNotFound)
+	p.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestNotFound)
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather must succeed — a failure here is the /metrics 500")

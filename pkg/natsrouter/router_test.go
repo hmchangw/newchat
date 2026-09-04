@@ -54,7 +54,7 @@ func TestRegister_Success(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.msg.test",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-1.msg.test", natsmetrics.MethodMoveChat,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hello " + req.Name + " from " + c.Param("account")}, nil
 		})
@@ -75,7 +75,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 	metrics := natsmetrics.NewFromProvider(mp).Publisher("site-a")
 	r := New(nc, "room-service", WithMetrics(metrics))
 
-	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list",
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.member.list", natsmetrics.MethodListMembers,
 		func(_ *Context, req testReq) (*testResp, error) {
 			if req.Name == "deny" {
 				return nil, errcode.Forbidden("not allowed")
@@ -112,7 +112,7 @@ func TestRouter_WithMetricsRecordsBoundedRequestResultsAndReplies(t *testing.T) 
 					}
 					for _, point := range data.DataPoints {
 						attrs := attrsOfPoint(point.Attributes)
-						if attrs["rpc.method"] != "member_read" || attrs["rpc.system.name"] != "nats" {
+						if attrs["rpc.method"] != "list_members" || attrs["rpc.system.name"] != "nats" {
 							return false
 						}
 						results[attrs["error.type"]] += point.Count
@@ -143,7 +143,7 @@ func TestRegister_ParamsExtraction(t *testing.T) {
 	r := New(nc, "test-service")
 
 	var captured Params
-	Register(r, "chat.user.{account}.request.room.{roomID}.{siteID}.msg.test",
+	Register(r, "chat.user.{account}.request.room.{roomID}.{siteID}.msg.test", natsmetrics.MethodOpenRoom,
 		func(c *Context, req testReq) (*testResp, error) {
 			captured = c.Params
 			return &testResp{}, nil
@@ -162,7 +162,7 @@ func TestRegister_InvalidJSON(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetRoomKey,
 		func(c *Context, req testReq) (*testResp, error) {
 			t.Fatal("handler should not be called for invalid JSON")
 			return nil, nil
@@ -180,7 +180,7 @@ func TestRegister_HandlerError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodGetRoomAppTabs,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("something broke")
 		})
@@ -198,7 +198,7 @@ func TestRegisterNoBody_Success(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}",
+	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}", natsmetrics.MethodBatchGetRooms,
 		func(c *Context) (*testResp, error) {
 			return &testResp{Greeting: "room " + c.Param("roomID")}, nil
 		})
@@ -235,7 +235,7 @@ func TestMiddleware_ExecutionOrder(t *testing.T) {
 	r.Use(makeMiddleware("B"))
 	r.Use(makeMiddleware("C"))
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodListOrgMembers,
 		func(c *Context, req testReq) (*testResp, error) {
 			order = append(order, "handler")
 			return &testResp{}, nil
@@ -263,7 +263,7 @@ func TestMiddleware_ShortCircuit(t *testing.T) {
 	})
 
 	handlerCalled := false
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodListMemberStatuses,
 		func(c *Context, req testReq) (*testResp, error) {
 			handlerCalled = true
 			return &testResp{}, nil
@@ -282,7 +282,7 @@ func TestRecovery_CatchesPanic(t *testing.T) {
 	r := New(nc, "test-service")
 	r.Use(Recovery())
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodListMentionableSubscriptions,
 		func(c *Context, req testReq) (*testResp, error) {
 			panic("boom!")
 		})
@@ -300,7 +300,7 @@ func TestRegister_NoParams(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "static.subject",
+	Register(r, "static.subject", natsmetrics.MethodMarkMessageRead,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hello " + req.Name}, nil
 		})
@@ -318,7 +318,7 @@ func TestRegister_RouteError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodListMessageReaders,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.NotFound("thing not found")
 		})
@@ -337,7 +337,7 @@ func TestRegister_RouteErrorSimple(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodMarkThreadRead,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.BadRequest(fmt.Sprintf("user %s not allowed", "alice"))
 		})
@@ -356,7 +356,7 @@ func TestRegister_InternalErrorNotExposed(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodUpdateMemberRole,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("database connection refused")
 		})
@@ -420,7 +420,7 @@ func TestErrcodeError_WrappedInFmtErrorf(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodRemoveMember,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, fmt.Errorf("context: %w", errcode.Forbidden("not allowed"))
 		})
@@ -465,7 +465,7 @@ func TestContext_Abort(t *testing.T) {
 		// Don't call Next
 	})
 
-	Register(r, "test.abort",
+	Register(r, "test.abort", natsmetrics.MethodAddMembers,
 		func(c *Context, req testReq) (*testResp, error) {
 			handlerCalled = true
 			return &testResp{}, nil
@@ -483,7 +483,7 @@ func TestRequestID_Generated(t *testing.T) {
 	r.Use(RequestID())
 
 	var capturedID string
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodRenameRoom,
 		func(c *Context, req testReq) (*testResp, error) {
 			val, ok := c.Get("requestID")
 			require.True(t, ok)
@@ -503,7 +503,7 @@ func TestRequestID_FromHeader(t *testing.T) {
 	r.Use(RequestID())
 
 	var capturedID string
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodSetRoomRestricted,
 		func(c *Context, req testReq) (*testResp, error) {
 			capturedID = c.MustGet("requestID").(string)
 			return &testResp{}, nil
@@ -525,7 +525,7 @@ func TestRegisterNoBody_HandlerError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "test.{id}",
+	RegisterNoBody(r, "test.{id}", natsmetrics.MethodBatchGetRoomsInfo,
 		func(c *Context) (*testResp, error) {
 			return nil, fmt.Errorf("something failed")
 		})
@@ -542,7 +542,7 @@ func TestRegisterNoBody_RouteError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "test.{id}",
+	RegisterNoBody(r, "test.{id}", natsmetrics.MethodBatchGetThreadRoomsInfo,
 		func(c *Context) (*testResp, error) {
 			return nil, errcode.NotFound("item not found")
 		})
@@ -561,7 +561,7 @@ func TestLogging_LogsRequest(t *testing.T) {
 	r := New(nc, "test-service")
 	r.Use(Logging())
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodMarkAllThreadsRead,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "ok"}, nil
 		})
@@ -579,7 +579,7 @@ func TestRegister_TypedInternalError(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "test.{id}",
+	Register(r, "test.{id}", natsmetrics.MethodEnsureRoomKey,
 		func(c *Context, req testReq) (*testResp, error) {
 			return nil, errcode.Internal("failed to load data")
 		})
@@ -781,7 +781,7 @@ func TestRegister_PayloadCapture(t *testing.T) {
 		nc := startTestNATS(t)
 		r := New(nc, "test-service")
 		r.Use(RequestID())
-		Register(r, "test.{id}", func(c *Context, req testReq) (*testResp, error) {
+		Register(r, "test.{id}", natsmetrics.MethodCreateRoom, func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hi " + req.Name}, nil
 		})
 
@@ -813,7 +813,7 @@ func TestRegisterOptionalBody_EmptyPayloadYieldsZeroValue(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt.test", natsmetrics.MethodStartTeamsRoomCall,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "name=" + req.Name}, nil
 		})
@@ -829,7 +829,7 @@ func TestRegisterOptionalBody_NonEmptyPayloadUnmarshals(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt2.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt2.test", natsmetrics.MethodStartTeamsUserCall,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "name=" + req.Name}, nil
 		})
@@ -846,7 +846,7 @@ func TestRegisterOptionalBody_MalformedPayloadIsBadRequest(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt3.test",
+	RegisterOptionalBody(r, "chat.user.{account}.request.user.s1.opt3.test", natsmetrics.MethodCreateTeamsMeeting,
 		func(c *Context, req testReq) (*testResp, error) {
 			t.Fatal("handler must not run on malformed payload")
 			return nil, nil
@@ -867,4 +867,145 @@ func attrsOfPoint(set attribute.Set) map[string]string {
 		out[string(kv.Key)] = kv.Value.String()
 	}
 	return out
+}
+
+// serverCallMethods returns the rpc.method of every rpc.server.call.duration
+// point recorded so far. Collect is a snapshot, so callers that expect zero
+// samples must first wait on something the handler itself sets.
+func serverCallMethods(t *testing.T, reader *sdkmetric.ManualReader) []string {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var methods []string
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok || m.Name != "rpc.server.call.duration" {
+				continue
+			}
+			for _, point := range hist.DataPoints {
+				methods = append(methods, attrsOfPoint(point.Attributes)["rpc.method"])
+			}
+		}
+	}
+	return methods
+}
+
+// A reply-registering route records the method its registration named — not one
+// derived from the subject, which is what let user-service's
+// chatlist.section.create record as room-service's room_mutation.
+func TestRouter_RecordsRegisteredMethod(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "room-service", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.room.rename",
+		natsmetrics.MethodRenameRoom,
+		func(_ *Context, req testReq) (*testResp, error) { return &testResp{Greeting: "ok"}, nil })
+
+	_, err := nc.Request(context.Background(),
+		"chat.user.alice.request.room.room-a.site-a.room.rename", []byte(`{"name":"ok"}`), 2*time.Second)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"rename_room"}, serverCallMethods(t, reader))
+	}, time.Second, 10*time.Millisecond)
+}
+
+// A RegisterVoid route has no reply subject, so it is not an RPC call. It must
+// produce no rpc.server.call.duration sample at all — its local handler time is
+// not a round trip, and the presence heartbeat lane that uses this is the
+// fleet's highest-volume traffic, so recording it inflates the histogram's count
+// and pulls every percentile down.
+//
+// The handler signals through done, because there is no reply to wait on and
+// asserting "still empty" against an unsynchronised handler would pass before
+// the handler had run at all. done alone is not enough, though: recordHandled
+// runs from a defer in the dispatch goroutine, so it is ordered *after* the
+// handler returns and racing it would let this test pass against an
+// implementation that had lost the recordRPC guard. Shutdown waits on r.wg, and
+// `defer r.wg.Done()` is registered first in that goroutine so it unwinds last
+// — strictly after the record site. That is the edge the assertion needs.
+func TestRouter_RegisterVoidRecordsNoRPCSample(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "user-presence-service", WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")))
+	done := make(chan struct{})
+	RegisterVoid(r, "chat.user.{account}.event.presence.site-a.ping",
+		func(_ *Context, req testReq) error { close(done); return nil })
+
+	require.NoError(t, nc.PublishMsg(context.Background(), &nats.Msg{
+		Subject: "chat.user.alice.event.presence.site-a.ping",
+		Data:    []byte(`{"name":"ok"}`),
+	}))
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("void handler never ran")
+	}
+	require.NoError(t, r.Shutdown(context.Background()))
+	assert.Empty(t, serverCallMethods(t, reader))
+}
+
+// An undeclared method compiles — RPCMethod is a string type — so registration
+// is where it has to be caught. Left unchecked it would record as "unknown",
+// which is precisely the bucket this work removes.
+func TestRegisterPanicsOnUndeclaredMethod(t *testing.T) {
+	for _, method := range []natsmetrics.RPCMethod{"", "not_registered", natsmetrics.MethodUnknown} {
+		t.Run(string(method), func(t *testing.T) {
+			r := New(startTestNATS(t), "test")
+			assert.Panics(t, func() {
+				Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open", method,
+					func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
+			})
+		})
+	}
+}
+
+// Two routes sharing a method merge into one series, and nothing downstream can
+// separate them again. The vocabulary test cannot see this — only a router knows
+// which methods one service registered.
+func TestRegisterPanicsOnDuplicateMethodInOneRouter(t *testing.T) {
+	r := New(startTestNATS(t), "room-service")
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
+		func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
+
+	assert.Panics(t, func() {
+		Register(r, "chat.user.{account}.request.room.{roomID}.site-a.app.tabs",
+			natsmetrics.MethodOpenRoom,
+			func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil })
+	})
+}
+
+// Admission rejection replies before the handler runs, so it has no result to
+// classify — but it is still that route's traffic and must carry its method, or
+// a saturation incident lands in a different series from the route that
+// saturated.
+func TestRouter_AdmissionRejectionKeepsRouteMethod(t *testing.T) {
+	nc := startTestNATS(t)
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	r := New(nc, "room-service",
+		WithMetrics(natsmetrics.NewFromProvider(mp).Publisher("site-a")), WithMaxConcurrency(1))
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	Register(r, "chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
+		func(_ *Context, req testReq) (*testResp, error) { <-block; return &testResp{}, nil })
+
+	// The first request occupies the only slot; the second is shed.
+	go func() {
+		_, _ = nc.Request(context.Background(),
+			"chat.user.alice.request.room.room-a.site-a.open", []byte(`{"name":"ok"}`), 5*time.Second)
+	}()
+	require.Eventually(t, func() bool {
+		_, err := nc.Request(context.Background(),
+			"chat.user.bob.request.room.room-b.site-a.open", []byte(`{"name":"ok"}`), time.Second)
+		return err == nil && len(serverCallMethods(t, reader)) > 0
+	}, 3*time.Second, 20*time.Millisecond)
+
+	assert.Contains(t, serverCallMethods(t, reader), "open_room")
 }

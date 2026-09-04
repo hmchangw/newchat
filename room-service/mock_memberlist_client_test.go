@@ -83,7 +83,7 @@ func (m *MockrequestRecorder) EXPECT() *MockrequestRecorderMockRecorder {
 }
 
 // Request mocks base method.
-func (m *MockrequestRecorder) Request(arg0 context.Context, arg1 natsmetrics.Operation, arg2 time.Duration, arg3 error) {
+func (m *MockrequestRecorder) Request(arg0 context.Context, arg1 natsmetrics.RPCMethod, arg2 time.Duration, arg3 error) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Request", arg0, arg1, arg2, arg3)
 }

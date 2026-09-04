@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 )
 
 // TestShutdown_StopsAcceptingNewRequests verifies that after Shutdown returns,
@@ -18,7 +20,7 @@ func TestRouter_Shutdown_StopsAcceptingNewRequests(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-shutdown")
 
-	Register(r, "test.shutdown.{id}",
+	Register(r, "test.shutdown.{id}", natsmetrics.MethodGetSettings,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hi"}, nil
 		})
@@ -48,7 +50,7 @@ func TestRouter_Shutdown_WaitsForInflightHandlers(t *testing.T) {
 	release := make(chan struct{})
 	handlerFinished := make(chan struct{})
 
-	Register(r, "test.slow.{id}",
+	Register(r, "test.slow.{id}", natsmetrics.MethodSetSettings,
 		func(c *Context, req testReq) (*testResp, error) {
 			close(handlerReached)
 			<-release
@@ -112,7 +114,7 @@ func TestRouter_Shutdown_RespectsContextDeadline(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done) // unblock the handler when test ends
 
-	Register(r, "test.stuck.{id}",
+	Register(r, "test.stuck.{id}", natsmetrics.MethodListPriorityContacts,
 		func(c *Context, req testReq) (*testResp, error) {
 			close(handlerReached)
 			<-done
@@ -137,7 +139,7 @@ func TestRouter_Shutdown_RespectsContextDeadline(t *testing.T) {
 func TestRouter_Shutdown_Idempotent(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-shutdown-idempotent")
-	Register(r, "test.idem.{id}",
+	Register(r, "test.idem.{id}", natsmetrics.MethodAddPriorityContact,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{}, nil
 		})
@@ -148,6 +150,22 @@ func TestRouter_Shutdown_Idempotent(t *testing.T) {
 	require.NoError(t, r.Shutdown(ctx))
 }
 
+// testMethods supplies one distinct declared method per concurrently registered
+// route below: a router rejects two routes claiming the same one, so the loop
+// cannot reuse a single constant.
+var testMethods = []natsmetrics.RPCMethod{
+	natsmetrics.MethodSearchMessages, natsmetrics.MethodSearchRooms,
+	natsmetrics.MethodSearchApps, natsmetrics.MethodSearchUsers,
+	natsmetrics.MethodSearchOrgs, natsmetrics.MethodListEmojis,
+	natsmetrics.MethodDeleteEmoji, natsmetrics.MethodTranslateText,
+	natsmetrics.MethodCreateDMRoom, natsmetrics.MethodSetManualPresence,
+	natsmetrics.MethodBatchGetPresence, natsmetrics.MethodBatchGetPeerPresence,
+	natsmetrics.MethodCreateBotRoom, natsmetrics.MethodAddBotRoomMembers,
+	natsmetrics.MethodRemoveBotRoomMembers, natsmetrics.MethodGetBotRoom,
+	natsmetrics.MethodEnsureBotDMRoom, natsmetrics.MethodSendRoomMessage,
+	natsmetrics.MethodSendDM, natsmetrics.MethodGetPresenceSnapshot,
+}
+
 // TestShutdown_ConcurrentRegistrationSafe verifies addRoute is safe to run
 // alongside other addRoute calls (belt-and-suspenders for the subs slice
 // even though registration is normally startup-only).
@@ -156,11 +174,11 @@ func TestRouter_Shutdown_ConcurrentRegistrationSafe(t *testing.T) {
 	r := New(nc, "test-shutdown-concurrent")
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := range testMethods {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			RegisterNoBody(r, subjectf(i),
+			RegisterNoBody(r, subjectf(i), testMethods[i],
 				func(c *Context) (*testResp, error) { return &testResp{}, nil })
 		}(i)
 	}
@@ -180,7 +198,7 @@ func TestRouter_Shutdown_StressUnderLoad(t *testing.T) {
 
 	firstEntered := make(chan struct{})
 	var once sync.Once
-	Register(r, "stress.{id}",
+	Register(r, "stress.{id}", natsmetrics.MethodRemovePriorityContact,
 		func(c *Context, req testReq) (*testResp, error) {
 			once.Do(func() { close(firstEntered) })
 			time.Sleep(time.Duration(1+req.Name[0]%5) * time.Millisecond)

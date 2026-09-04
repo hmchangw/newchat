@@ -17,6 +17,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -35,7 +36,7 @@ func TestTranslate_EndToEnd(t *testing.T) {
 
 	const siteID = "site-a"
 	router := natsrouter.Default(nc, "translation-service")
-	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), NewHandler(mockTranslator{}).Translate)
+	natsrouter.Register(router, subject.TranslateRequestPattern(siteID), natsmetrics.MethodTranslateText, NewHandler(mockTranslator{}).Translate)
 	t.Cleanup(func() { require.NoError(t, router.Shutdown(context.Background())) })
 
 	reqSubject := subject.TranslateRequest("alice", siteID)

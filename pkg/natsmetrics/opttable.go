@@ -13,7 +13,7 @@ import (
 //
 // The label space is closed — every component is a normalized enum — but it is
 // far wider than what a process actually records. destination x operation x
-// outcome is 1,848 combinations, while PublishLabelsFromSubject and the fixed
+// outcome is 924 combinations, while PublishLabelsFromSubject and the fixed
 // call sites between them can only produce about seventeen destination/operation
 // pairs; precomputing the cross product cost 8,094 allocations per Publisher and
 // held every one of them for the life of the process.

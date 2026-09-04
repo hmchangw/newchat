@@ -32,8 +32,8 @@ func TestNewFromProviderIfEnabled_DisabledCollapsesToZeroValue(t *testing.T) {
 
 	ctx := context.Background()
 	publisher.Failure(ctx, DestinationCanonical, OperationCanonicalPublish, nil)
-	publisher.Request(ctx, OperationHistoryRead, time.Millisecond, nil)
-	publisher.HandledRequest(ctx, OperationMemberRead, time.Millisecond, RequestSuccess)
+	publisher.Request(ctx, MethodGetChannelHistory, time.Millisecond, nil)
+	publisher.HandledRequest(ctx, MethodListMembers, time.Millisecond, RequestSuccess)
 	consumer.LoopStarted(ctx)
 	consumer.LoopStopped(ctx)
 	consumer.Terminal(ctx, EventUnknown, TerminalInternal)

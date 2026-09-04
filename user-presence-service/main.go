@@ -173,9 +173,9 @@ func main() {
 	natsrouter.RegisterVoid(router, subject.PresencePingPattern(cfg.SiteID), handler.Ping)
 	natsrouter.RegisterVoid(router, subject.PresenceActivityPattern(cfg.SiteID), handler.Activity)
 	natsrouter.RegisterVoid(router, subject.PresenceByePattern(cfg.SiteID), handler.Bye)
-	natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), handler.SetManual)
-	natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), handler.QueryBatch)
-	natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), handler.QueryBatchPeer)
+	natsrouter.Register(router, subject.PresenceManualSetPattern(cfg.SiteID), natsmetrics.MethodSetManualPresence, handler.SetManual)
+	natsrouter.Register(router, subject.PresenceQueryBatch(cfg.SiteID), natsmetrics.MethodBatchGetPresence, handler.QueryBatch)
+	natsrouter.Register(router, subject.PresenceQueryBatchPeer(cfg.SiteID), natsmetrics.MethodBatchGetPeerPresence, handler.QueryBatchPeer)
 
 	sweeper := NewSweeper(store, publish, cfg.SiteID, cfg.Presence.SweepInterval)
 	sweepCtx, stopSweep := context.WithCancel(ctx)

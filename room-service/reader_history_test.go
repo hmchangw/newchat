@@ -38,8 +38,8 @@ func startOtelNATS(t *testing.T) *o11ynats.Conn {
 func TestHistoryMessageReader_RecordsBoundedRequestResult(t *testing.T) {
 	nc := startOtelNATS(t)
 	recorder := NewMockrequestRecorder(gomock.NewController(t))
-	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Nil()).
-		Do(func(_ context.Context, _ natsmetrics.Operation, duration time.Duration, _ error) {
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.MethodGetMessage, gomock.Any(), gomock.Nil()).
+		Do(func(_ context.Context, _ natsmetrics.RPCMethod, duration time.Duration, _ error) {
 			assert.GreaterOrEqual(t, duration, time.Duration(0))
 		})
 	const siteID = "site-a"
@@ -73,7 +73,7 @@ func TestHistoryMessageReader_RecordsFinalRequestFailure(t *testing.T) {
 				require.NoError(t, err)
 			}
 			recorder := NewMockrequestRecorder(gomock.NewController(t))
-			recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationHistoryGetMessage, gomock.Any(), gomock.Not(gomock.Nil()))
+			recorder.EXPECT().Request(gomock.Any(), natsmetrics.MethodGetMessage, gomock.Any(), gomock.Not(gomock.Nil()))
 			r := newHistoryMessageReader(nc, siteID, withHistoryRequestRecorder(recorder))
 
 			_, _, err := r.GetMessageReadMeta(context.Background(), "alice", "room-a", "message-a")

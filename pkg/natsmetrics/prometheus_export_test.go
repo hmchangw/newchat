@@ -9,6 +9,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -44,6 +45,74 @@ func newPrometheusExportSetup(t *testing.T) (*Metrics, *prometheus.Registry) {
 	return NewFromProvider(mp), reg
 }
 
+// The exported label must never carry "unknown" for traffic a route served:
+// registration makes the method mandatory, so an unknown here means a caller
+// built an RPCMethod from a string and the normalizer rejected it.
+func TestExportedRPCMethodIsNeverUnknownForRegisteredTraffic(t *testing.T) {
+	m, reg := newPrometheusExportSetup(t)
+	publisher := m.Publisher("s1")
+	ctx := context.Background()
+	publisher.HandledRequest(ctx, MethodRenameRoom, 5*time.Millisecond, RequestSuccess)
+	publisher.HandledRequest(ctx, MethodGetMessage, 5*time.Millisecond, RequestNotFound)
+
+	families := gatherFamilies(t, reg)
+	methods := labelValues(families, "rpc_server_call_duration_seconds", "rpc_method")
+	assert.ElementsMatch(t, []string{"rename_room", "get_message"}, methods)
+	assert.NotContains(t, methods, "unknown")
+}
+
+// Every sample carries a non-empty rpc_method. The label is required at
+// registration, so its absence here would mean a record path bypassed the
+// route — the one way an unlabelled series could still appear.
+//
+// This file deliberately does NOT assert that a method maps to one handler:
+// nothing in pkg/natsmetrics knows what a handler is. That guarantee is
+// natsrouter's, enforced by the per-router duplicate panic and covered by
+// TestRegisterPanicsOnDuplicateMethodInOneRouter.
+func TestEveryExportedSampleCarriesAMethod(t *testing.T) {
+	m, reg := newPrometheusExportSetup(t)
+	ctx := context.Background()
+	publisher := m.Publisher("s1")
+	for _, method := range []RPCMethod{MethodRenameRoom, MethodGetMessage, MethodSendDM} {
+		publisher.HandledRequest(ctx, method, time.Millisecond, RequestSuccess)
+	}
+
+	families := gatherFamilies(t, reg)
+	methods := labelValues(families, "rpc_server_call_duration_seconds", "rpc_method")
+	require.Len(t, methods, 3)
+	for _, method := range methods {
+		assert.NotEmpty(t, method)
+	}
+}
+
+// gatherFamilies gathers the registry's metric families, failing the test on
+// any gather error (a failure here is the /metrics 500).
+func gatherFamilies(t *testing.T, reg *prometheus.Registry) []*dto.MetricFamily {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err, "gather must succeed — a failure here is the /metrics 500")
+	return families
+}
+
+// labelValues returns the value of labelName from every sample in the named
+// family, in the order samples appear.
+func labelValues(families []*dto.MetricFamily, familyName, labelName string) []string {
+	var values []string
+	for _, mf := range families {
+		if mf.GetName() != familyName {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			for _, lp := range metric.GetLabel() {
+				if lp.GetName() == labelName {
+					values = append(values, lp.GetValue())
+				}
+			}
+		}
+	}
+	return values
+}
+
 func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T) {
 	m, reg := newPrometheusExportSetup(t)
 	ctx := context.Background()
@@ -58,8 +127,8 @@ func TestPrometheusExport_GatherSucceedsWithResourceConstantLabels(t *testing.T)
 	// so the nil call left chat_nats_publish_failures out of the exposition
 	// entirely and this guard silently stopped covering it.
 	p.Failure(ctx, DestinationCanonical, OperationCanonicalPublish, nats.ErrTimeout)
-	p.Request(ctx, OperationPresenceLookup, time.Millisecond, nil)
-	p.HandledRequest(ctx, OperationRoomRead, time.Millisecond, RequestSuccess)
+	p.Request(ctx, MethodGetPresenceSnapshot, time.Millisecond, nil)
+	p.HandledRequest(ctx, MethodOpenRoom, time.Millisecond, RequestSuccess)
 
 	families, err := reg.Gather()
 	require.NoError(t, err, "gather must succeed — a failure here is the /metrics 500")

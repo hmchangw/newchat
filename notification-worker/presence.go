@@ -78,7 +78,7 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 			}
 			started := time.Now()
 			msg, err := b.req.Request(ctx, subj, data, b.timeout)
-			b.metrics.Request(ctx, natsmetrics.OperationPresenceLookup, time.Since(started), err)
+			b.metrics.Request(ctx, natsmetrics.MethodGetPresenceSnapshot, time.Since(started), err)
 			if err != nil {
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
 				return

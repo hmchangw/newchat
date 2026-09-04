@@ -131,42 +131,25 @@ const (
 	DestinationUnknown        DestinationKind = "unknown"
 )
 
-type Operation string
+// PublishOperation is the closed publish-side label for the publish-failure
+// family. The RPC families no longer share it: a request/reply route's label
+// is an RPCMethod declared at registration, not a value derived from a
+// subject.
+type PublishOperation string
 
 const (
-	OperationCanonicalPublish    Operation = "canonical_publish"
-	OperationClientResponse      Operation = "client_response"
-	OperationRecipientPublish    Operation = "recipient_publish"
-	OperationNotificationPublish Operation = "notification_publish"
-	OperationPushPublish         Operation = "push_publish"
-	OperationHistoryGetMessage   Operation = "history_get_message"
-	OperationPresenceLookup      Operation = "presence_lookup"
-	OperationThreadTCount        Operation = "thread_tcount"
-	OperationTeamsUserUpsert     Operation = "teams_user_upsert"
-	// OperationChannelHistory and OperationThreadOpen are split out of
-	// history_read because SLO-4 and SLO-5 measure them separately, against
-	// different bounds. Their cost models differ — channel load walks
-	// messages_by_room buckets, thread open slices one partition of
-	// thread_messages_by_thread — so one shared label would drag the fast
-	// family's ratio down with walk latency and dilute the slow family's
-	// violations with fast traffic, in opposite directions and at a ratio that
-	// drifts with traffic mix.
-	OperationChannelHistory Operation = "channel_history"
-	OperationThreadOpen     Operation = "thread_open"
-	// OperationHistoryRead keeps every other history route: scroll, jump,
-	// single and batch reads, pinned lists, thread parents, and the
-	// server-to-server thread lanes. None of them is described by an SLO.
-	OperationHistoryRead     Operation = "history_read"
-	OperationHistoryMutation Operation = "history_mutation"
-	OperationRoomRead        Operation = "room_read"
-	OperationRoomMutation    Operation = "room_mutation"
-	OperationMemberRead      Operation = "member_read"
-	OperationMemberMutation  Operation = "member_mutation"
-	OperationTeamsRoom       Operation = "teams_room"
-	OperationRoomPublish     Operation = "room_publish"
-	OperationMemberPublish   Operation = "member_publish"
-	OperationOutboxPublish   Operation = "outbox_publish"
-	OperationUnknown         Operation = "unknown"
+	OperationCanonicalPublish    PublishOperation = "canonical_publish"
+	OperationClientResponse      PublishOperation = "client_response"
+	OperationRecipientPublish    PublishOperation = "recipient_publish"
+	OperationNotificationPublish PublishOperation = "notification_publish"
+	OperationPushPublish         PublishOperation = "push_publish"
+	OperationThreadTCount        PublishOperation = "thread_tcount"
+	OperationTeamsUserUpsert     PublishOperation = "teams_user_upsert"
+	OperationRoomPublish         PublishOperation = "room_publish"
+	OperationMemberPublish       PublishOperation = "member_publish"
+	OperationOutboxPublish       PublishOperation = "outbox_publish"
+
+	OperationUnknown PublishOperation = "unknown"
 )
 
 // Metrics owns the shared instruments. Instrument-creation failures fall back
@@ -273,18 +256,18 @@ type terminalKey struct {
 
 type publishKey struct {
 	destination DestinationKind
-	operation   Operation
+	operation   PublishOperation
 	outcome     PublishOutcome
 }
 
 type requestKey struct {
-	operation Operation
-	outcome   PublishOutcome
+	method  RPCMethod
+	outcome PublishOutcome
 }
 
 type handledRequestKey struct {
-	operation Operation
-	result    RequestResult
+	method RPCMethod
+	result RequestResult
 }
 
 type Consumer struct {
@@ -573,15 +556,15 @@ func (m *Metrics) Publisher(site string) Publisher {
 		// marks a call as having succeeded.
 		request: newOptTable(func(key requestKey) metric.MeasurementOption {
 			if key.outcome == RequestSucceeded {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(key.method))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.outcome)))
+			return build(rpcSystemName, rpcMethod(key.method), errorType(string(key.outcome)))
 		}),
 		handled: newOptTable(func(key handledRequestKey) metric.MeasurementOption {
 			if key.result == RequestSuccess {
-				return build(rpcSystemName, rpcMethod(key.operation))
+				return build(rpcSystemName, rpcMethod(key.method))
 			}
-			return build(rpcSystemName, rpcMethod(key.operation), errorType(string(key.result)))
+			return build(rpcSystemName, rpcMethod(key.method), errorType(string(key.result)))
 		}),
 	}
 }
@@ -608,32 +591,32 @@ func (m *Metrics) Publisher(site string) Publisher {
 //
 // The cost mattered: the fan-out paths in broadcast-worker and
 // pkg/roomkeysender call this once per recipient.
-func (p Publisher) Failure(ctx context.Context, destination DestinationKind, operation Operation, err error) {
+func (p Publisher) Failure(ctx context.Context, destination DestinationKind, operation PublishOperation, err error) {
 	if err == nil || p.metrics == nil {
 		return
 	}
-	key := publishKey{normalizeDestination(destination), normalizeOperation(operation), ClassifyPublishError(err)}
+	key := publishKey{normalizeDestination(destination), normalizePublishOperation(operation), ClassifyPublishError(err)}
 	p.metrics.publishFailures.Add(ctx, 1, p.attempt.get(key))
 }
 
 // Request records one outbound request/reply call as rpc.client.call.duration.
 // The histogram's own count is the call count, so there is no paired counter.
-func (p Publisher) Request(ctx context.Context, operation Operation, duration time.Duration, err error) {
+func (p Publisher) Request(ctx context.Context, method RPCMethod, duration time.Duration, err error) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.request.get(requestKey{normalizeOperation(operation), classifyRequestOutcome(err)})
+	opt := p.request.get(requestKey{normalizeRPCMethod(method), classifyRequestOutcome(err)})
 	p.metrics.clientCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
 // HandledRequest records one inbound request/reply handler result as
 // rpc.server.call.duration. Both labels are normalized against closed enums;
 // subjects and error strings are never attributes.
-func (p Publisher) HandledRequest(ctx context.Context, operation Operation, duration time.Duration, result RequestResult) {
+func (p Publisher) HandledRequest(ctx context.Context, method RPCMethod, duration time.Duration, result RequestResult) {
 	if p.metrics == nil {
 		return
 	}
-	opt := p.handled.get(handledRequestKey{normalizeOperation(operation), normalizeRequestResult(result)})
+	opt := p.handled.get(handledRequestKey{normalizeRPCMethod(method), normalizeRequestResult(result)})
 	p.metrics.serverCallDuration.Record(ctx, duration.Seconds(), opt)
 }
 
@@ -658,15 +641,12 @@ func normalizeDestination(destination DestinationKind) DestinationKind {
 	}
 }
 
-func normalizeOperation(operation Operation) Operation {
+func normalizePublishOperation(operation PublishOperation) PublishOperation {
 	switch operation {
 	case OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
-		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
-		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
-		OperationChannelHistory, OperationThreadOpen,
-		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
-		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
-		OperationMemberPublish, OperationOutboxPublish:
+		OperationNotificationPublish, OperationPushPublish, OperationThreadTCount,
+		OperationTeamsUserUpsert, OperationRoomPublish, OperationMemberPublish,
+		OperationOutboxPublish:
 		return operation
 	default:
 		return OperationUnknown

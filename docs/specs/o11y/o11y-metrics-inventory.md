@@ -192,15 +192,19 @@ labels. `nats_slow_consumer_events_total` is scoped the same way.
 All subject- and error-derived dimensions are closed enums. Inbound request
 `result` is one of `success`, `bad_request`, `unauthenticated`, `forbidden`,
 `not_found`, `conflict`, `too_many_requests`, `unavailable`, or `internal`.
-Room and history operations are coarse bounded categories — `room_read`,
-`room_mutation`, `member_read`, `member_mutation`, `channel_history`,
-`thread_open`, `history_read`, `history_mutation`, `room_publish`,
-`member_publish`, `outbox_publish`. `channel_history` and `thread_open` are
-deliberately finer than the rest: each is the whole numerator and denominator of
-an SLO (SLO-4 and SLO-5), which the coarse `history_read` cannot serve because it
-also carries scroll, jump, single and batch reads, pinned lists and thread
-parents. Subject families that do not map normalize to `unknown` rather than
-minting a label.
+Publish operations stay subject-derived and coarse — `canonical_publish`,
+`client_response`, `recipient_publish`, `notification_publish`,
+`push_publish`, `thread_tcount`, `teams_user_upsert`, `room_publish`,
+`member_publish`, `outbox_publish` — and a subject that does not map normalizes
+to `unknown` rather than minting a label.
+
+`rpc.method`, by contrast, is supplied at route registration, not derived from
+the subject: each of the fleet's 92 routes declares its own lower-snake-case
+`<verb>_<object>[_qualifier]` method, enforced unique per service by
+natsrouter's duplicate check, so there is no coarse-bucket collapsing left to
+describe — `get_channel_history` (SLO-4) and `get_thread_messages` (SLO-5) are
+just two entries in that one-method-per-route vocabulary, not a finer carve-out
+of a shared category. See the metrics contract's §13.1.
 Raw subjects, room IDs, account IDs, site IDs parsed out of subject tokens, and
 error strings are never labels.
 

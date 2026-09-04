@@ -1,9 +1,11 @@
 package natsmetrics
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // These lists used to live in metrics.go, where they existed only to drive the
@@ -44,14 +46,12 @@ var (
 		DestinationMemberEvent, DestinationClientResponse, DestinationUserSync, DestinationUnknown,
 	}
 
-	allOperations = []Operation{
+	allPublishOperations = []PublishOperation{
 		OperationCanonicalPublish, OperationClientResponse, OperationRecipientPublish,
-		OperationNotificationPublish, OperationPushPublish, OperationHistoryGetMessage,
-		OperationPresenceLookup, OperationThreadTCount, OperationTeamsUserUpsert,
-		OperationChannelHistory, OperationThreadOpen,
-		OperationHistoryRead, OperationHistoryMutation, OperationRoomRead, OperationRoomMutation,
-		OperationMemberRead, OperationMemberMutation, OperationTeamsRoom, OperationRoomPublish,
-		OperationMemberPublish, OperationOutboxPublish, OperationUnknown,
+		OperationNotificationPublish, OperationPushPublish, OperationThreadTCount,
+		OperationTeamsUserUpsert, OperationRoomPublish, OperationMemberPublish,
+		OperationOutboxPublish,
+		OperationUnknown,
 	}
 )
 
@@ -65,8 +65,8 @@ func TestNormalizersAcceptEveryDeclaredValue(t *testing.T) {
 	for _, destination := range allDestinations {
 		assert.Equal(t, destination, normalizeDestination(destination))
 	}
-	for _, operation := range allOperations {
-		assert.Equal(t, operation, normalizeOperation(operation))
+	for _, operation := range allPublishOperations {
+		assert.Equal(t, operation, normalizePublishOperation(operation))
 	}
 	for _, result := range allRequestResults {
 		assert.Equal(t, result, normalizeRequestResult(result))
@@ -78,23 +78,31 @@ func TestNormalizersAcceptEveryDeclaredValue(t *testing.T) {
 
 // The worst case is per site, per service, and for the consumer families also
 // per stream/consumer pair, so these numbers multiply out in the backend. They
-// are asserted rather than described so that adding one operation — which adds
-// 84 publish-failure series (12 destinations x 7 outcomes) and 17 request
-// series (8 client + 9 server) at a stroke — has to be acknowledged here.
+// are asserted rather than described so that adding one label value — one
+// operation adds 84 publish-failure series (12 destinations x 7 outcomes), one
+// rpc method adds 17 request series (8 client + 9 server) — has to be
+// acknowledged here.
+//
+// The publish and RPC families no longer share one enum: PublishOperation now carries
+// only the labels PublishLabelsFromSubject and the fixed publish call sites can
+// actually produce, and the request families are keyed by RPCMethod. The
+// publish figure is a real upper bound again, and the request ones count the
+// vocabulary plus its "unknown" record-time fallback, which is a reachable
+// label value but not a registerable method.
 func TestLabelSpaceStaysWithinBudget(t *testing.T) {
 	assert.Equal(t, 75, len(allEventTypes)*len(allOutcomes),
 		"chat.nats.consumer.messages / .processing.duration: event_type x outcome")
 	assert.Equal(t, 105, len(allEventTypes)*len(allTerminalReasons),
 		"chat.nats.terminal.failures: event_type x reason")
-	assert.Equal(t, 1848, len(allDestinations)*len(allOperations)*len(allPublishOutcomes),
+	assert.Equal(t, 924, len(allDestinations)*len(allPublishOperations)*len(allPublishOutcomes),
 		"chat.nats.publish.failures: destination_kind x operation x outcome")
-	assert.Equal(t, 176, len(allOperations)*len(allRequestOutcomes),
+	assert.Equal(t, 744, (len(allRPCMethods)+1)*len(allRequestOutcomes),
 		"rpc.client.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
-	assert.Equal(t, 198, len(allOperations)*len(allRequestResults),
+	assert.Equal(t, 837, (len(allRPCMethods)+1)*len(allRequestResults),
 		"rpc.server.call.duration: rpc.method x error.type, plus one unlabelled success series per method")
 }
 
-// The publish family's theoretical 1,848 is the clearest argument for building
+// The publish family's theoretical cross-product is the clearest argument for building
 // sets on demand: destination and operation are chosen together at each call
 // site, never crossed, so the pairs that can actually occur are the ones
 // PublishLabelsFromSubject returns plus the fixed literal pairs. Roughly
@@ -131,10 +139,19 @@ func TestPublishLabelPairsAreFarNarrowerThanTheCrossProduct(t *testing.T) {
 
 	assert.Less(t, len(reachable), 20,
 		"if this grows toward %d, revisit whether destination_kind still adds information over operation",
-		len(allDestinations)*len(allOperations))
+		len(allDestinations)*len(allPublishOperations))
 }
 
 type publishPair struct {
 	destination DestinationKind
-	operation   Operation
+	operation   PublishOperation
+}
+
+// rpc.method comes from route registration. A subject-derived fallback would
+// reintroduce exactly the cross-service misclassification the registration
+// argument removes, so there must be no such function to call.
+func TestNoSubjectDerivedRPCMethodRemains(t *testing.T) {
+	src, err := os.ReadFile("subject.go")
+	require.NoError(t, err)
+	assert.NotContains(t, string(src), "RequestOperationFromSubject")
 }

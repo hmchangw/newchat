@@ -25,6 +25,7 @@ import (
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/msgraph"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/outbox"
@@ -125,33 +126,33 @@ func NewHandler(store RoomStore, keyStore RoomKeyStore, memberListClient MemberL
 // on callers sending a stable X-Request-ID across retries — see docs/client-api.md.
 // Register/RegisterNoBody panic on subscription failure (fatal at startup).
 func (h *Handler) Register(r *natsrouter.Router) {
-	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), h.muteToggle)
-	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), h.favoriteToggle)
-	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), h.moveChat)
-	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), h.openRoom)
-	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), h.getRoomAppTabs)
-	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), h.getRoomAppCommandMenu)
-	natsrouter.RegisterNoBody(r, subject.OrgMembersPattern(h.siteID), h.listOrgMembers)
-	natsrouter.RegisterNoBody(r, subject.MemberListPattern(h.siteID), h.listMembers)
-	natsrouter.RegisterNoBody(r, subject.MemberStatusesPattern(h.siteID), h.listMemberStatuses)
-	natsrouter.RegisterNoBody(r, subject.MentionableSubscriptionsPattern(h.siteID), h.listMentionableSubscriptions)
-	natsrouter.RegisterNoBody(r, subject.RoomKeyGetPattern(h.siteID), h.getRoomKey)
-	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), h.messageRead)
-	natsrouter.Register(r, subject.MessageReadReceiptPattern(h.siteID), h.messageReadReceipt)
-	natsrouter.Register(r, subject.MessageThreadReadPattern(h.siteID), h.messageThreadRead)
-	natsrouter.Register(r, subject.MemberRoleUpdatePattern(h.siteID), h.updateRole)
-	natsrouter.Register(r, subject.MemberRemovePattern(h.siteID), h.removeMember)
-	natsrouter.Register(r, subject.MemberAddPattern(h.siteID), h.addMembers)
-	natsrouter.Register(r, subject.RoomRenamePattern(h.siteID), h.roomRename)
-	natsrouter.Register(r, subject.RoomRestricted(h.siteID), h.roomRestricted)
-	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), h.roomsInfoBatch)
-	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), h.threadRoomInfoBatch)
-	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), h.clearAllThreadRead)
-	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), h.ensureRoomKey)
-	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), h.createRoom)
-	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), h.teamsRoomCall)
-	natsrouter.Register(r, subject.TeamsUserCallPattern(h.siteID), h.teamsUserCall)
-	natsrouter.Register(r, subject.TeamsMeetingPattern(h.siteID), h.teamsMeeting)
+	natsrouter.RegisterNoBody(r, subject.MuteTogglePattern(h.siteID), natsmetrics.MethodToggleMute, h.muteToggle)
+	natsrouter.RegisterNoBody(r, subject.FavoriteTogglePattern(h.siteID), natsmetrics.MethodToggleFavorite, h.favoriteToggle)
+	natsrouter.Register(r, subject.MoveChatPattern(h.siteID), natsmetrics.MethodMoveChat, h.moveChat)
+	natsrouter.RegisterNoBody(r, subject.OpenRoomPattern(h.siteID), natsmetrics.MethodOpenRoom, h.openRoom)
+	natsrouter.RegisterNoBody(r, subject.RoomAppTabsPattern(h.siteID), natsmetrics.MethodGetRoomAppTabs, h.getRoomAppTabs)
+	natsrouter.RegisterNoBody(r, subject.RoomAppCmdMenuPattern(h.siteID), natsmetrics.MethodGetRoomAppCommandMenu, h.getRoomAppCommandMenu)
+	natsrouter.RegisterNoBody(r, subject.OrgMembersPattern(h.siteID), natsmetrics.MethodListOrgMembers, h.listOrgMembers)
+	natsrouter.RegisterNoBody(r, subject.MemberListPattern(h.siteID), natsmetrics.MethodListMembers, h.listMembers)
+	natsrouter.RegisterNoBody(r, subject.MemberStatusesPattern(h.siteID), natsmetrics.MethodListMemberStatuses, h.listMemberStatuses)
+	natsrouter.RegisterNoBody(r, subject.MentionableSubscriptionsPattern(h.siteID), natsmetrics.MethodListMentionableSubscriptions, h.listMentionableSubscriptions)
+	natsrouter.RegisterNoBody(r, subject.RoomKeyGetPattern(h.siteID), natsmetrics.MethodGetRoomKey, h.getRoomKey)
+	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), natsmetrics.MethodMarkMessageRead, h.messageRead)
+	natsrouter.Register(r, subject.MessageReadReceiptPattern(h.siteID), natsmetrics.MethodListMessageReaders, h.messageReadReceipt)
+	natsrouter.Register(r, subject.MessageThreadReadPattern(h.siteID), natsmetrics.MethodMarkThreadRead, h.messageThreadRead)
+	natsrouter.Register(r, subject.MemberRoleUpdatePattern(h.siteID), natsmetrics.MethodUpdateMemberRole, h.updateRole)
+	natsrouter.Register(r, subject.MemberRemovePattern(h.siteID), natsmetrics.MethodRemoveMember, h.removeMember)
+	natsrouter.Register(r, subject.MemberAddPattern(h.siteID), natsmetrics.MethodAddMembers, h.addMembers)
+	natsrouter.Register(r, subject.RoomRenamePattern(h.siteID), natsmetrics.MethodRenameRoom, h.roomRename)
+	natsrouter.Register(r, subject.RoomRestricted(h.siteID), natsmetrics.MethodSetRoomRestricted, h.roomRestricted)
+	natsrouter.Register(r, subject.RoomsInfoBatchSubscribe(h.siteID), natsmetrics.MethodBatchGetRoomsInfo, h.roomsInfoBatch)
+	natsrouter.Register(r, subject.ThreadRoomInfoBatch(h.siteID), natsmetrics.MethodBatchGetThreadRoomsInfo, h.threadRoomInfoBatch)
+	natsrouter.Register(r, subject.RoomThreadReadAllSubscribe(h.siteID), natsmetrics.MethodMarkAllThreadsRead, h.clearAllThreadRead)
+	natsrouter.Register(r, subject.RoomKeyEnsure(h.siteID), natsmetrics.MethodEnsureRoomKey, h.ensureRoomKey)
+	natsrouter.Register(r, subject.RoomCreatePattern(h.siteID), natsmetrics.MethodCreateRoom, h.createRoom)
+	natsrouter.Register(r, subject.TeamsRoomCallPattern(h.siteID), natsmetrics.MethodStartTeamsRoomCall, h.teamsRoomCall)
+	natsrouter.Register(r, subject.TeamsUserCallPattern(h.siteID), natsmetrics.MethodStartTeamsUserCall, h.teamsUserCall)
+	natsrouter.Register(r, subject.TeamsMeetingPattern(h.siteID), natsmetrics.MethodCreateTeamsMeeting, h.teamsMeeting)
 }
 
 func (h *Handler) createRoom(c *natsrouter.Context, req model.CreateRoomRequest) (*model.CreateRoomReply, error) { //nolint:gocritic // hugeParam: req is passed by value to satisfy the natsrouter.Register handler signature

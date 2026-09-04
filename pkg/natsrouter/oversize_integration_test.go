@@ -21,6 +21,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/testutil/testimages"
 )
 
@@ -93,7 +94,7 @@ func TestIntegration_OversizeReplyReturnsErrorEnvelope(t *testing.T) {
 	})
 
 	const subject = "chat.user.alice.request.history.load"
-	Register(r, "chat.user.{account}.request.history.load",
+	Register(r, "chat.user.{account}.request.history.load", natsmetrics.MethodGetChannelHistory,
 		func(c *Context, req bulkReq) (*bulkResp, error) {
 			items := make([]string, req.Limit)
 			for i := range items {
@@ -141,7 +142,7 @@ func TestIntegration_OversizeErrorReplyReturnsErrorEnvelope(t *testing.T) {
 	})
 
 	const subject = "chat.user.bob.request.rooms.info"
-	Register(r, "chat.user.{account}.request.rooms.info",
+	Register(r, "chat.user.{account}.request.rooms.info", natsmetrics.MethodBatchGetRoomsInfo,
 		func(c *Context, _ bulkReq) (*bulkResp, error) {
 			return nil, errcode.BadRequest(strings.Repeat("y", cappedMaxPayload*2))
 		})

@@ -62,8 +62,8 @@ func TestNATSMemberListClient_HappyPath(t *testing.T) {
 func TestNATSMemberListClient_RecordsBoundedRequestResult(t *testing.T) {
 	nc := startInProcessNATS(t)
 	recorder := NewMockrequestRecorder(gomock.NewController(t))
-	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Nil()).
-		Do(func(_ context.Context, _ natsmetrics.Operation, duration time.Duration, _ error) {
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.MethodListMembers, gomock.Any(), gomock.Nil()).
+		Do(func(_ context.Context, _ natsmetrics.RPCMethod, duration time.Duration, _ error) {
 			assert.GreaterOrEqual(t, duration, time.Duration(0))
 		})
 	client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
@@ -101,7 +101,7 @@ func TestNATSMemberListClient_RecordsFinalRequestFailure(t *testing.T) {
 				t.Cleanup(func() { _ = sub.Unsubscribe() })
 			}
 			recorder := NewMockrequestRecorder(gomock.NewController(t))
-			recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Not(gomock.Nil()))
+			recorder.EXPECT().Request(gomock.Any(), natsmetrics.MethodListMembers, gomock.Any(), gomock.Not(gomock.Nil()))
 			client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
 
 			_, err := client.ListMembers(context.Background(), "alice", ch, 0)
@@ -308,7 +308,7 @@ func TestNATSMemberListClient_NotRoomMemberIsNotARequestFailure(t *testing.T) {
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
 	recorder := NewMockrequestRecorder(gomock.NewController(t))
-	recorder.EXPECT().Request(gomock.Any(), natsmetrics.OperationMemberRead, gomock.Any(), gomock.Nil())
+	recorder.EXPECT().Request(gomock.Any(), natsmetrics.MethodListMembers, gomock.Any(), gomock.Nil())
 	client := NewNATSMemberListClient(nc, 2*time.Second, withMemberListRequestRecorder(recorder))
 
 	_, err = client.ListMembers(context.Background(), requester, ch, 0)

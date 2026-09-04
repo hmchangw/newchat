@@ -240,7 +240,7 @@ func TestPublishAndRequestMetrics(t *testing.T) {
 	// A successful publish records nothing; only the failure lands.
 	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nil)
 	p.Failure(context.Background(), DestinationPush, OperationPushPublish, nats.ErrNoResponders)
-	p.Request(context.Background(), OperationPresenceLookup, 25*time.Millisecond, nats.ErrTimeout)
+	p.Request(context.Background(), MethodGetPresenceSnapshot, 25*time.Millisecond, nats.ErrTimeout)
 
 	rm := collect(t, reader)
 	assert.Len(t, metricPoints[int64](t, rm, "chat.nats.publish.failures"), 1)
@@ -252,8 +252,8 @@ func TestPublishAndRequestMetrics(t *testing.T) {
 func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	m, reader := newTestMetrics(t)
 	p := m.Publisher("s1")
-	p.Failure(context.Background(), DestinationKind("dynamic.destination"), Operation("dynamic.operation"), nats.ErrTimeout)
-	p.Request(context.Background(), Operation("another.dynamic.operation"), time.Millisecond, nil)
+	p.Failure(context.Background(), DestinationKind("dynamic.destination"), PublishOperation("dynamic.operation"), nats.ErrTimeout)
+	p.Request(context.Background(), RPCMethod("another.dynamic.operation"), time.Millisecond, nil)
 
 	rm := collect(t, reader)
 	publishPoints := metricPoints[int64](t, rm, "chat.nats.publish.failures")
@@ -262,13 +262,13 @@ func TestPublishAndRequestLabelsAreBounded(t *testing.T) {
 	assert.Equal(t, string(OperationUnknown), attrs(publishPoints[0])["operation"])
 	requestPoints := histogramPoints(t, rm, "rpc.client.call.duration")
 	require.Len(t, requestPoints, 1)
-	assert.Equal(t, string(OperationUnknown), attrsOf(requestPoints[0])["rpc.method"])
+	assert.Equal(t, string(MethodUnknown), attrsOf(requestPoints[0])["rpc.method"])
 }
 
 func TestZeroValuePublisherDoesNotAffectBusinessFlow(t *testing.T) {
 	var publisher Publisher
 	publisher.Failure(context.Background(), DestinationPush, OperationPushPublish, errors.New("publish failed"))
-	publisher.Request(context.Background(), OperationPresenceLookup, time.Millisecond, errors.New("request failed"))
+	publisher.Request(context.Background(), MethodGetPresenceSnapshot, time.Millisecond, errors.New("request failed"))
 }
 
 func TestClassifiersAreBounded(t *testing.T) {

@@ -114,7 +114,7 @@ func main() {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
 	}
 	router := natsrouter.Default(nc, "translation-service", routerOpts...)
-	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), handler.Translate)
+	natsrouter.Register(router, subject.TranslateRequestPattern(cfg.SiteID), natsmetrics.MethodTranslateText, handler.Translate)
 
 	slog.Info("translation-service running", "site", cfg.SiteID, "backend", cfg.Backend)
 

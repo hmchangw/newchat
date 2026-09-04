@@ -10,6 +10,7 @@ import (
 	"github.com/hmchangw/chat/history-service/internal/mongorepo"
 	pkgmodel "github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/pagefit"
 	"github.com/hmchangw/chat/pkg/preview"
@@ -268,37 +269,37 @@ func (s *HistoryService) Close(ctx context.Context) error {
 
 // RegisterHandlers wires all NATS endpoints. Panics on subscription failure (fatal at startup).
 func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
-	natsrouter.Register(r, subject.MsgHistoryPattern(siteID), s.LoadHistory)
-	natsrouter.Register(r, subject.MsgNextPattern(siteID), s.LoadNextMessages)
-	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), s.LoadSurroundingMessages)
-	natsrouter.Register(r, subject.MsgGetPattern(siteID), s.GetMessageByID)
-	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), s.GetMessagesByIDs)
-	natsrouter.Register(r, subject.RoomsGet(siteID), s.RoomsGet)
-	natsrouter.Register(r, subject.MsgEditPattern(siteID), func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgHistoryPattern(siteID), natsmetrics.MethodGetChannelHistory, s.LoadHistory)
+	natsrouter.Register(r, subject.MsgNextPattern(siteID), natsmetrics.MethodGetNextMessages, s.LoadNextMessages)
+	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), natsmetrics.MethodGetSurroundingMessages, s.LoadSurroundingMessages)
+	natsrouter.Register(r, subject.MsgGetPattern(siteID), natsmetrics.MethodGetMessage, s.GetMessageByID)
+	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), natsmetrics.MethodBatchGetMessages, s.GetMessagesByIDs)
+	natsrouter.Register(r, subject.RoomsGet(siteID), natsmetrics.MethodBatchGetRooms, s.RoomsGet)
+	natsrouter.Register(r, subject.MsgEditPattern(siteID), natsmetrics.MethodEditMessage, func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
 		return s.EditMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgDeletePattern(siteID), func(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgDeletePattern(siteID), natsmetrics.MethodDeleteMessage, func(c *natsrouter.Context, req models.DeleteMessageRequest) (*models.DeleteMessageResponse, error) {
 		return s.DeleteMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgPinPattern(siteID), func(c *natsrouter.Context, req models.PinMessageRequest) (*models.PinMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgPinPattern(siteID), natsmetrics.MethodPinMessage, func(c *natsrouter.Context, req models.PinMessageRequest) (*models.PinMessageResponse, error) {
 		return s.PinMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgUnpinPattern(siteID), func(c *natsrouter.Context, req models.UnpinMessageRequest) (*models.UnpinMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgUnpinPattern(siteID), natsmetrics.MethodUnpinMessage, func(c *natsrouter.Context, req models.UnpinMessageRequest) (*models.UnpinMessageResponse, error) {
 		return s.UnpinMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgPinnedListPattern(siteID), s.ListPinnedMessages)
-	natsrouter.Register(r, subject.MsgReactPattern(siteID), func(c *natsrouter.Context, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
+	natsrouter.Register(r, subject.MsgPinnedListPattern(siteID), natsmetrics.MethodListPinnedMessages, s.ListPinnedMessages)
+	natsrouter.Register(r, subject.MsgReactPattern(siteID), natsmetrics.MethodToggleMessageReaction, func(c *natsrouter.Context, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
 		return s.ReactMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgThreadPattern(siteID), s.GetThreadMessages)
-	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), s.GetThreadParentMessages)
-	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
+	natsrouter.Register(r, subject.MsgThreadPattern(siteID), natsmetrics.MethodGetThreadMessages, s.GetThreadMessages)
+	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), natsmetrics.MethodGetThreadParentMessages, s.GetThreadParentMessages)
+	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), natsmetrics.MethodMigrateEditMessage, func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
 		return s.MigrationEditMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MigrationInternalMsgDelete(siteID), func(c *natsrouter.Context, req pkgmodel.MigrationDeleteRequest) (*pkgmodel.MigrationAck, error) {
+	natsrouter.Register(r, subject.MigrationInternalMsgDelete(siteID), natsmetrics.MethodMigrateDeleteMessage, func(c *natsrouter.Context, req pkgmodel.MigrationDeleteRequest) (*pkgmodel.MigrationAck, error) {
 		return s.MigrationDeleteMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), s.ListThreadSubscriptions)
+	natsrouter.Register(r, subject.ThreadSubscriptionList(siteID), natsmetrics.MethodListThreadSubscriptions, s.ListThreadSubscriptions)
 }
 
 // Compile-time checks.

@@ -23,7 +23,7 @@ router := natsrouter.Default(nc, "my-service")
 // Add HandlerTimeout explicitly — duration varies per service.
 router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
-natsrouter.Register(router, "chat.user.{account}.msg.send", svc.SendMessage)
+natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage, svc.SendMessage)
 
 // On shutdown:
 router.Shutdown(ctx)
@@ -172,6 +172,7 @@ All accept a `Registrar` (currently `*Router`). They are free functions, not `*R
 func Register[Req, Resp any](
     r Registrar,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context, req Req) (*Resp, error),
 )
 
@@ -179,6 +180,7 @@ func Register[Req, Resp any](
 func RegisterNoBody[Resp any](
     r Registrar,
     pattern string,
+    method natsmetrics.RPCMethod,
     fn func(c *Context) (*Resp, error),
 )
 
@@ -192,6 +194,8 @@ func RegisterVoid[Req any](
 ```
 
 All three **panic** if the NATS subscription fails. This is intentional — registration happens at startup, and a failed subscription means the service cannot function (same pattern as `http.HandleFunc`).
+
+`Register`, `RegisterNoBody`, and `RegisterOptionalBody` also panic if `method` is not a valid, declared member of the `natsmetrics` RPC method vocabulary (`RPCMethod.Valid()` is false — this covers `""`, an unregistered string, and `MethodUnknown`), and if `method` is already claimed by another route registered on the same router (two routes sharing a method would merge into one `rpc_method` series). `RegisterVoid` takes no method and is unaffected by either check.
 
 ### Context
 
@@ -354,11 +358,11 @@ Three handler shapes for three use cases:
 |----------|-------------|----------|----------|
 | `Register[Req, Resp]` | Yes | Yes | Standard request/reply (most endpoints) |
 | `RegisterNoBody[Resp]` | No | Yes | GET-style lookups where subject has all info |
-| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns) |
+| `RegisterVoid[Req]` | Yes | No | Fire-and-forget events (under `WithMaxConcurrency` saturation: dropped with a Warn log; under unbounded default: always spawns). Takes no `method` argument and records no `rpc.server.call.duration` sample — a route with no reply subject is not an RPC call. |
 
 ```go
 // Request/reply — the most common pattern.
-natsrouter.Register(router, "chat.user.{account}.msg.send",
+natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage,
     func(c *natsrouter.Context, req SendRequest) (*SendResponse, error) {
         account := c.Param("account")
         // ... business logic ...
@@ -366,7 +370,7 @@ natsrouter.Register(router, "chat.user.{account}.msg.send",
     })
 
 // GET-style — no request body needed.
-natsrouter.RegisterNoBody(router, "chat.user.{account}.rooms.get.{roomID}",
+natsrouter.RegisterNoBody(router, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodOpenRoom,
     func(c *natsrouter.Context) (*Room, error) {
         return store.FindRoom(c, c.Param("roomID"))
     })

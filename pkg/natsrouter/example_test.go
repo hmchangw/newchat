@@ -12,6 +12,7 @@ import (
 	o11ynats "github.com/flywindy/o11y/nats"
 
 	"github.com/hmchangw/chat/pkg/errcode"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
 
@@ -30,9 +31,13 @@ func Example_basicUsage() {
 
 	// Register a handler — {account} and {roomID} are extracted from the subject.
 	// The pattern is automatically converted to a NATS wildcard for subscription.
+	// The third argument is the route's rpc.method: a declared natsmetrics
+	// constant, unique within this router, that every metric for this route is
+	// labelled with. Registration panics if it is undeclared or already claimed.
 	natsrouter.Register[GreetRequest, GreetResponse](
 		router,
 		"chat.user.{account}.room.{roomID}.greet",
+		natsmetrics.MethodSendRoomMessage,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			account := c.Param("account")
 			roomID := c.Param("roomID")
@@ -55,6 +60,7 @@ func Example_withMiddleware() {
 	natsrouter.Register(
 		router,
 		"chat.user.{account}.greet",
+		natsmetrics.MethodSendDM,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			return &GreetResponse{Reply: "hello " + c.Param("account")}, nil
 		},
@@ -75,6 +81,7 @@ func Example_noBodyHandler() {
 	natsrouter.RegisterNoBody[Room](
 		router,
 		"chat.user.{account}.request.rooms.get.{roomID}",
+		natsmetrics.MethodBatchGetRooms,
 		func(c *natsrouter.Context) (*Room, error) {
 			roomID := c.Param("roomID")
 			return &Room{ID: roomID, Name: "General"}, nil
@@ -90,6 +97,7 @@ func Example_errorHandling() {
 	natsrouter.Register(
 		router,
 		"chat.user.{account}.request.rooms.get.{roomID}",
+		natsmetrics.MethodBatchGetRooms,
 		func(c *natsrouter.Context, req GreetRequest) (*Room, error) {
 			room := findRoom(c.Param("roomID"))
 			if room == nil {
@@ -148,6 +156,7 @@ func Example_customMiddleware() {
 	natsrouter.Register[GreetRequest, GreetResponse](
 		router,
 		"chat.user.{account}.greet",
+		natsmetrics.MethodSendDM,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			return &GreetResponse{Reply: "hello"}, nil
 		},

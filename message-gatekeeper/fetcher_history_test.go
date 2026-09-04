@@ -180,7 +180,7 @@ func requestMetricFor(t *testing.T) (natsmetrics.Publisher, func(errorType strin
 					for _, kv := range dp.Attributes.ToSlice() {
 						got[string(kv.Key)] = kv.Value.String()
 					}
-					if got["rpc.method"] != string(natsmetrics.OperationHistoryGetMessage) {
+					if got["rpc.method"] != string(natsmetrics.MethodGetMessage) {
 						continue
 					}
 					methodTotal += dp.Count

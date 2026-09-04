@@ -332,8 +332,8 @@ partition slice). Targets: §1.
   (v2). Labelled proxy until then.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
   `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
-  label slices both workflows from one middleware — `channel_history` for SLO-4,
-  `thread_open` for SLO-5. Names follow the OTel RPC semantic conventions rather
+  label slices both workflows from one middleware — `get_channel_history` for SLO-4,
+  `get_thread_messages` for SLO-5. Names follow the OTel RPC semantic conventions rather
   than the spelling this document first proposed.
 
   **The denominator is not the family total.** `error_type` is absent on success,
@@ -345,12 +345,12 @@ partition slice). Targets: §1.
   ```promql
   # good  — succeeded within the bound
   sum by (site) (rate(rpc_server_call_duration_seconds_bucket{
-        service_name="history-service", rpc_method="thread_open",
+        service_name="history-service", rpc_method="get_thread_messages",
         error_type="", le="0.25"}[28d]))
   /
   # valid — success + budget-burning failures, never the 4xx classes
   sum by (site) (rate(rpc_server_call_duration_seconds_count{
-        service_name="history-service", rpc_method="thread_open",
+        service_name="history-service", rpc_method="get_thread_messages",
         error_type=~"|internal|unavailable|too_many_requests"}[28d]))
   ```
 
@@ -370,7 +370,7 @@ partition slice). Targets: §1.
   `too_many_requests`, `unavailable` and `internal` are eligible; and a
   server-side timeout carries no `errcode` so it falls to the default branch and
   arrives as `internal`. SLO-4 is the same expression with
-  `rpc_method="channel_history"` and `le="0.5"`. Pin this label set in the
+  `rpc_method="get_channel_history"` and `le="0.5"`. Pin this label set in the
   recording rule's test — adding a tenth `RequestResult` without revisiting the
   regex silently moves it into or out of the denominator.
 
@@ -573,7 +573,7 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 
 | P | Work | Unlocks |
 |---|---|---|
-| P1 | ✅ `natsrouter` metrics middleware (`rpc_server_call_duration_seconds{rpc_method, error_type}`, OTel RPC semconv) | SLO-4/5 + dashboards for all non-named RPCs |
+| P1 | ✅ `natsrouter` metrics middleware (`rpc_server_call_duration_seconds{rpc_method, error_type}`, OTel RPC semconv). `rpc_method` is supplied at route registration (92 constants for 91 routes plus one client-only method); `RegisterVoid` routes — user-presence-service's fire-and-forget `hello`/`ping`/`activity`/`bye` lane — take no method and record no sample, so they never appear in this family (see the contract's §13.1) | SLO-4/5 + dashboards for all non-named RPCs |
 | P2 | J1 counters — gatekeeper `messages_canonical_published_total` (upstream denominator), message-worker persisted, broadcast-worker `broadcast_channel_enqueue_total` + `broadcast_channel_enqueue_age_seconds` measured from the **JetStream metadata store timestamp** (the SLO-2 origin, §2), **plus a separate unscored gatekeeper build→publish diagnostic measured as a same-process monotonic duration (`time.Since(buildStartedAt)`), not by subtracting `evt.Timestamp`**; `broadcast_channel_enqueue_age_invalid_total{reason}` (`missing_metadata` / `negative_age`) for **measurement-invalid only** (`age < 0` / missing metadata — no upper latency cap; large positive ages stay scored as bad, §2 Caveats); terminal-outcome/dedup semantics, no message-ID labels | SLO-1a/1b/2 |
 | P3 | NATS/JetStream Prometheus exporter (infra) — consumer `num_pending`/`num_ack_pending` + ack-floor (stalled-backlog signal); **plus a custom monitor** to derive oldest-pending **age** (exporter alone doesn't expose it). Recording rules must **filter `{is_consumer_leader="true"}`** before aggregating consumer state, or clustered follower replicas double-count the series | outage backstop for 1a/1b/2/6/9 |
 | P4 | notification-worker push-stream handoff (**recipient-granular** accepted/recipients) · **search duration `status` label** (→ `{kind,status}`) · outbox producer-side published + forwarded-within-bound (matching label sets) · **NATS connection-risk counters** (disconnect/reconnect/closed/ErrorHandler) as the SLO-1b connection-risk backstop | SLO-1b/6/8/9 |
@@ -581,6 +581,16 @@ required** (`sdk.Meter()` is exposed; search-service is the exemplar).
 | P6 | **loadgen NATS-subscribe prober** (protocol receipt) + SLO assertion mode (§10) · login→connect→initial-data; sparse-journey floor; SLO-aware load asserts. **Render is out of scope here** — proves protocol receipt, not decrypt/render | protocol-receive last-mile SLI |
 | P6b | **browser synthetic / RUM** prober — decrypt/render/state-apply | render-level declared last mile |
 | P7 | v2: **exact outcome ledger** (dedup / first-write / exhaustion via a max-delivery **advisory consumer** — makes 1a/1b/2/6/9 exact instead of approximate) · **SLO-1b/2 server-confirmed publication boundary** (flush checkpoint / durable-PubAck path, migrating both off v1 enqueue-acceptance; SLO-2 timing must use a **single-clock or explicitly correlated boundary**, not PubAck observation alone) · **push-service** provider delivery metrics (cross-repo) · correlated single-J1 outcome · search index freshness · member-add convergence · encrypted `key.get` · read-receipt convergence | — |
+
+**Cutover note (P1).** Every `rpc_method` value changed with the move to
+registration-time methods. Grafana panels filtering on `room_mutation`,
+`room_read`, `member_read`, `member_mutation`, `teams_room`, `history_read`,
+`history_mutation`, `channel_history` or `thread_open` need a pass — a
+dashboard-owner task, not a rollout blocker. The `rpc_method="unknown"` series
+disappears entirely rather than shrinking, so a panel excluding it should drop
+the filter rather than leave it dangling. The SLI/SLO programme is not live —
+no recording rule reads `rpc_method` yet — so there is no bridging window to
+preserve; SLO-4/5 above already use the new values.
 
 ---
 

@@ -283,7 +283,7 @@ func main() {
 
 	router := natsrouter.DefaultGuarded(nc, "room-worker", cfg.Guard,
 		natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics))
-	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), handler.serverCreateDM)
+	natsrouter.Register(router, subject.RoomCreateDMSync(cfg.SiteID), natsmetrics.MethodCreateDMRoom, handler.serverCreateDM)
 
 	sem := make(chan struct{}, cfg.MaxWorkers)
 	var wg sync.WaitGroup

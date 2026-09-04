@@ -36,7 +36,7 @@ type natsMemberListClient struct {
 }
 
 type requestRecorder interface {
-	Request(context.Context, natsmetrics.Operation, time.Duration, error)
+	Request(context.Context, natsmetrics.RPCMethod, time.Duration, error)
 }
 
 type memberListClientOption func(*natsMemberListClient)
@@ -93,7 +93,7 @@ func (c *natsMemberListClient) ListMembers(ctx context.Context, requester string
 		if errors.Is(outcome, errNotRoomMember) {
 			outcome = nil
 		}
-		c.metrics.Request(ctx, natsmetrics.OperationMemberRead, time.Since(started), outcome)
+		c.metrics.Request(ctx, natsmetrics.MethodListMembers, time.Since(started), outcome)
 	}()
 	reply, err := c.nc.RequestMsgWithContext(reqCtx, out)
 	if err != nil {

@@ -15,7 +15,7 @@ import (
 )
 
 type failureRecorder interface {
-	Failure(context.Context, natsmetrics.DestinationKind, natsmetrics.Operation, error)
+	Failure(context.Context, natsmetrics.DestinationKind, natsmetrics.PublishOperation, error)
 }
 
 // Publisher publishes byte payloads to NATS JetStream with dedup support.

@@ -80,7 +80,7 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	subj := subject.MsgGet(account, roomID, siteID)
 	started := time.Now()
 	msg, err := f.nc.Request(ctx, subj, reqBytes, historyRequestTimeout)
-	f.metrics.Request(ctx, natsmetrics.OperationHistoryGetMessage, time.Since(started), err)
+	f.metrics.Request(ctx, natsmetrics.MethodGetMessage, time.Since(started), err)
 	if err != nil {
 		return nil, natsutil.RequestFailure("history request", err)
 	}
