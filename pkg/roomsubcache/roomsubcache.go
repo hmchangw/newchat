@@ -65,6 +65,12 @@ type Member struct {
 	// pre-fix entries (whose siteId carried the room's site) miss instead of
 	// misrouting the RPC forever.
 	HomeSiteID string `json:"homeSiteId,omitempty"`
+	// IsSubscribed is the subscription's own flag, denormalised for the fan-out
+	// path. Safe to serve from a TTL'd entry because it is stable: an explicit
+	// subscribe/unsubscribe flips it, unlike lastSeenAt/hasMention/threadUnread,
+	// which roomlist-worker rewrites on every message and which therefore must
+	// never be cached here.
+	IsSubscribed bool `json:"isSubscribed,omitempty"`
 }
 
 // Cache stores and retrieves a room's member list.
@@ -152,20 +158,32 @@ func NewValkeyCache(client valkeyutil.Client, opts ...Option) Cache {
 // the Entry{Members, CachedAt} envelope. That is a change of JSON kind, array
 // to object, so reusing v3 would have each binary in a rolling deploy handed
 // the other's shape — an unmarshal error, not a silent zero value.
-const cacheKeySchemaVersion = "v4"
+//
+// Bumped to v5 when IsSubscribed was added. A v4 entry decodes cleanly under
+// the v5 shape, which is precisely the danger: every member would read as
+// unsubscribed for the full TTL with nothing to signal it.
+const cacheKeySchemaVersion = "v5"
 
-// legacyCacheKeySchemaVersion is the pre-envelope generation. Only invalidation
-// touches it: while a rolling deploy can still have a v3 binary live, a bust
-// must clear both or that binary keeps serving a member list for a room whose
-// membership just changed. Drop this once no v3 binary can be running.
-const legacyCacheKeySchemaVersion = "v3"
+// legacyCacheKeySchemaVersions are the superseded generations, newest first.
+// Only invalidation touches them: a rolling deploy can still have a binary of
+// an older generation live, and a bust must clear that generation's key too or
+// that binary keeps serving a member list for a room whose membership just
+// changed. Drop an entry once no binary of that generation can be running.
+var legacyCacheKeySchemaVersions = []string{"v4", "v3"}
 
 func cacheKey(roomID string) string {
 	return "room:" + cacheKeySchemaVersion + ":" + roomID + ":subs"
 }
 
-func legacyCacheKey(roomID string) string {
-	return "room:" + legacyCacheKeySchemaVersion + ":" + roomID + ":subs"
+// allGenerationKeys returns the current key followed by every superseded one,
+// in the order Invalidate deletes them.
+func allGenerationKeys(roomID string) []string {
+	keys := make([]string, 0, 1+len(legacyCacheKeySchemaVersions))
+	keys = append(keys, cacheKey(roomID))
+	for _, v := range legacyCacheKeySchemaVersions {
+		keys = append(keys, "room:"+v+":"+roomID+":subs")
+	}
+	return keys
 }
 
 // Get returns the cached member list for roomID. On absence it returns
@@ -240,10 +258,10 @@ func (c *valkeyCache) Set(ctx context.Context, roomID string, members []Member, 
 	return nil
 }
 
-// Invalidate removes the cached entry for roomID, in both key generations —
-// see legacyCacheKeySchemaVersion. Those keys carry no hash tag and so land in
-// different cluster slots; the client pipelines one DEL per key, so neither
-// delete can take the other down with a CROSSSLOT rejection.
+// Invalidate removes the cached entry for roomID in every key generation — see
+// legacyCacheKeySchemaVersions. Those keys carry no hash tag and so land in
+// different cluster slots; the client pipelines one DEL per key, so no delete
+// can take another down with a CROSSSLOT rejection.
 //
 // Best-effort, like every other tier's invalidation: a bust runs after the
 // authoritative write has committed, and BustKeys is what strips the caller's
@@ -253,5 +271,5 @@ func (c *valkeyCache) Invalidate(ctx context.Context, roomID string) {
 	if roomID == "" {
 		return
 	}
-	valkeyutil.BustKeys(ctx, c.client, "roomsubcache", cacheKey(roomID), legacyCacheKey(roomID))
+	valkeyutil.BustKeys(ctx, c.client, "roomsubcache", allGenerationKeys(roomID)...)
 }
