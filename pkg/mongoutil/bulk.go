@@ -1,10 +1,13 @@
 package mongoutil
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // BulkResult mirrors mongo.BulkWriteResult; bulk methods return (nil, nil) on empty input.
@@ -58,4 +61,87 @@ func bsonSetWithoutID(item any) (set bson.M, id any, err error) {
 	id = m["_id"]
 	delete(m, "_id")
 	return m, id, nil
+}
+
+// MaxBulkChunk is the default number of write models sent in one BulkWrite,
+// bounding what a caller with tens of thousands of models builds in memory.
+const MaxBulkChunk = 1000
+
+// chunkWriteModels splits models into ordered batches of size (MaxBulkChunk if <=0).
+func chunkWriteModels(models []mongo.WriteModel, size int) [][]mongo.WriteModel {
+	if size <= 0 {
+		size = MaxBulkChunk
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	chunks := make([][]mongo.WriteModel, 0, 1+(len(models)-1)/size)
+	for start := 0; start < len(models); start += size {
+		end := min(start+size, len(models))
+		chunks = append(chunks, models[start:end])
+	}
+	return chunks
+}
+
+// merge folds a chunk's result into the accumulator, rebasing UpsertedIDs
+// ordinals by base so each chunk's index 0 does not overwrite the last.
+func (r *BulkResult) merge(res *mongo.BulkWriteResult, base int) {
+	if res == nil {
+		return
+	}
+	r.Matched += res.MatchedCount
+	r.Modified += res.ModifiedCount
+	r.Upserted += res.UpsertedCount
+	r.Inserted += res.InsertedCount
+	r.Deleted += res.DeletedCount
+	if !res.Acknowledged {
+		r.Acknowledged = false
+	}
+	for ordinal, id := range res.UpsertedIDs {
+		if r.UpsertedIDs == nil {
+			r.UpsertedIDs = make(map[int64]any, len(res.UpsertedIDs))
+		}
+		r.UpsertedIDs[int64(base)+ordinal] = id
+	}
+}
+
+// terminalBulkError reports whether a chunk failure should stop the remaining
+// chunks. Per-model write errors must not: an unordered BulkWrite would have
+// carried on past them, and chunking may not turn one bad model into a barrier.
+func terminalBulkError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	var bwe mongo.BulkWriteException
+	if !errors.As(err, &bwe) {
+		return true
+	}
+	return bwe.WriteConcernError != nil || len(bwe.WriteErrors) == 0
+}
+
+// ChunkedBulkWrite issues models as unordered BulkWrites of at most size each,
+// merging every chunk's result even on error. Callers must be idempotent.
+func ChunkedBulkWrite(ctx context.Context, coll *mongo.Collection, models []mongo.WriteModel, size int) (*BulkResult, error) {
+	if len(models) == 0 {
+		return nil, nil
+	}
+	opts := options.BulkWrite().SetOrdered(false)
+	out := &BulkResult{Acknowledged: true}
+	var writeErrs error
+	base := 0
+	for _, chunk := range chunkWriteModels(models, size) {
+		res, err := coll.BulkWrite(ctx, chunk, opts)
+		// Merge first: a failed unordered chunk still returns the models it did
+		// write, and dropping them would understate what actually landed.
+		out.merge(res, base)
+		if err != nil {
+			err = fmt.Errorf("bulk write models %d-%d of %d: %w", base, base+len(chunk), len(models), err)
+			if terminalBulkError(ctx, err) {
+				return out, err
+			}
+			writeErrs = errors.Join(writeErrs, err)
+		}
+		base += len(chunk)
+	}
+	return out, writeErrs
 }

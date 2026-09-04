@@ -16,6 +16,7 @@ import (
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/health"
 	"github.com/hmchangw/chat/pkg/idgen"
+	"github.com/hmchangw/chat/pkg/jsretry"
 	"github.com/hmchangw/chat/pkg/logctx"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
@@ -307,6 +308,14 @@ func main() {
 	}
 	consumerMetrics.LoopStarted(ctx)
 
+	// Pace the heartbeat off the deadline the server actually applied, not the
+	// one we asked for: the two differ whenever AckWait is unset or clamped.
+	ackWait := consumerCfg.AckWait
+	if info := cons.CachedInfo(); info != nil {
+		ackWait = info.Config.AckWait
+	}
+	heartbeatEvery := jsretry.HeartbeatInterval(ackWait)
+
 	wg.Add(1)
 	go func() {
 		// The loop itself is counted so shutdown, which stops the iterator and
@@ -319,21 +328,26 @@ func main() {
 				consumerMetrics.LoopFailed(context.Background(), err)
 				return
 			}
+			// Heartbeat from delivery, not from when a worker frees up: a
+			// message queued on the semaphore is already spending its ack
+			// deadline, and a large-room mutation can outrun what is left.
+			stopHeartbeat := jsretry.Heartbeat(msgCtx, msg, heartbeatEvery)
 			sem <- struct{}{}
 			wg.Add(1)
-			go func(msgCtx context.Context, msg jetstream.Msg) {
+			go func(msgCtx context.Context, msg jetstream.Msg, stopHeartbeat func()) {
 				tracked := consumerMetrics.Track(msgCtx, msg, natsmetrics.RoomEventTypeFromSubject(msg.Subject()), consumerCfg.MaxDeliver)
 				msgCtx = tracked.Context(msgCtx)
 				// runJobWithRecovery contains handler panics (it Acks — drops — the
 				// poison message) so this async goroutine, which runs outside
 				// natsrouter's recovery middleware, can't crash the worker.
 				defer func() {
+					stopHeartbeat()
 					tracked.Finish(msgCtx)
 					<-sem
 					wg.Done()
 				}()
 				runJobWithRecovery(msgCtx, handler, tracked)
-			}(msgCtx, msg)
+			}(msgCtx, msg, stopHeartbeat)
 		}
 	}()
 
