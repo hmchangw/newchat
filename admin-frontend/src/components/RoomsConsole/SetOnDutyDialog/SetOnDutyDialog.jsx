@@ -47,10 +47,6 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
   // this action demotes every other member of the room.
   const pinned = owner && !matches.some((m) => m.account === owner)
   const visible = pinned ? [...members.filter((m) => m.account === owner), ...matches] : matches
-  // Bots are shown but not selectable: room-service would accept one as owner
-  // (CheckMembership only looks for a subscription), so this is the console's
-  // guard against handing a room to an account nobody reads.
-  const botsOnly = members.length > 0 && members.every((m) => m.isBot)
 
   const handleConfirm = async () => {
     setSubmitting(true)
@@ -79,12 +75,6 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
         <p className="onduty-owner-empty">This room has no members to promote.</p>
       )}
 
-      {botsOnly && (
-        <p className="onduty-owner-empty">
-          This room has only bot members, which cannot be made owner.
-        </p>
-      )}
-
       {members.length > 0 && (
         <fieldset className="onduty-owner">
           <legend>Owner account</legend>
@@ -105,19 +95,15 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
             {visible.map((member, i) => (
               <label
                 key={member.account}
-                className={`onduty-owner-option ${pinned && i === 0 ? 'is-pinned' : ''} ${
-                  member.isBot ? 'is-disabled' : ''
-                }`}
+                className={`onduty-owner-option ${pinned && i === 0 ? 'is-pinned' : ''}`}
               >
                 <input
                   type="radio"
                   name="onduty-owner"
                   value={member.account}
                   checked={owner === member.account}
-                  // Guarded rather than relying on `disabled` alone: that only stops
-                  // a browser from dispatching the event, it does not make the rule true.
-                  onChange={() => !member.isBot && setOwner(member.account)}
-                  disabled={submitting || member.isBot}
+                  onChange={() => setOwner(member.account)}
+                  disabled={submitting}
                 />
                 <span>{member.account}</span>
                 {member.isBot && <span className="onduty-owner-bot">bot</span>}

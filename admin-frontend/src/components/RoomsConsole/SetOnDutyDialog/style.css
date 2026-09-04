@@ -44,16 +44,6 @@
   background: var(--bg-hover);
 }
 
-/* A bot stays listed so the roster reads complete, but cannot be chosen. */
-.onduty-owner-option.is-disabled {
-  color: var(--text-muted);
-  cursor: not-allowed;
-}
-
-.onduty-owner-option.is-disabled:hover {
-  background: transparent;
-}
-
 /* The chosen owner is pinned to the top when the filter stops matching them;
    the rule keeps that row from reading as part of the match list. */
 .onduty-owner-option.is-pinned {
