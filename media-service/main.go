@@ -22,7 +22,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsrouter"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/obs"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -72,7 +72,8 @@ func run() error {
 		return fmt.Errorf("connect mongo: %w", err)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
-	store := newMongoStore(mongoClient.Database(cfg.MongoDB))
+	db := mongoClient.Database(cfg.MongoDB)
+	store := newMongoStore(db)
 	defer mongoutil.Disconnect(ctx, mongoClient)
 
 	if err := store.EnsureEmojiIndexes(ctx); err != nil {
@@ -108,8 +109,7 @@ func run() error {
 	// c.DataFromReader and the PUT routes accept uploads, both bound to the
 	// request context — a short deadline would cancel a slow up/download
 	// mid-stream. (The NATS request/reply side still uses cfg.Guard.)
-	sessions := botauth.NewValidator(
-		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
+	sessions := botauth.NewValidator(session.NewMongoStore(db))
 	registerRoutes(r, h, sessions, cfg.SiteID)
 
 	srv := &http.Server{

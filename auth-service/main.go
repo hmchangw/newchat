@@ -16,9 +16,10 @@ import (
 
 	"github.com/hmchangw/chat/pkg/botauth"
 	"github.com/hmchangw/chat/pkg/ginutil"
+	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -35,12 +36,14 @@ type config struct {
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
 	TLSSkipVerify bool     `env:"TLS_SKIP_VERIFY"           envDefault:"false"`
 
-	// BotplatformURL is the LOCAL site's botplatform-service URL. When set,
-	// auth-service exposes the session-token branch of POST /auth: a client
-	// supplying authToken (instead of ssoToken) gets its session validated
-	// via botplatform's /api/v1/auth/validate and a role-scoped NATS JWT minted.
-	// Unset = session-token requests fail with 503 upstream_unavailable.
-	BotplatformURL string `env:"BOTPLATFORM_URL"`
+	// Mongo backs the session-token branch of POST /auth: a client supplying
+	// authToken (instead of ssoToken) has its session read from the shared
+	// sessions collection botplatform-service issues into, and a role-scoped
+	// NATS JWT minted. Required, so no deployment silently degrades to 503.
+	MongoURI      string `env:"MONGO_URI,required"`
+	MongoDB       string `env:"MONGO_DB" envDefault:"chat"`
+	MongoUsername string `env:"MONGO_USERNAME"`
+	MongoPassword string `env:"MONGO_PASSWORD"`
 }
 
 func main() {
@@ -74,12 +77,16 @@ func run() error {
 		return fmt.Errorf("init observability: %w", err)
 	}
 
-	opts := []Option{WithJitter(cfg.NATSJWTExpiryJitter)}
-	if cfg.BotplatformURL != "" {
-		rc := restyutil.New("", restyutil.WithTimeout(5*time.Second))
-		opts = append(opts, WithBotplatformValidator(
-			botauth.NewValidator(rc, cfg.BotplatformURL)))
-		slog.Info("session-token branch enabled", "botplatform_url", cfg.BotplatformURL)
+	mongoClient, err := mongoutil.Connect(ctx, cfg.MongoURI, cfg.MongoUsername, cfg.MongoPassword,
+		mongoutil.WithObservability(sdk))
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	sessions := session.NewMongoStore(mongoClient.Database(cfg.MongoDB))
+
+	opts := []Option{
+		WithJitter(cfg.NATSJWTExpiryJitter),
+		WithBotplatformValidator(botauth.NewValidator(sessions)),
 	}
 
 	var handler *AuthHandler
@@ -139,6 +146,7 @@ func run() error {
 				slog.Info("shutting down auth service")
 				return srv.Shutdown(ctx)
 			},
+			func(ctx context.Context) error { mongoutil.Disconnect(ctx, mongoClient); return nil },
 			func(ctx context.Context) error { return obsShutdown(ctx) },
 		)
 	}()

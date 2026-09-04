@@ -2,30 +2,19 @@ package botauth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
-	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/principal"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/session"
+	"github.com/hmchangw/chat/pkg/sessiontoken"
 )
-
-// decodeJSON reads a request body into out.
-func decodeJSON(r *http.Request, out any) error {
-	return json.NewDecoder(r.Body).Decode(out)
-}
 
 // stubValidator is the Authenticate seam: it records the token it saw and
 // returns the canned principal/error.
@@ -97,70 +86,70 @@ func TestHasRole(t *testing.T) {
 	}
 }
 
+// stubFinder is the session.Store slice Validator reads: it records the hash it
+// was asked for and returns the canned session/error.
+type stubFinder struct {
+	session *session.Session
+	err     error
+	gotHash string
+}
+
+func (s *stubFinder) FindByHash(_ context.Context, hash string) (*session.Session, error) {
+	s.gotHash = hash
+	return s.session, s.err
+}
+
 func TestValidator_Validate(t *testing.T) {
 	tests := []struct {
 		name          string
-		status        int
-		body          string
+		session       *session.Session
+		err           error
 		wantPrincipal principal.Principal
 		wantCode      errcode.Code
 		wantReason    errcode.Reason
 		wantRawErr    bool
 	}{
 		{
-			name:   "valid session",
-			status: http.StatusOK,
-			body: `{"valid":true,"principal":{"userId":"u1","account":"alerts.sa.bot",` +
-				`"siteId":"site-a","roles":["bot"]}}`,
+			name: "valid session",
+			session: &session.Session{
+				ID: "h", UserID: "u1", Account: "alerts.sa.bot", SiteID: "site-a", Roles: []string{"bot"},
+			},
 			wantPrincipal: principal.Principal{
 				UserID: "u1", Account: "alerts.sa.bot", SiteID: "site-a", Roles: []string{"bot"},
 			},
 		},
 		{
-			name:       "200 with valid false",
-			status:     http.StatusOK,
-			body:       `{"valid":false}`,
+			name:       "unknown session",
+			err:        session.ErrNotFound,
 			wantCode:   errcode.CodeUnauthenticated,
 			wantReason: errcode.BotplatformInvalidToken,
 		},
 		{
-			name:       "401 unknown session",
-			status:     http.StatusUnauthorized,
-			body:       `{"code":"unauthenticated","reason":"invalid_token"}`,
+			// A session with no userId cannot be matched against a caller — it
+			// must fail closed rather than return an empty identity as success.
+			name:       "session without userId",
+			session:    &session.Session{ID: "h", Account: "ghost.bot"},
 			wantCode:   errcode.CodeUnauthenticated,
 			wantReason: errcode.BotplatformInvalidToken,
 		},
-		{name: "500 upstream fault is a raw error", status: http.StatusInternalServerError, body: `{"code":"internal"}`, wantRawErr: true},
-		{name: "400 upstream rejection is a raw error", status: http.StatusBadRequest, body: `{"code":"bad_request"}`, wantRawErr: true},
+		{name: "store fault is a raw error", err: errors.New("mongo: connection reset"), wantRawErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var gotPath, gotRequestID string
-			var gotBody map[string]string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotPath = r.URL.Path
-				gotRequestID = r.Header.Get(natsutil.RequestIDHeader)
-				_ = decodeJSON(r, &gotBody)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tt.status)
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer srv.Close()
+			finder := &stubFinder{session: tt.session, err: tt.err}
+			v := NewValidator(finder)
 
-			v := NewValidator(restyutil.New(""), srv.URL)
-			ctx := natsutil.WithRequestID(context.Background(), "01970a4f-8c2d-7c9a-abcd-e0123456789f")
-			got, err := v.Validate(ctx, "raw-token")
+			got, err := v.Validate(context.Background(), "raw-token")
 
-			assert.Equal(t, "/api/v1/auth/validate", gotPath)
-			assert.Equal(t, "raw-token", gotBody["authToken"])
-			assert.Equal(t, "01970a4f-8c2d-7c9a-abcd-e0123456789f", gotRequestID)
+			assert.Equal(t, sessiontoken.Hash("raw-token"), finder.gotHash,
+				"the store must be queried by the token hash, never the raw token")
 
 			var ec *errcode.Error
 			switch {
 			case tt.wantRawErr:
 				require.Error(t, err)
-				assert.False(t, errors.As(err, &ec), "upstream faults must stay raw so the caller maps them to 503")
+				assert.False(t, errors.As(err, &ec), "store faults must stay raw so the caller maps them to 503")
 			case tt.wantCode != "":
 				require.Error(t, err)
 				require.ErrorAs(t, err, &ec)
@@ -174,16 +163,19 @@ func TestValidator_Validate(t *testing.T) {
 	}
 }
 
-func TestValidator_Validate_TransportError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	srv.Close() // closed: the POST cannot connect
+// TestAuthenticate_StoreFaultIs503 pins the wire contract a store outage maps
+// to: the same unavailable envelope the HTTP validator used, so clients see no
+// change from the switch to a direct session read.
+func TestAuthenticate_StoreFaultIs503(t *testing.T) {
+	v := NewValidator(&stubFinder{err: errors.New("mongo: connection reset")})
 
-	v := NewValidator(restyutil.New(""), srv.URL)
-	_, err := v.Validate(context.Background(), "raw-token")
+	_, err := Authenticate(context.Background(), v, "u1", "tok")
 
-	require.Error(t, err)
 	var ec *errcode.Error
-	assert.False(t, errors.As(err, &ec), "transport failures must stay raw")
+	require.ErrorAs(t, err, &ec)
+	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
+	assert.Equal(t, errcode.BotplatformUpstreamUnavailable, ec.Reason)
+	assert.Equal(t, "session store unavailable", ec.Message)
 }
 
 func TestAuthenticate(t *testing.T) {
@@ -305,23 +297,6 @@ func TestAuthenticate_NonAuthTypedErrorPassesThrough(t *testing.T) {
 	assert.Equal(t, "slow down", ec.Message)
 }
 
-func TestValidator_Validate_ValidTrueWithoutPrincipal(t *testing.T) {
-	// A 200 {"valid":true} with no principal must fail closed — an empty identity
-	// returned as success is a bypass for direct Validate callers.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"valid":true}`))
-	}))
-	defer srv.Close()
-
-	_, err := NewValidator(restyutil.New(""), srv.URL).Validate(context.Background(), "tok")
-
-	var ec *errcode.Error
-	require.ErrorAs(t, err, &ec)
-	assert.Equal(t, errcode.CodeUnauthenticated, ec.Code)
-	assert.Equal(t, errcode.BotplatformInvalidToken, ec.Reason)
-}
-
 func TestAuthenticate_NoUpstreamCallWhenCredentialsMissing(t *testing.T) {
 	stub := &stubValidator{principal: principal.Principal{UserID: "u1"}}
 
@@ -333,86 +308,7 @@ func TestAuthenticate_NoUpstreamCallWhenCredentialsMissing(t *testing.T) {
 
 // TestValidator_Validate_CoalescesConcurrentCalls pins the stampede guard: N
 // simultaneous requests for one token must cost botplatform a single validation.
-func TestValidator_Validate_CoalescesConcurrentCalls(t *testing.T) {
-	var calls atomic.Int64
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		<-release // hold the request open so the others pile up behind it
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"valid":true,"principal":{"userId":"u1","account":"a.bot"}}`))
-	}))
-	defer srv.Close()
 
-	v := NewValidator(restyutil.New(""), srv.URL)
-	const n = 20
-	var wg, entered sync.WaitGroup
-	results := make([]principal.Principal, n)
-	errs := make([]error, n)
-	for i := range n {
-		wg.Add(1)
-		entered.Add(1)
-		go func() {
-			defer wg.Done()
-			entered.Done() // struck immediately before Validate, so the window below is a few instructions
-			results[i], errs[i] = v.Validate(context.Background(), "same-token")
-		}()
-	}
-	// Every goroutine must be at the shared call before the server responds:
-	// singleflight forgets the key on completion, so a straggler arriving after
-	// the release would start a second upstream call and fail the count below.
-	entered.Wait()
-	assert.Eventually(t, func() bool { return calls.Load() == 1 }, time.Second, time.Millisecond)
-	close(release)
-	wg.Wait()
-
-	assert.Equal(t, int64(1), calls.Load(), "N concurrent validations must collapse to one upstream call")
-	for i := range n {
-		require.NoError(t, errs[i])
-		assert.Equal(t, "a.bot", results[i].Account)
-	}
-}
-
-// TestValidator_Validate_CallerCancellationDoesNotPoisonOthers proves the shared
-// call is detached: one caller giving up must not fail the rest.
-func TestValidator_Validate_CallerCancellationDoesNotPoisonOthers(t *testing.T) {
-	proceed := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		<-proceed
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"valid":true,"principal":{"userId":"u1","account":"a.bot"}}`))
-	}))
-	defer srv.Close()
-
-	v := NewValidator(restyutil.New(""), srv.URL)
-	firstCtx, cancelFirst := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	var firstErr, secondErr error
-	var second principal.Principal
-	firstDone := make(chan struct{})
-	go func() {
-		defer wg.Done()
-		defer close(firstDone)
-		_, firstErr = v.Validate(firstCtx, "tok")
-	}()
-	go func() { defer wg.Done(); second, secondErr = v.Validate(context.Background(), "tok") }()
-
-	// Sequence rather than race: while proceed is held the shared call cannot
-	// resolve, so the cancelled caller has only one way out of its select.
-	cancelFirst()
-	<-firstDone
-	close(proceed)
-	wg.Wait()
-
-	assert.Error(t, firstErr, "the cancelled caller gets its own context error")
-	require.NoError(t, secondErr, "the surviving caller must still be served")
-	assert.Equal(t, "a.bot", second.Account)
-}
-
-// TestErrInvalidToken_NotShared guards against handing every caller the same
-// *errcode.Error: its fields are exported, so a shared pointer is one mutation
 // (or one concurrent write) away from corrupting unrelated requests.
 func TestErrInvalidToken_NotShared(t *testing.T) {
 	stub := &stubValidator{principal: principal.Principal{UserID: "u1"}}
@@ -428,85 +324,4 @@ func TestErrInvalidToken_NotShared(t *testing.T) {
 	// Mutating one must not reach the other.
 	a.Message = "mutated"
 	assert.Equal(t, "invalid session token", b.Message)
-}
-
-// panicTransport panics inside the singleflight closure, where resty runs.
-type panicTransport struct{}
-
-func (panicTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	panic("boom")
-}
-
-// TestValidator_Validate_ContainsPanic pins the recover. singleflight re-raises a
-// panic from its own goroutine (`go panic(e)` when waiters exist, which DoChan
-// always creates), out of reach of gin.Recovery — so without the recover this
-// does not fail the request, it takes the process down with it.
-func TestValidator_Validate_ContainsPanic(t *testing.T) {
-	v := NewValidator(restyutil.New("", restyutil.WithTransport(panicTransport{})), "http://example")
-
-	_, err := v.Validate(context.Background(), "tok")
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "panic")
-	var ec *errcode.Error
-	assert.False(t, errors.As(err, &ec), "a panic is infra failure: raw, so it collapses to 503 at the boundary")
-
-	// The slot must come back, or one panic would permanently shrink the pool.
-	_, err = v.Validate(context.Background(), "tok2")
-	require.Error(t, err)
-	assert.NotErrorIs(t, err, errShedded)
-}
-
-// TestValidator_Validate_ShedsWhenSaturated pins the ceiling: the singleflight key
-// is a caller-supplied token, so unique tokens each start their own detached call.
-// Past maxInFlight the validator must shed with 503 rather than accumulate work.
-func TestValidator_Validate_ShedsWhenSaturated(t *testing.T) {
-	release := make(chan struct{})
-	var active atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		active.Add(1)
-		<-release
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"valid":true,"principal":{"userId":"u1","account":"a.bot"}}`))
-	}))
-	defer srv.Close()
-
-	v := NewValidator(restyutil.New(""), srv.URL)
-
-	// Declared after srv.Close's defer, so LIFO runs it first: a failed require
-	// below Goexits, and without this the 64 parked handlers would hang Close for
-	// the package timeout, burying the assertion under a timeout panic.
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	defer unblock()
-
-	// Fill the pool with distinct tokens so nothing coalesces.
-	var wg sync.WaitGroup
-	for i := range maxInFlight {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = v.Validate(context.Background(), fmt.Sprintf("tok-%d", i))
-		}()
-	}
-	assert.Eventually(t, func() bool { return active.Load() == int64(maxInFlight) },
-		2*time.Second, time.Millisecond)
-
-	// One more distinct token must be shed immediately, not queued.
-	_, err := v.Validate(context.Background(), "one-too-many")
-	require.ErrorIs(t, err, errShedded)
-
-	// Shedding is capacity state, not a wire contract: through Authenticate it
-	// must reach the client as the documented "botplatform unavailable" 503,
-	// indistinguishable from a botplatform that could not be reached at all.
-	_, err = Authenticate(context.Background(), v, "u1", "one-too-many-2")
-
-	var ec *errcode.Error
-	require.ErrorAs(t, err, &ec)
-	assert.Equal(t, errcode.CodeUnavailable, ec.Code)
-	assert.Equal(t, errcode.BotplatformUpstreamUnavailable, ec.Reason)
-	assert.Equal(t, "botplatform unavailable", ec.Message)
-
-	unblock()
-	wg.Wait()
 }

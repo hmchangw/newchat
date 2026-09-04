@@ -100,7 +100,6 @@ label — instrumented at one seam, not scattered across the decision tree.
 | `CACHE_MAX_AGE_SECONDS` | `Cache-Control: public, max-age=` value | `21600` (6h) |
 | `EID_CACHE_TTL` | account→employeeId cache TTL (near-immutable → long) | `24h` |
 | `EID_CACHE_CAPACITY` | account→employeeId cache max entries (≈ employee population) | `120000` |
-| `BOTPLATFORM_URL` | LOCAL site's botplatform-service, used to validate session tokens on the write endpoints | **required, non-empty** |
 
 `CLUSTER_DOMAINS` is a **JSON array** of `{"siteID","domain"}` objects mapping
 each `siteID` to the **full base URL (including scheme)** of *that cluster's*
@@ -443,9 +442,10 @@ locally even for a remote bot):
 ### 7a.4 Authorization — botplatform session token
 
 Write endpoints require a botplatform session token (`x-user-id` +
-`x-auth-token`), validated through `pkg/botauth` against botplatform-service's
-`POST /api/v1/auth/validate`. media-service has no `pkg/oidc` dependency: SSO
-users never write here.
+`x-auth-token`), validated through `pkg/botauth` by reading the shared
+`sessions` collection (`pkg/session`) directly — the same lookup
+botplatform-service's `POST /api/v1/auth/validate` performs, without the HTTP
+hop. media-service has no `pkg/oidc` dependency: SSO users never write here.
 
 | Endpoint | Rule | Failure |
 |---|---|---|
@@ -456,10 +456,6 @@ A bot owns its own avatar, so it may set it; an admin may set any bot's, for
 provisioning. Emoji are stricter because a shortcode is a **site-wide shared
 name** every user renders — one bot must not be able to overwrite `:party:` for
 the whole site.
-
-`BOTPLATFORM_URL` is a **required** env var: the service refuses to start
-without it, so no deployment can fall back to serving these endpoints
-anonymously.
 
 Read endpoints (GET) are public by design — the frontend loads them from
 `<img src>`, which cannot send credential headers.

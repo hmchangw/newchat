@@ -52,8 +52,9 @@ type userInfoResp struct {
 	DeptID      string `json:"deptId"`
 }
 
-// BotplatformValidator validates a session authToken against botplatform-service.
-// Returns errcode.Unauthenticated for invalid tokens, a raw wrapped error otherwise (503 upstream).
+// BotplatformValidator validates a botplatform session authToken against the
+// shared sessions collection. Returns errcode.Unauthenticated for invalid
+// tokens, a raw wrapped error otherwise (503 upstream).
 type BotplatformValidator interface {
 	Validate(ctx context.Context, authToken string) (principal.Principal, error)
 }
@@ -232,7 +233,7 @@ func (h *AuthHandler) handleSession(ctx context.Context, c *gin.Context, req aut
 			errhttp.Write(ctx, c, ec)
 			return
 		}
-		errhttp.Write(ctx, c, errcode.Unavailable("botplatform unavailable",
+		errhttp.Write(ctx, c, errcode.Unavailable("session store unavailable",
 			errcode.WithReason(errcode.BotplatformUpstreamUnavailable),
 			errcode.WithCause(err)))
 		return
