@@ -52,8 +52,9 @@ type userInfoResp struct {
 	DeptID      string `json:"deptId"`
 }
 
-// BotplatformValidator validates a session authToken against botplatform-service.
-// Returns errcode.Unauthenticated for invalid tokens, a raw wrapped error otherwise (503 upstream).
+// BotplatformValidator validates a botplatform session authToken against the
+// shared sessions collection. Returns errcode.Unauthenticated for invalid
+// tokens, a raw wrapped error otherwise (503 upstream).
 type BotplatformValidator interface {
 	Validate(ctx context.Context, authToken string) (principal.Principal, error)
 }
@@ -62,7 +63,7 @@ type BotplatformValidator interface {
 // scoped NATS user JWTs.
 type AuthHandler struct {
 	validator     TokenValidator
-	bpValidator   BotplatformValidator // optional; nil disables the session-token branch
+	bpValidator   BotplatformValidator // main always sets it; nil only in tests that omit the option
 	signingKey    nkeys.KeyPair
 	accountPubKey string
 	jwtExpiry     time.Duration
@@ -93,9 +94,9 @@ func WithRandFloat(fn func() float64) Option {
 	return func(h *AuthHandler) { h.randFloat = fn }
 }
 
-// WithBotplatformValidator enables the session-token branch of POST /auth.
-// Without it, a request carrying an authToken is rejected as if the field
-// were unsupported.
+// WithBotplatformValidator wires the session-token branch of POST /auth. main
+// always passes it; the nil guard in handleSession is unreachable in production
+// but keeps the failure explicit for a handler built without the option.
 func WithBotplatformValidator(v BotplatformValidator) Option {
 	return func(h *AuthHandler) { h.bpValidator = v }
 }
@@ -232,7 +233,7 @@ func (h *AuthHandler) handleSession(ctx context.Context, c *gin.Context, req aut
 			errhttp.Write(ctx, c, ec)
 			return
 		}
-		errhttp.Write(ctx, c, errcode.Unavailable("botplatform unavailable",
+		errhttp.Write(ctx, c, errcode.Unavailable("session store unavailable",
 			errcode.WithReason(errcode.BotplatformUpstreamUnavailable),
 			errcode.WithCause(err)))
 		return

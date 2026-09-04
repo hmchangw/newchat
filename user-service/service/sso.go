@@ -11,7 +11,7 @@ import (
 	"github.com/hmchangw/chat/user-service/models"
 )
 
-// The not-configured sentinel reuses upstream_unavailable (auth-service BOTPLATFORM_URL-unset precedent).
+// The not-configured sentinel reuses upstream_unavailable (the session-token-auth-unconfigured precedent).
 var (
 	errSSONotConfigured = errcode.Unavailable("sso is not configured on this site", errcode.WithReason(errcode.BotplatformUpstreamUnavailable))
 	errSSOTokenMismatch = errcode.BadRequest("sso token does not belong to this account")
