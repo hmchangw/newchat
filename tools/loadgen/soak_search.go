@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
-	"strings"
 	"sync"
 	"time"
 
@@ -195,21 +194,6 @@ func (r *soakSearchReader) IndexedAt(
 		}
 	}
 	return soakSearchIndexMissing, true, nil
-}
-
-// searchProbeTerm reduces a payload to a term the analyzer will match. The
-// bodies are generated filler, so the first whitespace-delimited token is both
-// stable and present in the indexed document.
-// The returned term is cloned: a substring shares the backing array of the
-// string it came from, so handing one to the catalogue would pin the whole body
-// it was meant to replace.
-func searchProbeTerm(content string) string {
-	for field := range strings.FieldsSeq(content) {
-		if len(field) >= 3 {
-			return strings.Clone(field)
-		}
-	}
-	return "soak"
 }
 
 func (r *soakSearchReader) pickQuery() (string, string) {

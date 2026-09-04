@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"container/list"
@@ -7,49 +7,51 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
-const soakCatalogShardCount = 64
+const shardCount = 64
 
-type soakCatalogAction string
+type Action string
 
 const (
-	soakCatalogEdit         soakCatalogAction = "edit"
-	soakCatalogDelete       soakCatalogAction = "delete"
-	soakCatalogPin          soakCatalogAction = "pin"
-	soakCatalogReaction     soakCatalogAction = "reaction"
-	soakCatalogThreadParent soakCatalogAction = "thread_parent"
-	// soakCatalogThreadRead picks a message whose thread actually exists.
-	// Deliberately not the same predicate as soakCatalogThreadParent: that one
+	ActionEdit         Action = "edit"
+	ActionDelete       Action = "delete"
+	ActionPin          Action = "pin"
+	ActionReaction     Action = "reaction"
+	ActionThreadParent Action = "thread_parent"
+	// ActionThreadRead picks a message whose thread actually exists.
+	// Deliberately not the same predicate as ActionThreadParent: that one
 	// asks "can a new reply be attached here?", which is true of a message with
 	// zero replies — precisely the case that has no thread room yet.
-	soakCatalogThreadRead soakCatalogAction = "thread_read"
-	// soakCatalogReadReceipt picks a persisted message to ask "who has read
+	ActionThreadRead Action = "thread_read"
+	// ActionReadReceipt picks a persisted message to ask "who has read
 	// this?". The caller must address the request as that message's own author:
 	// room-service serves read receipts only to the sender, so any other
 	// identity is refused. This comment previously claimed the opposite, and the
 	// lane it misled failed every request it ever sent.
-	soakCatalogReadReceipt soakCatalogAction = "read_receipt"
+	ActionReadReceipt Action = "read_receipt"
 )
 
-type soakClock interface {
+type TimeProvider interface {
 	Now() time.Time
 }
 
-type soakRealClock struct{}
+type RealClock struct{}
 
-func (soakRealClock) Now() time.Time { return time.Now().UTC() }
+func (RealClock) Now() time.Time { return time.Now().UTC() }
 
-// soakCatalogCandidate carries what the catalogue keeps about a message, which
+// Candidate carries what the catalogue keeps about a message, which
 // deliberately excludes the body. Nothing that reads the catalogue needs it —
 // the verifiers compare by digest and the search probe wants a single term —
 // and at the sizes this runs at the bodies were the largest thing the harness
-// held. Build the content fields with setSoakCatalogContent.
-type soakCatalogCandidate struct {
+// held. Build the content fields with setContent.
+type Candidate struct {
 	ID     string
 	RoomID string
 	Author string
@@ -65,35 +67,46 @@ type soakCatalogCandidate struct {
 	ThreadReplyLimit int
 }
 
-// setSoakCatalogContent reduces a message body to what the catalogue keeps: the
+// setContent reduces a message body to what the catalogue keeps: the
 // digest the read-back verifiers compare against, its length, and the one term
 // the search-index probe queries with.
-func setSoakCatalogContent(candidate *soakCatalogCandidate, body string) {
-	candidate.ContentSHA256 = soakContentDigest(body)
+func setContent(candidate *Candidate, body string) {
+	candidate.ContentSHA256 = ContentDigest(body)
 	candidate.ContentLength = len(body)
-	candidate.SearchTerm = searchProbeTerm(body)
+	candidate.SearchTerm = SearchTerm(body)
 }
 
 // reduceContentLocked is the single place a body enters the catalogue. Every
 // path that admits a message goes through it, so none of them can forget to
 // record the digest and leave later read-backs comparing against an empty one.
-func (c *soakCatalog) reduceContentLocked(candidate *soakCatalogCandidate, body string) {
-	setSoakCatalogContent(candidate, body)
+func (c *Catalog) reduceContentLocked(candidate *Candidate, body string) {
+	setContent(candidate, body)
 	candidate.Content = ""
 	if !c.retainSearchTerms {
 		candidate.SearchTerm = ""
 	}
 }
 
-// soakContentDigest is the form every read-back comparison uses, so a verifier
+// ContentDigest is the form every read-back comparison uses, so a verifier
 // never has to hold a body to check one.
-func soakContentDigest(body string) string {
+func ContentDigest(body string) string {
 	digest := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(digest[:])
 }
 
-type soakCatalogMessage struct {
-	soakCatalogCandidate
+// SearchTerm reduces a payload to a term the analyzer will match. The returned
+// term is cloned so retaining it does not retain the complete message body.
+func SearchTerm(content string) string {
+	for field := range strings.FieldsSeq(content) {
+		if len(field) >= 3 {
+			return strings.Clone(field)
+		}
+	}
+	return "soak"
+}
+
+type Message struct {
+	Candidate
 	AcceptedAt    time.Time
 	Edited        bool
 	Deleted       bool
@@ -102,8 +115,8 @@ type soakCatalogMessage struct {
 	ThreadReplies int
 }
 
-type soakCatalogEntry struct {
-	soakCatalogCandidate
+type entry struct {
+	Candidate
 	acceptedAt time.Time
 	edited     bool
 	deleted    bool
@@ -121,22 +134,22 @@ type soakCatalogEntry struct {
 	globalElement           *list.Element
 }
 
-type soakCatalogRoom struct {
-	messages map[string]*soakCatalogEntry
-	order    []*soakCatalogEntry
+type room struct {
+	messages map[string]*entry
+	order    []*entry
 }
 
-type soakCatalogShard struct {
+type shard struct {
 	mu    sync.RWMutex
-	rooms map[string]*soakCatalogRoom
+	rooms map[string]*room
 }
 
-type soakPendingEntry struct {
+type pendingEntry struct {
 	key       string
-	candidate soakCatalogCandidate
+	candidate Candidate
 }
 
-type soakCatalog struct {
+type Catalog struct {
 	// retainSearchTerms keeps the term the search-index probe queries with. The
 	// soak's bodies are one repeated character with no word boundaries, so that
 	// term is the whole body — the thing this catalogue exists not to hold. It
@@ -145,9 +158,9 @@ type soakCatalog struct {
 	perRoomCap        int
 	globalCap         int
 	persistGrace      time.Duration
-	clock             soakClock
+	clock             TimeProvider
 
-	shards [soakCatalogShardCount]soakCatalogShard
+	shards [shardCount]shard
 
 	globalMu     sync.Mutex
 	globalOrder  list.List
@@ -156,16 +169,16 @@ type soakCatalog struct {
 	pendingOrder list.List
 }
 
-func newSoakCatalog(
+func New(
 	perRoomCap int,
 	globalCap int,
 	persistGrace time.Duration,
-	clock soakClock,
-) *soakCatalog {
+	clock TimeProvider,
+) *Catalog {
 	if clock == nil {
-		clock = soakRealClock{}
+		clock = RealClock{}
 	}
-	return &soakCatalog{
+	return &Catalog{
 		perRoomCap:   max(1, perRoomCap),
 		globalCap:    max(1, globalCap),
 		persistGrace: max(0, persistGrace),
@@ -176,11 +189,11 @@ func newSoakCatalog(
 
 // RetainSearchTerms is set when the search-index observer is configured, which
 // is the only reader that needs the query term.
-func (c *soakCatalog) RetainSearchTerms(retain bool) {
+func (c *Catalog) RetainSearchTerms(retain bool) {
 	c.retainSearchTerms = retain
 }
 
-func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
+func (c *Catalog) TrackPublished(candidate *Candidate) error {
 	if candidate == nil {
 		return fmt.Errorf("published message candidate is required")
 	}
@@ -195,51 +208,51 @@ func (c *soakCatalog) TrackPublished(candidate *soakCatalogCandidate) error {
 		tracked.ThreadReplyLimit = distribution.ThreadReplyHardCap
 	}
 	tracked.ThreadReplyLimit = min(tracked.ThreadReplyLimit, distribution.ThreadReplyHardCap)
-	key := soakCatalogKey(tracked.RoomID, tracked.ID)
+	key := key(tracked.RoomID, tracked.ID)
 
 	c.globalMu.Lock()
 	defer c.globalMu.Unlock()
 	if _, exists := c.pending[key]; exists || c.messageExists(tracked.RoomID, tracked.ID) {
 		return fmt.Errorf("message %q already tracked in room %q", tracked.ID, tracked.RoomID)
 	}
-	element := c.pendingOrder.PushBack(&soakPendingEntry{key: key, candidate: tracked})
+	element := c.pendingOrder.PushBack(&pendingEntry{key: key, candidate: tracked})
 	c.pending[key] = element
 	for len(c.pending) > c.globalCap {
 		oldest := c.pendingOrder.Front()
-		pending := oldest.Value.(*soakPendingEntry)
+		pending := oldest.Value.(*pendingEntry)
 		delete(c.pending, pending.key)
 		c.pendingOrder.Remove(oldest)
 	}
 	return nil
 }
 
-func (c *soakCatalog) Accept(roomID, messageID string) bool {
+func (c *Catalog) Accept(roomID, messageID string) bool {
 	return c.AcceptAt(roomID, messageID, time.Time{})
 }
 
-func (c *soakCatalog) AcceptAt(
+func (c *Catalog) AcceptAt(
 	roomID string,
 	messageID string,
 	createdAt time.Time,
 ) bool {
-	key := soakCatalogKey(roomID, messageID)
+	key := key(roomID, messageID)
 	c.globalMu.Lock()
 	element, exists := c.pending[key]
 	if !exists {
 		c.globalMu.Unlock()
 		return false
 	}
-	pending := element.Value.(*soakPendingEntry)
+	pending := element.Value.(*pendingEntry)
 	delete(c.pending, key)
 	c.pendingOrder.Remove(element)
 	if !createdAt.IsZero() {
 		pending.candidate.CreatedAt = createdAt
 	}
 
-	entry := &soakCatalogEntry{
-		soakCatalogCandidate: pending.candidate,
-		acceptedAt:           c.clock.Now(),
-		reactions:            make(map[string]map[string]struct{}),
+	entry := &entry{
+		Candidate:  pending.candidate,
+		acceptedAt: c.clock.Now(),
+		reactions:  make(map[string]map[string]struct{}),
 	}
 	if entry.ThreadParentID == "" {
 		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
@@ -281,8 +294,8 @@ func (c *soakCatalog) AcceptAt(
 	return true
 }
 
-func (c *soakCatalog) Reject(roomID, messageID string) bool {
-	key := soakCatalogKey(roomID, messageID)
+func (c *Catalog) Reject(roomID, messageID string) bool {
+	key := key(roomID, messageID)
 	c.globalMu.Lock()
 	defer c.globalMu.Unlock()
 	element, exists := c.pending[key]
@@ -294,17 +307,17 @@ func (c *soakCatalog) Reject(roomID, messageID string) bool {
 	return true
 }
 
-func (c *soakCatalog) PickEligible(
+func (c *Catalog) PickEligible(
 	roomID string,
 	actor string,
-	action soakCatalogAction,
-) (soakCatalogMessage, bool) {
+	action Action,
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	now := c.clock.Now()
 	for i := len(room.order) - 1; i >= 0; i-- {
@@ -312,74 +325,74 @@ func (c *soakCatalog) PickEligible(
 		if !c.eligible(entry, actor, action, now) {
 			continue
 		}
-		return snapshotSoakCatalogEntry(entry), true
+		return snapshot(entry), true
 	}
-	return soakCatalogMessage{}, false
+	return Message{}, false
 }
 
-func (c *soakCatalog) PickAnyEligible(
+func (c *Catalog) PickAnyEligible(
 	roomID string,
-	action soakCatalogAction,
-) (soakCatalogMessage, bool) {
+	action Action,
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	now := c.clock.Now()
 	for i := len(room.order) - 1; i >= 0; i-- {
 		entry := room.order[i]
 		if c.eligible(entry, entry.Author, action, now) {
-			return snapshotSoakCatalogEntry(entry), true
+			return snapshot(entry), true
 		}
 	}
-	return soakCatalogMessage{}, false
+	return Message{}, false
 }
 
-func (c *soakCatalog) GetEligible(
+func (c *Catalog) GetEligible(
 	roomID string,
 	messageID string,
-	action soakCatalogAction,
-) (soakCatalogMessage, bool) {
+	action Action,
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	entry := room.messages[messageID]
 	if entry == nil || !c.eligible(entry, entry.Author, action, c.clock.Now()) {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
-	return snapshotSoakCatalogEntry(entry), true
+	return snapshot(entry), true
 }
 
-func (c *soakCatalog) PickPinCandidate(
+func (c *Catalog) PickPinCandidate(
 	roomID string,
 	pinned bool,
-) (soakCatalogMessage, bool) {
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	now := c.clock.Now()
 	for i := len(room.order) - 1; i >= 0; i-- {
 		entry := room.order[i]
 		if entry.pinned == pinned &&
-			c.eligible(entry, entry.Author, soakCatalogPin, now) {
-			return snapshotSoakCatalogEntry(entry), true
+			c.eligible(entry, entry.Author, ActionPin, now) {
+			return snapshot(entry), true
 		}
 	}
-	return soakCatalogMessage{}, false
+	return Message{}, false
 }
 
-func (c *soakCatalog) PinnedCount(roomID string) int {
+func (c *Catalog) PinnedCount(roomID string) int {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
@@ -396,19 +409,19 @@ func (c *soakCatalog) PinnedCount(roomID string) int {
 	return count
 }
 
-func (c *soakCatalog) PickVerificationCandidate(
+func (c *Catalog) PickVerificationCandidate(
 	roomID string,
 	preferMutated bool,
-) (soakCatalogMessage, bool) {
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	now := c.clock.Now()
-	var fallback *soakCatalogEntry
+	var fallback *entry
 	for i := len(room.order) - 1; i >= 0; i-- {
 		entry := room.order[i]
 		if !c.persistenceEligible(entry, now) {
@@ -419,81 +432,81 @@ func (c *soakCatalog) PickVerificationCandidate(
 		}
 		mutated := entry.edited || entry.deleted
 		if mutated == preferMutated {
-			return snapshotSoakCatalogEntry(entry), true
+			return snapshot(entry), true
 		}
 	}
 	if fallback != nil {
-		return snapshotSoakCatalogEntry(fallback), true
+		return snapshot(fallback), true
 	}
-	return soakCatalogMessage{}, false
+	return Message{}, false
 }
 
-func (c *soakCatalog) PickHistoryVerificationCandidate(
+func (c *Catalog) PickHistoryVerificationCandidate(
 	roomID string,
-) (soakCatalogMessage, bool) {
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	now := c.clock.Now()
 	for i := len(room.order) - 1; i >= 0; i-- {
 		entry := room.order[i]
 		if entry.ThreadParentID == "" && c.persistenceEligible(entry, now) {
-			return snapshotSoakCatalogEntry(entry), true
+			return snapshot(entry), true
 		}
 	}
-	return soakCatalogMessage{}, false
+	return Message{}, false
 }
 
-func (c *soakCatalog) GetVerificationCandidate(
+func (c *Catalog) GetVerificationCandidate(
 	roomID string,
 	messageID string,
-) (soakCatalogMessage, bool) {
+) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	entry := room.messages[messageID]
 	if entry == nil || !c.persistenceEligible(entry, c.clock.Now()) {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
-	return snapshotSoakCatalogEntry(entry), true
+	return snapshot(entry), true
 }
 
-func (c *soakCatalog) Get(roomID, messageID string) (soakCatalogMessage, bool) {
+func (c *Catalog) Get(roomID, messageID string) (Message, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	room := shard.rooms[roomID]
 	if room == nil {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
 	entry, exists := room.messages[messageID]
 	if !exists {
-		return soakCatalogMessage{}, false
+		return Message{}, false
 	}
-	return snapshotSoakCatalogEntry(entry), true
+	return snapshot(entry), true
 }
 
-func (c *soakCatalog) MarkEdited(roomID, messageID, content string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) MarkEdited(roomID, messageID, content string) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.deleted || entry.Author == "" {
 			return false
 		}
 		entry.edited = true
-		c.reduceContentLocked(&entry.soakCatalogCandidate, content)
+		c.reduceContentLocked(&entry.Candidate, content)
 		return true
 	})
 }
 
-func (c *soakCatalog) MarkDeleted(roomID, messageID string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) MarkDeleted(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.deleted {
 			return false
 		}
@@ -502,8 +515,8 @@ func (c *soakCatalog) MarkDeleted(roomID, messageID string) bool {
 	})
 }
 
-func (c *soakCatalog) SetPinned(roomID, messageID string, pinned bool) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) SetPinned(roomID, messageID string, pinned bool) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.deleted {
 			return false
 		}
@@ -512,7 +525,7 @@ func (c *soakCatalog) SetPinned(roomID, messageID string, pinned bool) bool {
 	})
 }
 
-func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
+func (c *Catalog) ObservePinned(message *wire.Message) bool {
 	if message == nil || message.RoomID == "" || message.MessageID == "" ||
 		message.Sender.Account == "" {
 		return false
@@ -529,8 +542,8 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		return true
 	}
 
-	entry := &soakCatalogEntry{
-		soakCatalogCandidate: soakCatalogCandidate{
+	entry := &entry{
+		Candidate: Candidate{
 			ID: message.MessageID, RoomID: message.RoomID,
 			Author:    message.Sender.Account,
 			CreatedAt: message.CreatedAt, ThreadParentID: message.ThreadParentID,
@@ -542,7 +555,7 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 		pinned:     true,
 		reactions:  make(map[string]map[string]struct{}),
 	}
-	c.reduceContentLocked(&entry.soakCatalogCandidate, message.Msg)
+	c.reduceContentLocked(&entry.Candidate, message.Msg)
 	if entry.ThreadParentID == "" {
 		entry.threadFollowers = map[string]struct{}{entry.Author: {}}
 		entry.threadFollowersComplete = false
@@ -571,11 +584,11 @@ func (c *soakCatalog) ObservePinned(message *soakWireMessage) bool {
 	return true
 }
 
-func (c *soakCatalog) SetReaction(
+func (c *Catalog) SetReaction(
 	roomID, messageID, emoji, account string,
 	present bool,
 ) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.deleted || emoji == "" || account == "" {
 			return false
 		}
@@ -599,8 +612,8 @@ func (c *soakCatalog) SetReaction(
 	})
 }
 
-func (c *soakCatalog) ReserveThreadReply(roomID, messageID string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) ReserveThreadReply(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.deleted || entry.ThreadParentID != "" ||
 			entry.threadReplies+entry.threadReservations >= entry.ThreadReplyLimit {
 			return false
@@ -610,8 +623,8 @@ func (c *soakCatalog) ReserveThreadReply(roomID, messageID string) bool {
 	})
 }
 
-func (c *soakCatalog) ReleaseThreadReplyReservation(roomID, messageID string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) ReleaseThreadReplyReservation(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.threadReservations <= 0 {
 			return false
 		}
@@ -623,8 +636,8 @@ func (c *soakCatalog) ReleaseThreadReplyReservation(roomID, messageID string) bo
 // ConfirmThreadReply converts one pending reservation into an accepted reply.
 // The first reply becomes readable only after persistGrace, giving the async
 // message-worker time to create the thread room and persist its first row.
-func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
-	return c.update(roomID, messageID, func(entry *soakCatalogEntry) bool {
+func (c *Catalog) ConfirmThreadReply(roomID, messageID string) bool {
+	return c.update(roomID, messageID, func(entry *entry) bool {
 		if entry.threadReservations <= 0 {
 			return false
 		}
@@ -643,12 +656,12 @@ func (c *soakCatalog) ConfirmThreadReply(roomID, messageID string) bool {
 // ThreadRecipients snapshots the recipient accounts that the broadcast worker
 // will include for a channel thread reply without mentions: the sender, parent
 // author, and authors of accepted replies that already follow the thread.
-func (c *soakCatalog) ThreadRecipients(roomID, parentID, sender string) []string {
+func (c *Catalog) ThreadRecipients(roomID, parentID, sender string) []string {
 	recipients, _ := c.ThreadRecipientSet(roomID, parentID, sender)
 	return recipients
 }
 
-func (c *soakCatalog) ThreadRecipientSet(roomID, parentID, sender string) ([]string, bool) {
+func (c *Catalog) ThreadRecipientSet(roomID, parentID, sender string) ([]string, bool) {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
@@ -679,15 +692,15 @@ func (c *soakCatalog) ThreadRecipientSet(roomID, parentID, sender string) ([]str
 	return result, parent.threadFollowersComplete
 }
 
-func (c *soakCatalog) Size() int {
+func (c *Catalog) Size() int {
 	c.globalMu.Lock()
 	defer c.globalMu.Unlock()
 	return c.size
 }
 
-func (c *soakCatalog) update(
+func (c *Catalog) update(
 	roomID, messageID string,
-	fn func(*soakCatalogEntry) bool,
+	fn func(*entry) bool,
 ) bool {
 	shard := c.shard(roomID)
 	shard.mu.Lock()
@@ -703,10 +716,10 @@ func (c *soakCatalog) update(
 	return fn(entry)
 }
 
-func (c *soakCatalog) eligible(
-	entry *soakCatalogEntry,
+func (c *Catalog) eligible(
+	entry *entry,
 	actor string,
-	action soakCatalogAction,
+	action Action,
 	now time.Time,
 ) bool {
 	if entry.deleted || now.Before(entry.acceptedAt) ||
@@ -714,12 +727,12 @@ func (c *soakCatalog) eligible(
 		return false
 	}
 	switch action {
-	case soakCatalogEdit, soakCatalogDelete:
+	case ActionEdit, ActionDelete:
 		return entry.Author == actor
-	case soakCatalogThreadParent:
+	case ActionThreadParent:
 		return entry.ThreadParentID == "" &&
 			entry.threadReplies+entry.threadReservations < entry.ThreadReplyLimit
-	case soakCatalogThreadRead:
+	case ActionThreadRead:
 		// A thread room is created by message-worker when the first reply
 		// lands, so a zero-reply message has none. Reading it makes
 		// history-service log `empty thread_room_id` and short-circuit before
@@ -728,22 +741,22 @@ func (c *soakCatalog) eligible(
 		// The reply budget is irrelevant here: a full thread is still readable.
 		return entry.ThreadParentID == "" && entry.threadReplies > 0 &&
 			!now.Before(entry.threadReadableAt)
-	case soakCatalogPin, soakCatalogReaction, soakCatalogReadReceipt:
+	case ActionPin, ActionReaction, ActionReadReceipt:
 		return true
 	default:
 		return false
 	}
 }
 
-func (c *soakCatalog) persistenceEligible(
-	entry *soakCatalogEntry,
+func (c *Catalog) persistenceEligible(
+	entry *entry,
 	now time.Time,
 ) bool {
 	return !now.Before(entry.acceptedAt) &&
 		now.Sub(entry.acceptedAt) >= c.persistGrace
 }
 
-func (c *soakCatalog) removeRoomIndexLocked(room *soakCatalogRoom, index int) {
+func (c *Catalog) removeRoomIndexLocked(room *room, index int) {
 	entry := room.order[index]
 	delete(room.messages, entry.ID)
 	copy(room.order[index:], room.order[index+1:])
@@ -752,8 +765,8 @@ func (c *soakCatalog) removeRoomIndexLocked(room *soakCatalogRoom, index int) {
 	c.size--
 }
 
-func (c *soakCatalog) removeOldestUnpinnedRoomLocked(
-	room *soakCatalogRoom,
+func (c *Catalog) removeOldestUnpinnedRoomLocked(
+	room *room,
 ) bool {
 	for i, entry := range room.order {
 		if entry.pinned {
@@ -765,9 +778,9 @@ func (c *soakCatalog) removeOldestUnpinnedRoomLocked(
 	return false
 }
 
-func (c *soakCatalog) removeOldestUnpinnedGlobalLocked() bool {
+func (c *Catalog) removeOldestUnpinnedGlobalLocked() bool {
 	for element := c.globalOrder.Front(); element != nil; element = element.Next() {
-		entry := element.Value.(*soakCatalogEntry)
+		entry := element.Value.(*entry)
 		shard := c.shard(entry.RoomID)
 		shard.mu.Lock()
 		room := shard.rooms[entry.RoomID]
@@ -787,12 +800,12 @@ func (c *soakCatalog) removeOldestUnpinnedGlobalLocked() bool {
 	return false
 }
 
-func (c *soakCatalog) removeOldestGlobalLocked() bool {
+func (c *Catalog) removeOldestGlobalLocked() bool {
 	element := c.globalOrder.Front()
 	if element == nil {
 		return false
 	}
-	entry := element.Value.(*soakCatalogEntry)
+	entry := element.Value.(*entry)
 	shard := c.shard(entry.RoomID)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -811,7 +824,7 @@ func (c *soakCatalog) removeOldestGlobalLocked() bool {
 	return false
 }
 
-func (c *soakCatalog) messageExists(roomID, messageID string) bool {
+func (c *Catalog) messageExists(roomID, messageID string) bool {
 	shard := c.shard(roomID)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
@@ -823,25 +836,25 @@ func (c *soakCatalog) messageExists(roomID, messageID string) bool {
 	return exists
 }
 
-func (c *soakCatalog) shard(roomID string) *soakCatalogShard {
+func (c *Catalog) shard(roomID string) *shard {
 	hasher := fnv.New32a()
 	_, _ = hasher.Write([]byte(roomID))
-	return &c.shards[hasher.Sum32()%soakCatalogShardCount]
+	return &c.shards[hasher.Sum32()%shardCount]
 }
 
-func (s *soakCatalogShard) room(roomID string) *soakCatalogRoom {
+func (s *shard) room(roomID string) *room {
 	if s.rooms == nil {
-		s.rooms = make(map[string]*soakCatalogRoom)
+		s.rooms = make(map[string]*room)
 	}
-	room := s.rooms[roomID]
-	if room == nil {
-		room = &soakCatalogRoom{messages: make(map[string]*soakCatalogEntry)}
-		s.rooms[roomID] = room
+	currentRoom := s.rooms[roomID]
+	if currentRoom == nil {
+		currentRoom = &room{messages: make(map[string]*entry)}
+		s.rooms[roomID] = currentRoom
 	}
-	return room
+	return currentRoom
 }
 
-func snapshotSoakCatalogEntry(entry *soakCatalogEntry) soakCatalogMessage {
+func snapshot(entry *entry) Message {
 	reactions := make(map[string][]string, len(entry.reactions))
 	for emoji, accounts := range entry.reactions {
 		users := make([]string, 0, len(accounts))
@@ -851,17 +864,17 @@ func snapshotSoakCatalogEntry(entry *soakCatalogEntry) soakCatalogMessage {
 		sort.Strings(users)
 		reactions[emoji] = users
 	}
-	return soakCatalogMessage{
-		soakCatalogCandidate: entry.soakCatalogCandidate,
-		AcceptedAt:           entry.acceptedAt,
-		Edited:               entry.edited,
-		Deleted:              entry.deleted,
-		Pinned:               entry.pinned,
-		Reactions:            reactions,
-		ThreadReplies:        entry.threadReplies,
+	return Message{
+		Candidate:     entry.Candidate,
+		AcceptedAt:    entry.acceptedAt,
+		Edited:        entry.edited,
+		Deleted:       entry.deleted,
+		Pinned:        entry.pinned,
+		Reactions:     reactions,
+		ThreadReplies: entry.threadReplies,
 	}
 }
 
-func soakCatalogKey(roomID, messageID string) string {
+func key(roomID, messageID string) string {
 	return roomID + "\x00" + messageID
 }

@@ -20,6 +20,7 @@ func TestSoakPackages_DoNotRepeatTheSoakPrefixInIdentifiers(t *testing.T) {
 	t.Parallel()
 
 	for _, dir := range []string{
+		"internal/soak/catalog",
 		"internal/soak/rpc",
 		"internal/soak/userread",
 		"internal/soak/wire",

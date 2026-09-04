@@ -144,12 +144,13 @@ coverage-loadgen-failure:
 
 # Run only Cassandra Run A tests (unit + integration), then enforce the scoped
 # coverage contract. CLI/environment wiring and the Mongo adapter stay in the
-# Run A aggregate; the core threshold excludes those two boundary files.
+# Run A aggregate; the core threshold excludes those two boundary files and
+# follows core code into the extracted internal packages.
 SOAK_COVERAGE_PROFILE ?= coverage-loadgen-soak.out
 coverage-loadgen-soak:
 	go test -race -tags integration -run Soak -coverprofile=$(SOAK_COVERAGE_PROFILE) ./tools/loadgen/...
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -min 80
-	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/userread/ -exclude soak_main.go -exclude soak_store.go -min 90
+	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/soak_ -include tools/loadgen/internal/soak/catalog/ -include tools/loadgen/internal/soak/userread/ -exclude soak_main.go -exclude soak_store.go -min 90
 	go run ./tools/coveragecheck -profile $(SOAK_COVERAGE_PROFILE) -include tools/loadgen/internal/soak/ -min 90
 
 # Regenerate all mocks via go generate

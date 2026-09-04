@@ -578,7 +578,7 @@ func TestSoakReader_RecordsRPCFailuresByEndpoint(t *testing.T) {
 func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	editedAt := time.Unix(101, 0).UTC()
 	expected := soakCatalogMessage{
-		soakCatalogCandidate: soakCatalogCandidate{
+		Candidate: soakCatalogCandidate{
 			ID: "message-1", RoomID: "room-1", Author: "alice",
 			ContentSHA256: soakContentDigest("hello"),
 		},
@@ -680,56 +680,6 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 		assert.Equal(t, tt.want, result.Class)
 		assert.Equal(t, tt.class, result.RPCErrorClass)
 	}
-}
-
-func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
-	clock := newFakeSoakClock(time.Unix(100, 0))
-	catalog := newSoakCatalog(1, 1, -time.Second, nil)
-	require.Error(t, catalog.TrackPublished(nil))
-	require.Error(t, catalog.TrackPublished(&soakCatalogCandidate{}))
-	assert.False(t, catalog.Accept("missing", "missing"))
-	assert.False(t, catalog.Reject("missing", "missing"))
-
-	candidate := &soakCatalogCandidate{
-		ID: "message-1", RoomID: "room-1", Author: "alice",
-		CreatedAt: clock.Now(),
-	}
-	require.NoError(t, catalog.TrackPublished(candidate))
-	require.Error(t, catalog.TrackPublished(candidate))
-	require.True(t, catalog.Accept("room-1", "message-1"))
-	assert.False(t, catalog.Accept("room-1", "message-1"))
-	require.Error(t, catalog.TrackPublished(candidate))
-
-	for _, action := range []soakCatalogAction{
-		soakCatalogEdit, soakCatalogDelete, soakCatalogThreadParent,
-		soakCatalogPin, soakCatalogReaction, soakCatalogAction("invalid"),
-	} {
-		_, ok := catalog.PickAnyEligible("missing", action)
-		assert.False(t, ok)
-	}
-	_, ok := catalog.GetEligible("missing", "message-1", soakCatalogEdit)
-	assert.False(t, ok)
-	_, ok = catalog.PickPinCandidate("missing", false)
-	assert.False(t, ok)
-	assert.Zero(t, catalog.PinnedCount("missing"))
-	_, ok = catalog.PickVerificationCandidate("missing", false)
-	assert.False(t, ok)
-	_, ok = catalog.GetVerificationCandidate("missing", "message-1")
-	assert.False(t, ok)
-
-	assert.False(t, catalog.MarkEdited("missing", "message-1", "edited"))
-	assert.False(t, catalog.MarkDeleted("missing", "message-1"))
-	assert.False(t, catalog.SetPinned("missing", "message-1", true))
-	assert.False(t, catalog.SetReaction("missing", "message-1", "wave", "bob", true))
-	assert.False(t, catalog.ReserveThreadReply("missing", "message-1"))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "", "bob", true))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "", true))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "bob", false))
-	assert.True(t, catalog.MarkDeleted("room-1", "message-1"))
-	assert.False(t, catalog.MarkDeleted("room-1", "message-1"))
-	assert.False(t, catalog.MarkEdited("room-1", "message-1", "edited"))
-	assert.False(t, catalog.SetPinned("room-1", "message-1", true))
-	assert.False(t, catalog.ReserveThreadReply("room-1", "message-1"))
 }
 
 func TestSoakTopology_RejectsInvalidIdentitySources(t *testing.T) {

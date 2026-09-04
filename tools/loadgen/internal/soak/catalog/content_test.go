@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"crypto/sha256"
@@ -12,11 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
-func trackAcceptedSoakMessage(t *testing.T, catalog *soakCatalog, roomID, id, content string) {
+func trackAcceptedSoakMessage(t *testing.T, catalog *Catalog, roomID, id, content string) {
 	t.Helper()
-	candidate := soakCatalogCandidate{
+	candidate := Candidate{
 		ID: id, RoomID: roomID, Author: "user-1",
 		Content: content, CreatedAt: time.Unix(1000, 0).UTC(),
 	}
@@ -29,7 +30,7 @@ func trackAcceptedSoakMessage(t *testing.T, catalog *soakCatalog, roomID, id, co
 // body was the single largest thing the harness held — measured at 351MB for a
 // full catalogue of default-sized messages.
 func TestSoakCatalog_KeepsAContentDigestRatherThanTheBody(t *testing.T) {
-	catalog := newSoakCatalog(16, 64, 0, nil)
+	catalog := New(16, 64, 0, nil)
 	body := "soakbody alpha bravo charlie"
 	trackAcceptedSoakMessage(t, catalog, "room-1", "msg-1", body)
 
@@ -43,7 +44,7 @@ func TestSoakCatalog_KeepsAContentDigestRatherThanTheBody(t *testing.T) {
 }
 
 func TestSoakCatalog_KeepsTheTermTheSearchProbeQueriesWith(t *testing.T) {
-	catalog := newSoakCatalog(16, 64, 0, nil)
+	catalog := New(16, 64, 0, nil)
 	catalog.RetainSearchTerms(true)
 	body := "ab soakterm trailing words"
 	trackAcceptedSoakMessage(t, catalog, "room-1", "msg-1", body)
@@ -51,11 +52,11 @@ func TestSoakCatalog_KeepsTheTermTheSearchProbeQueriesWith(t *testing.T) {
 	message, known := catalog.Get("room-1", "msg-1")
 
 	require.True(t, known)
-	assert.Equal(t, searchProbeTerm(body), message.SearchTerm)
+	assert.Equal(t, SearchTerm(body), message.SearchTerm)
 }
 
 func TestSoakCatalog_RefreshesTheDigestAndTermWhenAMessageIsEdited(t *testing.T) {
-	catalog := newSoakCatalog(16, 64, 0, nil)
+	catalog := New(16, 64, 0, nil)
 	catalog.RetainSearchTerms(true)
 	trackAcceptedSoakMessage(t, catalog, "room-1", "msg-1", "original wording here")
 
@@ -65,7 +66,7 @@ func TestSoakCatalog_RefreshesTheDigestAndTermWhenAMessageIsEdited(t *testing.T)
 	require.True(t, known)
 	digest := sha256.Sum256([]byte("replacement wording here"))
 	assert.Equal(t, hex.EncodeToString(digest[:]), message.ContentSHA256)
-	assert.Equal(t, searchProbeTerm("replacement wording here"), message.SearchTerm)
+	assert.Equal(t, SearchTerm("replacement wording here"), message.SearchTerm)
 	assert.Equal(t, len("replacement wording here"), message.ContentLength)
 }
 
@@ -77,13 +78,13 @@ func TestSoakCatalog_RefreshesTheDigestAndTermWhenAMessageIsEdited(t *testing.T)
 func TestSoakCatalog_MemoryDoesNotScaleWithMessageSize(t *testing.T) {
 	const messages = 20000
 	measure := func(body string) float64 {
-		catalog := newSoakCatalog(messages, messages, 0, nil)
+		catalog := New(messages, messages, 0, nil)
 		runtime.GC()
 		var before runtime.MemStats
 		runtime.ReadMemStats(&before)
 		for i := range messages {
-			candidate := soakCatalogCandidate{
-				ID: soakCatalogProbeID(i), RoomID: "room-1", Author: "user-1",
+			candidate := Candidate{
+				ID: CatalogProbeID(i), RoomID: "room-1", Author: "user-1",
 				Content: body, CreatedAt: time.Unix(1000, 0).UTC(),
 			}
 			if err := catalog.TrackPublished(&candidate); err != nil {
@@ -106,7 +107,7 @@ func TestSoakCatalog_MemoryDoesNotScaleWithMessageSize(t *testing.T) {
 			"the body is still being retained", large, small)
 }
 
-func soakCatalogProbeID(index int) string {
+func CatalogProbeID(index int) string {
 	const digits = "0123456789"
 	id := []byte("msg-000000")
 	for position := len(id) - 1; position >= 4 && index > 0; position-- {
@@ -121,10 +122,10 @@ func soakCatalogProbeID(index int) string {
 // digest against a real one and reports a content mismatch for a message the
 // service returned correctly.
 func TestSoakCatalog_ObservePinnedRecordsTheContentDigest(t *testing.T) {
-	catalog := newSoakCatalog(16, 64, 0, nil)
+	catalog := New(16, 64, 0, nil)
 	body := "pinned announcement body"
 
-	require.True(t, catalog.ObservePinned(&soakWireMessage{
+	require.True(t, catalog.ObservePinned(&wire.Message{
 		MessageID: "msg-1", RoomID: "room-1", Msg: body,
 		Sender:    cassandra.Participant{Account: "user-1"},
 		CreatedAt: time.Unix(1000, 0).UTC(),
@@ -132,30 +133,9 @@ func TestSoakCatalog_ObservePinnedRecordsTheContentDigest(t *testing.T) {
 
 	message, known := catalog.Get("room-1", "msg-1")
 	require.True(t, known)
-	assert.Equal(t, soakContentDigest(body), message.ContentSHA256)
+	assert.Equal(t, ContentDigest(body), message.ContentSHA256)
 	assert.Equal(t, len(body), message.ContentLength)
 	assert.Empty(t, message.Content)
-}
-
-func TestSoakCatalog_ObservePinnedVerifiesCleanAgainstTheServiceReply(t *testing.T) {
-	catalog := newSoakCatalog(16, 64, 0, nil)
-	body := "pinned announcement body"
-	require.True(t, catalog.ObservePinned(&soakWireMessage{
-		MessageID: "msg-1", RoomID: "room-1", Msg: body,
-		Sender:    cassandra.Participant{Account: "user-1"},
-		CreatedAt: time.Unix(1000, 0).UTC(),
-	}))
-	expected, known := catalog.Get("room-1", "msg-1")
-	require.True(t, known)
-
-	result := soakVerifyResult{}
-	compareSoakVerifiedMessage(&result, &expected, &soakVerifyMessage{
-		MessageID: "msg-1", RoomID: "room-1", Msg: body,
-		Sender: modelParticipant("user-1"),
-	})
-
-	assert.Equal(t, soakVerifyOK, result.Class)
-	assert.Empty(t, result.Field)
 }
 
 // A Go substring shares the backing array of the string it came from, so a term
@@ -167,7 +147,7 @@ func TestSoakCatalog_ObservePinnedVerifiesCleanAgainstTheServiceReply(t *testing
 func TestSoakCatalog_RetainedSearchTermDoesNotPinTheBody(t *testing.T) {
 	const messages = 5000
 	measure := func(bodySize int) float64 {
-		catalog := newSoakCatalog(messages, messages, 0, nil)
+		catalog := New(messages, messages, 0, nil)
 		catalog.RetainSearchTerms(true)
 		runtime.GC()
 		var before runtime.MemStats
@@ -175,9 +155,9 @@ func TestSoakCatalog_RetainedSearchTermDoesNotPinTheBody(t *testing.T) {
 		for i := range messages {
 			// A distinct body per message, as the send lane produces: one
 			// shared body would be pinned once however many terms point at it.
-			body := soakCatalogProbeID(i) + " " + strings.Repeat("ab ", bodySize/3)
-			candidate := soakCatalogCandidate{
-				ID: soakCatalogProbeID(i), RoomID: "room-1", Author: "user-1",
+			body := CatalogProbeID(i) + " " + strings.Repeat("ab ", bodySize/3)
+			candidate := Candidate{
+				ID: CatalogProbeID(i), RoomID: "room-1", Author: "user-1",
 				Content: body, CreatedAt: time.Unix(1000, 0).UTC(),
 			}
 			if err := catalog.TrackPublished(&candidate); err != nil {

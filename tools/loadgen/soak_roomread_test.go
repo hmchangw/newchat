@@ -273,7 +273,7 @@ func TestSoakRoomReader_ReadReceiptsUsesTheRoomMessageSubject(t *testing.T) {
 	reader, _, recorder := newSoakRoomReadFixture(t, transport, 11)
 	messages := &soakRoomMessageStub{
 		message: soakCatalogMessage{
-			soakCatalogCandidate: soakCatalogCandidate{
+			Candidate: soakCatalogCandidate{
 				ID: "msg-1", RoomID: "room-1", Author: "user-a0",
 			},
 		}, found: true,
@@ -333,7 +333,7 @@ func TestSoakRoomReader_ReadMixedEventuallyDispatchesEveryRoomReadAction(t *test
 	reader, _, recorder := newSoakRoomReadFixture(t, transport, 7)
 	reader.SetMessageSource(&soakRoomMessageStub{
 		message: soakCatalogMessage{
-			soakCatalogCandidate: soakCatalogCandidate{ID: "msg-1", RoomID: "room-1"},
+			Candidate: soakCatalogCandidate{ID: "msg-1", RoomID: "room-1"},
 		}, found: true,
 	})
 
