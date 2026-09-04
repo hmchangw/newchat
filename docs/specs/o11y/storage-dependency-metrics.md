@@ -81,7 +81,9 @@ The message-worker sites cover the first core-message campaign's write path. The
 |---|---|---|---|---|
 | `db.client.operation.duration` / `db_client_operation_duration_seconds_*` | Histogram | `service_name`, `db_system_name`, `db_operation_name` (endpoint id), `db_collection_name` (index), `server_address` / `server_port`, and on failures `error_type` plus `db_response_status_code` | Per-request Elasticsearch latency, rate and errors by service, endpoint and index | Existing for instrumented clients |
 
-Recorded under the instrumentation scope `github.com/flywindy/o11y/elasticsearch`; spans keep the upstream `elasticsearch-api` scope. "Failure" follows each client API's own contract, so a 404 from a typed `Get`/`Delete`/`Exists` is a normal result and is not counted.
+Recorded under the instrumentation scope `github.com/flywindy/o11y/elasticsearch`; spans keep the upstream `elasticsearch-api` scope.
+
+**"Failure" here means any status above 299, routine 404s included.** The SDK follows each client API's own contract, and `searchengine` builds the **low-level** client, whose contract is `esapi.Response.IsError` — status > 299. The typed client's exemption, under which a 404 from `Get`/`Delete`/`Exists` is a normal result, does **not** apply to this repo. That matters because a 404 is a routine outcome on this path: `httpAdapter.GetDoc` returns `(nil, false, nil)` for it, and search-service's `loadRestricted` reads the per-account user-room doc on every Valkey miss, where a user with no restricted rooms legitimately has no document. Those samples carry `error_type="404"` and `db_response_status_code="404"`, so an error-ratio panel built from §7 must exclude them or it will show a permanent, meaningless ES error rate. The same 404 has always set the span status to `Error`; only the metric is new. Pinned by `TestAdapter_RoutineGetDocMissIsCountedAsAnError`.
 
 Direct Elasticsearch client coverage is:
 
@@ -187,13 +189,28 @@ sum by (db_system_name, service_name, db_operation_name) (
   rate(db_client_operation_duration_seconds_count[5m])
 )
 
-# Operation error ratio (error_type exists only on failures)
+# Operation error ratio (error_type exists only on failures).
+# Over-counts Elasticsearch — use the ES-specific query below for that system.
 sum by (db_system_name, service_name) (
   rate(db_client_operation_duration_seconds_count{error_type!=""}[5m])
 )
 /
 sum by (db_system_name, service_name) (
   rate(db_client_operation_duration_seconds_count[5m])
+)
+
+# Elasticsearch error ratio. The low-level client counts a routine document
+# miss as a failure, so 404 must be excluded (§4). A label matcher cannot
+# express "not (system=es and status=404)", so Elasticsearch gets its own query
+# rather than a carve-out inside the one above.
+sum by (service_name) (
+  rate(db_client_operation_duration_seconds_count{
+    db_system_name="elasticsearch", error_type!="", error_type!="404"
+  }[5m])
+)
+/
+sum by (service_name) (
+  rate(db_client_operation_duration_seconds_count{db_system_name="elasticsearch"}[5m])
 )
 
 # p99 client latency

@@ -2,7 +2,7 @@
 
 > **Status:** IN PROGRESS. This document is the design/rollout plan for adopting
 > [`github.com/flywindy/o11y`](https://github.com/flywindy/o11y) (currently
-> pinned at **v0.11.0**) as the single observability entry point across the chat
+> pinned at **v0.12.0**) as the single observability entry point across the chat
 > platform.
 > Branch: `feat/integrate-o11y-sdk`. **Phase 0** (dependency baseline) and
 > **Phase 1** (`pkg/obs` wrapper) have landed; Phases 2–4 are pending.

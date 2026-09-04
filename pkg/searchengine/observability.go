@@ -26,9 +26,9 @@ type connectConfig struct {
 type Option func(*connectConfig)
 
 // WithObservability builds the Elasticsearch client via o11y/elasticsearch using
-// the supplied tracer provider, so the adapter's operations emit ES-semantic
-// spans. Ignored for non-Elasticsearch backends. When omitted, New builds a
-// plain client.
+// the supplied providers, so the adapter's operations emit ES-semantic spans and
+// an operation-duration sample each. Ignored for non-Elasticsearch backends.
+// When omitted, New builds a plain client.
 func WithObservability(o Observability) Option {
 	return func(c *connectConfig) { c.obs = o }
 }
