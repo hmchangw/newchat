@@ -12,6 +12,7 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
   const [members, setMembers] = useState([])
   const [loaded, setLoaded] = useState(false)
   const [owner, setOwner] = useState('')
+  const [filter, setFilter] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
   const handleAdminError = useHandleAdminError()
@@ -34,6 +35,18 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authToken, room.id])
+
+  // Filtering is local: the roster is already loaded and bounded by room-service's
+  // MAX_ROOM_SIZE, so a query per keystroke would buy nothing.
+  const needle = filter.trim().toLowerCase()
+  const matches = needle
+    ? members.filter((m) => m.account.toLowerCase().includes(needle))
+    : members
+  // A chosen owner stays on screen even once the filter stops matching them —
+  // otherwise confirm would submit an account the admin can no longer see, and
+  // this action demotes every other member of the room.
+  const pinned = owner && !matches.some((m) => m.account === owner)
+  const visible = pinned ? [...members.filter((m) => m.account === owner), ...matches] : matches
 
   const handleConfirm = async () => {
     setSubmitting(true)
@@ -65,9 +78,25 @@ export default function SetOnDutyDialog({ authToken, room, onClose, onDone }) {
       {members.length > 0 && (
         <fieldset className="onduty-owner">
           <legend>Owner account</legend>
+          <input
+            type="text"
+            className="onduty-owner-filter"
+            aria-label="Filter members"
+            placeholder="Filter members…"
+            autoComplete="off"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            disabled={submitting}
+          />
+          {matches.length === 0 && (
+            <p className="onduty-owner-empty">No member matches “{filter.trim()}”.</p>
+          )}
           <div className="onduty-owner-list" role="radiogroup" aria-label="Owner account">
-            {members.map((member) => (
-              <label key={member.account} className="onduty-owner-option">
+            {visible.map((member, i) => (
+              <label
+                key={member.account}
+                className={`onduty-owner-option ${pinned && i === 0 ? 'is-pinned' : ''}`}
+              >
                 <input
                   type="radio"
                   name="onduty-owner"

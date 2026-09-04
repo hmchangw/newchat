@@ -137,6 +137,60 @@ describe('SetOnDutyDialog', () => {
     expect(screen.getByRole('button', { name: /set onduty/i })).toBeDisabled()
   })
 
+  it('filters the list as you type, case-insensitively', async () => {
+    renderDialog()
+    const group = await screen.findByRole('radiogroup', { name: /owner/i })
+    fireEvent.change(screen.getByRole('textbox', { name: /filter/i }), {
+      target: { value: 'BO' },
+    })
+    expect(within(group).getAllByRole('radio').map((r) => r.value)).toEqual([
+      'bob',
+      'helperbot',
+    ])
+  })
+
+  it('restores the full list when the filter is cleared', async () => {
+    renderDialog()
+    const group = await screen.findByRole('radiogroup', { name: /owner/i })
+    const filter = screen.getByRole('textbox', { name: /filter/i })
+    fireEvent.change(filter, { target: { value: 'alice' } })
+    expect(within(group).getAllByRole('radio')).toHaveLength(1)
+
+    fireEvent.change(filter, { target: { value: '  ' } })
+    expect(within(group).getAllByRole('radio')).toHaveLength(3)
+  })
+
+  it('says so when nothing matches the filter', async () => {
+    renderDialog()
+    await waitFor(() => expect(listRoomMembers).toHaveBeenCalled())
+    fireEvent.change(screen.getByRole('textbox', { name: /filter/i }), {
+      target: { value: 'zzz' },
+    })
+    expect(screen.getByText(/no member matches/i)).toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+  })
+
+  it('keeps the chosen owner on screen when the filter would hide them', async () => {
+    renderDialog()
+    fireEvent.click(await ownerRadio('alice'))
+    fireEvent.change(screen.getByRole('textbox', { name: /filter/i }), {
+      target: { value: 'bob' },
+    })
+
+    // Submitting an owner the admin cannot see would demote every other member blind.
+    const alice = await ownerRadio('alice')
+    expect(alice).toBeInTheDocument()
+    expect(alice).toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: /set onduty/i }))
+    await waitFor(() =>
+      expect(setRoomOnDuty).toHaveBeenCalledWith('tok', 'r-1', {
+        onDuty: true,
+        ownerAccount: 'alice',
+      }),
+    )
+  })
+
   it('closes without calling the API when cancelled', async () => {
     const onClose = vi.fn()
     renderDialog({ onClose })

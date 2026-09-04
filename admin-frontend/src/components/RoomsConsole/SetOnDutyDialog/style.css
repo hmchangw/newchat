@@ -14,6 +14,11 @@
   font-weight: var(--font-medium);
 }
 
+/* The .dialog input rule already styles this; only the spacing below it is ours. */
+.onduty-owner-filter {
+  margin-bottom: var(--space-sm);
+}
+
 .onduty-owner-list {
   display: flex;
   flex-direction: column;
@@ -37,6 +42,13 @@
 
 .onduty-owner-option:hover {
   background: var(--bg-hover);
+}
+
+/* The chosen owner is pinned to the top when the filter stops matching them;
+   the rule keeps that row from reading as part of the match list. */
+.onduty-owner-option.is-pinned {
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 
 .onduty-owner-option input {
