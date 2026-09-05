@@ -370,7 +370,7 @@ Three server rules the code must respect (`nats-io/nats-server`, `server/consume
   (`:612-617`). `DurableConsumerDefaults` clamps and warns.
 
 ### Graceful Shutdown
-- Use `pkg/shutdown.Wait` in every service's `main.go`
-- JetStream workers cleanup order: `iter.Stop()` → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases
+- Use `pkg/shutdown.Wait` in every service's `main.go` — except a service that can raise its own shutdown signal (any `pkg/loopguard` worker), which arms `sig := shutdown.Signals()` before starting its loop and calls `shutdown.WaitOn(ctx, sig, …)`
+- JetStream workers cleanup order: `guard.BeginShutdown()` → `iter.Stop()` → `wg.Wait()` (with timeout) → `nc.Drain()` → disconnect databases
 - HTTP services cleanup order: `nc.Drain()` → disconnect databases
 - Shutdown timeout (25s) must be less than Kubernetes `terminationGracePeriodSeconds` (30s)

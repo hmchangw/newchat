@@ -48,9 +48,6 @@ func New(name string, onUnexpectedStop func()) *Guard {
 // Call it as the first shutdown hook, before iter.Stop().
 func (g *Guard) BeginShutdown() { g.stopping.Store(true) }
 
-// Stopping reports whether BeginShutdown has been called.
-func (g *Guard) Stopping() bool { return g.stopping.Load() }
-
 // Stopped records that the loop has exited with err. Every exit is recorded,
 // including the deliberate one during shutdown: a worker that has stopped
 // consuming is not ready either way, and during shutdown failing readiness is

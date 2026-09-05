@@ -76,7 +76,6 @@ func TestGuard_StopAfterBeginShutdownDoesNotFireHook(t *testing.T) {
 	}
 	assert.Error(t, g.Check().Probe(context.Background()),
 		"readiness must still fail while shutting down, so the pod drains")
-	assert.True(t, g.Stopping())
 }
 
 // A loop with two observers (the loop's own exit and a Closed() watcher) may

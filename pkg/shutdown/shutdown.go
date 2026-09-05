@@ -23,7 +23,10 @@ func Wait(ctx context.Context, timeout time.Duration, shutdownFuncs ...func(cont
 // Signals returns a buffered channel already armed for SIGINT and SIGTERM. A
 // service that can raise its own shutdown signal calls this BEFORE starting
 // anything able to raise it, then hands the channel to WaitOn — see the note
-// there for why the ordering matters.
+// there for why the ordering matters. Never signal.Stop the channel in
+// production code: the registration must outlive every path that could raise
+// the signal, or a late self-raised SIGTERM regains its default disposition and
+// kills the process mid-shutdown. main returning is the process ending anyway.
 func Signals() chan os.Signal {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

@@ -8,7 +8,7 @@ served by `pkg/health`.
 | Path       | Meaning   | Behavior |
 |------------|-----------|----------|
 | `/healthz` | Liveness  | Always `200 {"status":"ok"}` while the process runs. It never probes dependencies — a dependency outage must not restart the pod. |
-| `/readyz`  | Readiness | Reports whether this pod is connected to NATS. `200` when `CONNECTED` or `RECONNECTING`; `503` once the connection is `DISCONNECTED`/`CLOSED`. |
+| `/readyz`  | Readiness | Reports whether this pod can do its job. `200` when the NATS connection is `CONNECTED` or `RECONNECTING` and every consume loop is running; `503` once the connection is `DISCONNECTED`/`CLOSED`, or once a consume loop has exited (`pkg/loopguard`) — including the deliberate stop during graceful shutdown, which is what drains the pod from the load balancer. |
 
 ## Where they listen
 
@@ -40,13 +40,17 @@ Most services receive work over NATS, not an HTTP Service, so readiness here is
 primarily a rollout-gating and operator signal — and a safe one, since nothing is
 routed off it.
 
-The NATS readiness check is `natsutil.HealthCheck(nc)`.
+The NATS readiness check is `natsutil.HealthCheck(nc)`. JetStream workers add
+one `loopguard.Guard.Check()` per consume loop (named `consume-loop`, or per lane
+in multi-lane workers such as `outbox-ordered-{site}`), which fails with the
+terminal iterator error once that loop has exited.
 
 ## Liveness
 
-Liveness is process-up only. (A consume-loop heartbeat — failing liveness when a
-worker's pull loop wedges while the process stays alive — is the natural next
-addition, since that is the failure neither current probe catches.)
+Liveness is process-up only. A consume loop that dies while the process stays
+alive is handled without a probe: `pkg/loopguard` fails readiness and raises
+SIGTERM on the process, so the supervisor replaces the pod through the ordinary
+graceful-shutdown path.
 
 `HEALTH_ADDR` is a standard `caarlos0/env` var; override per deployment if
 `:8081` clashes with another container port.

@@ -315,8 +315,8 @@ func captureLogs(t *testing.T) *capturingHandler {
 
 // A graceful stop is the normal end of every pod's life: iter.Stop() during
 // shutdown makes Next return, and reporting that at ERROR trips error-rate
-// alerting on every single deploy. The intent is already recorded — stopped()
-// reads the same flag two lines earlier to decide not to re-signal the process.
+// alerting on every single deploy. The loop hands the exit to the guard, which
+// reads the intent BeginShutdown recorded to pick the level.
 func TestConsumeLoop_GracefulStopIsNotLoggedAsAnError(t *testing.T) {
 	logs := captureLogs(t)
 	state := loopguard.New("consume-loop", nil)
