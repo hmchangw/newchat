@@ -1,9 +1,9 @@
 # Storage Dependency Metrics
 
-> Verified against the code on 2026-08-21. This is the repository's dictionary
-> of MongoDB and Cassandra client metrics: what each family is called, what
-> labels it carries, and what it proves. Panels and alerts are built from it,
-> but are not defined here.
+> Verified against the code on 2026-09-04. This is the repository's dictionary
+> of MongoDB, Cassandra and Elasticsearch client metrics: what each family is
+> called, what labels it carries, and what it proves. Panels and alerts are
+> built from it, but are not defined here.
 >
 > MongoDB server metrics come from the managed service's own dashboard and are
 > deliberately not inventoried here.
@@ -73,7 +73,39 @@ Batch call sites need o11y's `ExecuteBatch` seam to produce spans/metrics; a dir
 
 The message-worker sites cover the first core-message campaign's write path. The remaining sites must move to the seam before a campaign claims Cassandra coverage for reactions, pin/unpin, or the bot lane.
 
-## 4. Existing Storage-Relevant Application and Loadgen Metrics
+## 4. Existing Elasticsearch Client Metrics
+
+`pkg/searchengine.New` instruments clients only when the caller passes `searchengine.WithObservability`. Until o11y v0.12.0 the integration was trace-only; the SDK now owns one histogram (o11y ADR 0027), recorded once per request from start to end with retries included, on the SDK `MeterProvider` and regardless of span sampling.
+
+| OTel instrument / Prometheus family | Type | Allowed labels | What it proves | Status |
+|---|---|---|---|---|
+| `db.client.operation.duration` / `db_client_operation_duration_seconds_*` | Histogram | `service_name`, `db_system_name`, `db_operation_name` (endpoint id), `db_collection_name` (index), `server_address` / `server_port`, and on failures `error_type` plus `db_response_status_code` | Per-request Elasticsearch latency, rate and errors by service, endpoint and index | Existing for instrumented clients |
+
+Recorded under the instrumentation scope `github.com/flywindy/o11y/elasticsearch`; spans keep the upstream `elasticsearch-api` scope.
+
+**"Failure" here means any status above 299, routine 404s included.** The SDK follows each client API's own contract, and `searchengine` builds the **low-level** client, whose contract is `esapi.Response.IsError` — status > 299. The typed client's exemption, under which a 404 from `Get`/`Delete`/`Exists` is a normal result, does **not** apply to this repo.
+
+That matters because two endpoints treat a 404 as a routine outcome, and both still record a sample carrying `error_type="404"` and `db_response_status_code="404"`:
+
+| `db_operation_name` | Adapter method | Why its 404 is routine |
+|---|---|---|
+| `get` | `httpAdapter.GetDoc` | Returns `(nil, false, nil)`. search-service's `loadRestricted` reads the per-account user-room doc on every Valkey miss, and a user with no restricted rooms legitimately has no document |
+| `indices.get_mapping` | `httpAdapter.GetIndexMapping` | Returns `(nil, nil)` — an index that does not exist yet has no mapping to compare against |
+
+**A 404 is not routine everywhere, so the exclusion must be by operation, not by status alone.** `update_by_query` is the counterexample: its path carries no `ignore_unavailable`, so a missing index answers 404, and the adapter fails the caller on any non-200. Dropping every ES 404 from the numerator would hide that outage entirely. (`search` and `indices.put_mapping` cannot 404 on a missing index at all — both paths set `ignore_unavailable=true&allow_no_indices=true`.)
+
+The §7 Elasticsearch query excludes 404 for exactly the two operations above. The same 404 has always set the span status to `Error`; only the metric is new. All three behaviours are pinned by `TestAdapter_RoutineMissIsCountedAsAnError` and `TestAdapter_UpdateByQueryMissIsARealFailure`, so the operation strings this query depends on cannot drift silently.
+
+Direct Elasticsearch client coverage is:
+
+| Coverage | Processes |
+|---|---|
+| Instrumented | search-service; search-sync-worker |
+| Missing instrumentation | data-migration/es-index-migrator; integration tests building a plain client |
+
+`db_collection_name` is emitted only when a request addresses exactly one index: it is absent for a cross-index search, for a bulk whose index is set per action line, and for a comma-separated multi-index list; a wildcard or alias (`messages-site-a-v1-*`) is one addressed name and is kept as written. This matters here because message indices roll monthly (`pkg/searchindex.MessageIndexName`, `{prefix}-{YYYY-MM}`), so a call site that names one month's index directly mints a new series each month. `o11y.WithMaxUniqueCollections` bounds that at the export boundary by collapsing values beyond its cap to `other`, under a budget separate from Cassandra's. An `other` bucket appearing on the Elasticsearch metric is the expected signal to opt the label out with `elasticsearch.WithCollectionMetricLabel(false)` — not a defect to investigate.
+
+## 5. Existing Storage-Relevant Application and Loadgen Metrics
 
 These metrics do not replace database telemetry; they connect dependency behavior to a product outcome.
 
@@ -122,9 +154,9 @@ Other loadgen lanes remain aggregate or sampled. A campaign that relies on one
 of those lanes remains inconclusive if aggregate success looks healthy but
 individual operations can disappear.
 
-## 5. Missing Metrics and Telemetry
+## 6. Missing Metrics and Telemetry
 
-### 5.1 Gaps that change what a result can prove
+### 6.1 Gaps that change what a result can prove
 
 | Missing signal | Required implementation | Why it is required |
 |---|---|---|
@@ -135,7 +167,7 @@ individual operations can disappear.
 | Retry/exhaustion metrics | Count application retry, driver attempt, JetStream redelivery, terminal failure, and permanent drop separately | Logs alone cannot prove retry safety or enumerate exhausted work |
 | Operation outcome ledger expansion | The ledger settles message sends and the five room/member lanes. Thread and user writes, the real bot chain and federation are not covered | Aggregate success can look healthy while individual operations disappear |
 
-### 5.2 Cassandra server signals to normalize
+### 6.2 Cassandra server signals to normalize
 
 | Canonical signal | Dimensions | Dashboard/alert use |
 |---|---|---|
@@ -158,7 +190,7 @@ individual operations can disappear.
 
 Table/keyspace labels are acceptable on server metrics because their values are bounded by deployed schema. Never label application hot-path metrics with room ID, message ID, account, trace ID, or arbitrary error text.
 
-## 6. Core PromQL Patterns
+## 7. Core PromQL Patterns
 
 The following queries use the SDK's current Prometheus naming. Label spelling must be verified against the deployed collector.
 
@@ -168,13 +200,41 @@ sum by (db_system_name, service_name, db_operation_name) (
   rate(db_client_operation_duration_seconds_count[5m])
 )
 
-# Operation error ratio (error_type exists only on failures)
+# Operation error ratio (error_type exists only on failures).
+# Over-counts Elasticsearch — use the ES-specific query below for that system.
 sum by (db_system_name, service_name) (
   rate(db_client_operation_duration_seconds_count{error_type!=""}[5m])
 )
 /
 sum by (db_system_name, service_name) (
   rate(db_client_operation_duration_seconds_count[5m])
+)
+
+# Elasticsearch error ratio. The low-level client counts a routine document miss
+# as a failure, so 404 is excluded for the two document-miss operations only
+# (§4) — a 404 from update_by_query is a real failure and stays counted.
+# A label matcher cannot express "not (op=get and status=404)", so the numerator
+# is the union of two selectors. It is seeded from the denominator so a service
+# with traffic and no errors reads 0% instead of no data.
+(
+  sum by (service_name) (
+    rate(db_client_operation_duration_seconds_count{
+      db_system_name="elasticsearch", error_type!="", error_type!="404"
+    }[5m])
+    or
+    rate(db_client_operation_duration_seconds_count{
+      db_system_name="elasticsearch", error_type="404",
+      db_operation_name!="get", db_operation_name!="indices.get_mapping"
+    }[5m])
+  )
+  or on (service_name)
+  0 * sum by (service_name) (
+    rate(db_client_operation_duration_seconds_count{db_system_name="elasticsearch"}[5m])
+  )
+)
+/
+sum by (service_name) (
+  rate(db_client_operation_duration_seconds_count{db_system_name="elasticsearch"}[5m])
 )
 
 # p99 client latency
@@ -212,11 +272,12 @@ sum by (action, class) (
 
 In PromQL, `error_type!=""` excludes series where the label is absent as well as series where it is empty. Keep the denominator unfiltered so it includes successful and failed operations.
 
-## 7. Code Evidence
+## 8. Code Evidence
 
 - Mongo client setup and startup ping: `pkg/mongoutil/mongo.go`, `tuning.go`, and `readpref.go`.
 - Cassandra consistency, timeout, host policy, and pool setup: `pkg/cassutil/cass.go`.
-- SDK metric definitions and label filters: cached `github.com/flywindy/o11y v0.9.1` Mongo and Cassandra integrations, selected by `go.mod`.
+- Elasticsearch client setup and instrumentation seam: `pkg/searchengine/factory.go` and `observability.go`.
+- SDK metric definitions and label filters: cached `github.com/flywindy/o11y v0.12.0` Mongo, Cassandra and Elasticsearch integrations, selected by `go.mod`.
 - Current loadgen collectors: `tools/loadgen/metrics.go`.
 - Mongo change-stream outcome metrics: `data-migration/oplog-connector/metrics.go`.
 - At-rest metrics: `pkg/atrest/metrics.go`.
