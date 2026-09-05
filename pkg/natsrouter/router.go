@@ -45,6 +45,15 @@ type Router struct {
 
 	mu   sync.Mutex
 	subs []*nats.Subscription
+	// rpcMethodOf maps each registered pattern to the rpc.method it declared.
+	// Keyed by pattern, not by method: a pattern is unique by construction
+	// (two routes on one pattern is a duplicate NATS subscription, not a
+	// metrics problem), so every registered route gets its own entry and a
+	// duplicated method shows up as two lines in the golden file. Keyed the
+	// other way round, the second registration overwrote the first and a
+	// copy-pasted constant could produce a byte-identical golden.
+	rpcMethodOf map[string]natsmetrics.RPCMethod
+
 	// methods maps each claimed rpc.method to the pattern that claimed it. A
 	// second route naming the same method is logged and both routes are
 	// registered, merging into one metric series rather than being rejected.
@@ -102,9 +111,10 @@ func WithMetrics(metrics natsmetrics.Publisher) Option {
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
 func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := &Router{
-		nc:      nc,
-		queue:   queue,
-		methods: map[natsmetrics.RPCMethod]string{},
+		nc:          nc,
+		queue:       queue,
+		methods:     map[natsmetrics.RPCMethod]string{},
+		rpcMethodOf: map[string]natsmetrics.RPCMethod{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -224,21 +234,28 @@ func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handl
 			"method", method, "claimed_by", claimed, "pattern", pattern)
 	}
 	r.methods[method] = pattern
+	r.rpcMethodOf[pattern] = method
 	r.mu.Unlock()
 
 	r.addRoute(pattern, method, true, handlers)
 }
 
-// Routes returns the method-to-pattern table this router registered, copied so
+// Routes returns the pattern-to-method table this router registered, copied so
 // a caller cannot reach the dispatch state. Each service's registration test
 // compares it to a golden file, which is what pins a route to its correct
-// method — the duplicate check above only catches collisions.
-func (r *Router) Routes() map[natsmetrics.RPCMethod]string {
+// method — the duplicate check above only catches collisions, and only in a
+// log line.
+//
+// One entry per route, keyed by pattern. That is what makes a duplicated
+// method visible: both routes appear, so the golden file grows a line whose
+// method already sits on another line, instead of the later registration
+// silently overwriting the earlier one.
+func (r *Router) Routes() map[string]natsmetrics.RPCMethod {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make(map[natsmetrics.RPCMethod]string, len(r.methods))
-	for m, p := range r.methods {
-		out[m] = p
+	out := make(map[string]natsmetrics.RPCMethod, len(r.rpcMethodOf))
+	for p, m := range r.rpcMethodOf {
+		out[p] = m
 	}
 	return out
 }

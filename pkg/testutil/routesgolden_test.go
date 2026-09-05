@@ -13,30 +13,40 @@ import (
 // degraded route can never be written into one or hand-added to one.
 func TestRejectFallbackMethod(t *testing.T) {
 	tests := []struct {
-		name    string
-		routes  map[natsmetrics.RPCMethod]string
-		wantErr bool
+		name      string
+		routes    map[string]natsmetrics.RPCMethod
+		wantErr   bool
+		wantNamed []string
 	}{
 		{
 			name:   "only declared methods",
-			routes: map[natsmetrics.RPCMethod]string{natsmetrics.MethodOpenRoom: "chat.user.{account}.request.room.open"},
+			routes: map[string]natsmetrics.RPCMethod{"chat.user.{account}.request.room.open": natsmetrics.MethodOpenRoom},
 		},
 		{
 			name:   "empty table",
-			routes: map[natsmetrics.RPCMethod]string{},
+			routes: map[string]natsmetrics.RPCMethod{},
 		},
 		{
 			name:    "degraded route alone",
-			routes:  map[natsmetrics.RPCMethod]string{natsmetrics.MethodOther: "chat.user.{account}.request.room.typo"},
+			routes:  map[string]natsmetrics.RPCMethod{"chat.user.{account}.request.room.typo": natsmetrics.MethodOther},
 			wantErr: true,
 		},
 		{
 			name: "degraded route beside a good one",
-			routes: map[natsmetrics.RPCMethod]string{
-				natsmetrics.MethodOpenRoom: "chat.user.{account}.request.room.open",
-				natsmetrics.MethodOther:    "chat.user.{account}.request.room.typo",
+			routes: map[string]natsmetrics.RPCMethod{
+				"chat.user.{account}.request.room.open": natsmetrics.MethodOpenRoom,
+				"chat.user.{account}.request.room.typo": natsmetrics.MethodOther,
 			},
 			wantErr: true,
+		},
+		{
+			name: "two degraded routes are both named",
+			routes: map[string]natsmetrics.RPCMethod{
+				"chat.user.{account}.request.room.typo":  natsmetrics.MethodOther,
+				"chat.user.{account}.request.room.typo2": natsmetrics.MethodOther,
+			},
+			wantErr:   true,
+			wantNamed: []string{"chat.user.{account}.request.room.typo", "chat.user.{account}.request.room.typo2"},
 		},
 	}
 
@@ -49,8 +59,14 @@ func TestRejectFallbackMethod(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), string(natsmetrics.MethodOther))
-			assert.Contains(t, err.Error(), "chat.user.{account}.request.room.typo",
-				"the message must name the offending pattern so the route is findable")
+			named := tt.wantNamed
+			if named == nil {
+				named = []string{"chat.user.{account}.request.room.typo"}
+			}
+			for _, pattern := range named {
+				assert.Contains(t, err.Error(), pattern,
+					"the message must name every offending pattern so each route is findable")
+			}
 		})
 	}
 }

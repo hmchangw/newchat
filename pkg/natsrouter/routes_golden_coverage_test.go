@@ -3,12 +3,14 @@ package natsrouter
 import (
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -56,6 +58,16 @@ var skipDirNames = map[string]bool{
 // routes_test.go and the file becomes an unread fixture that agrees with
 // nothing. So the directory must also hold a test that calls
 // testutil.AssertRoutesGolden — the file and its caller are checked together.
+//
+// What this proves, exactly: the call is present in a file that the default
+// build compiles. Files excluded by a build constraint do not count, because
+// `make test` runs no build tags — a call moved behind //go:build integration
+// would otherwise satisfy this test while never running.
+//
+// What it does not prove: that the test body reaches the call. A t.Skip, an
+// early return, or a call sitting in a helper nothing invokes all leave this
+// test green. No source scan closes that, so it is stated rather than
+// claimed away.
 func TestEveryRPCRouteRegistrationHasAGoldenFile(t *testing.T) {
 	rootDir := repoRootForGoldenScan(t)
 
@@ -120,8 +132,10 @@ func TestEveryRPCRouteRegistrationHasAGoldenFile(t *testing.T) {
 		called, scanErr := dirCallsAssertRoutesGolden(repo, fset, dir)
 		require.NoError(t, scanErr)
 		assert.True(t, called,
-			"%s registers an RPC route but no _test.go there calls testutil.AssertRoutesGolden; "+
-				"without the call the golden file is never compared and pins nothing", dir)
+			"%s registers an RPC route but no default-build _test.go there calls "+
+				"testutil.AssertRoutesGolden; without the call the golden file is never "+
+				"compared and pins nothing (a call behind //go:build integration does not "+
+				"count — make test runs no tags)", dir)
 	}
 }
 
@@ -143,15 +157,55 @@ func dirCallsAssertRoutesGolden(repo fs.FS, fset *token.FileSet, dir string) (bo
 		if readErr != nil {
 			return false, fmt.Errorf("read %s: %w", p, readErr)
 		}
-		file, parseErr := parser.ParseFile(fset, p, src, 0)
+		file, parseErr := parser.ParseFile(fset, p, src, parser.ParseComments)
 		if parseErr != nil {
 			return false, fmt.Errorf("parse %s: %w", p, parseErr)
+		}
+		if !builtByDefault(file) {
+			continue
 		}
 		if fileCallsAssertRoutesGolden(file) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// builtByDefault reports whether the default build compiles this file — no
+// -tags, current GOOS/GOARCH. A //go:build line naming a tag nobody sets
+// (integration, in this repo) evaluates false and the file does not count
+// toward the AssertRoutesGolden requirement.
+func builtByDefault(file *ast.File) bool {
+	for _, group := range file.Comments {
+		for _, c := range group.List {
+			if !strings.HasPrefix(c.Text, "//go:build") {
+				continue
+			}
+			expr, err := constraint.Parse(c.Text)
+			if err != nil {
+				// An unparseable constraint is not a licence to assume the
+				// file builds; treat it as excluded so the directory must
+				// carry the call somewhere unambiguous.
+				return false
+			}
+			return expr.Eval(func(tag string) bool {
+				return tag == runtime.GOOS || tag == runtime.GOARCH || tag == "unix" && isUnix()
+			})
+		}
+	}
+	return true
+}
+
+// isUnix mirrors the toolchain's "unix" build tag for the platforms this repo
+// builds on. Kept narrow deliberately: it exists so a //go:build unix file is
+// not misread as excluded, not to reimplement the toolchain.
+func isUnix() bool {
+	switch runtime.GOOS {
+	case "linux", "darwin", "freebsd", "netbsd", "openbsd", "dragonfly", "solaris", "aix":
+		return true
+	default:
+		return false
+	}
 }
 
 // fileCallsAssertRoutesGolden looks for a testutil.AssertRoutesGolden call.

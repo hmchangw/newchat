@@ -57,6 +57,27 @@ func registerCallSites(r *natsrouter.Router) {
 	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
 	natsrouter.RegisterNoBody(r, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodOther, nil)
 
+	// Multi-line spellings. gofmt produces these as soon as a line grows past
+	// the print width, so they are ordinary code, not contrivances. Both
+	// walked past the first allowlist because its trailing ".*$" could not
+	// match across a newline.
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	natsrouter.Register(r, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.RPCMethod(
+		"typo",
+	), nil)
+
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	natsrouter.RegisterNoBody(r, "chat.user.{account}.request.room.{roomID}.site-a.open", "open"+
+		"_room", nil)
+
+	// A direct selector stays clean when gofmt wraps the call.
+	natsrouter.Register(
+		r,
+		"chat.user.{account}.request.room.{roomID}.site-a.rename",
+		natsmetrics.MethodRenameRoom,
+		nil,
+	)
+
 	// The correct form: a natsmetrics.Method* selector. No annotation, so any
 	// rule firing here is a false positive.
 	natsrouter.Register(r, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom, nil)

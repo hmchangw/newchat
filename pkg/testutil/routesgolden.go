@@ -44,13 +44,16 @@ const routesGoldenPath = "testdata/routes.golden"
 // That writes the file from the live registration table and fails once, so the
 // new table lands in the diff for review rather than being absorbed silently.
 // The same happens the first time a service adds this test.
-func AssertRoutesGolden(t *testing.T, routes map[natsmetrics.RPCMethod]string) {
+func AssertRoutesGolden(t *testing.T, routes map[string]natsmetrics.RPCMethod) {
 	t.Helper()
 
+	require.NotEmpty(t, routes,
+		"the router registered no RPC routes; a golden generated from an empty table pins nothing. "+
+			"Check the test builds the router through the service's real registration function")
 	require.NoError(t, rejectFallbackMethod(routes))
 
 	lines := make([]string, 0, len(routes))
-	for method, pattern := range routes {
+	for pattern, method := range routes {
 		lines = append(lines, string(method)+" "+pattern)
 	}
 	slices.Sort(lines)
@@ -70,14 +73,24 @@ func AssertRoutesGolden(t *testing.T, routes map[natsmetrics.RPCMethod]string) {
 // rejectFallbackMethod reports the pattern registered under MethodOther, if
 // any. Kept separate from AssertRoutesGolden so it can be tested without a
 // fake *testing.T.
-func rejectFallbackMethod(routes map[natsmetrics.RPCMethod]string) error {
-	pattern, degraded := routes[natsmetrics.MethodOther]
-	if !degraded {
+func rejectFallbackMethod(routes map[string]natsmetrics.RPCMethod) error {
+	degraded := make([]string, 0, 1)
+	for pattern, method := range routes {
+		if method == natsmetrics.MethodOther {
+			degraded = append(degraded, pattern)
+		}
+	}
+	if len(degraded) == 0 {
 		return nil
 	}
+	// Every degraded route is named, not just the first. The table is keyed by
+	// pattern, so they all survive to here; keyed by method they would have
+	// overwritten each other and a second typo would stay hidden until the
+	// first was fixed.
+	slices.Sort(degraded)
 	return fmt.Errorf(
-		"route %q registered as %s: registration degraded a method outside the vocabulary. "+
+		"routes %v registered as %s: registration degraded a method outside the vocabulary. "+
 			"Add the method to pkg/natsmetrics/rpcmethod.go and pass its constant, "+
 			"rather than regenerating %s with the fallback in it",
-		pattern, natsmetrics.MethodOther, routesGoldenPath)
+		degraded, natsmetrics.MethodOther, routesGoldenPath)
 }

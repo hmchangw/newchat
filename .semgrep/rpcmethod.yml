@@ -58,6 +58,19 @@ rules:
     #
     # (?!Other$) carves MethodOther back out of the allowlist while leaving a
     # hypothetical MethodOtherThing in it.
+    #
+    # The regex deliberately ends after the lookahead. metavariable-regex is a
+    # start-anchored re.match, so no trailing ".*$" is needed — and adding one
+    # silently reopens the hole: Python re leaves "." not matching "\n" and "$"
+    # anchored to end-of-string, so any method argument whose source text spans
+    # lines (a gofmt-wrapped RPCMethod(...) conversion, a split string concat)
+    # failed the ".*$" and the rule did not fire. The fixture covers both
+    # multi-line spellings so a re-added anchor fails the rule tests.
+    #
+    # An aliased or dot-imported natsmetrics is flagged rather than allowed:
+    # the qualifier is spelled literally here, so nm.MethodOpenRoom is a false
+    # positive. That fails closed, which is the safe direction; this repo does
+    # not alias the import.
     patterns:
       - pattern-either:
           - pattern: natsrouter.Register($R, $PATTERN, $METHOD, $FN)
@@ -68,4 +81,4 @@ rules:
           - pattern: natsrouter.RegisterOptionalBody[...]($R, $PATTERN, $METHOD, $FN)
       - metavariable-regex:
           metavariable: $METHOD
-          regex: ^(?!natsmetrics\.Method(?!Other$)[A-Z]).*$
+          regex: ^(?!natsmetrics\.Method(?!Other$)[A-Z])

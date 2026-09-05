@@ -4,8 +4,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,9 +65,24 @@ func TestOtherIsTheFallbackAndNotRegisterable(t *testing.T) {
 // hand-maintained copy) and diffs its RPCMethod-typed constants, by value,
 // against rpcMethodSet in both directions.
 func TestConstBlockMatchesRPCMethodList(t *testing.T) {
+	// Every non-test .go file in the package, not just rpcmethod.go. A hard
+	// coded filename made the alias guard below cosmetic: a second constant
+	// spelling an existing method from a sibling file was invisible to the
+	// scan, valid at registration, and accepted by the semgrep rule.
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "rpcmethod.go", nil, 0)
-	require.NoError(t, err, "parse rpcmethod.go")
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, parseErr := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, parseErr, "parse %s", name)
+		files = append(files, f)
+	}
+	require.NotEmpty(t, files, "package scan found no non-test .go files")
 
 	// Two indexes, because one is not enough. valueOf answers "what does this
 	// constant spell", ownersOf answers "which constants spell this value" —
@@ -74,7 +92,11 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 	// still passes, because the value itself is perfectly valid.
 	valueOf := map[string]RPCMethod{}
 	ownersOf := map[RPCMethod][]string{}
-	for _, decl := range file.Decls {
+	var decls []ast.Decl
+	for _, f := range files {
+		decls = append(decls, f.Decls...)
+	}
+	for _, decl := range decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
 			continue
@@ -137,6 +159,7 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 			outside = append(outside, name)
 		}
 	}
+	sort.Strings(outside)
 	assert.Equal(t, []string{"MethodOther"}, outside,
 		"MethodOther must be the only RPCMethod constant that is not in rpcMethods")
 	assert.Len(t, valueOf, len(rpcMethods)+1,
