@@ -52,7 +52,8 @@ func AssertRoutesGolden(t *testing.T, routes []natsmetrics.RPCRoute) {
 			"Check the test builds the router through the service's real registration function")
 	require.NoError(t, rejectFallbackMethod(routes))
 
-	require.NoError(t, rejectDuplicatePattern(routes))
+	require.NoError(t, rejectDuplicateSubject(routes))
+	require.NoError(t, rejectDuplicateMethod(routes))
 
 	lines := make([]string, 0, len(routes))
 	for _, rt := range routes {
@@ -97,26 +98,58 @@ func rejectFallbackMethod(routes []natsmetrics.RPCRoute) error {
 		degraded, natsmetrics.MethodOther, routesGoldenPath)
 }
 
-// rejectDuplicatePattern reports a subject pattern registered more than once.
-// Two live subscriptions on one pattern means a request is answered by
-// whichever handler NATS picks, which is a routing defect well before it is a
-// metrics one — and the golden file, being sorted lines, would show it only as
-// an easily-skimmed repeat.
-func rejectDuplicatePattern(routes []natsmetrics.RPCRoute) error {
-	seen := make(map[string]natsmetrics.RPCMethod, len(routes))
+// rejectDuplicateSubject reports a canonical NATS subject claimed by more than
+// one route. It compares NATSSubject, not Pattern: the router replaces every
+// {placeholder} with "*" before subscribing, so
+// chat.user.{account}.request.settings.get and
+// chat.user.{user}.request.settings.get are two distinct patterns that
+// subscribe to one subject. Comparing patterns passed that pair while NATS
+// split the traffic between two handlers.
+func rejectDuplicateSubject(routes []natsmetrics.RPCRoute) error {
+	type claim struct {
+		pattern string
+		method  natsmetrics.RPCMethod
+	}
+	seen := make(map[string]claim, len(routes))
 	dupes := make([]string, 0, 1)
 	for _, rt := range routes {
-		if first, ok := seen[rt.Pattern]; ok {
-			dupes = append(dupes, fmt.Sprintf("%s (as %s and %s)", rt.Pattern, first, rt.Method))
+		if first, ok := seen[rt.NATSSubject]; ok {
+			dupes = append(dupes, fmt.Sprintf("%s (from %q as %s, and %q as %s)",
+				rt.NATSSubject, first.pattern, first.method, rt.Pattern, rt.Method))
 			continue
 		}
-		seen[rt.Pattern] = rt.Method
+		seen[rt.NATSSubject] = claim{pattern: rt.Pattern, method: rt.Method}
 	}
 	if len(dupes) == 0 {
 		return nil
 	}
 	slices.Sort(dupes)
 	return fmt.Errorf(
-		"subject patterns registered more than once: %v. Both subscriptions are live, so a "+
-			"request is answered by whichever handler NATS picks", dupes)
+		"NATS subjects claimed by more than one route: %v. Both subscriptions are live, so "+
+			"requests are split between their handlers", dupes)
+}
+
+// rejectDuplicateMethod reports one rpc.method claimed by two routes. The
+// contract's invariant is that service_name + rpc_method identifies one
+// handler, so this is a violation whether or not the golden file happens to
+// show it — leaving it as a diff to notice made the invariant advisory, and a
+// regenerated golden would have absorbed it.
+func rejectDuplicateMethod(routes []natsmetrics.RPCRoute) error {
+	seen := make(map[natsmetrics.RPCMethod]string, len(routes))
+	dupes := make([]string, 0, 1)
+	for _, rt := range routes {
+		if first, ok := seen[rt.Method]; ok {
+			dupes = append(dupes, fmt.Sprintf("%s (on %q and %q)", rt.Method, first, rt.Pattern))
+			continue
+		}
+		seen[rt.Method] = rt.Pattern
+	}
+	if len(dupes) == 0 {
+		return nil
+	}
+	slices.Sort(dupes)
+	return fmt.Errorf(
+		"rpc methods claimed by more than one route in this service: %v. service_name + "+
+			"rpc_method must identify one handler, or their samples merge into a series no "+
+			"dashboard can split", dupes)
 }

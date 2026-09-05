@@ -913,10 +913,11 @@ func TestRouter_RecordsRegisteredMethod(t *testing.T) {
 }
 
 // A RegisterVoid route has no reply subject, so it is not an RPC call. It must
-// produce no rpc.server.call.duration sample at all — its local handler time is
-// not a round trip, and the presence heartbeat lane that uses this is the
-// fleet's highest-volume traffic, so recording it inflates the histogram's count
-// and pulls every percentile down.
+// produce no rpc.server.call.duration sample at all: its local handler time is
+// not a round trip, and timing it as one would misreport what the histogram
+// measures. (The percentile-dilution argument that used to sit here held only
+// while every route shared one rpc_method label — see register.go, which
+// retired it.)
 //
 // The handler signals through done, because there is no reply to wait on and
 // asserting "still empty" against an unsynchronised handler would pass before
@@ -996,8 +997,16 @@ func TestRegisterKeepsBothRoutesOnDuplicateMethod(t *testing.T) {
 	// the earlier one and, when the duplicate registered first, the golden
 	// came out byte-identical to the committed one.
 	assert.Equal(t, []natsmetrics.RPCRoute{
-		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.open"},
-		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.app.tabs"},
+		{
+			Method:      natsmetrics.MethodOpenRoom,
+			Pattern:     "chat.user.{account}.request.room.{roomID}.site-a.open",
+			NATSSubject: "chat.user.*.request.room.*.site-a.open",
+		},
+		{
+			Method:      natsmetrics.MethodOpenRoom,
+			Pattern:     "chat.user.{account}.request.room.{roomID}.site-a.app.tabs",
+			NATSSubject: "chat.user.*.request.room.*.site-a.app.tabs",
+		},
 	}, r.Routes())
 }
 
@@ -1045,4 +1054,23 @@ func TestRouter_AdmissionRejectionKeepsRouteMethod(t *testing.T) {
 	}, 3*time.Second, 20*time.Millisecond)
 
 	assert.Contains(t, serverCallMethods(t, reader), "open_room")
+}
+
+// Two patterns whose placeholders are spelled differently collapse to one NATS
+// subject, so both handlers are subscribed and the queue group splits requests
+// between them. Routes must carry the canonical subject, or the golden gate
+// compares the two distinct patterns and sees nothing wrong.
+func TestRoutesCarryTheCanonicalNATSSubject(t *testing.T) {
+	r := New(startTestNATS(t), "user-service")
+	handler := func(_ *Context, req testReq) (*testResp, error) { return &testResp{}, nil }
+
+	Register(r, "chat.user.{account}.request.settings.get", natsmetrics.MethodGetSettings, handler)
+	Register(r, "chat.user.{user}.request.settings.get", natsmetrics.MethodGetChatlist, handler)
+
+	got := r.Routes()
+	require.Len(t, got, 2)
+	assert.Equal(t, got[0].NATSSubject, got[1].NATSSubject,
+		"two placeholder spellings of one subject must be visible as one subject")
+	assert.NotEqual(t, got[0].Pattern, got[1].Pattern,
+		"the patterns differ, which is exactly why comparing them missed this")
 }

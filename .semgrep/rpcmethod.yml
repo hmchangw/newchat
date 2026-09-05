@@ -94,12 +94,28 @@ rules:
           #
           # The first keys on the field name every Publisher in this repo is
           # stored under; the second on the duration argument's shape, which
-          # nc.Request never has in that position. A Publisher held under some
-          # other field name and timed without time.Since escapes both; that
-          # is the residual, and it is narrower than the false-positive flood
-          # the unconstrained pattern caused.
+          # nc.Request never has in that position; the third on an explicit
+          # RPCMethod conversion, which is unambiguous on any receiver.
+          #
+          # Residual, stated exactly: a Publisher stored under a field name
+          # other than `metrics`, timed without an inline time.Since, and given
+          # a bare string literal or a variable. The conversion — the shape a
+          # developer reaches for when the compiler complains — is covered on
+          # any receiver. Closing the rest needs type resolution, which semgrep
+          # OSS does not do for Go and which a syntax rule cannot fake.
           - pattern: $P.metrics.Request($CTX, $METHOD, $DUR, $ERR)
           - pattern: $P.Request($CTX, $METHOD, time.Since($T), $ERR)
+          # Receiver- and duration-agnostic. An explicit RPCMethod conversion
+          # in the second argument cannot be anything but a method argument —
+          # nats.Conn.Request takes a subject there — so this branch needs no
+          # receiver heuristic and catches a Publisher held under any field
+          # name, timed any way.
+          # Nested so $METHOD still binds: the outer metavariable-regex is
+          # ANDed with whichever branch matched, and a branch that does not
+          # bind $METHOD can never satisfy it.
+          - patterns:
+              - pattern: $P.Request($CTX, $METHOD, $DUR, $ERR)
+              - pattern: $P.Request($CTX, natsmetrics.RPCMethod($X), $DUR, $ERR)
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(?!natsmetrics\.Method(?!Other$)[A-Z])

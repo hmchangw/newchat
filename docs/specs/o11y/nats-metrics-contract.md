@@ -772,12 +772,22 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    method argument that is passed names a constant directly", not as "every
    outbound call is measured".
 
-   Two mechanical limits on the client-lane branches, since a bare
-   `$P.Request(...)` also matches `nats.Conn.Request(ctx, subject, payload,
-   timeout)` — same arity, unrelated method, 26 false positives. The branches
-   key on the `metrics` field name every publisher in this repo is stored
-   under, and on a `time.Since(...)` duration argument. A publisher held under
-   a different field name *and* timed without `time.Since` escapes both.
+   **The client-lane branches are not a guarantee over every method argument.**
+   A bare `$P.Request(...)` also matches `nats.Conn.Request(ctx, subject,
+   payload, timeout)` — same arity, unrelated method, 26 false positives — so
+   the branches are constrained three ways: the `metrics` field name every
+   publisher in this repo is stored under, a `time.Since(...)` duration
+   argument, and an explicit `natsmetrics.RPCMethod(...)` conversion in the
+   method position. The third is receiver- and duration-agnostic, because that
+   conversion cannot be anything but a method argument.
+
+   What still escapes: a publisher stored under some other field name, timed
+   without an inline `time.Since`, *and* given a bare string literal or a
+   variable. Closing that needs type resolution, which semgrep OSS does not do
+   for Go; a type-aware gate would mean adding `golang.org/x/tools` to
+   `go.mod`, which is a dependency decision nobody has taken. Read the client
+   half as "the six existing call-site shapes, plus any explicit conversion",
+   not as "every method argument".
 2. **Each service's `routes_test.go`**, comparing `Router.Routes()` to
    `testdata/routes.golden` via `testutil.AssertRoutesGolden`, catches a
    *valid* but wrong constant — one that compiles, passes every runtime check,
@@ -786,6 +796,11 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    review. Ten goldens, 92 routes.
 
    Two things make it harder to switch this gate off, and one hole stays open.
+   File selection is delegated to `go/build`'s own `Context.MatchFile` rather
+   than reimplemented — an earlier hand-rolled evaluator understood only GOOS,
+   GOARCH and `unix`, so it read `//go:build !go1.25` backwards (unknown tag
+   treated as false, negation true) and counted a file the toolchain never
+   compiles.
    `AssertRoutesGolden` refuses a table containing `MethodOther` *before* it
    reads or generates the golden file, so a route that degraded at
    registration can neither be baked into a regenerated golden nor
@@ -818,14 +833,22 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    panic's first firing could as easily be a production pod as a review
    comment.
 
-Gate 2 has two blind spots, both by construction rather than oversight:
+Gate 2's remaining limits, by construction rather than oversight:
 
-- `Routes()` is keyed by *pattern*, one entry per route, so a duplicate
-  registration within one service now shows as two golden lines carrying the
-  same method — a visible diff. It was keyed by method until this was found:
-  the later registration overwrote the earlier one, and a duplicate that
-  registered *first* produced a golden byte-identical to the committed file,
-  so the only signal was one `slog.Error` at boot.
+- Duplicate registrations are rejected, not merely shown. `Routes()` is an
+  append-only slice of `{Method, Pattern, NATSSubject}` — one entry per
+  registration call, never keyed — and `AssertRoutesGolden` refuses two routes
+  sharing a method and two routes sharing a canonical NATS subject.
+
+  Three shapes of this were live at different points and each is worth
+  knowing, because each looked closed from where the previous one was fixed.
+  Keyed by method, the later registration overwrote the earlier and a
+  duplicate that registered *first* produced a byte-identical golden. Rekeyed
+  by pattern, that closed but the mirror opened: one pattern registered twice
+  lost its first claimant. Comparing patterns as strings then still missed
+  `{account}` versus `{user}` — different patterns, one subscription after the
+  router replaces every placeholder with `*`, so NATS splits the traffic
+  between both handlers. Only the canonical subject settles it.
 - A `t.Skip` or an unreached call site leaves the gate green (above).
 - A subject pattern registered twice is rejected outright by
   `AssertRoutesGolden` rather than reported as a golden diff: both

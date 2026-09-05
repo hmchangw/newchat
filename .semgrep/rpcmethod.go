@@ -23,8 +23,9 @@ import (
 // natsmetrics Publisher held in a field named metrics, beside the NATS
 // connection whose Request method has the same arity.
 type clientLane struct {
-	metrics natsmetrics.Publisher
-	nc      *nats.Conn
+	metrics   natsmetrics.Publisher
+	telemetry natsmetrics.Publisher
+	nc        *nats.Conn
 }
 
 // The hole this closes: RPCMethod is a named string type, so a typed value
@@ -41,6 +42,7 @@ func registerCallSites(r *natsrouter.Router) {
 	var c clientLane
 	ctx := context.Background()
 	started := time.Now()
+	elapsed := time.Since(started)
 	var err error
 	_ = err
 	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
@@ -126,6 +128,15 @@ func registerCallSites(r *natsrouter.Router) {
 	c.metrics.Request(ctx, natsmetrics.RPCMethod("typo"), time.Since(started), err)
 
 	c.metrics.Request(ctx, natsmetrics.MethodGetMessage, time.Since(started), err)
+
+	// A Publisher under a different field name, timed without an inline
+	// time.Since: neither the field-name branch nor the duration branch
+	// matches, but the RPCMethod conversion does.
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	c.telemetry.Request(ctx, natsmetrics.RPCMethod("typo"), elapsed, err)
+
+	// The same shape with a direct selector stays clean.
+	c.telemetry.Request(ctx, natsmetrics.MethodGetMessage, elapsed, err)
 
 	// nats.Conn.Request has the same arity and an unrelated meaning; it must
 	// not be flagged, or every outbound call in the repo becomes a finding.

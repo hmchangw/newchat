@@ -7,6 +7,12 @@ package natsmetrics
 type RPCRoute struct {
 	Method  RPCMethod
 	Pattern string
+	// NATSSubject is Pattern with every {placeholder} replaced by the "*"
+	// wildcard — what the router actually subscribes to. Two patterns that
+	// differ only in placeholder spelling ({account} vs {user}) collapse to
+	// one subject and create two competing subscriptions, so uniqueness has
+	// to be judged on this, never on Pattern.
+	NATSSubject string
 }
 
 // RPCMethod is a closed, code-owned label for the rpc_method metric

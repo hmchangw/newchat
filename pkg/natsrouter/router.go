@@ -55,6 +55,10 @@ type Router struct {
 	// are live on NATS and a request can be answered by either handler.
 	rpcRoutes []natsmetrics.RPCRoute
 
+	// subjects maps each canonical NATS subject to the first pattern that
+	// produced it, so two placeholder spellings of one subject are caught.
+	subjects map[string]string
+
 	// methods maps each claimed rpc.method to the pattern that claimed it. A
 	// second route naming the same method is logged and both routes are
 	// registered, merging into one metric series rather than being rejected.
@@ -112,9 +116,10 @@ func WithMetrics(metrics natsmetrics.Publisher) Option {
 // control). Use WithMaxConcurrency to opt into a concurrency cap.
 func New(nc *o11ynats.Conn, queue string, opts ...Option) *Router {
 	r := &Router{
-		nc:      nc,
-		queue:   queue,
-		methods: map[natsmetrics.RPCMethod]string{},
+		nc:       nc,
+		queue:    queue,
+		methods:  map[natsmetrics.RPCMethod]string{},
+		subjects: map[string]string{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -226,7 +231,16 @@ func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handl
 			"pattern", pattern, "method", method)
 		method = natsmetrics.MethodOther
 	}
+	natsSubject := parsePattern(pattern).natsSubject
+
 	r.mu.Lock()
+	if claimedBy, dup := r.subjects[natsSubject]; dup {
+		// Distinct patterns, one subscription: NATS delivers each request to
+		// exactly one of the two handlers, chosen by queue-group balancing.
+		slog.Error("natsrouter: two patterns resolve to one NATS subject; requests will be split between their handlers",
+			"subject", natsSubject, "pattern", pattern, "claimed_by", claimedBy)
+	}
+	r.subjects[natsSubject] = pattern
 	if claimed, dup := r.methods[method]; dup {
 		// Registering anyway: refusing would drop the route, and a merged
 		// series is a blunt signal where a missing API is an outage.
@@ -234,7 +248,7 @@ func (r *Router) addRPCRoute(pattern string, method natsmetrics.RPCMethod, handl
 			"method", method, "claimed_by", claimed, "pattern", pattern)
 	}
 	r.methods[method] = pattern
-	r.rpcRoutes = append(r.rpcRoutes, natsmetrics.RPCRoute{Method: method, Pattern: pattern})
+	r.rpcRoutes = append(r.rpcRoutes, natsmetrics.RPCRoute{Method: method, Pattern: pattern, NATSSubject: natsSubject})
 	r.mu.Unlock()
 
 	r.addRoute(pattern, method, true, handlers)

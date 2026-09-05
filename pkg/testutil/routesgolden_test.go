@@ -71,24 +71,42 @@ func TestRejectFallbackMethod(t *testing.T) {
 	}
 }
 
-// A pattern registered twice leaves both subscriptions live, so a request is
-// answered by whichever handler NATS picks. Keyed collections hid this; the
-// route list does not.
-func TestRejectDuplicatePattern(t *testing.T) {
-	const pattern = "chat.user.{account}.request.room.{roomID}.site-a.open"
+// Two patterns that differ only in placeholder spelling subscribe to one
+// subject, so both handlers are live and NATS splits the traffic. Comparing
+// Pattern passed this pair; comparing NATSSubject does not.
+func TestRejectDuplicateSubject(t *testing.T) {
+	const subject = "chat.user.*.request.settings.get"
 
-	err := rejectDuplicatePattern([]natsmetrics.RPCRoute{
-		{Method: natsmetrics.MethodOpenRoom, Pattern: pattern},
-		{Method: natsmetrics.MethodGetRoomAppTabs, Pattern: pattern},
+	err := rejectDuplicateSubject([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodGetSettings, Pattern: "chat.user.{account}.request.settings.get", NATSSubject: subject},
+		{Method: natsmetrics.MethodGetChatlist, Pattern: "chat.user.{user}.request.settings.get", NATSSubject: subject},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), pattern)
-	assert.Contains(t, err.Error(), string(natsmetrics.MethodOpenRoom))
-	assert.Contains(t, err.Error(), string(natsmetrics.MethodGetRoomAppTabs),
-		"both spellings must be named, or the reader cannot tell which registration to remove")
+	assert.Contains(t, err.Error(), subject)
+	assert.Contains(t, err.Error(), "{account}")
+	assert.Contains(t, err.Error(), "{user}",
+		"both patterns must be named, or the reader cannot tell which registration to remove")
 
-	require.NoError(t, rejectDuplicatePattern([]natsmetrics.RPCRoute{
-		{Method: natsmetrics.MethodOpenRoom, Pattern: pattern},
-		{Method: natsmetrics.MethodGetRoomAppTabs, Pattern: pattern + ".tabs"},
-	}), "distinct patterns sharing nothing must pass")
+	require.NoError(t, rejectDuplicateSubject([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodGetSettings, Pattern: "chat.user.{account}.request.settings.get", NATSSubject: subject},
+		{Method: natsmetrics.MethodGetChatlist, Pattern: "chat.user.{account}.request.chatlist.get", NATSSubject: "chat.user.*.request.chatlist.get"},
+	}), "distinct subjects must pass")
+}
+
+// service_name + rpc_method must identify one handler. Two routes sharing a
+// method merge into a series no dashboard can split, so the golden file
+// showing it is not enough — a regeneration would absorb it.
+func TestRejectDuplicateMethod(t *testing.T) {
+	err := rejectDuplicateMethod([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.open", NATSSubject: "a"},
+		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.archive", NATSSubject: "b"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), string(natsmetrics.MethodOpenRoom))
+	assert.Contains(t, err.Error(), "archive", "both routes must be named")
+
+	require.NoError(t, rejectDuplicateMethod([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodOpenRoom, Pattern: "a", NATSSubject: "a"},
+		{Method: natsmetrics.MethodGetRoomAppTabs, Pattern: "b", NATSSubject: "b"},
+	}))
 }
