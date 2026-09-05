@@ -1,4 +1,4 @@
-package main
+package mutation
 
 import (
 	"context"
@@ -10,39 +10,43 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/catalog"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
-const soakReactionShortcode = "thumbsup"
+const ReactionShortcode = "thumbsup"
 
-type soakMutationKind string
+type Kind string
 
 const (
-	soakMutationEdit      soakMutationKind = "edit"
-	soakMutationDelete    soakMutationKind = "delete"
-	soakMutationPinFamily soakMutationKind = "pin_family"
+	KindEdit      Kind = "edit"
+	KindDelete    Kind = "delete"
+	KindPinFamily Kind = "pin_family"
 )
 
-type soakMutationScheduler struct {
+type Scheduler struct {
 	softDeleteRatio float64
 	rng             *rand.Rand
 	rngMu           sync.Mutex
 	pendingDeletes  atomic.Int64
 }
 
-func newSoakMutationScheduler(
+func NewScheduler(
 	softDeleteRatio float64,
 	rng *rand.Rand,
-) *soakMutationScheduler {
+) *Scheduler {
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	return &soakMutationScheduler{
+	return &Scheduler{
 		softDeleteRatio: min(max(softDeleteRatio, 0), 1),
 		rng:             rng,
 	}
 }
 
-func (s *soakMutationScheduler) ObserveAcceptedSend() {
+func (s *Scheduler) ObserveAcceptedSend() {
 	s.rngMu.Lock()
 	scheduled := s.rng.Float64() < s.softDeleteRatio
 	s.rngMu.Unlock()
@@ -51,26 +55,26 @@ func (s *soakMutationScheduler) ObserveAcceptedSend() {
 	}
 }
 
-func (s *soakMutationScheduler) Next() soakMutationKind {
+func (s *Scheduler) Next() Kind {
 	for {
 		pending := s.pendingDeletes.Load()
 		if pending == 0 {
 			break
 		}
 		if s.pendingDeletes.CompareAndSwap(pending, pending-1) {
-			return soakMutationDelete
+			return KindDelete
 		}
 	}
 	s.rngMu.Lock()
 	edit := s.rng.Intn(2) == 0
 	s.rngMu.Unlock()
 	if edit {
-		return soakMutationEdit
+		return KindEdit
 	}
-	return soakMutationPinFamily
+	return KindPinFamily
 }
 
-type soakMutationConfig struct {
+type Config struct {
 	SiteID                 string
 	MutationRetries        int
 	RetryMinBackoff        time.Duration
@@ -82,22 +86,22 @@ type soakMutationConfig struct {
 	RequestTimeout         time.Duration
 }
 
-type soakMutationSample struct {
-	Action        soakRPCAction
+type Sample struct {
+	Action        rpc.Action
 	Latency       time.Duration
-	ErrorClass    soakErrorClass
-	ErrorReason   soakErrorReason
+	ErrorClass    rpc.ErrorClass
+	ErrorReason   rpc.ErrorReason
 	Retries       int
 	Skipped       bool
 	TargetMissing bool
 }
 
-type soakMutationSampleRecorder interface {
-	Record(soakMutationSample)
+type SampleRecorder interface {
+	Record(Sample)
 }
 
-type soakMutationOutcome struct {
-	Action            soakRPCAction
+type Outcome struct {
+	Action            rpc.Action
 	MessageID         string
 	Retries           int
 	Skipped           bool
@@ -106,7 +110,7 @@ type soakMutationOutcome struct {
 	AmbiguityResolved bool
 }
 
-type soakReactionStateMessage struct {
+type reactionStateMessage struct {
 	RoomID    string `json:"roomId"`
 	MessageID string `json:"messageId"`
 	Reactions map[string][]struct {
@@ -114,14 +118,14 @@ type soakReactionStateMessage struct {
 	} `json:"reactions"`
 }
 
-type soakMutator struct {
-	cfg      soakMutationConfig
-	catalog  *soakCatalog
-	rpc      *soakRPCClient
-	recorder soakMutationSampleRecorder
+type Mutator struct {
+	cfg      Config
+	catalog  *catalog.Catalog
+	rpc      *rpc.Client
+	recorder SampleRecorder
 	rng      *rand.Rand
-	clock    soakClock
-	sleeper  soakSleeper
+	clock    catalog.TimeProvider
+	sleeper  rpc.Sleeper
 
 	rngMu      sync.Mutex
 	members    map[string][]model.SubscriptionUser
@@ -129,18 +133,18 @@ type soakMutator struct {
 	hotTargets map[string]string
 }
 
-func newSoakMutator(
-	cfg *soakMutationConfig,
-	topology *soakTopology,
-	catalog *soakCatalog,
-	rpc *soakRPCClient,
-	recorder soakMutationSampleRecorder,
+func New(
+	cfg *Config,
+	roomTopology *topology.Topology,
+	messageCatalog *catalog.Catalog,
+	rpcClient *rpc.Client,
+	recorder SampleRecorder,
 	rng *rand.Rand,
-	clock soakClock,
-	sleeper soakSleeper,
-) *soakMutator {
+	clock catalog.TimeProvider,
+	sleeper rpc.Sleeper,
+) *Mutator {
 	if cfg == nil {
-		cfg = &soakMutationConfig{}
+		cfg = &Config{}
 	}
 	config := *cfg
 	if config.MutationRetries < 0 {
@@ -165,17 +169,17 @@ func newSoakMutator(
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	if clock == nil {
-		clock = soakRealClock{}
+		clock = catalog.RealClock{}
 	}
 	if sleeper == nil {
-		sleeper = soakTimerSleeper{}
+		sleeper = rpc.TimerSleeper{}
 	}
 	members := make(map[string][]model.SubscriptionUser)
-	if topology != nil {
-		active := activeSoakUserIDs(topology)
-		for i := range topology.Subscriptions {
-			subscription := &topology.Subscriptions[i]
-			if isActiveSoakSubscription(subscription, active) &&
+	if roomTopology != nil {
+		active := topology.ActiveUserIDs(roomTopology)
+		for i := range roomTopology.Subscriptions {
+			subscription := &roomTopology.Subscriptions[i]
+			if topology.IsActiveSubscription(subscription, active) &&
 				subscription.RoomID != "" &&
 				subscription.User.Account != "" {
 				members[subscription.RoomID] = append(
@@ -185,40 +189,40 @@ func newSoakMutator(
 			}
 		}
 	}
-	return &soakMutator{
-		cfg: config, catalog: catalog, rpc: rpc, recorder: recorder,
+	return &Mutator{
+		cfg: config, catalog: messageCatalog, rpc: rpcClient, recorder: recorder,
 		rng: rng, clock: clock, sleeper: sleeper, members: members,
 		hotTargets: make(map[string]string),
 	}
 }
 
-func (m *soakMutator) Edit(
+func (m *Mutator) Edit(
 	ctx context.Context,
 	roomID string,
 	content string,
-) (soakMutationOutcome, error) {
-	outcome := soakMutationOutcome{Action: soakRPCEdit}
-	message, ok := m.catalog.PickAnyEligible(roomID, soakCatalogEdit)
+) (Outcome, error) {
+	outcome := Outcome{Action: rpc.ActionEdit}
+	message, ok := m.catalog.PickAnyEligible(roomID, catalog.ActionEdit)
 	if !ok {
 		return m.skip(outcome), nil
 	}
 	outcome.MessageID = message.ID
-	var response soakEditMessageResponse
+	var response wire.EditMessageResponse
 	result, retries, latency, targetMissing, err := m.callMutation(
 		ctx,
-		soakRPCRequest{
-			Action: soakRPCEdit,
+		rpc.Request{
+			Action: rpc.ActionEdit,
 			Subject: subject.MsgEdit(
 				message.Author,
 				roomID,
 				m.cfg.SiteID,
 			),
 			Account: message.Author, RoomID: roomID,
-			Body: soakEditMessageRequest{
+			Body: wire.EditMessageRequest{
 				MessageID: message.ID,
 				NewMsg:    content,
 			},
-			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+			Timeout: m.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 		},
 		&response,
 	)
@@ -231,8 +235,8 @@ func (m *soakMutator) Edit(
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		err = newSoakAssertionError("edit returned a different message ID")
-		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
+		err = rpc.NewAssertionError("edit returned a different message ID")
+		m.recordResult(outcome, latency, rpc.ErrorAssertion, "", false)
 		return outcome, err
 	}
 	m.catalog.MarkEdited(roomID, message.ID, content)
@@ -240,29 +244,29 @@ func (m *soakMutator) Edit(
 	return outcome, nil
 }
 
-func (m *soakMutator) Delete(
+func (m *Mutator) Delete(
 	ctx context.Context,
 	roomID string,
-) (soakMutationOutcome, error) {
-	outcome := soakMutationOutcome{Action: soakRPCDelete}
-	message, ok := m.catalog.PickAnyEligible(roomID, soakCatalogDelete)
+) (Outcome, error) {
+	outcome := Outcome{Action: rpc.ActionDelete}
+	message, ok := m.catalog.PickAnyEligible(roomID, catalog.ActionDelete)
 	if !ok {
 		return m.skip(outcome), nil
 	}
 	outcome.MessageID = message.ID
-	var response soakDeleteMessageResponse
+	var response wire.DeleteMessageResponse
 	result, retries, latency, targetMissing, err := m.callMutation(
 		ctx,
-		soakRPCRequest{
-			Action: soakRPCDelete,
+		rpc.Request{
+			Action: rpc.ActionDelete,
 			Subject: subject.MsgDelete(
 				message.Author,
 				roomID,
 				m.cfg.SiteID,
 			),
 			Account: message.Author, RoomID: roomID,
-			Body:    soakDeleteMessageRequest{MessageID: message.ID},
-			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+			Body:    wire.DeleteMessageRequest{MessageID: message.ID},
+			Timeout: m.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 		},
 		&response,
 	)
@@ -275,8 +279,8 @@ func (m *soakMutator) Delete(
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		err = newSoakAssertionError("delete returned a different message ID")
-		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
+		err = rpc.NewAssertionError("delete returned a different message ID")
+		m.recordResult(outcome, latency, rpc.ErrorAssertion, "", false)
 		return outcome, err
 	}
 	m.catalog.MarkDeleted(roomID, message.ID)
@@ -284,13 +288,13 @@ func (m *soakMutator) Delete(
 	return outcome, nil
 }
 
-func (m *soakMutator) PinOrUnpin(
+func (m *Mutator) PinOrUnpin(
 	ctx context.Context,
 	roomID string,
-) (soakMutationOutcome, error) {
+) (Outcome, error) {
 	pinnedCount := m.catalog.PinnedCount(roomID)
 	var (
-		message soakCatalogMessage
+		message catalog.Message
 		ok      bool
 		pin     bool
 	)
@@ -303,11 +307,11 @@ func (m *soakMutator) PinOrUnpin(
 			message, ok = m.catalog.PickPinCandidate(roomID, true)
 		}
 	}
-	action := soakRPCUnpin
+	action := rpc.ActionUnpin
 	if pin {
-		action = soakRPCPin
+		action = rpc.ActionPin
 	}
-	outcome := soakMutationOutcome{Action: action}
+	outcome := Outcome{Action: action}
 	if !ok {
 		return m.skip(outcome), nil
 	}
@@ -319,25 +323,25 @@ func (m *soakMutator) PinOrUnpin(
 	return m.unpin(ctx, roomID, &message, outcome)
 }
 
-func (m *soakMutator) pin(
+func (m *Mutator) pin(
 	ctx context.Context,
 	roomID string,
-	message *soakCatalogMessage,
-	outcome soakMutationOutcome,
-) (soakMutationOutcome, error) {
-	var response soakPinMessageResponse
+	message *catalog.Message,
+	outcome Outcome,
+) (Outcome, error) {
+	var response wire.PinMessageResponse
 	result, retries, latency, targetMissing, err := m.callMutation(
 		ctx,
-		soakRPCRequest{
-			Action: soakRPCPin,
+		rpc.Request{
+			Action: rpc.ActionPin,
 			Subject: subject.MsgPin(
 				message.Author,
 				roomID,
 				m.cfg.SiteID,
 			),
 			Account: message.Author, RoomID: roomID,
-			Body:    soakPinMessageRequest{MessageID: message.ID},
-			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+			Body:    wire.PinMessageRequest{MessageID: message.ID},
+			Timeout: m.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 		},
 		&response,
 	)
@@ -350,33 +354,33 @@ func (m *soakMutator) pin(
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
-		return outcome, newSoakAssertionError("pin returned a different message ID")
+		m.recordResult(outcome, latency, rpc.ErrorAssertion, "", false)
+		return outcome, rpc.NewAssertionError("pin returned a different message ID")
 	}
 	m.catalog.SetPinned(roomID, message.ID, true)
 	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
-func (m *soakMutator) unpin(
+func (m *Mutator) unpin(
 	ctx context.Context,
 	roomID string,
-	message *soakCatalogMessage,
-	outcome soakMutationOutcome,
-) (soakMutationOutcome, error) {
-	var response soakUnpinMessageResponse
+	message *catalog.Message,
+	outcome Outcome,
+) (Outcome, error) {
+	var response wire.UnpinMessageResponse
 	result, retries, latency, targetMissing, err := m.callMutation(
 		ctx,
-		soakRPCRequest{
-			Action: soakRPCUnpin,
+		rpc.Request{
+			Action: rpc.ActionUnpin,
 			Subject: subject.MsgUnpin(
 				message.Author,
 				roomID,
 				m.cfg.SiteID,
 			),
 			Account: message.Author, RoomID: roomID,
-			Body:    soakUnpinMessageRequest{MessageID: message.ID},
-			Timeout: m.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+			Body:    wire.UnpinMessageRequest{MessageID: message.ID},
+			Timeout: m.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 		},
 		&response,
 	)
@@ -389,19 +393,19 @@ func (m *soakMutator) unpin(
 		return outcome, err
 	}
 	if response.MessageID != message.ID {
-		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
-		return outcome, newSoakAssertionError("unpin returned a different message ID")
+		m.recordResult(outcome, latency, rpc.ErrorAssertion, "", false)
+		return outcome, rpc.NewAssertionError("unpin returned a different message ID")
 	}
 	m.catalog.SetPinned(roomID, message.ID, false)
 	m.recordResult(outcome, latency, "", "", false)
 	return outcome, nil
 }
 
-func (m *soakMutator) React(
+func (m *Mutator) React(
 	ctx context.Context,
 	roomID string,
-) (soakMutationOutcome, error) {
-	outcome := soakMutationOutcome{Action: soakRPCReact}
+) (Outcome, error) {
+	outcome := Outcome{Action: rpc.ActionReact}
 	message, ok := m.reactionTarget(roomID)
 	if !ok {
 		return m.skip(outcome), nil
@@ -414,16 +418,16 @@ func (m *soakMutator) React(
 	outcome.ReactionAction = desired
 
 	var rpcLatency time.Duration
-	request := soakRPCRequest{
-		Action:  soakRPCReact,
+	request := rpc.Request{
+		Action:  rpc.ActionReact,
 		Subject: subject.MsgReact(actor.Account, roomID, m.cfg.SiteID),
 		Account: actor.Account, RoomID: roomID,
-		Body: soakReactMessageRequest{
+		Body: wire.ReactMessageRequest{
 			MessageID: message.ID,
-			Shortcode: soakReactionShortcode,
+			Shortcode: ReactionShortcode,
 		},
 		Timeout:   m.cfg.RequestTimeout,
-		RetryMode: soakRetryAmbiguous,
+		RetryMode: rpc.RetryAmbiguous,
 		ResolveAmbiguity: func(resolveCtx context.Context) (bool, error) {
 			actual, resolveErr := m.readReactionState(
 				resolveCtx,
@@ -439,17 +443,17 @@ func (m *soakMutator) React(
 		},
 	}
 	var (
-		response      soakReactMessageResponse
-		result        soakRPCResult
+		response      wire.ReactMessageResponse
+		result        rpc.Result
 		err           error
 		targetRetries int
 	)
 	for {
-		response = soakReactMessageResponse{}
+		response = wire.ReactMessageResponse{}
 		attemptStartedAt := m.clock.Now()
 		result, err = m.rpc.Call(ctx, request, &response)
 		rpcLatency += m.clock.Now().Sub(attemptStartedAt)
-		if err == nil || result.ErrorClass != soakErrorNotFound {
+		if err == nil || result.ErrorClass != rpc.ErrorNotFound {
 			break
 		}
 		if targetRetries >= m.cfg.MutationRetries {
@@ -467,7 +471,7 @@ func (m *soakMutator) React(
 	latency := rpcLatency
 	outcome.Retries = targetRetries + result.Retries
 	outcome.AmbiguityResolved = result.AmbiguityResolved
-	if err != nil && result.ErrorClass == soakErrorNotFound &&
+	if err != nil && result.ErrorClass == rpc.ErrorNotFound &&
 		targetRetries >= m.cfg.MutationRetries {
 		return m.missing(outcome, latency), nil
 	}
@@ -477,11 +481,11 @@ func (m *soakMutator) React(
 	}
 	if !result.AmbiguityResolved &&
 		(response.MessageID != message.ID ||
-			response.Shortcode != soakReactionShortcode ||
+			response.Shortcode != ReactionShortcode ||
 			(response.Action != model.ReactionActionAdded &&
 				response.Action != model.ReactionActionRemoved)) {
-		m.recordResult(outcome, latency, soakErrorAssertion, "", false)
-		return outcome, newSoakAssertionError(
+		m.recordResult(outcome, latency, rpc.ErrorAssertion, "", false)
+		return outcome, rpc.NewAssertionError(
 			"reaction response did not identify a valid state transition",
 		)
 	}
@@ -493,7 +497,7 @@ func (m *soakMutator) React(
 	m.catalog.SetReaction(
 		roomID,
 		message.ID,
-		soakReactionShortcode,
+		ReactionShortcode,
 		actor.Account,
 		actual == model.ReactionActionAdded,
 	)
@@ -501,9 +505,9 @@ func (m *soakMutator) React(
 	return outcome, nil
 }
 
-func (m *soakMutator) reactionTarget(
+func (m *Mutator) reactionTarget(
 	roomID string,
-) (soakCatalogMessage, bool) {
+) (catalog.Message, bool) {
 	if m.cfg.ReactionMessageScope == "hot_only" {
 		m.hotMu.Lock()
 		messageID := m.hotTargets[roomID]
@@ -512,13 +516,13 @@ func (m *soakMutator) reactionTarget(
 			if message, ok := m.catalog.GetEligible(
 				roomID,
 				messageID,
-				soakCatalogReaction,
+				catalog.ActionReaction,
 			); ok {
 				return message, true
 			}
 		}
 	}
-	message, ok := m.catalog.PickAnyEligible(roomID, soakCatalogReaction)
+	message, ok := m.catalog.PickAnyEligible(roomID, catalog.ActionReaction)
 	if ok && m.cfg.ReactionMessageScope == "hot_only" {
 		m.hotMu.Lock()
 		m.hotTargets[roomID] = message.ID
@@ -527,15 +531,15 @@ func (m *soakMutator) reactionTarget(
 	return message, ok
 }
 
-func (m *soakMutator) reactionActor(
+func (m *Mutator) reactionActor(
 	roomID string,
-	message *soakCatalogMessage,
+	message *catalog.Message,
 ) (model.SubscriptionUser, model.ReactionAction, bool) {
 	members := m.members[roomID]
 	if len(members) == 0 {
 		return model.SubscriptionUser{}, "", false
 	}
-	existing := message.Reactions[soakReactionShortcode]
+	existing := message.Reactions[ReactionShortcode]
 	maxWidth := min(m.cfg.ReactionsPerHotMessage, len(members))
 	remove := len(existing) >= maxWidth
 	if !remove && len(existing) > 0 {
@@ -573,34 +577,34 @@ func (m *soakMutator) reactionActor(
 	return actor, model.ReactionActionAdded, true
 }
 
-func (m *soakMutator) readReactionState(
+func (m *Mutator) readReactionState(
 	ctx context.Context,
 	account string,
 	roomID string,
 	messageID string,
 ) (bool, error) {
-	var state soakReactionStateMessage
-	_, err := m.rpc.Call(ctx, soakRPCRequest{
-		Action: soakRPCGetMessage,
+	var state reactionStateMessage
+	_, err := m.rpc.Call(ctx, rpc.Request{
+		Action: rpc.ActionGetMessage,
 		Subject: subject.MsgGet(
 			account,
 			roomID,
 			m.cfg.SiteID,
 		),
 		Account: account, RoomID: roomID,
-		Body:      soakGetMessageByIDRequest{MessageID: messageID},
+		Body:      wire.GetMessageByIDRequest{MessageID: messageID},
 		Timeout:   m.cfg.RequestTimeout,
-		RetryMode: soakRetrySafe,
+		RetryMode: rpc.RetrySafe,
 	}, &state)
 	if err != nil {
 		return false, fmt.Errorf("read reaction state: %w", err)
 	}
 	if state.MessageID != messageID || state.RoomID != roomID {
-		return false, newSoakAssertionError(
+		return false, rpc.NewAssertionError(
 			"reaction state read returned a different message",
 		)
 	}
-	for _, reactor := range state.Reactions[soakReactionShortcode] {
+	for _, reactor := range state.Reactions[ReactionShortcode] {
 		if reactor.Account == account {
 			return true, nil
 		}
@@ -609,12 +613,12 @@ func (m *soakMutator) readReactionState(
 }
 
 //nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
-func (m *soakMutator) callMutation(
+func (m *Mutator) callMutation(
 	ctx context.Context,
-	request soakRPCRequest,
+	request rpc.Request,
 	response any,
-) (soakRPCResult, int, time.Duration, bool, error) {
-	var result soakRPCResult
+) (rpc.Result, int, time.Duration, bool, error) {
+	var result rpc.Result
 	var rpcLatency time.Duration
 	for attempt := 0; attempt <= m.cfg.MutationRetries; attempt++ {
 		attemptStartedAt := m.clock.Now()
@@ -624,7 +628,7 @@ func (m *soakMutator) callMutation(
 		if err == nil {
 			return result, attempt, rpcLatency, false, nil
 		}
-		if result.ErrorClass != soakErrorNotFound {
+		if result.ErrorClass != rpc.ErrorNotFound {
 			return result, attempt, rpcLatency, false, err
 		}
 		if attempt == m.cfg.MutationRetries {
@@ -643,7 +647,7 @@ func (m *soakMutator) callMutation(
 	)
 }
 
-func (m *soakMutator) mutationBackoff(retry int) time.Duration {
+func (m *Mutator) mutationBackoff(retry int) time.Duration {
 	delay := m.cfg.RetryMinBackoff
 	for range retry {
 		if delay >= m.cfg.RetryMaxBackoff/2 {
@@ -654,39 +658,39 @@ func (m *soakMutator) mutationBackoff(retry int) time.Duration {
 	return min(delay, m.cfg.RetryMaxBackoff)
 }
 
-func (m *soakMutator) missing(
-	outcome soakMutationOutcome,
+func (m *Mutator) missing(
+	outcome Outcome,
 	latency time.Duration,
-) soakMutationOutcome {
+) Outcome {
 	outcome.Skipped = true
 	outcome.TargetMissing = true
 	m.recordResult(
 		outcome,
 		latency,
-		soakErrorMutationTargetMissing,
+		rpc.ErrorMutationTargetMissing,
 		"",
 		true,
 	)
 	return outcome
 }
 
-func (m *soakMutator) skip(outcome soakMutationOutcome) soakMutationOutcome {
+func (m *Mutator) skip(outcome Outcome) Outcome {
 	outcome.Skipped = true
 	m.recordResult(outcome, 0, "", "", false)
 	return outcome
 }
 
-func (m *soakMutator) recordResult(
-	outcome soakMutationOutcome,
+func (m *Mutator) recordResult(
+	outcome Outcome,
 	latency time.Duration,
-	class soakErrorClass,
-	reason soakErrorReason,
+	class rpc.ErrorClass,
+	reason rpc.ErrorReason,
 	targetMissing bool,
 ) {
 	if m.recorder == nil {
 		return
 	}
-	m.recorder.Record(soakMutationSample{
+	m.recorder.Record(Sample{
 		Action: outcome.Action, Latency: latency,
 		ErrorClass: class, ErrorReason: reason,
 		Retries: outcome.Retries, Skipped: outcome.Skipped,

@@ -80,10 +80,6 @@ func validSoakErrorReason(reason soakErrorReason) bool {
 	return soakrpc.ValidErrorReason(reason)
 }
 
-func newSoakAssertionError(message string) error {
-	return soakrpc.NewAssertionError(message)
-}
-
 func parseSoakErrorEnvelope(data []byte) error {
 	return soakrpc.ParseErrorEnvelope(data)
 }
@@ -107,7 +103,6 @@ type soakRPCTransport = soakrpc.Transport
 type soakSleeper = soakrpc.Sleeper
 type soakTimerSleeper = soakrpc.TimerSleeper
 type soakRPCRequest = soakrpc.Request
-type soakRPCResult = soakrpc.Result
 type soakRPCClient = soakrpc.Client
 type soakRequestError = soakrpc.RequestError
 

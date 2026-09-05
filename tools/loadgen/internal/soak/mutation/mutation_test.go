@@ -1,4 +1,4 @@
-package main
+package mutation
 
 import (
 	"context"
@@ -14,45 +14,102 @@ import (
 	"github.com/hmchangw/chat/pkg/emoji"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakcatalog "github.com/hmchangw/chat/tools/loadgen/internal/soak/catalog"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
 func TestSoakReactionShortcode_MatchesHistoryServiceContract(t *testing.T) {
-	canonical, err := emoji.Canonicalize(soakReactionShortcode)
+	canonical, err := emoji.Canonicalize(ReactionShortcode)
 	require.NoError(t, err)
-	assert.Equal(t, soakReactionShortcode, canonical)
+	assert.Equal(t, ReactionShortcode, canonical)
+}
+
+func TestNewSoakMutator_AppliesDefaultsAndFiltersMembers(t *testing.T) {
+	mutator := New(
+		nil,
+		&soaktopology.Topology{
+			ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
+			Subscriptions: []model.Subscription{
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
+				},
+				{
+					RoomID: "room-1",
+					User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
+				},
+			}},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	assert.Zero(t, mutator.cfg.MutationRetries)
+	assert.Equal(t, 100*time.Millisecond, mutator.cfg.RetryMinBackoff)
+	assert.Equal(t, mutator.cfg.RetryMinBackoff, mutator.cfg.RetryMaxBackoff)
+	assert.Equal(t, 10, mutator.cfg.MaxPinnedPerRoom)
+	assert.Equal(t, 1, mutator.cfg.ReactionsPerHotMessage)
+	assert.Equal(t, 5*time.Second, mutator.cfg.RequestTimeout)
+	assert.NotNil(t, mutator.rng)
+	assert.NotNil(t, mutator.clock)
+	assert.NotNil(t, mutator.sleeper)
+	assert.Len(t, mutator.members["room-1"], 1)
+
+	mutator = New(
+		&Config{MutationRetries: -1},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	assert.Zero(t, mutator.cfg.MutationRetries)
+
+	scheduler := NewScheduler(2, nil)
+	scheduler.ObserveAcceptedSend()
+	assert.Equal(t, KindDelete, scheduler.Next())
+	scheduler = NewScheduler(-1, rand.New(rand.NewSource(1)))
+	assert.NotEqual(t, KindDelete, scheduler.Next())
 }
 
 func TestSoakMutator_EditAndDeleteUseOriginalSender(t *testing.T) {
 	tests := []struct {
 		name        string
-		run         func(*soakMutator) (soakMutationOutcome, error)
+		run         func(*Mutator) (Outcome, error)
 		reply       []byte
-		wantAction  soakRPCAction
+		wantAction  rpc.Action
 		wantSubject string
-		assertState func(*testing.T, soakCatalogMessage)
+		assertState func(*testing.T, soakcatalog.Message)
 	}{
 		{
 			name: "edit",
-			run: func(mutator *soakMutator) (soakMutationOutcome, error) {
+			run: func(mutator *Mutator) (Outcome, error) {
 				return mutator.Edit(context.Background(), "room-1", "updated")
 			},
 			reply:       []byte(`{"messageId":"message-1","editedAt":1000}`),
-			wantAction:  soakRPCEdit,
+			wantAction:  rpc.ActionEdit,
 			wantSubject: subject.MsgEdit("alice", "room-1", "site-1"),
-			assertState: func(t *testing.T, message soakCatalogMessage) {
+			assertState: func(t *testing.T, message soakcatalog.Message) {
 				assert.True(t, message.Edited)
-				assert.Equal(t, soakContentDigest("updated"), message.ContentSHA256)
+				assert.Equal(t, soakcatalog.ContentDigest("updated"), message.ContentSHA256)
 			},
 		},
 		{
 			name: "soft delete",
-			run: func(mutator *soakMutator) (soakMutationOutcome, error) {
+			run: func(mutator *Mutator) (Outcome, error) {
 				return mutator.Delete(context.Background(), "room-1")
 			},
 			reply:       []byte(`{"messageId":"message-1","deletedAt":1000}`),
-			wantAction:  soakRPCDelete,
+			wantAction:  rpc.ActionDelete,
 			wantSubject: subject.MsgDelete("alice", "room-1", "site-1"),
-			assertState: func(t *testing.T, message soakCatalogMessage) {
+			assertState: func(t *testing.T, message soakcatalog.Message) {
 				assert.True(t, message.Deleted)
 			},
 		},
@@ -87,28 +144,28 @@ func TestSoakMutator_EditAndDeleteUseOriginalSender(t *testing.T) {
 }
 
 func TestSoakMutationScheduler_DeletesAtConfiguredAcceptedMessageRatio(t *testing.T) {
-	scheduler := newSoakMutationScheduler(0.001, rand.New(rand.NewSource(42)))
+	scheduler := NewScheduler(0.001, rand.New(rand.NewSource(42)))
 	const accepted = 1000000
 	for range accepted {
 		scheduler.ObserveAcceptedSend()
 	}
 
 	deletes := 0
-	for scheduler.Next() == soakMutationDelete {
+	for scheduler.Next() == KindDelete {
 		deletes++
 	}
 	assert.InDelta(t, accepted*0.001, deletes, accepted*0.00015)
 }
 
 func TestSoakMutationScheduler_NonDeleteBudgetSplitsEditAndPin(t *testing.T) {
-	scheduler := newSoakMutationScheduler(0, rand.New(rand.NewSource(42)))
-	counts := map[soakMutationKind]int{}
+	scheduler := NewScheduler(0, rand.New(rand.NewSource(42)))
+	counts := map[Kind]int{}
 	for range 100000 {
 		counts[scheduler.Next()]++
 	}
-	assert.InDelta(t, 0.50, float64(counts[soakMutationEdit])/100000, 0.01)
-	assert.InDelta(t, 0.50, float64(counts[soakMutationPinFamily])/100000, 0.01)
-	assert.Zero(t, counts[soakMutationDelete])
+	assert.InDelta(t, 0.50, float64(counts[KindEdit])/100000, 0.01)
+	assert.InDelta(t, 0.50, float64(counts[KindPinFamily])/100000, 0.01)
+	assert.Zero(t, counts[KindDelete])
 }
 
 func TestSoakMutator_PinUnpinTransitionsAndAvoidsPinLimit(t *testing.T) {
@@ -123,14 +180,14 @@ func TestSoakMutator_PinUnpinTransitionsAndAvoidsPinLimit(t *testing.T) {
 
 	pin, err := mutator.PinOrUnpin(context.Background(), "room-1")
 	require.NoError(t, err)
-	assert.Equal(t, soakRPCPin, pin.Action)
+	assert.Equal(t, rpc.ActionPin, pin.Action)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
 	assert.True(t, message.Pinned)
 
 	unpin, err := mutator.PinOrUnpin(context.Background(), "room-1")
 	require.NoError(t, err)
-	assert.Equal(t, soakRPCUnpin, unpin.Action)
+	assert.Equal(t, rpc.ActionUnpin, unpin.Action)
 	message, ok = catalog.Get("room-1", "message-1")
 	require.True(t, ok)
 	assert.False(t, message.Pinned)
@@ -151,7 +208,7 @@ func TestSoakMutator_AtPinLimitChoosesUnpinInsteadOfInvalidPin(t *testing.T) {
 
 	outcome, err := mutator.PinOrUnpin(context.Background(), "room-1")
 	require.NoError(t, err)
-	assert.Equal(t, soakRPCUnpin, outcome.Action)
+	assert.Equal(t, rpc.ActionUnpin, outcome.Action)
 	calls := transport.snapshot()
 	require.Len(t, calls, 1)
 	assert.Equal(t, subject.MsgUnpin("alice", "room-1", "site-1"), calls[0].subject)
@@ -197,7 +254,7 @@ func TestSoakMutator_ReactionActorsAreMembersUniqueAndClamped(t *testing.T) {
 
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
-	assert.Len(t, message.Reactions[soakReactionShortcode], 1, "third operation removes at the width cap")
+	assert.Len(t, message.Reactions[ReactionShortcode], 1, "third operation removes at the width cap")
 }
 
 func TestSoakMutator_ReactionRemoveShareUsesExistingActor(t *testing.T) {
@@ -206,7 +263,7 @@ func TestSoakMutator_ReactionRemoveShareUsesExistingActor(t *testing.T) {
 	require.True(t, catalog.SetReaction(
 		"room-1",
 		"message-1",
-		soakReactionShortcode,
+		ReactionShortcode,
 		"bob",
 		true,
 	))
@@ -245,7 +302,7 @@ func TestSoakMutator_ReactionReconcilesAuthoritativeToggleAfterRestart(t *testin
 	assert.Equal(t, model.ReactionActionRemoved, outcome.ReactionAction)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
-	assert.Empty(t, message.Reactions[soakReactionShortcode])
+	assert.Empty(t, message.Reactions[ReactionShortcode])
 }
 
 func TestSoakMutator_HotOnlyScopeKeepsBuildingSameMessage(t *testing.T) {
@@ -307,7 +364,7 @@ func TestSoakMutator_NotFoundRetriesThenReportsTargetMissing(t *testing.T) {
 
 	samples := recorder.snapshot()
 	require.Len(t, samples, 1)
-	assert.Equal(t, soakErrorMutationTargetMissing, samples[0].ErrorClass)
+	assert.Equal(t, rpc.ErrorMutationTargetMissing, samples[0].ErrorClass)
 	assert.True(t, samples[0].TargetMissing)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
@@ -368,7 +425,7 @@ func TestSoakMutator_ReactionNotFoundUsesTargetRetryPolicy(t *testing.T) {
 
 	samples := recorder.snapshot()
 	require.Len(t, samples, 1)
-	assert.Equal(t, soakErrorMutationTargetMissing, samples[0].ErrorClass)
+	assert.Equal(t, rpc.ErrorMutationTargetMissing, samples[0].ErrorClass)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
 	assert.Empty(t, message.Reactions)
@@ -387,6 +444,16 @@ func TestSoakMutator_ReactionTimeoutReadsStateInsteadOfBlindToggleRetry(t *testi
 		{data: state},
 	}}
 	mutator := newTestSoakMutator(catalog, transport, &soakMutationRecorder{}, mutationTopology(), clock)
+	mutator.rpc = rpc.NewClient(
+		transport,
+		rpc.RetryConfig{
+			MaxAttempts: 2,
+			MinBackoff:  time.Millisecond,
+			MaxBackoff:  time.Millisecond,
+		},
+		&soakRecordingSleeper{},
+		nil,
+	)
 	mutator.cfg.ReactionRemoveShare = 0
 
 	outcome, err := mutator.React(context.Background(), "room-1")
@@ -400,7 +467,46 @@ func TestSoakMutator_ReactionTimeoutReadsStateInsteadOfBlindToggleRetry(t *testi
 	assert.Equal(t, subject.MsgGet("bob", "room-1", "site-1"), calls[1].subject)
 	message, ok := catalog.Get("room-1", "message-1")
 	require.True(t, ok)
-	assert.Equal(t, []string{"bob"}, message.Reactions[soakReactionShortcode])
+	assert.Equal(t, []string{"bob"}, message.Reactions[ReactionShortcode])
+}
+
+func TestSoakMutator_ReactionTimeoutRetriesWhenStateDidNotChange(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
+	state := []byte(`{
+		"roomId":"room-1",
+		"messageId":"message-1",
+		"reactions":{}
+	}`)
+	transport := &soakReadTransport{replies: []soakRPCFakeReply{
+		{err: context.DeadlineExceeded},
+		{data: state},
+		{data: reactionSuccess("message-1", model.ReactionActionAdded)},
+	}}
+	mutator := newTestSoakMutator(catalog, transport, &soakMutationRecorder{}, mutationTopology(), clock)
+	mutator.rpc = rpc.NewClient(
+		transport,
+		rpc.RetryConfig{
+			MaxAttempts: 2,
+			MinBackoff:  time.Millisecond,
+			MaxBackoff:  time.Millisecond,
+		},
+		&soakRecordingSleeper{},
+		nil,
+	)
+	mutator.cfg.ReactionRemoveShare = 0
+
+	outcome, err := mutator.React(context.Background(), "room-1")
+	require.NoError(t, err)
+	assert.False(t, outcome.AmbiguityResolved)
+	assert.Equal(t, 1, outcome.Retries)
+	assert.Equal(t, model.ReactionActionAdded, outcome.ReactionAction)
+
+	calls := transport.snapshot()
+	require.Len(t, calls, 3)
+	assert.Equal(t, subject.MsgReact("bob", "room-1", "site-1"), calls[0].subject)
+	assert.Equal(t, subject.MsgGet("bob", "room-1", "site-1"), calls[1].subject)
+	assert.Equal(t, subject.MsgReact("bob", "room-1", "site-1"), calls[2].subject)
 }
 
 func TestSoakMutator_DeletedMessagesAreExcludedFromFutureActions(t *testing.T) {
@@ -423,44 +529,128 @@ func TestSoakMutator_DeletedMessagesAreExcludedFromFutureActions(t *testing.T) {
 	assert.Empty(t, transport.snapshot())
 }
 
-func TestSoakReactionRateIsIndependentConfiguration(t *testing.T) {
-	cfg := validSoakConfig(t)
-	cfg.SendRate = 1
-	cfg.ReactionRate = 87
-	cfg.ReactionsPerHotMessage = 2
-	require.NoError(t, validateSoakConfig(&cfg, "chat"))
-	assert.Equal(t, float64(87), cfg.ReactionRate)
+func TestSoakMutator_SkipsUnavailableTargetsAndActors(t *testing.T) {
+	clock := newFakeSoakClock(time.Unix(100, 0))
+	empty := soakcatalog.New(8, 100, 0, clock)
+	mutator := newTestSoakMutator(
+		empty,
+		&soakReadTransport{},
+		&soakMutationRecorder{},
+		mutationTopology(),
+		clock,
+	)
 
-	cfg.SendRate = 1000
-	require.NoError(t, validateSoakConfig(&cfg, "chat"))
-	assert.Equal(t, float64(87), cfg.ReactionRate)
+	edit, err := mutator.Edit(context.Background(), "room-1", "edited")
+	require.NoError(t, err)
+	assert.True(t, edit.Skipped)
+	deleted, err := mutator.Delete(context.Background(), "room-1")
+	require.NoError(t, err)
+	assert.True(t, deleted.Skipped)
+	pinned, err := mutator.PinOrUnpin(context.Background(), "room-1")
+	require.NoError(t, err)
+	assert.True(t, pinned.Skipped)
+	reaction, err := mutator.React(context.Background(), "room-1")
+	require.NoError(t, err)
+	assert.True(t, reaction.Skipped)
+
+	catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
+	mutator = newTestSoakMutator(
+		catalog,
+		&soakReadTransport{},
+		&soakMutationRecorder{},
+		&soaktopology.Topology{},
+		clock,
+	)
+	reaction, err = mutator.React(context.Background(), "room-1")
+	require.NoError(t, err)
+	assert.True(t, reaction.Skipped)
+}
+
+func TestSoakMutator_RejectsMismatchedMutationReplies(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*soakcatalog.Catalog)
+		invoke func(*Mutator) (Outcome, error)
+	}{
+		{
+			name: "edit",
+			invoke: func(mutator *Mutator) (Outcome, error) {
+				return mutator.Edit(context.Background(), "room-1", "edited")
+			},
+		},
+		{
+			name: "delete",
+			invoke: func(mutator *Mutator) (Outcome, error) {
+				return mutator.Delete(context.Background(), "room-1")
+			},
+		},
+		{
+			name: "pin",
+			invoke: func(mutator *Mutator) (Outcome, error) {
+				return mutator.PinOrUnpin(context.Background(), "room-1")
+			},
+		},
+		{
+			name:  "unpin",
+			setup: func(catalog *soakcatalog.Catalog) { catalog.SetPinned("room-1", "message-1", true) },
+			invoke: func(mutator *Mutator) (Outcome, error) {
+				return mutator.PinOrUnpin(context.Background(), "room-1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := newFakeSoakClock(time.Unix(100, 0))
+			catalog := acceptedMutationMessage(t, clock, "message-1", "alice")
+			if tt.setup != nil {
+				tt.setup(catalog)
+			}
+			recorder := &soakMutationRecorder{}
+			mutator := newTestSoakMutator(
+				catalog,
+				&soakReadTransport{replies: []soakRPCFakeReply{{
+					data: []byte(`{"messageId":"different"}`),
+				}}},
+				recorder,
+				mutationTopology(),
+				clock,
+			)
+
+			_, err := tt.invoke(mutator)
+			require.Error(t, err)
+			assert.Equal(t, rpc.ErrorAssertion, rpc.ClassifyError(err))
+			require.NotEmpty(t, recorder.snapshot())
+			assert.Equal(t, rpc.ErrorAssertion, recorder.snapshot()[0].ErrorClass)
+		})
+	}
 }
 
 type soakMutationRecorder struct {
 	mu      sync.Mutex
-	samples []soakMutationSample
+	samples []Sample
 }
 
-func (r *soakMutationRecorder) Record(sample soakMutationSample) {
+func (r *soakMutationRecorder) Record(sample Sample) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.samples = append(r.samples, sample)
 }
 
-func (r *soakMutationRecorder) snapshot() []soakMutationSample {
+func (r *soakMutationRecorder) snapshot() []Sample {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]soakMutationSample(nil), r.samples...)
+	return append([]Sample(nil), r.samples...)
 }
 
 func newTestSoakMutator(
-	catalog *soakCatalog,
-	transport soakRPCTransport,
-	recorder soakMutationSampleRecorder,
-	topology *soakTopology,
+	catalog *soakcatalog.Catalog,
+	transport rpc.Transport,
+	recorder SampleRecorder,
+	topology *soaktopology.Topology,
 	clock *fakeSoakClock,
-) *soakMutator {
-	return newSoakMutator(&soakMutationConfig{
+) *Mutator {
+	return New(&Config{
 		SiteID:                 "site-1",
 		MutationRetries:        2,
 		RetryMinBackoff:        time.Millisecond,
@@ -470,9 +660,9 @@ func newTestSoakMutator(
 		ReactionRemoveShare:    0.20,
 		ReactionMessageScope:   "hot_only",
 		RequestTimeout:         time.Second,
-	}, topology, catalog, newSoakRPCClient(
+	}, topology, catalog, rpc.NewClient(
 		transport,
-		soakRetryConfig{
+		rpc.RetryConfig{
 			MaxAttempts: 1,
 			MinBackoff:  time.Millisecond,
 			MaxBackoff:  time.Millisecond,
@@ -482,8 +672,8 @@ func newTestSoakMutator(
 	), recorder, rand.New(rand.NewSource(1)), clock, &soakRecordingSleeper{})
 }
 
-func mutationTopology() *soakTopology {
-	return &soakTopology{Subscriptions: []model.Subscription{
+func mutationTopology() *soaktopology.Topology {
+	return &soaktopology.Topology{Subscriptions: []model.Subscription{
 		{
 			RoomID: "room-1", IsSubscribed: true,
 			User: model.SubscriptionUser{ID: "u-alice", Account: "alice"},
@@ -500,22 +690,22 @@ func acceptedMutationMessage(
 	clock *fakeSoakClock,
 	messageID string,
 	author string,
-) *soakCatalog {
+) *soakcatalog.Catalog {
 	t.Helper()
-	catalog := newSoakCatalog(16, 100, 0, clock)
+	catalog := soakcatalog.New(16, 100, 0, clock)
 	acceptMutationCatalogMessage(t, catalog, clock, messageID, author)
 	return catalog
 }
 
 func acceptMutationCatalogMessage(
 	t *testing.T,
-	catalog *soakCatalog,
+	catalog *soakcatalog.Catalog,
 	clock *fakeSoakClock,
 	messageID string,
 	author string,
 ) {
 	t.Helper()
-	require.NoError(t, catalog.TrackPublished(&soakCatalogCandidate{
+	require.NoError(t, catalog.TrackPublished(&soakcatalog.Candidate{
 		ID: messageID, RoomID: "room-1", Author: author, Content: "original",
 		CreatedAt: clock.Now(), ThreadReplyLimit: 10,
 	}))
@@ -524,9 +714,9 @@ func acceptMutationCatalogMessage(
 }
 
 func reactionSuccess(messageID string, action model.ReactionAction) []byte {
-	data, err := json.Marshal(soakReactMessageResponse{
+	data, err := json.Marshal(wire.ReactMessageResponse{
 		MessageID: messageID,
-		Shortcode: soakReactionShortcode,
+		Shortcode: ReactionShortcode,
 		Action:    action,
 		ReactedAt: 1000,
 	})

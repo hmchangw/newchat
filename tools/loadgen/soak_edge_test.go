@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"testing"
 	"time"
 
@@ -339,47 +338,6 @@ func TestSoakTimerSleeper_ObservesCancellationAndTimer(t *testing.T) {
 	cancel()
 	assert.ErrorIs(t, (soakTimerSleeper{}).Sleep(ctx, time.Hour), context.Canceled)
 	require.NoError(t, (soakTimerSleeper{}).Sleep(context.Background(), 0))
-}
-
-func TestNewSoakMutator_AppliesDefaultsAndFiltersMembers(t *testing.T) {
-	mutator := newSoakMutator(
-		nil,
-		&soakTopology{
-			ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
-			Subscriptions: []model.Subscription{
-				{
-					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
-				},
-				{
-					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
-				},
-			}},
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-
-	assert.Zero(t, mutator.cfg.MutationRetries)
-	assert.Equal(t, 100*time.Millisecond, mutator.cfg.RetryMinBackoff)
-	assert.Equal(t, mutator.cfg.RetryMinBackoff, mutator.cfg.RetryMaxBackoff)
-	assert.Equal(t, 10, mutator.cfg.MaxPinnedPerRoom)
-	assert.Equal(t, 1, mutator.cfg.ReactionsPerHotMessage)
-	assert.Equal(t, 5*time.Second, mutator.cfg.RequestTimeout)
-	assert.NotNil(t, mutator.rng)
-	assert.NotNil(t, mutator.clock)
-	assert.NotNil(t, mutator.sleeper)
-	assert.Len(t, mutator.members["room-1"], 1)
-
-	scheduler := newSoakMutationScheduler(2, nil)
-	scheduler.ObserveAcceptedSend()
-	assert.Equal(t, soakMutationDelete, scheduler.Next())
-	scheduler = newSoakMutationScheduler(-1, rand.New(rand.NewSource(1)))
-	assert.NotEqual(t, soakMutationDelete, scheduler.Next())
 }
 
 func TestSoakMutator_SkipsUnavailableTargetsAndActors(t *testing.T) {

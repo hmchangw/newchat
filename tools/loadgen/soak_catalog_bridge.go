@@ -22,7 +22,6 @@ const (
 )
 
 type soakClock = soakcatalog.TimeProvider
-type soakRealClock = soakcatalog.RealClock
 type soakCatalogCandidate = soakcatalog.Candidate
 type soakCatalogMessage = soakcatalog.Message
 type soakCatalog = soakcatalog.Catalog
