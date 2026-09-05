@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
 	"github.com/hmchangw/chat/pkg/model"
 )
@@ -17,7 +18,7 @@ import (
 
 func TestSubscriptionRepo_GetSubscription(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	joinTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -41,7 +42,7 @@ func TestSubscriptionRepo_GetSubscription(t *testing.T) {
 // is a silent regression the unit guards, which only read the var, cannot see.
 func TestSubscriptionRepo_GetSubscription_ProjectionFields(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	joinTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -83,7 +84,7 @@ func TestSubscriptionRepo_GetSubscription_ProjectionFields(t *testing.T) {
 
 func TestSubscriptionRepo_GetSubscription_NotFound(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	sub, err := repo.GetSubscription(ctx, "nonexistent", "r1")
@@ -93,7 +94,7 @@ func TestSubscriptionRepo_GetSubscription_NotFound(t *testing.T) {
 
 func TestSubscriptionRepo_GetHistorySharedSince_NilHSS(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	// Insert subscription with no HistorySharedSince (owner — full history access)
@@ -113,7 +114,7 @@ func TestSubscriptionRepo_GetHistorySharedSince_NilHSS(t *testing.T) {
 
 func TestSubscriptionRepo_GetHistorySharedSince_WithHSS(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	joinTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -134,7 +135,7 @@ func TestSubscriptionRepo_GetHistorySharedSince_WithHSS(t *testing.T) {
 
 func TestSubscriptionRepo_GetHistorySharedSince_NotSubscribed(t *testing.T) {
 	db := setupMongo(t)
-	repo := NewSubscriptionRepo(db)
+	repo := NewSubscriptionRepo(db, readpref.Primary())
 	ctx := context.Background()
 
 	accessSince, subscribed, err := repo.GetHistorySharedSince(ctx, "nobody", "r1")

@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
@@ -158,6 +159,13 @@ func main() {
 	}
 	slog.Info("mongo key read preference configured", "readPreference", keyReadPref.Mode().String())
 
+	subReadPref, err := mongoutil.ParseReadPreference(cfg.Mongo.SubscriptionReadPreference)
+	if err != nil {
+		slog.Error("invalid mongo subscription read preference", "value", cfg.Mongo.SubscriptionReadPreference, "error", err)
+		os.Exit(1)
+	}
+	slog.Info("mongo subscription read preference configured", "readPreference", subReadPref.Mode().String())
+
 	cassSession, err := cassutil.Connect(cassutil.Config{
 		Hosts:    cfg.Cassandra.Hosts,
 		Keyspace: cfg.Cassandra.Keyspace,
@@ -224,7 +232,7 @@ func main() {
 
 	cassRepo := cassrepo.NewRepository(cassSession, bucketSizer, cfg.MessageReadMaxBuckets, cipher)
 	db := mongoClient.Database(cfg.Mongo.DB)
-	subRepo := mongorepo.NewSubscriptionRepo(db)
+	subRepo := mongorepo.NewSubscriptionRepo(db, subReadPref)
 	roomRepo := mongorepo.NewRoomRepo(db, previewCipher, preview.Key{SiteID: cfg.SiteID, Epoch: cfg.PreviewKeyEpoch})
 	threadRoomRepo := mongorepo.NewThreadRoomRepo(db)
 	threadSubRepo := mongorepo.NewThreadSubscriptionRepo(db)
@@ -274,12 +282,45 @@ func main() {
 	base := subL2Source{l2: subL2, inner: subRepo}
 	var subSource service.SubscriptionRepository = base
 	if cfg.SubCacheSize > 0 && cfg.SubCacheTTL > 0 {
-		sc, err := readcache.NewSubscriptionCache(base, cfg.SubCacheSize, cfg.SubCacheTTL)
+		sc, err := readcache.NewSubscriptionCache(base, cfg.SubCacheSize, cfg.SubCacheTTL,
+			readcache.WithMaxInflight(cfg.SubCacheMaxInflight))
 		if err != nil {
 			slog.Error("init subscription cache failed", "error", err)
 			os.Exit(1)
 		}
 		subSource = sc
+		// Active invalidation: evict a member's cached access window the moment a
+		// membership change fans out, so the next msg.history read reflects the
+		// current boundary instead of the stale full-access entry (#414).
+		if err := startSubCacheInvalidation(ctx, nc, sc); err != nil {
+			slog.Error("subscribe subscription.update for cache invalidation failed", "error", err)
+			os.Exit(1)
+		}
+		// Core NATS gives no replay: an eviction fanned out while this instance was
+		// disconnected is lost, and the stale full-access entry would keep
+		// authorizing reads until TTL. Suspend the cache on disconnect (stop serving
+		// or storing grants + purge) and Resume it on reconnect (purge, then re-arm).
+		// The suspend barrier holds across the whole outage AND until the reconnect
+		// purge finishes, so no read is served from the pre-reconnect cache before
+		// the reconnect callback runs — it falls through to the primary instead.
+		// Chain the existing handlers (connection metrics) rather than replace them.
+		raw := nc.NatsConn()
+		prevReconnect := raw.Opts.ReconnectedCB
+		raw.SetReconnectHandler(func(c *nats.Conn) {
+			if prevReconnect != nil {
+				prevReconnect(c)
+			}
+			sc.Resume()
+			slog.Warn("nats reconnected: purged and re-armed subscription access cache to drop possibly-missed evictions")
+		})
+		prevDisconnect := raw.Opts.DisconnectedErrCB
+		raw.SetDisconnectErrHandler(func(c *nats.Conn, err error) {
+			if prevDisconnect != nil {
+				prevDisconnect(c, err)
+			}
+			sc.Suspend()
+			slog.Warn("nats disconnected: suspended subscription access cache; grants can't be invalidated while offline")
+		})
 		slog.Info("subscription cache enabled",
 			"size", cfg.SubCacheSize, "ttl", cfg.SubCacheTTL,
 			"sub_l2_ttl", cfg.SubL2.TTL,
