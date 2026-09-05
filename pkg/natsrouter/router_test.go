@@ -995,10 +995,10 @@ func TestRegisterKeepsBothRoutesOnDuplicateMethod(t *testing.T) {
 	// diff a reviewer sees. Keyed by method the later registration replaced
 	// the earlier one and, when the duplicate registered first, the golden
 	// came out byte-identical to the committed one.
-	got := r.Routes()
-	assert.Len(t, got, 2)
-	assert.Equal(t, natsmetrics.MethodOpenRoom, got["chat.user.{account}.request.room.{roomID}.site-a.open"])
-	assert.Equal(t, natsmetrics.MethodOpenRoom, got["chat.user.{account}.request.room.{roomID}.site-a.app.tabs"])
+	assert.Equal(t, []natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.open"},
+		{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.{roomID}.site-a.app.tabs"},
+	}, r.Routes())
 }
 
 // Routes is what each service's registration test compares to its golden file,
@@ -1012,8 +1012,9 @@ func TestRoutesReturnsACopy(t *testing.T) {
 
 	got := r.Routes()
 	require.Len(t, got, 1)
-	delete(got, "chat.user.{account}.request.room.{roomID}.site-a.open")
-	assert.Len(t, r.Routes(), 1, "Routes must not hand out the router's own map")
+	got[0].Method = "mutated"
+	assert.Equal(t, natsmetrics.MethodOpenRoom, r.Routes()[0].Method,
+		"Routes must not hand out the router's own slice")
 }
 
 // Admission rejection replies before the handler runs, so it has no result to

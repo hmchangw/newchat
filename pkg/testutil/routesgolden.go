@@ -44,7 +44,7 @@ const routesGoldenPath = "testdata/routes.golden"
 // That writes the file from the live registration table and fails once, so the
 // new table lands in the diff for review rather than being absorbed silently.
 // The same happens the first time a service adds this test.
-func AssertRoutesGolden(t *testing.T, routes map[string]natsmetrics.RPCMethod) {
+func AssertRoutesGolden(t *testing.T, routes []natsmetrics.RPCRoute) {
 	t.Helper()
 
 	require.NotEmpty(t, routes,
@@ -52,9 +52,11 @@ func AssertRoutesGolden(t *testing.T, routes map[string]natsmetrics.RPCMethod) {
 			"Check the test builds the router through the service's real registration function")
 	require.NoError(t, rejectFallbackMethod(routes))
 
+	require.NoError(t, rejectDuplicatePattern(routes))
+
 	lines := make([]string, 0, len(routes))
-	for pattern, method := range routes {
-		lines = append(lines, string(method)+" "+pattern)
+	for _, rt := range routes {
+		lines = append(lines, string(rt.Method)+" "+rt.Pattern)
 	}
 	slices.Sort(lines)
 	got := strings.Join(lines, "\n") + "\n"
@@ -73,11 +75,11 @@ func AssertRoutesGolden(t *testing.T, routes map[string]natsmetrics.RPCMethod) {
 // rejectFallbackMethod reports the pattern registered under MethodOther, if
 // any. Kept separate from AssertRoutesGolden so it can be tested without a
 // fake *testing.T.
-func rejectFallbackMethod(routes map[string]natsmetrics.RPCMethod) error {
+func rejectFallbackMethod(routes []natsmetrics.RPCRoute) error {
 	degraded := make([]string, 0, 1)
-	for pattern, method := range routes {
-		if method == natsmetrics.MethodOther {
-			degraded = append(degraded, pattern)
+	for _, rt := range routes {
+		if rt.Method == natsmetrics.MethodOther {
+			degraded = append(degraded, rt.Pattern)
 		}
 	}
 	if len(degraded) == 0 {
@@ -93,4 +95,28 @@ func rejectFallbackMethod(routes map[string]natsmetrics.RPCMethod) error {
 			"Add the method to pkg/natsmetrics/rpcmethod.go and pass its constant, "+
 			"rather than regenerating %s with the fallback in it",
 		degraded, natsmetrics.MethodOther, routesGoldenPath)
+}
+
+// rejectDuplicatePattern reports a subject pattern registered more than once.
+// Two live subscriptions on one pattern means a request is answered by
+// whichever handler NATS picks, which is a routing defect well before it is a
+// metrics one — and the golden file, being sorted lines, would show it only as
+// an easily-skimmed repeat.
+func rejectDuplicatePattern(routes []natsmetrics.RPCRoute) error {
+	seen := make(map[string]natsmetrics.RPCMethod, len(routes))
+	dupes := make([]string, 0, 1)
+	for _, rt := range routes {
+		if first, ok := seen[rt.Pattern]; ok {
+			dupes = append(dupes, fmt.Sprintf("%s (as %s and %s)", rt.Pattern, first, rt.Method))
+			continue
+		}
+		seen[rt.Pattern] = rt.Method
+	}
+	if len(dupes) == 0 {
+		return nil
+	}
+	slices.Sort(dupes)
+	return fmt.Errorf(
+		"subject patterns registered more than once: %v. Both subscriptions are live, so a "+
+			"request is answered by whichever handler NATS picks", dupes)
 }

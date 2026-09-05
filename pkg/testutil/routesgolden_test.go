@@ -14,36 +14,36 @@ import (
 func TestRejectFallbackMethod(t *testing.T) {
 	tests := []struct {
 		name      string
-		routes    map[string]natsmetrics.RPCMethod
+		routes    []natsmetrics.RPCRoute
 		wantErr   bool
 		wantNamed []string
 	}{
 		{
 			name:   "only declared methods",
-			routes: map[string]natsmetrics.RPCMethod{"chat.user.{account}.request.room.open": natsmetrics.MethodOpenRoom},
+			routes: []natsmetrics.RPCRoute{{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.open"}},
 		},
 		{
 			name:   "empty table",
-			routes: map[string]natsmetrics.RPCMethod{},
+			routes: nil,
 		},
 		{
 			name:    "degraded route alone",
-			routes:  map[string]natsmetrics.RPCMethod{"chat.user.{account}.request.room.typo": natsmetrics.MethodOther},
+			routes:  []natsmetrics.RPCRoute{{Method: natsmetrics.MethodOther, Pattern: "chat.user.{account}.request.room.typo"}},
 			wantErr: true,
 		},
 		{
 			name: "degraded route beside a good one",
-			routes: map[string]natsmetrics.RPCMethod{
-				"chat.user.{account}.request.room.open": natsmetrics.MethodOpenRoom,
-				"chat.user.{account}.request.room.typo": natsmetrics.MethodOther,
+			routes: []natsmetrics.RPCRoute{
+				{Method: natsmetrics.MethodOpenRoom, Pattern: "chat.user.{account}.request.room.open"},
+				{Method: natsmetrics.MethodOther, Pattern: "chat.user.{account}.request.room.typo"},
 			},
 			wantErr: true,
 		},
 		{
 			name: "two degraded routes are both named",
-			routes: map[string]natsmetrics.RPCMethod{
-				"chat.user.{account}.request.room.typo":  natsmetrics.MethodOther,
-				"chat.user.{account}.request.room.typo2": natsmetrics.MethodOther,
+			routes: []natsmetrics.RPCRoute{
+				{Method: natsmetrics.MethodOther, Pattern: "chat.user.{account}.request.room.typo"},
+				{Method: natsmetrics.MethodOther, Pattern: "chat.user.{account}.request.room.typo2"},
 			},
 			wantErr:   true,
 			wantNamed: []string{"chat.user.{account}.request.room.typo", "chat.user.{account}.request.room.typo2"},
@@ -69,4 +69,26 @@ func TestRejectFallbackMethod(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pattern registered twice leaves both subscriptions live, so a request is
+// answered by whichever handler NATS picks. Keyed collections hid this; the
+// route list does not.
+func TestRejectDuplicatePattern(t *testing.T) {
+	const pattern = "chat.user.{account}.request.room.{roomID}.site-a.open"
+
+	err := rejectDuplicatePattern([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodOpenRoom, Pattern: pattern},
+		{Method: natsmetrics.MethodGetRoomAppTabs, Pattern: pattern},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), pattern)
+	assert.Contains(t, err.Error(), string(natsmetrics.MethodOpenRoom))
+	assert.Contains(t, err.Error(), string(natsmetrics.MethodGetRoomAppTabs),
+		"both spellings must be named, or the reader cannot tell which registration to remove")
+
+	require.NoError(t, rejectDuplicatePattern([]natsmetrics.RPCRoute{
+		{Method: natsmetrics.MethodOpenRoom, Pattern: pattern},
+		{Method: natsmetrics.MethodGetRoomAppTabs, Pattern: pattern + ".tabs"},
+	}), "distinct patterns sharing nothing must pass")
 }

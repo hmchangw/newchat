@@ -161,7 +161,7 @@ func dirCallsAssertRoutesGolden(repo fs.FS, fset *token.FileSet, dir string) (bo
 		if parseErr != nil {
 			return false, fmt.Errorf("parse %s: %w", p, parseErr)
 		}
-		if !builtByDefault(file) {
+		if !builtByDefault(e.Name(), file) {
 			continue
 		}
 		if fileCallsAssertRoutesGolden(file) {
@@ -175,7 +175,45 @@ func dirCallsAssertRoutesGolden(repo fs.FS, fset *token.FileSet, dir string) (bo
 // -tags, current GOOS/GOARCH. A //go:build line naming a tag nobody sets
 // (integration, in this repo) evaluates false and the file does not count
 // toward the AssertRoutesGolden requirement.
-func builtByDefault(file *ast.File) bool {
+//
+// The name is checked as well as the comment, because Go constrains files by
+// filename suffix too: routes_windows_test.go compiles on no Linux CI runner
+// and carries no //go:build line to say so. Reading only the comment counted
+// it as coverage.
+func builtByDefault(name string, file *ast.File) bool {
+	if !matchesFilenameConstraint(name) {
+		return false
+	}
+	return matchesBuildComment(file)
+}
+
+// matchesFilenameConstraint applies the toolchain's _GOOS / _GOARCH /
+// _GOOS_GOARCH filename rule to name (with any _test suffix already trimmed by
+// the caller's convention of passing the base name).
+func matchesFilenameConstraint(name string) bool {
+	base := strings.TrimSuffix(name, ".go")
+	base = strings.TrimSuffix(base, "_test")
+	parts := strings.Split(base, "_")
+	if len(parts) < 2 {
+		return true
+	}
+	last := parts[len(parts)-1]
+	if len(parts) >= 3 {
+		if secondLast := parts[len(parts)-2]; knownGOOS[secondLast] && knownGOARCH[last] {
+			return secondLast == runtime.GOOS && last == runtime.GOARCH
+		}
+	}
+	switch {
+	case knownGOOS[last]:
+		return last == runtime.GOOS
+	case knownGOARCH[last]:
+		return last == runtime.GOARCH
+	default:
+		return true
+	}
+}
+
+func matchesBuildComment(file *ast.File) bool {
 	for _, group := range file.Comments {
 		for _, c := range group.List {
 			if !strings.HasPrefix(c.Text, "//go:build") {
@@ -194,6 +232,24 @@ func builtByDefault(file *ast.File) bool {
 		}
 	}
 	return true
+}
+
+// knownGOOS and knownGOARCH cover the values the toolchain treats as filename
+// constraints. Only membership matters — a name ending in a value that is not
+// one of these (routes_batch.go) is unconstrained.
+var knownGOOS = map[string]bool{
+	"aix": true, "android": true, "darwin": true, "dragonfly": true, "freebsd": true,
+	"hurd": true, "illumos": true, "ios": true, "js": true, "linux": true, "nacl": true,
+	"netbsd": true, "openbsd": true, "plan9": true, "solaris": true, "wasip1": true,
+	"windows": true, "zos": true,
+}
+
+var knownGOARCH = map[string]bool{
+	"386": true, "amd64": true, "amd64p32": true, "arm": true, "arm64": true, "arm64be": true,
+	"armbe": true, "loong64": true, "mips": true, "mips64": true, "mips64le": true,
+	"mips64p32": true, "mips64p32le": true, "mipsle": true, "ppc": true, "ppc64": true,
+	"ppc64le": true, "riscv": true, "riscv64": true, "s390": true, "s390x": true,
+	"sparc": true, "sparc64": true, "wasm": true,
 }
 
 // isUnix mirrors the toolchain's "unix" build tag for the platforms this repo
