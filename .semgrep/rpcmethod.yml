@@ -4,7 +4,8 @@ rules:
     severity: ERROR
     message: >
       Pass a natsmetrics.Method* constant directly as the rpc method argument
-      of a natsrouter server route registration. Anything else — a string
+      — of a natsrouter server route registration, or of a
+      natsmetrics Publisher.Request call on the outbound lane. Anything else — a string
       literal, an explicit natsmetrics.RPCMethod(...) conversion, or a
       variable, even one holding a legitimate constant — is rejected here.
 
@@ -28,16 +29,24 @@ rules:
     paths:
       exclude:
         - "**/*_test.go"
-    # SCOPE: server route registration only.
+    # SCOPE: both lanes' method arguments, and nothing else.
     #
-    # This rule reaches into natsrouter's three method-bearing registrars and
-    # nothing else. It does NOT cover the outbound lane — natsmetrics
-    # Publisher.Request and the nine uninstrumented call sites around it carry
-    # no rpc.client instrument yet, so there is no method argument there to
-    # constrain. Do not read a passing scan as "every rpc.method in the repo
-    # is a vocabulary constant"; read it as "no server route names one
-    # indirectly". When the client lane gains an instrument, its call sites
-    # need their own branches here.
+    # Server lane: natsrouter's three method-bearing registrars.
+    #
+    # Client lane: Publisher.Request, which records rpc.client.call.duration
+    # and takes the same RPCMethod. An earlier version of this rule claimed
+    # the outbound lane had "no rpc.client instrument yet, so no method
+    # argument to constrain". That was wrong — Publisher.Request IS the
+    # recorder, and six call sites already pass it a method (room-service's
+    # history reader and memberlist client, message-gatekeeper's history
+    # fetcher, broadcast-worker's and notification-worker's parent fetchers,
+    # notification-worker's presence batcher). They had exactly the hole this
+    # rule closes on the server side.
+    #
+    # Still NOT covered: the nine raw nc.Request call sites that record no
+    # client metric at all. A rule cannot constrain an argument that is not
+    # passed. Read a passing scan as "every method argument that is passed
+    # names a constant directly", not as "every outbound call is measured".
     #
     # Each registrar gets two branches: the inferred-type-arguments call
     # natsrouter.Register(r, pattern, method, fn), which is how most call
@@ -79,6 +88,18 @@ rules:
           - pattern: natsrouter.RegisterNoBody[...]($R, $PATTERN, $METHOD, $FN)
           - pattern: natsrouter.RegisterOptionalBody($R, $PATTERN, $METHOD, $FN)
           - pattern: natsrouter.RegisterOptionalBody[...]($R, $PATTERN, $METHOD, $FN)
+          # Client lane. Two branches, because a bare $P.Request(...) also
+          # matches nats.Conn.Request(ctx, subject, payload, timeout) — same
+          # arity, unrelated method — and produced 26 false positives.
+          #
+          # The first keys on the field name every Publisher in this repo is
+          # stored under; the second on the duration argument's shape, which
+          # nc.Request never has in that position. A Publisher held under some
+          # other field name and timed without time.Since escapes both; that
+          # is the residual, and it is narrower than the false-positive flood
+          # the unconstrained pattern caused.
+          - pattern: $P.metrics.Request($CTX, $METHOD, $DUR, $ERR)
+          - pattern: $P.Request($CTX, $METHOD, time.Since($T), $ERR)
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(?!natsmetrics\.Method(?!Other$)[A-Z])

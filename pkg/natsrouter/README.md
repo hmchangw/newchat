@@ -363,10 +363,10 @@ Three handler shapes for three use cases:
 ```go
 // Request/reply — the most common pattern.
 natsrouter.Register(router, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom,
-    func(c *natsrouter.Context, req SendRequest) (*SendResponse, error) {
-        account := c.Param("account")
+    func(c *natsrouter.Context, req RenameRoomRequest) (*Room, error) {
+        roomID := c.Param("roomID")
         // ... business logic ...
-        return &SendResponse{ID: msg.ID}, nil
+        return &Room{ID: roomID, Name: req.Name}, nil
     })
 
 // GET-style — no request body needed.

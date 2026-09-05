@@ -90,10 +90,20 @@ func RegisterOptionalBody[Req, Resp any](
 // RegisterVoid subscribes a handler that processes a request without replying.
 //
 // It takes no rpc.method and records no rpc.server.call.duration sample: with
-// no reply subject there is no call to time, and the presence heartbeat lane
-// that uses this is the fleet's highest-volume traffic, so recording it would
-// inflate the histogram's count and pull every percentile down. Observe these
-// routes with a handler-duration metric of their own, not the RPC family.
+// no reply subject there is no call to time, so timing it as an RPC would
+// report local handler cost as a round trip.
+//
+// The percentile-dilution argument that used to sit here — that the presence
+// heartbeat lane would drag every quantile down — held only while every route
+// shared one rpc_method label, and this vocabulary removed that. The reason
+// to keep these out of the RPC family is the semantic one above, not the
+// statistical one.
+//
+// These routes therefore have no latency signal at all today, which is a gap,
+// not a resting state: the presence lane is the fleet's highest-volume
+// traffic. The replacement is a separate chat.nats.handler.duration with its
+// own bounded operation label and no rpc.method — tracked as a P1 follow-up in
+// docs/specs/o11y/nats-metrics-contract.md.
 func RegisterVoid[Req any](
 	r *Router,
 	pattern string,

@@ -15,7 +15,7 @@ type soakReadKind string
 
 const (
 	soakReadHistory soakReadKind = "load_history"
-	soakReadThread  soakReadKind = "get_thread_messages"
+	soakReadThread  soakReadKind = "list_thread_messages"
 	soakReadMessage soakReadKind = "get_message_by_id"
 )
 

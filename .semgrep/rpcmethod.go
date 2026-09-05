@@ -10,9 +10,22 @@
 package testdata
 
 import (
+	"context"
+	"time"
+
+	"github.com/nats-io/nats.go"
+
 	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsrouter"
 )
+
+// clientLane mirrors the shape every outbound caller in this repo uses: a
+// natsmetrics Publisher held in a field named metrics, beside the NATS
+// connection whose Request method has the same arity.
+type clientLane struct {
+	metrics natsmetrics.Publisher
+	nc      *nats.Conn
+}
 
 // The hole this closes: RPCMethod is a named string type, so a typed value
 // (natsmetrics.MethodX) cannot be transposed with the pattern argument — the
@@ -25,6 +38,11 @@ import (
 // literal. The literal-only version of this rule passed both the conversion
 // and the variable.
 func registerCallSites(r *natsrouter.Router) {
+	var c clientLane
+	ctx := context.Background()
+	started := time.Now()
+	var err error
+	_ = err
 	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
 	natsrouter.Register(r, "chat.user.{account}.request.room.{roomID}.site-a.rename", "rename_room", nil)
 
@@ -70,6 +88,19 @@ func registerCallSites(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, "chat.user.{account}.request.room.{roomID}.site-a.open", "open"+
 		"_room", nil)
 
+	// Explicit type arguments on the other two registrars. Without a case per
+	// branch, deleting one of the six patterns leaves the rule tests green:
+	// the surviving branches still fire on the cases that were written.
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	natsrouter.RegisterNoBody[BotSendResponse](r, "chat.bot.{account}.room.get", "get_bot_room", nil)
+
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	natsrouter.RegisterOptionalBody[BotSendRoomRequest, BotSendResponse](r, "chat.bot.{account}.dm.ensure", "ensure_bot_dm_room", nil)
+
+	// Correct explicit-generic forms for the same two.
+	natsrouter.RegisterNoBody[BotSendResponse](r, "chat.bot.{account}.room.get", natsmetrics.MethodGetBotRoom, nil)
+	natsrouter.RegisterOptionalBody[BotSendRoomRequest, BotSendResponse](r, "chat.bot.{account}.dm.ensure", natsmetrics.MethodEnsureBotDMRoom, nil)
+
 	// A direct selector stays clean when gofmt wraps the call.
 	natsrouter.Register(
 		r,
@@ -84,6 +115,21 @@ func registerCallSites(r *natsrouter.Router) {
 	natsrouter.Register[BotSendRoomRequest, BotSendResponse](r, "chat.bot.{account}.msg.send.room", natsmetrics.MethodSendRoomMessage, nil)
 	natsrouter.RegisterNoBody(r, "chat.user.{account}.request.room.{roomID}.site-a.open", natsmetrics.MethodOpenRoom, nil)
 	natsrouter.RegisterOptionalBody(r, "chat.user.{account}.request.sso.refresh", natsmetrics.MethodRefreshSSOToken, nil)
+
+	// Client lane: Publisher.Request records rpc.client.call.duration and takes
+	// the same RPCMethod, so its method argument needs the same constraint.
+	// Six call sites in the repo pass one today.
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	c.metrics.Request(ctx, "get_message", time.Since(started), err)
+
+	// ruleid: rpcmethod-server-route-must-name-a-vocabulary-constant
+	c.metrics.Request(ctx, natsmetrics.RPCMethod("typo"), time.Since(started), err)
+
+	c.metrics.Request(ctx, natsmetrics.MethodGetMessage, time.Since(started), err)
+
+	// nats.Conn.Request has the same arity and an unrelated meaning; it must
+	// not be flagged, or every outbound call in the repo becomes a finding.
+	_, _ = c.nc.Request(ctx, "chat.user.a.request.msg.get", nil, time.Second)
 
 	// RegisterVoid takes no method argument at all — the heartbeat lane it
 	// serves records no rpc.server.call.duration sample — so there is no

@@ -706,7 +706,7 @@ instrument name** you grep for in source underneath where the two differ.
 | `chat_nats_terminal_failures_total`<br><sub>`chat.nats.terminal.failures`</sub> | counter | the 5 JetStream consumers | on first terminal loss | none | campaign; work permanently lost |
 | `chat_nats_publish_failures_total`<br><sub>`chat.nats.publish.failures`</sub> | counter | the 14 services that wire a `natsmetrics.Publisher` — **not** every publisher; see below | on first failure | none — the broker has no record of a publish that never arrived | campaign |
 | `rpc_client_call_duration_seconds`<br><sub>`rpc.client.call.duration`</sub> | histogram | room-service, message-gatekeeper, broadcast-worker, notification-worker | on first outbound request | none — Core NATS request/reply is invisible to the broker | cross-site health; its `_count` is the call count |
-| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="get_channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="get_thread_messages"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` note below |
+| `rpc_server_call_duration_seconds`<br><sub>`rpc.server.call.duration`</sub> | histogram | every `natsrouter` service | on first inbound request | none | **SLO-4** (`le="0.5"`, `rpc_method="get_channel_history"`) and **SLO-5** (`le="0.25"`, `rpc_method="list_thread_messages"`) — the denominator filters `error_type` to the eligible set, never `_count` as a whole; see `sli-slo.md` §3 and the `rpc.method` note below |
 
 These two are the only families here that do not carry the `chat_` prefix, and
 the exception is deliberate: they implement the OpenTelemetry RPC semantic
@@ -752,14 +752,32 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    not values: it cannot distinguish one holding `MethodOpenRoom` from one
    holding a typo, so it admits neither.
 
-   **Scope: server route registration only.** The rule reaches into
-   `natsrouter`'s three method-bearing registrars and nothing else. The
-   outbound lane — `Publisher.Request` and the nine uninstrumented call sites
-   around it — carries no `rpc.client` instrument yet, so it has no method
-   argument to constrain. A passing scan means "no server route names its
-   method indirectly", not "every `rpc.method` in the repo is a vocabulary
-   constant". When the client lane gains an instrument, its call sites need
-   their own branches in the rule.
+   **Scope: every method argument that is actually passed, on both lanes.**
+   The rule covers `natsrouter`'s three method-bearing registrars and
+   `Publisher.Request`, which records `rpc.client.call.duration` and takes the
+   same `RPCMethod`.
+
+   An earlier version of this paragraph said the outbound lane "carries no
+   `rpc.client` instrument yet, so it has no method argument to constrain".
+   That was wrong twice over: `Publisher.Request` *is* the recorder, and six
+   call sites already pass it a method — room-service's history reader and
+   memberlist client, message-gatekeeper's history fetcher, broadcast-worker's
+   and notification-worker's parent fetchers, and notification-worker's
+   presence batcher. They carried exactly the hole this rule closes on the
+   server side, for as long as the claim stood.
+
+   What remains outside: the nine raw `nc.Request` call sites that record no
+   client metric at all. A rule cannot constrain an argument that is never
+   passed, so those need the instrument first. Read a passing scan as "every
+   method argument that is passed names a constant directly", not as "every
+   outbound call is measured".
+
+   Two mechanical limits on the client-lane branches, since a bare
+   `$P.Request(...)` also matches `nats.Conn.Request(ctx, subject, payload,
+   timeout)` — same arity, unrelated method, 26 false positives. The branches
+   key on the `metrics` field name every publisher in this repo is stored
+   under, and on a `time.Since(...)` duration argument. A publisher held under
+   a different field name *and* timed without `time.Since` escapes both.
 2. **Each service's `routes_test.go`**, comparing `Router.Routes()` to
    `testdata/routes.golden` via `testutil.AssertRoutesGolden`, catches a
    *valid* but wrong constant — one that compiles, passes every runtime check,
@@ -809,8 +827,13 @@ Gate 2 has two blind spots, both by construction rather than oversight:
   registered *first* produced a golden byte-identical to the committed file,
   so the only signal was one `slog.Error` at boot.
 - A `t.Skip` or an unreached call site leaves the gate green (above).
+- A subject pattern registered twice is rejected outright by
+  `AssertRoutesGolden` rather than reported as a golden diff: both
+  subscriptions are live on NATS, so a request is answered by whichever
+  handler NATS picks, which is a routing defect before it is a metrics one.
 - `RegisterVoid` routes carry no method and never enter `Routes()`, so they
-  are invisible to this gate by construction. user-presence-service's four
+  are invisible to this gate by construction. See the follow-up below —
+  those four routes currently emit no server-side latency signal at all. user-presence-service's four
   fire-and-forget routes (`hello`/`ping`/`activity`/`bye`) are pinned by
   nothing.
 
@@ -824,6 +847,28 @@ natsrouter's duplicate check is scoped to one router accordingly — it does not
 enforce the key, it only logs a collision within a service (see gate 2's blind
 spots above). That scoping is what lets room-service and user-service each
 register their own `mark_all_threads_read` without colliding.
+
+### Required follow-up: the RegisterVoid lane has no latency metric
+
+`RegisterVoid` leaving `rpc.server.call.duration` was correct — those routes
+have no reply subject, so there is no call to time, and recording them as RPC
+would have misrepresented fire-and-forget traffic as request/reply. But the
+replacement was never built, and the four routes it affects
+(`hello`/`ping`/`activity`/`bye` on user-presence-service) are the fleet's
+highest-volume traffic. They emit **no server-side latency signal today**.
+Sampled traces and on-demand logs do not substitute for a steady-state
+latency metric on the busiest lane in the system.
+
+This is deliberately deferred out of this change, not overlooked, and it is a
+P1 follow-up: a separate messaging-handler instrument, `chat.nats.handler.duration`,
+with its own bounded operation label (`presence_hello`, `presence_ping`,
+`presence_activity`, `presence_bye`) and **no `rpc.method`** — these are not
+RPCs and must not be labelled as though they were.
+
+The original justification in `register.go` — that recording these would pull
+every percentile down — held only while every route shared one label. This
+branch's own change invalidated it, which is why the lane needs its own
+instrument rather than readmission to the RPC family.
 
 Three methods carry no live traffic today, found while auditing the
 vocabulary:

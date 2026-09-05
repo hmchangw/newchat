@@ -333,7 +333,7 @@ partition slice). Targets: §1.
 - 🔧 **Enter channel / thread** — the `natsrouter` metrics middleware (§8 P1):
   `rpc_server_call_duration_seconds{rpc_method, error_type}`; the `rpc_method`
   label slices both workflows from one middleware — `get_channel_history` for SLO-4,
-  `get_thread_messages` for SLO-5. Names follow the OTel RPC semantic conventions rather
+  `list_thread_messages` for SLO-5. Names follow the OTel RPC semantic conventions rather
   than the spelling this document first proposed.
 
   **The denominator is not the family total.** `error_type` is absent on success,
@@ -345,12 +345,12 @@ partition slice). Targets: §1.
   ```promql
   # good  — succeeded within the bound
   sum by (site) (rate(rpc_server_call_duration_seconds_bucket{
-        service_name="history-service", rpc_method="get_thread_messages",
+        service_name="history-service", rpc_method="list_thread_messages",
         error_type="", le="0.25"}[28d]))
   /
   # valid — success + budget-burning failures, never the 4xx classes
   sum by (site) (rate(rpc_server_call_duration_seconds_count{
-        service_name="history-service", rpc_method="get_thread_messages",
+        service_name="history-service", rpc_method="list_thread_messages",
         error_type=~"|internal|unavailable|too_many_requests"}[28d]))
   ```
 

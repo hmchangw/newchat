@@ -21,7 +21,7 @@ const (
 	soakRPCThreadReply soakRPCAction = "thread_reply"
 	soakRPCLoadHistory soakRPCAction = "load_history"
 	soakRPCLoadNext    soakRPCAction = "load_next"
-	soakRPCGetThread   soakRPCAction = "get_thread_messages"
+	soakRPCGetThread   soakRPCAction = "list_thread_messages"
 	soakRPCGetMessage  soakRPCAction = "get_message_by_id"
 	soakRPCReact       soakRPCAction = "reaction"
 	soakRPCEdit        soakRPCAction = "edit"
