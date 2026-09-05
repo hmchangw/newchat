@@ -536,7 +536,11 @@ func broadcastProcessor(handler *Handler) messageProcessor {
 				"phase", "received", "request_id", natsutil.RequestIDFromContext(handlerCtx),
 				"subject", msg.Subject(), "bytes", len(msg.Data()), "stream_wait_ms", streamWaitMs)
 		}
-		jsretry.Settle(handlerCtx, msg, jsretry.LowLatencyBackoff, handler.HandleMessage(handlerCtx, msg.Data()))
+		// The schedule is chosen from the error, not fixed: a downstream that is
+		// shedding must not be retried at LowLatencyBackoff's 200ms first rung.
+		// See settleBackoff.
+		err := handler.HandleMessage(handlerCtx, msg.Data())
+		jsretry.Settle(handlerCtx, msg, settleBackoff(err), err)
 	}
 }
 
