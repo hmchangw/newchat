@@ -75,14 +75,14 @@ function, which is the repo's own statement of what the route does.
 | Subject builder | Handler | `rpc_method` |
 |---|---|---|
 | `MsgHistoryPattern` | `s.LoadHistory` | `get_channel_history` **(SLO-4)** |
-| `MsgThreadPattern` | `s.GetThreadMessages` | `get_thread_messages` **(SLO-5)** |
+| `MsgThreadPattern` | `s.GetThreadMessages` | `list_thread_messages` **(SLO-5)** |
 | `MsgNextPattern` | `s.LoadNextMessages` | `get_next_messages` |
 | `MsgSurroundingPattern` | `s.LoadSurroundingMessages` | `get_surrounding_messages` |
 | `MsgGetPattern` | `s.GetMessageByID` | `get_message` |
 | `MsgGetIDsPattern` | `s.GetMessagesByIDs` | `batch_get_messages` |
 | `RoomsGet` | `s.RoomsGet` | `batch_get_room_previews` |
 | `MsgPinnedListPattern` | `s.ListPinnedMessages` | `list_pinned_messages` |
-| `MsgThreadParentPattern` | `s.GetThreadParentMessages` | `get_thread_parent_messages` |
+| `MsgThreadParentPattern` | `s.GetThreadParentMessages` | `list_thread_parent_messages` |
 | `ThreadSubscriptionList` | `s.ListThreadSubscriptions` | `list_thread_subscriptions` |
 | `MsgEditPattern` | `s.EditMessage` | `edit_message` |
 | `MsgDeletePattern` | `s.DeleteMessage` | `delete_message` |
@@ -246,7 +246,7 @@ routes. Two things follow.
 not live: no recording rules are running and no error budget is in flight. So
 the rename costs nothing here, and there is no reason to hold those two names
 back as exceptions to `<verb>_<object>`. They become `get_channel_history` and
-`get_thread_messages` along with everything else — two odd names left behind to
+`list_thread_messages` along with everything else — two odd names left behind to
 protect a window nobody is measuring would be the worse outcome. Task 5 still
 updates the queries so the document is correct on the day the SLOs do launch.
 
@@ -344,9 +344,9 @@ var allRPCMethods = []RPCMethod{
 	MethodCreateRoom, MethodStartTeamsRoomCall, MethodStartTeamsUserCall,
 	MethodCreateTeamsMeeting,
 	// history-service
-	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
+	MethodGetChannelHistory, MethodListThreadMessages, MethodGetNextMessages,
 	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodGetThreadParentMessages,
+	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodListThreadParentMessages,
 	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
 	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
 	MethodMigrateEditMessage, MethodMigrateDeleteMessage,
@@ -1211,7 +1211,7 @@ the three orphans found during this work:
 - [ ] **Step 2: Update the SLO queries**
 
 In `docs/load-testing/common/sli-slo.md`, change `rpc_method="thread_open"` to
-`rpc_method="get_thread_messages"` and `rpc_method="channel_history"` to
+`rpc_method="list_thread_messages"` and `rpc_method="channel_history"` to
 `rpc_method="get_channel_history"` in the SLO-4 and SLO-5 PromQL blocks. No
 bridging rule: the SLI/SLO programme is not live, so nothing is measuring these
 labels yet and there is no window to preserve. The edit is so the document is

@@ -106,8 +106,21 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 			if !ok {
 				continue
 			}
-			typeIdent, ok := vs.Type.(*ast.Ident)
-			if !ok || typeIdent.Name != "RPCMethod" {
+			// An RPCMethod constant must be spelled MethodX RPCMethod =
+			// "literal". Anything else is rejected outright rather than
+			// skipped: `const MethodDupe = MethodGetMessage` has no explicit
+			// type, so the earlier scan walked past it — while Go still gave
+			// it type RPCMethod, Valid() returned true for it, and semgrep
+			// accepted natsmetrics.MethodDupe. A skipped declaration is a
+			// constant outside every guard below.
+			typeIdent, isIdent := vs.Type.(*ast.Ident)
+			if !isIdent || typeIdent.Name != "RPCMethod" {
+				for _, name := range vs.Names {
+					assert.False(t, strings.HasPrefix(name.Name, "Method"),
+						"%s is named like an rpc method but is not declared as `%s RPCMethod = \"...\"`; "+
+							"an implicitly typed or aliased constant is invisible to every guard in this test",
+						name.Name, name.Name)
+				}
 				continue
 			}
 			for i, name := range vs.Names {

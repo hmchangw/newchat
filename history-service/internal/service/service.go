@@ -291,8 +291,8 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgReactPattern(siteID), natsmetrics.MethodToggleMessageReaction, func(c *natsrouter.Context, req models.ReactMessageRequest) (*models.ReactMessageResponse, error) {
 		return s.ReactMessage(c, siteID, req)
 	})
-	natsrouter.Register(r, subject.MsgThreadPattern(siteID), natsmetrics.MethodGetThreadMessages, s.GetThreadMessages)
-	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), natsmetrics.MethodGetThreadParentMessages, s.GetThreadParentMessages)
+	natsrouter.Register(r, subject.MsgThreadPattern(siteID), natsmetrics.MethodListThreadMessages, s.GetThreadMessages)
+	natsrouter.Register(r, subject.MsgThreadParentPattern(siteID), natsmetrics.MethodListThreadParentMessages, s.GetThreadParentMessages)
 	natsrouter.Register(r, subject.MigrationInternalMsgEdit(siteID), natsmetrics.MethodMigrateEditMessage, func(c *natsrouter.Context, req pkgmodel.MigrationEditRequest) (*pkgmodel.MigrationAck, error) {
 		return s.MigrationEditMessage(c, siteID, req)
 	})

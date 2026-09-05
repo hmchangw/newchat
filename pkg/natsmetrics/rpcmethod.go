@@ -1,5 +1,14 @@
 package natsmetrics
 
+// RPCRoute pairs a registered subject pattern with the rpc.method it declared.
+// It lives here rather than in natsrouter because pkg/testutil's golden helper
+// consumes it, and natsrouter's own integration tests import pkg/testutil —
+// declaring it there makes that an import cycle.
+type RPCRoute struct {
+	Method  RPCMethod
+	Pattern string
+}
+
 // RPCMethod is a closed, code-owned label for the rpc_method metric
 // dimension. A route declares its method at registration time; the value
 // never comes from a subject, a client payload, or any other dynamic source.
@@ -36,23 +45,23 @@ const (
 	MethodCreateTeamsMeeting           RPCMethod = "create_teams_meeting"
 
 	// history-service
-	MethodGetChannelHistory       RPCMethod = "get_channel_history"
-	MethodGetThreadMessages       RPCMethod = "get_thread_messages"
-	MethodGetNextMessages         RPCMethod = "get_next_messages"
-	MethodGetSurroundingMessages  RPCMethod = "get_surrounding_messages"
-	MethodGetMessage              RPCMethod = "get_message"
-	MethodBatchGetMessages        RPCMethod = "batch_get_messages"
-	MethodBatchGetRoomPreviews    RPCMethod = "batch_get_room_previews"
-	MethodListPinnedMessages      RPCMethod = "list_pinned_messages"
-	MethodGetThreadParentMessages RPCMethod = "get_thread_parent_messages"
-	MethodListThreadSubscriptions RPCMethod = "list_thread_subscriptions"
-	MethodEditMessage             RPCMethod = "edit_message"
-	MethodDeleteMessage           RPCMethod = "delete_message"
-	MethodPinMessage              RPCMethod = "pin_message"
-	MethodUnpinMessage            RPCMethod = "unpin_message"
-	MethodToggleMessageReaction   RPCMethod = "toggle_message_reaction"
-	MethodMigrateEditMessage      RPCMethod = "migrate_edit_message"
-	MethodMigrateDeleteMessage    RPCMethod = "migrate_delete_message"
+	MethodGetChannelHistory        RPCMethod = "get_channel_history"
+	MethodListThreadMessages       RPCMethod = "list_thread_messages"
+	MethodGetNextMessages          RPCMethod = "get_next_messages"
+	MethodGetSurroundingMessages   RPCMethod = "get_surrounding_messages"
+	MethodGetMessage               RPCMethod = "get_message"
+	MethodBatchGetMessages         RPCMethod = "batch_get_messages"
+	MethodBatchGetRoomPreviews     RPCMethod = "batch_get_room_previews"
+	MethodListPinnedMessages       RPCMethod = "list_pinned_messages"
+	MethodListThreadParentMessages RPCMethod = "list_thread_parent_messages"
+	MethodListThreadSubscriptions  RPCMethod = "list_thread_subscriptions"
+	MethodEditMessage              RPCMethod = "edit_message"
+	MethodDeleteMessage            RPCMethod = "delete_message"
+	MethodPinMessage               RPCMethod = "pin_message"
+	MethodUnpinMessage             RPCMethod = "unpin_message"
+	MethodToggleMessageReaction    RPCMethod = "toggle_message_reaction"
+	MethodMigrateEditMessage       RPCMethod = "migrate_edit_message"
+	MethodMigrateDeleteMessage     RPCMethod = "migrate_delete_message"
 
 	// user-service (MethodMarkAllThreadsRead is shared with room-service)
 	MethodGetCurrentUser             RPCMethod = "get_current_user"
@@ -147,9 +156,9 @@ var rpcMethods = []RPCMethod{
 	MethodCreateTeamsMeeting,
 
 	// history-service
-	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
+	MethodGetChannelHistory, MethodListThreadMessages, MethodGetNextMessages,
 	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodGetThreadParentMessages,
+	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodListThreadParentMessages,
 	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
 	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
 	MethodMigrateEditMessage, MethodMigrateDeleteMessage,
