@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
+	soakpresence "github.com/hmchangw/chat/tools/loadgen/internal/soak/presence"
 )
 
 // soakPresenceSpy stands in for presence-service: it records the signals that
@@ -194,7 +195,7 @@ func TestSoakPresence_SignalsReachPresenceSubjectsWithARequestID(t *testing.T) {
 		assert.NotEmpty(t, connIDs[i])
 	}
 	assert.Equal(t, float64(2), promtestutil.ToFloat64(
-		metrics.SoakPresenceSignals.WithLabelValues(soakPresenceSignalHello)))
+		metrics.SoakPresenceSignals.WithLabelValues(soakpresence.SignalHello)))
 }
 
 func TestSoakPresence_QueryMatchesTheAnnouncedState(t *testing.T) {
@@ -219,16 +220,10 @@ func TestSoakPresence_QueryMatchesTheAnnouncedState(t *testing.T) {
 	// inside the TTL so the server is not entitled to have expired it.
 	now = now.Add(time.Second)
 
-	accounts, expectations := lane.verifiableBatch()
-	require.Len(t, accounts, 2)
-	for _, expected := range expectations {
-		assert.Equal(t, model.StatusOnline, expected)
-	}
-
 	require.NoError(t, lane.Verify(ctx))
 
 	assert.Equal(t, float64(2), promtestutil.ToFloat64(
-		metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckMatch)))
+		metrics.SoakPresenceChecks.WithLabelValues(soakpresence.CheckMatch)))
 	assert.Equal(t, float64(0), promtestutil.ToFloat64(
-		metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckMismatch)))
+		metrics.SoakPresenceChecks.WithLabelValues(soakpresence.CheckMismatch)))
 }

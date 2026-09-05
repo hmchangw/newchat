@@ -1,4 +1,4 @@
-package main
+package search
 
 import (
 	"context"
@@ -9,26 +9,29 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/read"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
-// soakSearchIndexResult is what the index probe could establish about one
-// message. It is deliberately three-valued: "not there yet" is not the same
-// claim as "not there", and only the latter is evidence of loss.
-type soakSearchIndexResult string
+// IndexResult is what the index probe could establish about one message. It is
+// deliberately four-valued: "not due yet" and "could not determine" are both
+// distinct from "not there", and only the latter is evidence of loss.
+type IndexResult string
 
 const (
-	soakSearchIndexFound   soakSearchIndexResult = "found"
-	soakSearchIndexMissing soakSearchIndexResult = "missing"
-	soakSearchIndexUnknown soakSearchIndexResult = "unknown"
-	// soakSearchIndexTooEarly is distinct from unknown on purpose. It says the
+	IndexFound   IndexResult = "found"
+	IndexMissing IndexResult = "missing"
+	IndexUnknown IndexResult = "unknown"
+	// IndexTooEarly is distinct from unknown on purpose. It says the
 	// answer is not due yet, which lets the reconciler reschedule to the settle
 	// boundary instead of re-asking every retry interval — at the default
 	// rates, polling through a 30s settle window would spend several times the
 	// entire reconciliation budget on queries that cannot succeed.
-	soakSearchIndexTooEarly soakSearchIndexResult = "too_early"
+	IndexTooEarly IndexResult = "too_early"
 )
 
-type soakSearchConfig struct {
+type Config struct {
 	SiteID         string
 	PageSize       int
 	RequestTimeout time.Duration
@@ -38,7 +41,7 @@ type soakSearchConfig struct {
 	Settle time.Duration
 }
 
-// soakSearchReader drives search-service and answers whether a message reached
+// Reader drives search-service and answers whether a message reached
 // the search index.
 //
 // The read lane it serves is ordinary read traffic: latency and outcome, no
@@ -46,10 +49,10 @@ type soakSearchConfig struct {
 // search-sync-worker Acks and drops a message whose payload fails to decode or
 // build an action, so that loss leaves its consumer at zero pending and is
 // invisible from JetStream. Asking the query side is the only way to see it.
-type soakSearchReader struct {
-	cfg      soakSearchConfig
-	rpc      *soakRPCClient
-	recorder soakReadSampleRecorder
+type Reader struct {
+	cfg      Config
+	rpc      *rpc.Client
+	recorder read.SampleRecorder
 	now      func() time.Time
 
 	mu       sync.Mutex
@@ -58,14 +61,14 @@ type soakSearchReader struct {
 	terms    []string
 }
 
-func newSoakSearchReader(
-	cfg soakSearchConfig,
-	topology *soakTopology,
-	rpc *soakRPCClient,
-	recorder soakReadSampleRecorder,
+func New(
+	cfg Config,
+	topology *topology.Topology,
+	rpc *rpc.Client,
+	recorder read.SampleRecorder,
 	rng *rand.Rand,
 	now func() time.Time,
-) (*soakSearchReader, error) {
+) (*Reader, error) {
 	if topology == nil {
 		return nil, fmt.Errorf("soak search reader requires a topology")
 	}
@@ -79,13 +82,13 @@ func newSoakSearchReader(
 		cfg.PageSize = 20
 	}
 	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = soakRequestTimeout
+		cfg.RequestTimeout = 5 * time.Second
 	}
 	if cfg.Settle <= 0 {
 		cfg.Settle = 30 * time.Second
 	}
 
-	reader := &soakSearchReader{
+	reader := &Reader{
 		cfg: cfg, rpc: rpc, recorder: recorder, now: now, rng: rng,
 		// Tokens the seeded room names carry (soak-{runId}-channel-NNNNNN), so
 		// room search returns real hits. Message bodies are generated filler —
@@ -107,7 +110,7 @@ func newSoakSearchReader(
 	return reader, nil
 }
 
-func (r *soakSearchReader) ReadMixed(ctx context.Context) error {
+func (r *Reader) ReadMixed(ctx context.Context) error {
 	r.mu.Lock()
 	messages := r.rng.Float64() < 0.7
 	r.mu.Unlock()
@@ -117,30 +120,30 @@ func (r *soakSearchReader) ReadMixed(ctx context.Context) error {
 	return r.SearchRooms(ctx)
 }
 
-func (r *soakSearchReader) SearchMessages(ctx context.Context) error {
+func (r *Reader) SearchMessages(ctx context.Context) error {
 	account, term := r.pickQuery()
 	var response model.SearchMessagesResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCSearchMessages,
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionSearchMessages,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
 		Account: account,
 		Body:    model.SearchMessagesRequest{Query: term, Size: r.cfg.PageSize},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *read.Sample) {
 		sample.CountRows(len(response.Messages))
 	})
 }
 
-func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
+func (r *Reader) SearchRooms(ctx context.Context) error {
 	account, term := r.pickQuery()
 	var response model.SearchRoomsResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCSearchRooms,
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionSearchRooms,
 		Subject: subject.SearchRooms(account, r.cfg.SiteID),
 		Account: account,
 		Body:    model.SearchRoomsRequest{Query: term, Size: r.cfg.PageSize},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *read.Sample) {
 		sample.CountRows(len(response.Rooms))
 	})
 }
@@ -153,24 +156,24 @@ func (r *soakSearchReader) SearchRooms(ctx context.Context) error {
 // each body to it so no verifier has to hold one.
 //
 // publishedAt gates the settle window. Before it elapses the probe returns
-// unknown without issuing a request, because an absent hit there is legal and
-// the query would only spend a read slot to learn nothing.
-func (r *soakSearchReader) IndexedAt(
+// IndexTooEarly without issuing a request, because an absent hit there is legal
+// and the query would only spend a read slot to learn nothing.
+func (r *Reader) IndexedAt(
 	ctx context.Context,
 	account, roomID, messageID, term string,
 	publishedAt time.Time,
-) (soakSearchIndexResult, bool, error) {
+) (IndexResult, bool, error) {
 	if account == "" || roomID == "" || messageID == "" {
-		return soakSearchIndexUnknown, false,
+		return IndexUnknown, false,
 			fmt.Errorf("search index probe requires an account, room and message")
 	}
 	if r.now().UTC().Sub(publishedAt.UTC()) < r.cfg.Settle {
-		return soakSearchIndexTooEarly, false, nil
+		return IndexTooEarly, false, nil
 	}
 
 	var response model.SearchMessagesResponse
-	err := r.call(ctx, soakRPCRequest{
-		Action:  soakRPCSearchIndexProbe,
+	err := r.call(ctx, rpc.Request{
+		Action:  rpc.ActionSearchIndexProbe,
 		Subject: subject.SearchMessages(account, r.cfg.SiteID),
 		Account: account, RoomID: roomID,
 		Body: model.SearchMessagesRequest{
@@ -178,43 +181,43 @@ func (r *soakSearchReader) IndexedAt(
 			RoomIDs: []string{roomID},
 			Size:    r.cfg.PageSize,
 		},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *read.Sample) {
 		sample.CountRows(len(response.Messages))
 	})
 	if err != nil {
 		// A search-service or Elasticsearch outage proves nothing about the
 		// message. Reporting missing here would turn every dependency outage
 		// longer than the deadline into a data-loss claim.
-		return soakSearchIndexUnknown, true, err
+		return IndexUnknown, true, err
 	}
 	for i := range response.Messages {
 		if response.Messages[i].MessageID == messageID {
-			return soakSearchIndexFound, true, nil
+			return IndexFound, true, nil
 		}
 	}
-	return soakSearchIndexMissing, true, nil
+	return IndexMissing, true, nil
 }
 
-func (r *soakSearchReader) pickQuery() (string, string) {
+func (r *Reader) pickQuery() (string, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.accounts[r.rng.Intn(len(r.accounts))], r.terms[r.rng.Intn(len(r.terms))]
 }
 
 //nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
-func (r *soakSearchReader) call(
+func (r *Reader) call(
 	ctx context.Context,
-	request soakRPCRequest,
+	request rpc.Request,
 	response any,
-	apply func(*soakReadSample),
+	apply func(*read.Sample),
 ) error {
 	if r.rpc == nil {
 		return fmt.Errorf("soak search reader requires an RPC client")
 	}
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
-	sample := soakReadSample{
+	sample := read.Sample{
 		Action: request.Action, Latency: r.now().Sub(startedAt),
 		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
@@ -231,68 +234,15 @@ func (r *soakSearchReader) call(
 	return nil
 }
 
-func (r *soakSearchReader) record(sample *soakReadSample) {
+func (r *Reader) record(sample *read.Sample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}
 }
 
-// soakSearchIndexProbe answers the ledger's index question for one operation.
-//
-// The query term comes from the in-process catalog rather than the WAL: the
-// ledger deliberately never stores a message body, and search-service offers no
-// lookup by message ID. After a pod replacement the catalog is empty, so a
-// recovered operation reports unknown and resolves `unverified` — the same
-// stance recovered recipient operations already take, and the honest one, since
-// the pre-restart evidence cannot be reconstructed.
-type soakSearchIndexProbe struct {
-	reader  *soakSearchReader
-	catalog *soakCatalog
-}
-
-func newSoakSearchIndexProbe(
-	reader *soakSearchReader,
-	catalog *soakCatalog,
-) *soakSearchIndexProbe {
-	return &soakSearchIndexProbe{reader: reader, catalog: catalog}
-}
-
-// Indexed reports the verdict and whether it issued a query. Every path that
-// answers from local state returns false: the reconciler refunds the read
-// allowance for a claim that reached no service, and charging it here would
-// make the run deliver less read traffic than it was configured for.
-func (p *soakSearchIndexProbe) Indexed(
-	ctx context.Context,
-	operation *failureOperation,
-) (soakSearchIndexResult, bool, error) {
-	if p == nil || p.reader == nil || p.catalog == nil || operation == nil {
-		return soakSearchIndexUnknown, false, nil
-	}
-	roomID := operation.Targets["roomId"]
-	messageID := operation.Targets["messageId"]
-	account := operation.Attributes[soakFailureAttributeAccount]
-	if roomID == "" || messageID == "" || account == "" {
-		return soakSearchIndexUnknown, false, nil
-	}
-	message, known := p.catalog.Get(roomID, messageID)
-	if !known || message.SearchTerm == "" {
-		return soakSearchIndexUnknown, false, nil
-	}
-	return p.reader.IndexedAt(
-		ctx, account, roomID, messageID, message.SearchTerm, operation.StartedAt,
-	)
-}
-
 // SettleBoundary is the earliest time an index probe for a message published at
 // publishedAt can produce a usable answer. The reconciler reschedules a
 // too-early operation to exactly this point.
-func (r *soakSearchReader) SettleBoundary(publishedAt time.Time) time.Time {
+func (r *Reader) SettleBoundary(publishedAt time.Time) time.Time {
 	return publishedAt.UTC().Add(r.cfg.Settle)
-}
-
-func (p *soakSearchIndexProbe) SettleBoundary(publishedAt time.Time) time.Time {
-	if p == nil || p.reader == nil {
-		return publishedAt
-	}
-	return p.reader.SettleBoundary(publishedAt)
 }

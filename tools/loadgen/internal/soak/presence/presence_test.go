@@ -1,4 +1,4 @@
-package main
+package presence
 
 import (
 	"context"
@@ -11,22 +11,23 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
-type soakPresenceRecordingPublisher struct {
+type recordingPublisher struct {
 	mu       sync.Mutex
 	subjects []string
 	payloads [][]byte
 	err      error
 }
 
-func (p *soakPresenceRecordingPublisher) Publish(target string, data []byte) error {
+func (p *recordingPublisher) Publish(target string, data []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.err != nil {
@@ -37,43 +38,42 @@ func (p *soakPresenceRecordingPublisher) Publish(target string, data []byte) err
 	return nil
 }
 
-func (p *soakPresenceRecordingPublisher) sent() []string {
+func (p *recordingPublisher) sent() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.subjects...)
 }
 
-type soakPresenceFixture struct {
-	lane      *soakPresenceLane
-	publisher *soakPresenceRecordingPublisher
-	transport *soakRoomOpsTransport
-	metrics   *Metrics
+type presenceFixture struct {
+	lane      *Lane
+	publisher *recordingPublisher
+	transport *testTransport
+	observer  *testObserver
 	now       time.Time
 }
 
-func (f *soakPresenceFixture) advance(d time.Duration) { f.now = f.now.Add(d) }
+func (f *presenceFixture) advance(d time.Duration) { f.now = f.now.Add(d) }
 
-func newSoakPresenceFixture(t *testing.T, queryShare float64, reply []byte) *soakPresenceFixture {
+func newPresenceFixture(t *testing.T, queryShare float64, reply []byte) *presenceFixture {
 	t.Helper()
-	fixture := &soakPresenceFixture{
-		publisher: &soakPresenceRecordingPublisher{},
-		transport: &soakRoomOpsTransport{reply: reply},
-		metrics:   NewMetrics(),
+	fixture := &presenceFixture{
+		publisher: &recordingPublisher{},
+		transport: &testTransport{reply: reply},
+		observer:  newTestObserver(),
 		now:       time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}
-	t.Cleanup(fixture.metrics.stopNATSHealth)
-	topology := soakRoomStateTestTopology(3)
-	lane, err := newSoakPresenceLane(
-		soakPresenceConfig{
+	topology := testTopology(3)
+	lane, err := New(
+		Config{
 			SiteID: "site-a", Connections: 2, QueryShare: queryShare,
 			Settle: time.Second, TTL: 5 * time.Minute, QueryBatchSize: 10,
 			RequestTimeout: time.Second,
 		},
 		topology,
 		fixture.publisher,
-		newSoakRPCClient(fixture.transport, soakRetryConfig{MaxAttempts: 1}, &soakRecordingSleeper{}, nil),
-		fixture.metrics,
-		&soakRoomReadRecorder{},
+		rpc.NewClient(fixture.transport, rpc.RetryConfig{MaxAttempts: 1}, &testSleeper{}, nil),
+		fixture.observer,
+		&testReadRecorder{},
 		rand.New(rand.NewSource(1)),
 		func() time.Time { return fixture.now },
 	)
@@ -83,7 +83,7 @@ func newSoakPresenceFixture(t *testing.T, queryShare float64, reply []byte) *soa
 }
 
 func TestSoakPresenceLane_StartsEveryConnectionWithHello(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 
 	require.NoError(t, fixture.lane.Signal(context.Background()))
 
@@ -91,14 +91,12 @@ func TestSoakPresenceLane_StartsEveryConnectionWithHello(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.True(t, strings.HasSuffix(sent[0], ".presence.site-a.hello"),
 		"a connection the run has not opened yet must start with hello, got %q", sent[0])
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceSignals.WithLabelValues(soakPresenceSignalHello)))
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceConnections.WithLabelValues(string(model.StatusOnline))))
+	assert.Equal(t, 1, fixture.observer.signal(SignalHello))
+	assert.Equal(t, 1, fixture.observer.connection(model.StatusOnline))
 }
 
 func TestSoakPresenceLane_PayloadsCarryAStableConnectionID(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 
 	for range 6 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
@@ -125,7 +123,7 @@ func TestSoakPresenceLane_PayloadsCarryAStableConnectionID(t *testing.T) {
 }
 
 func TestSoakPresenceLane_AdvancesThroughItsLifecycle(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 
 	for range 30 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
@@ -151,19 +149,18 @@ func TestSoakPresenceLane_AdvancesThroughItsLifecycle(t *testing.T) {
 }
 
 func TestSoakPresenceLane_FailedPublishDoesNotMoveTheExpectation(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 	fixture.publisher.err = errors.New("connection closed")
 
 	err := fixture.lane.Signal(context.Background())
 
 	require.Error(t, err)
-	assert.Equal(t, float64(2), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceConnections.WithLabelValues(string(model.StatusOffline))),
+	assert.Equal(t, 2, fixture.observer.connection(model.StatusOffline),
 		"a signal that never left the process cannot change what the server is expected to report")
 }
 
 func TestSoakPresenceLane_VerifyComparesAgainstTheLastSignal(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, []byte(
+	fixture := newPresenceFixture(t, 0, []byte(
 		`{"states":[{"account":"user-a0","status":"online"},{"account":"user-b0","status":"online"}],"timestamp":1}`,
 	))
 	for range 2 {
@@ -174,12 +171,11 @@ func TestSoakPresenceLane_VerifyComparesAgainstTheLastSignal(t *testing.T) {
 	require.NoError(t, fixture.lane.Verify(context.Background()))
 
 	assert.Equal(t, subject.PresenceQueryBatch("site-a"), fixture.transport.subjects[0])
-	assert.Equal(t, float64(2), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckMatch)))
+	assert.Equal(t, 2, fixture.observer.check(CheckMatch))
 }
 
 func TestSoakPresenceLane_VerifyCountsADisagreement(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, []byte(
+	fixture := newPresenceFixture(t, 0, []byte(
 		`{"states":[{"account":"user-a0","status":"offline"},{"account":"user-b0","status":"offline"}],"timestamp":1}`,
 	))
 	for range 2 {
@@ -189,23 +185,21 @@ func TestSoakPresenceLane_VerifyCountsADisagreement(t *testing.T) {
 
 	require.NoError(t, fixture.lane.Verify(context.Background()))
 
-	assert.Equal(t, float64(2), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckMismatch)))
+	assert.Equal(t, 2, fixture.observer.check(CheckMismatch))
 }
 
 func TestSoakPresenceLane_VerifySkipsSignalsThatHaveNotSettled(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
+	fixture := newPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
 	require.NoError(t, fixture.lane.Signal(context.Background()))
 
 	require.NoError(t, fixture.lane.Verify(context.Background()))
 
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckSkipped)))
+	assert.Equal(t, 1, fixture.observer.check(CheckSkipped))
 	assert.Empty(t, fixture.transport.subjects, "nothing settled yet, so nothing is asked")
 }
 
 func TestSoakPresenceLane_VerifySkipsExpectationsThePresenceTTLCouldHaveDropped(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
+	fixture := newPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
 	for range 2 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
 	}
@@ -215,14 +209,12 @@ func TestSoakPresenceLane_VerifySkipsExpectationsThePresenceTTLCouldHaveDropped(
 
 	require.NoError(t, fixture.lane.Verify(context.Background()))
 
-	assert.Equal(t, float64(1), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckSkipped)))
-	assert.Equal(t, float64(0), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckMismatch)))
+	assert.Equal(t, 1, fixture.observer.check(CheckSkipped))
+	assert.Zero(t, fixture.observer.check(CheckMismatch))
 }
 
 func TestSoakPresenceLane_VerifyCountsAnUnansweredQuery(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 	fixture.transport.err = nats.ErrNoResponders
 	for range 2 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
@@ -232,13 +224,12 @@ func TestSoakPresenceLane_VerifyCountsAnUnansweredQuery(t *testing.T) {
 	err := fixture.lane.Verify(context.Background())
 
 	require.Error(t, err)
-	assert.Equal(t, float64(2), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckUnknown)),
+	assert.Equal(t, 2, fixture.observer.check(CheckUnknown),
 		"an unreachable presence service is never a mismatch")
 }
 
 func TestSoakPresenceLane_MissingAccountInTheReplyIsUnknown(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
+	fixture := newPresenceFixture(t, 0, []byte(`{"states":[],"timestamp":1}`))
 	for range 2 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
 	}
@@ -246,44 +237,66 @@ func TestSoakPresenceLane_MissingAccountInTheReplyIsUnknown(t *testing.T) {
 
 	require.NoError(t, fixture.lane.Verify(context.Background()))
 
-	assert.Equal(t, float64(2), testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckUnknown)))
+	assert.Equal(t, 2, fixture.observer.check(CheckUnknown))
 }
 
 func TestSoakPresenceLane_QueryShareSpendsSlotsOnVerification(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 1.0, []byte(`{"states":[],"timestamp":1}`))
+	fixture := newPresenceFixture(t, 1.0, []byte(`{"states":[],"timestamp":1}`))
 
 	require.NoError(t, fixture.lane.Signal(context.Background()))
 
 	assert.Empty(t, fixture.publisher.sent(),
 		"a full query share turns every slot into a verification")
-	assert.Positive(t, testutil.ToFloat64(
-		fixture.metrics.SoakPresenceChecks.WithLabelValues(soakPresenceCheckSkipped)))
+	assert.Positive(t, fixture.observer.check(CheckSkipped))
 }
 
 func TestSoakPresenceLane_RejectsInvalidConstruction(t *testing.T) {
-	_, err := newSoakPresenceLane(
-		soakPresenceConfig{SiteID: "site-a"}, nil, nil, nil, nil, nil,
+	_, err := New(
+		Config{SiteID: "site-a"}, nil, nil, nil, nil, nil,
 		rand.New(rand.NewSource(1)), nil,
 	)
 	require.Error(t, err)
 
-	_, err = newSoakPresenceLane(
-		soakPresenceConfig{SiteID: "site-a"}, soakRoomStateTestTopology(1), nil, nil, nil, nil,
+	_, err = New(
+		Config{SiteID: "site-a"}, testTopology(1), nil, nil, nil, nil,
 		nil, nil,
 	)
 	require.Error(t, err)
 
-	_, err = newSoakPresenceLane(
-		soakPresenceConfig{SiteID: "site-a"}, &soakTopology{}, nil, nil, nil, nil,
+	_, err = New(
+		Config{SiteID: "site-a"}, &topology.Topology{}, nil, nil, nil, nil,
 		rand.New(rand.NewSource(1)), nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "active account")
 }
 
+func TestNewSoakPresenceLane_FiltersAndBoundsConnections(t *testing.T) {
+	lane, err := New(
+		Config{SiteID: "site-a", Connections: 2},
+		&topology.Topology{ActiveUsers: []model.User{
+			{ID: "empty"},
+			{ID: "u-1", Account: "alice"},
+			{ID: "u-duplicate", Account: "alice"},
+			{ID: "u-2", Account: "bob"},
+			{ID: "u-3", Account: "carol"},
+		}},
+		nil,
+		nil,
+		newTestObserver(),
+		nil,
+		rand.New(rand.NewSource(1)),
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, lane.connections, 2)
+	assert.Equal(t, "alice", lane.connections[0].account)
+	assert.Equal(t, "bob", lane.connections[1].account)
+}
+
 func TestSoakPresenceLane_RequiresAPublisher(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 	fixture.lane.pool = nil
 
 	err := fixture.lane.Signal(context.Background())
@@ -294,38 +307,34 @@ func TestSoakPresenceLane_RequiresAPublisher(t *testing.T) {
 func TestSoakPresencePayload_CoversEverySignal(t *testing.T) {
 	at := time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC)
 	for _, signal := range []string{
-		soakPresenceSignalHello, soakPresenceSignalPing,
-		soakPresenceSignalActivityAway, soakPresenceSignalActivityBack,
-		soakPresenceSignalBye,
+		SignalHello, SignalPing,
+		SignalActivityAway, SignalActivityBack,
+		SignalBye,
 	} {
 		t.Run(signal, func(t *testing.T) {
-			payload := soakPresencePayload(signal, "conn-1", at)
+			payload := payloadFor(signal, "conn-1", at)
 
 			require.NotNil(t, payload)
 			assert.Contains(t, string(payload), `"connId":"conn-1"`)
-			assert.NotEmpty(t, soakPresenceSubject(signal, "user-a0", "site-a"))
+			assert.NotEmpty(t, subjectFor(signal, "user-a0", "site-a"))
 		})
 	}
-	assert.Nil(t, soakPresencePayload("unknown", "conn-1", at))
-	assert.Empty(t, soakPresenceSubject("unknown", "user-a0", "site-a"))
+	assert.Nil(t, payloadFor("unknown", "conn-1", at))
+	assert.Empty(t, subjectFor("unknown", "user-a0", "site-a"))
 }
 
 func TestSoakPresenceLane_AwayEdgeIsReportedAsAway(t *testing.T) {
-	fixture := newSoakPresenceFixture(t, 0, nil)
+	fixture := newPresenceFixture(t, 0, nil)
 	require.NoError(t, fixture.lane.Signal(context.Background()))
 
 	// Drive until the lane emits an away edge for a live connection.
 	for range 40 {
 		require.NoError(t, fixture.lane.Signal(context.Background()))
-		if testutil.ToFloat64(
-			fixture.metrics.SoakPresenceSignals.WithLabelValues(soakPresenceSignalActivityAway),
-		) > 0 {
+		if fixture.observer.signal(SignalActivityAway) > 0 {
 			break
 		}
 	}
 
-	assert.Positive(t, testutil.ToFloat64(
-		fixture.metrics.SoakPresenceSignals.WithLabelValues(soakPresenceSignalActivityAway)))
-	assert.Positive(t, testutil.ToFloat64(
-		fixture.metrics.SoakPresenceConnections.WithLabelValues(string(model.StatusAway))))
+	assert.Positive(t, fixture.observer.signal(SignalActivityAway))
+	assert.Positive(t, fixture.observer.connection(model.StatusAway))
 }

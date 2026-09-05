@@ -1,10 +1,11 @@
-package main
+package presence
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
+	"strings"
 	"sync"
 	"time"
 
@@ -14,30 +15,40 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/read"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
 const (
-	soakPresenceSignalHello        = "hello"
-	soakPresenceSignalPing         = "ping"
-	soakPresenceSignalActivityAway = "activity_away"
-	soakPresenceSignalActivityBack = "activity_back"
-	soakPresenceSignalBye          = "bye"
+	SignalHello        = "hello"
+	SignalPing         = "ping"
+	SignalActivityAway = "activity_away"
+	SignalActivityBack = "activity_back"
+	SignalBye          = "bye"
 )
 
 const (
-	soakPresenceCheckMatch    = "match"
-	soakPresenceCheckMismatch = "mismatch"
-	soakPresenceCheckSkipped  = "skipped"
-	soakPresenceCheckUnknown  = "unknown"
+	CheckMatch    = "match"
+	CheckMismatch = "mismatch"
+	CheckSkipped  = "skipped"
+	CheckUnknown  = "unknown"
 )
 
-// soakPresencePublisher sends a presence signal. The signals are fire-and-forget
+// Publisher sends a presence signal. The signals are fire-and-forget
 // core NATS publishes, so this returns an error only for local failures.
-type soakPresencePublisher interface {
+type Publisher interface {
 	Publish(subject string, data []byte) error
 }
 
-type soakPresenceConfig struct {
+// Observer keeps the lane independent from the root Prometheus collector.
+type Observer interface {
+	CountSignal(signal string)
+	CountCheck(result string, count int)
+	SetConnections(status model.PresenceStatus, count int)
+}
+
+type Config struct {
 	SiteID string
 	// Connections bounds how many virtual clients the lane maintains.
 	Connections int
@@ -55,7 +66,7 @@ type soakPresenceConfig struct {
 	RequestTimeout time.Duration
 }
 
-type soakPresenceConnection struct {
+type connection struct {
 	account  string
 	connID   string
 	expected model.PresenceStatus
@@ -64,7 +75,7 @@ type soakPresenceConnection struct {
 	inFlight bool
 }
 
-// soakPresenceLane drives presence traffic and samples whether the reported
+// Lane drives presence traffic and samples whether the reported
 // state agrees with what it last sent.
 //
 // It deliberately keeps no evidence ledger. Presence signals are unacknowledged
@@ -73,31 +84,31 @@ type soakPresenceConnection struct {
 // allowed to expire on its own. The only honest evidence is a later query, and
 // only for a connection that was refreshed recently enough that the server
 // still owes an answer.
-type soakPresenceLane struct {
-	cfg      soakPresenceConfig
-	pool     soakPresencePublisher
-	rpc      *soakRPCClient
-	metrics  *Metrics
-	recorder soakReadSampleRecorder
+type Lane struct {
+	cfg      Config
+	pool     Publisher
+	rpc      *rpc.Client
+	observer Observer
+	recorder read.SampleRecorder
 	now      func() time.Time
 
 	mu          sync.Mutex
 	rng         *rand.Rand
-	connections []*soakPresenceConnection
+	connections []*connection
 	cursor      int
 	queryCredit float64
 }
 
-func newSoakPresenceLane(
-	cfg soakPresenceConfig,
-	topology *soakTopology,
-	pool soakPresencePublisher,
-	rpc *soakRPCClient,
-	metrics *Metrics,
-	recorder soakReadSampleRecorder,
+func New(
+	cfg Config,
+	topology *topology.Topology,
+	pool Publisher,
+	rpc *rpc.Client,
+	observer Observer,
+	recorder read.SampleRecorder,
 	rng *rand.Rand,
 	now func() time.Time,
-) (*soakPresenceLane, error) {
+) (*Lane, error) {
 	if topology == nil {
 		return nil, fmt.Errorf("soak presence lane requires a topology")
 	}
@@ -114,7 +125,7 @@ func newSoakPresenceLane(
 		cfg.QueryBatchSize = 50
 	}
 	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = soakRequestTimeout
+		cfg.RequestTimeout = 5 * time.Second
 	}
 	if cfg.Settle <= 0 {
 		cfg.Settle = 5 * time.Second
@@ -124,8 +135,8 @@ func newSoakPresenceLane(
 	}
 	cfg.QueryShare = min(max(cfg.QueryShare, 0), 1)
 
-	lane := &soakPresenceLane{
-		cfg: cfg, pool: pool, rpc: rpc, metrics: metrics, recorder: recorder,
+	lane := &Lane{
+		cfg: cfg, pool: pool, rpc: rpc, observer: observer, recorder: recorder,
 		now: now, rng: rng,
 	}
 	seen := make(map[string]struct{}, cfg.Connections)
@@ -141,7 +152,7 @@ func newSoakPresenceLane(
 			continue
 		}
 		seen[account] = struct{}{}
-		lane.connections = append(lane.connections, &soakPresenceConnection{
+		lane.connections = append(lane.connections, &connection{
 			account: account,
 			connID:  fmt.Sprintf("soak-%s-%04d", topology.ActiveUsers[i].ID, i),
 			// Every connection starts offline: the run has sent nothing yet.
@@ -157,7 +168,7 @@ func newSoakPresenceLane(
 
 // Signal advances one virtual client through its lifecycle, or spends the slot
 // verifying instead when the query share is due.
-func (l *soakPresenceLane) Signal(ctx context.Context) error {
+func (l *Lane) Signal(ctx context.Context) error {
 	if l.claimQuerySlot() {
 		return l.Verify(ctx)
 	}
@@ -175,7 +186,7 @@ func (l *soakPresenceLane) Signal(ctx context.Context) error {
 
 // Verify queries a batch of connections and compares the reported status with
 // what the lane last sent.
-func (l *soakPresenceLane) Verify(ctx context.Context) error {
+func (l *Lane) Verify(ctx context.Context) error {
 	// The constructor does not require an RPC client and publish already guards
 	// its pool, so guard here too rather than panicking on the query path.
 	if l.rpc == nil {
@@ -183,26 +194,26 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 	}
 	accounts, expectations := l.verifiableBatch()
 	if len(accounts) == 0 {
-		l.countCheck(soakPresenceCheckSkipped, 1)
+		l.countCheck(CheckSkipped, 1)
 		return nil
 	}
 	var response model.PresenceQueryResponse
 	startedAt := l.now()
-	result, err := l.rpc.Call(ctx, soakRPCRequest{
-		Action:  soakRPCPresenceQuery,
+	result, err := l.rpc.Call(ctx, rpc.Request{
+		Action:  rpc.ActionPresenceQuery,
 		Subject: subject.PresenceQueryBatch(l.cfg.SiteID),
 		Body:    model.PresenceQuery{Accounts: accounts},
-		Timeout: l.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Timeout: l.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response)
-	sample := soakReadSample{
-		Action: soakRPCPresenceQuery, Latency: l.now().Sub(startedAt),
+	sample := read.Sample{
+		Action: rpc.ActionPresenceQuery, Latency: l.now().Sub(startedAt),
 		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
 	if err != nil {
 		sample.ErrorClass = result.ErrorClass
 		sample.ErrorReason = result.ErrorReason
 		l.record(&sample)
-		l.countCheck(soakPresenceCheckUnknown, len(accounts))
+		l.countCheck(CheckUnknown, len(accounts))
 		return fmt.Errorf("query presence batch: %w", err)
 	}
 	sample.CountRows(len(response.States))
@@ -224,13 +235,13 @@ func (l *soakPresenceLane) Verify(ctx context.Context) error {
 			mismatched++
 		}
 	}
-	l.countCheck(soakPresenceCheckMatch, matched)
-	l.countCheck(soakPresenceCheckMismatch, mismatched)
-	l.countCheck(soakPresenceCheckUnknown, unknown)
+	l.countCheck(CheckMatch, matched)
+	l.countCheck(CheckMismatch, mismatched)
+	l.countCheck(CheckUnknown, unknown)
 	return nil
 }
 
-func (l *soakPresenceLane) nextSignal() (*soakPresenceConnection, string, []byte, bool) {
+func (l *Lane) nextSignal() (*connection, string, []byte, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for offset := range l.connections {
@@ -241,48 +252,48 @@ func (l *soakPresenceLane) nextSignal() (*soakPresenceConnection, string, []byte
 		connection.inFlight = true
 		l.cursor = (l.cursor + offset + 1) % len(l.connections)
 		signal := l.nextSignalKindLocked(connection)
-		return connection, signal, soakPresencePayload(signal, connection.connID, l.now()), true
+		return connection, signal, payloadFor(signal, connection.connID, l.now()), true
 	}
 	return nil, "", nil, false
 }
 
 // nextSignalKindLocked walks a client through hello, refreshes and idle edges,
 // then a disconnect, which is the shape a real client produces.
-func (l *soakPresenceLane) nextSignalKindLocked(connection *soakPresenceConnection) string {
+func (l *Lane) nextSignalKindLocked(connection *connection) string {
 	if connection.expected == model.StatusOffline {
-		return soakPresenceSignalHello
+		return SignalHello
 	}
 	switch roll := l.rng.Float64(); {
 	case roll < 0.60:
-		return soakPresenceSignalPing
+		return SignalPing
 	case roll < 0.75 && connection.expected == model.StatusOnline:
-		return soakPresenceSignalActivityAway
+		return SignalActivityAway
 	case roll < 0.90 && connection.expected == model.StatusAway:
-		return soakPresenceSignalActivityBack
+		return SignalActivityBack
 	case roll < 0.95:
-		return soakPresenceSignalBye
+		return SignalBye
 	default:
-		return soakPresenceSignalPing
+		return SignalPing
 	}
 }
 
-func (l *soakPresenceLane) publish(
-	connection *soakPresenceConnection,
+func (l *Lane) publish(
+	connection *connection,
 	signal string,
 	payload []byte,
 ) error {
 	if l.pool == nil {
 		return fmt.Errorf("soak presence lane requires a publisher")
 	}
-	target := soakPresenceSubject(signal, connection.account, l.cfg.SiteID)
+	target := subjectFor(signal, connection.account, l.cfg.SiteID)
 	if target == "" {
 		return fmt.Errorf("unsupported presence signal %q", signal)
 	}
 	return l.pool.Publish(target, payload)
 }
 
-func (l *soakPresenceLane) settle(
-	connection *soakPresenceConnection,
+func (l *Lane) settle(
+	connection *connection,
 	signal string,
 	sent bool,
 ) {
@@ -297,15 +308,15 @@ func (l *soakPresenceLane) settle(
 	// The publish is unacknowledged, so this records what the lane asked for,
 	// never a confirmed server state. The query is what turns it into evidence.
 	switch signal {
-	case soakPresenceSignalHello, soakPresenceSignalActivityBack:
+	case SignalHello, SignalActivityBack:
 		connection.expected = model.StatusOnline
 		connection.lastPing = at
-	case soakPresenceSignalPing:
+	case SignalPing:
 		connection.lastPing = at
-	case soakPresenceSignalActivityAway:
+	case SignalActivityAway:
 		connection.expected = model.StatusAway
 		connection.lastPing = at
-	case soakPresenceSignalBye:
+	case SignalBye:
 		connection.expected = model.StatusOffline
 	}
 	l.countSignal(signal)
@@ -315,7 +326,7 @@ func (l *soakPresenceLane) settle(
 // verifiableBatch selects connections whose expectation the server still owes.
 // A connection is skipped while its last signal is settling, and an online
 // expectation is skipped once the TTL could legitimately have expired it.
-func (l *soakPresenceLane) verifiableBatch() ([]string, map[string]model.PresenceStatus) {
+func (l *Lane) verifiableBatch() ([]string, map[string]model.PresenceStatus) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now().UTC()
@@ -342,7 +353,7 @@ func (l *soakPresenceLane) verifiableBatch() ([]string, map[string]model.Presenc
 	return accounts, expectations
 }
 
-func (l *soakPresenceLane) claimQuerySlot() bool {
+func (l *Lane) claimQuerySlot() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.queryCredit += l.cfg.QueryShare
@@ -353,34 +364,34 @@ func (l *soakPresenceLane) claimQuerySlot() bool {
 	return true
 }
 
-func (l *soakPresenceLane) countSignal(signal string) {
-	if l.metrics == nil {
+func (l *Lane) countSignal(signal string) {
+	if l.observer == nil {
 		return
 	}
-	l.metrics.SoakPresenceSignals.WithLabelValues(signal).Inc()
+	l.observer.CountSignal(signal)
 }
 
-func (l *soakPresenceLane) countCheck(result string, count int) {
-	if l.metrics == nil || count <= 0 {
+func (l *Lane) countCheck(result string, count int) {
+	if l.observer == nil || count <= 0 {
 		return
 	}
-	l.metrics.SoakPresenceChecks.WithLabelValues(result).Add(float64(count))
+	l.observer.CountCheck(result, count)
 }
 
-func (l *soakPresenceLane) record(sample *soakReadSample) {
+func (l *Lane) record(sample *read.Sample) {
 	if l.recorder != nil {
 		l.recorder.Record(sample)
 	}
 }
 
-func (l *soakPresenceLane) refreshGauges() {
+func (l *Lane) refreshGauges() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.refreshGaugesLocked()
 }
 
-func (l *soakPresenceLane) refreshGaugesLocked() {
-	if l.metrics == nil {
+func (l *Lane) refreshGaugesLocked() {
+	if l.observer == nil {
 		return
 	}
 	counts := map[model.PresenceStatus]int{
@@ -390,38 +401,58 @@ func (l *soakPresenceLane) refreshGaugesLocked() {
 		counts[connection.expected]++
 	}
 	for status, count := range counts {
-		l.metrics.SoakPresenceConnections.WithLabelValues(string(status)).Set(float64(count))
+		l.observer.SetConnections(status, count)
 	}
 }
 
-func soakPresenceSubject(signal, account, siteID string) string {
+func concreteSubject(pattern, account string) string {
+	return strings.Replace(pattern, "{account}", account, 1)
+}
+
+func helloSubject(account, siteID string) string {
+	return concreteSubject(subject.PresenceHelloPattern(siteID), account)
+}
+
+func pingSubject(account, siteID string) string {
+	return concreteSubject(subject.PresencePingPattern(siteID), account)
+}
+
+func activitySubject(account, siteID string) string {
+	return concreteSubject(subject.PresenceActivityPattern(siteID), account)
+}
+
+func byeSubject(account, siteID string) string {
+	return concreteSubject(subject.PresenceByePattern(siteID), account)
+}
+
+func subjectFor(signal, account, siteID string) string {
 	switch signal {
-	case soakPresenceSignalHello:
-		return presenceHelloSubject(account, siteID)
-	case soakPresenceSignalPing:
-		return presencePingSubject(account, siteID)
-	case soakPresenceSignalActivityAway, soakPresenceSignalActivityBack:
-		return presenceActivitySubject(account, siteID)
-	case soakPresenceSignalBye:
-		return presenceByeSubject(account, siteID)
+	case SignalHello:
+		return helloSubject(account, siteID)
+	case SignalPing:
+		return pingSubject(account, siteID)
+	case SignalActivityAway, SignalActivityBack:
+		return activitySubject(account, siteID)
+	case SignalBye:
+		return byeSubject(account, siteID)
 	default:
 		return ""
 	}
 }
 
-func soakPresencePayload(signal, connID string, at time.Time) []byte {
+func payloadFor(signal, connID string, at time.Time) []byte {
 	timestamp := at.UTC().UnixMilli()
 	var payload any
 	switch signal {
-	case soakPresenceSignalHello:
+	case SignalHello:
 		payload = model.Hello{ConnID: connID, Timestamp: timestamp}
-	case soakPresenceSignalPing:
+	case SignalPing:
 		payload = model.Ping{ConnID: connID, Timestamp: timestamp}
-	case soakPresenceSignalActivityAway:
+	case SignalActivityAway:
 		payload = model.Activity{ConnID: connID, Away: true, Timestamp: timestamp}
-	case soakPresenceSignalActivityBack:
+	case SignalActivityBack:
 		payload = model.Activity{ConnID: connID, Away: false, Timestamp: timestamp}
-	case soakPresenceSignalBye:
+	case SignalBye:
 		payload = model.ByeRequest{ConnID: connID, Timestamp: timestamp}
 	default:
 		return nil
@@ -433,18 +464,18 @@ func soakPresencePayload(signal, connID string, at time.Time) []byte {
 	return encoded
 }
 
-// natsSoakPresencePublisher sends presence signals on the soak's existing
+// NATSPublisher sends presence signals on the soak's existing
 // connection. They are plain core NATS publishes with no reply, matching how a
 // real client emits them.
-type natsSoakPresencePublisher struct {
+type NATSPublisher struct {
 	conn *nats.Conn
 }
 
-func newNATSSoakPresencePublisher(conn *nats.Conn) *natsSoakPresencePublisher {
-	return &natsSoakPresencePublisher{conn: conn}
+func NewNATSPublisher(conn *nats.Conn) *NATSPublisher {
+	return &NATSPublisher{conn: conn}
 }
 
-func (p *natsSoakPresencePublisher) Publish(target string, data []byte) error {
+func (p *NATSPublisher) Publish(target string, data []byte) error {
 	if p == nil || p.conn == nil {
 		return fmt.Errorf("soak presence publisher is not connected")
 	}
