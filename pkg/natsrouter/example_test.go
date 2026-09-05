@@ -33,11 +33,14 @@ func Example_basicUsage() {
 	// The pattern is automatically converted to a NATS wildcard for subscription.
 	// The third argument is the route's rpc.method: a declared natsmetrics
 	// constant, unique within this router, that every metric for this route is
-	// labelled with. Registration panics if it is undeclared or already claimed.
+	// labelled with. An undeclared method is not rejected: registration logs
+	// and degrades that route to natsmetrics.MethodOther ("_OTHER"). The gates
+	// that actually catch a wrong method run before deploy — .semgrep/
+	// rpcmethod.yml and the service's own testdata/routes.golden test.
 	natsrouter.Register[GreetRequest, GreetResponse](
 		router,
-		"chat.user.{account}.room.{roomID}.greet",
-		natsmetrics.MethodSendRoomMessage,
+		"chat.user.{account}.request.room.{roomID}.site-a.rename",
+		natsmetrics.MethodRenameRoom,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			account := c.Param("account")
 			roomID := c.Param("roomID")
@@ -59,8 +62,8 @@ func Example_withMiddleware() {
 
 	natsrouter.Register(
 		router,
-		"chat.user.{account}.greet",
-		natsmetrics.MethodSendDM,
+		"chat.user.{account}.request.settings.get",
+		natsmetrics.MethodGetSettings,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			return &GreetResponse{Reply: "hello " + c.Param("account")}, nil
 		},
@@ -80,8 +83,8 @@ func Example_noBodyHandler() {
 	// No request body needed — the roomID comes from the subject.
 	natsrouter.RegisterNoBody[Room](
 		router,
-		"chat.user.{account}.request.rooms.get.{roomID}",
-		natsmetrics.MethodBatchGetRooms,
+		"chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
 		func(c *natsrouter.Context) (*Room, error) {
 			roomID := c.Param("roomID")
 			return &Room{ID: roomID, Name: "General"}, nil
@@ -96,8 +99,8 @@ func Example_errorHandling() {
 
 	natsrouter.Register(
 		router,
-		"chat.user.{account}.request.rooms.get.{roomID}",
-		natsmetrics.MethodBatchGetRooms,
+		"chat.user.{account}.request.room.{roomID}.site-a.open",
+		natsmetrics.MethodOpenRoom,
 		func(c *natsrouter.Context, req GreetRequest) (*Room, error) {
 			room := findRoom(c.Param("roomID"))
 			if room == nil {
@@ -155,8 +158,8 @@ func Example_customMiddleware() {
 
 	natsrouter.Register[GreetRequest, GreetResponse](
 		router,
-		"chat.user.{account}.greet",
-		natsmetrics.MethodSendDM,
+		"chat.user.{account}.request.settings.get",
+		natsmetrics.MethodGetSettings,
 		func(c *natsrouter.Context, req GreetRequest) (*GreetResponse, error) {
 			return &GreetResponse{Reply: "hello"}, nil
 		},

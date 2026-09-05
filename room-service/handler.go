@@ -137,7 +137,7 @@ func (h *Handler) Register(r *natsrouter.Router) {
 	natsrouter.RegisterNoBody(r, subject.MemberStatusesPattern(h.siteID), natsmetrics.MethodListMemberStatuses, h.listMemberStatuses)
 	natsrouter.RegisterNoBody(r, subject.MentionableSubscriptionsPattern(h.siteID), natsmetrics.MethodListMentionableSubscriptions, h.listMentionableSubscriptions)
 	natsrouter.RegisterNoBody(r, subject.RoomKeyGetPattern(h.siteID), natsmetrics.MethodGetRoomKey, h.getRoomKey)
-	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), natsmetrics.MethodMarkMessageRead, h.messageRead)
+	natsrouter.RegisterNoBody(r, subject.MessageReadPattern(h.siteID), natsmetrics.MethodMarkRoomRead, h.messageRead)
 	natsrouter.Register(r, subject.MessageReadReceiptPattern(h.siteID), natsmetrics.MethodListMessageReaders, h.messageReadReceipt)
 	natsrouter.Register(r, subject.MessageThreadReadPattern(h.siteID), natsmetrics.MethodMarkThreadRead, h.messageThreadRead)
 	natsrouter.Register(r, subject.MemberRoleUpdatePattern(h.siteID), natsmetrics.MethodUpdateMemberRole, h.updateRole)

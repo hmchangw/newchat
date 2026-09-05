@@ -1,5 +1,5 @@
 batch_get_messages chat.user.{account}.request.room.{roomID}.site-a.msg.get.ids
-batch_get_rooms chat.server.request.history.site-a.rooms.get
+batch_get_room_previews chat.server.request.history.site-a.rooms.get
 delete_message chat.user.{account}.request.room.{roomID}.site-a.msg.delete
 edit_message chat.user.{account}.request.room.{roomID}.site-a.msg.edit
 get_channel_history chat.user.{account}.request.room.{roomID}.site-a.msg.history

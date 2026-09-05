@@ -198,7 +198,7 @@ func TestRegisterNoBody_Success(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}", natsmetrics.MethodBatchGetRooms,
+	RegisterNoBody(r, "chat.user.{account}.request.rooms.get.{roomID}", natsmetrics.MethodBatchGetRoomPreviews,
 		func(c *Context) (*testResp, error) {
 			return &testResp{Greeting: "room " + c.Param("roomID")}, nil
 		})
@@ -300,7 +300,7 @@ func TestRegister_NoParams(t *testing.T) {
 	nc := startTestNATS(t)
 	r := New(nc, "test-service")
 
-	Register(r, "static.subject", natsmetrics.MethodMarkMessageRead,
+	Register(r, "static.subject", natsmetrics.MethodMarkRoomRead,
 		func(c *Context, req testReq) (*testResp, error) {
 			return &testResp{Greeting: "hello " + req.Name}, nil
 		})
@@ -989,8 +989,16 @@ func TestRegisterKeepsBothRoutesOnDuplicateMethod(t *testing.T) {
 			natsmetrics.MethodOpenRoom, handler)
 	})
 
-	// Both subscriptions live; the map keeps the last claimant.
-	assert.Len(t, r.Routes(), 1)
+	// Both subscriptions live, and both are visible. Routes is keyed by
+	// pattern, so the duplicate does not overwrite its incumbent — the golden
+	// file grows a second line carrying an already-used method, which is the
+	// diff a reviewer sees. Keyed by method the later registration replaced
+	// the earlier one and, when the duplicate registered first, the golden
+	// came out byte-identical to the committed one.
+	got := r.Routes()
+	assert.Len(t, got, 2)
+	assert.Equal(t, natsmetrics.MethodOpenRoom, got["chat.user.{account}.request.room.{roomID}.site-a.open"])
+	assert.Equal(t, natsmetrics.MethodOpenRoom, got["chat.user.{account}.request.room.{roomID}.site-a.app.tabs"])
 }
 
 // Routes is what each service's registration test compares to its golden file,
@@ -1004,7 +1012,7 @@ func TestRoutesReturnsACopy(t *testing.T) {
 
 	got := r.Routes()
 	require.Len(t, got, 1)
-	delete(got, natsmetrics.MethodOpenRoom)
+	delete(got, "chat.user.{account}.request.room.{roomID}.site-a.open")
 	assert.Len(t, r.Routes(), 1, "Routes must not hand out the router's own map")
 }
 

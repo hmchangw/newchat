@@ -18,7 +18,7 @@ const (
 	MethodListMemberStatuses           RPCMethod = "list_member_statuses"
 	MethodListMentionableSubscriptions RPCMethod = "list_mentionable_subscriptions"
 	MethodGetRoomKey                   RPCMethod = "get_room_key"
-	MethodMarkMessageRead              RPCMethod = "mark_message_read"
+	MethodMarkRoomRead                 RPCMethod = "mark_room_read"
 	MethodListMessageReaders           RPCMethod = "list_message_readers"
 	MethodMarkThreadRead               RPCMethod = "mark_thread_read"
 	MethodUpdateMemberRole             RPCMethod = "update_member_role"
@@ -42,7 +42,7 @@ const (
 	MethodGetSurroundingMessages  RPCMethod = "get_surrounding_messages"
 	MethodGetMessage              RPCMethod = "get_message"
 	MethodBatchGetMessages        RPCMethod = "batch_get_messages"
-	MethodBatchGetRooms           RPCMethod = "batch_get_rooms"
+	MethodBatchGetRoomPreviews    RPCMethod = "batch_get_room_previews"
 	MethodListPinnedMessages      RPCMethod = "list_pinned_messages"
 	MethodGetThreadParentMessages RPCMethod = "get_thread_parent_messages"
 	MethodListThreadSubscriptions RPCMethod = "list_thread_subscriptions"
@@ -139,7 +139,7 @@ var rpcMethods = []RPCMethod{
 	MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,
 	MethodGetRoomAppTabs, MethodGetRoomAppCommandMenu, MethodListOrgMembers,
 	MethodListMembers, MethodListMemberStatuses, MethodListMentionableSubscriptions,
-	MethodGetRoomKey, MethodMarkMessageRead, MethodListMessageReaders,
+	MethodGetRoomKey, MethodMarkRoomRead, MethodListMessageReaders,
 	MethodMarkThreadRead, MethodUpdateMemberRole, MethodRemoveMember, MethodAddMembers,
 	MethodRenameRoom, MethodSetRoomRestricted, MethodBatchGetRoomsInfo,
 	MethodBatchGetThreadRoomsInfo, MethodMarkAllThreadsRead, MethodEnsureRoomKey,
@@ -149,7 +149,7 @@ var rpcMethods = []RPCMethod{
 	// history-service
 	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
 	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-	MethodBatchGetRooms, MethodListPinnedMessages, MethodGetThreadParentMessages,
+	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodGetThreadParentMessages,
 	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
 	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
 	MethodMigrateEditMessage, MethodMigrateDeleteMessage,

@@ -274,7 +274,7 @@ func (s *HistoryService) RegisterHandlers(r *natsrouter.Router, siteID string) {
 	natsrouter.Register(r, subject.MsgSurroundingPattern(siteID), natsmetrics.MethodGetSurroundingMessages, s.LoadSurroundingMessages)
 	natsrouter.Register(r, subject.MsgGetPattern(siteID), natsmetrics.MethodGetMessage, s.GetMessageByID)
 	natsrouter.Register(r, subject.MsgGetIDsPattern(siteID), natsmetrics.MethodBatchGetMessages, s.GetMessagesByIDs)
-	natsrouter.Register(r, subject.RoomsGet(siteID), natsmetrics.MethodBatchGetRooms, s.RoomsGet)
+	natsrouter.Register(r, subject.RoomsGet(siteID), natsmetrics.MethodBatchGetRoomPreviews, s.RoomsGet)
 	natsrouter.Register(r, subject.MsgEditPattern(siteID), natsmetrics.MethodEditMessage, func(c *natsrouter.Context, req models.EditMessageRequest) (*models.EditMessageResponse, error) {
 		return s.EditMessage(c, siteID, req)
 	})

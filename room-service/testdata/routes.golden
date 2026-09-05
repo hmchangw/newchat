@@ -13,7 +13,7 @@ list_mentionable_subscriptions chat.user.{account}.request.room.{roomID}.site-a.
 list_message_readers chat.user.{account}.request.room.{roomID}.site-a.message.read-receipt
 list_org_members chat.user.{account}.request.orgs.{orgID}.site-a.members
 mark_all_threads_read chat.server.request.room.site-a.thread.read.all
-mark_message_read chat.user.{account}.request.room.{roomID}.site-a.message.read
+mark_room_read chat.user.{account}.request.room.{roomID}.site-a.message.read
 mark_thread_read chat.user.{account}.request.room.{roomID}.site-a.message.thread.read
 move_chat chat.user.{account}.request.room.{roomID}.site-a.chat.move
 open_room chat.user.{account}.request.room.{roomID}.site-a.open
