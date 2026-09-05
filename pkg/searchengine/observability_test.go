@@ -131,23 +131,70 @@ func TestAdapter_RecordsOperationDurationOnSuppliedMeterProvider(t *testing.T) {
 
 // searchengine builds the LOW-LEVEL client, whose failure contract is
 // esapi.Response.IsError (status > 299) — so every status past 299 is counted,
-// including a 404 that the caller treats as a routine miss. GetDoc does exactly
-// that: search-service's loadRestricted reads the per-account user-room doc and
-// a user with no restricted rooms legitimately has none. Those samples therefore
-// carry error.type="404", which any error-ratio panel must exclude. Pinned here
-// because the metric's own docs describe the TYPED client's 404 exemption, which
-// this repo does not get. See storage-dependency-metrics.md §4.
-func TestAdapter_RoutineGetDocMissIsCountedAsAnError(t *testing.T) {
-	a, reader := instrumentedAdapter(t, esStubServer(t, http.StatusNotFound, `{"found":false}`))
+// including a 404 the caller treats as a routine miss. Two endpoints do exactly
+// that, and docs/specs/o11y/storage-dependency-metrics.md §7 excludes their 404s
+// from the error-ratio query by db.operation.name, so the operation strings are
+// pinned here rather than left to drift.
+//
+// update_by_query is deliberately absent: its path carries no
+// ignore_unavailable, and the adapter fails the caller on any non-200, so a 404
+// there is a real failure and must stay in the ratio.
+func TestAdapter_RoutineMissIsCountedAsAnError(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		call      func(t *testing.T, a *httpAdapter)
+	}{
+		{
+			name:      "GetDoc miss",
+			operation: "get",
+			call: func(t *testing.T, a *httpAdapter) {
+				t.Helper()
+				_, found, err := a.GetDoc(context.Background(), "userroom", "nobody")
+				require.NoError(t, err, "a 404 is a miss, not an error, to the caller")
+				require.False(t, found)
+			},
+		},
+		{
+			name:      "GetIndexMapping miss",
+			operation: "indices.get_mapping",
+			call: func(t *testing.T, a *httpAdapter) {
+				t.Helper()
+				body, err := a.GetIndexMapping(context.Background(), "missing-index")
+				require.NoError(t, err, "a 404 is a miss, not an error, to the caller")
+				require.Nil(t, body)
+			},
+		},
+	}
 
-	_, found, err := a.GetDoc(context.Background(), "userroom", "nobody")
-	require.NoError(t, err, "a 404 is a miss, not an error, to the caller")
-	require.False(t, found)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, reader := instrumentedAdapter(t, esStubServer(t, http.StatusNotFound, `{"found":false}`))
+			tt.call(t, a)
+
+			dp := singleDataPoint(t, reader, "db.client.operation.duration")
+			assert.Equal(t, tt.operation, attrString(t, dp, "db.operation.name"))
+			assert.Equal(t, "404", attrString(t, dp, "error.type"))
+			// semconv records the ES status as a string, not an int.
+			assert.Equal(t, "404", attrString(t, dp, "db.response.status_code"))
+		})
+	}
+}
+
+// A 404 from update_by_query is a real failure — the path carries no
+// ignore_unavailable, so a missing index 404s and the adapter returns an error.
+// The §7 query must keep counting it, which it does by excluding 404 only for
+// the two document-miss operations above.
+func TestAdapter_UpdateByQueryMissIsARealFailure(t *testing.T) {
+	a, reader := instrumentedAdapter(t, esStubServer(t, http.StatusNotFound,
+		`{"error":{"type":"index_not_found_exception"}}`))
+
+	err := a.UpdateByQuery(context.Background(), "missing-index", json.RawMessage(`{"query":{"match_all":{}}}`))
+	require.Error(t, err, "a 404 here fails the caller")
 
 	dp := singleDataPoint(t, reader, "db.client.operation.duration")
+	assert.Equal(t, "update_by_query", attrString(t, dp, "db.operation.name"))
 	assert.Equal(t, "404", attrString(t, dp, "error.type"))
-	// semconv records the ES status as a string, not an int.
-	assert.Equal(t, "404", attrString(t, dp, "db.response.status_code"))
 }
 
 // o11yESScope is the instrumentation scope the o11y elasticsearch package

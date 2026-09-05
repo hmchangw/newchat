@@ -83,7 +83,18 @@ The message-worker sites cover the first core-message campaign's write path. The
 
 Recorded under the instrumentation scope `github.com/flywindy/o11y/elasticsearch`; spans keep the upstream `elasticsearch-api` scope.
 
-**"Failure" here means any status above 299, routine 404s included.** The SDK follows each client API's own contract, and `searchengine` builds the **low-level** client, whose contract is `esapi.Response.IsError` — status > 299. The typed client's exemption, under which a 404 from `Get`/`Delete`/`Exists` is a normal result, does **not** apply to this repo. That matters because a 404 is a routine outcome on this path: `httpAdapter.GetDoc` returns `(nil, false, nil)` for it, and search-service's `loadRestricted` reads the per-account user-room doc on every Valkey miss, where a user with no restricted rooms legitimately has no document. Those samples carry `error_type="404"` and `db_response_status_code="404"`, so an error-ratio panel built from §7 must exclude them or it will show a permanent, meaningless ES error rate. The same 404 has always set the span status to `Error`; only the metric is new. Pinned by `TestAdapter_RoutineGetDocMissIsCountedAsAnError`.
+**"Failure" here means any status above 299, routine 404s included.** The SDK follows each client API's own contract, and `searchengine` builds the **low-level** client, whose contract is `esapi.Response.IsError` — status > 299. The typed client's exemption, under which a 404 from `Get`/`Delete`/`Exists` is a normal result, does **not** apply to this repo.
+
+That matters because two endpoints treat a 404 as a routine outcome, and both still record a sample carrying `error_type="404"` and `db_response_status_code="404"`:
+
+| `db_operation_name` | Adapter method | Why its 404 is routine |
+|---|---|---|
+| `get` | `httpAdapter.GetDoc` | Returns `(nil, false, nil)`. search-service's `loadRestricted` reads the per-account user-room doc on every Valkey miss, and a user with no restricted rooms legitimately has no document |
+| `indices.get_mapping` | `httpAdapter.GetIndexMapping` | Returns `(nil, nil)` — an index that does not exist yet has no mapping to compare against |
+
+**A 404 is not routine everywhere, so the exclusion must be by operation, not by status alone.** `update_by_query` is the counterexample: its path carries no `ignore_unavailable`, so a missing index answers 404, and the adapter fails the caller on any non-200. Dropping every ES 404 from the numerator would hide that outage entirely. (`search` and `indices.put_mapping` cannot 404 on a missing index at all — both paths set `ignore_unavailable=true&allow_no_indices=true`.)
+
+The §7 Elasticsearch query excludes 404 for exactly the two operations above. The same 404 has always set the span status to `Error`; only the metric is new. All three behaviours are pinned by `TestAdapter_RoutineMissIsCountedAsAnError` and `TestAdapter_UpdateByQueryMissIsARealFailure`, so the operation strings this query depends on cannot drift silently.
 
 Direct Elasticsearch client coverage is:
 
@@ -199,14 +210,27 @@ sum by (db_system_name, service_name) (
   rate(db_client_operation_duration_seconds_count[5m])
 )
 
-# Elasticsearch error ratio. The low-level client counts a routine document
-# miss as a failure, so 404 must be excluded (§4). A label matcher cannot
-# express "not (system=es and status=404)", so Elasticsearch gets its own query
-# rather than a carve-out inside the one above.
-sum by (service_name) (
-  rate(db_client_operation_duration_seconds_count{
-    db_system_name="elasticsearch", error_type!="", error_type!="404"
-  }[5m])
+# Elasticsearch error ratio. The low-level client counts a routine document miss
+# as a failure, so 404 is excluded for the two document-miss operations only
+# (§4) — a 404 from update_by_query is a real failure and stays counted.
+# A label matcher cannot express "not (op=get and status=404)", so the numerator
+# is the union of two selectors. It is seeded from the denominator so a service
+# with traffic and no errors reads 0% instead of no data.
+(
+  sum by (service_name) (
+    rate(db_client_operation_duration_seconds_count{
+      db_system_name="elasticsearch", error_type!="", error_type!="404"
+    }[5m])
+    or
+    rate(db_client_operation_duration_seconds_count{
+      db_system_name="elasticsearch", error_type="404",
+      db_operation_name!="get", db_operation_name!="indices.get_mapping"
+    }[5m])
+  )
+  or on (service_name)
+  0 * sum by (service_name) (
+    rate(db_client_operation_duration_seconds_count{db_system_name="elasticsearch"}[5m])
+  )
 )
 /
 sum by (service_name) (
