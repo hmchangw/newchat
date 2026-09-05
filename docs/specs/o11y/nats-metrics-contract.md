@@ -735,16 +735,45 @@ the `rpc_method="unknown"` series has disappeared, not shrunk.
 
 Three gates keep the vocabulary closed, from cheapest to last-resort:
 
-1. **`.semgrep/rpcmethod.yml`**, a SAST rule, catches an untyped string literal
-   in the method argument at review time — the type system alone doesn't: a
-   string literal is assignable to `RPCMethod`, so `Register(r, pattern,
-   "rename_room", fn)` compiles.
+1. **`.semgrep/rpcmethod.yml`**, a SAST rule, requires the method argument to
+   be a `natsmetrics.Method*` selector *written at the call site*. It is an
+   allowlist, not a list of known-bad shapes: a string literal, an explicit
+   `natsmetrics.RPCMethod(...)` conversion, a variable — even one holding a
+   legitimate constant — and `MethodOther` itself are all refused. The type
+   system alone catches none of these, because an untyped string constant is
+   assignable to `RPCMethod` and a conversion accepts any string, so
+   `Register(r, pattern, "rename_room", fn)` and
+   `Register(r, pattern, natsmetrics.RPCMethod("typo"), fn)` both compile. A
+   variable is refused rather than resolved because the rule matches syntax,
+   not values: it cannot distinguish one holding `MethodOpenRoom` from one
+   holding a typo, so it admits neither.
+
+   **Scope: server route registration only.** The rule reaches into
+   `natsrouter`'s three method-bearing registrars and nothing else. The
+   outbound lane — `Publisher.Request` and the nine uninstrumented call sites
+   around it — carries no `rpc.client` instrument yet, so it has no method
+   argument to constrain. A passing scan means "no server route names its
+   method indirectly", not "every `rpc.method` in the repo is a vocabulary
+   constant". When the client lane gains an instrument, its call sites need
+   their own branches in the rule.
 2. **Each service's `routes_test.go`**, comparing `Router.Routes()` to
    `testdata/routes.golden` via `testutil.AssertRoutesGolden`, catches a
    *valid* but wrong constant — one that compiles, passes every runtime check,
    and simply names the wrong route. This is what actually pins a route to its
    correct method: a copy-pasted wrong constant shows up as a one-line diff in
    review. Ten goldens, 92 routes.
+
+   Two things keep this gate from being switched off quietly.
+   `AssertRoutesGolden` refuses a table containing `MethodOther` *before* it
+   reads or generates the golden file, so a route that degraded at
+   registration can neither be baked into a regenerated golden nor
+   hand-written into an existing one — the fallback never becomes an accepted
+   spelling. And `TestEveryRPCRouteRegistrationHasAGoldenFile` (in
+   `pkg/natsrouter`) parses every non-test `.go` file in the repo: a directory
+   that registers a method-bearing route must have both `testdata/routes.golden`
+   *and* a `_test.go` beside it that calls `AssertRoutesGolden`. Checking only
+   for the file would let someone delete the test and leave an unread fixture
+   that agrees with nothing.
 3. **Runtime, in `addRPCRoute`**, is the backstop for whatever reaches it
    anyway: an undeclared method logs `slog.Error` and degrades that route to
    `MethodOther` (`_OTHER`) rather than panicking; a method already claimed by

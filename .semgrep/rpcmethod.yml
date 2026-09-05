@@ -1,42 +1,71 @@
 rules:
-  - id: rpcmethod-must-be-a-vocabulary-constant
+  - id: rpcmethod-server-route-must-name-a-vocabulary-constant
     languages: [go]
     severity: ERROR
     message: >
-      Pass a natsmetrics.Method* constant, not a string literal, as the rpc
-      method argument. RPCMethod is a named string type, so a typed constant
-      cannot be transposed with the pattern argument — the compiler already
-      refuses that — but an untyped string constant is assignable to both
-      string and RPCMethod, so a plain literal here compiles and silently
-      degrades to rpc_method="_OTHER" at runtime instead of failing the
-      build. If the route needs a method that doesn't exist yet, add it to
-      pkg/natsmetrics/rpcmethod.go — its rpcMethods list is the single
-      source of truth, and the naming guards in rpcmethod_test.go run over
-      it.
+      Pass a natsmetrics.Method* constant directly as the rpc method argument
+      of a natsrouter server route registration. Anything else — a string
+      literal, an explicit natsmetrics.RPCMethod(...) conversion, or a
+      variable, even one holding a legitimate constant — is rejected here.
+
+      RPCMethod is a named string type, so a typed constant cannot be
+      transposed with the pattern argument; the compiler already refuses
+      that. What the compiler does not refuse is an untyped string constant
+      (assignable to both string and RPCMethod), a conversion of an arbitrary
+      string, or an indirection through a variable. All three compile and
+      then degrade to rpc_method="_OTHER" at runtime instead of failing the
+      build. A variable is refused rather than resolved because this rule
+      matches syntax, not values: it cannot tell a variable holding
+      MethodOpenRoom from one holding a typo, and a rule that accepted the
+      shape would accept both.
+
+      natsmetrics.MethodOther is refused too. It is the record-time fallback
+      for a value that should never occur, not a method a route may claim.
+
+      If the route needs a method that does not exist yet, add it to
+      pkg/natsmetrics/rpcmethod.go — its rpcMethods list is the single source
+      of truth, and the naming guards in rpcmethod_test.go run over it.
     paths:
       exclude:
         - "**/*_test.go"
-    # RegisterVoid takes no method argument, so it needs no pattern here —
-    # there is no method position to check.
+    # SCOPE: server route registration only.
     #
-    # Each of the three method-bearing registrars gets two branches: the
-    # inferred-type-arguments call natsrouter.Register(r, pattern, method,
-    # fn), which is how most call sites read, and the explicit form
-    # natsrouter.Register[Req, Resp](...), which bot-message-handler and
-    # bot-room-service use because Go can't infer Req from a nil handler
-    # literal in some call shapes. Explicit type arguments sit between the
-    # function name and the call parens, a different AST shape than the
-    # plain call — a pattern for one does not match the other, so dropping
-    # either branch reopens the hole on exactly the call sites that use it.
+    # This rule reaches into natsrouter's three method-bearing registrars and
+    # nothing else. It does NOT cover the outbound lane — natsmetrics
+    # Publisher.Request and the nine uninstrumented call sites around it carry
+    # no rpc.client instrument yet, so there is no method argument there to
+    # constrain. Do not read a passing scan as "every rpc.method in the repo
+    # is a vocabulary constant"; read it as "no server route names one
+    # indirectly". When the client lane gains an instrument, its call sites
+    # need their own branches here.
     #
-    # "..." inside the quoted position matches any string literal, not just
-    # empty strings — semgrep's literal-string wildcard. A
-    # natsmetrics.Method* selector, or an explicit natsmetrics.RPCMethod(...)
-    # conversion, is a different expression shape and does not match.
-    pattern-either:
-      - pattern: natsrouter.Register($R, $PATTERN, "...", $FN)
-      - pattern: natsrouter.Register[...]($R, $PATTERN, "...", $FN)
-      - pattern: natsrouter.RegisterNoBody($R, $PATTERN, "...", $FN)
-      - pattern: natsrouter.RegisterNoBody[...]($R, $PATTERN, "...", $FN)
-      - pattern: natsrouter.RegisterOptionalBody($R, $PATTERN, "...", $FN)
-      - pattern: natsrouter.RegisterOptionalBody[...]($R, $PATTERN, "...", $FN)
+    # Each registrar gets two branches: the inferred-type-arguments call
+    # natsrouter.Register(r, pattern, method, fn), which is how most call
+    # sites read, and the explicit form natsrouter.Register[Req, Resp](...),
+    # which bot-message-handler and bot-room-service use because Go can't
+    # infer Req from a nil handler literal in some call shapes. Explicit type
+    # arguments sit between the function name and the call parens, a different
+    # AST shape than the plain call — a pattern for one does not match the
+    # other, so dropping either branch reopens the hole on exactly the call
+    # sites that use it.
+    #
+    # The allowlist is expressed as a negative lookahead over the method
+    # metavariable's source text, so the rule fires on everything that is not
+    # a direct natsmetrics.Method* selector. Written the other way round — as
+    # a denylist of known-bad shapes — every shape nobody thought of is
+    # admitted by default, which is how the earlier literal-only version let
+    # natsmetrics.RPCMethod("typo") through.
+    #
+    # (?!Other$) carves MethodOther back out of the allowlist while leaving a
+    # hypothetical MethodOtherThing in it.
+    patterns:
+      - pattern-either:
+          - pattern: natsrouter.Register($R, $PATTERN, $METHOD, $FN)
+          - pattern: natsrouter.Register[...]($R, $PATTERN, $METHOD, $FN)
+          - pattern: natsrouter.RegisterNoBody($R, $PATTERN, $METHOD, $FN)
+          - pattern: natsrouter.RegisterNoBody[...]($R, $PATTERN, $METHOD, $FN)
+          - pattern: natsrouter.RegisterOptionalBody($R, $PATTERN, $METHOD, $FN)
+          - pattern: natsrouter.RegisterOptionalBody[...]($R, $PATTERN, $METHOD, $FN)
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(?!natsmetrics\.Method(?!Other$)[A-Z]).*$

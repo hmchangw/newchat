@@ -51,6 +51,11 @@ var skipDirNames = map[string]bool{
 // for any directory that registers a method-bearing route, rather than
 // leaving the pairing to the convention that all ten current packages
 // happen to follow it.
+//
+// A golden file on disk is not by itself proof the gate runs: delete the
+// routes_test.go and the file becomes an unread fixture that agrees with
+// nothing. So the directory must also hold a test that calls
+// testutil.AssertRoutesGolden — the file and its caller are checked together.
 func TestEveryRPCRouteRegistrationHasAGoldenFile(t *testing.T) {
 	rootDir := repoRootForGoldenScan(t)
 
@@ -111,7 +116,68 @@ func TestEveryRPCRouteRegistrationHasAGoldenFile(t *testing.T) {
 			"%s registers an RPC route (natsrouter.Register / RegisterNoBody / RegisterOptionalBody) "+
 				"but has no testdata/routes.golden; add a routes_test.go there calling "+
 				"testutil.AssertRoutesGolden(t, router.Routes())", dir)
+
+		called, scanErr := dirCallsAssertRoutesGolden(repo, fset, dir)
+		require.NoError(t, scanErr)
+		assert.True(t, called,
+			"%s registers an RPC route but no _test.go there calls testutil.AssertRoutesGolden; "+
+				"without the call the golden file is never compared and pins nothing", dir)
 	}
+}
+
+// dirCallsAssertRoutesGolden reports whether any _test.go directly in dir
+// calls testutil.AssertRoutesGolden. Non-recursive on purpose: the helper
+// reads testdata/ relative to the package under test's own working directory,
+// so a call from a subdirectory would compare a different package's golden.
+func dirCallsAssertRoutesGolden(repo fs.FS, fset *token.FileSet, dir string) (bool, error) {
+	entries, err := fs.ReadDir(repo, dir)
+	if err != nil {
+		return false, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		p := path.Join(dir, e.Name())
+		src, readErr := fs.ReadFile(repo, p)
+		if readErr != nil {
+			return false, fmt.Errorf("read %s: %w", p, readErr)
+		}
+		file, parseErr := parser.ParseFile(fset, p, src, 0)
+		if parseErr != nil {
+			return false, fmt.Errorf("parse %s: %w", p, parseErr)
+		}
+		if fileCallsAssertRoutesGolden(file) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// fileCallsAssertRoutesGolden looks for a testutil.AssertRoutesGolden call.
+// The package qualifier is matched loosely (any selector base) so an import
+// alias does not silently defeat the check.
+func fileCallsAssertRoutesGolden(file *ast.File) bool {
+	found := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name == "AssertRoutesGolden" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // fileRegistersRPCRoute reports whether file contains a call to one of the

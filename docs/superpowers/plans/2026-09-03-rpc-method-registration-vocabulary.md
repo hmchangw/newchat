@@ -1,5 +1,15 @@
 # RPC Method at Registration Implementation Plan
 
+> ⚠️ **SUPERSEDED IN PART — do not implement this document as written.**
+> Kept for history. The follow-up plan
+> [`2026-09-04-rpc-method-hardening.md`](2026-09-04-rpc-method-hardening.md)
+> reverses two of its decisions, and the code follows the later plan:
+>
+> | This plan says | What shipped |
+> | --- | --- |
+> | The fallback stays spelled `"unknown"` ("Rejected: `_OTHER` as the fallback value", below) | `MethodOther = "_OTHER"`. The rejection cited `semconv/v1.40.0/rpcconv`, a metric-helper package that carries no enum. The normative text is in `semconv/v1.40.0/attribute_group.go:13902-13934`: "When the method is not recognized … the attribute MUST be set to `_OTHER`." |
+> | An unregistered or duplicate method panics at startup | Registration logs and degrades to `_OTHER`. A telemetry label defect should not stop a process the three pre-deploy gates already guard. |
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `rpc_method` a required argument of every reply-registering `natsrouter` route so each of the fleet's 92 RPC routes carries its own verb-first name, and stop recording fire-and-forget routes in the RPC histogram.
@@ -199,6 +209,14 @@ publish enum.
 ---
 
 ## Rejected: `_OTHER` as the fallback value
+
+> ⚠️ **This section is wrong and was reversed.** See the superseded note at the
+> top of this document. The reasoning below reads the wrong package: `rpcconv`
+> is the metric-helper package and carries no enum, so its silence is not
+> evidence. `attribute_group.go:13902-13934` is where `rpc.method` is defined,
+> and it states the `_OTHER` requirement outright. Retained verbatim because
+> the mistake — presenting a range-limited grep as an exhaustive search — is
+> worth being able to find again.
 
 The fallback stays spelled `"unknown"`. OpenTelemetry does **not** require
 `_OTHER` for `rpc.method`: in `go.opentelemetry.io/otel@v1.44.0/semconv/v1.40.0/rpcconv`

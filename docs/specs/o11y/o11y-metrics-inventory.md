@@ -175,13 +175,27 @@ convention's instrument names, unit and labels verbatim (verified against
 on failure per the convention, so a successful call carries no error label at
 all.
 
-Bucket boundaries are the one deliberate deviation: these histograms use
+There are two deliberate deviations, both recorded in
+`pkg/natsmetrics/rpcsemconv.go` rather than left implicit — a claimed
+conformance is worse than a stated deviation.
+
+The first is bucket boundaries: these histograms use
 `o11y.DefaultLatencyBuckets()` (11 boundaries), not the convention's own table
 (14). The SDK overrides the identical table for `http.server.*` so that p99 is
 directly comparable across services, and an RPC family on different boundaries
 would break exactly that. Interop is unaffected in the part that matters — a
 generic RPC panel still finds and groups these series by name and label; only
 `histogram_quantile`'s interpolation points differ.
+
+The second is `rpc.method`'s spelling. The convention asks for a
+fully-qualified name (its own example is `EchoService/Echo`); the values here
+are short (`rename_room`), chosen for Grafana readability. `service_name` is
+already a constant label on every series via `WithResourceAsConstantLabels`, so
+it carries the qualifier a fully-qualified name would —
+`service_name="room-service"` plus `rpc_method="rename_room"` is the same join
+key as `RoomService/RenameRoom`, split across two labels instead of one string.
+The `_OTHER` fallback for an unrecognized method follows the convention
+unchanged.
 
 The two `chat.nats.client.*` families are the exception: they carry no `site`
 at all, because they are emitted from the opt-in connection helper, which sits

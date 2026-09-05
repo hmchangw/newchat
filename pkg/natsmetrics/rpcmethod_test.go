@@ -66,9 +66,14 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 	file, err := parser.ParseFile(fset, "rpcmethod.go", nil, 0)
 	require.NoError(t, err, "parse rpcmethod.go")
 
-	// declared maps each RPCMethod-typed constant's string value to the
-	// identifier that declares it, so a mismatch can name the constant.
-	declared := map[RPCMethod]string{}
+	// Two indexes, because one is not enough. valueOf answers "what does this
+	// constant spell", ownersOf answers "which constants spell this value" —
+	// and only the second catches an alias, a second constant declared with a
+	// value some other constant already owns. Keyed the other way round, an
+	// alias silently overwrites the original owner and every check downstream
+	// still passes, because the value itself is perfectly valid.
+	valueOf := map[string]RPCMethod{}
+	ownersOf := map[RPCMethod][]string{}
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
@@ -89,14 +94,23 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 				require.True(t, ok && lit.Kind == token.STRING, "%s: expected a string literal value", name.Name)
 				value, unquoteErr := strconv.Unquote(lit.Value)
 				require.NoError(t, unquoteErr, "%s: unquote %s", name.Name, lit.Value)
-				declared[RPCMethod(value)] = name.Name
+				require.NotContains(t, valueOf, name.Name, "%s is declared more than once", name.Name)
+				valueOf[name.Name] = RPCMethod(value)
+				ownersOf[RPCMethod(value)] = append(ownersOf[RPCMethod(value)], name.Name)
 			}
 		}
 	}
-	require.NotEmpty(t, declared, "const-block scan found nothing — the parser is probably wrong")
+	require.NotEmpty(t, valueOf, "const-block scan found nothing — the parser is probably wrong")
+
+	// One constant per value. An alias spells an existing method under a second
+	// name: the label stays bounded and valid, so nothing else here can see it,
+	// but the vocabulary then has two spellings for one series.
+	for value, owners := range ownersOf {
+		assert.Len(t, owners, 1, "%q is declared by more than one constant (%v); one value, one owner", value, owners)
+	}
 
 	// Every declared constant except MethodOther must be in rpcMethods.
-	for value, name := range declared {
+	for name, value := range valueOf {
 		if name == "MethodOther" {
 			assert.False(t, value.Valid(), "MethodOther must stay outside rpcMethods, the fallback is not registerable")
 			continue
@@ -107,10 +121,26 @@ func TestConstBlockMatchesRPCMethodList(t *testing.T) {
 
 	// Nothing in rpcMethods may be absent from the const block.
 	for _, m := range rpcMethods {
-		name, ok := declared[m]
-		assert.True(t, ok, "%q is in rpcMethods but has no matching RPCMethod constant declared in rpcmethod.go", m)
-		assert.NotEqual(t, "MethodOther", name, "%q resolved to MethodOther, which must never appear in rpcMethods", m)
+		owners := ownersOf[m]
+		require.NotEmpty(t, owners, "%q is in rpcMethods but has no matching RPCMethod constant declared in rpcmethod.go", m)
+		assert.NotContains(t, owners, "MethodOther", "%q resolved to MethodOther, which must never appear in rpcMethods", m)
 	}
+
+	// MethodOther exists exactly once, and is the only constant outside the
+	// list. Together with the counts below this closes the gap in both
+	// directions: no extra constant can hide beside the list, and no listed
+	// method can be missing one.
+	assert.Len(t, ownersOf[MethodOther], 1, "MethodOther must be declared exactly once")
+	outside := []string{}
+	for name, value := range valueOf {
+		if !value.Valid() {
+			outside = append(outside, name)
+		}
+	}
+	assert.Equal(t, []string{"MethodOther"}, outside,
+		"MethodOther must be the only RPCMethod constant that is not in rpcMethods")
+	assert.Len(t, valueOf, len(rpcMethods)+1,
+		"the const block must hold exactly one constant per rpcMethods entry, plus MethodOther")
 }
 
 func cutFirstToken(name string) (head, tail string, ok bool) {
@@ -135,8 +165,9 @@ func TestRPCMethodListHasNoDuplicateEntries(t *testing.T) {
 	assert.Len(t, rpcMethods, 92)
 }
 
-// Valid is what natsrouter calls at registration, so a gap here is a route that
-// panics at startup despite naming a real constant.
+// Valid is what natsrouter calls at registration, so a gap here is a route
+// that degrades to _OTHER despite naming a real constant — its samples merge
+// into the fallback series instead of carrying the method the code declares.
 func TestValidAcceptsEveryDeclaredMethodAndNothingElse(t *testing.T) {
 	for _, m := range rpcMethods {
 		assert.True(t, m.Valid(), "%q must be registerable", m)
