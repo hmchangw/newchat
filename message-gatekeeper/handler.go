@@ -242,6 +242,15 @@ func (h *Handler) HandleJetStreamMsg(ctx context.Context, msg jetstream.Msg) {
 			// flow terminal for the infra path; the Error line below carries the cause.
 			slog.Log(ctx, logctx.LevelFlow, "gatekeeper nak", "phase", "nak", "request_id", req.RequestID)
 			slog.ErrorContext(ctx, "process message failed (infra)", "error", err, "account", account, "room_id", roomID)
+			if final {
+				// The delivery budget is spent: JetStream drops the message after
+				// this NAK, so nothing will ever publish to the sender's reply
+				// subject. The client published onto MESSAGES successfully and
+				// would otherwise wait forever for a reply that cannot come.
+				// MarshalQuiet because this branch already logged the cause.
+				h.sendReply(ctx, account, &req, errnats.MarshalQuiet(
+					errcode.Unavailable("message could not be accepted, please retry")))
+			}
 			jsretry.Nak(ctx, msg, jsretry.DefaultBackoff, "process message failed (infra)")
 		}
 		return
