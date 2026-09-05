@@ -889,7 +889,7 @@ func (h *Handler) publishSubscriptionUpdate(ctx context.Context, account, action
 // client retry can't double-enqueue the same (destination, event) into the
 // outbox.
 func (h *Handler) federateOne(ctx context.Context, roomID, destSiteID string, eventType model.InboxEventType, payload []byte, dedupSeed string, ts int64) error {
-	dedupID := natsutil.InboxDedupID(ctx, destSiteID, dedupSeed)
+	dedupID := natsutil.InboxDedupID(ctx, destSiteID, eventType, dedupSeed)
 	return outbox.Publish(ctx, h.publishToStream, h.siteID, roomID, destSiteID, eventType, payload, dedupID, ts)
 }
 
