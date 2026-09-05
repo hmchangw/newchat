@@ -67,8 +67,10 @@ func TestExportedRPCMethodIsNeverUnknownForRegisteredTraffic(t *testing.T) {
 //
 // This file deliberately does NOT assert that a method maps to one handler:
 // nothing in pkg/natsmetrics knows what a handler is. That guarantee is
-// natsrouter's, enforced by the per-router duplicate panic and covered by
-// TestRegisterPanicsOnDuplicateMethodInOneRouter.
+// natsrouter's. Nothing enforces it at runtime: a duplicate logs and both
+// routes register anyway (TestRegisterKeepsBothRoutesOnDuplicateMethod). What
+// makes it reviewable is the golden file, which is keyed by pattern and so
+// shows both routes carrying the one method.
 func TestEveryExportedSampleCarriesAMethod(t *testing.T) {
 	m, reg := newPrometheusExportSetup(t)
 	ctx := context.Background()

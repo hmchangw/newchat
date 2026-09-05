@@ -151,8 +151,9 @@ func TestRouter_Shutdown_Idempotent(t *testing.T) {
 }
 
 // testMethods supplies one distinct declared method per concurrently registered
-// route below: a router rejects two routes claiming the same one, so the loop
-// cannot reuse a single constant.
+// route below. The router does not reject a reused constant — it logs and
+// registers both — but reusing one here would collapse the routes into a
+// single Routes() line and make the test's own bookkeeping ambiguous.
 var testMethods = []natsmetrics.RPCMethod{
 	natsmetrics.MethodSearchMessages, natsmetrics.MethodSearchRooms,
 	natsmetrics.MethodSearchApps, natsmetrics.MethodSearchUsers,

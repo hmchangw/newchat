@@ -23,7 +23,7 @@ router := natsrouter.Default(nc, "my-service")
 // Add HandlerTimeout explicitly — duration varies per service.
 router.Use(natsrouter.HandlerTimeout(5 * time.Second))
 
-natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage, svc.SendMessage)
+natsrouter.Register(router, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom, svc.RenameRoom)
 
 // On shutdown:
 router.Shutdown(ctx)
@@ -99,7 +99,7 @@ When admission control is enabled, a non-blocking acquire on a semaphore inside 
 
 ### Important properties
 
-- **Per-route overrides are not supported today.** A single router-wide semaphore (when admission control is enabled) covers every route. The `Registrar` interface is intentionally minimal so a future wrapper (e.g. a route group with its own admission semaphore) can be added without breaking the existing API. Route-level isolation should wait until real evidence of noisy-neighbor contention surfaces in production.
+- **Per-route overrides are not supported today.** A single router-wide semaphore (when admission control is enabled) covers every route. The registrars take `*Router` directly, so a future wrapper (e.g. a route group with its own admission semaphore) would need an interface introduced first. Route-level isolation should wait until real evidence of noisy-neighbor contention surfaces in production.
 
 - **Per-subject FIFO ordering is NOT preserved.** Two messages that arrive on the same subscription are spawned into independent goroutines and race; whichever wins the goroutine schedule runs first. Handlers must be idempotent or use external coordination (Cassandra LWTs, Mongo conditional updates) to ensure correctness under concurrent invocation.
 
@@ -165,12 +165,12 @@ func WithMaxConcurrency(n int) Option
 
 ### Registration Functions
 
-All accept a `Registrar` (currently `*Router`). They are free functions, not `*Router` methods, because Go's type-parameter rules (as of Go 1.22) do not permit type parameters on methods. `Register[Req, Resp]`'s typed handlers can only live on a free function.
+All accept a `*Router`. They are free functions, not `*Router` methods, because Go's type-parameter rules (as of Go 1.22) do not permit type parameters on methods. `Register[Req, Resp]`'s typed handlers can only live on a free function.
 
 ```go
 // Request body + JSON response. The standard request/reply handler.
 func Register[Req, Resp any](
-    r Registrar,
+    r *Router,
     pattern string,
     method natsmetrics.RPCMethod,
     fn func(c *Context, req Req) (*Resp, error),
@@ -178,7 +178,7 @@ func Register[Req, Resp any](
 
 // No request body, JSON response. For GET-style lookups where all data is in the subject.
 func RegisterNoBody[Resp any](
-    r Registrar,
+    r *Router,
     pattern string,
     method natsmetrics.RPCMethod,
     fn func(c *Context) (*Resp, error),
@@ -187,7 +187,7 @@ func RegisterNoBody[Resp any](
 // Request body, no response. For fire-and-forget events.
 // CAUTION: messages on saturated routers are silently dropped (see Concurrency Model).
 func RegisterVoid[Req any](
-    r Registrar,
+    r *Router,
     pattern string,
     fn func(c *Context, req Req) error,
 )
@@ -362,7 +362,7 @@ Three handler shapes for three use cases:
 
 ```go
 // Request/reply — the most common pattern.
-natsrouter.Register(router, "chat.user.{account}.msg.send", natsmetrics.MethodSendRoomMessage,
+natsrouter.Register(router, "chat.user.{account}.request.room.{roomID}.site-a.rename", natsmetrics.MethodRenameRoom,
     func(c *natsrouter.Context, req SendRequest) (*SendResponse, error) {
         account := c.Param("account")
         // ... business logic ...

@@ -739,7 +739,11 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    be a `natsmetrics.Method*` selector *written at the call site*. It is an
    allowlist, not a list of known-bad shapes: a string literal, an explicit
    `natsmetrics.RPCMethod(...)` conversion, a variable — even one holding a
-   legitimate constant — and `MethodOther` itself are all refused. The type
+   legitimate constant — and `MethodOther` itself are all refused, in
+   single-line and gofmt-wrapped spellings alike. An aliased or dot-imported
+   `natsmetrics` is refused too rather than allowed: the qualifier is spelled
+   literally in the rule, so an alias is a false positive, which fails in the
+   safe direction. The type
    system alone catches none of these, because an untyped string constant is
    assignable to `RPCMethod` and a conversion accepts any string, so
    `Register(r, pattern, "rename_room", fn)` and
@@ -763,7 +767,7 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    correct method: a copy-pasted wrong constant shows up as a one-line diff in
    review. Ten goldens, 92 routes.
 
-   Two things keep this gate from being switched off quietly.
+   Two things make it harder to switch this gate off, and one hole stays open.
    `AssertRoutesGolden` refuses a table containing `MethodOther` *before* it
    reads or generates the golden file, so a route that degraded at
    registration can neither be baked into a regenerated golden nor
@@ -771,9 +775,18 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
    spelling. And `TestEveryRPCRouteRegistrationHasAGoldenFile` (in
    `pkg/natsrouter`) parses every non-test `.go` file in the repo: a directory
    that registers a method-bearing route must have both `testdata/routes.golden`
-   *and* a `_test.go` beside it that calls `AssertRoutesGolden`. Checking only
-   for the file would let someone delete the test and leave an unread fixture
-   that agrees with nothing.
+   *and* a `_test.go` beside it, compiled by the default build, that calls
+   `AssertRoutesGolden`. Checking only for the file would let someone delete
+   the test and leave an unread fixture that agrees with nothing; ignoring
+   build constraints would let the call move behind `//go:build integration`,
+   which `make test` never compiles.
+
+   The hole: this proves the call is *written*, not that it *runs*. A
+   `t.Skip`, an early return, or a call in a helper nothing invokes all leave
+   the gate green. No source scan closes that, so it is stated here rather
+   than claimed away. The scan also skips `.git`, `node_modules`,
+   `.superpowers`, `docs`, `.semgrep` and `_`-prefixed directories — a route
+   registered inside one of those would not be seen.
 3. **Runtime, in `addRPCRoute`**, is the backstop for whatever reaches it
    anyway: an undeclared method logs `slog.Error` and degrades that route to
    `MethodOther` (`_OTHER`) rather than panicking; a method already claimed by
@@ -789,11 +802,13 @@ Three gates keep the vocabulary closed, from cheapest to last-resort:
 
 Gate 2 has two blind spots, both by construction rather than oversight:
 
-- `Routes()` is keyed by method, so a duplicate registration within one
-  service collapses two routes into a single golden line — the file
-  *shrinks*, it does not grow a visibly-wrong entry. The router's
-  `slog.Error` on the duplicate is the louder signal for that case, not the
-  golden diff.
+- `Routes()` is keyed by *pattern*, one entry per route, so a duplicate
+  registration within one service now shows as two golden lines carrying the
+  same method — a visible diff. It was keyed by method until this was found:
+  the later registration overwrote the earlier one, and a duplicate that
+  registered *first* produced a golden byte-identical to the committed file,
+  so the only signal was one `slog.Error` at boot.
+- A `t.Skip` or an unreached call site leaves the gate green (above).
 - `RegisterVoid` routes carry no method and never enter `Routes()`, so they
   are invisible to this gate by construction. user-presence-service's four
   fire-and-forget routes (`hello`/`ping`/`activity`/`bye`) are pinned by
@@ -804,9 +819,11 @@ Names follow `<verb>_<object>[_qualifier]` in lower `snake_case`, guarded by
 (`mark_all_threads_read` is registered by both room-service and user-service —
 two halves of one operation across a hop), plus one client-only method
 (`get_presence_snapshot`), giving 92 constants. Uniqueness is per router, not
-per fleet: `service_name` + `rpc_method` is the identity key natsrouter's
-duplicate check enforces, which is what lets room-service and user-service
-each register their own `mark_all_threads_read` without colliding.
+per fleet: `service_name` + `rpc_method` is the identity key, and
+natsrouter's duplicate check is scoped to one router accordingly — it does not
+enforce the key, it only logs a collision within a service (see gate 2's blind
+spots above). That scoping is what lets room-service and user-service each
+register their own `mark_all_threads_read` without colliding.
 
 Three methods carry no live traffic today, found while auditing the
 vocabulary:

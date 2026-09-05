@@ -216,7 +216,7 @@ to `unknown` rather than minting a label.
 the subject: each of the fleet's 92 routes declares its own lower-snake-case
 `<verb>_<object>[_qualifier]` method. A duplicate claim within a service is
 logged, not rejected; each service's `testdata/routes.golden` file is what
-enforces one method per route, so there is no coarse-bucket collapsing left to
+is what pins one method per route in review, so there is no coarse-bucket collapsing left to
 describe — `get_channel_history` (SLO-4) and `get_thread_messages` (SLO-5) are
 just two entries in that one-method-per-route vocabulary, not a finer carve-out
 of a shared category. See the metrics contract's §13.1.

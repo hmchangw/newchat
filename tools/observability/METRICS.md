@@ -88,7 +88,9 @@ Publisher / request-reply (label `site`):
 
 Both RPC families carry `rpc_system_name="nats"`. `rpc_method` is a bounded operation, never the
 subject: it is declared at route registration (`natsrouter.Register`/`RegisterNoBody`/
-`RegisterOptionalBody` require a `natsmetrics.RPCMethod` constant to compile), and `RegisterVoid`
+`RegisterOptionalBody` take a required `natsmetrics.RPCMethod` argument, and `.semgrep/rpcmethod.yml`
+is what forces that argument to be a `Method*` constant — the compiler alone accepts a bare string
+literal), and `RegisterVoid`
 routes (fire-and-forget, no reply) carry no method and record no `rpc_server_call_duration_seconds`
 sample at all — they are absent from this family, not present with an empty label.
 `rpc_method="_OTHER"` is **not** a fallback bucket for an unmapped subject; it only appears when

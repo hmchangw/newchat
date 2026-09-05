@@ -8,7 +8,7 @@
 > | This plan says | What shipped |
 > | --- | --- |
 > | The fallback stays spelled `"unknown"` ("Rejected: `_OTHER` as the fallback value", below) | `MethodOther = "_OTHER"`. The rejection cited `semconv/v1.40.0/rpcconv`, a metric-helper package that carries no enum. The normative text is in `semconv/v1.40.0/attribute_group.go:13902-13934`: "When the method is not recognized … the attribute MUST be set to `_OTHER`." |
-> | An unregistered or duplicate method panics at startup | Registration logs and degrades to `_OTHER`. A telemetry label defect should not stop a process the three pre-deploy gates already guard. |
+> | An unregistered or duplicate method panics at startup | Neither panics. An unregistered method logs and degrades that route to `_OTHER`; a duplicate logs and registers both routes anyway, keeping the declared method, so their samples merge into one series. A telemetry label defect should not stop a process the pre-deploy gates already guard. |
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -53,7 +53,7 @@ function, which is the repo's own statement of what the route does.
 | `MemberStatusesPattern` | `h.listMemberStatuses` | `list_member_statuses` |
 | `MentionableSubscriptionsPattern` | `h.listMentionableSubscriptions` | `list_mentionable_subscriptions` |
 | `RoomKeyGetPattern` | `h.getRoomKey` | `get_room_key` |
-| `MessageReadPattern` | `h.messageRead` | `mark_message_read` |
+| `MessageReadPattern` | `h.messageRead` | `mark_room_read` |
 | `MessageReadReceiptPattern` | `h.messageReadReceipt` | `list_message_readers` |
 | `MessageThreadReadPattern` | `h.messageThreadRead` | `mark_thread_read` |
 | `MemberRoleUpdatePattern` | `h.updateRole` | `update_member_role` |
@@ -80,7 +80,7 @@ function, which is the repo's own statement of what the route does.
 | `MsgSurroundingPattern` | `s.LoadSurroundingMessages` | `get_surrounding_messages` |
 | `MsgGetPattern` | `s.GetMessageByID` | `get_message` |
 | `MsgGetIDsPattern` | `s.GetMessagesByIDs` | `batch_get_messages` |
-| `RoomsGet` | `s.RoomsGet` | `batch_get_rooms` |
+| `RoomsGet` | `s.RoomsGet` | `batch_get_room_previews` |
 | `MsgPinnedListPattern` | `s.ListPinnedMessages` | `list_pinned_messages` |
 | `MsgThreadParentPattern` | `s.GetThreadParentMessages` | `get_thread_parent_messages` |
 | `ThreadSubscriptionList` | `s.ListThreadSubscriptions` | `list_thread_subscriptions` |
@@ -337,7 +337,7 @@ var allRPCMethods = []RPCMethod{
 	MethodToggleMute, MethodToggleFavorite, MethodMoveChat, MethodOpenRoom,
 	MethodGetRoomAppTabs, MethodGetRoomAppCommandMenu, MethodListOrgMembers,
 	MethodListMembers, MethodListMemberStatuses, MethodListMentionableSubscriptions,
-	MethodGetRoomKey, MethodMarkMessageRead, MethodListMessageReaders,
+	MethodGetRoomKey, MethodMarkRoomRead, MethodListMessageReaders,
 	MethodMarkThreadRead, MethodUpdateMemberRole, MethodRemoveMember, MethodAddMembers,
 	MethodRenameRoom, MethodSetRoomRestricted, MethodBatchGetRoomsInfo,
 	MethodBatchGetThreadRoomsInfo, MethodMarkAllThreadsRead, MethodEnsureRoomKey,
@@ -346,7 +346,7 @@ var allRPCMethods = []RPCMethod{
 	// history-service
 	MethodGetChannelHistory, MethodGetThreadMessages, MethodGetNextMessages,
 	MethodGetSurroundingMessages, MethodGetMessage, MethodBatchGetMessages,
-	MethodBatchGetRooms, MethodListPinnedMessages, MethodGetThreadParentMessages,
+	MethodBatchGetRoomPreviews, MethodListPinnedMessages, MethodGetThreadParentMessages,
 	MethodListThreadSubscriptions, MethodEditMessage, MethodDeleteMessage,
 	MethodPinMessage, MethodUnpinMessage, MethodToggleMessageReaction,
 	MethodMigrateEditMessage, MethodMigrateDeleteMessage,
