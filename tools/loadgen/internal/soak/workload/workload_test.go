@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
 )
 
 func TestSoakNew_DefaultsAndRunDependencies(t *testing.T) {
@@ -381,7 +383,7 @@ func allRatesConfig() Config {
 }
 
 type fakeLifecycle struct {
-	window        RunWindow
+	window        run.Window
 	prepareErr    error
 	completeErr   error
 	stopErr       error
@@ -391,14 +393,14 @@ type fakeLifecycle struct {
 }
 
 func newFakeLifecycle(now time.Time) *fakeLifecycle {
-	return &fakeLifecycle{window: RunWindow{
+	return &fakeLifecycle{window: run.Window{
 		Deadline: now.Add(time.Hour), LastHeartbeatAt: now,
 	}}
 }
 
 func (l *fakeLifecycle) Prepare(
 	context.Context, string, time.Duration, bool, time.Time,
-) (RunWindow, error) {
+) (run.Window, error) {
 	return l.window, l.prepareErr
 }
 

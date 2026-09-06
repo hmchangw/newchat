@@ -5,15 +5,11 @@ import (
 	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
-// These aliases keep the existing runtime call sites stable while topology is
-// extracted. They are removed after the remaining soak packages own their
-// dependencies directly.
+// These aliases keep failure-aware room state and observation adapters stable.
+// The production entry points compose topology directly; the aliases leave
+// with the failure runtime in the follow-up PR.
 type soakTopology = soaktopology.Topology
 type soakIDs = soaktopology.IdentitySource
-
-func newProductionSoakIDs() *soakIDs {
-	return soaktopology.NewProductionIdentitySource()
-}
 
 func buildSoakTopology(
 	users []model.User,
@@ -30,17 +26,6 @@ func buildSoakTopology(
 		ChannelRatio:   cfg.ChannelRatio,
 		ChannelMembers: cfg.ChannelMembers,
 	}, siteID, seed, ids)
-}
-
-func activeSoakUserIDs(topology *soakTopology) map[string]struct{} {
-	return soaktopology.ActiveUserIDs(topology)
-}
-
-func isActiveSoakSubscription(
-	subscription *model.Subscription,
-	active map[string]struct{},
-) bool {
-	return soaktopology.IsActiveSubscription(subscription, active)
 }
 
 func isSoakRoomMember(subscription *model.Subscription) bool {

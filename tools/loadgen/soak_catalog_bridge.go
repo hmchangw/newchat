@@ -6,9 +6,9 @@ import (
 	soakcatalog "github.com/hmchangw/chat/tools/loadgen/internal/soak/catalog"
 )
 
-// These aliases keep the root runtime stable while its lanes move into
-// internal/soak packages in later commits. New package code uses the concise
-// catalog names directly.
+// These aliases are the compatibility boundary for the failure ledger and
+// root adapter tests. The production runtime composes catalog directly; the
+// aliases disappear when the failure runtime moves in the follow-up PR.
 type soakCatalogAction = soakcatalog.Action
 
 const (

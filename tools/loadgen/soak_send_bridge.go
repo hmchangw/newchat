@@ -3,8 +3,6 @@ package main
 import (
 	"math/rand"
 
-	"github.com/nats-io/nats.go"
-
 	soaksend "github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
 )
 
@@ -63,20 +61,4 @@ func newSoakSender(
 	options ...soakSenderOption,
 ) *soakSender {
 	return soaksend.New(cfg, catalog, publisher, clock, rng, ids, options...)
-}
-
-type soakResponseSubscription = soaksend.ResponseSubscription
-type soakResponseSource = soaksend.ResponseSource
-type natsSoakResponseSource = soaksend.NATSResponseSource
-
-func newNATSSoakResponseSource(nc *nats.Conn) *natsSoakResponseSource {
-	return soaksend.NewNATSResponseSource(nc)
-}
-
-func startSoakSendResponsesWithObserver(
-	source soakResponseSource,
-	sender *soakSender,
-	observer func(soakSendReplyResult),
-) (soakResponseSubscription, error) {
-	return soaksend.StartResponsesWithObserver(source, sender, observer)
 }

@@ -143,7 +143,7 @@ func newSoakPresenceIntegrationLane(
 	t *testing.T,
 	natsURL, siteID string,
 	now func() time.Time,
-) (*soakPresenceLane, *Metrics) {
+) (*soakpresence.Lane, *Metrics) {
 	t.Helper()
 	conn, err := nats.Connect(natsURL)
 	require.NoError(t, err)
@@ -151,18 +151,18 @@ func newSoakPresenceIntegrationLane(
 
 	metrics := NewMetrics()
 	t.Cleanup(metrics.stopNATSHealth)
-	lane, err := newSoakPresenceLane(
-		soakPresenceConfig{
+	lane, err := soakpresence.New(
+		soakpresence.Config{
 			SiteID: siteID, Connections: 2, QueryShare: 0,
 			Settle: time.Millisecond, TTL: time.Minute,
 			QueryBatchSize: 8, RequestTimeout: 5 * time.Second,
 		},
 		soakRoomStateTestTopology(3),
-		newNATSSoakPresencePublisher(conn),
+		soakpresence.NewNATSPublisher(conn),
 		newSoakRPCClient(
 			newNATSHistoryRequester(conn), soakRetryConfig{MaxAttempts: 1}, nil, nil,
 		),
-		metrics, &soakRoomReadRecorder{},
+		&soakPresenceMetricsAdapter{metrics: metrics}, &soakRoomReadRecorder{},
 		rand.New(rand.NewSource(1)), now,
 	)
 	require.NoError(t, err)

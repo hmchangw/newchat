@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
 )
 
 const (
@@ -73,16 +75,10 @@ type Result struct {
 	LeaseAbort   bool
 }
 
-type RunWindow struct {
-	Deadline        time.Time
-	LastHeartbeatAt time.Time
-	RestartCount    int
-}
-
 // Lifecycle owns durable run-state transitions. Workload only orchestrates
 // them, so it does not depend on the Mongo manifest representation.
 type Lifecycle interface {
-	Prepare(context.Context, string, time.Duration, bool, time.Time) (RunWindow, error)
+	Prepare(context.Context, string, time.Duration, bool, time.Time) (run.Window, error)
 	Complete(context.Context, string, time.Time) error
 	Stop(context.Context, string, time.Time) error
 	TouchHeartbeat(context.Context, string, time.Time) error
@@ -570,7 +566,7 @@ func RunHeartbeat(
 			return ctx.Err()
 		}
 		switch {
-		case errors.Is(err, ErrRunNotActive):
+		case errors.Is(err, ErrRunNotActive), errors.Is(err, run.ErrRunNotActive):
 			recordHeartbeatAttempt(observer, HeartbeatNotActive, false, completedAt)
 			return fmt.Errorf("update heartbeat: %w", err)
 		case err != nil:

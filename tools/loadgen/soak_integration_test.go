@@ -20,6 +20,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
+	soaksend "github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
 )
 
 func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
@@ -120,10 +121,10 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 		nil,
 	)
 	replies := make(chan soakSendObservation, 1)
-	responseSubscription, err := startSoakSendResponsesWithObserver(
-		newNATSSoakResponseSource(nc),
+	responseSubscription, err := soaksend.StartResponsesWithObserver(
+		soaksend.NewNATSResponseSource(nc),
 		sender,
-		func(result soakSendReplyResult) {
+		func(result soaksend.ReplyResult) {
 			replies <- soakSendObservation{result: result}
 		},
 	)

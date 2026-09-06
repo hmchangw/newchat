@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
 	soakrun "github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
@@ -26,7 +24,7 @@ const (
 )
 
 type soakWorkloadResult = soakworkload.Result
-type soakRunWindow = soakworkload.RunWindow
+type soakRunWindow = soakrun.Window
 
 //go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakLifecycleStore
 
@@ -105,10 +103,6 @@ func withSoakPacingMetrics(recorder *soakPacingMetrics) soakWorkloadOption {
 	return soakworkload.WithPacingRecorder(recorder)
 }
 
-func withSoakHeartbeatObserver(observer soakHeartbeatObserver) soakWorkloadOption {
-	return soakworkload.WithHeartbeatObserver(observer)
-}
-
 func withSoakFailureInvalidation(invalidate func(string)) soakWorkloadOption {
 	if invalidate == nil {
 		return soakworkload.WithFailureInvalidation(nil)
@@ -164,10 +158,9 @@ func newSoakWorkload(
 	if onSaturation == nil {
 		onSaturation = func() {}
 	}
-	lifecycle := &soakLifecycleAdapter{store: store}
 	return &soakWorkload{
 		inner: soakworkload.New(
-			&config, lifecycle, actions, dispatch, now, onSaturation, options...,
+			&config, soakrun.NewLifecycle(store), actions, dispatch, now, onSaturation, options...,
 		),
 		cfg: config, actions: *actions, dispatch: dispatch,
 		now: now, onSaturation: onSaturation,
@@ -221,51 +214,6 @@ func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfi
 	}
 }
 
-type soakLifecycleAdapter struct {
-	store soakLifecycleStore
-}
-
-func (a *soakLifecycleAdapter) Prepare(
-	ctx context.Context,
-	runID string,
-	duration time.Duration,
-	continuous bool,
-	now time.Time,
-) (soakworkload.RunWindow, error) {
-	if continuous {
-		return prepareContinuousSoakRun(ctx, a.store, runID, now)
-	}
-	return prepareSoakRun(ctx, a.store, runID, duration, now)
-}
-
-func (a *soakLifecycleAdapter) Complete(
-	ctx context.Context, runID string, now time.Time,
-) error {
-	return completeSoakRun(ctx, a.store, runID, now)
-}
-
-func (a *soakLifecycleAdapter) Stop(
-	ctx context.Context, runID string, now time.Time,
-) error {
-	return stopSoakRun(ctx, a.store, runID, now)
-}
-
-func (a *soakLifecycleAdapter) TouchHeartbeat(
-	ctx context.Context, runID string, at time.Time,
-) error {
-	if a.store == nil {
-		return fmt.Errorf("soak lifecycle store is required")
-	}
-	err := a.store.TouchHeartbeat(ctx, runID, at)
-	if errors.Is(err, errSoakRunNotActive) {
-		return fmt.Errorf("%w: %w", soakworkload.ErrRunNotActive, err)
-	}
-	if err != nil {
-		return fmt.Errorf("touch soak heartbeat: %w", err)
-	}
-	return nil
-}
-
 func dispatchSoakLane(
 	ctx context.Context,
 	_ string,
@@ -287,53 +235,7 @@ func prepareSoakRun(
 	duration time.Duration,
 	now time.Time,
 ) (soakRunWindow, error) {
-	if store == nil {
-		return soakRunWindow{}, fmt.Errorf("soak lifecycle store is required")
-	}
-	if runID == "" {
-		return soakRunWindow{}, fmt.Errorf("soak run ID is required")
-	}
-	if duration <= 0 {
-		return soakRunWindow{}, fmt.Errorf("soak duration must be greater than zero")
-	}
-	manifest, err := store.GetManifest(ctx, runID)
-	if err != nil {
-		return soakRunWindow{}, fmt.Errorf("load soak lifecycle: %w", err)
-	}
-	if manifest == nil {
-		return soakRunWindow{}, errSoakManifestNotFound
-	}
-	if manifest.State != soakManifestSeeded &&
-		manifest.State != soakManifestRunning &&
-		manifest.State != soakManifestCompleted {
-		return soakRunWindow{}, fmt.Errorf("soak manifest state %q cannot run", manifest.State)
-	}
-	if manifest.RunMode == soakRunModeContinuous {
-		return soakRunWindow{}, fmt.Errorf(
-			"soak manifest run mode %q cannot use a duration deadline", manifest.RunMode,
-		)
-	}
-	if manifest.Deadline == nil {
-		firstStartedAt := now.UTC()
-		deadline := firstStartedAt.Add(duration)
-		manifest.FirstStartedAt = &firstStartedAt
-		manifest.Deadline = &deadline
-		manifest.ConfiguredDuration = duration
-		manifest.RestartCount = 0
-	} else if manifest.State == soakManifestRunning {
-		manifest.RestartCount++
-	}
-	manifest.State = soakManifestRunning
-	heartbeat := now.UTC()
-	manifest.LastHeartbeatAt = &heartbeat
-	manifest.UpdatedAt = heartbeat
-	if err := store.PutManifest(ctx, manifest); err != nil {
-		return soakRunWindow{}, fmt.Errorf("mark soak run running: %w", err)
-	}
-	return soakRunWindow{
-		Deadline: *manifest.Deadline, LastHeartbeatAt: heartbeat,
-		RestartCount: manifest.RestartCount,
-	}, nil
+	return soakrun.NewLifecycle(store).Prepare(ctx, runID, duration, false, now)
 }
 
 func prepareContinuousSoakRun(
@@ -342,45 +244,7 @@ func prepareContinuousSoakRun(
 	runID string,
 	now time.Time,
 ) (soakRunWindow, error) {
-	if store == nil {
-		return soakRunWindow{}, fmt.Errorf("soak lifecycle store is required")
-	}
-	if runID == "" {
-		return soakRunWindow{}, fmt.Errorf("soak run ID is required")
-	}
-	manifest, err := store.GetManifest(ctx, runID)
-	if err != nil {
-		return soakRunWindow{}, fmt.Errorf("load continuous soak lifecycle: %w", err)
-	}
-	if manifest == nil {
-		return soakRunWindow{}, errSoakManifestNotFound
-	}
-	if manifest.RunMode != soakRunModeContinuous {
-		return soakRunWindow{}, fmt.Errorf("soak manifest run mode %q is not continuous", manifest.RunMode)
-	}
-	if manifest.State != soakManifestSeeded && manifest.State != soakManifestRunning &&
-		manifest.State != soakManifestStopped {
-		return soakRunWindow{}, fmt.Errorf("continuous soak manifest state %q cannot run", manifest.State)
-	}
-	startedAt := now.UTC()
-	if manifest.FirstStartedAt == nil {
-		manifest.FirstStartedAt = &startedAt
-		manifest.RestartCount = 0
-	} else {
-		manifest.RestartCount++
-	}
-	manifest.State = soakManifestRunning
-	manifest.Deadline = nil
-	manifest.ConfiguredDuration = 0
-	manifest.LastStoppedAt = nil
-	manifest.LastHeartbeatAt = &startedAt
-	manifest.UpdatedAt = startedAt
-	if err := store.PutManifest(ctx, manifest); err != nil {
-		return soakRunWindow{}, fmt.Errorf("mark continuous soak run running: %w", err)
-	}
-	return soakRunWindow{
-		LastHeartbeatAt: startedAt, RestartCount: manifest.RestartCount,
-	}, nil
+	return soakrun.NewLifecycle(store).Prepare(ctx, runID, 0, true, now)
 }
 
 func stopSoakRun(
@@ -389,33 +253,7 @@ func stopSoakRun(
 	runID string,
 	now time.Time,
 ) error {
-	if store == nil {
-		return fmt.Errorf("soak lifecycle store is required")
-	}
-	if runID == "" {
-		return fmt.Errorf("soak run ID is required")
-	}
-	manifest, err := store.GetManifest(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("load soak manifest for stop: %w", err)
-	}
-	if manifest == nil {
-		return errSoakManifestNotFound
-	}
-	if manifest.State == soakManifestStopped {
-		return nil
-	}
-	if manifest.State != soakManifestRunning {
-		return fmt.Errorf("soak manifest state %q cannot stop", manifest.State)
-	}
-	stoppedAt := now.UTC()
-	manifest.State = soakManifestStopped
-	manifest.LastStoppedAt = &stoppedAt
-	manifest.UpdatedAt = stoppedAt
-	if err := store.PutManifest(ctx, manifest); err != nil {
-		return fmt.Errorf("mark soak run stopped: %w", err)
-	}
-	return nil
+	return soakrun.NewLifecycle(store).Stop(ctx, runID, now)
 }
 
 func completeSoakRun(
@@ -424,21 +262,7 @@ func completeSoakRun(
 	runID string,
 	now time.Time,
 ) error {
-	manifest, err := store.GetManifest(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("load soak manifest for completion: %w", err)
-	}
-	if manifest == nil {
-		return errSoakManifestNotFound
-	}
-	completedAt := now.UTC()
-	manifest.State = soakManifestCompleted
-	manifest.CompletedAt = &completedAt
-	manifest.UpdatedAt = completedAt
-	if err := store.PutManifest(ctx, manifest); err != nil {
-		return fmt.Errorf("mark soak run completed: %w", err)
-	}
-	return nil
+	return soakrun.NewLifecycle(store).Complete(ctx, runID, now)
 }
 
 func minimumSoakHeartbeatStaleAfter(
@@ -469,7 +293,7 @@ func runSoakHeartbeat(
 		wait = waitRetry
 	}
 	return soakworkload.RunHeartbeat(
-		ctx, &soakLifecycleAdapter{store: store}, runID, healthyTicks,
+		ctx, soakrun.NewLifecycle(store), runID, healthyTicks,
 		attemptTimeout, retryInterval, staleAfter, shutdownMargin,
 		lastSuccessAt, wait, now, observer,
 	)

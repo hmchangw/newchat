@@ -2,9 +2,9 @@ package main
 
 import soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
 
-// These aliases keep the existing lanes stable while the RPC transport moves
-// behind an explicit package boundary. They are removed as lanes move to their
-// owning packages.
+// These aliases keep the failure ledger and root RPC adapters stable while the
+// production runtime composes rpc directly. They are removed with the failure
+// runtime in the follow-up PR.
 type soakRPCAction = soakrpc.Action
 
 const (
