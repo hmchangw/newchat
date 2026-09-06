@@ -40,10 +40,6 @@ const (
 	soakRPCSearchIndexProbe = soakrpc.ActionSearchIndexProbe
 )
 
-func validSoakRPCAction(action soakRPCAction) bool {
-	return soakrpc.ValidAction(action)
-}
-
 type soakErrorClass = soakrpc.ErrorClass
 
 const (
@@ -75,10 +71,6 @@ const (
 	soakErrorReasonUnknown     = soakrpc.ReasonUnknown
 	soakReasonResponseTooLarge = soakrpc.ReasonResponseTooLarge
 )
-
-func validSoakErrorReason(reason soakErrorReason) bool {
-	return soakrpc.ValidErrorReason(reason)
-}
 
 func parseSoakErrorEnvelope(data []byte) error {
 	return soakrpc.ParseErrorEnvelope(data)

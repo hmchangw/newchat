@@ -58,10 +58,6 @@ const (
 	soakVerifyFieldPagination = soakread.VerifyFieldPagination
 )
 
-func validSoakVerifyField(field soakVerifyField) bool {
-	return soakread.ValidVerifyField(field)
-}
-
 type soakVerifyConfig = soakread.VerifyConfig
 type soakVerifyMessage = soakread.VerifyMessage
 type soakVerifyResult = soakread.VerifyResult
