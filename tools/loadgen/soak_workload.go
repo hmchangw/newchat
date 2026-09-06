@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	soakrun "github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
 	soakworkload "github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
@@ -27,6 +28,8 @@ const (
 type soakWorkloadResult = soakworkload.Result
 type soakRunWindow = soakworkload.RunWindow
 
+//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakLifecycleStore
+
 type soakLifecycleStore interface {
 	GetManifest(context.Context, string) (*soakManifest, error)
 	PutManifest(context.Context, *soakManifest) error
@@ -34,8 +37,8 @@ type soakLifecycleStore interface {
 }
 
 var (
-	errSoakManifestNotFound      = errors.New("soak run manifest not found")
-	errSoakRunNotActive          = errors.New("soak run is not active")
+	errSoakManifestNotFound      = soakrun.ErrManifestNotFound
+	errSoakRunNotActive          = soakrun.ErrRunNotActive
 	errSoakHeartbeatLeaseInvalid = soakworkload.ErrHeartbeatLeaseInvalid
 	errSoakHeartbeatLeaseAtRisk  = soakworkload.ErrHeartbeatLeaseAtRisk
 )

@@ -1,4 +1,4 @@
-package main
+package run
 
 import (
 	"context"
@@ -19,39 +19,25 @@ import (
 	"github.com/hmchangw/chat/pkg/atrest"
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 )
 
 const (
-	soakManifestCollection  = "loadgen_soak_runs"
-	soakOwnershipCollection = "loadgen_soak_ownership"
-	soakInsertBatchSize     = 1000
-	soakOwnershipChunkSize  = 2000
+	ManifestCollection  = "loadgen_soak_runs"
+	OwnershipCollection = "loadgen_soak_ownership"
+	insertBatchSize     = 1000
 )
 
-//go:generate mockgen -destination=mock_soak_store_test.go -package=main . soakSeedStore,soakLifecycleStore
-
-type soakSeedStore interface {
-	FindManifest(ctx context.Context, runID string) (*soakManifest, error)
-	BorrowUsers(ctx context.Context, siteID string, limit int) ([]model.User, error)
-	FindConflictingRoomIDs(ctx context.Context, runID string, roomIDs []string) ([]string, error)
-	ResetOwned(ctx context.Context, runID string) error
-	PutManifest(ctx context.Context, manifest *soakManifest) error
-	InsertOwnedRooms(ctx context.Context, runID string, rooms []model.Room) error
-	InsertOwnedSubscriptions(ctx context.Context, runID string, subscriptions []model.Subscription) error
-	ReplaceOwnershipChunks(ctx context.Context, runID string, chunks [][]string) error
-}
-
-type mongoSoakStore struct {
+type Mongo struct {
 	db *mongo.Database
 }
 
-var (
-	_ soakSeedStore      = (*mongoSoakStore)(nil)
-	_ soakTeardownStore  = (*mongoSoakStore)(nil)
-	_ soakLifecycleStore = (*mongoSoakStore)(nil)
-)
+func NewMongo(db *mongo.Database) *Mongo { return &Mongo{db: db} }
 
-func soakUserFilter(siteID string) bson.D {
+var _ SeedStore = (*Mongo)(nil)
+var _ TeardownStore = (*Mongo)(nil)
+
+func userFilter(siteID string) bson.D {
 	return bson.D{
 		{Key: "siteId", Value: siteID},
 		{Key: "active", Value: bson.D{{Key: "$ne", Value: false}}},
@@ -69,7 +55,7 @@ func soakUserFilter(siteID string) bson.D {
 	}
 }
 
-func soakUserProjection() bson.D {
+func userProjection() bson.D {
 	return bson.D{
 		{Key: "_id", Value: 1},
 		{Key: "account", Value: 1},
@@ -81,7 +67,7 @@ func soakUserProjection() bson.D {
 	}
 }
 
-func (s *mongoSoakStore) BorrowUsers(
+func (s *Mongo) BorrowUsers(
 	ctx context.Context,
 	siteID string,
 	limit int,
@@ -90,9 +76,9 @@ func (s *mongoSoakStore) BorrowUsers(
 		return nil, fmt.Errorf("borrowed soak user limit must be greater than zero")
 	}
 	opts := options.Find().
-		SetProjection(soakUserProjection()).
+		SetProjection(userProjection()).
 		SetLimit(int64(limit))
-	cursor, err := s.db.Collection("users").Find(ctx, soakUserFilter(siteID), opts)
+	cursor, err := s.db.Collection("users").Find(ctx, userFilter(siteID), opts)
 	if err != nil {
 		return nil, fmt.Errorf("find borrowed soak users: %w", err)
 	}
@@ -105,14 +91,14 @@ func (s *mongoSoakStore) BorrowUsers(
 	return users, nil
 }
 
-func (s *mongoSoakStore) ResetOwned(ctx context.Context, runID string) error {
+func (s *Mongo) ResetOwned(ctx context.Context, runID string) error {
 	after := ""
 	for {
 		page, err := s.NextOwnershipPage(
 			ctx,
 			runID,
 			after,
-			soakOwnershipChunkSize,
+			OwnershipChunkSize,
 		)
 		if err != nil {
 			return fmt.Errorf("page prior soak ownership: %w", err)
@@ -134,13 +120,13 @@ func (s *mongoSoakStore) ResetOwned(ctx context.Context, runID string) error {
 	return nil
 }
 
-func (s *mongoSoakStore) FindConflictingRoomIDs(
+func (s *Mongo) FindConflictingRoomIDs(
 	ctx context.Context,
 	runID string,
 	roomIDs []string,
 ) ([]string, error) {
 	var conflicts []string
-	for _, batch := range chunkSoakRoomIDs(roomIDs, soakInsertBatchSize) {
+	for _, batch := range ChunkRoomIDs(roomIDs, insertBatchSize) {
 		cursor, err := s.db.Collection("rooms").Find(
 			ctx,
 			bson.D{
@@ -169,14 +155,14 @@ func (s *mongoSoakStore) FindConflictingRoomIDs(
 	return conflicts, nil
 }
 
-// soakManifestWriteConcern keeps every manifest lease write durable across a
+// manifestWriteConcern keeps every manifest lease write durable across a
 // replica-set failover. The manifest is the fence seed and teardown read to
 // decide whether a run is still alive, so an acknowledged write a rollback can
 // erase would let teardown act on a heartbeat the surviving primary never saw
 // while the run is still dispatching. Most deployments already default to
 // majority; a PSA topology or a URI carrying w:1 does not, and the lease is
 // too load-bearing to inherit that.
-func soakManifestWriteConcern() *writeconcern.WriteConcern {
+func manifestWriteConcern() *writeconcern.WriteConcern {
 	concern := writeconcern.Majority()
 	journal := true
 	concern.Journal = &journal
@@ -187,14 +173,14 @@ func soakManifestWriteConcern() *writeconcern.WriteConcern {
 // the lease concern cannot be lost by adding a write that reaches for the
 // plain collection. Reads are unaffected by write concern and use s.db
 // directly.
-func (s *mongoSoakStore) manifestCollection() *mongo.Collection {
+func (s *Mongo) manifestCollection() *mongo.Collection {
 	return s.db.Collection(
-		soakManifestCollection,
-		options.Collection().SetWriteConcern(soakManifestWriteConcern()),
+		ManifestCollection,
+		options.Collection().SetWriteConcern(manifestWriteConcern()),
 	)
 }
 
-func (s *mongoSoakStore) PutManifest(ctx context.Context, manifest *soakManifest) error {
+func (s *Mongo) PutManifest(ctx context.Context, manifest *Manifest) error {
 	_, err := s.manifestCollection().ReplaceOne(
 		ctx,
 		bson.D{{Key: "_id", Value: manifest.ID}},
@@ -207,18 +193,18 @@ func (s *mongoSoakStore) PutManifest(ctx context.Context, manifest *soakManifest
 	return nil
 }
 
-func (s *mongoSoakStore) GetManifest(
+func (s *Mongo) GetManifest(
 	ctx context.Context,
 	runID string,
-) (*soakManifest, error) {
-	var manifest soakManifest
-	err := s.db.Collection(soakManifestCollection).FindOne(
+) (*Manifest, error) {
+	var manifest Manifest
+	err := s.db.Collection(ManifestCollection).FindOne(
 		ctx,
 		bson.D{{Key: "_id", Value: runID}},
-		options.FindOne().SetProjection(soakManifestProjection()),
+		options.FindOne().SetProjection(manifestProjection()),
 	).Decode(&manifest)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, errSoakManifestNotFound
+		return nil, ErrManifestNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get soak manifest %q: %w", runID, err)
@@ -226,21 +212,21 @@ func (s *mongoSoakStore) GetManifest(
 	return &manifest, nil
 }
 
-// soakHeartbeatUpdate advances the persisted lease without ever moving it
+// heartbeatUpdate advances the persisted lease without ever moving it
 // backward. An attempt abandoned at its client timeout may still be executing
 // server-side, so it can land after a later retry has already written a newer
 // beat; $set would then regress the timestamp teardown reads while the loop
 // goes on trusting the newer one it saw acknowledged. $max makes the write
 // order irrelevant. MatchedCount still distinguishes an inactive manifest,
 // because the filter is what decides a match, not whether a field moved.
-func soakHeartbeatUpdate(heartbeat time.Time) bson.D {
+func heartbeatUpdate(heartbeat time.Time) bson.D {
 	return bson.D{{Key: "$max", Value: bson.D{
 		{Key: "lastHeartbeatAt", Value: heartbeat},
 		{Key: "updatedAt", Value: heartbeat},
 	}}}
 }
 
-func (s *mongoSoakStore) TouchHeartbeat(
+func (s *Mongo) TouchHeartbeat(
 	ctx context.Context,
 	runID string,
 	at time.Time,
@@ -249,32 +235,32 @@ func (s *mongoSoakStore) TouchHeartbeat(
 		ctx,
 		bson.D{
 			{Key: "_id", Value: runID},
-			{Key: "state", Value: soakManifestRunning},
+			{Key: "state", Value: StateRunning},
 		},
-		soakHeartbeatUpdate(at.UTC()),
+		heartbeatUpdate(at.UTC()),
 	)
 	if err != nil {
 		return fmt.Errorf("touch soak manifest %q heartbeat: %w", runID, err)
 	}
 	if result.MatchedCount == 0 {
 		return fmt.Errorf(
-			"touch soak manifest %q heartbeat: %w", runID, errSoakRunNotActive,
+			"touch soak manifest %q heartbeat: %w", runID, ErrRunNotActive,
 		)
 	}
 	return nil
 }
 
-func (s *mongoSoakStore) LoadTopology(
+func (s *Mongo) LoadTopology(
 	ctx context.Context,
 	runID string,
 	siteID string,
-) (soakTopology, error) {
+) (topology.Topology, error) {
 	manifest, err := s.FindManifest(ctx, runID)
 	if err != nil {
-		return soakTopology{}, fmt.Errorf("load soak topology manifest: %w", err)
+		return topology.Topology{}, fmt.Errorf("load soak topology manifest: %w", err)
 	}
 	if manifest == nil {
-		return soakTopology{}, fmt.Errorf(
+		return topology.Topology{}, fmt.Errorf(
 			"load soak topology for run %q: manifest not found",
 			runID,
 		)
@@ -288,16 +274,16 @@ func (s *mongoSoakStore) LoadTopology(
 			ctx,
 			runID,
 			after,
-			soakOwnershipChunkSize,
+			OwnershipChunkSize,
 		)
 		if pageErr != nil {
-			return soakTopology{}, fmt.Errorf("page soak topology ownership: %w", pageErr)
+			return topology.Topology{}, fmt.Errorf("page soak topology ownership: %w", pageErr)
 		}
 		if page == nil {
 			break
 		}
 		if page.Cursor == "" || page.Cursor <= after {
-			return soakTopology{}, fmt.Errorf("soak topology ownership cursor did not advance")
+			return topology.Topology{}, fmt.Errorf("soak topology ownership cursor did not advance")
 		}
 		pageRooms, pageSubscriptions, loadErr := s.loadOwnedTopologyPage(
 			ctx,
@@ -306,20 +292,20 @@ func (s *mongoSoakStore) LoadTopology(
 			page.RoomIDs,
 		)
 		if loadErr != nil {
-			return soakTopology{}, loadErr
+			return topology.Topology{}, loadErr
 		}
 		rooms = append(rooms, pageRooms...)
 		subscriptions = append(subscriptions, pageSubscriptions...)
 		after = page.Cursor
 	}
 	if len(rooms) == 0 {
-		return soakTopology{}, fmt.Errorf(
+		return topology.Topology{}, fmt.Errorf(
 			"load soak topology for run %q: no owned rooms",
 			runID,
 		)
 	}
 	if len(subscriptions) == 0 {
-		return soakTopology{}, fmt.Errorf(
+		return topology.Topology{}, fmt.Errorf(
 			"load soak topology for run %q: no owned subscriptions",
 			runID,
 		)
@@ -339,7 +325,7 @@ func (s *mongoSoakStore) LoadTopology(
 	for _, userID := range manifest.ActiveUserIDs {
 		user, ok := usersByID[userID]
 		if !ok {
-			return soakTopology{}, fmt.Errorf(
+			return topology.Topology{}, fmt.Errorf(
 				"load soak topology for run %q: active user %q has no subscription",
 				runID,
 				userID,
@@ -348,7 +334,7 @@ func (s *mongoSoakStore) LoadTopology(
 		activeUsers = append(activeUsers, user)
 	}
 	if len(activeUsers) != manifest.ActiveUserCount {
-		return soakTopology{}, fmt.Errorf(
+		return topology.Topology{}, fmt.Errorf(
 			"load soak topology for run %q: active user count mismatch",
 			runID,
 		)
@@ -382,19 +368,19 @@ func (s *mongoSoakStore) LoadTopology(
 		borrowedUsers = append(borrowedUsers, candidate)
 	}
 	if len(borrowedUsers) == 0 {
-		return soakTopology{}, fmt.Errorf(
+		return topology.Topology{}, fmt.Errorf(
 			"load soak topology for run %q: no borrowed users",
 			runID,
 		)
 	}
 
-	return soakTopology{
+	return topology.Topology{
 		BorrowedUsers: borrowedUsers, ActiveUsers: activeUsers,
 		Rooms: rooms, Subscriptions: subscriptions,
 	}, nil
 }
 
-func (s *mongoSoakStore) loadOwnedTopologyPage(
+func (s *Mongo) loadOwnedTopologyPage(
 	ctx context.Context,
 	runID string,
 	siteID string,
@@ -483,7 +469,7 @@ func (s *mongoSoakStore) loadOwnedTopologyPage(
 	return rooms, subscriptions, nil
 }
 
-func (s *mongoSoakStore) HasWrappedDEK(
+func (s *Mongo) HasWrappedDEK(
 	ctx context.Context,
 	roomID string,
 ) (bool, error) {
@@ -510,7 +496,7 @@ func (s *mongoSoakStore) HasWrappedDEK(
 	return len(record.WrappedDEK) > 0, nil
 }
 
-func soakManifestProjection() bson.D {
+func manifestProjection() bson.D {
 	return bson.D{
 		{Key: "_id", Value: 1},
 		{Key: "state", Value: 1},
@@ -538,14 +524,14 @@ func soakManifestProjection() bson.D {
 	}
 }
 
-func (s *mongoSoakStore) InsertOwnedRooms(
+func (s *Mongo) InsertOwnedRooms(
 	ctx context.Context,
 	runID string,
 	rooms []model.Room,
 ) error {
 	docs := make([]any, len(rooms))
 	for i := range rooms {
-		docs[i] = ownedSoakRoom{Room: rooms[i], SoakRunID: runID}
+		docs[i] = ownedRoom{Room: rooms[i], SoakRunID: runID}
 	}
 	if err := insertSoakBatches(ctx, s.db.Collection("rooms"), docs); err != nil {
 		return fmt.Errorf("insert owned soak rooms: %w", err)
@@ -553,14 +539,14 @@ func (s *mongoSoakStore) InsertOwnedRooms(
 	return nil
 }
 
-func (s *mongoSoakStore) InsertOwnedSubscriptions(
+func (s *Mongo) InsertOwnedSubscriptions(
 	ctx context.Context,
 	runID string,
 	subscriptions []model.Subscription,
 ) error {
 	docs := make([]any, len(subscriptions))
 	for i := range subscriptions {
-		docs[i] = ownedSoakSubscription{
+		docs[i] = ownedSubscription{
 			Subscription: subscriptions[i],
 			SoakRunID:    runID,
 		}
@@ -571,18 +557,18 @@ func (s *mongoSoakStore) InsertOwnedSubscriptions(
 	return nil
 }
 
-func (s *mongoSoakStore) ReplaceOwnershipChunks(
+func (s *Mongo) ReplaceOwnershipChunks(
 	ctx context.Context,
 	runID string,
 	chunks [][]string,
 ) error {
-	collection := s.db.Collection(soakOwnershipCollection)
-	if _, err := collection.DeleteMany(ctx, soakOwnershipIDFilter(runID, "")); err != nil {
+	collection := s.db.Collection(OwnershipCollection)
+	if _, err := collection.DeleteMany(ctx, ownershipIDFilter(runID, "")); err != nil {
 		return fmt.Errorf("delete prior ownership chunks for run %q: %w", runID, err)
 	}
 	docs := make([]any, len(chunks))
 	for i := range chunks {
-		docs[i] = soakOwnershipChunk{
+		docs[i] = ownershipChunk{
 			ID:        fmt.Sprintf("%s:%06d", runID, i),
 			SoakRunID: runID,
 			RoomIDs:   append([]string(nil), chunks[i]...),
@@ -595,8 +581,8 @@ func (s *mongoSoakStore) ReplaceOwnershipChunks(
 }
 
 func insertSoakBatches(ctx context.Context, collection *mongo.Collection, docs []any) error {
-	for start := 0; start < len(docs); start += soakInsertBatchSize {
-		end := min(start+soakInsertBatchSize, len(docs))
+	for start := 0; start < len(docs); start += insertBatchSize {
+		end := min(start+insertBatchSize, len(docs))
 		if _, err := collection.InsertMany(ctx, docs[start:end]); err != nil {
 			return fmt.Errorf("insert batch into %s: %w", collection.Name(), err)
 		}
@@ -604,16 +590,16 @@ func insertSoakBatches(ctx context.Context, collection *mongo.Collection, docs [
 	return nil
 }
 
-func (s *mongoSoakStore) FindManifest(
+func (s *Mongo) FindManifest(
 	ctx context.Context,
 	runID string,
-) (*soakManifest, error) {
-	var manifest soakManifest
-	err := s.db.Collection(soakManifestCollection).
+) (*Manifest, error) {
+	var manifest Manifest
+	err := s.db.Collection(ManifestCollection).
 		FindOne(
 			ctx,
 			bson.D{{Key: "_id", Value: runID}},
-			options.FindOne().SetProjection(soakManifestProjection()),
+			options.FindOne().SetProjection(manifestProjection()),
 		).
 		Decode(&manifest)
 	if err == nil {
@@ -625,16 +611,16 @@ func (s *mongoSoakStore) FindManifest(
 	return nil, fmt.Errorf("find soak manifest %q: %w", runID, err)
 }
 
-func (s *mongoSoakStore) NextOwnershipPage(
+func (s *Mongo) NextOwnershipPage(
 	ctx context.Context,
 	runID string,
 	after string,
 	limit int,
-) (*soakOwnershipPage, error) {
-	var chunk soakOwnershipChunk
-	err := s.db.Collection(soakOwnershipCollection).FindOne(
+) (*OwnershipPage, error) {
+	var chunk ownershipChunk
+	err := s.db.Collection(OwnershipCollection).FindOne(
 		ctx,
-		soakOwnershipIDFilter(runID, after),
+		ownershipIDFilter(runID, after),
 		options.FindOne().
 			SetProjection(bson.D{
 				{Key: "_id", Value: 1},
@@ -656,13 +642,13 @@ func (s *mongoSoakStore) NextOwnershipPage(
 			limit,
 		)
 	}
-	return &soakOwnershipPage{
+	return &OwnershipPage{
 		Cursor:  chunk.ID,
 		RoomIDs: chunk.RoomIDs,
 	}, nil
 }
 
-func soakOwnershipIDFilter(runID string, after string) bson.D {
+func ownershipIDFilter(runID string, after string) bson.D {
 	lowerOperator := "$gte"
 	lower := runID + ":"
 	if after != "" {
@@ -678,7 +664,7 @@ func soakOwnershipIDFilter(runID string, after string) bson.D {
 	}}
 }
 
-func (s *mongoSoakStore) DeleteOwnedRoomBatch(
+func (s *Mongo) DeleteOwnedRoomBatch(
 	ctx context.Context,
 	runID string,
 	roomIDs []string,
@@ -738,7 +724,7 @@ func (s *mongoSoakStore) DeleteOwnedRoomBatch(
 	return nil
 }
 
-func (s *mongoSoakStore) deleteOwnedThreads(
+func (s *Mongo) deleteOwnedThreads(
 	ctx context.Context,
 	runID string,
 	roomFilter bson.D,
@@ -752,7 +738,7 @@ func (s *mongoSoakStore) deleteOwnedThreads(
 		return fmt.Errorf("find thread rooms for soak run %q: %w", runID, err)
 	}
 
-	threadRoomIDs := make([]string, 0, soakInsertBatchSize)
+	threadRoomIDs := make([]string, 0, insertBatchSize)
 	deleteThreadSubscriptions := func() error {
 		if len(threadRoomIDs) == 0 {
 			return nil
@@ -784,7 +770,7 @@ func (s *mongoSoakStore) deleteOwnedThreads(
 			return fmt.Errorf("decode thread room for soak run %q: %w", runID, err)
 		}
 		threadRoomIDs = append(threadRoomIDs, threadRoom.ID)
-		if len(threadRoomIDs) == soakInsertBatchSize {
+		if len(threadRoomIDs) == insertBatchSize {
 			if err := deleteThreadSubscriptions(); err != nil {
 				_ = cursor.Close(ctx)
 				return err
@@ -808,23 +794,23 @@ func (s *mongoSoakStore) deleteOwnedThreads(
 	return nil
 }
 
-func (s *mongoSoakStore) DeleteOwnership(ctx context.Context, runID string) error {
-	if _, err := s.db.Collection(soakOwnershipCollection).DeleteMany(
+func (s *Mongo) DeleteOwnership(ctx context.Context, runID string) error {
+	if _, err := s.db.Collection(OwnershipCollection).DeleteMany(
 		ctx,
-		soakOwnershipIDFilter(runID, ""),
+		ownershipIDFilter(runID, ""),
 	); err != nil {
 		return fmt.Errorf("delete ownership for soak run %q: %w", runID, err)
 	}
 	return nil
 }
 
-func (s *mongoSoakStore) MarkCleaned(ctx context.Context, runID string) error {
+func (s *Mongo) MarkCleaned(ctx context.Context, runID string) error {
 	now := time.Now().UTC()
 	result, err := s.manifestCollection().UpdateOne(
 		ctx,
 		bson.D{{Key: "_id", Value: runID}},
 		bson.D{{Key: "$set", Value: bson.D{
-			{Key: "state", Value: soakManifestCleaned},
+			{Key: "state", Value: StateCleaned},
 			{Key: "updatedAt", Value: now},
 			{Key: "cleanedAt", Value: now},
 		}}},
@@ -838,37 +824,34 @@ func (s *mongoSoakStore) MarkCleaned(ctx context.Context, runID string) error {
 	return nil
 }
 
-type ownedSoakRoom struct {
+type ownedRoom struct {
 	model.Room `bson:",inline"`
 	SoakRunID  string `bson:"soakRunId"`
 }
 
-type ownedSoakSubscription struct {
+type ownedSubscription struct {
 	model.Subscription `bson:",inline"`
 	SoakRunID          string `bson:"soakRunId"`
 }
 
-type soakOwnershipChunk struct {
+type ownershipChunk struct {
 	ID        string   `bson:"_id"`
 	SoakRunID string   `bson:"soakRunId"`
 	RoomIDs   []string `bson:"roomIds"`
 }
 
-// soakRoomStateStore is declared by its consumers in soak_roommember.go.
-var _ soakRoomStateStore = (*mongoSoakStore)(nil)
-
 // primary routes a read at the replica-set primary. The shared soak client
 // connects with SecondaryPreferred, and a lagging secondary would report a
 // completed write as missing — turning replication lag into a false data-loss
 // claim during exactly the failures this run is measuring.
-func (s *mongoSoakStore) primary(name string) *mongo.Collection {
+func (s *Mongo) primary(name string) *mongo.Collection {
 	return mongoutil.CollectionWithReadPreference(s.db.Collection(name), readpref.Primary())
 }
 
-// soakCreatedRoomPrefix is the name every room the create lane makes starts
+// CreatedRoomPrefix is the name every room the create lane makes starts
 // with. It is what separates them from the far larger seeded population, which
 // shares the same ownership records.
-func soakCreatedRoomPrefix(runID string) string {
+func CreatedRoomPrefix(runID string) string {
 	return fmt.Sprintf("soak-%s-created-", runID)
 }
 
@@ -879,7 +862,7 @@ func soakCreatedRoomPrefix(runID string) string {
 // It counts by name prefix rather than by ownership, because the seeded rooms
 // carry the same ownership marker and outnumber the budget many times over —
 // counting those would zero the allowance the moment any process restarted.
-func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (int, error) {
+func (s *Mongo) CountCreatedRooms(ctx context.Context, runID string) (int, error) {
 	if runID == "" {
 		return 0, fmt.Errorf("count created soak rooms requires a run ID")
 	}
@@ -891,7 +874,7 @@ func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (i
 	// allowance on every restart.
 	total, err := s.primary("rooms").CountDocuments(ctx, bson.D{
 		{Key: "name", Value: bson.D{
-			{Key: "$regex", Value: "^" + regexp.QuoteMeta(soakCreatedRoomPrefix(runID))},
+			{Key: "$regex", Value: "^" + regexp.QuoteMeta(CreatedRoomPrefix(runID))},
 		}},
 	})
 	if err != nil {
@@ -905,7 +888,7 @@ func (s *mongoSoakStore) CountCreatedRooms(ctx context.Context, runID string) (i
 // identifier the run can journal ahead of the request — and therefore the only
 // way a replacement process can find, verify and take ownership of a room whose
 // reply was lost.
-func (s *mongoSoakStore) RoomIDByName(
+func (s *Mongo) RoomIDByName(
 	ctx context.Context,
 	siteID, name string,
 ) (string, bool, error) {
@@ -932,7 +915,7 @@ func (s *mongoSoakStore) RoomIDByName(
 	return document.ID, true, nil
 }
 
-func (s *mongoSoakStore) RoomName(ctx context.Context, roomID string) (string, bool, error) {
+func (s *Mongo) RoomName(ctx context.Context, roomID string) (string, bool, error) {
 	if roomID == "" {
 		return "", false, fmt.Errorf("read soak room name requires a room ID")
 	}
@@ -956,7 +939,7 @@ func (s *mongoSoakStore) RoomName(ctx context.Context, roomID string) (string, b
 	return document.Name, true, nil
 }
 
-func (s *mongoSoakStore) IsRoomMember(
+func (s *Mongo) IsRoomMember(
 	ctx context.Context,
 	roomID, account string,
 ) (bool, error) {
@@ -980,7 +963,7 @@ func (s *mongoSoakStore) IsRoomMember(
 	return true, nil
 }
 
-func (s *mongoSoakStore) SubscriptionMuted(
+func (s *Mongo) SubscriptionMuted(
 	ctx context.Context,
 	roomID, account string,
 ) (bool, bool, error) {
@@ -1013,7 +996,7 @@ func (s *mongoSoakStore) SubscriptionMuted(
 // SubscriptionLastSeen reads the authoritative read cursor. mark-read only ever
 // moves it forward, so comparing two server-written values proves the write
 // landed without trusting loadgen's clock.
-func (s *mongoSoakStore) SubscriptionLastSeen(
+func (s *Mongo) SubscriptionLastSeen(
 	ctx context.Context,
 	roomID, account string,
 ) (time.Time, bool, error) {
@@ -1050,7 +1033,7 @@ func (s *mongoSoakStore) SubscriptionLastSeen(
 // only deletes rooms carrying this run's marker and only reaches rooms listed
 // in an ownership chunk, so both are needed or the create lane would leave its
 // rooms behind forever.
-func (s *mongoSoakStore) AppendOwnedRooms(
+func (s *Mongo) AppendOwnedRooms(
 	ctx context.Context,
 	runID string,
 	roomIDs []string,
@@ -1093,9 +1076,9 @@ func (s *mongoSoakStore) AppendOwnedRooms(
 			"runId", runID, "requested", len(roomIDs), "matched", marked.MatchedCount)
 	}
 
-	collection := s.db.Collection(soakOwnershipCollection)
-	for start := 0; start < len(roomIDs); start += soakOwnershipChunkSize {
-		end := min(start+soakOwnershipChunkSize, len(roomIDs))
+	collection := s.db.Collection(OwnershipCollection)
+	for start := 0; start < len(roomIDs); start += OwnershipChunkSize {
+		end := min(start+OwnershipChunkSize, len(roomIDs))
 		if err := s.insertOwnershipChunk(ctx, collection, runID, roomIDs[start:end]); err != nil {
 			return err
 		}
@@ -1107,7 +1090,7 @@ func (s *mongoSoakStore) AppendOwnedRooms(
 // concurrent appends that computed the same next index. Reconciliation runs
 // from several lane slots at once, so the read-then-insert is genuinely
 // concurrent and a lost race would strand the room outside teardown's reach.
-func (s *mongoSoakStore) insertOwnershipChunk(
+func (s *Mongo) insertOwnershipChunk(
 	ctx context.Context,
 	collection *mongo.Collection,
 	runID string,
@@ -1119,7 +1102,7 @@ func (s *mongoSoakStore) insertOwnershipChunk(
 		if err != nil {
 			return err
 		}
-		_, err = collection.InsertOne(ctx, soakOwnershipChunk{
+		_, err = collection.InsertOne(ctx, ownershipChunk{
 			ID:        fmt.Sprintf("%s:%06d", runID, next+attempt),
 			SoakRunID: runID,
 			RoomIDs:   append([]string(nil), roomIDs...),
@@ -1139,7 +1122,7 @@ func (s *mongoSoakStore) insertOwnershipChunk(
 
 // nextOwnershipChunkIndex keeps appended chunk IDs sorting after existing ones
 // so the teardown pager's strictly-advancing cursor still reaches them.
-func (s *mongoSoakStore) nextOwnershipChunkIndex(
+func (s *Mongo) nextOwnershipChunkIndex(
 	ctx context.Context,
 	runID string,
 ) (int, error) {
@@ -1147,10 +1130,10 @@ func (s *mongoSoakStore) nextOwnershipChunkIndex(
 	// stale highest chunk, so every retry recomputes the same taken index and
 	// the insert loop exhausts its attempts against contention that is not
 	// there — leaving the created room outside teardown's reach.
-	var chunk soakOwnershipChunk
-	err := s.primary(soakOwnershipCollection).FindOne(
+	var chunk ownershipChunk
+	err := s.primary(OwnershipCollection).FindOne(
 		ctx,
-		soakOwnershipIDFilter(runID, ""),
+		ownershipIDFilter(runID, ""),
 		options.FindOne().
 			SetProjection(bson.D{{Key: "_id", Value: 1}}).
 			SetSort(bson.D{{Key: "_id", Value: -1}}),

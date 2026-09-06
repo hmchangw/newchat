@@ -26,6 +26,7 @@ func TestSoakPackages_DoNotRepeatTheSoakPrefixInIdentifiers(t *testing.T) {
 		"internal/soak/presence",
 		"internal/soak/read",
 		"internal/soak/rpc",
+		"internal/soak/run",
 		"internal/soak/search",
 		"internal/soak/send",
 		"internal/soak/userread",

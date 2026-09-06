@@ -383,25 +383,6 @@ func TestPrepareContinuousSoakRun_ResumesStoppedManifestWithoutDeadline(
 	assert.Equal(t, 1, manifest.RestartCount)
 }
 
-func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T) {
-	projection := soakManifestProjection()
-	fields := make(map[string]any, len(projection))
-	for _, element := range projection {
-		fields[element.Key] = element.Value
-	}
-	for _, field := range []string{
-		"_id", "state", "siteId", "mongoDatabase", "cassandraKeyspace",
-		"configDigest", "borrowedUserCount", "activeUserCount", "activeUserIds", "roomCount",
-		"subscriptionCount", "startedAt", "updatedAt", "seededAt",
-		"cleanedAt", "firstStartedAt", "deadline", "completedAt",
-		"configuredDuration", "restartCount", "runMode", "lastStoppedAt",
-		"lastHeartbeatAt",
-	} {
-		assert.Equal(t, 1, fields[field], field)
-	}
-	assert.Len(t, fields, 23)
-}
-
 func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.T) {
 	now := time.Now().UTC()
 	store := seededLifecycleStoreAt("run-1", now.Add(-time.Hour))

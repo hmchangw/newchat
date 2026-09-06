@@ -34,6 +34,7 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/stream"
 	"github.com/hmchangw/chat/pkg/subject"
+	soakrun "github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
 )
 
 // dialNATS opens a NATS connection for the load generator. The tool emits no
@@ -431,12 +432,12 @@ func runSoakTeardown(ctx context.Context, cfg *config) int {
 			return 1
 		}
 		defer cassutil.Close(session)
-		cleaner = &gocqlSoakCleaner{session: session, keyspace: cfg.CassandraKeyspace}
+		cleaner = soakrun.NewCassandraCleaner(session, cfg.CassandraKeyspace)
 	}
 
 	found, err := teardownSoak(
 		ctx,
-		&mongoSoakStore{db: db},
+		newMongoSoakStore(db),
 		cleaner,
 		&cfg.Soak,
 		cfg.CassandraKeyspace,

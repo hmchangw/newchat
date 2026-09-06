@@ -380,7 +380,7 @@ func runSoakSeed(
 	defer cleanup()
 	topology, err := seedSoak(
 		ctx,
-		&mongoSoakStore{db: db},
+		newMongoSoakStore(db),
 		keyStore,
 		&soakSeedInput{
 			RunID: cfg.Soak.RunID, SiteID: cfg.SiteID,
@@ -472,7 +472,7 @@ func runSoakWorkload(
 			mongoutil.Disconnect(context.Background(), client)
 		}
 	}()
-	store := &mongoSoakStore{db: client.Database(cfg.MongoDB)}
+	store := newMongoSoakStore(client.Database(cfg.MongoDB))
 
 	topology, err := store.LoadTopology(ctx, cfg.Soak.RunID, cfg.SiteID)
 	if err != nil {
