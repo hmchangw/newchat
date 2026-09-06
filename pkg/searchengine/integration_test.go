@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -21,12 +23,16 @@ import (
 func TestMain(m *testing.M) { testutil.RunTests(m) }
 
 // recorderObs satisfies Observability with an in-memory span recorder so the
-// test can assert that the adapter emits ES-semantic spans.
+// test can assert that the adapter emits ES-semantic spans. Metrics are not
+// under test here, so the MeterProvider is a noop — the facade requires a
+// non-nil one regardless.
 type recorderObs struct {
 	tp *trace.TracerProvider
 }
 
 func (r recorderObs) TracerProvider() oteltrace.TracerProvider { return r.tp }
+
+func (recorderObs) MeterProvider() metric.MeterProvider { return metricnoop.NewMeterProvider() }
 
 func TestNew_WithObservability_RecordsESSemanticSpan(t *testing.T) {
 	esURL := testutil.Elasticsearch(t)

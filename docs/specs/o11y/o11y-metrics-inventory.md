@@ -89,15 +89,20 @@ Enabled wherever the matching `WithObservability` / middleware is wired.
 | **MongoDB** (`mongoutil`) | `db.client.operation.duration`; pool count, idle-min, max, pending-requests, timeouts, and create-time | direct clients passing `mongoutil.WithObservability`; see the storage contract for gaps |
 | **Valkey/Redis** (`valkeyutil`) | `db.client.operation.duration`; connection-pool usage/wait/use/create metrics | gatekeeper, broadcast, notification, room-*, search-*, user-* |
 | **Cassandra** (`cassutil`) | `db.client.operation.duration`, `cassandra.query.attempts`, `db.client.connection.create_time`, `cassandra.connection.attempts` | message-worker, bot-message-worker, history-service ordinary queries; raw batches remain a gap |
+| **Elasticsearch** (`searchengine`, o11y v0.12.0+) | `db.client.operation.duration` (one sample per request, retries included) | search-service, search-sync-worker |
 | **Go runtime** (`WithRuntimeMetrics`, **on by default**) | goroutines, GC pauses/count, heap/alloc, memory, GOMAXPROCS | **all** services |
 
-**Two notable auto-gaps (spans only, NO metrics):**
+**One notable auto-gap (spans only, NO metrics):**
 - **NATS/JetStream client** (`otelnats`) — emits *spans*, but **no client
   metrics** from the SDK itself. This is still true of the instrumentation
   layer; the gap is now covered at the application layer instead, by the shared
   `chat.nats.*` families in §2.1. Do not expect SDK-auto NATS series.
-- **Elasticsearch client** (`searchengine`) — emits *spans* (ES `_search`/`_bulk`
-  latency is visible in traces) but **no metrics** instrument.
+
+The **Elasticsearch client** (`searchengine`) was the second such gap until o11y
+v0.12.0, which added an SDK-owned `db.client.operation.duration` histogram beside
+the spans — one sample per request, retries included. Labels and the monthly
+index-name caveat are in
+[`storage-dependency-metrics.md`](storage-dependency-metrics.md) §4.
 
 ---
 
