@@ -372,6 +372,41 @@ type lane struct {
 	action Action
 }
 
+// LaneSpec is one lane's public identity: the name it reports as the Prometheus
+// `lane` label, and the rate a given Config gives it.
+type LaneSpec struct {
+	Name string
+	Rate float64
+}
+
+// Lanes reports the lane registry under cfg, in dispatch order. The names are
+// contract rather than labels: they are the `lane` value on
+// loadgen_soak_dispatched_total and its siblings, and the failure ledger routes
+// its per-lane observers by four of them. A nil cfg reports every rate as zero,
+// which is how a caller asks for the vocabulary alone.
+func Lanes(cfg *Config) []LaneSpec {
+	w := &Workload{}
+	if cfg != nil {
+		w.cfg = *cfg
+	}
+	registry := w.lanes()
+	specs := make([]LaneSpec, 0, len(registry))
+	for _, entry := range registry {
+		specs = append(specs, LaneSpec{Name: entry.name, Rate: entry.rate})
+	}
+	return specs
+}
+
+// LaneNames is Lanes reduced to the vocabulary.
+func LaneNames() []string {
+	specs := Lanes(nil)
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, spec.Name)
+	}
+	return names
+}
+
 func (w *Workload) lanes() []lane {
 	return []lane{
 		{name: "send", rate: w.cfg.SendRate, action: w.actions.Send},

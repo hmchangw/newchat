@@ -171,32 +171,6 @@ func (w *soakWorkload) Run(ctx context.Context) (soakWorkloadResult, error) {
 	return w.inner.Run(ctx)
 }
 
-type soakLane struct {
-	name   string
-	rate   float64
-	action soakWorkloadAction
-}
-
-func (w *soakWorkload) lanes() []soakLane {
-	return []soakLane{
-		{name: "send", rate: w.cfg.SendRate, action: w.actions.Send},
-		{name: "read", rate: w.cfg.ReadRate, action: w.actions.Read},
-		{name: "mutation", rate: w.cfg.MutationRate, action: w.actions.Mutation},
-		{name: "reaction", rate: w.cfg.ReactionRate, action: w.actions.Reaction},
-		{name: "pinned_list", rate: w.cfg.PinnedListRate, action: w.actions.PinnedList},
-		{name: "verify", rate: w.cfg.VerifyRate, action: w.actions.Verify},
-		{name: soakFailureLaneMemberMutation, rate: w.cfg.MemberMutationRate, action: w.actions.MemberMutation},
-		{name: soakFailureLaneRoomMutation, rate: w.cfg.RoomMutationRate, action: w.actions.RoomMutation},
-		{name: "room_read", rate: w.cfg.RoomReadRate, action: w.actions.RoomRead},
-		{name: "user_read", rate: w.cfg.UserReadRate, action: w.actions.UserRead},
-		{name: "search_read", rate: w.cfg.SearchReadRate, action: w.actions.SearchRead},
-		{name: soakFailureLaneRoomCreate, rate: w.cfg.RoomCreateRate, action: w.actions.RoomCreate},
-		{name: soakFailureLaneReadReceipt, rate: w.cfg.ReadReceiptRate, action: w.actions.ReadReceipt},
-		{name: "presence", rate: w.cfg.PresenceRate, action: w.actions.Presence},
-	}
-}
-
-// soakWorkloadConfigFrom maps the parsed environment onto every scheduler lane.
 func soakWorkloadConfigFrom(cfg *soakConfig, maxInFlight int) *soakWorkloadConfig {
 	return &soakWorkloadConfig{
 		RunID: cfg.RunID, Duration: cfg.RunDuration,

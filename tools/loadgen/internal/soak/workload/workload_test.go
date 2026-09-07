@@ -556,3 +556,34 @@ func sequenceNow(values ...time.Time) func() time.Time {
 		return value
 	}
 }
+
+// A named set rather than a count: it says which lane went missing, and a new
+// lane has to be added here deliberately rather than by bumping a number that
+// carries no meaning. These strings are contract, not labels — they are the
+// Prometheus `lane` value on loadgen_soak_dispatched_total and friends, and the
+// failure ledger routes its observers by four of them.
+func TestSoakLaneNames_CoverTheRegistry(t *testing.T) {
+	assert.ElementsMatch(t, []string{
+		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+		"member_mutation", "room_mutation", "room_read", "user_read",
+		"search_read", "room_create", "read_receipt", "presence",
+	}, LaneNames())
+
+	// Every registered lane is dispatchable. Run() skips a lane whose action is
+	// nil, so one wired to no Actions field is a lane that reports a configured
+	// rate and then never runs — the same silent gap as an unmapped rate, from
+	// the other side.
+	for _, lane := range (&Workload{actions: everyLaneAction()}).lanes() {
+		assert.NotNil(t, lane.action, "lane=%s has no action", lane.name)
+	}
+}
+
+func everyLaneAction() Actions {
+	noop := Action(func(context.Context, bool) error { return nil })
+	return Actions{
+		Send: noop, Read: noop, Mutation: noop, Reaction: noop,
+		PinnedList: noop, Verify: noop, MemberMutation: noop,
+		RoomMutation: noop, RoomRead: noop, UserRead: noop,
+		SearchRead: noop, RoomCreate: noop, ReadReceipt: noop, Presence: noop,
+	}
+}

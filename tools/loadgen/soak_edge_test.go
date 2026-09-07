@@ -12,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	soakworkload "github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
 type configurableSoakLifecycleStore struct {
@@ -172,19 +173,24 @@ func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	// A named set rather than a count: it says which lane went missing, and a
-	// new lane has to be added here deliberately rather than by bumping a
-	// number that carries no meaning.
-	names := make([]string, 0, len(workload.lanes()))
-	for _, lane := range workload.lanes() {
-		names = append(names, lane.name)
-	}
-	assert.ElementsMatch(t, []string{
-		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+}
+
+// The workload package owns the lane vocabulary and asserts the whole set; what
+// only the root can check is that the four lanes the failure ledger routes
+// observers by still exist under those exact names. Rename one on either side
+// and the ledger stops matching the traffic it is supposed to be watching,
+// silently — every other signal keeps reporting.
+func TestSoakFailureLanes_MatchTheWorkloadRegistry(t *testing.T) {
+	names := soakworkload.LaneNames()
+	for _, lane := range []string{
 		soakFailureLaneMemberMutation, soakFailureLaneRoomMutation,
-		"room_read", "user_read", "search_read",
-		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt, "presence",
-	}, names)
+		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt,
+	} {
+		assert.Contains(t, names, lane)
+	}
+	// message_send is the ledger's own operation lane, not a workload lane;
+	// asserting its absence keeps the two vocabularies from being conflated.
+	assert.NotContains(t, names, soakFailureLaneMessageSend)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {

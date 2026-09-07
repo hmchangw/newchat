@@ -13,6 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	soakworkload "github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
 func TestSoakWorkload_RunsIndependentConfiguredLanes(t *testing.T) {
@@ -986,25 +988,8 @@ func TestSoakWorkloadConfigFrom_EnablesEveryLane(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.UserReadRate = 10
 
-	workload := newSoakWorkload(
-		soakWorkloadConfigFrom(&cfg, 256), nil, allSoakWorkloadActions(), nil, nil, nil,
-	)
-
-	for _, lane := range workload.lanes() {
-		assert.Positive(t, lane.rate, "lane=%s has no configured rate", lane.name)
-	}
-}
-
-// allSoakWorkloadActions fills every action slot so lanes() reports the lane as
-// runnable and the assertion above is about rates alone.
-func allSoakWorkloadActions() *soakWorkloadActions {
-	noop := func(context.Context, bool) error { return nil }
-	return &soakWorkloadActions{
-		Send: noop, Read: noop, Mutation: noop, Reaction: noop,
-		PinnedList: noop, Verify: noop, MemberMutation: noop,
-		RoomMutation: noop, RoomRead: noop, UserRead: noop,
-		SearchRead: noop, RoomCreate: noop, ReadReceipt: noop,
-		Presence: noop,
+	for _, lane := range soakworkload.Lanes(soakWorkloadConfigFrom(&cfg, 256)) {
+		assert.Positive(t, lane.Rate, "lane=%s has no configured rate", lane.Name)
 	}
 }
 
