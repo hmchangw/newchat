@@ -1,7 +1,7 @@
 package main
 
 import (
-	"math/rand"
+	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 
 	soaksend "github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
 )
