@@ -488,6 +488,8 @@ func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
 func TestSoakCatalog_SelectorsExposeOnlyEligibleState(t *testing.T) {
 	clock := newFakeClock(time.Unix(100, 0))
 	catalog := New(8, 100, 0, clock)
+	// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
+	// nosemgrep: gosec.G601-1
 	for _, candidate := range []Candidate{
 		{ID: "clean", RoomID: "room-1", Author: "alice", Content: "clean"},
 		{ID: "mutated", RoomID: "room-1", Author: "bob", Content: "before"},
