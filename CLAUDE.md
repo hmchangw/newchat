@@ -246,13 +246,14 @@ All commands are wrapped in the root Makefile. Always use `make` targets — nev
   - `return errcode.NotFound("room not found")` — pick the constructor whose name matches the HTTP/wire category (`BadRequest`, `NotFound`, `Forbidden`, `Conflict`, `Internal`, …).
   - `return errcode.Forbidden("only owners can do this", errcode.WithReason(errcode.RoomNotOwner))` — add `WithReason` **only** when the frontend must branch on the case. Prefer a package-level sentinel (e.g. room-service `helper.go`) over reconstructing the same error at multiple sites, so `errors.Is` matches.
   - For an infra failure, `return fmt.Errorf("get subscription: %w", err)` — a raw wrapped error collapses to `internal` at the boundary; do NOT dress it up as an errcode.
+  - Reading a reply from another service: `if err := errcode.FromReply(msg.Data); err != nil { return nil, err }`. It returns nil for a non-envelope, the typed `*errcode.Error` for a code this build knows, and an untyped error for one it does not — so `errors.As` correctly finds nothing for an unrecognised code. Never hand-roll `Parse` + `Code.Valid()`: every combination of the two is wrong in one direction or the other.
 - **Tier 2 — one line per handler, written once and copied.** The adapter that turns the returned error into the wire envelope. You pick exactly one, determined by your transport, never both:
   - NATS raw handler: `errnats.Reply(ctx, m.Msg, err)`.
   - `pkg/natsrouter` handler: returned automatically by the router — you write nothing.
   - Gin handler: `errhttp.Write(ctx, c, err)`.
 - **Tier 3 — specialist, you'll know when.** Don't use these in ordinary request/reply handlers:
   - `errcode.Permanent` / `IsPermanent` — JetStream **workers only**, to Ack-poison vs Nak-retry.
-  - `errcode.Parse` — **cross-site consumers** decoding a remote envelope (e.g. `memberlist_client.go`).
+  - `errcode.Parse` — **only** when a site needs the raw envelope *and* handles `!Code.Valid()` itself (e.g. `memberlist_client.go`, which remaps a remote reason and degrades a legacy envelope); semgrep blocks it everywhere else, so pair it with a `nosemgrep` naming the reason. Ordinary reply reading is the Tier 1 `errcode.FromReply` bullet above, not this one.
   - `errnats.Marshal` / `MarshalQuiet` / `ReplyQuiet` — already-logged paths; the plain `Reply` already classifies-and-logs once, so `Quiet` exists only to avoid a double-log.
   - `errcode.Classify`, `WithLogger`, `WithLogValues` — boundary/observability plumbing; handlers get request-id logging for free from the router middleware.
 - **Never log AND return.** `Reply`/`Write` run `Classify`, which logs once at a category-aware level. A `slog.Error(...)` before returning the same error double-logs.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	. "github.com/hmchangw/chat/pkg/errcode"
+	ec "github.com/hmchangw/chat/pkg/errcode"
 )
 
 type reply struct{ Data []byte }
@@ -87,6 +88,50 @@ func readRemoteReplyAndBranch(msg reply) error {
 func readRemoteReplyViaDotImport(msg reply) error {
 	// ruleid: remote-envelope-must-use-fromreply
 	e, ok := Parse(msg.Data)
+	if !ok {
+		return nil
+	}
+	return e
+}
+
+// The alias claim the rule comment makes, asserted rather than assumed: semgrep
+// resolves `ec` back to the package, so a rename cannot walk past the rule.
+func readRemoteReplyViaAlias(msg reply) error {
+	// ruleid: remote-envelope-must-use-fromreply
+	e, ok := ec.Parse(msg.Data)
+	if !ok {
+		return nil
+	}
+	return e
+}
+
+// Taking the function as a value moves the call one line away from the name.
+// A call-expression pattern sees nothing here; a reference pattern sees the
+// name, which is the reason this rule matches the reference and not the call.
+func readRemoteReplyViaFunctionValue(msg reply) error {
+	// ruleid: remote-envelope-must-use-fromreply
+	parseReply := errcode.Parse
+	e, ok := parseReply(msg.Data)
+	if !ok {
+		return nil
+	}
+	return e
+}
+
+func readRemoteReplyViaAliasFunctionValue(msg reply) error {
+	// ruleid: remote-envelope-must-use-fromreply
+	parseReply := ec.Parse
+	e, ok := parseReply(msg.Data)
+	if !ok {
+		return nil
+	}
+	return e
+}
+
+func readRemoteReplyViaDotImportFunctionValue(msg reply) error {
+	// ruleid: remote-envelope-must-use-fromreply
+	parseReply := Parse
+	e, ok := parseReply(msg.Data)
 	if !ok {
 		return nil
 	}

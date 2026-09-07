@@ -71,6 +71,51 @@ func TestFromReply(t *testing.T) {
 			wantTyped:    false,
 			wantContains: []string{"boom"},
 		},
+		{
+			// The third way this goes wrong, and the one Parse alone cannot see:
+			// the envelope does not decode at all. Metadata is map[string]string,
+			// so one numeric value fails the whole unmarshal, Parse says "not an
+			// envelope", and the reply falls through to the success decoder — the
+			// same zero-value-success fail-open the unknown-code branch exists to
+			// stop. Whether a field decodes is a question about this build's
+			// struct, not about whether the call failed.
+			name:         "an envelope whose fields do not decode is still an error",
+			data:         []byte(`{"code":"unavailable","error":"upstream down","metadata":{"retryAfter":5}}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"upstream down"},
+		},
+		{
+			name:         "a non-string code does not make the envelope a success",
+			data:         []byte(`{"code":123,"error":"numeric code"}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"numeric code"},
+		},
+		{
+			name:         "a non-string reason does not make the envelope a success",
+			data:         []byte(`{"code":"unavailable","error":"boom","reason":42}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"boom"},
+		},
+		{
+			// The boundary, stated so it is a decision rather than an oversight:
+			// the envelope contract is a non-empty string "error". A payload whose
+			// "error" is not a string carries no message to relay and matches no
+			// producer in this repo, so it stays a non-envelope. Widening past the
+			// contract would start turning success payloads that happen to carry
+			// an "error" key of another shape into failures.
+			name: "a non-string error field is not an envelope",
+			data: []byte(`{"error":["not","a","string"],"code":"unavailable"}`),
+		},
+		{
+			name:      "metadata survives on the decodable path",
+			data:      []byte(`{"code":"not_found","error":"room not found","metadata":{"roomId":"r1"}}`),
+			wantErr:   true,
+			wantTyped: true,
+			wantCode:  CodeNotFound,
+		},
 	}
 
 	for _, tt := range tests {

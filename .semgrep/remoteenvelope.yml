@@ -36,17 +36,21 @@ rules:
         - "**/*_test.go"
         - "/pkg/errcode/"
         - ".semgrep/"
-    # Match the call expression itself, not the assignment forms. Enumerating
-    # shapes is how the first version of this rule leaked: it caught
-    # `e, ok := errcode.Parse(x)` but not `return errcode.Parse(x)` nor
-    # `f(errcode.Parse(x))`, so a handler could bypass it without trying.
+    # Match the *reference* to errcode.Parse, not a call shape. Enumerating
+    # shapes is how each earlier version of this rule leaked: the first caught
+    # `e, ok := errcode.Parse(x)` but not `return errcode.Parse(x)`; the second
+    # caught every call but not `parseReply := errcode.Parse`, which hands the
+    # function to a variable and calls it a line later. A reference cannot be
+    # spelled around — the name has to appear to be used at all. (A value passed
+    # in from another package still escapes; that needs a type-aware analyzer,
+    # and no call site here is shaped that way.)
     pattern-either:
-      - pattern: errcode.Parse(...)
-      # A dot-import makes the call read as a bare `Parse(...)`. semgrep resolves
-      # a named alias back to the package, but not a dot-import, so that one
-      # shape needs its own pattern.
+      - pattern: errcode.Parse
+      # A dot-import makes the reference read as a bare `Parse`. semgrep
+      # resolves a named alias back to the package, but not a dot-import, so
+      # that one shape needs its own pattern. Both claims are fixtured.
       - patterns:
-          - pattern: Parse(...)
+          - pattern: Parse
           - pattern-inside: |
               import . "github.com/hmchangw/chat/pkg/errcode"
               ...
