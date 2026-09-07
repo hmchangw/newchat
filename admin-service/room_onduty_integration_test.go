@@ -49,7 +49,7 @@ func newOnDutyRig(t *testing.T, siteID string, reply func(model.RoomRestrictedRe
 	require.NoError(t, store.EnsureIndexes(ctx))
 
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const authToken = "onduty-test-token"
 	seedSession(t, db, session.Session{
 		ID:       sessiontoken.Hash(authToken),
@@ -197,7 +197,7 @@ func TestIntegration_SetRoomOnDuty_RPCTimeout(t *testing.T) {
 	require.NoError(t, store.EnsureIndexes(ctx))
 
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const authToken = "onduty-timeout-token"
 	seedSession(t, db, session.Session{
 		ID: sessiontoken.Hash(authToken), UserID: "u-admin", Account: "p_admin",

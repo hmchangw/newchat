@@ -138,6 +138,9 @@ func TestSimClient_HealthTicksDoNotPostponeTheJWTRefresh(t *testing.T) {
 	// One second of life means the schedule fires at 800ms; postponed, it
 	// would not fire until ~999ms.
 	s.cache.mu.Lock()
+	// Not a credential: a sentinel marking the token cache primed, so the refresh
+	// schedule can be pinned without minting a JWT.
+	// nosemgrep: hardcoded-credential-literal
 	s.cache.token, s.cache.expiresAt = "primed", time.Now().Add(time.Second)
 	s.cache.mu.Unlock()
 

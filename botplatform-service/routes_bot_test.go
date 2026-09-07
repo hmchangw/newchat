@@ -54,7 +54,7 @@ func TestRegisterBotRoutes_ChainWiring(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const rawToken = "wire-test-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),
@@ -123,7 +123,7 @@ func TestRegisterBotRoutes_NoValkey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const rawToken = "no-valkey-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),
@@ -196,7 +196,7 @@ func TestRegisterBotRoutes_AuthUsesTheCachedStore(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	// #nosec G101 -- fabricated test fixture, not a live credential
-	// nosemgrep: gosec.G101-1
+	// nosemgrep: gosec.G101-1, hardcoded-credential-literal
 	const rawToken = "cached-path-token"
 	botSess := &session.Session{
 		ID:      sessiontoken.Hash(rawToken),
