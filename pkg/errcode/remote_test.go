@@ -100,14 +100,51 @@ func TestFromReply(t *testing.T) {
 			wantContains: []string{"boom"},
 		},
 		{
-			// The boundary, stated so it is a decision rather than an oversight:
-			// the envelope contract is a non-empty string "error". A payload whose
-			// "error" is not a string carries no message to relay and matches no
-			// producer in this repo, so it stays a non-envelope. Widening past the
-			// contract would start turning success payloads that happen to carry
-			// an "error" key of another shape into failures.
-			name: "a non-string error field is not an envelope",
-			data: []byte(`{"error":["not","a","string"],"code":"unavailable"}`),
+			// Having no message to relay is not a reason to report success. The
+			// discriminator is the "error" key, not the message: a payload
+			// carrying one whose shape cannot encode "no error" is a foreign or
+			// corrupt envelope, and letting it through means the success decoder
+			// ignores the unknown fields and hands the caller a zero value.
+			name:         "an array error field is a malformed envelope, not a success",
+			data:         []byte(`{"error":["not","a","string"],"code":"unavailable"}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"malformed"},
+		},
+		{
+			name:         "an object error field is a malformed envelope",
+			data:         []byte(`{"error":{"code":1,"detail":"x"}}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"malformed"},
+		},
+		{
+			name:         "a numeric error field is a malformed envelope",
+			data:         []byte(`{"error":500}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"malformed"},
+		},
+		{
+			name:         "a boolean error field is a malformed envelope",
+			data:         []byte(`{"error":true}`),
+			wantErr:      true,
+			wantTyped:    false,
+			wantContains: []string{"malformed"},
+		},
+		{
+			// The boundary, and the principle behind it: a value that can encode
+			// "no error" is not an envelope; a value that cannot is a malformed
+			// one. null and "" are both widespread spellings of "no error" —
+			// {"data":…,"error":null} is a common success shape — so reading
+			// either as a failure would break working calls. An array or object
+			// spells no such thing.
+			name: "a null error field is a success, not an envelope",
+			data: []byte(`{"error":null,"rooms":[]}`),
+		},
+		{
+			name: "an empty-string error field is a success, not an envelope",
+			data: []byte(`{"error":"","rooms":[]}`),
 		},
 		{
 			name:      "metadata survives on the decodable path",

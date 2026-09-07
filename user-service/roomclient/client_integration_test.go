@@ -132,6 +132,27 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		assert.Contains(t, err.Error(), "upstream boom")
 	})
 
+	t.Run("malformed error envelope — fails the call, never a zero-value success", func(t *testing.T) {
+		nc := dial(t)
+
+		// The failure mode this asserts against is silent: RoomsInfoBatchResponse
+		// has no "error" field, so encoding/json ignores the envelope entirely
+		// and decodes a zero value. If FromReply passed this through, the caller
+		// would return (nil, nil) and the remote failure would read as "no rooms".
+		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
+			_ = m.Respond([]byte(`{"error":["not","a","string"],"code":"unavailable"}`))
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+
+		rooms, err := New(nc, "site-a").GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
+		require.Error(t, err, "a malformed envelope must fail the call, not decode as an empty result")
+		assert.Nil(t, rooms)
+		var e *errcode.Error
+		assert.False(t, errors.As(err, &e),
+			"a malformed envelope carries no trustworthy code, so it must not be relayed typed")
+	})
+
 	t.Run("GetRoomsMeta — skipKeys set on the wire, GetRoomsInfo leaves it unset", func(t *testing.T) {
 		nc := dial(t)
 

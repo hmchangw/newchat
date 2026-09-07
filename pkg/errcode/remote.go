@@ -2,6 +2,7 @@ package errcode
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -31,31 +32,42 @@ import (
 //     decode — Metadata is map[string]string, so a single numeric value sinks
 //     the whole unmarshal — landing back in the first failure by another route.
 //
-// So the envelope is recognised by its contract (a non-empty string "error")
-// before anything is decoded, and that answer never depends on whether the rest
-// of the payload fits this build's struct. An envelope is always a failure; a
-// code this build does not know, and a payload it cannot fully decode, are both
-// failures that must not be relayed typed. Callers that need to branch on a
-// specific code use errors.As, which finds nothing for either — which is the
-// point.
+// So the envelope is recognised by the presence of its discriminator — the
+// "error" key — before anything is decoded, and that answer never depends on
+// whether the rest of the payload fits this build's struct. An envelope is
+// always a failure; a code this build does not know, and a payload it cannot
+// fully decode, are both failures that must not be relayed typed. Callers that
+// need to branch on a specific code use errors.As, which finds nothing for
+// either — which is the point.
 //
-// The contract is the boundary: a payload whose "error" is not a string carries
-// no message to relay and matches no producer here, so it stays a non-envelope.
-// Reaching past the contract would start reading success payloads as failures.
+// Having no message to relay is not a reason to report success, so the
+// discriminator is the key, not the message. The one line that needs drawing is
+// which values mean "no error": null and "" both do — {"data":…,"error":null}
+// is a common success shape — while an array, object, number or bool spells no
+// such thing and is a foreign or corrupt envelope. Only a payload that is not
+// JSON at all falls through untouched, for the success decoder to report.
 func FromReply(data []byte) error {
-	// Narrow on purpose: encoding/json type-checks only the fields the target
-	// struct declares, so this sees the message whatever the other fields hold.
+	// Deliberately a RawMessage: it separates "no error key" from "an error key
+	// this build cannot read", which a string field collapses into one.
 	var envelope struct {
-		Message string `json:"error"`
+		Message json.RawMessage `json:"error"`
 	}
-	//nolint:nilerr // an undecodable payload is simply "not an envelope"; the reply is not this build's to interpret
-	if err := json.Unmarshal(data, &envelope); err != nil || envelope.Message == "" {
+	//nolint:nilerr // a non-JSON payload is not this build's to interpret; the caller's decoder reports it
+	if err := json.Unmarshal(data, &envelope); err != nil || len(envelope.Message) == 0 {
+		return nil
+	}
+
+	var message string
+	if err := json.Unmarshal(envelope.Message, &message); err != nil {
+		return errors.New("remote returned a malformed error envelope")
+	}
+	if message == "" { // null decodes to "" too, and both mean "no error"
 		return nil
 	}
 
 	e, ok := Parse(data)
 	if !ok {
-		return fmt.Errorf("remote returned an error this build cannot decode: %s", envelope.Message)
+		return fmt.Errorf("remote returned an error this build cannot decode: %s", message)
 	}
 	if !e.Code.Valid() {
 		return fmt.Errorf("remote returned unknown error code %q: %s", e.Code, e.Message)
