@@ -23,9 +23,19 @@ import (
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/stream"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/catalog"
+	collect "github.com/hmchangw/chat/tools/loadgen/internal/soak/collector"
 	"github.com/hmchangw/chat/tools/loadgen/internal/soak/distribution"
-	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/mutation"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/presence"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/read"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/run"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/search"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
 	soakuserread "github.com/hmchangw/chat/tools/loadgen/internal/soak/userread"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
 const (
@@ -41,7 +51,7 @@ type soakEncryptionStore interface {
 type soakRuntimeStore interface {
 	soakLifecycleStore
 	soakEncryptionStore
-	LoadTopology(context.Context, string, string) (soakTopology, error)
+	LoadTopology(context.Context, string, string) (topology.Topology, error)
 }
 
 // soakDefaultPageLimit is how many messages a soak read asks for per page.
@@ -147,18 +157,18 @@ func waitForSoakWrappedDEK(
 }
 
 type soakReadCollectorRecorder struct {
-	collector *SoakCollector
+	collector *collect.Collector
 	now       func() time.Time
 }
 
-func (r *soakReadCollectorRecorder) Record(sample *soakReadSample) {
-	outcome := soakOutcomeSucceeded
+func (r *soakReadCollectorRecorder) Record(sample *read.Sample) {
+	outcome := collect.OutcomeSucceeded
 	if sample.Skipped {
-		outcome = soakOutcomeSkipped
+		outcome = collect.OutcomeSkipped
 	} else if sample.ErrorClass != "" {
-		outcome = soakOutcomeFailed
+		outcome = collect.OutcomeFailed
 	}
-	recordSoakSample(r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&collect.Sample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
 		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
@@ -176,18 +186,18 @@ func recordSoakSample(err error) {
 }
 
 type soakMutationCollectorRecorder struct {
-	collector *SoakCollector
+	collector *collect.Collector
 	now       func() time.Time
 }
 
-func (r *soakMutationCollectorRecorder) Record(sample soakMutationSample) {
-	outcome := soakOutcomeSucceeded
+func (r *soakMutationCollectorRecorder) Record(sample mutation.Sample) {
+	outcome := collect.OutcomeSucceeded
 	if sample.Skipped {
-		outcome = soakOutcomeSkipped
+		outcome = collect.OutcomeSkipped
 	} else if sample.ErrorClass != "" {
-		outcome = soakOutcomeFailed
+		outcome = collect.OutcomeFailed
 	}
-	recordSoakSample(r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&collect.Sample{
 		Action: sample.Action, Outcome: outcome, At: r.now(),
 		Latency: sample.Latency, Retries: sample.Retries,
 		ErrorClass: sample.ErrorClass, ErrorReason: sample.ErrorReason,
@@ -196,26 +206,26 @@ func (r *soakMutationCollectorRecorder) Record(sample soakMutationSample) {
 }
 
 type soakVerifyCollectorRecorder struct {
-	collector *SoakCollector
+	collector *collect.Collector
 	now       func() time.Time
 }
 
-func (r *soakVerifyCollectorRecorder) Record(result *soakVerifyResult) {
+func (r *soakVerifyCollectorRecorder) Record(result *read.VerifyResult) {
 	if result == nil {
 		return
 	}
 	recordSoakSample(r.collector.RecordVerification(result))
-	outcome := soakOutcomeFailed
+	outcome := collect.OutcomeFailed
 	switch result.Class {
-	case soakVerifyOK:
-		outcome = soakOutcomeSucceeded
-	case soakVerifySkipped:
-		outcome = soakOutcomeSkipped
-	case soakVerifyMissing, soakVerifyMismatch, soakVerifyMalformed,
-		soakVerifyRetryable, soakVerifyRPCError:
-		outcome = soakOutcomeFailed
+	case read.VerifyOK:
+		outcome = collect.OutcomeSucceeded
+	case read.VerifySkipped:
+		outcome = collect.OutcomeSkipped
+	case read.VerifyMissing, read.VerifyMismatch, read.VerifyMalformed,
+		read.VerifyRetryable, read.VerifyRPCError:
+		outcome = collect.OutcomeFailed
 	}
-	recordSoakSample(r.collector.Record(&soakOperationSample{
+	recordSoakSample(r.collector.Record(&collect.Sample{
 		Action: result.Action, Outcome: outcome, At: r.now(),
 		Latency: result.Latency, Retries: result.Retries,
 		ErrorClass: result.RPCErrorClass, ErrorReason: result.RPCErrorReason,
@@ -229,7 +239,7 @@ type soakCollectorRecorders struct {
 }
 
 func newSoakCollectorRecorders(
-	collector *SoakCollector,
+	collector *collect.Collector,
 	now func() time.Time,
 ) soakCollectorRecorders {
 	if now == nil {
@@ -245,25 +255,25 @@ func newSoakCollectorRecorders(
 type soakRuntimeSelector struct {
 	mu      sync.Mutex
 	rooms   []string
-	members map[string][]soakSendTarget
+	members map[string][]send.Target
 	picker  *distribution.RoomPicker
 	sizer   *distribution.PayloadSizer
 	rng     *rand.Rand
 }
 
 func newSoakRuntimeSelector(
-	topology *soakTopology,
+	shape *topology.Topology,
 	cfg *soakConfig,
 	seed int64,
 ) (*soakRuntimeSelector, error) {
-	if topology == nil || len(topology.Rooms) == 0 {
+	if shape == nil || len(shape.Rooms) == 0 {
 		return nil, fmt.Errorf("soak topology has no rooms")
 	}
 	if cfg == nil {
 		return nil, fmt.Errorf("soak configuration is required")
 	}
 	picker, err := distribution.NewRoomPicker(
-		seed, len(topology.Rooms), cfg.RoomZipfS, cfg.RoomZipfV,
+		seed, len(shape.Rooms), cfg.RoomZipfS, cfg.RoomZipfV,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build soak room distribution: %w", err)
@@ -278,33 +288,33 @@ func newSoakRuntimeSelector(
 		return nil, fmt.Errorf("build soak payload distribution: %w", err)
 	}
 	selector := &soakRuntimeSelector{
-		rooms: make([]string, len(topology.Rooms)), picker: picker, sizer: sizer,
+		rooms: make([]string, len(shape.Rooms)), picker: picker, sizer: sizer,
 		rng:     rand.New(rand.NewSource(seed + 2)),
-		members: make(map[string][]soakSendTarget, len(topology.Rooms)),
+		members: make(map[string][]send.Target, len(shape.Rooms)),
 	}
-	for i := range topology.Rooms {
-		selector.rooms[i] = topology.Rooms[i].ID
+	for i := range shape.Rooms {
+		selector.rooms[i] = shape.Rooms[i].ID
 	}
-	active := activeSoakUserIDs(topology)
-	roomTypes := make(map[string]model.RoomType, len(topology.Rooms))
-	for i := range topology.Rooms {
-		roomTypes[topology.Rooms[i].ID] = topology.Rooms[i].Type
+	active := topology.ActiveUserIDs(shape)
+	roomTypes := make(map[string]model.RoomType, len(shape.Rooms))
+	for i := range shape.Rooms {
+		roomTypes[shape.Rooms[i].ID] = shape.Rooms[i].Type
 	}
-	recipients := soakRecipientSets(topology)
-	for i := range topology.Subscriptions {
-		subscription := &topology.Subscriptions[i]
-		if !isActiveSoakSubscription(subscription, active) ||
+	recipients := soakRecipientSets(shape)
+	for i := range shape.Subscriptions {
+		subscription := &shape.Subscriptions[i]
+		if !topology.IsActiveSubscription(subscription, active) ||
 			subscription.User.ID == "" ||
 			subscription.User.Account == "" {
 			continue
 		}
 		selector.members[subscription.RoomID] = append(
 			selector.members[subscription.RoomID],
-			soakSendTarget{
+			send.Target{
 				UserID: subscription.User.ID, Account: subscription.User.Account,
 				RoomID: subscription.RoomID, RoomType: roomTypes[subscription.RoomID],
 				Recipients:           append([]string(nil), recipients[subscription.RoomID]...),
-				RecipientSetSource:   recipientSetSourceTopology,
+				RecipientSetSource:   send.RecipientSourceTopology,
 				RecipientSetComplete: true,
 				RecipientRoute:       recipientRouteForRoomType(roomTypes[subscription.RoomID]),
 			},
@@ -318,24 +328,24 @@ func newSoakRuntimeSelector(
 	return selector, nil
 }
 
-func recipientRouteForRoomType(roomType model.RoomType) recipientExpectedRoute {
+func recipientRouteForRoomType(roomType model.RoomType) send.RecipientExpectedRoute {
 	if roomType == model.RoomTypeChannel {
-		return recipientExpectedRouteRoom
+		return send.RecipientRouteRoom
 	}
-	return recipientExpectedRouteUser
+	return send.RecipientRouteUser
 }
 
-func soakRecipientSets(topology *soakTopology) map[string][]string {
-	if topology == nil {
+func soakRecipientSets(shape *topology.Topology) map[string][]string {
+	if shape == nil {
 		return nil
 	}
-	recipients := make(map[string][]string, len(topology.Rooms))
+	recipients := make(map[string][]string, len(shape.Rooms))
 	// ActiveUsers bounds sender selection only. Broadcast evidence must retain
 	// every subscribed human account, including borrowed non-senders that the
 	// production broadcast worker is still required to reach.
-	for i := range topology.Subscriptions {
-		subscription := &topology.Subscriptions[i]
-		if !isSoakRoomMember(subscription) ||
+	for i := range shape.Subscriptions {
+		subscription := &shape.Subscriptions[i]
+		if !topology.IsRoomMember(subscription) ||
 			subscription.User.IsBot || subscription.User.Account == "" {
 			continue
 		}
@@ -354,7 +364,7 @@ func (s *soakRuntimeSelector) nextRoom() string {
 	return s.rooms[s.picker.Next()]
 }
 
-func (s *soakRuntimeSelector) nextSend() (soakSendTarget, string) {
+func (s *soakRuntimeSelector) nextSend() (send.Target, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	roomID := s.rooms[s.picker.Next()]
@@ -364,7 +374,7 @@ func (s *soakRuntimeSelector) nextSend() (soakSendTarget, string) {
 }
 
 type soakSendObservation struct {
-	result soakSendReplyResult
+	result send.ReplyResult
 }
 
 func runSoakSeed(
@@ -378,16 +388,12 @@ func runSoakSeed(
 		return 1
 	}
 	defer cleanup()
-	topology, err := seedSoak(
+	seeded, err := run.Seed(
 		ctx,
-		&mongoSoakStore{db: db},
+		run.NewMongo(db),
 		keyStore,
-		&soakSeedInput{
-			RunID: cfg.Soak.RunID, SiteID: cfg.SiteID,
-			MongoDatabase: cfg.MongoDB, CassandraKeyspace: cfg.CassandraKeyspace,
-			Seed: seed, Config: &cfg.Soak,
-		},
-		newProductionSoakIDs(),
+		soakSeedInputFrom(cfg, seed),
+		topology.NewProductionIdentitySource(),
 	)
 	if err != nil {
 		slog.Error("seed Cassandra soak topology", "runId", cfg.Soak.RunID, "error", err)
@@ -395,19 +401,19 @@ func runSoakSeed(
 	}
 	if poolOut != "" {
 		if err := writePoolArtifact(poolOut, cfg.Soak.RunID, cfg.SiteID,
-			digestSoakConfig(&cfg.Soak), topology.ActiveUsers); err != nil {
+			digestSoakConfig(&cfg.Soak), seeded.ActiveUsers); err != nil {
 			slog.Error("write pool artifact", "error", err, "path", poolOut)
 			return 1
 		}
-		slog.Info("pool artifact written", "path", poolOut, "accounts", len(topology.ActiveUsers))
+		slog.Info("pool artifact written", "path", poolOut, "accounts", len(seeded.ActiveUsers))
 	}
 	slog.Info(
 		"Cassandra soak topology seeded",
 		"runId", cfg.Soak.RunID,
-		"borrowedUsers", len(topology.BorrowedUsers),
-		"activeUsers", len(topology.ActiveUsers),
-		"rooms", len(topology.Rooms),
-		"subscriptions", len(topology.Subscriptions),
+		"borrowedUsers", len(seeded.BorrowedUsers),
+		"activeUsers", len(seeded.ActiveUsers),
+		"rooms", len(seeded.Rooms),
+		"subscriptions", len(seeded.Subscriptions),
 	)
 	return 0
 }
@@ -472,7 +478,7 @@ func runSoakWorkload(
 			mongoutil.Disconnect(context.Background(), client)
 		}
 	}()
-	store := &mongoSoakStore{db: client.Database(cfg.MongoDB)}
+	store := run.NewMongo(client.Database(cfg.MongoDB))
 
 	topology, err := store.LoadTopology(ctx, cfg.Soak.RunID, cfg.SiteID)
 	if err != nil {
@@ -585,8 +591,8 @@ func runSoakWorkload(
 	if cfg.Soak.RunMode == soakRunModeContinuous {
 		collectorDuration = 0
 	}
-	collector := NewSoakCollector(
-		metrics,
+	collector := collect.New(
+		&soakCollectorMetrics{metrics: metrics},
 		now(),
 		cfg.Soak.Warmup,
 		collectorDuration,
@@ -775,20 +781,20 @@ func runSoakWorkload(
 		now,
 		trackerOptions...,
 	)
-	catalog := newSoakCatalog(
+	catalog := catalog.New(
 		cfg.Soak.RecentPerRoom,
 		cfg.Soak.RecentTotal,
 		cfg.Soak.PersistGrace,
 		nil,
 	)
 	catalog.RetainSearchTerms(cfg.Soak.SearchObserverEnabled)
-	scheduler := newSoakMutationScheduler(
+	scheduler := mutation.NewScheduler(
 		cfg.Soak.SoftDeleteRatio,
 		rand.New(rand.NewSource(seed+3)),
 	)
 	threadBudgets := distribution.NewThreadBudgetSampler(seed + 7)
-	sender := newSoakSender(
-		soakSendConfig{
+	sender := send.New(
+		send.Config{
 			SiteID: cfg.SiteID, ThreadShare: cfg.Soak.ThreadShare,
 			ReplyTimeout:         10 * time.Second,
 			NextThreadReplyLimit: threadBudgets.Next,
@@ -798,38 +804,38 @@ func runSoakWorkload(
 		nil,
 		rand.New(rand.NewSource(seed+4)),
 		nil,
-		withSoakSendLifecycle(failureTracker, func(error) {
+		send.WithLifecycle(failureTracker, func(error) {
 			// The ledger reports the reason through its own invalidation and
 			// untracked counters; logging per send would flood during an outage.
 			metrics.FailureUntracked.WithLabelValues(failureUntrackedReasonStart).Inc()
 		}),
 	)
 	sendReplies := make(chan soakSendObservation, cfg.MaxInFlight+1)
-	responseSub, err := startSoakSendResponsesWithObserver(
-		newNATSSoakResponseSource(nc.NatsConn()),
+	responseSub, err := send.StartResponsesWithObserver(
+		send.NewNATSResponseSource(nc.NatsConn()),
 		sender,
-		func(result soakSendReplyResult) {
-			action := soakRPCSend
-			if result.Kind == soakSendThreadReply {
-				action = soakRPCThreadReply
+		func(result send.ReplyResult) {
+			action := rpc.ActionSend
+			if result.Kind == send.KindThreadReply {
+				action = rpc.ActionThreadReply
 			}
-			outcome := soakOutcomeFailed
+			outcome := collect.OutcomeFailed
 			errorClass := result.ErrorClass
 			errorReason := result.ErrorReason
-			if result.Status == soakSendReplyAccepted {
-				outcome = soakOutcomeSucceeded
+			if result.Status == send.ReplyAccepted {
+				outcome = collect.OutcomeSucceeded
 				errorClass = ""
 				errorReason = ""
 				scheduler.ObserveAcceptedSend()
 			} else if errorClass == "" {
-				errorClass = soakErrorInternal
+				errorClass = rpc.ErrorInternal
 			}
-			recordSoakSample(collector.Record(&soakOperationSample{
+			recordSoakSample(collector.Record(&collect.Sample{
 				Action: action, Outcome: outcome, At: now(),
 				Latency: result.Latency, ErrorClass: errorClass,
 				ErrorReason: errorReason,
 			}))
-			if result.Status != soakSendReplyUnmatched {
+			if result.Status != send.ReplyUnmatched {
 				if err := failureTracker.ObserveReply(&result); err != nil {
 					slog.Error("record Cassandra soak send observation", "error", err)
 				}
@@ -866,9 +872,9 @@ func runSoakWorkload(
 		return 1
 	}
 
-	rpc := newSoakRPCClient(
+	rpcClient := rpc.NewClient(
 		newNATSHistoryRequester(nc.NatsConn()),
-		soakRetryConfig{
+		rpc.RetryConfig{
 			MaxAttempts: cfg.Soak.MutationRetries + 1,
 			MinBackoff:  cfg.Soak.RetryMinBackoff,
 			MaxBackoff:  cfg.Soak.RetryMaxBackoff,
@@ -879,17 +885,17 @@ func runSoakWorkload(
 	)
 	failureVerifier := newSoakFailureRPCVerifier(
 		cfg.SiteID,
-		rpc,
+		rpcClient,
 		catalog,
 		recorders.verify,
 		now,
 	)
-	searchReader, searchReaderErr := newSoakSearchReader(
-		soakSearchConfig{
+	searchReader, searchReaderErr := search.New(
+		search.Config{
 			SiteID: cfg.SiteID, PageSize: opts.PageLimit,
 			RequestTimeout: soakRequestTimeout, Settle: cfg.Soak.SearchSettle,
 		},
-		&topology, rpc, recorders.read,
+		&topology, rpcClient, recorders.read,
 		rand.New(rand.NewSource(seed+13)),
 		now,
 	)
@@ -915,14 +921,14 @@ func runSoakWorkload(
 		reconcilerOptions...,
 	)
 	reconcileGate := newSoakShareGate(cfg.Soak.ReconcileReadShare)
-	warmReader := newSoakReader(
-		soakReadConfig{
+	warmReader := read.NewReader(
+		read.Config{
 			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
 		catalog,
-		rpc,
+		rpcClient,
 		nil,
 		rand.New(rand.NewSource(seed+5)),
 		now,
@@ -936,17 +942,17 @@ func runSoakWorkload(
 		slog.Error("warm Cassandra soak pinned catalog", "error", err)
 		return 1
 	}
-	reader := newSoakReader(
+	reader := read.NewReader(
 		soakMeasuredReadConfig(cfg.SiteID, opts.PageLimit),
 		&topology,
 		catalog,
-		rpc,
+		rpcClient,
 		recorders.read,
 		rand.New(rand.NewSource(seed+5)),
 		now,
 	)
-	mutator := newSoakMutator(
-		&soakMutationConfig{
+	mutator := mutation.New(
+		&mutation.Config{
 			SiteID: cfg.SiteID, MutationRetries: cfg.Soak.MutationRetries,
 			RetryMinBackoff:        cfg.Soak.RetryMinBackoff,
 			RetryMaxBackoff:        cfg.Soak.RetryMaxBackoff,
@@ -957,19 +963,19 @@ func runSoakWorkload(
 		},
 		&topology,
 		catalog,
-		rpc,
+		rpcClient,
 		recorders.mutation,
 		rand.New(rand.NewSource(seed+6)),
 		nil,
 		nil,
 	)
-	verifier := newSoakVerifier(
-		&soakVerifyConfig{
+	verifier := read.NewVerifier(
+		&read.VerifyConfig{
 			SiteID: cfg.SiteID, PageLimit: opts.PageLimit, MaxPages: soakMaxPages(opts.PageLimit),
 			RequestTimeout: soakRequestTimeout,
 		},
 		catalog,
-		rpc,
+		rpcClient,
 		recorders.verify,
 		now,
 	)
@@ -987,7 +993,7 @@ func runSoakWorkload(
 	roomReader := newSoakRoomReader(
 		soakRoomReadConfigFrom(cfg.SiteID, &cfg.Soak),
 		roomPool,
-		rpc,
+		rpcClient,
 		recorders.read,
 		rand.New(rand.NewSource(seed+9)),
 		now,
@@ -999,7 +1005,7 @@ func runSoakWorkload(
 			SiteID: cfg.SiteID, PageLimit: opts.PageLimit,
 			RequestTimeout: soakRequestTimeout,
 		},
-		&topology, rpc, soakUserReadRecorderAdapter{recorder: recorders.read},
+		&topology, rpcClient, soakUserReadRecorderAdapter{recorder: recorders.read},
 		rand.New(rand.NewSource(seed+11)),
 		now,
 	)
@@ -1017,7 +1023,7 @@ func runSoakWorkload(
 			RoomCreateBudget: cfg.Soak.RoomCreateBudget, CreateRoomSize: cfg.Soak.RoomCreateSize,
 		},
 		roomPool,
-		newSoakRoomMutator(cfg.SiteID, rpc, soakRequestTimeout, now),
+		newSoakRoomMutator(cfg.SiteID, rpcClient, soakRequestTimeout, now),
 		ledger,
 		roomReader,
 		store,
@@ -1052,17 +1058,17 @@ func runSoakWorkload(
 	roomLanes.SpendCreateBudget(created)
 	roomReconcileGate := newSoakShareGate(cfg.Soak.RoomReconcileReadShare)
 
-	presenceLane, err := newSoakPresenceLane(
-		soakPresenceConfig{
+	presenceLane, err := presence.New(
+		presence.Config{
 			SiteID: cfg.SiteID, Connections: cfg.Soak.PresenceConnections,
 			QueryShare: cfg.Soak.PresenceQueryShare, Settle: cfg.Soak.PresenceSettle,
 			TTL: cfg.Soak.PresenceTTL, QueryBatchSize: cfg.Soak.PresenceQueryBatch,
 			RequestTimeout: soakRequestTimeout,
 		},
 		&topology,
-		newNATSSoakPresencePublisher(nc.NatsConn()),
-		rpc,
-		metrics,
+		presence.NewNATSPublisher(nc.NatsConn()),
+		rpcClient,
+		&soakPresenceMetricsAdapter{metrics: metrics},
 		recorders.read,
 		rand.New(rand.NewSource(seed+10)),
 		now,
@@ -1073,14 +1079,14 @@ func runSoakWorkload(
 	}
 
 	var verificationSequence atomic.Uint64
-	actions := soakWorkloadActions{
+	actions := workload.Actions{
 		Send: func(actionCtx context.Context, _ bool) error {
 			// #nosec G601 -- go.mod requires go 1.25; since 1.22 each iteration has its own loop variable
 			// nosemgrep: gosec.G601-1
 			for _, result := range sender.ExpireResults() {
-				if err := collector.Record(&soakOperationSample{
-					Action: soakRPCSend, Outcome: soakOutcomeFailed, At: now(),
-					ErrorClass: soakErrorTimeout,
+				if err := collector.Record(&collect.Sample{
+					Action: rpc.ActionSend, Outcome: collect.OutcomeFailed, At: now(),
+					ErrorClass: rpc.ErrorTimeout,
 				}); err != nil {
 					slog.Error("record expired Cassandra soak send timeout", "error", err)
 				}
@@ -1093,14 +1099,14 @@ func runSoakWorkload(
 			if publishErr == nil {
 				return nil
 			}
-			action := soakRPCSend
-			if pending != nil && pending.Kind == soakSendThreadReply {
-				action = soakRPCThreadReply
+			action := rpc.ActionSend
+			if pending != nil && pending.Kind == send.KindThreadReply {
+				action = rpc.ActionThreadReply
 			}
-			recordSoakSample(collector.Record(&soakOperationSample{
-				Action: action, Outcome: soakOutcomeFailed, At: now(),
-				ErrorClass:  classifySoakRPCError(publishErr),
-				ErrorReason: classifySoakRPCReason(publishErr),
+			recordSoakSample(collector.Record(&collect.Sample{
+				Action: action, Outcome: collect.OutcomeFailed, At: now(),
+				ErrorClass:  rpc.ClassifyError(publishErr),
+				ErrorReason: rpc.ClassifyReason(publishErr),
 			}))
 			// Publish classifies definite local rejections as not_sent. Ambiguous
 			// failures remain active for admission timeout and downstream
@@ -1120,9 +1126,9 @@ func runSoakWorkload(
 		Mutation: func(actionCtx context.Context, _ bool) error {
 			roomID := selector.nextRoom()
 			switch scheduler.Next() {
-			case soakMutationDelete:
+			case mutation.KindDelete:
 				_, _ = mutator.Delete(actionCtx, roomID)
-			case soakMutationPinFamily:
+			case mutation.KindPinFamily:
 				_, _ = mutator.PinOrUnpin(actionCtx, roomID)
 			default:
 				_, _ = mutator.Edit(actionCtx, roomID, "soak-edited")
@@ -1151,13 +1157,13 @@ func runSoakWorkload(
 		},
 		MemberMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.MemberMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak member mutation", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak member mutation", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomMutation: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomMutation(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room mutation", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak room mutation", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
@@ -1168,7 +1174,7 @@ func runSoakWorkload(
 			if roomReconcileGate.Allow() {
 				reconciled, err := roomLanes.Reconcile(actionCtx, roomVerifier)
 				if err != nil {
-					slog.Error("reconcile Cassandra soak room operation", soakErrorAttrs(err)...)
+					slog.Error("reconcile Cassandra soak room operation", rpc.ErrorAttrs(err)...)
 				}
 				if reconciled {
 					return nil
@@ -1189,50 +1195,50 @@ func runSoakWorkload(
 				}
 			}
 			if err := roomReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room read", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak room read", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		UserRead: func(actionCtx context.Context, _ bool) error {
 			if err := userReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak user read", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak user read", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		SearchRead: func(actionCtx context.Context, _ bool) error {
 			if err := searchReader.ReadMixed(actionCtx); err != nil {
-				slog.Error("run Cassandra soak search read", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak search read", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		RoomCreate: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.RoomCreate(actionCtx); err != nil {
-				slog.Error("run Cassandra soak room create", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak room create", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		ReadReceipt: func(actionCtx context.Context, _ bool) error {
 			if err := roomLanes.ReadReceipt(actionCtx); err != nil {
-				slog.Error("run Cassandra soak read receipt", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak read receipt", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 		Presence: func(actionCtx context.Context, _ bool) error {
 			if err := presenceLane.Signal(actionCtx); err != nil {
-				slog.Error("run Cassandra soak presence signal", soakErrorAttrs(err)...)
+				slog.Error("run Cassandra soak presence signal", rpc.ErrorAttrs(err)...)
 			}
 			return nil
 		},
 	}
-	workload := newSoakWorkload(
+	workload := workload.New(
 		soakWorkloadConfigFrom(&cfg.Soak, cfg.MaxInFlight),
-		store,
+		run.NewLifecycle(store),
 		&actions,
-		nil,
+		dispatchSoakLane,
 		now,
 		nil,
-		withSoakPacingMetrics(newSoakPacingMetrics(metrics)),
-		withSoakHeartbeatObserver(heartbeatStatus),
+		workload.WithPacingRecorder(newSoakPacingMetrics(metrics)),
+		workload.WithHeartbeatObserver(heartbeatStatus),
 		withSoakFailureInvalidation(ledger.Invalidate),
 	)
 	result, runErr := workload.Run(workloadCtx)
@@ -1312,10 +1318,10 @@ func soakConsumerSamplerTargets(siteID string) []soakConsumerSamplerTarget {
 	}
 }
 
-func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {
+func soakMeasuredReadConfig(siteID string, pageLimit int) read.Config {
 	// Workload Model v1 defines the read rate in RPCs/second. Scheduled reads
 	// therefore fetch one page; the independent verifier owns bucket-walks.
-	return soakReadConfig{
+	return read.Config{
 		SiteID: siteID, PageLimit: pageLimit, MaxPages: 1,
 		RequestTimeout: soakRequestTimeout,
 	}
@@ -1323,7 +1329,7 @@ func soakMeasuredReadConfig(siteID string, pageLimit int) soakReadConfig {
 
 func warmSoakPinnedCatalog(
 	ctx context.Context,
-	reader *soakReader,
+	reader *read.Reader,
 	roomIDs []string,
 	maxInFlight int,
 ) error {
@@ -1368,7 +1374,7 @@ func runSoakEncryptionPreflight(
 	ctx context.Context,
 	cfg soakEncryptionPreflightConfig,
 	store soakEncryptionStore,
-	sender *soakSender,
+	sender *send.Sender,
 	selector *soakRuntimeSelector,
 	replies <-chan soakSendObservation,
 ) error {
@@ -1404,7 +1410,7 @@ func runSoakEncryptionPreflight(
 			if observation.result.RequestID != pending.RequestID {
 				continue
 			}
-			if observation.result.Status != soakSendReplyAccepted {
+			if observation.result.Status != send.ReplyAccepted {
 				return fmt.Errorf(
 					"encrypted front-door probe was %s",
 					observation.result.Status,
@@ -1449,35 +1455,35 @@ func startSoakMetricsServer(addr string, metrics *Metrics) *http.Server {
 	return server
 }
 
-func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
-	rates := map[soakRPCAction]float64{
-		soakRPCSend:        cfg.SendRate * (1 - cfg.ThreadShare),
-		soakRPCThreadReply: cfg.SendRate * cfg.ThreadShare,
-		soakRPCLoadHistory: cfg.ReadRate * 0.75,
-		soakRPCGetThread:   cfg.ReadRate * 0.15,
-		soakRPCGetMessage:  cfg.ReadRate * 0.10,
-		soakRPCReact:       cfg.ReactionRate,
-		soakRPCPinnedList:  cfg.PinnedListRate,
-		soakRPCReadBack:    cfg.VerifyRate,
+func soakTargetRates(cfg *soakConfig) map[rpc.Action]float64 {
+	rates := map[rpc.Action]float64{
+		rpc.ActionSend:        cfg.SendRate * (1 - cfg.ThreadShare),
+		rpc.ActionThreadReply: cfg.SendRate * cfg.ThreadShare,
+		rpc.ActionLoadHistory: cfg.ReadRate * 0.75,
+		rpc.ActionGetThread:   cfg.ReadRate * 0.15,
+		rpc.ActionGetMessage:  cfg.ReadRate * 0.10,
+		rpc.ActionReact:       cfg.ReactionRate,
+		rpc.ActionPinnedList:  cfg.PinnedListRate,
+		rpc.ActionReadBack:    cfg.VerifyRate,
 		// The room mutation lane alternates rename and mute, so each shape gets
 		// half of the configured rate.
-		soakRPCMemberAdd:        cfg.MemberMutationRate / 2,
-		soakRPCMemberRemove:     cfg.MemberMutationRate / 2,
-		soakRPCRoomRename:       cfg.RoomMutationRate / 2,
-		soakRPCMuteToggle:       cfg.RoomMutationRate / 2,
-		soakRPCRoomCreate:       cfg.RoomCreateRate,
-		soakRPCMemberList:       cfg.RoomReadRate * 0.45,
-		soakRPCRoomsInfo:        cfg.RoomReadRate * 0.27,
-		soakRPCSubscriptionList: cfg.RoomReadRate * 0.18,
-		soakRPCReadReceiptList:  cfg.RoomReadRate * 0.10,
-		soakRPCMessageRead:      cfg.ReadReceiptRate,
-		soakRPCPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
-		soakRPCSearchMessages:   cfg.SearchReadRate * 0.7,
-		soakRPCSearchRooms:      cfg.SearchReadRate * 0.3,
+		rpc.ActionMemberAdd:        cfg.MemberMutationRate / 2,
+		rpc.ActionMemberRemove:     cfg.MemberMutationRate / 2,
+		rpc.ActionRoomRename:       cfg.RoomMutationRate / 2,
+		rpc.ActionMuteToggle:       cfg.RoomMutationRate / 2,
+		rpc.ActionRoomCreate:       cfg.RoomCreateRate,
+		rpc.ActionMemberList:       cfg.RoomReadRate * 0.45,
+		rpc.ActionRoomsInfo:        cfg.RoomReadRate * 0.27,
+		rpc.ActionSubscriptionList: cfg.RoomReadRate * 0.18,
+		rpc.ActionReadReceiptList:  cfg.RoomReadRate * 0.10,
+		rpc.ActionMessageRead:      cfg.ReadReceiptRate,
+		rpc.ActionPresenceQuery:    cfg.PresenceRate * cfg.PresenceQueryShare,
+		rpc.ActionSearchMessages:   cfg.SearchReadRate * 0.7,
+		rpc.ActionSearchRooms:      cfg.SearchReadRate * 0.3,
 	}
 	// The user lane dispatches uniformly across its reads, so each carries an
 	// equal share of the configured rate.
-	userReadActions := soakrpc.UserReadActions()
+	userReadActions := rpc.UserReadActions()
 	share := cfg.UserReadRate / float64(len(userReadActions))
 	for _, action := range userReadActions {
 		rates[action] = share
@@ -1485,4 +1491,4 @@ func soakTargetRates(cfg *soakConfig) map[soakRPCAction]float64 {
 	return rates
 }
 
-var _ soakRuntimeStore = (*mongoSoakStore)(nil)
+var _ soakRuntimeStore = (*run.Mongo)(nil)

@@ -13,6 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	soakworkload "github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
 func TestSoakWorkload_RunsIndependentConfiguredLanes(t *testing.T) {
@@ -381,25 +383,6 @@ func TestPrepareContinuousSoakRun_ResumesStoppedManifestWithoutDeadline(
 	assert.Nil(t, manifest.Deadline)
 	assert.Zero(t, manifest.ConfiguredDuration)
 	assert.Equal(t, 1, manifest.RestartCount)
-}
-
-func TestSoakManifestProjection_IncludesLifecycleAndOwnershipFields(t *testing.T) {
-	projection := soakManifestProjection()
-	fields := make(map[string]any, len(projection))
-	for _, element := range projection {
-		fields[element.Key] = element.Value
-	}
-	for _, field := range []string{
-		"_id", "state", "siteId", "mongoDatabase", "cassandraKeyspace",
-		"configDigest", "borrowedUserCount", "activeUserCount", "activeUserIds", "roomCount",
-		"subscriptionCount", "startedAt", "updatedAt", "seededAt",
-		"cleanedAt", "firstStartedAt", "deadline", "completedAt",
-		"configuredDuration", "restartCount", "runMode", "lastStoppedAt",
-		"lastHeartbeatAt",
-	} {
-		assert.Equal(t, 1, fields[field], field)
-	}
-	assert.Len(t, fields, 23)
 }
 
 func TestSoakWorkload_AlreadyElapsedDeadlineCompletesWithoutDispatch(t *testing.T) {
@@ -1005,25 +988,8 @@ func TestSoakWorkloadConfigFrom_EnablesEveryLane(t *testing.T) {
 	cfg := validSoakConfig(t)
 	cfg.UserReadRate = 10
 
-	workload := newSoakWorkload(
-		soakWorkloadConfigFrom(&cfg, 256), nil, allSoakWorkloadActions(), nil, nil, nil,
-	)
-
-	for _, lane := range workload.lanes() {
-		assert.Positive(t, lane.rate, "lane=%s has no configured rate", lane.name)
-	}
-}
-
-// allSoakWorkloadActions fills every action slot so lanes() reports the lane as
-// runnable and the assertion above is about rates alone.
-func allSoakWorkloadActions() *soakWorkloadActions {
-	noop := func(context.Context, bool) error { return nil }
-	return &soakWorkloadActions{
-		Send: noop, Read: noop, Mutation: noop, Reaction: noop,
-		PinnedList: noop, Verify: noop, MemberMutation: noop,
-		RoomMutation: noop, RoomRead: noop, UserRead: noop,
-		SearchRead: noop, RoomCreate: noop, ReadReceipt: noop,
-		Presence: noop,
+	for _, lane := range soakworkload.Lanes(soakWorkloadConfigFrom(&cfg, 256)) {
+		assert.Positive(t, lane.Rate, "lane=%s has no configured rate", lane.Name)
 	}
 }
 

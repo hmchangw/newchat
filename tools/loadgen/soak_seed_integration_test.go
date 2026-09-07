@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"testing"
 	"time"
@@ -18,6 +19,20 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/testutil"
 )
+
+func newSequenceSoakIDs() *soakIDs {
+	var room, subscription int
+	return &soakIDs{
+		NewChannelRoomID: func() string {
+			room++
+			return fmt.Sprintf("channel-%03d", room)
+		},
+		NewSubscriptionID: func() string {
+			subscription++
+			return fmt.Sprintf("subscription-%05d", subscription)
+		},
+	}
+}
 
 func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 	ctx := context.Background()
@@ -52,7 +67,7 @@ func TestSeedSoak_PreservesBorrowedAndUnrelatedMongoData(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(roomsCollection, time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -192,7 +207,7 @@ func TestSeedSoak_RejectsExistingDMRoomBeforeWritingManifest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	input := soakSeedInput{
@@ -248,7 +263,7 @@ func countDocuments(t *testing.T, collection *mongo.Collection, filter any) int6
 func TestSoakStore_ReadsRoomStateFromThePrimary(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_roomstate")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 
 	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "room-1", "name": "soak-channel"})
 	require.NoError(t, err)
@@ -280,7 +295,7 @@ func TestSoakStore_ReadsRoomStateFromThePrimary(t *testing.T) {
 func TestSoakStore_ReportsAbsentRoomStateWithoutError(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_roomstate_absent")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 
 	_, found, err := store.RoomName(ctx, "missing-room")
 	require.NoError(t, err)
@@ -297,7 +312,7 @@ func TestSoakStore_ReportsAbsentRoomStateWithoutError(t *testing.T) {
 
 func TestSoakStore_RejectsRoomStateLookupsWithoutIdentifiers(t *testing.T) {
 	ctx := context.Background()
-	store := &mongoSoakStore{db: testutil.MongoDB(t, "loadgen_soak_roomstate_args")}
+	store := newMongoSoakStore(testutil.MongoDB(t, "loadgen_soak_roomstate_args"))
 
 	_, _, err := store.RoomName(ctx, "")
 	require.Error(t, err)
@@ -312,7 +327,7 @@ func TestSoakStore_RejectsRoomStateLookupsWithoutIdentifiers(t *testing.T) {
 func TestSoakStore_AppendOwnedRoomsKeepsTeardownPaging(t *testing.T) {
 	ctx := context.Background()
 	db := testutil.MongoDB(t, "loadgen_soak_ownership_append")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 
 	require.NoError(t, store.ReplaceOwnershipChunks(ctx, "run-1", [][]string{{"room-1", "room-2"}}))
 	_, err := db.Collection("rooms").InsertOne(ctx, bson.M{"_id": "room-3", "name": "created"})
@@ -344,7 +359,7 @@ func TestSoakStore_AppendOwnedRoomsKeepsTeardownPaging(t *testing.T) {
 
 func TestSoakStore_AppendOwnedRoomsIsANoOpWithoutRooms(t *testing.T) {
 	ctx := context.Background()
-	store := &mongoSoakStore{db: testutil.MongoDB(t, "loadgen_soak_ownership_noop")}
+	store := newMongoSoakStore(testutil.MongoDB(t, "loadgen_soak_ownership_noop"))
 
 	require.NoError(t, store.AppendOwnedRooms(ctx, "run-1", nil))
 	require.Error(t, store.AppendOwnedRooms(ctx, "", []string{"room-1"}))
@@ -370,7 +385,7 @@ func TestLoadTopology_RestoresEnoughStateToBuildTheRoomPool(t *testing.T) {
 	_, err := db.Collection("users").InsertMany(ctx, userDocs)
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -420,7 +435,7 @@ func TestLoadTopology_RestoresRoomsCreatedDuringTheRun(t *testing.T) {
 	_, err := db.Collection("users").InsertMany(ctx, userDocs)
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -487,7 +502,7 @@ func TestLoadTopology_RestoresMuteAndReadCursorState(t *testing.T) {
 	_, err := db.Collection("users").InsertMany(ctx, userDocs)
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -549,7 +564,7 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 	_, err := db.Collection("users").InsertMany(ctx, userDocs)
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -610,12 +625,13 @@ func TestCountCreatedRooms_ExcludesTheSeededPopulation(t *testing.T) {
 func insertRoomServiceCreatedRoom(
 	t *testing.T,
 	ctx context.Context,
+	db *mongo.Database,
 	store *mongoSoakStore,
 	runID, siteID, roomID string,
 	accounts []model.SubscriptionUser,
 ) {
 	t.Helper()
-	_, err := store.db.Collection("rooms").InsertOne(ctx, bson.D{
+	_, err := db.Collection("rooms").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: roomID},
 		{Key: "name", Value: soakCreatedRoomPrefix(runID) + "abc"},
 		{Key: "type", Value: model.RoomTypeChannel},
@@ -644,7 +660,7 @@ func insertRoomServiceCreatedRoom(
 			{Key: "joinedAt", Value: time.Now().UTC()},
 		})
 	}
-	_, err = store.db.Collection("subscriptions").InsertMany(ctx, documents)
+	_, err = db.Collection("subscriptions").InsertMany(ctx, documents)
 	require.NoError(t, err)
 
 	require.NoError(t, store.AppendOwnedRooms(ctx, runID, []string{roomID}))
@@ -672,7 +688,7 @@ func TestLoadTopology_RestoresSubscriptionsRoomServiceWroteForCreatedRooms(t *te
 	_, err := db.Collection("users").InsertMany(ctx, userDocs)
 	require.NoError(t, err)
 
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 	cfg := validSoakConfig(t)
@@ -695,7 +711,7 @@ func TestLoadTopology_RestoresSubscriptionsRoomServiceWroteForCreatedRooms(t *te
 		{ID: seeded.ActiveUsers[0].ID, Account: seeded.ActiveUsers[0].Account},
 		{ID: seeded.ActiveUsers[1].ID, Account: seeded.ActiveUsers[1].Account},
 	}
-	insertRoomServiceCreatedRoom(t, ctx, store, cfg.RunID, "site-a", createdRoomID, members)
+	insertRoomServiceCreatedRoom(t, ctx, db, store, cfg.RunID, "site-a", createdRoomID, members)
 
 	reloaded, err := store.LoadTopology(ctx, cfg.RunID, "site-a")
 	require.NoError(t, err)

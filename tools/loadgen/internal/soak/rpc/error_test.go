@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// attrMap folds soakErrorAttrs' flat key/value slice into a map so a test can
+// attrMap folds ErrorAttrs' flat key/value slice into a map so a test can
 // assert on presence and absence without depending on emission order.
 func attrMap(t *testing.T, attrs []any) map[string]any {
 	t.Helper()
@@ -32,26 +32,26 @@ func attrMap(t *testing.T, attrs []any) map[string]any {
 // server logs for.
 func TestSoakErrorAttrs_CarriesTheRequestIdentity(t *testing.T) {
 	cause := errors.New("nats request: context deadline exceeded")
-	err := &soakRequestError{
-		Action:   soakRPCSubscriptionList,
+	err := &RequestError{
+		Action:   ActionSubscriptionList,
 		Subject:  "chat.user.alice.request.user.tw01.subscription.list",
 		Account:  "alice",
 		RoomID:   "room-1",
-		Class:    soakErrorResponseTooLarge,
-		Reason:   soakErrorReason(soakReasonResponseTooLarge),
+		Class:    ErrorResponseTooLarge,
+		Reason:   ErrorReason(ReasonResponseTooLarge),
 		Attempts: 3,
 		Retries:  2,
 		Cause:    cause,
 	}
 
-	got := attrMap(t, soakErrorAttrs(err))
+	got := attrMap(t, ErrorAttrs(err))
 
-	assert.Equal(t, string(soakRPCSubscriptionList), got["action"])
+	assert.Equal(t, string(ActionSubscriptionList), got["action"])
 	assert.Equal(t, "alice", got["account"])
 	assert.Equal(t, "room-1", got["room_id"])
 	assert.Equal(t, "chat.user.alice.request.user.tw01.subscription.list", got["subject"])
-	assert.Equal(t, string(soakErrorResponseTooLarge), got["error_class"])
-	assert.Equal(t, string(soakReasonResponseTooLarge), got["error_reason"])
+	assert.Equal(t, string(ErrorResponseTooLarge), got["error_class"])
+	assert.Equal(t, string(ReasonResponseTooLarge), got["error_reason"])
 	assert.Equal(t, 3, got["attempts"])
 	assert.Equal(t, 2, got["retries"])
 	assert.Contains(t, got, "error")
@@ -61,15 +61,15 @@ func TestSoakErrorAttrs_CarriesTheRequestIdentity(t *testing.T) {
 // room_id="" on every user-read error is noise that trains readers to skip
 // the field they will one day need.
 func TestSoakErrorAttrs_OmitsEmptyFields(t *testing.T) {
-	err := &soakRequestError{
-		Action: soakRPCUserMe,
-		Class:  soakErrorTimeout,
+	err := &RequestError{
+		Action: ActionUserMe,
+		Class:  ErrorTimeout,
 		Cause:  errors.New("boom"),
 	}
 
-	got := attrMap(t, soakErrorAttrs(err))
+	got := attrMap(t, ErrorAttrs(err))
 
-	assert.Equal(t, string(soakRPCUserMe), got["action"])
+	assert.Equal(t, string(ActionUserMe), got["action"])
 	assert.NotContains(t, got, "account")
 	assert.NotContains(t, got, "room_id")
 	assert.NotContains(t, got, "subject")
@@ -83,28 +83,28 @@ func TestSoakErrorAttrs_OmitsEmptyFields(t *testing.T) {
 func TestSoakErrorAttrs_FallsBackToTheBareError(t *testing.T) {
 	err := errors.New("prepare soak room state pool")
 
-	got := attrMap(t, soakErrorAttrs(err))
+	got := attrMap(t, ErrorAttrs(err))
 
 	assert.Equal(t, err, got["error"])
 	assert.Len(t, got, 1)
 }
 
 func TestSoakErrorAttrs_NilErrorYieldsNoAttrs(t *testing.T) {
-	assert.Empty(t, soakErrorAttrs(nil))
+	assert.Empty(t, ErrorAttrs(nil))
 }
 
 // The carrier is added by the RPC client and wrapped again by every lane on
 // the way up, so it has to be findable through that wrapping.
 func TestSoakErrorAttrs_FindsTheCarrierThroughWrapping(t *testing.T) {
-	inner := &soakRequestError{
-		Action:  soakRPCSubscriptionList,
+	inner := &RequestError{
+		Action:  ActionSubscriptionList,
 		Account: "bob",
-		Class:   soakErrorTimeout,
+		Class:   ErrorTimeout,
 		Cause:   errors.New("deadline"),
 	}
-	wrapped := fmt.Errorf("issue %s request: %w", soakRPCSubscriptionList, inner)
+	wrapped := fmt.Errorf("issue %s request: %w", ActionSubscriptionList, inner)
 
-	got := attrMap(t, soakErrorAttrs(wrapped))
+	got := attrMap(t, ErrorAttrs(wrapped))
 
 	assert.Equal(t, "bob", got["account"])
 	assert.Equal(t, wrapped, got["error"], "the outermost message is what a reader needs")
@@ -113,10 +113,10 @@ func TestSoakErrorAttrs_FindsTheCarrierThroughWrapping(t *testing.T) {
 // Retry classification upstream keys on sentinel errors; the carrier must not
 // break errors.Is by swallowing what it wraps.
 func TestSoakRequestError_UnwrapsToItsCause(t *testing.T) {
-	cause := fmt.Errorf("%w: %s", errSoakRetryExhausted, "subscription_list")
-	err := &soakRequestError{Action: soakRPCSubscriptionList, Cause: cause}
+	cause := fmt.Errorf("%w: %s", ErrRetryExhausted, "subscription_list")
+	err := &RequestError{Action: ActionSubscriptionList, Cause: cause}
 
-	assert.ErrorIs(t, err, errSoakRetryExhausted)
+	assert.ErrorIs(t, err, ErrRetryExhausted)
 	assert.Equal(t, cause, errors.Unwrap(err))
 }
 
@@ -125,7 +125,7 @@ func TestSoakRequestError_UnwrapsToItsCause(t *testing.T) {
 // "issue subscription_list request: subscription_list: ..." on every line.
 func TestSoakRequestError_ErrorIsTheCauseVerbatim(t *testing.T) {
 	cause := errors.New("nats request: context deadline exceeded")
-	err := &soakRequestError{Action: soakRPCSubscriptionList, Cause: cause}
+	err := &RequestError{Action: ActionSubscriptionList, Cause: cause}
 
 	assert.Equal(t, cause.Error(), err.Error())
 }
@@ -133,11 +133,11 @@ func TestSoakRequestError_ErrorIsTheCauseVerbatim(t *testing.T) {
 // A carrier with no cause would be a programming error, but it must not panic
 // a running soak: the log line degrades instead.
 func TestSoakRequestError_SurvivesANilCause(t *testing.T) {
-	err := &soakRequestError{Action: soakRPCSubscriptionList}
+	err := &RequestError{Action: ActionSubscriptionList}
 
 	assert.NotPanics(t, func() {
 		_ = err.Error()
-		_ = soakErrorAttrs(err)
+		_ = ErrorAttrs(err)
 	})
 	assert.Nil(t, errors.Unwrap(err))
 }
@@ -146,8 +146,8 @@ func TestSoakRequestError_SurvivesANilCause(t *testing.T) {
 
 // newCarrierTestClient builds a client whose retries are instant, so a test can
 // assert on the carrier without pacing a real backoff.
-func newCarrierTestClient(transport soakRPCTransport, attempts int) *soakRPCClient {
-	return newSoakRPCClient(transport, soakRetryConfig{
+func newCarrierTestClient(transport Transport, attempts int) *Client {
+	return NewClient(transport, RetryConfig{
 		MaxAttempts: attempts, MinBackoff: time.Millisecond,
 		MaxBackoff: time.Millisecond, Jitter: 0,
 	}, &soakRecordingSleeper{}, func() float64 { return 0 })
@@ -160,23 +160,23 @@ func TestSoakRPCClient_ExhaustedRetriesCarryTheRequestIdentity(t *testing.T) {
 	}}
 	client := newCarrierTestClient(transport, 2)
 
-	_, err := client.Call(context.Background(), soakRPCRequest{
-		Action:    soakRPCSubscriptionList,
+	_, err := client.Call(context.Background(), Request{
+		Action:    ActionSubscriptionList,
 		Subject:   "chat.user.alice.request.user.tw01.subscription.list",
 		Account:   "alice",
 		RoomID:    "room-1",
 		Timeout:   time.Second,
-		RetryMode: soakRetrySafe,
+		RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
-	var carrier *soakRequestError
+	var carrier *RequestError
 	require.ErrorAs(t, err, &carrier)
-	assert.Equal(t, soakRPCSubscriptionList, carrier.Action)
+	assert.Equal(t, ActionSubscriptionList, carrier.Action)
 	assert.Equal(t, "alice", carrier.Account)
 	assert.Equal(t, "room-1", carrier.RoomID)
 	assert.Equal(t, "chat.user.alice.request.user.tw01.subscription.list", carrier.Subject)
-	assert.Equal(t, soakErrorTimeout, carrier.Class)
+	assert.Equal(t, ErrorTimeout, carrier.Class)
 	assert.Equal(t, 2, carrier.Attempts)
 	assert.Equal(t, 1, carrier.Retries)
 }
@@ -189,12 +189,12 @@ func TestSoakRPCClient_CarrierPreservesTheRetrySentinel(t *testing.T) {
 	}}
 	client := newCarrierTestClient(transport, 1)
 
-	_, err := client.Call(context.Background(), soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Timeout: time.Second, RetryMode: soakRetrySafe,
+	_, err := client.Call(context.Background(), Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
-	assert.ErrorIs(t, err, errSoakRetryExhausted)
+	assert.ErrorIs(t, err, ErrRetryExhausted)
 }
 
 // The failure this whole change exists to make greppable: an oversize reply
@@ -206,23 +206,23 @@ func TestSoakRPCClient_OversizeReplyCarriesAccountAndReason(t *testing.T) {
 	}}
 	client := newCarrierTestClient(transport, 1)
 
-	_, err := client.Call(context.Background(), soakRPCRequest{
-		Action:  soakRPCSubscriptionList,
+	_, err := client.Call(context.Background(), Request{
+		Action:  ActionSubscriptionList,
 		Subject: "chat.user.carol.request.user.tw01.subscription.list",
 		Account: "carol",
-		Timeout: time.Second, RetryMode: soakRetrySafe,
+		Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
-	var carrier *soakRequestError
+	var carrier *RequestError
 	require.ErrorAs(t, err, &carrier)
 	assert.Equal(t, "carol", carrier.Account)
-	assert.Equal(t, soakErrorResponseTooLarge, carrier.Class)
-	assert.Equal(t, soakErrorReason(soakReasonResponseTooLarge), carrier.Reason)
+	assert.Equal(t, ErrorResponseTooLarge, carrier.Class)
+	assert.Equal(t, ErrorReason(ReasonResponseTooLarge), carrier.Reason)
 
-	got := attrMap(t, soakErrorAttrs(err))
+	got := attrMap(t, ErrorAttrs(err))
 	assert.Equal(t, "carol", got["account"])
-	assert.Equal(t, string(soakErrorResponseTooLarge), got["error_class"])
+	assert.Equal(t, string(ErrorResponseTooLarge), got["error_class"])
 }
 
 // A body that never reached the wire has no reply to classify, but the action
@@ -230,8 +230,8 @@ func TestSoakRPCClient_OversizeReplyCarriesAccountAndReason(t *testing.T) {
 func TestSoakRPCClient_EncodeFailureStillCarriesTheAction(t *testing.T) {
 	client := newCarrierTestClient(&soakRPCFakeTransport{}, 1)
 
-	_, err := client.Call(context.Background(), soakRPCRequest{
-		Action:  soakRPCSubscriptionList,
+	_, err := client.Call(context.Background(), Request{
+		Action:  ActionSubscriptionList,
 		Subject: "chat.test",
 		Account: "dave",
 		Body:    make(chan int), // channels are not JSON-encodable
@@ -239,11 +239,11 @@ func TestSoakRPCClient_EncodeFailureStillCarriesTheAction(t *testing.T) {
 	}, nil)
 
 	require.Error(t, err)
-	var carrier *soakRequestError
+	var carrier *RequestError
 	require.ErrorAs(t, err, &carrier)
-	assert.Equal(t, soakRPCSubscriptionList, carrier.Action)
+	assert.Equal(t, ActionSubscriptionList, carrier.Action)
 	assert.Equal(t, "dave", carrier.Account)
-	assert.Equal(t, soakErrorRequestEncode, carrier.Class)
+	assert.Equal(t, ErrorRequestEncode, carrier.Class)
 }
 
 // --- a dead context still identifies the request ---
@@ -265,21 +265,21 @@ func TestSoakRPCClient_CanceledContextCarriesTheRequestIdentity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	result, err := client.Call(ctx, soakRPCRequest{
-		Action:  soakRPCSubscriptionList,
+	result, err := client.Call(ctx, Request{
+		Action:  ActionSubscriptionList,
 		Subject: "chat.user.erin.request.user.tw01.subscription.list",
 		Account: "erin", RoomID: "room-9",
-		Timeout: time.Second, RetryMode: soakRetrySafe,
+		Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
 	assert.Zero(t, transport.callCount(), "a dead context must not reach the wire")
-	var carrier *soakRequestError
+	var carrier *RequestError
 	require.ErrorAs(t, err, &carrier)
 	assert.Equal(t, "erin", carrier.Account)
 	assert.Equal(t, "room-9", carrier.RoomID)
-	assert.Equal(t, soakErrorCanceled, carrier.Class)
-	assert.Equal(t, soakErrorCanceled, result.ErrorClass,
+	assert.Equal(t, ErrorCanceled, carrier.Class)
+	assert.Equal(t, ErrorCanceled, result.ErrorClass,
 		"an empty class is what the recorder reads as a success")
 }
 
@@ -290,13 +290,13 @@ func TestSoakRPCClient_ExpiredDeadlineIsClassifiedAsATimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
 	defer cancel()
 
-	result, err := client.Call(ctx, soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Account: "erin", Timeout: time.Second, RetryMode: soakRetrySafe,
+	result, err := client.Call(ctx, Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Account: "erin", Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
-	assert.Equal(t, soakErrorTimeout, result.ErrorClass)
+	assert.Equal(t, ErrorTimeout, result.ErrorClass)
 }
 
 // The guard at the top of each attempt returned bare too. A soak torn down
@@ -309,20 +309,20 @@ func TestSoakRPCClient_CancellationBetweenAttemptsCarriesTheIdentity(t *testing.
 	transport := &soakCancelingTransport{cancel: cancel, inner: &soakRPCFakeTransport{
 		replies: []soakRPCFakeReply{{err: context.DeadlineExceeded}},
 	}}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 	}, &soakIgnoringSleeper{}, func() float64 { return 0 })
 
-	result, err := client.Call(ctx, soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Account: "frank", Timeout: time.Second, RetryMode: soakRetrySafe,
+	result, err := client.Call(ctx, Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Account: "frank", Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
-	var carrier *soakRequestError
+	var carrier *RequestError
 	require.ErrorAs(t, err, &carrier)
 	assert.Equal(t, "frank", carrier.Account)
-	assert.Equal(t, soakErrorTimeout, carrier.Class,
+	assert.Equal(t, ErrorTimeout, carrier.Class,
 		"the attempt reached the wire and timed out; its effect is unknown, and "+
 			"reporting the teardown instead would erase that")
 	assert.Equal(t, 1, result.Attempts, "the spent attempt must still be reported")
@@ -331,7 +331,7 @@ func TestSoakRPCClient_CancellationBetweenAttemptsCarriesTheIdentity(t *testing.
 // soakCancelingTransport kills the context once the request is on the wire, so
 // the next attempt starts against a dead one.
 type soakCancelingTransport struct {
-	inner  soakRPCTransport
+	inner  Transport
 	cancel context.CancelFunc
 }
 
@@ -350,7 +350,7 @@ func (t *soakCancelingTransport) Request(
 // error_class=timeout, with the transport error that caused the retrying gone.
 // Both causes have to survive, at both exits.
 func TestSoakRPCClient_InterruptedRetryReportsBothCauses(t *testing.T) {
-	for name, sleeper := range map[string]soakSleeper{
+	for name, sleeper := range map[string]Sleeper{
 		"canceled before the next attempt": &soakIgnoringSleeper{},
 		"canceled during the backoff":      &soakRecordingSleeper{},
 	} {
@@ -360,22 +360,22 @@ func TestSoakRPCClient_InterruptedRetryReportsBothCauses(t *testing.T) {
 			transport := &soakCancelingTransport{cancel: cancel, inner: &soakRPCFakeTransport{
 				replies: []soakRPCFakeReply{{err: nats.ErrTimeout}},
 			}}
-			client := newSoakRPCClient(transport, soakRetryConfig{
+			client := NewClient(transport, RetryConfig{
 				MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 			}, sleeper, func() float64 { return 0 })
 
-			result, err := client.Call(ctx, soakRPCRequest{
-				Action: soakRPCSubscriptionList, Subject: "chat.test",
-				Account: "grace", Timeout: time.Second, RetryMode: soakRetrySafe,
+			result, err := client.Call(ctx, Request{
+				Action: ActionSubscriptionList, Subject: "chat.test",
+				Account: "grace", Timeout: time.Second, RetryMode: RetrySafe,
 			}, nil)
 
 			require.Error(t, err)
 			assert.ErrorIs(t, err, context.Canceled, "why the retrying stopped")
 			assert.ErrorIs(t, err, nats.ErrTimeout, "why the operation failed")
-			assert.Equal(t, soakErrorTimeout, result.ErrorClass,
+			assert.Equal(t, ErrorTimeout, result.ErrorClass,
 				"the class must agree with the cause the message reports")
 
-			got := attrMap(t, soakErrorAttrs(err))
+			got := attrMap(t, ErrorAttrs(err))
 			assert.Equal(t, "grace", got["account"])
 		})
 	}
@@ -388,15 +388,15 @@ func TestSoakRPCClient_CancellationBeforeAnyAttemptNamesTheAction(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := client.Call(ctx, soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Account: "grace", Timeout: time.Second, RetryMode: soakRetrySafe,
+	_, err := client.Call(ctx, Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Account: "grace", Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
-	assert.Contains(t, err.Error(), string(soakRPCSubscriptionList))
-	assert.Equal(t, 1, strings.Count(err.Error(), string(soakRPCSubscriptionList)),
+	assert.Contains(t, err.Error(), string(ActionSubscriptionList))
+	assert.Equal(t, 1, strings.Count(err.Error(), string(ActionSubscriptionList)),
 		"Call names the action once; got %q", err.Error())
 }
 
@@ -416,13 +416,13 @@ func TestSoakRPCClient_CancellationAfterBackoffCountsNoRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	transport := &soakRPCFakeTransport{replies: []soakRPCFakeReply{{err: nats.ErrTimeout}}}
-	client := newSoakRPCClient(transport, soakRetryConfig{
+	client := NewClient(transport, RetryConfig{
 		MaxAttempts: 3, MinBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
 	}, &soakCancelingSleeper{cancel: cancel}, func() float64 { return 0 })
 
-	result, err := client.Call(ctx, soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Account: "heidi", Timeout: time.Second, RetryMode: soakRetrySafe,
+	result, err := client.Call(ctx, Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Account: "heidi", Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)
@@ -439,9 +439,9 @@ func TestSoakRPCClient_AnExecutedRetryIsStillCounted(t *testing.T) {
 	}}
 	client := newCarrierTestClient(transport, 2)
 
-	result, err := client.Call(context.Background(), soakRPCRequest{
-		Action: soakRPCSubscriptionList, Subject: "chat.test",
-		Account: "heidi", Timeout: time.Second, RetryMode: soakRetrySafe,
+	result, err := client.Call(context.Background(), Request{
+		Action: ActionSubscriptionList, Subject: "chat.test",
+		Account: "heidi", Timeout: time.Second, RetryMode: RetrySafe,
 	}, nil)
 
 	require.Error(t, err)

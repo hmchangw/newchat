@@ -2,9 +2,9 @@ package main
 
 import soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
 
-// These aliases keep the existing lanes stable while the RPC transport moves
-// behind an explicit package boundary. They are removed as lanes move to their
-// owning packages.
+// These aliases keep the failure ledger and root RPC adapters stable while the
+// production runtime composes rpc directly. They are removed with the failure
+// runtime in the follow-up PR.
 type soakRPCAction = soakrpc.Action
 
 const (
@@ -40,10 +40,6 @@ const (
 	soakRPCSearchIndexProbe = soakrpc.ActionSearchIndexProbe
 )
 
-func validSoakRPCAction(action soakRPCAction) bool {
-	return soakrpc.ValidAction(action)
-}
-
 type soakErrorClass = soakrpc.ErrorClass
 
 const (
@@ -72,17 +68,9 @@ func validSoakErrorClass(class soakErrorClass) bool {
 type soakErrorReason = soakrpc.ErrorReason
 
 const (
-	soakErrorReasonUnknown     = soakrpc.ErrorReasonUnknown
+	soakErrorReasonUnknown     = soakrpc.ReasonUnknown
 	soakReasonResponseTooLarge = soakrpc.ReasonResponseTooLarge
 )
-
-func validSoakErrorReason(reason soakErrorReason) bool {
-	return soakrpc.ValidErrorReason(reason)
-}
-
-func newSoakAssertionError(message string) error {
-	return soakrpc.NewAssertionError(message)
-}
 
 func parseSoakErrorEnvelope(data []byte) error {
 	return soakrpc.ParseErrorEnvelope(data)
@@ -107,7 +95,6 @@ type soakRPCTransport = soakrpc.Transport
 type soakSleeper = soakrpc.Sleeper
 type soakTimerSleeper = soakrpc.TimerSleeper
 type soakRPCRequest = soakrpc.Request
-type soakRPCResult = soakrpc.Result
 type soakRPCClient = soakrpc.Client
 type soakRequestError = soakrpc.RequestError
 

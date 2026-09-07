@@ -3,8 +3,7 @@ package main
 import soakuserread "github.com/hmchangw/chat/tools/loadgen/internal/soak/userread"
 
 // soakUserReadRecorderAdapter connects the extracted lane's sample to the
-// shared recorder still owned by the root soak engine. It remains at the
-// composition boundary until the other read lanes move to their packages.
+// failure-aware recorder at the root composition boundary.
 type soakUserReadRecorderAdapter struct {
 	recorder soakReadSampleRecorder
 }

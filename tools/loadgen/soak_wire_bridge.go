@@ -2,9 +2,9 @@ package main
 
 import soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 
-// These aliases keep the existing soak call sites stable while the wire DTOs
-// move behind an explicit package boundary. They are removed as the callers
-// move into their owning packages.
+// These aliases keep the failure-aware root room adapters stable. Extracted
+// lanes and the production entry points use wire directly; the aliases leave
+// when those adapters move with the failure runtime.
 type soakRoomMeta = soakwire.RoomMeta
 type soakLoadHistoryRequest = soakwire.LoadHistoryRequest
 type soakLoadHistoryResponse = soakwire.LoadHistoryResponse

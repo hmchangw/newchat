@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"math/rand" // #nosec G404 -- load generator randomness, never used for secrets // nosemgrep: math-random-used
 	"testing"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/model/cassandra"
+	soakworkload "github.com/hmchangw/chat/tools/loadgen/internal/soak/workload"
 )
 
 type configurableSoakLifecycleStore struct {
@@ -173,19 +173,24 @@ func TestNewSoakWorkload_AppliesSafeDefaults(t *testing.T) {
 	assert.NotNil(t, workload.dispatch)
 	assert.NotNil(t, workload.now)
 	assert.NotNil(t, workload.onSaturation)
-	// A named set rather than a count: it says which lane went missing, and a
-	// new lane has to be added here deliberately rather than by bumping a
-	// number that carries no meaning.
-	names := make([]string, 0, len(workload.lanes()))
-	for _, lane := range workload.lanes() {
-		names = append(names, lane.name)
-	}
-	assert.ElementsMatch(t, []string{
-		"send", "read", "mutation", "reaction", "pinned_list", "verify",
+}
+
+// The workload package owns the lane vocabulary and asserts the whole set; what
+// only the root can check is that the four lanes the failure ledger routes
+// observers by still exist under those exact names. Rename one on either side
+// and the ledger stops matching the traffic it is supposed to be watching,
+// silently — every other signal keeps reporting.
+func TestSoakFailureLanes_MatchTheWorkloadRegistry(t *testing.T) {
+	names := soakworkload.LaneNames()
+	for _, lane := range []string{
 		soakFailureLaneMemberMutation, soakFailureLaneRoomMutation,
-		"room_read", "user_read", "search_read",
-		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt, "presence",
-	}, names)
+		soakFailureLaneRoomCreate, soakFailureLaneReadReceipt,
+	} {
+		assert.Contains(t, names, lane)
+	}
+	// message_send is the ledger's own operation lane, not a workload lane;
+	// asserting its absence keeps the two vocabularies from being conflated.
+	assert.NotContains(t, names, soakFailureLaneMessageSend)
 }
 
 func TestSoakConstructors_DoNotMutateCallerConfig(t *testing.T) {
@@ -341,47 +346,6 @@ func TestSoakTimerSleeper_ObservesCancellationAndTimer(t *testing.T) {
 	require.NoError(t, (soakTimerSleeper{}).Sleep(context.Background(), 0))
 }
 
-func TestNewSoakMutator_AppliesDefaultsAndFiltersMembers(t *testing.T) {
-	mutator := newSoakMutator(
-		nil,
-		&soakTopology{
-			ActiveUsers: []model.User{{ID: "u-1", Account: "alice"}},
-			Subscriptions: []model.Subscription{
-				{
-					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-1", Account: "alice"},
-				},
-				{
-					RoomID: "room-1",
-					User:   model.SubscriptionUser{ID: "u-2", Account: "bob"},
-				},
-			}},
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-
-	assert.Zero(t, mutator.cfg.MutationRetries)
-	assert.Equal(t, 100*time.Millisecond, mutator.cfg.RetryMinBackoff)
-	assert.Equal(t, mutator.cfg.RetryMinBackoff, mutator.cfg.RetryMaxBackoff)
-	assert.Equal(t, 10, mutator.cfg.MaxPinnedPerRoom)
-	assert.Equal(t, 1, mutator.cfg.ReactionsPerHotMessage)
-	assert.Equal(t, 5*time.Second, mutator.cfg.RequestTimeout)
-	assert.NotNil(t, mutator.rng)
-	assert.NotNil(t, mutator.clock)
-	assert.NotNil(t, mutator.sleeper)
-	assert.Len(t, mutator.members["room-1"], 1)
-
-	scheduler := newSoakMutationScheduler(2, nil)
-	scheduler.ObserveAcceptedSend()
-	assert.Equal(t, soakMutationDelete, scheduler.Next())
-	scheduler = newSoakMutationScheduler(-1, rand.New(rand.NewSource(1)))
-	assert.NotEqual(t, soakMutationDelete, scheduler.Next())
-}
-
 func TestSoakMutator_SkipsUnavailableTargetsAndActors(t *testing.T) {
 	clock := newFakeSoakClock(time.Unix(100, 0))
 	empty := newSoakCatalog(8, 100, 0, clock)
@@ -495,20 +459,11 @@ func TestSoakReaderAndVerifier_ApplyDefaultsAndSkipEmptyCatalog(t *testing.T) {
 		nil,
 		nil,
 	)
-	assert.Equal(t, 50, reader.cfg.PageLimit)
-	assert.Equal(t, 100, reader.cfg.MaxPages)
-	assert.Equal(t, 5*time.Second, reader.cfg.RequestTimeout)
-	assert.NotNil(t, reader.rng)
-	assert.NotNil(t, reader.now)
 	outcome, err := reader.LoadHistory(context.Background(), "room-1")
 	require.NoError(t, err)
 	assert.True(t, outcome.Skipped)
 
 	verifier := newSoakVerifier(nil, catalog, nil, nil, nil)
-	assert.Equal(t, 50, verifier.cfg.PageLimit)
-	assert.Equal(t, 20, verifier.cfg.MaxPages)
-	assert.Equal(t, 5*time.Second, verifier.cfg.RequestTimeout)
-	assert.NotNil(t, verifier.now)
 	result := verifier.Sample(context.Background(), "room-1")
 	assert.Equal(t, soakVerifySkipped, result.Class)
 	result = verifier.VerifyHistory(context.Background(), "room-1", "missing")
@@ -578,7 +533,7 @@ func TestSoakReader_RecordsRPCFailuresByEndpoint(t *testing.T) {
 func TestCompareSoakVerifiedMessage_ClassifiesEveryMismatch(t *testing.T) {
 	editedAt := time.Unix(101, 0).UTC()
 	expected := soakCatalogMessage{
-		soakCatalogCandidate: soakCatalogCandidate{
+		Candidate: soakCatalogCandidate{
 			ID: "message-1", RoomID: "room-1", Author: "alice",
 			ContentSHA256: soakContentDigest("hello"),
 		},
@@ -680,56 +635,6 @@ func TestClassifySoakVerifyRPCError_CoversTerminalAndTransientClasses(t *testing
 		assert.Equal(t, tt.want, result.Class)
 		assert.Equal(t, tt.class, result.RPCErrorClass)
 	}
-}
-
-func TestSoakCatalog_RejectsInvalidAndRepeatedTransitions(t *testing.T) {
-	clock := newFakeSoakClock(time.Unix(100, 0))
-	catalog := newSoakCatalog(1, 1, -time.Second, nil)
-	require.Error(t, catalog.TrackPublished(nil))
-	require.Error(t, catalog.TrackPublished(&soakCatalogCandidate{}))
-	assert.False(t, catalog.Accept("missing", "missing"))
-	assert.False(t, catalog.Reject("missing", "missing"))
-
-	candidate := &soakCatalogCandidate{
-		ID: "message-1", RoomID: "room-1", Author: "alice",
-		CreatedAt: clock.Now(),
-	}
-	require.NoError(t, catalog.TrackPublished(candidate))
-	require.Error(t, catalog.TrackPublished(candidate))
-	require.True(t, catalog.Accept("room-1", "message-1"))
-	assert.False(t, catalog.Accept("room-1", "message-1"))
-	require.Error(t, catalog.TrackPublished(candidate))
-
-	for _, action := range []soakCatalogAction{
-		soakCatalogEdit, soakCatalogDelete, soakCatalogThreadParent,
-		soakCatalogPin, soakCatalogReaction, soakCatalogAction("invalid"),
-	} {
-		_, ok := catalog.PickAnyEligible("missing", action)
-		assert.False(t, ok)
-	}
-	_, ok := catalog.GetEligible("missing", "message-1", soakCatalogEdit)
-	assert.False(t, ok)
-	_, ok = catalog.PickPinCandidate("missing", false)
-	assert.False(t, ok)
-	assert.Zero(t, catalog.PinnedCount("missing"))
-	_, ok = catalog.PickVerificationCandidate("missing", false)
-	assert.False(t, ok)
-	_, ok = catalog.GetVerificationCandidate("missing", "message-1")
-	assert.False(t, ok)
-
-	assert.False(t, catalog.MarkEdited("missing", "message-1", "edited"))
-	assert.False(t, catalog.MarkDeleted("missing", "message-1"))
-	assert.False(t, catalog.SetPinned("missing", "message-1", true))
-	assert.False(t, catalog.SetReaction("missing", "message-1", "wave", "bob", true))
-	assert.False(t, catalog.ReserveThreadReply("missing", "message-1"))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "", "bob", true))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "", true))
-	assert.False(t, catalog.SetReaction("room-1", "message-1", "wave", "bob", false))
-	assert.True(t, catalog.MarkDeleted("room-1", "message-1"))
-	assert.False(t, catalog.MarkDeleted("room-1", "message-1"))
-	assert.False(t, catalog.MarkEdited("room-1", "message-1", "edited"))
-	assert.False(t, catalog.SetPinned("room-1", "message-1", true))
-	assert.False(t, catalog.ReserveThreadReply("room-1", "message-1"))
 }
 
 func TestSoakTopology_RejectsInvalidIdentitySources(t *testing.T) {

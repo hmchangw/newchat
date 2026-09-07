@@ -20,13 +20,14 @@ import (
 	"github.com/hmchangw/chat/pkg/roomkeystore"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
+	soaksend "github.com/hmchangw/chat/tools/loadgen/internal/soak/send"
 )
 
 func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	ctx := context.Background()
 	const siteID = "site-soak-run-a"
 	db := testutil.MongoDB(t, "loadgen_soak_run_a")
-	store := &mongoSoakStore{db: db}
+	store := newMongoSoakStore(db)
 	keyStore := roomkeystore.NewMongoStore(db.Collection("rooms"), time.Hour)
 	t.Cleanup(func() { require.NoError(t, keyStore.Close()) })
 
@@ -63,7 +64,7 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, topology.Rooms, cfg.RoomCount)
 	require.NotEmpty(t, topology.Subscriptions)
-	assert.Equal(t, soakUserIDs(seededTopology.ActiveUsers), soakUserIDs(topology.ActiveUsers))
+	assert.Equal(t, integrationSoakUserIDs(seededTopology.ActiveUsers), integrationSoakUserIDs(topology.ActiveUsers))
 
 	nc, err := nats.Connect(testutil.NATS(t))
 	require.NoError(t, err)
@@ -120,10 +121,10 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 		nil,
 	)
 	replies := make(chan soakSendObservation, 1)
-	responseSubscription, err := startSoakSendResponsesWithObserver(
-		newNATSSoakResponseSource(nc),
+	responseSubscription, err := soaksend.StartResponsesWithObserver(
+		soaksend.NewNATSResponseSource(nc),
 		sender,
-		func(result soakSendReplyResult) {
+		func(result soaksend.ReplyResult) {
 			replies <- soakSendObservation{result: result}
 		},
 	)
@@ -198,4 +199,12 @@ func TestSoakRunA_SeedFrontDoorReadBackAndTeardown(t *testing.T) {
 		db.Collection("rooms"),
 		bson.D{{Key: "soakRunId", Value: cfg.RunID}},
 	))
+}
+
+func integrationSoakUserIDs(users []model.User) []string {
+	ids := make([]string, len(users))
+	for i := range users {
+		ids[i] = users[i].ID
+	}
+	return ids
 }

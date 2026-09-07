@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
@@ -25,6 +26,7 @@ type soakRoomMemberEvidenceHarness struct {
 	t         *testing.T
 	natsURL   string
 	ledgerDir string
+	db        *mongo.Database
 	store     *mongoSoakStore
 	metrics   *Metrics
 	now       time.Time
@@ -33,9 +35,10 @@ type soakRoomMemberEvidenceHarness struct {
 
 func newSoakRoomMemberEvidenceHarness(t *testing.T) *soakRoomMemberEvidenceHarness {
 	t.Helper()
+	db := testutil.MongoDB(t, "loadgen_soak_roommember")
 	harness := &soakRoomMemberEvidenceHarness{
 		t: t, natsURL: testutil.NATS(t), ledgerDir: t.TempDir(),
-		store:   &mongoSoakStore{db: testutil.MongoDB(t, "loadgen_soak_roommember")},
+		db: db, store: newMongoSoakStore(db),
 		metrics: NewMetrics(), now: time.Now().UTC(),
 	}
 	t.Cleanup(harness.metrics.stopNATSHealth)
@@ -133,7 +136,7 @@ func TestFailureObservation_RoomMemberEvidenceSurvivesRestart(t *testing.T) {
 
 	account := operation.Attributes[soakFailureAttributeTargetAccount]
 	roomID := operation.Targets["roomId"]
-	_, err := harness.store.db.Collection("room_members").InsertOne(ctx, bson.M{
+	_, err := harness.db.Collection("room_members").InsertOne(ctx, bson.M{
 		"_id": "rm-1", "rid": roomID,
 		"member": bson.M{"type": "individual", "id": "u9", "account": account},
 	})
@@ -192,7 +195,7 @@ func TestFailureObservation_ReadReceiptCursorMovesForward(t *testing.T) {
 
 	// room-service writes the cursor with its own clock; the verifier only ever
 	// compares two server-written timestamps.
-	_, err := harness.store.db.Collection("subscriptions").InsertOne(ctx, bson.M{
+	_, err := harness.db.Collection("subscriptions").InsertOne(ctx, bson.M{
 		"_id":        "sub-1",
 		"roomId":     operation.Targets["roomId"],
 		"u":          bson.M{"account": operation.Targets["account"]},
@@ -223,7 +226,7 @@ func TestFailureObservation_ReadReceiptCursorNeverAppears(t *testing.T) {
 	// belongs to — but the accepted mark-read never wrote a cursor. That is the
 	// lost write; a subscription that vanished entirely is a different claim and
 	// is covered separately below.
-	_, err := harness.store.db.Collection("subscriptions").InsertOne(ctx, bson.M{
+	_, err := harness.db.Collection("subscriptions").InsertOne(ctx, bson.M{
 		"_id":    "sub-1",
 		"roomId": operations[0].Targets["roomId"],
 		"u":      bson.M{"account": operations[0].Targets["account"]},
@@ -267,10 +270,11 @@ func TestFailureObservation_ReadReceiptVanishedSubscriptionIsBad(t *testing.T) {
 
 func TestSoakStore_SubscriptionLastSeenReadsThePrimary(t *testing.T) {
 	ctx := context.Background()
-	store := &mongoSoakStore{db: testutil.MongoDB(t, "loadgen_soak_lastseen")}
+	db := testutil.MongoDB(t, "loadgen_soak_lastseen")
+	store := newMongoSoakStore(db)
 	written := time.Now().UTC().Truncate(time.Millisecond)
 
-	_, err := store.db.Collection("subscriptions").InsertMany(ctx, []any{
+	_, err := db.Collection("subscriptions").InsertMany(ctx, []any{
 		bson.M{
 			"_id": "sub-seen", "roomId": "room-1",
 			"u": bson.M{"account": "reader"}, "lastSeenAt": written,

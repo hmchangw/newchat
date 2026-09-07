@@ -9,84 +9,40 @@ import (
 
 	"github.com/hmchangw/chat/pkg/model"
 	"github.com/hmchangw/chat/pkg/subject"
-	soakrpc "github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
-	soaktopology "github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
-	soakwire "github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/rpc"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/topology"
+	"github.com/hmchangw/chat/tools/loadgen/internal/soak/wire"
 )
 
-const soakRequestTimeout = 5 * time.Second
+const defaultRequestTimeout = 5 * time.Second
 
-type soakTopology = soaktopology.Topology
-type soakRPCAction = soakrpc.Action
-type soakRPCClient = soakrpc.Client
-type soakRPCRequest = soakrpc.Request
-
-const (
-	soakRetrySafe = soakrpc.RetrySafe
-
-	soakRPCUserMe                  = soakrpc.ActionUserMe
-	soakRPCUserProfileGet          = soakrpc.ActionUserProfileGet
-	soakRPCUserStatusGet           = soakrpc.ActionUserStatusGet
-	soakRPCUserSettingsGet         = soakrpc.ActionUserSettingsGet
-	soakRPCUserChatlistGet         = soakrpc.ActionUserChatlistGet
-	soakRPCUserPriorityContacts    = soakrpc.ActionUserPriorityContacts
-	soakRPCUserAppsList            = soakrpc.ActionUserAppsList
-	soakRPCUserAppsCategories      = soakrpc.ActionUserAppsCategories
-	soakRPCUserSubscriptionCount   = soakrpc.ActionUserSubscriptionCount
-	soakRPCUserSubscriptionByRoom  = soakrpc.ActionUserSubscriptionByRoom
-	soakRPCUserSubscriptionChannel = soakrpc.ActionUserSubscriptionChannel
-	soakRPCUserSubscriptionDM      = soakrpc.ActionUserSubscriptionDM
-	soakRPCUserThreadList          = soakrpc.ActionUserThreadList
-	soakRPCUserThreadUnread        = soakrpc.ActionUserThreadUnread
-)
-
-type soakSubscriptionListResponse = soakwire.SubscriptionListResponse
-type soakUserNameRequest = soakwire.UserNameRequest
-type soakUserAccountNameRequest = soakwire.UserAccountNameRequest
-type soakUserRoomRequest = soakwire.UserRoomRequest
-type soakUserPageRequest = soakwire.UserPageRequest
-type soakUserChannelsRequest = soakwire.UserChannelsRequest
-type soakUserCountRequest = soakwire.UserCountRequest
-type soakUserEmptyRequest = soakwire.UserEmptyRequest
-type soakUserMeResponse = soakwire.UserMeResponse
-type soakUserStatusResponse = soakwire.UserStatusResponse
-type soakUserSettingsResponse = soakwire.UserSettingsResponse
-type soakUserChatlistResponse = soakwire.UserChatlistResponse
-type soakUserPriorityContactsResponse = soakwire.UserPriorityContactsResponse
-type soakUserAppsResponse = soakwire.UserAppsResponse
-type soakUserAppCategoriesResponse = soakwire.UserAppCategoriesResponse
-type soakUserCountResponse = soakwire.UserCountResponse
-type soakUserDMResponse = soakwire.UserDMResponse
-type soakUserThreadListResponse = soakwire.UserThreadListResponse
-type soakUserThreadUnreadResponse = soakwire.UserThreadUnreadResponse
-
-type soakReadSample struct {
-	Action      soakrpc.Action
+type Sample struct {
+	Action      rpc.Action
 	Latency     time.Duration
 	Messages    int
 	RowsCounted bool
 	ReplyBytes  int
-	ErrorClass  soakrpc.ErrorClass
-	ErrorReason soakrpc.ErrorReason
+	ErrorClass  rpc.ErrorClass
+	ErrorReason rpc.ErrorReason
 	Retries     int
 	Skipped     bool
 }
 
-func (s *soakReadSample) countRows(n int) {
+func (s *Sample) countRows(n int) {
 	s.Messages, s.RowsCounted = n, true
 }
 
-type soakReadSampleRecorder interface {
-	Record(*soakReadSample)
+type Recorder interface {
+	Record(*Sample)
 }
 
-type soakUserReadConfig struct {
+type Config struct {
 	SiteID         string
 	PageLimit      int
 	RequestTimeout time.Duration
 }
 
-// soakUserReader drives user-service's read surface. Every call is read-only,
+// Reader drives user-service's read surface. Every call is read-only,
 // so the lane carries no evidence ledger: a read has no expected side effect to
 // reconcile, only latency and an outcome.
 //
@@ -94,10 +50,10 @@ type soakUserReadConfig struct {
 // client. A fault window needs each of these paths exercised often enough to be
 // interpretable, and skewing toward the popular ones would leave the rest with
 // too few samples to say anything about.
-type soakUserReader struct {
-	cfg      soakUserReadConfig
-	rpc      *soakRPCClient
-	recorder soakReadSampleRecorder
+type Reader struct {
+	cfg      Config
+	rpc      *rpc.Client
+	recorder Recorder
 	now      func() time.Time
 
 	mu       sync.Mutex
@@ -107,31 +63,31 @@ type soakUserReader struct {
 	// dmPairs and channelPairs hold ordered (requester, peer) pairs taken from
 	// the topology's own rooms, so the DM and channel reads always name a
 	// counterpart the requester actually shares that kind of room with.
-	dmPairs      []soakUserAccountPair
-	channelPairs []soakUserAccountPair
-	reads        []soakUserRead
+	dmPairs      []accountPair
+	channelPairs []accountPair
+	reads        []read
 }
 
-// soakUserAccountPair is one direction of two accounts that share a room.
-type soakUserAccountPair struct {
+// accountPair is one direction of two accounts that share a room.
+type accountPair struct {
 	Requester string
 	Peer      string
 }
 
-// soakUserRead binds a bounded action label to the call that produces it.
-type soakUserRead struct {
-	Action soakRPCAction
-	Call   func(*soakUserReader, context.Context) error
+// read binds a bounded action label to the call that produces it.
+type read struct {
+	Action rpc.Action
+	Call   func(*Reader, context.Context) error
 }
 
-func newSoakUserReader(
-	cfg soakUserReadConfig,
-	topology *soakTopology,
-	rpc *soakRPCClient,
-	recorder soakReadSampleRecorder,
+func New(
+	cfg Config,
+	topology *topology.Topology,
+	rpcClient *rpc.Client,
+	recorder Recorder,
 	rng *rand.Rand,
 	now func() time.Time,
-) (*soakUserReader, error) {
+) (*Reader, error) {
 	if topology == nil {
 		return nil, fmt.Errorf("soak user reader requires a topology")
 	}
@@ -145,11 +101,11 @@ func newSoakUserReader(
 		cfg.PageLimit = 20
 	}
 	if cfg.RequestTimeout <= 0 {
-		cfg.RequestTimeout = soakRequestTimeout
+		cfg.RequestTimeout = defaultRequestTimeout
 	}
 
-	reader := &soakUserReader{
-		cfg: cfg, rpc: rpc, recorder: recorder, now: now, rng: rng,
+	reader := &Reader{
+		cfg: cfg, rpc: rpcClient, recorder: recorder, now: now, rng: rng,
 	}
 	for i := range topology.ActiveUsers {
 		if account := topology.ActiveUsers[i].Account; account != "" {
@@ -162,20 +118,20 @@ func newSoakUserReader(
 	for i := range topology.Rooms {
 		reader.rooms = append(reader.rooms, topology.Rooms[i].ID)
 	}
-	reader.dmPairs = soakUserRoomPairs(topology, reader.accounts, model.RoomTypeDM)
-	reader.channelPairs = soakUserRoomPairs(topology, reader.accounts, model.RoomTypeChannel)
-	reader.reads = soakUserReads()
+	reader.dmPairs = roomPairs(topology, reader.accounts, model.RoomTypeDM)
+	reader.channelPairs = roomPairs(topology, reader.accounts, model.RoomTypeChannel)
+	reader.reads = reads()
 	return reader, nil
 }
 
-// soakUserPairsPerRoom bounds how many (requester, peer) directions one room
+// pairsPerRoom bounds how many (requester, peer) directions one room
 // contributes, keeping the index linear in the number of subscriptions.
-const soakUserPairsPerRoom = 2
+const pairsPerRoom = 2
 
-// soakUserPeerFor returns a member of the room other than requester. Any
+// peerFor returns a member of the room other than requester. Any
 // co-member serves the purpose — the read asserts that a shared room is
 // visible, not which one of several co-members it names.
-func soakUserPeerFor(participants []string, requester string) (string, bool) {
+func peerFor(participants []string, requester string) (string, bool) {
 	for _, participant := range participants {
 		if participant != requester {
 			return participant, true
@@ -184,7 +140,7 @@ func soakUserPeerFor(participants []string, requester string) (string, bool) {
 	return "", false
 }
 
-// soakUserRoomPairs indexes rooms of one type as the (requester, peer)
+// roomPairs indexes rooms of one type as the (requester, peer)
 // directions whose requester is one of the lane's active accounts. Both reads
 // that name another account depend on it: a pair drawn at random shares a DM
 // almost never and a channel seldom, and in either case an empty answer becomes
@@ -197,7 +153,7 @@ func soakUserPeerFor(participants []string, requester string) (string, bool) {
 // indexing both sides would have these reads issuing traffic as borrowed
 // accounts nothing else touches, quietly changing what the lane measures.
 //
-// A channel contributes at most soakUserPairsPerRoom pairs. The point is a
+// A channel contributes at most pairsPerRoom pairs. The point is a
 // co-member that genuinely shares a room, not coverage of the membership
 // matrix, and a full cross-product would be quadratic in channelMembers. The
 // cap is applied after the active filter, never before it: which members a room
@@ -220,19 +176,19 @@ func soakUserPeerFor(participants []string, requester string) (string, bool) {
 // build Rooms in different orders, so a replacement process draws a different
 // sequence than the process it replaced. That is acceptable for read lanes with
 // no evidence to reconcile — it is recorded here so nobody relies on more.
-func soakUserRoomPairs(
-	topology *soakTopology,
+func roomPairs(
+	topologyData *topology.Topology,
 	accounts []string,
 	roomType model.RoomType,
-) []soakUserAccountPair {
+) []accountPair {
 	active := make(map[string]struct{}, len(accounts))
 	for _, account := range accounts {
 		active[account] = struct{}{}
 	}
 	members := make(map[string][]string)
-	for i := range topology.Subscriptions {
-		subscription := &topology.Subscriptions[i]
-		if subscription.RoomType != roomType || !soaktopology.IsRoomMember(subscription) ||
+	for i := range topologyData.Subscriptions {
+		subscription := &topologyData.Subscriptions[i]
+		if subscription.RoomType != roomType || !topology.IsRoomMember(subscription) ||
 			subscription.User.Account == "" {
 			continue
 		}
@@ -240,9 +196,9 @@ func soakUserRoomPairs(
 			members[subscription.RoomID], subscription.User.Account,
 		)
 	}
-	pairs := make([]soakUserAccountPair, 0, len(members)*2)
-	for i := range topology.Rooms {
-		participants := members[topology.Rooms[i].ID]
+	pairs := make([]accountPair, 0, len(members)*2)
+	for i := range topologyData.Rooms {
+		participants := members[topologyData.Rooms[i].ID]
 		// A DM room is always exactly two accounts. Fewer than two cannot name a
 		// counterpart at all, whatever the room type.
 		if roomType == model.RoomTypeDM && len(participants) != 2 {
@@ -253,181 +209,181 @@ func soakUserRoomPairs(
 		}
 		paired := 0
 		for _, requester := range participants {
-			if paired == soakUserPairsPerRoom {
+			if paired == pairsPerRoom {
 				break
 			}
 			if _, ok := active[requester]; !ok {
 				continue
 			}
-			peer, ok := soakUserPeerFor(participants, requester)
+			peer, ok := peerFor(participants, requester)
 			if !ok {
 				// Every row in this room names the same account, so there is no
 				// counterpart to ask about.
 				continue
 			}
-			pairs = append(pairs, soakUserAccountPair{Requester: requester, Peer: peer})
+			pairs = append(pairs, accountPair{Requester: requester, Peer: peer})
 			paired++
 		}
 	}
 	return pairs
 }
 
-// soakUserReads is the dispatch table. Its test keeps it equal to
+// reads is the dispatch table. Its test keeps it equal to
 // rpc.UserReadActions so a new allowlisted action needs a call to send it.
-func soakUserReads() []soakUserRead {
-	return []soakUserRead{
-		{soakRPCUserMe, (*soakUserReader).Me},
-		{soakRPCUserProfileGet, (*soakUserReader).ProfileByName},
-		{soakRPCUserStatusGet, (*soakUserReader).StatusByName},
-		{soakRPCUserSettingsGet, (*soakUserReader).Settings},
-		{soakRPCUserChatlistGet, (*soakUserReader).Chatlist},
-		{soakRPCUserPriorityContacts, (*soakUserReader).PriorityContacts},
-		{soakRPCUserAppsList, (*soakUserReader).AppsList},
-		{soakRPCUserAppsCategories, (*soakUserReader).AppsCategories},
-		{soakRPCUserSubscriptionCount, (*soakUserReader).SubscriptionCount},
-		{soakRPCUserSubscriptionByRoom, (*soakUserReader).SubscriptionByRoom},
-		{soakRPCUserSubscriptionChannel, (*soakUserReader).SubscriptionChannels},
-		{soakRPCUserSubscriptionDM, (*soakUserReader).SubscriptionDM},
-		{soakRPCUserThreadList, (*soakUserReader).ThreadList},
-		{soakRPCUserThreadUnread, (*soakUserReader).ThreadUnread},
+func reads() []read {
+	return []read{
+		{rpc.ActionUserMe, (*Reader).Me},
+		{rpc.ActionUserProfileGet, (*Reader).ProfileByName},
+		{rpc.ActionUserStatusGet, (*Reader).StatusByName},
+		{rpc.ActionUserSettingsGet, (*Reader).Settings},
+		{rpc.ActionUserChatlistGet, (*Reader).Chatlist},
+		{rpc.ActionUserPriorityContacts, (*Reader).PriorityContacts},
+		{rpc.ActionUserAppsList, (*Reader).AppsList},
+		{rpc.ActionUserAppsCategories, (*Reader).AppsCategories},
+		{rpc.ActionUserSubscriptionCount, (*Reader).SubscriptionCount},
+		{rpc.ActionUserSubscriptionByRoom, (*Reader).SubscriptionByRoom},
+		{rpc.ActionUserSubscriptionChannel, (*Reader).SubscriptionChannels},
+		{rpc.ActionUserSubscriptionDM, (*Reader).SubscriptionDM},
+		{rpc.ActionUserThreadList, (*Reader).ThreadList},
+		{rpc.ActionUserThreadUnread, (*Reader).ThreadUnread},
 	}
 }
 
-func (r *soakUserReader) ReadMixed(ctx context.Context) error {
+func (r *Reader) ReadMixed(ctx context.Context) error {
 	r.mu.Lock()
 	read := r.reads[r.rng.Intn(len(r.reads))]
 	r.mu.Unlock()
 	return read.Call(r, ctx)
 }
 
-func (r *soakUserReader) Me(ctx context.Context) error {
+func (r *Reader) Me(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserMeResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserMe,
+	var response wire.UserMeResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserMe,
 		Subject: subject.UserMe(account, r.cfg.SiteID),
 		Account: account,
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) ProfileByName(ctx context.Context) error {
+func (r *Reader) ProfileByName(ctx context.Context) error {
 	account, target := r.pickAccountPair()
-	var response soakUserStatusResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserProfileGet,
+	var response wire.UserStatusResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserProfileGet,
 		Subject: subject.UserProfileGetByName(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserNameRequest{Name: target},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Body:    wire.UserNameRequest{Name: target},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) StatusByName(ctx context.Context) error {
+func (r *Reader) StatusByName(ctx context.Context) error {
 	account, target := r.pickAccountPair()
-	var response soakUserStatusResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserStatusGet,
+	var response wire.UserStatusResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserStatusGet,
 		Subject: subject.UserStatusGetByName(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserNameRequest{Name: target},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Body:    wire.UserNameRequest{Name: target},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) Settings(ctx context.Context) error {
+func (r *Reader) Settings(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserSettingsResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserSettingsGet,
+	var response wire.UserSettingsResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserSettingsGet,
 		Subject: subject.UserSettingsGet(account, r.cfg.SiteID),
 		Account: account,
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) Chatlist(ctx context.Context) error {
+func (r *Reader) Chatlist(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserChatlistResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserChatlistGet,
+	var response wire.UserChatlistResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserChatlistGet,
 		Subject: subject.UserChatlistGet(account, r.cfg.SiteID),
 		Account: account,
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Sections))
 	})
 }
 
-func (r *soakUserReader) PriorityContacts(ctx context.Context) error {
+func (r *Reader) PriorityContacts(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserPriorityContactsResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserPriorityContacts,
+	var response wire.UserPriorityContactsResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserPriorityContacts,
 		Subject: subject.UserPriorityContactsGet(account, r.cfg.SiteID),
 		Account: account,
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Contacts))
 	})
 }
 
-func (r *soakUserReader) AppsList(ctx context.Context) error {
+func (r *Reader) AppsList(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserAppsResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserAppsList,
+	var response wire.UserAppsResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserAppsList,
 		Subject: subject.UserAppsList(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Body:    wire.UserPageRequest{Limit: r.cfg.PageLimit},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Apps))
 	})
 }
 
-func (r *soakUserReader) AppsCategories(ctx context.Context) error {
+func (r *Reader) AppsCategories(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserAppCategoriesResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserAppsCategories,
+	var response wire.UserAppCategoriesResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserAppsCategories,
 		Subject: subject.UserAppsCategories(account, r.cfg.SiteID),
 		Account: account,
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Categories))
 	})
 }
 
-func (r *soakUserReader) SubscriptionCount(ctx context.Context) error {
+func (r *Reader) SubscriptionCount(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserCountResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserSubscriptionCount,
+	var response wire.UserCountResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserSubscriptionCount,
 		Subject: subject.UserSubscriptionCount(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserCountRequest{},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Body:    wire.UserCountRequest{},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.Messages = response.Count
 	})
 }
 
-func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
+func (r *Reader) SubscriptionByRoom(ctx context.Context) error {
 	account := r.pickAccount()
 	roomID, ok := r.pickRoom()
 	if !ok {
-		r.recordSkip(soakRPCUserSubscriptionByRoom)
+		r.recordSkip(rpc.ActionUserSubscriptionByRoom)
 		return nil
 	}
-	var response soakSubscriptionListResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserSubscriptionByRoom,
+	var response wire.SubscriptionListResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserSubscriptionByRoom,
 		Subject: subject.UserSubscriptionGetByRoomID(account, r.cfg.SiteID),
 		Account: account, RoomID: roomID,
-		Body:    soakUserRoomRequest{RoomID: roomID},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Body:    wire.UserRoomRequest{RoomID: roomID},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		// A 0-or-1 answer for the room asked about, not a page.
 		sample.Messages = len(response.Subscriptions)
 	})
@@ -440,22 +396,22 @@ func (r *soakUserReader) SubscriptionByRoom(ctx context.Context) error {
 // account and every channel matches; and an account that shares no channel
 // makes an empty page the lane's normal answer, which cannot be told apart from
 // a query that is simply broken. Without a shared channel the lane skips.
-func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
+func (r *Reader) SubscriptionChannels(ctx context.Context) error {
 	account, coMember, ok := r.pickChannelPair()
 	if !ok {
-		r.recordSkip(soakRPCUserSubscriptionChannel)
+		r.recordSkip(rpc.ActionUserSubscriptionChannel)
 		return nil
 	}
-	var response soakSubscriptionListResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserSubscriptionChannel,
+	var response wire.SubscriptionListResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserSubscriptionChannel,
 		Subject: subject.UserSubscriptionGetChannels(account, r.cfg.SiteID),
 		Account: account,
-		Body: soakUserChannelsRequest{
+		Body: wire.UserChannelsRequest{
 			MembersContain: coMember, Limit: r.cfg.PageLimit,
 		},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Subscriptions))
 	})
 }
@@ -464,49 +420,49 @@ func (r *soakUserReader) SubscriptionChannels(ctx context.Context) error {
 // topology's own DM rooms: an arbitrary pair almost never shares one, so
 // drawing at random would make a guaranteed not-found the lane's normal result
 // and hide a real regression behind it. Without a DM room the lane skips.
-func (r *soakUserReader) SubscriptionDM(ctx context.Context) error {
+func (r *Reader) SubscriptionDM(ctx context.Context) error {
 	account, target, ok := r.pickDMPair()
 	if !ok {
-		r.recordSkip(soakRPCUserSubscriptionDM)
+		r.recordSkip(rpc.ActionUserSubscriptionDM)
 		return nil
 	}
-	var response soakUserDMResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserSubscriptionDM,
+	var response wire.UserDMResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserSubscriptionDM,
 		Subject: subject.UserSubscriptionGetDM(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserAccountNameRequest{AccountName: target},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Body:    wire.UserAccountNameRequest{AccountName: target},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) ThreadList(ctx context.Context) error {
+func (r *Reader) ThreadList(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserThreadListResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserThreadList,
+	var response wire.UserThreadListResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserThreadList,
 		Subject: subject.UserThreadList(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserPageRequest{Limit: r.cfg.PageLimit},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
-	}, &response, func(sample *soakReadSample) {
+		Body:    wire.UserPageRequest{Limit: r.cfg.PageLimit},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
+	}, &response, func(sample *Sample) {
 		sample.countRows(len(response.Items))
 	})
 }
 
-func (r *soakUserReader) ThreadUnread(ctx context.Context) error {
+func (r *Reader) ThreadUnread(ctx context.Context) error {
 	account := r.pickAccount()
-	var response soakUserThreadUnreadResponse
-	return r.call(ctx, soakRPCRequest{
-		Action:  soakRPCUserThreadUnread,
+	var response wire.UserThreadUnreadResponse
+	return r.call(ctx, rpc.Request{
+		Action:  rpc.ActionUserThreadUnread,
 		Subject: subject.UserThreadUnreadSummary(account, r.cfg.SiteID),
 		Account: account,
-		Body:    soakUserEmptyRequest{},
-		Timeout: r.cfg.RequestTimeout, RetryMode: soakRetrySafe,
+		Body:    wire.UserEmptyRequest{},
+		Timeout: r.cfg.RequestTimeout, RetryMode: rpc.RetrySafe,
 	}, &response, nil)
 }
 
-func (r *soakUserReader) pickAccount() string {
+func (r *Reader) pickAccount() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.accounts[r.rng.Intn(len(r.accounts))]
@@ -518,7 +474,7 @@ func (r *soakUserReader) pickAccount() string {
 // The retries are bounded rather than looped until distinct: a topology whose
 // accounts are all the same string would otherwise spin forever holding the
 // pool mutex, and a pair that collapses is a weaker sample, not a broken one.
-func (r *soakUserReader) pickAccountPair() (string, string) {
+func (r *Reader) pickAccountPair() (string, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	requester := r.accounts[r.rng.Intn(len(r.accounts))]
@@ -531,18 +487,18 @@ func (r *soakUserReader) pickAccountPair() (string, string) {
 	return requester, requester
 }
 
-func (r *soakUserReader) pickDMPair() (string, string, bool) {
-	return r.pickPair(func() []soakUserAccountPair { return r.dmPairs })
+func (r *Reader) pickDMPair() (string, string, bool) {
+	return r.pickPair(func() []accountPair { return r.dmPairs })
 }
 
-func (r *soakUserReader) pickChannelPair() (string, string, bool) {
-	return r.pickPair(func() []soakUserAccountPair { return r.channelPairs })
+func (r *Reader) pickChannelPair() (string, string, bool) {
+	return r.pickPair(func() []accountPair { return r.channelPairs })
 }
 
 // pickPair reads the index under the same lock as rng, which is what makes the
 // draw safe from the lane's concurrent goroutines.
-func (r *soakUserReader) pickPair(
-	index func() []soakUserAccountPair,
+func (r *Reader) pickPair(
+	index func() []accountPair,
 ) (string, string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -554,7 +510,7 @@ func (r *soakUserReader) pickPair(
 	return pair.Requester, pair.Peer, true
 }
 
-func (r *soakUserReader) pickRoom() (string, bool) {
+func (r *Reader) pickRoom() (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.rooms) == 0 {
@@ -564,18 +520,18 @@ func (r *soakUserReader) pickRoom() (string, bool) {
 }
 
 //nolint:gocritic // hugeParam: the request carries the failure identity; the copy is nothing beside the round trip.
-func (r *soakUserReader) call(
+func (r *Reader) call(
 	ctx context.Context,
-	request soakRPCRequest,
+	request rpc.Request,
 	response any,
-	apply func(*soakReadSample),
+	apply func(*Sample),
 ) error {
 	if r.rpc == nil {
 		return fmt.Errorf("soak user reader requires an RPC client")
 	}
 	startedAt := r.now()
 	result, err := r.rpc.Call(ctx, request, response)
-	sample := soakReadSample{
+	sample := Sample{
 		Action: request.Action, Latency: r.now().Sub(startedAt),
 		ReplyBytes: result.ReplyBytes, Retries: result.Retries,
 	}
@@ -592,28 +548,12 @@ func (r *soakUserReader) call(
 	return nil
 }
 
-func (r *soakUserReader) recordSkip(action soakRPCAction) {
-	r.record(&soakReadSample{Action: action, Skipped: true})
+func (r *Reader) recordSkip(action rpc.Action) {
+	r.record(&Sample{Action: action, Skipped: true})
 }
 
-func (r *soakUserReader) record(sample *soakReadSample) {
+func (r *Reader) record(sample *Sample) {
 	if r.recorder != nil {
 		r.recorder.Record(sample)
 	}
-}
-
-type Config = soakUserReadConfig
-type Reader = soakUserReader
-type Sample = soakReadSample
-type Recorder = soakReadSampleRecorder
-
-func New(
-	cfg Config,
-	topology *soaktopology.Topology,
-	rpcClient *soakrpc.Client,
-	recorder Recorder,
-	rng *rand.Rand,
-	now func() time.Time,
-) (*Reader, error) {
-	return newSoakUserReader(cfg, topology, rpcClient, recorder, rng, now)
 }

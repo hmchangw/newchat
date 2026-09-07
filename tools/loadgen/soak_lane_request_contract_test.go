@@ -123,7 +123,7 @@ func TestSoakRoomReader_ReadReceiptsAsksAsTheMessageAuthor(t *testing.T) {
 	// room-service answers read receipts only to the message's own sender.
 	reader.SetMessageSource(&soakStubMessageSource{
 		message: soakCatalogMessage{
-			soakCatalogCandidate: soakCatalogCandidate{
+			Candidate: soakCatalogCandidate{
 				ID: "msg-1", RoomID: roomID, Author: "author-of-record",
 			},
 		},
