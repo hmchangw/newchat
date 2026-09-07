@@ -53,8 +53,8 @@ func (c *natsPeerPresenceClient) QueryPeer(ctx context.Context, siteID string, a
 	if err != nil {
 		return nil, fmt.Errorf("presence peer query to %s: %w", siteID, err)
 	}
-	if errResp, ok := errcode.Parse(reply.Data); ok {
-		return nil, fmt.Errorf("remote presence query: %s", errResp.Message)
+	if remoteErr := errcode.FromReply(reply.Data); remoteErr != nil {
+		return nil, fmt.Errorf("remote presence query: %w", remoteErr)
 	}
 
 	var resp model.PresenceQueryResponse

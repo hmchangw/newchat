@@ -83,6 +83,7 @@ func permanentHistoryRejection(code errcode.Code) bool {
 // (permanent rejection) → Term; plain error (retryable/unknown/not-ok ack/undecodable) → Nak.
 // termCode is the rejecting category only for a permanent rejection (Term metric), else "".
 func classifyHistoryReply(subj string, data []byte) (termCode errcode.Code, err error) {
+	// nosemgrep: remote-envelope-must-use-fromreply -- returns an error on every envelope; Code only selects poison vs retryable, and an unrecognised one correctly takes the retryable path
 	if ec, ok := errcode.Parse(data); ok {
 		if permanentHistoryRejection(ec.Code) {
 			return ec.Code, fmt.Errorf("%w: history permanently rejected %q (%s): %s", migration.ErrPoison, subj, ec.Code, ec.Message)

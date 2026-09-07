@@ -159,6 +159,7 @@ func truncateForLog(s string) string {
 // service and its own clients, and re-emitting another service's would put
 // undocumented codes into admin-service's surface.
 func upstreamMessage(body, fallback string) string {
+	// nosemgrep: remote-envelope-must-use-fromreply -- reads only Message, for display text; Code is never read or relayed, so an unrecognised one cannot reach a closed-set API
 	if remote, ok := errcode.Parse([]byte(body)); ok {
 		return remote.Message
 	}

@@ -103,6 +103,7 @@ func (h *Handler) setRoomOnDuty(c *gin.Context) {
 		return
 	}
 
+	// nosemgrep: remote-envelope-must-use-fromreply -- writes an HTTP response directly rather than returning an error; already guards !remote.Code.Valid() on the line below
 	if remote, ok := errcode.Parse(reply.Data); ok {
 		// Parse does not validate Code, so a foreign envelope collapses to internal.
 		if !remote.Code.Valid() {
