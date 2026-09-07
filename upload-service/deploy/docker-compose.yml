@@ -32,7 +32,6 @@ services:
       - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-http://keycloak:8080/realms/chatapp}
       - OIDC_AUDIENCES=${OIDC_AUDIENCES:-nats-chat}
       - TLS_SKIP_VERIFY=${TLS_SKIP_VERIFY:-false}
-      - BOTPLATFORM_URL=${BOTPLATFORM_URL:-http://botplatform-service:8080}
       # Empty: bot uploads send no email to Drive. Set to a domain only if Drive
       # rejects blank attribution.
       - BOT_EMAIL_DOMAIN=${BOT_EMAIL_DOMAIN:-}

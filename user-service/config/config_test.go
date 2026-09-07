@@ -439,7 +439,6 @@ func TestLoad_HTTPDefaults(t *testing.T) {
 	assert.Equal(t, ":8081", cfg.HealthAddr)
 	assert.InDelta(t, 0.8, cfg.GoMemLimitFraction, 1e-9)
 	assert.Equal(t, 100, cfg.RoomBatchChunk)
-	assert.Empty(t, cfg.BotplatformURL)
 }
 
 // Every cross-field rule fails fast at startup rather than at first request.
@@ -479,7 +478,6 @@ func TestLoad_HTTPOverrides(t *testing.T) {
 	t.Setenv("HTTP_MAX_CONCURRENCY", "1024")
 	t.Setenv("HTTP_SUBSCRIPTION_DEFAULT_LIMIT", "200")
 	t.Setenv("HTTP_SUBSCRIPTION_MAX_LIMIT", "500")
-	t.Setenv("BOTPLATFORM_URL", "http://botplatform:8080")
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -487,7 +485,6 @@ func TestLoad_HTTPOverrides(t *testing.T) {
 	assert.Equal(t, 1024, cfg.HTTP.MaxConcurrency)
 	assert.Equal(t, 200, cfg.HTTP.DefaultLimit)
 	assert.Equal(t, 500, cfg.HTTP.MaxLimit)
-	assert.Equal(t, "http://botplatform:8080", cfg.BotplatformURL)
 }
 
 // Zero disables the limiter entirely; it must not be rejected as invalid.

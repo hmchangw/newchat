@@ -19,7 +19,7 @@ import (
 	"github.com/hmchangw/chat/pkg/mongoutil"
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 )
 
@@ -85,9 +85,6 @@ type config struct {
 	OIDCAudiences []string `env:"OIDC_AUDIENCES" envSeparator:","`
 	TLSSkipVerify bool     `env:"TLS_SKIP_VERIFY" envDefault:"false"`
 
-	// BotplatformURL is the LOCAL site's botplatform-service, used to validate
-	// bot/admin session tokens. Required and non-empty.
-	BotplatformURL string `env:"BOTPLATFORM_URL,required,notEmpty"`
 	// BotEmailDomain, when set, gives session callers {account}@{domain} for Drive's
 	// attribution field. Empty (default) sends no email.
 	BotEmailDomain string `env:"BOT_EMAIL_DOMAIN" envDefault:""`
@@ -141,7 +138,8 @@ func run() error {
 		return fmt.Errorf("mongo connect: %w", err)
 	}
 	slog.Info("mongo read preference configured", "readPreference", readPref.Mode().String())
-	store := NewMongoStore(mongoClient.Database(cfg.MongoDB))
+	db := mongoClient.Database(cfg.MongoDB)
+	store := NewMongoStore(db)
 	driveClient := drive.NewClient(&cfg.Drive)
 	legacyDriveClient := drive.NewClient(&cfg.LegacyDrive)
 
@@ -187,8 +185,8 @@ func run() error {
 	r.Use(gin.Recovery())
 	r.Use(requestIDMiddleware())
 	r.Use(accessLogMiddleware())
-	botValidator := botauth.NewValidator(
-		restyutil.New("", restyutil.WithTimeout(5*time.Second), restyutil.WithMaxIdleConns(32)), cfg.BotplatformURL)
+	// Bot/admin session tokens resolve against the shared sessions collection.
+	botValidator := botauth.NewValidator(session.NewMongoStore(db))
 	registerRoutes(r, handler, authDeps{
 		sso:            validator,
 		bot:            botValidator,

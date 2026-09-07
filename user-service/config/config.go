@@ -154,8 +154,6 @@ type Config struct {
 	// HealthAddr serves /healthz and /readyz on their own listener, so a shed API
 	// request can never fail a kubelet probe.
 	HealthAddr string `env:"HEALTH_ADDR" envDefault:":8081"`
-	// BotplatformURL enables the session-token auth branch; unset leaves SSO only.
-	BotplatformURL string `env:"BOTPLATFORM_URL" envDefault:""`
 	// GoMemLimitFraction sets GOMEMLIMIT to this share of the cgroup quota.
 	GoMemLimitFraction float64    `env:"GOMEMLIMIT_FRACTION" envDefault:"0.8"`
 	HTTP               HTTPConfig `envPrefix:"HTTP_"`

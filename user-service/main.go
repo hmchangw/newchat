@@ -30,7 +30,7 @@ import (
 	"github.com/hmchangw/chat/pkg/obs"
 	pkgoidc "github.com/hmchangw/chat/pkg/oidc"
 	"github.com/hmchangw/chat/pkg/pagefit"
-	"github.com/hmchangw/chat/pkg/restyutil"
+	"github.com/hmchangw/chat/pkg/session"
 	"github.com/hmchangw/chat/pkg/shutdown"
 	"github.com/hmchangw/chat/pkg/valkeyutil"
 	"github.com/hmchangw/chat/user-service/config"
@@ -256,7 +256,8 @@ func main() {
 	// Set when the listener dies on its own; read after the drain so the pod still
 	// exits non-zero and gets restarted.
 	var serveFailed atomic.Bool
-	httpSrv, cancelInFlight, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator, &serveFailed)
+	httpSrv, cancelInFlight, err := startHTTPServer(&cfg, httpSvc, sdk, tokenValidator,
+		botauth.NewValidator(session.NewMongoStore(httpDB)), &serveFailed)
 	if err != nil {
 		slog.Error("http server failed to start", "error", err)
 		os.Exit(1)
@@ -339,7 +340,7 @@ const httpDrainTimeout = 10 * time.Second
 // startHTTPServer builds the Gin engine and serves it in the background. It
 // returns once the listener is bound, so a port clash fails startup rather than
 // surfacing later as a silently missing API.
-func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator, serveFailed *atomic.Bool) (*http.Server, context.CancelFunc, error) {
+func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, sso ssoValidator, bot botauth.TokenValidator, serveFailed *atomic.Bool) (*http.Server, context.CancelFunc, error) {
 	shedCounter, err := sdk.MeterProvider().Meter("user-service").Int64Counter(
 		"http_requests_shed_total",
 		metric.WithDescription("HTTP requests rejected with 429 because the in-flight cap was reached."))
@@ -357,15 +358,7 @@ func startHTTPServer(cfg *config.Config, svc subscriptionLister, sdk *o11y.SDK, 
 	r.Use(ginutil.RequestID())
 	r.Use(ginutil.AccessLog())
 
-	auth := authDeps{sso: sso}
-	if cfg.BotplatformURL != "" {
-		auth.bot = botauth.NewValidator(restyutil.New("", restyutil.WithTimeout(5*time.Second)), cfg.BotplatformURL)
-		slog.Info("session-token auth enabled", "botplatform_url", cfg.BotplatformURL)
-	} else {
-		slog.Warn("BOTPLATFORM_URL unset — HTTP session-token auth disabled, ssoToken only")
-	}
-
-	registerRoutes(r, newHandler(svc, cfg.HTTP.DefaultLimit, cfg.HTTP.MaxLimit), auth, httpDeps{
+	registerRoutes(r, newHandler(svc, cfg.HTTP.DefaultLimit, cfg.HTTP.MaxLimit), authDeps{sso: sso, bot: bot}, httpDeps{
 		maxConcurrency: cfg.HTTP.MaxConcurrency,
 		gzipMinBytes:   cfg.HTTP.GzipMinBytes,
 		handlerTimeout: cfg.HTTP.HandlerTimeout,

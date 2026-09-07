@@ -250,7 +250,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 | 401 | `unauthenticated` | `sso_token_expired` | `{ "code": "unauthenticated", "reason": "sso_token_expired", "error": "SSO token has expired, please re-login" }` |
 | 401 | `unauthenticated` | `invalid_sso_token` | `{ "code": "unauthenticated", "reason": "invalid_sso_token", "error": "invalid SSO token" }` |
 | 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — botplatform session token failed validation. Same envelope every service returns for a rejected session token. |
-| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — auth-service cannot reach botplatform to validate a session token. |
+| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "session store unavailable" }` — auth-service cannot read the sessions collection to validate a session token. |
 | 500 | `internal` | — | `{ "code": "internal", "error": "internal error" }` — the real cause is logged server-side and never sent to the client. |
 
 The returned `natsJwt` has a server-configured lifetime (default 2h). Clients should re-call `POST /api/v1/auth` to refresh before it expires.
@@ -457,7 +457,7 @@ the server's `CORS_ALLOWED_ORIGINS` allowlist. Errors use the standard
 |---|---|---|---|
 | 400 | `bad_request` | `ambiguous_token` | `{ "code": "bad_request", "reason": "ambiguous_token", "error": "set exactly one of ssoToken / x-auth-token" }` |
 | 401 | `unauthenticated` | `invalid_token` | `{ "code": "unauthenticated", "reason": "invalid_token", "error": "invalid session token" }` — missing, unknown, or mismatched session credential. The three cases are deliberately indistinguishable. |
-| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "botplatform unavailable" }` — the session token could not be validated. Distinct from `401`: the credential was not rejected, it could not be checked. |
+| 503 | `unavailable` | `upstream_unavailable` | `{ "code": "unavailable", "reason": "upstream_unavailable", "error": "session store unavailable" }` — the session token could not be validated. Distinct from `401`: the credential was not rejected, it could not be checked. |
 
 #### POST /api/v1/file/setCookie
 
@@ -6922,7 +6922,7 @@ Every error response — NATS reply subjects, JetStream async results, and HTTP 
 | `pin_room_too_large` | forbidden | history-service pin/unpin (non-owner/admin/bot in a room above `LARGE_ROOM_THRESHOLD`) |
 | `sso_token_expired` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token expired), `sso.refresh` (refresh failed, re-login required) |
 | `invalid_sso_token` | unauthenticated | auth-service `POST /api/v1/auth`; user-service `sso.set` (submitted token fails verification) |
-| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot reach botplatform); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site); upload-service (§2.4) and media-service (§7) — a session token could not be validated against botplatform |
+| `upstream_unavailable` | unavailable | auth-service `POST /api/v1/auth` (cannot read the sessions collection); portal-service `GET /api/userInfo` (cannot reach home-site botplatform); user-service `sso.set`/`sso.refresh` (SSO not configured on this site); upload-service (§2.4) and media-service (§7) — a session token could not be validated against the sessions collection |
 | `invalid_request` | bad_request | auth-service (body parse / required field missing) |
 | `invalid_nkey` | bad_request | auth-service (natsPublicKey format) |
 | `missing_fields` | bad_request | auth-service (ssoToken/account/natsPublicKey missing); portal-service `GET /api/userInfo` (account missing); user-service `sso.set` (ssoToken/refreshToken missing) |
@@ -7079,7 +7079,7 @@ The service decodes the image bytes to verify they are a valid PNG or JPEG — m
 | `403 Forbidden` | `not_admin` — a valid session that is neither the named bot nor an admin, or one issued for another site. |
 | `404 Not Found` | No user record for `botName` — unknown bot. |
 | `409 Conflict` | Bot is owned by a different cluster. Response body names the correct domain. |
-| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against the sessions collection. |
 
 ##### Success response (`200`)
 
@@ -7151,7 +7151,7 @@ Raw image bytes as the body. PNG, JPEG, or GIF (animated GIFs are stored and ser
 | `400 Bad Request` | Reason `emoji_shortcode_reserved` — shortcode collides with a built-in standard emoji (would be permanently shadowed). |
 | `401 Unauthenticated` | `invalid_token` — missing, unknown, or mismatched session credential (the three are indistinguishable). |
 | `403 Forbidden` | `not_admin` — a valid session without the `admin` role, or one issued for another site. |
-| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against botplatform. |
+| `503 Unavailable` | `upstream_unavailable` — the session token could not be validated against the sessions collection. |
 
 ##### Success response (`200`)
 
@@ -8400,7 +8400,7 @@ See [Error envelope](#6-error-envelope-reference). HTTP statuses:
 **Endpoint:** `POST /api/v1/auth/validate`
 **Reply:** synchronous HTTP response
 
-Validates a session `authToken` and returns the associated principal. Called by auth-service (§2.2) when minting a NATS JWT for a session-token holder, and by the gateway during request routing. Validation is local-DB only — cross-site routing is the caller's responsibility.
+Validates a session `authToken` and returns the associated principal. Retained for the gateway during request routing; the in-repo services (auth-service §2.2, upload-service §2.4, media-service §7, user-service HTTP) validate session tokens by reading the shared `sessions` collection directly via `pkg/botauth` and no longer call this endpoint. Validation is local-DB only — cross-site routing is the caller's responsibility.
 
 This endpoint is intended for **server-to-server use**; bot SDKs do not call it directly.
 
@@ -8908,11 +8908,11 @@ Every `/api/v1` endpoint takes exactly one credential:
 | Header(s) | Credential | Notes |
 |---|---|---|
 | `ssoToken` | OIDC access token | **Recommended.** Verified locally against cached JWKS — no network hop. |
-| `x-user-id` + `x-auth-token` | Botplatform session | Costs a botplatform round trip, and `pkg/botauth` caps concurrent validations at 64. |
+| `x-user-id` + `x-auth-token` | Botplatform session | One MongoDB point read of the `sessions` collection per request (`pkg/botauth`); no cache, so a revoked session is rejected on its next request. |
 
 Supplying both is a `400`. The account is taken from the verified credential, never from the request, so a caller can only ever read its own data — the same guarantee NATS subject scoping provides.
 
-> **Use `ssoToken` for sidebar initialization.** The session-token path depends on botplatform being reachable and shares a 64-validation ceiling, which binds well before the server's own concurrency cap during a mass reconnect.
+> **Use `ssoToken` for sidebar initialization.** The session-token path costs a MongoDB read per request, so a mass reconnect of session-token clients lands on the database rather than on the local JWKS cache.
 
 ### 13.2 HTTP — GET /api/v1/subscriptions
 
