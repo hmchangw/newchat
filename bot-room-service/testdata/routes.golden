@@ -1,0 +1,5 @@
+add_bot_room_members chat.server.bot.request.room.site-a.{roomID}.member.add
+create_bot_room chat.server.bot.request.room.site-a.create
+ensure_bot_dm_room chat.server.bot.request.room.site-a.dm.ensure
+get_bot_room chat.server.bot.request.room.site-a.get
+remove_bot_room_members chat.server.bot.request.room.site-a.{roomID}.member.remove

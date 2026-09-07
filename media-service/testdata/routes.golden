@@ -1,0 +1,2 @@
+delete_emoji chat.user.{account}.request.emoji.site-a.delete
+list_emojis chat.user.{account}.request.emoji.site-a.list

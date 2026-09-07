@@ -1,0 +1,5 @@
+search_apps chat.user.{account}.request.search.site-a.apps
+search_messages chat.user.{account}.request.search.site-a.messages
+search_orgs chat.user.{account}.request.search.site-a.orgs
+search_rooms chat.user.{account}.request.search.site-a.rooms
+search_users chat.user.{account}.request.search.site-a.users
