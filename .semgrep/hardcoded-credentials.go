@@ -57,6 +57,8 @@ const constFormPassword = "sup3rs3cr3t" // nosemgrep: gosec.G101-1
 // ruleid: hardcoded-credential-literal
 var varFormSecret = "sup3rs3cr3t" // nosemgrep: gosec.G101-1
 
+// declarationForms covers the two patterns that only appear inside a function
+// body. The package-level const and var above complete the set of four.
 func declarationForms() {
 	// ruleid: hardcoded-credential-literal
 	shortDeclPassword := "sup3rs3cr3t" // nosemgrep: gosec.G101-1
@@ -70,6 +72,8 @@ func declarationForms() {
 
 // --- positives: one line per alternative of the name regex ---
 
+// nameAlternatives gives each alternative of the rule's name regex its own line,
+// so dropping one from the pattern fails here instead of narrowing the gate.
 func nameAlternatives() {
 	// ruleid: hardcoded-credential-literal
 	password := "value-that-is-long-enough" // nosemgrep: gosec.G101-1
@@ -112,6 +116,9 @@ type config struct {
 	ClientSecret  string
 }
 
+// structLiteralFieldIsNotCovered is the negative assertion for the composite
+// literal: no ruleid annotation, so the test runner reports a match here as a
+// false positive if a pattern ever widens into that form.
 func structLiteralFieldIsNotCovered() config {
 	return config{ProxyPassword: "proxypass", ClientSecret: "s"} // nosemgrep: gosec.G101-1
 }
