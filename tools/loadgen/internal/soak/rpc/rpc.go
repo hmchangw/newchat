@@ -154,6 +154,7 @@ func NewAssertionError(message string) error {
 }
 
 func ParseErrorEnvelope(data []byte) error {
+	// nosemgrep: remote-envelope-must-use-fromreply -- loadgen classifies envelopes itself; it is not a service call path and relays nothing to a closed-set API
 	parsed, ok := errcode.Parse(data)
 	if !ok {
 		return nil

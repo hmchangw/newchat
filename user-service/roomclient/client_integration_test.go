@@ -107,11 +107,11 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		assert.Equal(t, "Remote", rooms[0].Name)
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
-		// A well-formed error envelope whose code is outside our closed set must be
-		// relayed, not silently re-decoded as an empty success.
+		// A well-formed error envelope whose code is outside our closed set must
+		// fail the call, not be silently re-decoded as an empty success.
 		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
@@ -120,9 +120,16 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 
 		_, err = New(nc, "site-a").GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 
 	t.Run("GetRoomsMeta — skipKeys set on the wire, GetRoomsInfo leaves it unset", func(t *testing.T) {
@@ -342,11 +349,11 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		assert.Equal(t, errcode.CodeInternal, e.Code)
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
-		// A foreign-code error envelope must surface as the original error rather
-		// than collapse to the generic create-dm-failure backstop.
+		// A foreign-code error envelope must surface as a failure naming the code
+		// rather than collapse to the generic create-dm-failure backstop.
 		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
 			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
@@ -355,8 +362,15 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 
 		_, err = New(nc, "site-a").CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 }

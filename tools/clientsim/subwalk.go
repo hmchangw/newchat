@@ -134,7 +134,7 @@ func (l *natsLister) List(ctx context.Context, req subListRequest) (*subListPage
 	if err != nil {
 		return nil, fmt.Errorf("subscription.list request: %w", err)
 	}
-	if ec, isErr := errcode.Parse(msg.Data); isErr {
+	if ec := errcode.FromReply(msg.Data); ec != nil {
 		return nil, fmt.Errorf("subscription.list rejected: %w", ec)
 	}
 	// Decoded through a pointer-valued shadow of subListPage so an absent or

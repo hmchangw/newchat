@@ -83,11 +83,9 @@ func (b *bulkPresenceSource) Snapshot(ctx context.Context, accounts []string) (m
 				slog.Warn("presence rpc failed", "error", err, "chunk", len(ch))
 				return
 			}
-			if errResp, ok := errcode.Parse(msg.Data); ok {
+			if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
 				slog.Warn("presence rpc returned error response",
-					"error", errResp.Message,
-					"code", errResp.Code,
-					"chunk", len(ch))
+					"error", remoteErr, "chunk", len(ch))
 				return
 			}
 			var reply model.PresenceSnapshotReply

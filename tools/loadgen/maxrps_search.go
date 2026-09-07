@@ -113,6 +113,7 @@ func classifySearchReply(e searchEndpoint, body []byte, reqErr error) sloOutcome
 	if reqErr != nil {
 		return outcomeFailed
 	}
+	// nosemgrep: remote-envelope-must-use-fromreply -- loadgen passes Code to its own classifier, which has an explicit default arm
 	if ec, ok := errcode.Parse(body); ok {
 		return classifyErrcode(ec.Code)
 	}

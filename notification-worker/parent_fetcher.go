@@ -79,8 +79,11 @@ func (f *historyParentFetcher) FetchParent(ctx context.Context, account, roomID,
 	}
 	// The errcode envelope has a top-level "error"; a real Message never does, so this
 	// can't false-positive. Propagate the typed remote error for accurate classification.
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var parent parentMessageProjection
 	if err := sonic.Unmarshal(msg.Data, &parent); err != nil {

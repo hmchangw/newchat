@@ -123,7 +123,7 @@ func TestQueryPresence_Integration(t *testing.T) {
 		assert.Contains(t, err.Error(), "decode presence-query response")
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
 		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
@@ -134,8 +134,15 @@ func TestQueryPresence_Integration(t *testing.T) {
 
 		_, err = New(nc).QueryPresence(context.Background(), "site-a", []string{"alice"})
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 }

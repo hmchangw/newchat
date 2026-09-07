@@ -62,7 +62,15 @@ func (e *natsDMEnsurer) Ensure(ctx context.Context, sess *session.Session, targe
 		}
 		return "", errcode.Internal("dm ensure request", errcode.WithCause(err))
 	}
-	if ee, ok := errcode.Parse(reply.Data); ok {
+	// FromReply, then errors.As: errcode.New panics on a non-canonical Code, so
+	// feeding it a remote code this build does not know crashes the handler.
+	// FromReply hands back an untyped error for exactly that case, and
+	// errors.As correctly finds nothing in it.
+	if remoteErr := errcode.FromReply(reply.Data); remoteErr != nil {
+		var ee *errcode.Error
+		if !errors.As(remoteErr, &ee) {
+			return "", remoteErr
+		}
 		return "", errcode.New(ee.Code, ee.Message,
 			errcode.WithReason(ee.Reason),
 			errcode.WithCause(fmt.Errorf("dm ensure reply: %s", ee.Message)))

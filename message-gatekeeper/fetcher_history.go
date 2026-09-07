@@ -89,8 +89,11 @@ func (f *historyParentFetcher) FetchQuotedParent(
 	// "error" field so this cannot false-positive. Propagate the typed remote
 	// errcode so the caller can preserve the upstream classification (a
 	// transient infra failure stays unavailable, not collapsed to not_found).
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 
 	var parent quotedParentProjection

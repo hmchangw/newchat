@@ -36,8 +36,11 @@ func (c *roomClient) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []
 	if err != nil {
 		return nil, natsutil.RequestFailure("rooms-info rpc", err)
 	}
-	if e, ok := errcode.Parse(msg.Data); ok {
-		return nil, e
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var out model.RoomsInfoBatchResponse
 	if err := json.Unmarshal(msg.Data, &out); err != nil {

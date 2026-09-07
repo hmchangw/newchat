@@ -1,0 +1,52 @@
+rules:
+  - id: remote-envelope-must-use-fromreply
+    languages: [go]
+    severity: ERROR
+    message: >
+      Read a remote reply with errcode.FromReply, not errcode.Parse.
+
+      Parse answers "is this an error envelope" and Code.Valid answers "does
+      this build know the code". Neither answers "did the call fail", and every
+      hand-rolled combination in this repo got one of the two wrong:
+
+      `ok && ee.Code.Valid()` treats an unrecognised code as a success. The
+      reply falls through to a decoder, JSON's ignore-unknown-fields default
+      yields a zero-value response, the caller returns nil, and the call
+      records a success sample. A newer or cross-site peer silently turns
+      remote failures into empty results.
+
+      `ok` alone relays an unrecognised code onward as a typed *errcode.Error,
+      into writers and constructors that assume the closed set — errcode.New
+      panics on a non-canonical Code.
+
+      errcode.FromReply returns nil for a non-envelope, the typed *Error for a
+      canonical code, and an untyped error naming the code for an unrecognised
+      one. Branch on a specific code with errors.As, which correctly finds
+      nothing for an unrecognised one.
+
+      Six sites are exempt and each says why in a comment beside the call; the
+      two that most need the raw envelope:
+      room-service/memberlist_client.go remaps a remote Reason and degrades a
+      legacy envelope to Internal-with-a-warn; admin-service/room_onduty.go
+      writes an HTTP response directly. Both already handle an unrecognised
+      code. If a new site genuinely needs the raw envelope, handle
+      !Code.Valid() explicitly and nosemgrep with that reason.
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "/pkg/errcode/"
+        - ".semgrep/"
+    # Match the call expression itself, not the assignment forms. Enumerating
+    # shapes is how the first version of this rule leaked: it caught
+    # `e, ok := errcode.Parse(x)` but not `return errcode.Parse(x)` nor
+    # `f(errcode.Parse(x))`, so a handler could bypass it without trying.
+    pattern-either:
+      - pattern: errcode.Parse(...)
+      # A dot-import makes the call read as a bare `Parse(...)`. semgrep resolves
+      # a named alias back to the package, but not a dot-import, so that one
+      # shape needs its own pattern.
+      - patterns:
+          - pattern: Parse(...)
+          - pattern-inside: |
+              import . "github.com/hmchangw/chat/pkg/errcode"
+              ...

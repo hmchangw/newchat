@@ -26,7 +26,8 @@ type badgeClient interface {
 }
 
 // natsBadgeClient requests subject.BadgeCountBatch(siteID) via NATS request/reply,
-// mirroring historyParentFetcher's shape (sonic codec, errcode.Parse for the remote envelope).
+// mirroring historyParentFetcher's shape (sonic codec, errcode.FromReply for the
+// remote envelope).
 type natsBadgeClient struct {
 	nc *o11ynats.Conn
 }
@@ -53,8 +54,11 @@ func (c *natsBadgeClient) Counts(ctx context.Context, siteID, roomID string, acc
 	}
 	// The errcode envelope has a top-level "error"; a real response never does, so this
 	// can't false-positive. Propagate the typed remote error for accurate classification.
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var resp model.BadgeCountBatchResponse
 	if err := sonic.Unmarshal(msg.Data, &resp); err != nil {
