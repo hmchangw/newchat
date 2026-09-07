@@ -11,6 +11,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 )
 
@@ -29,17 +30,21 @@ type badgeClient interface {
 // mirroring historyParentFetcher's shape (sonic codec, errcode.Parse for the remote envelope).
 type natsBadgeClient struct {
 	nc *o11ynats.Conn
+	// metrics is injected on the same terms as historyParentFetcher's: building
+	// a second natsmetrics.Metrics here would duplicate the shared instruments,
+	// and the zero value records nothing.
+	metrics natsmetrics.Publisher
 }
 
-func newNatsBadgeClient(nc *o11ynats.Conn) *natsBadgeClient {
-	return &natsBadgeClient{nc: nc}
+func newNatsBadgeClient(nc *o11ynats.Conn, metrics natsmetrics.Publisher) *natsBadgeClient {
+	return &natsBadgeClient{nc: nc, metrics: metrics}
 }
 
 // Counts requests badge unread-room counts for accounts from siteID's user-service,
 // naming roomID as the room that triggered the notification. Any error (timeout, no
 // responder, remote errcode envelope, unmarshal) is wrapped and returned so the caller
 // can decide how to degrade — the badge phase must never NAK the push on its behalf.
-func (c *natsBadgeClient) Counts(ctx context.Context, siteID, roomID string, accounts []string) (map[string]int, error) {
+func (c *natsBadgeClient) Counts(ctx context.Context, siteID, roomID string, accounts []string) (_ map[string]int, resultErr error) {
 	// fetchUnreadCounts is fail-open and discards this error, so it never reaches
 	// a settle decision.
 	// nosemgrep: jsretry-marshal-failure-must-be-permanent
@@ -47,14 +52,31 @@ func (c *natsBadgeClient) Counts(ctx context.Context, siteID, roomID string, acc
 	if err != nil {
 		return nil, fmt.Errorf("marshal badge count batch request for site %s: %w", siteID, err)
 	}
+	// Recorded because this call blocks the notification handler: fetchUnreadCounts
+	// runs it inside an errgroup the handler awaits, bounded at badgeFetchTimeout,
+	// on a MAX_WORKERS semaphore loop. Without a client series a slow user-service
+	// shows up only as consumer lag, and the callee's own histogram does not close
+	// the gap — the fan-out is per home site, so a remote peer's server-side
+	// samples live in that site's Prometheus, not this one's.
+	//
+	// The outcome is the function's, not nc.Request's.
+	// A remote errcode envelope and a decode failure both arrive as a
+	// successful transport read, so recording at the call site labelled them
+	// success and lost error.type — the client histogram then disagreed with
+	// the callee's server histogram about whether the call failed.
+	started := time.Now()
+	defer func() {
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodBatchGetBadgeCounts, time.Since(started), resultErr)
+	}()
 	msg, err := c.nc.Request(ctx, subject.BadgeCountBatch(siteID), reqBytes, badgeFetchTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("badge count batch request to site %s: %w", siteID, err)
 	}
-	// The errcode envelope has a top-level "error"; a real response never does, so this
-	// can't false-positive. Propagate the typed remote error for accurate classification.
-	if ee, ok := errcode.Parse(msg.Data); ok && ee.Code.Valid() {
-		return nil, ee
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var resp model.BadgeCountBatchResponse
 	if err := sonic.Unmarshal(msg.Data, &resp); err != nil {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/user-service/service"
@@ -53,7 +54,7 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		rooms, err := New(nc, "site-a").GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
+		rooms, err := New(nc, "site-a", natsmetrics.Publisher{}).GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
 		require.NoError(t, err)
 		require.Len(t, rooms, 1)
 		require.Equal(t, "Eng", rooms[0].Name)
@@ -69,7 +70,7 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
@@ -83,7 +84,7 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := New(nc, "site-a").GetRoomsInfo(ctx, "site-a", []string{"r1"})
+		_, err := New(nc, "site-a", natsmetrics.Publisher{}).GetRoomsInfo(ctx, "site-a", []string{"r1"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rooms-info rpc")
 	})
@@ -101,28 +102,35 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		rooms, err := New(nc, "site-a").GetRoomsInfo(context.Background(), "site-b", []string{"r2"})
+		rooms, err := New(nc, "site-a", natsmetrics.Publisher{}).GetRoomsInfo(context.Background(), "site-b", []string{"r2"})
 		require.NoError(t, err)
 		require.Len(t, rooms, 1)
 		assert.Equal(t, "Remote", rooms[0].Name)
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
-		// A well-formed error envelope whose code is outside our closed set must be
-		// relayed, not silently re-decoded as an empty success.
+		// A well-formed error envelope whose code is outside our closed set must
+		// fail the call, not be silently re-decoded as an empty success.
 		sub, err := nc.Subscribe(context.Background(), subject.RoomsInfoBatch("site-a"), func(_ context.Context, m *nats.Msg) {
 			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).GetRoomsInfo(context.Background(), "site-a", []string{"r1"})
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 
 	t.Run("GetRoomsMeta — skipKeys set on the wire, GetRoomsInfo leaves it unset", func(t *testing.T) {
@@ -144,7 +152,7 @@ func TestGetRoomsInfo_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		c := New(nc, "site-a")
+		c := New(nc, "site-a", natsmetrics.Publisher{})
 		rooms, err := c.GetRoomsMeta(context.Background(), "site-a", []string{"r1"})
 		require.NoError(t, err)
 		require.Len(t, rooms, 1)
@@ -171,7 +179,7 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		got, err := New(nc, "site-a").GetThreadRoomInfoBatch(context.Background(), "site-a", []string{"tr1"})
+		got, err := New(nc, "site-a", natsmetrics.Publisher{}).GetThreadRoomInfoBatch(context.Background(), "site-a", []string{"tr1"})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, int64(42), got[0].LastMsgAt)
@@ -186,7 +194,7 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").GetThreadRoomInfoBatch(context.Background(), "site-a", []string{"tr1"})
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).GetThreadRoomInfoBatch(context.Background(), "site-a", []string{"tr1"})
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
 		assert.Equal(t, errcode.CodeBadRequest, e.Code)
@@ -199,7 +207,7 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := New(nc, "site-a").GetThreadRoomInfoBatch(ctx, "site-a", []string{"tr1"})
+		_, err := New(nc, "site-a", natsmetrics.Publisher{}).GetThreadRoomInfoBatch(ctx, "site-a", []string{"tr1"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "thread-room-info rpc")
 	})
@@ -217,7 +225,7 @@ func TestGetThreadRoomInfoBatch_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		got, err := New(nc, "site-a").GetThreadRoomInfoBatch(context.Background(), "site-b", []string{"tr2"})
+		got, err := New(nc, "site-a", natsmetrics.Publisher{}).GetThreadRoomInfoBatch(context.Background(), "site-b", []string{"tr2"})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 	})
@@ -236,7 +244,7 @@ func TestClearAllThreadUnread_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		require.NoError(t, New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-a", "alice"))
+		require.NoError(t, New(nc, "site-a", natsmetrics.Publisher{}).ClearAllThreadUnread(context.Background(), "site-a", "alice"))
 	})
 
 	t.Run("errcode reply relayed", func(t *testing.T) {
@@ -248,7 +256,7 @@ func TestClearAllThreadUnread_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		err = New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-a", "alice")
+		err = New(nc, "site-a", natsmetrics.Publisher{}).ClearAllThreadUnread(context.Background(), "site-a", "alice")
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
@@ -264,14 +272,14 @@ func TestClearAllThreadUnread_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		require.NoError(t, New(nc, "site-a").ClearAllThreadUnread(context.Background(), "site-b", "alice"))
+		require.NoError(t, New(nc, "site-a", natsmetrics.Publisher{}).ClearAllThreadUnread(context.Background(), "site-b", "alice"))
 	})
 
 	t.Run("no responder — returns error wrapping the rpc", func(t *testing.T) {
 		nc := dial(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		err := New(nc, "site-a").ClearAllThreadUnread(ctx, "site-a", "alice")
+		err := New(nc, "site-a", natsmetrics.Publisher{}).ClearAllThreadUnread(ctx, "site-a", "alice")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "clear-all-thread-unread rpc")
 	})
@@ -292,7 +300,7 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		sub2, err := New(nc, "site-a").CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
+		sub2, err := New(nc, "site-a", natsmetrics.Publisher{}).CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
 		require.NoError(t, err)
 		require.Equal(t, "new", sub2.ID)
 	})
@@ -307,7 +315,7 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
@@ -321,7 +329,7 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := New(nc, "site-a").CreateDMRoom(ctx, "alice", "bob", model.RoomTypeDM)
+		_, err := New(nc, "site-a", natsmetrics.Publisher{}).CreateDMRoom(ctx, "alice", "bob", model.RoomTypeDM)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "create-dm rpc")
 	})
@@ -335,28 +343,35 @@ func TestCreateDMRoom_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
 		assert.Equal(t, errcode.CodeInternal, e.Code)
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
-		// A foreign-code error envelope must surface as the original error rather
-		// than collapse to the generic create-dm-failure backstop.
+		// A foreign-code error envelope must surface as a failure naming the code
+		// rather than collapse to the generic create-dm-failure backstop.
 		sub, err := nc.Subscribe(context.Background(), subject.RoomCreateDMSync("site-a"), func(_ context.Context, m *nats.Msg) {
 			_ = m.Respond([]byte(`{"code":"upstream_only_code","error":"upstream boom"}`))
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc, "site-a").CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
+		_, err = New(nc, "site-a", natsmetrics.Publisher{}).CreateDMRoom(context.Background(), "alice", "bob", model.RoomTypeDM)
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 }

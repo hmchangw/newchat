@@ -10,6 +10,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/natsutil"
 	"github.com/hmchangw/chat/pkg/subject"
 )
@@ -19,12 +20,19 @@ const roomRPCTimeout = 5 * time.Second
 
 // Client implements service.RoomClient via NATS request/reply RPCs to room-service and room-worker.
 type Client struct {
+	// metrics is injected rather than built here: a second natsmetrics.Metrics
+	// would duplicate every shared instrument on a different construction path.
+	// The zero value is safe and records nothing.
+	metrics natsmetrics.Publisher
+
 	nc     *o11ynats.Conn
 	siteID string
 }
 
 // New returns a Client wired to nc and scoped to siteID.
-func New(nc *o11ynats.Conn, siteID string) *Client { return &Client{nc: nc, siteID: siteID} }
+func New(nc *o11ynats.Conn, siteID string, metrics natsmetrics.Publisher) *Client {
+	return &Client{nc: nc, siteID: siteID, metrics: metrics}
+}
 
 // GetRoomsInfo issues a batch room-info RPC; non-OK reply envelopes are relayed via errcode.Parse to preserve the remote classification.
 func (c *Client) GetRoomsInfo(ctx context.Context, siteID string, roomIDs []string) ([]model.RoomInfo, error) {
@@ -36,19 +44,30 @@ func (c *Client) GetRoomsMeta(ctx context.Context, siteID string, roomIDs []stri
 	return c.roomsInfo(ctx, siteID, roomIDs, true)
 }
 
-func (c *Client) roomsInfo(ctx context.Context, siteID string, roomIDs []string, skipKeys bool) ([]model.RoomInfo, error) {
+func (c *Client) roomsInfo(ctx context.Context, siteID string, roomIDs []string, skipKeys bool) (_ []model.RoomInfo, resultErr error) {
 	req, err := json.Marshal(model.RoomsInfoBatchRequest{RoomIDs: roomIDs, SkipKeys: skipKeys})
 	if err != nil {
 		return nil, fmt.Errorf("marshal rooms-info request: %w", err)
 	}
+	// Recorded from the final outcome, not from nc.Request's return: a remote
+	// errcode envelope and a decode failure both arrive as a successful
+	// transport read, so recording at the call site would label them success
+	// and lose error.type.
+	started := time.Now()
+	defer func() {
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodBatchGetRoomsInfo, time.Since(started), resultErr)
+	}()
 	msg, err := c.nc.Request(ctx, subject.RoomsInfoBatch(siteID), req, roomRPCTimeout)
 	if err != nil {
 		return nil, natsutil.RequestFailure("rooms-info rpc", err)
 	}
 	// Relay any remote error envelope as-is — including one carrying a code outside
 	// our closed set — so the original classification/message is never masked.
-	if e, ok := errcode.Parse(msg.Data); ok {
-		return nil, e
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var out model.RoomsInfoBatchResponse
 	if err := json.Unmarshal(msg.Data, &out); err != nil {
@@ -59,17 +78,28 @@ func (c *Client) roomsInfo(ctx context.Context, siteID string, roomIDs []string,
 
 // GetThreadRoomInfoBatch issues a batch thread-room-info RPC to room-service on
 // the given site; non-OK reply envelopes are relayed via errcode.Parse.
-func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) ([]model.ThreadRoomInfo, error) {
+func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, threadRoomIDs []string) (_ []model.ThreadRoomInfo, resultErr error) {
 	req, err := json.Marshal(model.ThreadRoomInfoBatchRequest{ThreadRoomIDs: threadRoomIDs})
 	if err != nil {
 		return nil, fmt.Errorf("marshal thread-room-info request: %w", err)
 	}
+	// Recorded from the final outcome, not from nc.Request's return: a remote
+	// errcode envelope and a decode failure both arrive as a successful
+	// transport read, so recording at the call site would label them success
+	// and lose error.type.
+	started := time.Now()
+	defer func() {
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodBatchGetThreadRoomsInfo, time.Since(started), resultErr)
+	}()
 	msg, err := c.nc.Request(ctx, subject.ThreadRoomInfoBatch(siteID), req, roomRPCTimeout)
 	if err != nil {
 		return nil, natsutil.RequestFailure("thread-room-info rpc", err)
 	}
-	if e, ok := errcode.Parse(msg.Data); ok {
-		return nil, e
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return nil, remoteErr
 	}
 	var out model.ThreadRoomInfoBatchResponse
 	if err := json.Unmarshal(msg.Data, &out); err != nil {
@@ -81,23 +111,34 @@ func (c *Client) GetThreadRoomInfoBatch(ctx context.Context, siteID string, thre
 // ClearAllThreadUnread issues the bulk clear-all-thread-unread RPC to room-service
 // on the given site; non-OK reply envelopes are relayed via errcode.Parse. The
 // reply carries no payload — success is a nil error.
-func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) error {
+func (c *Client) ClearAllThreadUnread(ctx context.Context, siteID, account string) (resultErr error) {
 	req, err := json.Marshal(model.RoomThreadReadAllRequest{Account: account})
 	if err != nil {
 		return fmt.Errorf("marshal clear-all-thread-unread request: %w", err)
 	}
+	// Recorded from the final outcome, not from nc.Request's return: a remote
+	// errcode envelope and a decode failure both arrive as a successful
+	// transport read, so recording at the call site would label them success
+	// and lose error.type.
+	started := time.Now()
+	defer func() {
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodMarkAllThreadsRead, time.Since(started), resultErr)
+	}()
 	msg, err := c.nc.Request(ctx, subject.RoomThreadReadAll(siteID), req, roomRPCTimeout)
 	if err != nil {
 		return natsutil.RequestFailure("clear-all-thread-unread rpc", err)
 	}
-	if e, ok := errcode.Parse(msg.Data); ok {
-		return e
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return remoteErr
 	}
 	return nil
 }
 
 // CreateDMRoom issues a DM-room creation RPC to room-worker; non-OK reply envelopes are relayed via errcode.Parse.
-func (c *Client) CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (model.Subscription, error) {
+func (c *Client) CreateDMRoom(ctx context.Context, account, otherAccount string, roomType model.RoomType) (_ model.Subscription, resultErr error) {
 	body, err := json.Marshal(model.SyncCreateDMRequest{
 		RoomType:         roomType,
 		RequesterAccount: account,
@@ -106,14 +147,25 @@ func (c *Client) CreateDMRoom(ctx context.Context, account, otherAccount string,
 	if err != nil {
 		return model.Subscription{}, fmt.Errorf("marshal create-dm request: %w", err)
 	}
+	// Recorded from the final outcome, not from nc.Request's return: a remote
+	// errcode envelope and a decode failure both arrive as a successful
+	// transport read, so recording at the call site would label them success
+	// and lose error.type.
+	started := time.Now()
+	defer func() {
+		c.metrics.RecordRPCClientCall(ctx, natsmetrics.MethodCreateDMRoom, time.Since(started), resultErr)
+	}()
 	msg, err := c.nc.Request(ctx, subject.RoomCreateDMSync(c.siteID), body, roomRPCTimeout)
 	if err != nil {
 		return model.Subscription{}, natsutil.RequestFailure("create-dm rpc", err)
 	}
 	// Relay any remote error envelope as-is — including one carrying a code outside
 	// our closed set — so the original classification/message is never masked.
-	if e, ok := errcode.Parse(msg.Data); ok {
-		return model.Subscription{}, e
+	// FromReply, not Parse: an envelope is always a failure, and an
+	// unrecognised code must not be relayed as a typed *errcode.Error. See its
+	// doc comment for the two ways hand-rolling this goes wrong.
+	if remoteErr := errcode.FromReply(msg.Data); remoteErr != nil {
+		return model.Subscription{}, remoteErr
 	}
 	var reply model.SyncCreateDMReply
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {

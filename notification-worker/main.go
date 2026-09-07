@@ -225,7 +225,7 @@ func main() {
 
 	var badge badgeClient
 	if cfg.BadgeCountEnabled {
-		badge = newNatsBadgeClient(nc)
+		badge = newNatsBadgeClient(nc, publishMetrics)
 	}
 
 	var settings UserSettingsSnapshotter = noopUserSettings{}

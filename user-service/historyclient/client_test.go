@@ -16,9 +16,14 @@ import (
 
 	o11ynats "github.com/flywindy/o11y/nats"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
+	"github.com/hmchangw/chat/pkg/testutil"
 )
 
 // startTestNATS spins up an embedded, in-process NATS server (no Docker) for
@@ -53,7 +58,7 @@ func TestRoomsGet_Hints(t *testing.T) {
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
 		hints := map[string]model.RoomTimeHint{"r1": {LastMsgAt: &lastMsgAt}}
-		_, err = New(nc).RoomsGet(context.Background(), "site-a", []string{"r1"}, hints)
+		_, err = New(nc, natsmetrics.Publisher{}).RoomsGet(context.Background(), "site-a", []string{"r1"}, hints)
 		require.NoError(t, err)
 
 		require.Contains(t, gotReq.Hints, "r1")
@@ -73,7 +78,7 @@ func TestRoomsGet_Hints(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+		_, err = New(nc, natsmetrics.Publisher{}).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
 		require.NoError(t, err)
 
 		_, present := gotRaw["hints"]
@@ -91,7 +96,7 @@ func TestRoomsGet_Hints(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		out, err := New(nc).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+		out, err := New(nc, natsmetrics.Publisher{}).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
 		require.NoError(t, err)
 		require.Contains(t, out, "r1")
 		assert.Equal(t, "m1", out["r1"].MessageID)
@@ -106,7 +111,7 @@ func TestRoomsGet_Hints(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+		_, err = New(nc, natsmetrics.Publisher{}).RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
@@ -119,8 +124,194 @@ func TestRoomsGet_Hints(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := New(nc).RoomsGet(ctx, "site-a", []string{"r1"}, nil)
+		_, err := New(nc, natsmetrics.Publisher{}).RoomsGet(ctx, "site-a", []string{"r1"}, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rooms-get rpc")
 	})
+}
+
+// clientMetricFor returns a Publisher writing into a manual reader, plus a
+// lookup over rpc.client.call.duration keyed by rpc.method and error.type.
+//
+// The pair matters together: asserting only on the requested error class would
+// still pass if one call were recorded twice under different labels, and
+// asserting only on the method would not catch a remote failure recorded as a
+// success — the defect that made the client histogram disagree with the
+// callee's server histogram about whether a call failed.
+func clientMetricFor(t *testing.T) (natsmetrics.Publisher, func(method natsmetrics.RPCMethod, errorType string) (count, methodTotal uint64)) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	pub := natsmetrics.NewFromProvider(mp).Publisher("site-a")
+
+	return pub, func(method natsmetrics.RPCMethod, errorType string) (uint64, uint64) {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &rm))
+
+		var count, methodTotal uint64
+		for _, scope := range rm.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name != "rpc.client.call.duration" {
+					continue
+				}
+				histogram, ok := m.Data.(metricdata.Histogram[float64])
+				require.True(t, ok, "rpc.client.call.duration must be a histogram")
+				for _, dp := range histogram.DataPoints {
+					attrs := map[string]string{}
+					for _, kv := range dp.Attributes.ToSlice() {
+						attrs[string(kv.Key)] = kv.Value.AsString()
+					}
+					if attrs["rpc.method"] != string(method) {
+						continue
+					}
+					methodTotal += dp.Count
+					// A successful call carries no error.type at all, per the
+					// convention's conditional attribute.
+					if attrs["error.type"] == errorType {
+						count += dp.Count
+					}
+				}
+			}
+		}
+		return count, methodTotal
+	}
+}
+
+// Every outbound call records rpc.client.call.duration from the call's final
+// outcome, not from what nc.Request returned. A remote errcode envelope and a
+// decode failure both arrive as a successful transport read, so recording at
+// the call site labelled two of the three failure modes success — and the
+// client histogram then disagreed with the callee's server histogram about
+// whether the call failed.
+//
+// Each case asserts the method as well as the class, because asserting only the
+// class would pass if one call were recorded twice under different labels.
+func TestHistoryClient_RecordsClientCall(t *testing.T) {
+	tests := []struct {
+		name      string
+		subject   string
+		method    natsmetrics.RPCMethod
+		call      func(c *Client) error
+		okReply   string
+		subscribe bool
+		reply     func(m *nats.Msg)
+		wantErr   bool
+		wantClass string // "" means a successful call, which carries no error.type
+	}{
+		{
+			name:    "RoomsGet success",
+			subject: subject.RoomsGet("site-a"),
+			method:  natsmetrics.MethodBatchGetRoomPreviews,
+			call: func(c *Client) error {
+				_, err := c.RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+				return err
+			},
+			subscribe: true,
+			reply:     func(m *nats.Msg) { _ = m.Respond([]byte(`{"previews":{}}`)) },
+		},
+		{
+			name:    "RoomsGet remote errcode envelope",
+			subject: subject.RoomsGet("site-a"),
+			method:  natsmetrics.MethodBatchGetRoomPreviews,
+			call: func(c *Client) error {
+				_, err := c.RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+				return err
+			},
+			subscribe: true,
+			reply: func(m *nats.Msg) {
+				body, _ := json.Marshal(errcode.NotFound("nope"))
+				_ = m.Respond(body)
+			},
+			wantErr:   true,
+			wantClass: "other_error",
+		},
+		{
+			name:    "RoomsGet undecodable reply",
+			subject: subject.RoomsGet("site-a"),
+			method:  natsmetrics.MethodBatchGetRoomPreviews,
+			call: func(c *Client) error {
+				_, err := c.RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+				return err
+			},
+			subscribe: true,
+			reply:     func(m *nats.Msg) { _ = m.Respond([]byte("{not json")) },
+			wantErr:   true,
+			wantClass: "other_error",
+		},
+		{
+			name:    "RoomsGet no responder",
+			subject: subject.RoomsGet("site-a"),
+			method:  natsmetrics.MethodBatchGetRoomPreviews,
+			call: func(c *Client) error {
+				_, err := c.RoomsGet(context.Background(), "site-a", []string{"r1"}, nil)
+				return err
+			},
+			wantErr:   true,
+			wantClass: "no_responders",
+		},
+		{
+			name:    "GetThreadList success",
+			subject: subject.ThreadSubscriptionList("site-a"),
+			method:  natsmetrics.MethodListThreadSubscriptions,
+			call: func(c *Client) error {
+				_, err := c.GetThreadList(context.Background(), "site-a", model.ThreadSubscriptionListRequest{})
+				return err
+			},
+			subscribe: true,
+			reply:     func(m *nats.Msg) { _ = m.Respond([]byte(`{}`)) },
+		},
+		{
+			name:    "GetThreadList remote errcode envelope",
+			subject: subject.ThreadSubscriptionList("site-a"),
+			method:  natsmetrics.MethodListThreadSubscriptions,
+			call: func(c *Client) error {
+				_, err := c.GetThreadList(context.Background(), "site-a", model.ThreadSubscriptionListRequest{})
+				return err
+			},
+			subscribe: true,
+			reply: func(m *nats.Msg) {
+				body, _ := json.Marshal(errcode.Forbidden("nope"))
+				_ = m.Respond(body)
+			},
+			wantErr:   true,
+			wantClass: "other_error",
+		},
+		{
+			name:    "GetThreadList no responder",
+			subject: subject.ThreadSubscriptionList("site-a"),
+			method:  natsmetrics.MethodListThreadSubscriptions,
+			call: func(c *Client) error {
+				_, err := c.GetThreadList(context.Background(), "site-a", model.ThreadSubscriptionListRequest{})
+				return err
+			},
+			wantErr:   true,
+			wantClass: "no_responders",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nc := testutil.EmbeddedNATS(t)
+			if tt.subscribe {
+				sub, err := nc.Subscribe(context.Background(), tt.subject, func(_ context.Context, m *nats.Msg) {
+					tt.reply(m)
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = sub.Unsubscribe() })
+			}
+
+			pub, calls := clientMetricFor(t)
+			err := tt.call(New(nc, pub))
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			count, methodTotal := calls(tt.method, tt.wantClass)
+			assert.Equal(t, uint64(1), count, "one call recorded as %q", tt.wantClass)
+			assert.Equal(t, uint64(1), methodTotal, "recorded exactly once, under one label set")
+		})
+	}
 }

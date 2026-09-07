@@ -19,6 +19,7 @@ import (
 
 	"github.com/hmchangw/chat/pkg/errcode"
 	"github.com/hmchangw/chat/pkg/model"
+	"github.com/hmchangw/chat/pkg/natsmetrics"
 	"github.com/hmchangw/chat/pkg/subject"
 	"github.com/hmchangw/chat/pkg/testutil"
 	"github.com/hmchangw/chat/user-service/service"
@@ -52,7 +53,7 @@ func TestQueryPresence_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		states, err := New(nc).QueryPresence(context.Background(), "site-a", []string{"alice"})
+		states, err := New(nc, natsmetrics.Publisher{}).QueryPresence(context.Background(), "site-a", []string{"alice"})
 		require.NoError(t, err)
 		require.Len(t, states, 1)
 		assert.Equal(t, "alice", states[0].Account)
@@ -69,7 +70,7 @@ func TestQueryPresence_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc).QueryPresence(context.Background(), "site-a", []string{"alice"})
+		_, err = New(nc, natsmetrics.Publisher{}).QueryPresence(context.Background(), "site-a", []string{"alice"})
 		require.Error(t, err)
 		var e *errcode.Error
 		require.True(t, errors.As(err, &e))
@@ -83,7 +84,7 @@ func TestQueryPresence_Integration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := New(nc).QueryPresence(ctx, "site-a", []string{"alice"})
+		_, err := New(nc, natsmetrics.Publisher{}).QueryPresence(ctx, "site-a", []string{"alice"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "presence-query rpc")
 	})
@@ -101,7 +102,7 @@ func TestQueryPresence_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		states, err := New(nc).QueryPresence(context.Background(), "site-b", []string{"bob"})
+		states, err := New(nc, natsmetrics.Publisher{}).QueryPresence(context.Background(), "site-b", []string{"bob"})
 		require.NoError(t, err)
 		require.Len(t, states, 1)
 		assert.Equal(t, model.StatusAway, states[0].Status)
@@ -118,12 +119,12 @@ func TestQueryPresence_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc).QueryPresence(context.Background(), "site-a", []string{"alice"})
+		_, err = New(nc, natsmetrics.Publisher{}).QueryPresence(context.Background(), "site-a", []string{"alice"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode presence-query response")
 	})
 
-	t.Run("unknown-code error envelope — relayed, not masked", func(t *testing.T) {
+	t.Run("unknown-code error envelope — surfaced untyped, not masked", func(t *testing.T) {
 		nc := dial(t)
 
 		sub, err := nc.Subscribe(context.Background(), subject.PresenceQueryBatchPeer("site-a"), func(_ context.Context, m *nats.Msg) {
@@ -132,10 +133,17 @@ func TestQueryPresence_Integration(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-		_, err = New(nc).QueryPresence(context.Background(), "site-a", []string{"alice"})
+		_, err = New(nc, natsmetrics.Publisher{}).QueryPresence(context.Background(), "site-a", []string{"alice"})
 		require.Error(t, err)
+		// FromReply's contract: an envelope is always a failure, but a code
+		// outside this build's closed set must NOT be relayed typed — errors.As
+		// finds nothing, so nothing downstream can feed the foreign code to a
+		// constructor or writer that assumes the closed set. The code and the
+		// remote message both survive as text.
 		var e *errcode.Error
-		require.True(t, errors.As(err, &e))
-		assert.Equal(t, "upstream boom", e.Message)
+		require.False(t, errors.As(err, &e),
+			"an unrecognised remote code must not surface as a typed *errcode.Error")
+		assert.Contains(t, err.Error(), "upstream_only_code")
+		assert.Contains(t, err.Error(), "upstream boom")
 	})
 }

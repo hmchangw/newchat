@@ -210,6 +210,12 @@ func main() {
 		slog.Warn("badge cache DISABLED — VALKEY_ADDRS is empty (dev only)")
 	}
 
+	// Built here rather than beside the router, because the outbound clients
+	// below need it too: user-service fans out to room-service, history-service
+	// and user-presence-service, so it is the caller whose rpc.client series
+	// says which dependency a slow request is waiting on.
+	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
+
 	// A zero Budget disables trimming, so the toggle needs no handler branch.
 	pageBudget := pagefit.Budget{}
 	if cfg.PageTrimming {
@@ -217,7 +223,7 @@ func main() {
 	} else {
 		slog.Warn("page trimming DISABLED — oversize replies fail with response_too_large")
 	}
-	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg,
+	svc := service.New(subRepo, userRepo, appRepo, threadSubRepo, roomclient.New(nc, cfg.SiteID, publishMetrics), historyclient.New(nc, publishMetrics), presenceclient.New(nc, publishMetrics), publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg,
 		service.WithPageBudget(pageBudget))
 
 	// A second service instance over the HTTP-only Mongo pool. Everything else --
@@ -229,12 +235,11 @@ func main() {
 		mongorepo.NewSubscriptionRepo(httpDB, cfg.SortKeyCacheSize, cfg.SortKeyCacheTTL, readFromSecondary,
 			mongorepo.WithShowTeamsRoom(cfg.ShowTeamsRoom), mongorepo.WithShowTeamsAccounts(cfg.ShowTeamsAccounts)),
 		mongorepo.NewUserRepo(httpDB, readFromSecondary), mongorepo.NewAppRepo(httpDB, readFromSecondary), threadSubRepo,
-		roomclient.New(nc, cfg.SiteID), historyclient.New(nc), presenceclient.New(nc),
+		roomclient.New(nc, cfg.SiteID, publishMetrics), historyclient.New(nc, publishMetrics), presenceclient.New(nc, publishMetrics),
 		publisher.New(js), publisher.NewCore(nc), badge, ssoTokenRepo, tokenValidator, tokenRefresher, &cfg)
 
 	// Bound in-flight handlers so a burst is shed at the door (ErrUnavailable)
 	// instead of piling unbounded work onto MongoDB. MAX_CONCURRENCY=0 disables.
-	publishMetrics := natsmetrics.NewFromProviderIfEnabled(sdk.MeterProvider(), sdk.Toggles.Metrics).Publisher(cfg.SiteID)
 	routerOpts := []natsrouter.Option{natsrouter.WithSiteID(cfg.SiteID), natsrouter.WithMetrics(publishMetrics)}
 	if cfg.MaxConcurrency > 0 {
 		routerOpts = append(routerOpts, natsrouter.WithMaxConcurrency(cfg.MaxConcurrency))
